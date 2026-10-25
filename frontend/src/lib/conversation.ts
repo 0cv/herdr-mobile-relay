@@ -25,6 +25,13 @@ export function conversationEntries(recorded: ConversationEntry[]): Conversation
   };
 
   for (const entry of recorded) {
+    if (entry.kind === 'compaction') continue;
+    if (entry.kind === 'notice') {
+      if (latestAssistant) conversation.push(answerOnly(latestAssistant));
+      latestAssistant = null;
+      conversation.push(entry);
+      continue;
+    }
     if (entry.role === 'user') {
       if (latestAssistant) conversation.push(answerOnly(latestAssistant));
       latestAssistant = null;

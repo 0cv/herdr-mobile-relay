@@ -81,7 +81,7 @@ export interface FrameChannel {
 export interface FrameChannelHandlers {
   onOpen(): void;
   onFrame(frame: E2EEWireFrame): void;
-  onClose(detail?: TransportStatusDetail): void;
+  onClose(detail?: TransportStatusDetail, relayTls?: boolean): void;
 }
 
 /** Factory shape used by the path manager to build a channel on demand. */

@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { advertisedSkillNames, normalizeCommands } from '../relay/pi-command-bridge/bridge.mjs';
 
 if (!process.env.PI_TEST_PACKAGE) throw new Error('Set PI_TEST_PACKAGE to the installed Pi 0.87.0 package directory');
 const root = resolve(process.env.PI_TEST_PACKAGE);
 const orchestration = process.env.PI_TEST_ORCHESTRATION;
-const dir = mkdtempSync('/tmp/herdr-pi-contract-');
+const dir = mkdtempSync(join(tmpdir(), 'herdr-pi-contract-'));
 process.env.HOME = dir;
 process.env.PI_CODING_AGENT_DIR = join(dir, 'custom-profile', 'agent');
 const load = path => import(pathToFileURL(join(root, path)));

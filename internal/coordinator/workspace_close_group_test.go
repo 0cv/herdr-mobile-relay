@@ -20,7 +20,7 @@ type closeSocketRequest struct {
 
 func startCloseSocket(t *testing.T, response func(closeSocketRequest) any) (string, <-chan closeSocketRequest) {
 	t.Helper()
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

@@ -16,7 +16,7 @@ import (
 
 func TestWorkspaceCloseRevokedBehindTopologyLock(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "socket")
+	path := filepath.Join(testSocketDir(t), "socket")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)

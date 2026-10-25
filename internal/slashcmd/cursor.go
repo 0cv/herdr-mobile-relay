@@ -312,8 +312,8 @@ func cursorCommandRoots(dir string) []string {
 // each command after the file. It walks the top level only, matching Cursor,
 // and skips anything that is not a regular file: a FIFO or socket named *.md
 // would block discovery forever.
-func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, bool) {
-	if dir == "" || *budget <= 0 {
+func (reader *catalogReader) scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, bool) {
+	if dir == "" || *budget <= 0 || reader.truncated {
 		return nil, *budget <= 0
 	}
 	entries, err := os.ReadDir(dir)
@@ -324,7 +324,7 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 	seen := make(map[string]bool, len(entries))
 	truncated := false
 	for _, entry := range entries {
-		if *budget <= 0 {
+		if *budget <= 0 || reader.truncated {
 			truncated = true
 			break
 		}
@@ -343,11 +343,14 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 		}
 		seen[cmdName] = true
 		*budget--
-		data, ok := readCursorCommandFile(path)
+		data, ok := reader.readCursorCommandFile(path)
 		if !ok {
 			continue
 		}
-		fm, _ := parseFrontmatterBytes(data)
+		fm, ok := parseFrontmatterBytes(data)
+		if !ok {
+			continue
+		}
 		description := fm["description"]
 		if description == "" {
 			description = extractFirstLineBytes(data)
@@ -363,10 +366,11 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 }
 
 func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	reader := newCatalogReader()
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(cursorBuiltins))
 		copy(builtins, cursorBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 
 	budget := maxCustomFiles
@@ -400,7 +404,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// root replaces an earlier one of the same name. The user roots load last,
 	// so a personal command file wins over a workspace file of the same name.
 	scanCommands := func(root, source string) {
-		cmds, trunc := scanCursorCommandDirBudget(root, source, &budget)
+		cmds, trunc := reader.scanCursorCommandDirBudget(root, source, &budget)
 		truncated = truncated || trunc
 		for _, command := range cmds {
 			if reserved[strings.ToLower(command.Command)] {
@@ -433,6 +437,9 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// a project one with the same id.
 	seenSkillFiles := make(map[string]bool)
 	scanSkills := func(root, source string, project bool) {
+		if reader.truncated {
+			return
+		}
 		dirs, trunc := cursorSkillWalk(root, project, &budget, seenSkillFiles)
 		truncated = truncated || trunc
 		if trunc || len(dirs) == 0 {
@@ -441,7 +448,10 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		duplicates := duplicateSkillFolderNames(dirs)
 		taken := make(map[string]bool, len(dirs))
 		for _, skillDir := range dirs {
-			data, ok := readCursorSkillFile(root, skillDir, project)
+			if reader.truncated {
+				break
+			}
+			data, ok := reader.readCursorSkillFile(root, skillDir, project)
 			if !ok {
 				continue
 			}
@@ -487,7 +497,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		if format == "" {
 			format = "/{name}"
 		}
-		custom, trunc := discoverGenericSkills(ctx.SkillDirs, format)
+		custom, trunc := reader.discoverGenericSkills(ctx.SkillDirs, format)
 		for _, command := range custom {
 			if reserved[strings.ToLower(command.Command)] {
 				continue
@@ -510,7 +520,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
 
 func init() {

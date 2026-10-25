@@ -1,0 +1,12 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1786680000000}
+{"type":"context.append_message","message":{"id":"before-compact","role":"user","content":[{"type":"text","text":"Keep pre-compaction history."}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680001000}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"Pre-compaction reply."}],"toolCalls":[]},"time":1786680002000}
+{"type":"context.apply_compaction","summary":"DO_NOT_EXPORT_COMPACTION_SUMMARY","compactedCount":2,"keptUserMessageCount":0,"time":1786680003000}
+{"type":"context.append_message","message":{"id":"undo-after-compact","role":"user","content":[{"type":"text","text":"WITHDRAWN_AFTER_COMPACT"}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680004000}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"WITHDRAWN_AFTER_COMPACT_REPLY"}],"toolCalls":[]},"time":1786680005000}
+{"type":"context.undo","count":1,"time":1786680006000}
+{"type":"context.clear","time":1786680007000}
+{"type":"context.append_message","message":{"id":"undo-after-clear","role":"user","content":[{"type":"text","text":"WITHDRAWN_AFTER_CLEAR"}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680008000}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"WITHDRAWN_AFTER_CLEAR_REPLY"}],"toolCalls":[]},"time":1786680009000}
+{"type":"context.undo","count":1,"time":1786680010000}
+{"type":"context.append_message","message":{"id":"surviving-after-clear","role":"user","content":[{"type":"text","text":"Continue after clear."}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680011000}

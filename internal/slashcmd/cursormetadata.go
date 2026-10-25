@@ -2,7 +2,6 @@ package slashcmd
 
 import (
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,16 +12,16 @@ import (
 
 const maxCursorFileSize = 1 << 20
 
-func readCursorCommandFile(path string) ([]byte, bool) {
+func (reader *catalogReader) readCursorCommandFile(path string) ([]byte, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, false
 	}
 	defer file.Close()
-	return readCursorFile(file, maxCursorFileSize)
+	return reader.readCursorFile(file, maxCursorFileSize)
 }
 
-func readCursorSkillFile(root, skillDir string, project bool) ([]byte, bool) {
+func (reader *catalogReader) readCursorSkillFile(root, skillDir string, project bool) ([]byte, bool) {
 	skillFile := filepath.Join(skillDir, "SKILL.md")
 	var file *os.File
 	var err error
@@ -50,16 +49,16 @@ func readCursorSkillFile(root, skillDir string, project bool) ([]byte, bool) {
 		}
 	}
 	defer file.Close()
-	return readCursorFile(file, maxCursorFileSize)
+	return reader.readCursorFile(file, maxCursorFileSize)
 }
 
-func readCursorFile(file *os.File, maxSize int64) ([]byte, bool) {
+func (reader *catalogReader) readCursorFile(file *os.File, maxSize int64) ([]byte, bool) {
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxSize {
 		return nil, false
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxSize+1))
-	if err != nil || len(data) == 0 || int64(len(data)) > maxSize {
+	data, ok := reader.readFile(file, maxSize, maxMetadataSize+1)
+	if !ok || len(data) == 0 {
 		return nil, false
 	}
 	return data, true
@@ -67,7 +66,8 @@ func readCursorFile(file *os.File, maxSize int64) ([]byte, bool) {
 
 func parseCursorSkillMetadata(data []byte) (map[string]string, bool) {
 	metadata := make(map[string]string)
-	content := strings.TrimPrefix(string(data), "\ufeff")
+	oversized := len(data) > maxMetadataSize
+	content := strings.TrimPrefix(string(data[:min(len(data), maxMetadataSize)]), "\ufeff")
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	language, ok := strings.CutPrefix(lines[0], "---")
 	if !ok || strings.HasPrefix(language, "-") {
@@ -84,6 +84,9 @@ func parseCursorSkillMetadata(data []byte) (map[string]string, bool) {
 		if line != "" && !strings.HasPrefix(line, "#") {
 			empty = false
 		}
+	}
+	if end == len(lines) && oversized {
+		return nil, false
 	}
 	if empty {
 		return metadata, true

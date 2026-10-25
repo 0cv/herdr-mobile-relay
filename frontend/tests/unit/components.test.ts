@@ -1,7 +1,8 @@
+import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
 import ConversationHistory from '$components/ConversationHistory.svelte';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
@@ -12,6 +13,8 @@ import LaunchView from '$components/LaunchView.svelte';
 import { CommandError, relayStore } from '$lib/store';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
+import { reloadRisk } from '$lib/reload-guard';
+import { targetRefForAgent } from '$lib/resource-id';
 import { setHomeLayout } from '$lib/preferences';
 import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
 
@@ -39,6 +42,7 @@ class SlashCommandWebSocket {
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
+  server_session_id: 'primary', terminal_id: 'terminal', generation: 1,
   project: 'relay', agent: 'codex', status: 'blocked',
   attention_kind: 'approval', attention_capable: true,
   command: 'Run make check?', options: ['Approve once', 'Always allow', 'Deny'],
@@ -138,6 +142,7 @@ describe('accessible Svelte interactions', () => {
     const user = userEvent.setup();
     const agent: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p2', pane_id: 'fedora::w1:p2',
+      server_session_id: 'primary', terminal_id: 'terminal-p2', generation: 1,
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
     };
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
@@ -180,6 +185,7 @@ describe('accessible Svelte interactions', () => {
     const user = userEvent.setup();
     const agent: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p3', pane_id: 'fedora::w1:p3',
+      server_session_id: 'primary', terminal_id: 'terminal-p3', generation: 1,
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
     };
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
@@ -219,7 +225,7 @@ describe('accessible Svelte interactions', () => {
     vi.stubGlobal('WebSocket', SlashCommandWebSocket);
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
     const socket = SlashCommandWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -298,81 +304,94 @@ describe('accessible Svelte interactions', () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(['success', 'failure'] as const)('ignores superseded catalog %s without clearing newer loading state', async (outcome) => {
-    const user = userEvent.setup();
-    const agent: Agent = {
-      relay_id: 'freshness', relay_label: 'Freshness', raw_pane_id: 'pane', pane_id: 'freshness::pane',
-      agent: 'pi', cwd: '/tmp/project', agent_session_id: 'first',
-    };
-    const requests: { resolve: (catalog: SlashCommandCatalog) => void; reject: (error: Error) => void }[] = [];
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    const load = vi.spyOn(relayStore, 'loadSlashCommands').mockImplementation(() => new Promise((resolve, reject) => {
-      requests.push({ resolve, reject });
-    }));
-    const props = { agent, allAgents: [agent], responding: new Set<string>() };
-    const view = render(TerminalView, props);
-    const composer = screen.getByRole('combobox', { name: 'Prompt' });
-    await user.type(composer, '/orches');
-    expect(load).toHaveBeenCalledTimes(1);
-    const replacement = { ...agent, agent_session_id: 'second' };
-    await view.rerender({ ...props, agent: replacement, allAgents: [replacement] });
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
-    expect(load).toHaveBeenLastCalledWith(replacement, true);
-    if (outcome === 'success') {
-      requests[0].resolve({ commands: [{ command: '/orchestrate-old', description: 'Old session', source: 'project' }], truncated: false });
-    } else {
-      requests[0].reject(new Error('Old request failed'));
-    }
-    await waitFor(() => expect(screen.getByText('Loading commands…')).toBeVisible());
-    expect(screen.queryByRole('option', { name: /orchestrate-old/ })).not.toBeInTheDocument();
-    requests[1].resolve({ commands: [{ command: '/orchestrate', description: 'Current session', source: 'project' }], truncated: false });
-    await waitFor(() => expect(screen.getByRole('option', { name: /orchestrate/ })).toBeVisible());
-    await user.click(screen.getByRole('button', { name: 'Refresh commands' }));
-    expect(load).toHaveBeenCalledTimes(3);
-    expect(screen.getByText('Refreshing commands…')).toBeVisible();
-    requests[2].resolve({ commands: [], truncated: false });
-    await waitFor(() => expect(screen.queryByRole('option')).not.toBeInTheDocument());
-    await user.clear(composer);
-    await user.type(composer, '/orches');
-    expect(load).toHaveBeenCalledTimes(4);
-    view.unmount();
-    requests[3].resolve({ commands: [{ command: '/orchestrate', description: 'After unmount', source: 'project' }], truncated: false });
-    await Promise.resolve();
-    expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
-    clearPromptDraft(agent);
-    vi.restoreAllMocks();
-  });
+  describe('catalog request lifecycle', () => {
+    afterEach(() => vi.restoreAllMocks());
 
-  it('revalidates an open palette on reconnect without fetching for each keystroke', async () => {
-    const user = userEvent.setup();
-    const agent: Agent = {
-      relay_id: 'reconnect', relay_label: 'Reconnect', raw_pane_id: 'pane', pane_id: 'reconnect::pane',
-      agent: 'pi', cwd: '/tmp/project',
-    };
-    const connected = { status: 'connected', capabilities: ['slash_commands'] };
-    relayStore.connections.set(new Map([['reconnect', connected as never]]));
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    const load = vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
-      commands: [{ command: '/orchestrate', description: 'Orchestrate', source: 'project' }], truncated: false,
+    it.each(['success', 'failure'] as const)('ignores superseded catalog %s without clearing newer loading state', async (outcome) => {
+      const user = userEvent.setup();
+      const agent: Agent = {
+        relay_id: 'freshness', relay_label: 'Freshness', raw_pane_id: 'pane', pane_id: 'freshness::pane',
+        server_session_id: 'primary', terminal_id: 'terminal', generation: 1,
+        agent: 'pi', cwd: '/tmp/project', agent_session_id: 'first',
+      };
+      const requests: { resolve: (catalog: SlashCommandCatalog) => void; reject: (error: Error) => void }[] = [];
+      vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+      const load = vi.spyOn(relayStore, 'loadSlashCommands').mockImplementation(() => new Promise((resolve, reject) => {
+        requests.push({ resolve, reject });
+      }));
+      const props = { agent, allAgents: [agent], responding: new Set<string>() };
+      const view = render(TerminalView, props);
+      const composer = screen.getByRole('combobox', { name: 'Prompt' });
+      await user.type(composer, '/orches');
+      expect(load).toHaveBeenCalledTimes(1);
+      const replacement = { ...agent, cwd: '/tmp/other-project' };
+      expect(targetRefForAgent(agent)).not.toBeNull();
+      expect(targetRefForAgent(replacement)).toEqual(targetRefForAgent(agent));
+      await view.rerender({ ...props, agent: replacement, allAgents: [replacement] });
+      const replacementComposer = screen.getByRole('combobox', { name: 'Prompt' });
+      expect(replacementComposer).toBe(composer);
+      expect(replacementComposer).toHaveValue('');
+      expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
+      expect(load).toHaveBeenCalledTimes(1);
+      await user.type(replacementComposer, '/orches');
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      expect(load).toHaveBeenLastCalledWith(replacement, true);
+      if (outcome === 'success') {
+        requests[0].resolve({ commands: [{ command: '/orchestrate-old', description: 'Old session', source: 'project' }], truncated: false });
+      } else {
+        requests[0].reject(new Error('Old request failed'));
+      }
+      await tick();
+      await waitFor(() => expect(screen.getByText('Loading commands…')).toBeVisible());
+      expect(screen.queryByText('Suggestions unavailable — you can still send this command.')).not.toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: /orchestrate-old/ })).not.toBeInTheDocument();
+      requests[1].resolve({ commands: [{ command: '/orchestrate', description: 'Current session', source: 'project' }], truncated: false });
+      await waitFor(() => expect(screen.getByRole('option', { name: /orchestrate/ })).toBeVisible());
+      await user.click(screen.getByRole('button', { name: 'Refresh commands' }));
+      expect(load).toHaveBeenCalledTimes(3);
+      expect(screen.getByText('Refreshing commands…')).toBeVisible();
+      requests[2].resolve({ commands: [], truncated: false });
+      await waitFor(() => expect(screen.queryByRole('option')).not.toBeInTheDocument());
+      await user.clear(replacementComposer);
+      await user.type(replacementComposer, '/orches');
+      expect(load).toHaveBeenCalledTimes(4);
+      view.unmount();
+      requests[3].resolve({ commands: [{ command: '/orchestrate', description: 'After unmount', source: 'project' }], truncated: false });
+      await Promise.resolve();
+      expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
+      clearPromptDraft(agent);
     });
-    const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
-    const composer = screen.getByRole('combobox', { name: 'Prompt' });
-    await user.type(composer, '/orches');
-    expect(load).toHaveBeenCalledTimes(1);
-    relayStore.connections.set(new Map([['reconnect', { ...connected, status: 'disconnected' } as never]]));
-    await waitFor(() => expect(screen.getByText('Suggestions unavailable — you can still send this command.')).toBeVisible());
-    expect(load).toHaveBeenCalledTimes(1);
-    relayStore.connections.set(new Map([['reconnect', connected as never]]));
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
-    await user.type(composer, 'trate');
-    expect(load).toHaveBeenCalledTimes(2);
-    await user.keyboard('{Escape}');
-    await user.type(composer, '-');
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
-    view.unmount();
-    clearPromptDraft(agent);
-    relayStore.connections.set(new Map());
-    vi.restoreAllMocks();
+
+    it('revalidates an open palette on reconnect without fetching for each keystroke', async () => {
+      const user = userEvent.setup();
+      const agent: Agent = {
+        relay_id: 'reconnect', relay_label: 'Reconnect', raw_pane_id: 'pane', pane_id: 'reconnect::pane',
+        agent: 'pi', cwd: '/tmp/project',
+      };
+      const connected = { status: 'connected', capabilities: ['slash_commands'] };
+      relayStore.connections.set(new Map([['reconnect', connected as never]]));
+      vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+      const load = vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
+        commands: [{ command: '/orchestrate', description: 'Orchestrate', source: 'project' }], truncated: false,
+      });
+      const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
+      const composer = screen.getByRole('combobox', { name: 'Prompt' });
+      await user.type(composer, '/orches');
+      expect(load).toHaveBeenCalledTimes(1);
+      relayStore.connections.set(new Map([['reconnect', { ...connected, status: 'disconnected' } as never]]));
+      await waitFor(() => expect(screen.getByText('Suggestions unavailable — you can still send this command.')).toBeVisible());
+      expect(load).toHaveBeenCalledTimes(1);
+      relayStore.connections.set(new Map([['reconnect', connected as never]]));
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      await user.type(composer, 'trate');
+      expect(load).toHaveBeenCalledTimes(2);
+      await user.keyboard('{Escape}');
+      await user.type(composer, '-');
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+      view.unmount();
+      clearPromptDraft(agent);
+      relayStore.connections.set(new Map());
+    });
   });
 
   it.each([
@@ -408,7 +427,7 @@ describe('accessible Svelte interactions', () => {
     respond.mockRestore();
   });
 
-  it.each(['filter', 'prompt', 'editor'] as const)('restores a refused %s draft after a same-target agent update, but not replacement or navigation', async (route) => {
+  it.each(['filter', 'prompt'] as const)('restores a refused %s draft after a same-target agent update, but not replacement or navigation', async (route) => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
@@ -420,7 +439,7 @@ describe('accessible Svelte interactions', () => {
       status: route === 'prompt' ? 'done' : 'blocked',
     };
     const content = route === 'filter' ? 'Available models\nType to filter • Enter to select • Tab to edit'
-      : route === 'editor' ? 'Custom answer: Which weekend?\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor' : 'Ready';
+      : 'Ready';
     for (const update of [
       {},
       { generation: 2 },
@@ -533,10 +552,12 @@ describe('accessible Svelte interactions', () => {
     expect(input).toBeDisabled();
     for (const attention_kind of ['approval', 'question'] as const) {
       await view.rerender({ readOnly: false, agent: { ...agent, attention_kind } });
-      expect(input).toBeDisabled();
+      expect(input).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send filter text' })).toBeDisabled();
     }
     await view.rerender({ agent, frame: { paneId: agent.pane_id, content: 'Available models', format: 'plain' } });
-    expect(input).toBeDisabled();
+    expect(input).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
     await view.rerender({
       agent,
       frame: {
@@ -544,7 +565,8 @@ describe('accessible Svelte interactions', () => {
         content: 'Type to filter • Enter to select • Tab to edit\nNeeds inspection\n>',
       },
     });
-    expect(input).toBeDisabled();
+    expect(input).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
     view.unmount();
     vi.restoreAllMocks();
   });
@@ -611,6 +633,30 @@ describe('accessible Svelte interactions', () => {
     });
     view.unmount();
     vi.restoreAllMocks();
+  });
+
+  it('holds automatic app reloads until a sent prompt settles, even after its view closes', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let settle: (result: CommandResult) => void = () => {};
+    vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    const agent: Agent = { ...blockedAgent, agent: 'codex', status: 'done', attention_kind: undefined, options: undefined };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: { paneId: agent.pane_id, content: 'Ready for the next request.', format: 'plain' },
+    });
+    try {
+      await user.type(screen.getByPlaceholderText('Type a reply…'), 'Continue');
+      await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+      expect(relayStore.sendToAgent).toHaveBeenCalledExactlyOnceWith(agent, { type: 'submit_prompt', text: 'Continue' });
+      view.unmount();
+      expect(reloadRisk()).toBe('delivery');
+      settle({ type: 'command_result', request_id: 'held-reload', ok: true });
+      await waitFor(() => expect(reloadRisk()).not.toBe('delivery'));
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it.each(['cursor', 'codex'])('submits normal prompts when %s output mentions filtering', async (agentName) => {
@@ -713,7 +759,7 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
-  it('enables blocked terminal text only while its editor is active', async () => {
+  it('keeps blocked terminal drafts editable and offers explicit manual input for custom controls', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
@@ -751,7 +797,9 @@ describe('accessible Svelte interactions', () => {
       },
       responding: new Set<string>(),
     });
-    expect(screen.getByPlaceholderText('Needs inspection — use terminal controls')).toBeDisabled();
+    expect(screen.getByLabelText('Prompt')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Type in terminal' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     choiceView.unmount();
 
@@ -765,20 +813,15 @@ describe('accessible Svelte interactions', () => {
       },
       responding: new Set<string>(),
     });
-    const terminalInput = screen.getByPlaceholderText('Type terminal input…');
+    const terminalInput = screen.getByLabelText('Prompt');
     expect(terminalInput).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
     expect(screen.queryByText('must not render')).not.toBeInTheDocument();
     await user.type(terminalInput, 'custom weekend');
-    await user.click(screen.getByRole('button', { name: 'Submit terminal text' }));
-    expect(send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith(unknown, {
-      type: 'send_input',
-      text: 'custom weekend',
-      keys: ['Enter'],
-      activity_label: 'Submitted terminal text',
-    });
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Type in terminal' })).toBeVisible();
+    expect(send).not.toHaveBeenCalled();
     unknownView.unmount();
     vi.restoreAllMocks();
   });
@@ -1576,6 +1619,7 @@ describe('accessible Svelte interactions', () => {
     const user = userEvent.setup();
     const agent: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p9', pane_id: 'fedora::w1:p9',
+      server_session_id: 'primary', terminal_id: 'terminal-p9', generation: 1, agent_session_id: 'draft-session',
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
     };
     vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
@@ -1585,21 +1629,28 @@ describe('accessible Svelte interactions', () => {
       type: 'command_result', request_id: 'prompt-1', ok: true,
     });
     try {
+      relayStore.connections.set(new Map([['fedora', { status: 'connected', capabilities: [] }]] as never));
+      vi.spyOn(relayStore, 'readPane').mockImplementation(() => {});
+      const freshFrame = () => ({ paneId: agent.pane_id, target: { relay_id: agent.relay_id, pane_id: agent.raw_pane_id, server_session_id: agent.server_session_id!, terminal_id: agent.terminal_id!, generation: agent.generation!, agent_session_id: agent.agent_session_id }, content: 'Ready', format: 'plain', noEcho: false, receivedAt: performance.now() });
       const first = render(ConversationHistory, { agent });
-      await user.type(screen.getByRole('textbox', { name: 'Prompt' }), 'Keep me around');
+      await first.rerender({ frame: freshFrame() });
+      await user.type(screen.getByRole('combobox', { name: 'Prompt' }), 'Keep me around');
       first.unmount();
 
       const second = render(ConversationHistory, { agent });
-      expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('Keep me around');
+      expect(screen.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
+      await second.rerender({ frame: freshFrame() });
+      expect(screen.getByRole('combobox', { name: 'Prompt' })).toHaveValue('Keep me around');
       await user.click(screen.getByRole('button', { name: 'Send prompt' }));
       expect(send).toHaveBeenCalledWith(agent, { type: 'submit_prompt', text: 'Keep me around' });
       second.unmount();
 
       render(ConversationHistory, { agent });
-      expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('');
+      expect(screen.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
     } finally {
       clearPromptDraft(agent);
       vi.restoreAllMocks();
+      relayStore.connections.set(new Map());
     }
   });
 });

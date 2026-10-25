@@ -1,0 +1,4 @@
+{"type":"metadata","protocol_version":"1.0","created_at":1786680000000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Imported prompt."}],"toolCalls":[]}}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"think","think":"DO_NOT_EXPORT_IMPORTED_REASONING"},{"type":"text","text":"Imported response."}],"toolCalls":[{"type":"function","id":"import-call","function":{"name":"Shell","arguments":"{\"command\":\"printf import-ok\"}"}}]}}
+{"type":"context.append_message","message":{"role":"tool","content":[{"type":"text","text":"import-ok"}],"toolCalls":[],"toolCallId":"import-call"}}

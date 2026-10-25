@@ -30,10 +30,15 @@ type openCodeReader struct {
 }
 
 type openCodeFileStamp struct {
-	databaseSize int64
-	databaseTime int64
-	walSize      int64
-	walTime      int64
+	databaseSize   int64
+	databaseTime   int64
+	walSize        int64
+	walTime        int64
+	databaseID     string
+	databaseChange string
+	walID          string
+	walChange      string
+	walIndex       string
 }
 
 type openCodeCacheEntry struct {
@@ -43,22 +48,25 @@ type openCodeCacheEntry struct {
 }
 
 type openCodeRow struct {
-	SessionID   string `json:"session_id"`
-	Directory   string `json:"directory"`
-	Title       string `json:"title"`
-	Updated     int64  `json:"time_updated"`
-	Agent       string `json:"agent"`
-	MessageID   string `json:"message_id"`
-	Created     int64  `json:"time_created"`
-	MessageData string `json:"message_data"`
-	PartID      string `json:"part_id"`
-	PartData    string `json:"part_data"`
-	Total       int    `json:"message_total"`
-	CursorFound int    `json:"cursor_found"`
-	MessageType string `json:"message_type"`
-	HasMessages int    `json:"has_messages"`
-	Database    string `json:"-"`
-	V2          bool   `json:"-"`
+	SchemaVersion int    `json:"schema_version"`
+	SessionID     string `json:"session_id"`
+	Directory     string `json:"directory"`
+	Title         string `json:"title"`
+	Updated       int64  `json:"time_updated"`
+	Agent         string `json:"agent"`
+	MessageID     string `json:"message_id"`
+	Created       int64  `json:"time_created"`
+	MessageData   string `json:"message_data"`
+	PartID        string `json:"part_id"`
+	PartData      string `json:"part_data"`
+	Total         int    `json:"message_total"`
+	CursorFound   int    `json:"cursor_found"`
+	MessageType   string `json:"message_type"`
+	HasMessages   int    `json:"has_messages"`
+	Database      string `json:"-"`
+	V2            bool   `json:"-"`
+
+	pendingIDs []string
 }
 
 func newOpenCodeReader(home string) *openCodeReader {
@@ -122,6 +130,7 @@ func (r *openCodeReader) readContext(ctx context.Context, sessionID, before stri
 		metadata := rows[0]
 		metadata.Database = database
 		entries, corrupt := parseOpenCodeRows(rows)
+		metadata.pendingIDs = openCodePendingIDs(rows, entries)
 		return entries, hasMore, corrupt, metadata, ""
 	}
 	if firstFailure != "" {
@@ -135,11 +144,14 @@ func openCodeStamp(database string) (openCodeFileStamp, bool) {
 	if err != nil {
 		return openCodeFileStamp{}, false
 	}
-	stamp := openCodeFileStamp{databaseSize: info.Size(), databaseTime: info.ModTime().UnixNano()}
+	stamp := openCodeFileStamp{databaseSize: info.Size(), databaseTime: info.ModTime().UnixNano(), databaseID: fileIdentity(info), databaseChange: fileChangeToken(info)}
 	if info, err = os.Stat(database + "-wal"); err == nil {
 		stamp.walSize = info.Size()
 		stamp.walTime = info.ModTime().UnixNano()
+		stamp.walID = fileIdentity(info)
+		stamp.walChange = fileChangeToken(info)
 	}
+	stamp.walIndex = walIndexHeader(database)
 	return stamp, true
 }
 
@@ -292,7 +304,7 @@ func (r *openCodeReader) queryV1(ctx context.Context, database, sessionID, befor
 		`WITH %s,selected AS (`+
 			`SELECT m.id,m.time_created,m.data FROM message AS m WHERE m.session_id=CAST(X'%s' AS TEXT)%s `+
 			`ORDER BY m.time_created DESC,m.id DESC LIMIT %d`+
-			`) SELECT s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,`+
+			`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,`+
 			`COALESCE(sm.id,'') AS message_id,COALESCE(sm.time_created,0) AS time_created,COALESCE(sm.data,'null') AS message_data,`+
 			`COALESCE(p.id,'') AS part_id,COALESCE(p.data,'null') AS part_data,`+
 			`(SELECT COUNT(*) FROM message WHERE session_id=s.id) AS message_total,%s AS cursor_found `+
@@ -309,8 +321,8 @@ func (r *openCodeReader) queryV1(ctx context.Context, database, sessionID, befor
 }
 
 // queryV2 reads the OpenCode 2.x tables. Only user and assistant turns are
-// selected, in SQL before LIMIT, so hidden turn types neither use page slots
-// nor count toward the total. Turn order is session_message.seq.
+// selected in SQL before LIMIT, so hidden turn types do not use page slots.
+// Turn order is session_message.seq.
 func (r *openCodeReader) queryV2(ctx context.Context, database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
 	const visible = `type IN ('user','assistant')`
 	sessionHex := hex.EncodeToString([]byte(sessionID))
@@ -332,11 +344,10 @@ func (r *openCodeReader) queryV2(ctx context.Context, database, sessionID, befor
 		`WITH %s,selected AS (`+
 			`SELECT m.id,m.type,m.seq,m.time_created,m.data FROM session_message AS m `+
 			`WHERE m.session_id=CAST(X'%s' AS TEXT) AND m.%s%s ORDER BY m.seq DESC LIMIT %d`+
-			`) SELECT s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,`+
+			`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,`+
 			`COALESCE(s.time_updated,0) AS time_updated,COALESCE(s.agent,'') AS agent,`+
 			`COALESCE(sm.id,'') AS message_id,COALESCE(sm.type,'') AS message_type,COALESCE(sm.time_created,0) AS time_created,`+
 			`COALESCE(sm.data,'null') AS message_data,`+
-			`(SELECT COUNT(*) FROM session_message WHERE session_id=s.id AND %s) AS message_total,`+
 			`EXISTS(SELECT 1 FROM session_message WHERE session_id=s.id) AS has_messages,%s AS cursor_found `+
 			`FROM session_v2 AS s LEFT JOIN selected AS sm ON 1=1 `+
 			`WHERE s.id=CAST(X'%s' AS TEXT) ORDER BY sm.seq DESC;`,
@@ -345,7 +356,6 @@ func (r *openCodeReader) queryV2(ctx context.Context, database, sessionID, befor
 		visible,
 		cursorFilter,
 		limit+1,
-		visible,
 		cursorFound,
 		sessionHex,
 	)
@@ -368,6 +378,9 @@ func (r *openCodeReader) runRows(ctx context.Context, database, query string, li
 	}
 	for index := range rows {
 		rows[index].V2 = v2
+		if v2 {
+			rows[index].Total = UnknownTotal
+		}
 	}
 	messageIDs := make([]string, 0, limit+1)
 	seen := make(map[string]struct{}, limit+1)
@@ -431,6 +444,35 @@ func validOpenCodeSessionID(value string) bool {
 		}
 	}
 	return true
+}
+
+func openCodePendingIDs(rows []openCodeRow, entries []Entry) []string {
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		seen[entry.ID] = true
+	}
+	var pending []string
+	for _, row := range rows {
+		if seen[row.MessageID] || row.MessageID == "" || len(row.MessageID) > 256 || strings.ContainsAny(row.MessageID, "\x00\r\n") {
+			continue
+		}
+		role := row.MessageType
+		if !row.V2 {
+			var message struct {
+				Role string `json:"role"`
+			}
+			if json.Unmarshal([]byte(row.MessageData), &message) != nil {
+				continue
+			}
+			role = message.Role
+		}
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		seen[row.MessageID] = true
+		pending = append(pending, row.MessageID)
+	}
+	return pending
 }
 
 func parseOpenCodeRows(rows []openCodeRow) ([]Entry, bool) {
@@ -502,9 +544,13 @@ func parseOpenCodeRows(rows []openCodeRow) ([]Entry, bool) {
 				input = string(part.State.Input)
 			}
 			activity := newToolActivity(part.CallID, part.Tool, input)
+			activity.State = openCodeToolState(part.State.Status)
 			activity.Output, activity.Truncated = clampText(sanitizeText(part.State.Output), maxEntryBytes)
 			activity.Error = part.State.Status == "error" || strings.TrimSpace(part.State.Error) != "" ||
 				openCodeExitFailed(part.State.Metadata)
+			if activity.Error {
+				activity.State = "failed"
+			}
 			entry.Tools = append(entry.Tools, activity)
 		}
 	}
@@ -597,9 +643,13 @@ func parseOpenCodeV2Content(entry *Entry, items []json.RawMessage) bool {
 				input = string(item.State.Input)
 			}
 			activity := newToolActivity(item.ID, item.Name, input)
+			activity.State = openCodeToolState(item.State.Status)
 			activity.Output, activity.Truncated = clampText(sanitizeText(openCodeV2ToolOutput(item.State.Content, item.State.Output)), maxEntryBytes)
 			activity.Error = item.State.Status == "error" || openCodeV2ErrorSet(item.State.Error) ||
 				openCodeExitFailed(item.State.Metadata)
+			if activity.Error {
+				activity.State = "failed"
+			}
 			entry.Tools = append(entry.Tools, activity)
 		}
 	}

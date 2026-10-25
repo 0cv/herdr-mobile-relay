@@ -1,0 +1,144 @@
+{
+  "synthetic": true,
+  "runtimeGenerated": false,
+  "automatedValidationExecuted": false,
+  "sourceCatalog": "../sources.json",
+  "expectedProjectionPolicy": "Positive text/tool allowlist, origin filtering, Full history retaining pre-compaction/pre-clear entries, undo withdrawal, latest active-branch selection before fold. These are proposed test expectations, not observed parser results.",
+  "globalNeverExportPrefix": "DO_NOT_EXPORT_",
+  "cwd": "/fixture/kimi-project",
+  "cases": [
+    {
+      "id": "native-v2",
+      "pin": "baseline",
+      "protocol": "1.5",
+      "sessionId": "session_00000000-0000-4000-8000-000000000001",
+      "wire": "v0.36.1-v2/wire.jsonl",
+      "state": "v0.36.1-v2/state.json",
+      "sources": ["record036", "message036", "context-types036", "loop-fold036", "transcript036", "meta-type036"],
+      "expectedTextInOrder": ["Check the fixture.", "Checking.", "Done.", "Check the fixture.", "Again."],
+      "expectedUserPromptCount": 2,
+      "expectedToolExchanges": [
+        {"stepUuid":"step-a", "callId":"call-0", "name":"Shell", "input":{"command":"printf fixture-ok"}, "output":"fixture-ok", "isError":false},
+        {"stepUuid":"step-c", "callId":"call-0", "name":"Shell", "input":{"command":"printf fixture-again"}, "output":"fixture-again", "isError":false}
+      ],
+      "notes": ["Tool-only step-c may have an empty text body but must retain its tool card.", "Do not deduplicate two actual identical prompts by text.", "Do not render turn.prompt scheduling records as extra prompts."]
+    },
+    {
+      "id": "legacy-engine",
+      "pin": "baseline",
+      "protocol": "1.4",
+      "sessionId": "session_00000000-0000-4000-8000-000000000002",
+      "wire": "v0.36.1-legacy/wire.jsonl",
+      "state": "v0.36.1-legacy/state.json",
+      "sources": ["migration-v1", "message036", "legacy-meta036", "store-v1"],
+      "expectedTextInOrder": ["Legacy engine prompt.", "Legacy engine response."],
+      "expectedToolExchanges": [{"callId":"legacy-call", "name":"Shell", "input":{"command":"printf legacy-ok"}, "output":"legacy-ok"}],
+      "notes": ["No native v2 metadata ID/version field is required in this legacy shape."]
+    },
+    {
+      "id": "builtin-import",
+      "pin": "baseline",
+      "protocol": "1.0",
+      "sessionId": "ses_00000000-0000-4000-8000-000000000003",
+      "wire": "v0.36.1-imported/wire.jsonl",
+      "state": "v0.36.1-imported/state.json",
+      "sources": ["import-one036", "import-wire036", "import-translator036", "import-state036", "import-bucket036", "migrate11"],
+      "expectedTextInOrder": ["Imported prompt.", "Imported response."],
+      "expectedToolExchanges": [{"callId":"import-call", "name":"Shell", "input":{"command":"printf import-ok"}, "output":"import-ok"}],
+      "perMessageTimestamps": "absent; do not fabricate from metadata.created_at",
+      "notes": ["Nested function is real importer output, not native 1.4/1.5 tool-call shape.", "Index cwd is necessary evidence; this state writer does not emit cwd/workDir.", "Substitute bucket placeholders only in an isolated test copy."]
+    },
+    {
+      "id": "linear-mutations",
+      "pin": "baseline",
+      "protocol": "1.5",
+      "wire": "v0.36.1-mutations/wire.jsonl",
+      "sources": ["context-ops036", "transcript036", "clock036", "undo036"],
+      "expectedFinalTextInOrder": ["Keep pre-compaction history.", "Pre-compaction reply.", "Continue after clear."],
+      "expectedFinalAbsentPrefixes": ["WITHDRAWN_", "DO_NOT_EXPORT_"],
+      "checkpoints": [
+        {"throughRecord":3, "expectedTextInOrder":["Keep pre-compaction history.", "Pre-compaction reply."]},
+        {"throughRecord":6, "additionalVisibleText":["WITHDRAWN_AFTER_COMPACT", "WITHDRAWN_AFTER_COMPACT_REPLY"]},
+        {"throughRecord":7, "expectedTextInOrder":["Keep pre-compaction history.", "Pre-compaction reply."], "requiresRemovalOrSnapshot":true},
+        {"throughRecord":8, "expectedTextInOrder":["Keep pre-compaction history.", "Pre-compaction reply."], "clearEstablishesUndoFloor":true},
+        {"throughRecord":11, "expectedTextInOrder":["Keep pre-compaction history.", "Pre-compaction reply."], "requiresRemovalOrSnapshot":true}
+      ]
+    },
+    {
+      "id": "latest-active-branches",
+      "pin": "latest",
+      "protocol": "1.5",
+      "wire": "v2.2.0-branches/wire.jsonl",
+      "sources": ["tree220", "fork-tree220", "wire220", "undo220"],
+      "expectedFinalActiveBranch": "b2",
+      "switches": [
+        {"record":10, "branch":"b1", "base":{"branch":"main", "line":5}, "legacyUndoLine":11},
+        {"record":17, "branch":"b2", "base":{"branch":"b1", "line":12}, "legacyUndoLine":18}
+      ],
+      "expectedFinalRestorableRecordLines": [1,2,3,4,5,20,21,22,23],
+      "expectedFinalTextInOrder": ["Keep this turn.", "Kept response.", "Final branch prompt.", "Final branch response."],
+      "expectedFinalAbsentPrefixes": ["ABANDONED_"],
+      "checkpoints": [
+        {"throughRecord":9, "expectedActiveBranch":"main", "visibleAbandonedTurn":"ABANDONED_MAIN_PROMPT"},
+        {"throughRecord":12, "expectedTextInOrder":["Keep this turn.", "Kept response."], "requiresRemovalOrSnapshot":true},
+        {"throughRecord":16, "expectedActiveBranch":"b1", "visibleAbandonedTurn":"ABANDONED_B1_PROMPT"},
+        {"throughRecord":19, "expectedTextInOrder":["Keep this turn.", "Kept response."], "requiresRemovalOrSnapshot":true}
+      ],
+      "notes": ["A baseline-only reader must explicitly report unsupported branch semantics, not return a falsely verified latest projection.", "Switch prefixes ending at record 10/11 or 17/18 require conservative incomplete/synchronizing handling."]
+    },
+    {
+      "id": "latest-privacy-and-duplicate",
+      "pin": "latest",
+      "protocol": "1.5",
+      "wire": "v2.2.0-privacy/wire.jsonl",
+      "sources": ["message220", "types220", "hook-parts220", "human220", "human-events220", "human-schema220", "clock220"],
+      "expectedTextInOrder": ["Visible latest prompt.", "Visible latest reply.", "Visible in-turn steer."],
+      "expectedAssistantReplyCount": 1,
+      "expectedToolExchanges": [{"callId":"latest-call", "name":"Shell", "input":{"command":"printf latest-ok"}, "output":"latest-ok", "isError":false}],
+      "notes": ["Inspect hook meta.source before stripping metadata.", "inTurn user text is visible but is not an independent undo anchor.", "This combined fixture does not settle latest human-engine-only history support."]
+    },
+    {
+      "id": "interrupted",
+      "pin": "baseline",
+      "protocol": "1.5",
+      "wire": "interrupted/wire.jsonl",
+      "sources": ["loop-fold036", "transcript036"],
+      "expectedTextInOrder": ["Interrupted prompt.", "Recorded partial response."],
+      "expectedAbsentText": ["ORPHAN_PART_MUST_NOT_APPEAR"],
+      "expectedPendingCallId": "pending-call",
+      "mustNotClaimCompleted": true
+    },
+    {
+      "id": "same-size-rewrite",
+      "pin": "baseline",
+      "protocol": "1.5",
+      "before": "rewrites/before.jsonl",
+      "after": "rewrites/after.jsonl",
+      "sources": ["persistence-v1", "append036", "wire036"],
+      "expectedBeforeText": "Old same-size.",
+      "expectedAfterText": "New same-size.",
+      "requiresResetOrReplacement": true,
+      "notes": ["Static snapshots only. In-place and atomic-replacement behavior must be exercised by future isolated tests."]
+    },
+    {
+      "id": "separate-fork",
+      "pin": "baseline",
+      "protocol": "1.5",
+      "sessionId": "session_00000000-0000-4000-8000-000000000004",
+      "state": "fork/state.json",
+      "wire": "fork/wire.jsonl",
+      "sources": ["lifecycle036", "meta-type036"],
+      "expectedTextInOrder": ["Copied source prompt."],
+      "mustNotConcatenateSourceSession": true
+    },
+    {
+      "id": "index-structure",
+      "pin": "baseline",
+      "index": "session_index.jsonl",
+      "sources": ["index-v1", "lifecycle036"],
+      "expectedSurvivingSessionIds": ["session_00000000-0000-4000-8000-000000000001", "ses_00000000-0000-4000-8000-000000000003"],
+      "notes": ["Paths contain explicit synthetic bucket placeholders; this is not a ready-to-open owner or runtime index."]
+    },
+    {"id":"workspace-keys", "file":"hash-cases.json", "sources":["hash-v2", "hash220", "hash-v1", "slug-v1"], "runtimeHashesVerified":false}
+  ]
+}

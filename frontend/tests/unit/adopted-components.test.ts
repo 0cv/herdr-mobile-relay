@@ -157,7 +157,7 @@ describe('adopted navigation and terminal controls', () => {
 
   it('sends a detected terminal menu action through the serialized key path', async () => {
     const user = userEvent.setup();
-    const current = agent();
+    const current = agent({ server_session_id: 'primary', terminal_id: 'terminal-1', generation: 1 });
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({

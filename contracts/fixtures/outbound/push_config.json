@@ -10,6 +10,7 @@
   "update": {"state": "current"},
   "app_deploy": {"state": "idle", "configured": false},
   "capabilities": [
+    "pi_integration",
     "attention_classification",
     "clear_activities",
     "directory_browser",
@@ -19,10 +20,12 @@
     "structured_questions",
     "slash_commands",
     "conversation_history",
+    "conversation_activity",
     "pane_size_opt_in",
     "pane_size_opt_in_rows",
     "workspace_inspection",
     "semantic_input",
+    "manual_terminal_input",
     "secret_input",
     "speech_voice_management",
     "invitation_qr"

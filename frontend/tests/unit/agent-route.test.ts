@@ -57,6 +57,87 @@ describe('notification deep links', () => {
   });
 });
 
+describe('inferred Kimi history navigation', () => {
+  const owner = 'a'.repeat(64);
+  const kimi = (overrides: Partial<Agent> = {}) => agent({ agent: 'Kimi-Code', agent_session_id: 'session-0', conversation_inferred_owner: owner, ...overrides });
+
+  it('follows 50 inferred session changes and unavailable history without authorizing an old target', () => {
+    const before = kimi();
+    const agents = writable([before]);
+    replaceView({ view: 'history', paneId: before.pane_id, target: targetRefForAgent(before)! });
+    stopFollowing = followInitialAgentSession(agents);
+    const push = vi.spyOn(history, 'pushState');
+    for (let i = 1; i <= 50; i++) {
+      const previous = get(currentView);
+      const after = kimi({ generation: i + 1, agent_session_id: i % 3 ? `session-${i}` : '' });
+      agents.set([after]);
+      expect(get(currentView)).toEqual({ view: 'history', paneId: before.pane_id, target: targetRefForAgent(after) });
+      if (previous.view === 'history') expect(targetRefMatchesAgent(previous.target!, after)).toBe(false);
+    }
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['changed process/cwd/pane owner', { conversation_inferred_owner: 'b'.repeat(64) }],
+    ['reported ID', { conversation_inferred_owner: undefined }],
+    ['invalid owner', { conversation_inferred_owner: '' }],
+    ['terminal replacement', { terminal_id: 'other-terminal' }],
+    ['server replacement', { server_session_id: 'other-server' }],
+    ['relay replacement', { relay_id: 'other-relay' }],
+    ['pane replacement', { raw_pane_id: 'other-pane' }],
+    ['agent replacement', { agent: 'pi' }],
+    ['skipped generation', { generation: 3 }],
+  ] satisfies [string, Partial<Agent>][])('does not follow %s', (_, override) => {
+    const before = kimi();
+    const agents = writable([before]);
+    const view = { view: 'history' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1', ...override })]);
+    expect(get(currentView)).toEqual(view);
+  });
+
+  it('does not follow snapshots without an agent provider', () => {
+    const before = kimi({ agent: undefined });
+    const agents = writable([before]);
+    const view = { view: 'history' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ agent: undefined, generation: 2, agent_session_id: 'session-1' })]);
+    expect(get(currentView)).toEqual(view);
+  });
+
+  it.each(['terminal', 'history'] as const)('does not follow an ownerless Kimi %s into a new process owner', (view) => {
+    const before = kimi({ agent_session_id: '', conversation_inferred_owner: undefined });
+    const agents = writable([before]);
+    const route = { view, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(route);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1', conversation_inferred_owner: 'b'.repeat(64) })]);
+    expect(get(currentView)).toEqual(route);
+  });
+
+  it.each(['terminal', 'history'] as const)('does not follow an unavailable inferred %s across an owner change', (view) => {
+    const before = kimi({ agent_session_id: '' });
+    const agents = writable([before]);
+    const route = { view, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(route);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1', conversation_inferred_owner: 'b'.repeat(64) })]);
+    expect(get(currentView)).toEqual(route);
+  });
+
+  it.each(['session-0', ''] as const)('never follows an inferred switch in Terminal from %s', (session) => {
+    const before = kimi({ agent_session_id: session });
+    const agents = writable([before]);
+    const view = { view: 'terminal' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1' })]);
+    expect(get(currentView)).toEqual(view);
+  });
+});
+
 describe('initial native session discovery navigation', () => {
   it.each(['terminal', 'history'] as const)('refreshes an open %s route without adding history or authorizing the old target', (view) => {
     const before = agent();

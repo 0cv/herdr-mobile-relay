@@ -1,0 +1,14 @@
+{
+  "id": "session_00000000-0000-4000-8000-000000000004",
+  "version": 2,
+  "cwd": "/fixture/kimi-project",
+  "createdAt": 1786680000000,
+  "updatedAt": 1786680001000,
+  "archived": false,
+  "title": "Synthetic fork",
+  "titleKind": "custom",
+  "isCustomTitle": true,
+  "forkedFrom": "session_00000000-0000-4000-8000-000000000001",
+  "agents": {"main": {"type": "main", "parentAgentId": null}},
+  "custom": {}
+}

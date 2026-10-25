@@ -264,7 +264,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .app-update-status-checking { inset: 0 0 auto; margin-top: .45rem; position: absolute; }
 .update-check-button:disabled { cursor: wait; filter: none; opacity: 1; }
 .hint, .form-status, .question-status { color: var(--muted); font-size: .74rem; line-height: 1.45; margin: .45rem 0 0; }
-.form-status.error, .upload-status.error, .hint.error { color: var(--danger); }
+.form-status.error, .upload-status.error, .draft-status.error, .hint.error { color: var(--danger); }
 .optional { font-weight: 400; }
 .warning { color: var(--warning) !important; }
 
@@ -393,27 +393,28 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .activity-detail-head { align-items: center; display: flex; gap: .5rem; }
 .activity-detail-head h2 { flex: 1; font-size: 1rem; margin: 0; }
 
-.conversation-page { display: flex; flex: 1 1 auto; flex-direction: column; gap: .65rem; margin: 0 auto; max-width: 48rem; min-height: 0; padding: .75rem .85rem calc(.75rem + env(safe-area-inset-bottom)); width: 100%; }
+.conversation-page { position: relative; display: flex; flex: 1 1 auto; flex-direction: column; gap: .65rem; margin: 0 auto; max-width: 48rem; min-height: 0; padding: .75rem .85rem calc(.75rem + env(safe-area-inset-bottom)); width: 100%; }
 .conversation-toolbar { align-items: center; display: flex; flex: 0 0 auto; gap: .75rem; justify-content: space-between; }
 .conversation-toolbar h2 { font-size: 1rem; margin: 0; }
-.conversation-toolbar p { color: var(--muted); font-size: .68rem; margin: .15rem 0 0; }
 .conversation-search { flex: 0 1 16rem; }
 .conversation-search input { min-height: 2.35rem; padding: .48rem .62rem; }
 .conversation-older { display: flex; flex: 0 0 auto; justify-content: center; }
+.conversation-source-status { color: var(--muted); flex: 0 0 auto; font-size: .68rem; margin: .1rem 0; overflow-wrap: anywhere; text-align: center; }
 .conversation-warning { color: var(--warning); flex: 0 0 auto; font-size: .7rem; margin: 0; text-align: center; }
 .conversation-warning.error { color: var(--danger); }
 .conversation-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .1rem .05rem .6rem; }
 .conversation-history-status { color: var(--muted); font-size: .68rem; line-height: 1.2; margin: 0; min-height: 1.05rem; padding: .15rem .25rem; text-align: center; }
+.conversation-entry.conversation-notice { border-inline-start: 3px solid var(--warning); }
 .conversation-history-sentinel { flex: 0 0 1px; height: 1px; min-height: 1px; pointer-events: none; }
 .conversation-input-area { flex: 0 0 auto; margin-top: auto; min-width: 0; }
-.conversation-composer { align-items: flex-end; display: flex; gap: .45rem; }
+.prompt-composer { min-width: 0; position: relative; }
+.conversation-input-area .term-input { padding: .25rem 0; }
 /* Attach controls stack vertically beside the composer so two targets cost
    one narrow column instead of two full icon widths of typing space. */
 .attach-stack { display: flex; flex-direction: column; gap: .18rem; }
 .attach-stack .button-icon { height: 1.3rem; min-height: 1.3rem; width: 2.2rem; }
 .attach-stack .button-symbol { height: 1.05rem; width: 1.05rem; }
 .conversation-composer-status { color: var(--muted); font-size: .68rem; margin: .35rem .2rem 0; }
-.conversation-composer-status.error { color: var(--danger); }
 /* The turns live in their own box so a ResizeObserver can watch the height of
    the content itself: the scroller's box never changes when a turn is added or
    when wrapped markdown settles, which is what the bottom pin has to follow. */
@@ -438,6 +439,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-markdown :is(h3, h4, h5, h6) { font-size: .86rem; line-height: 1.35; margin: .85rem 0 .4rem; }
 .conversation-markdown :is(ul, ol) { margin: .5rem 0; padding-left: 1.35rem; }
 .conversation-markdown li + li { margin-top: .25rem; }
+.conversation-markdown li > :is(ul, ol, p) { margin: .25rem 0; }
 .conversation-markdown blockquote { border-left: 3px solid var(--border); color: var(--muted); margin: .6rem 0; padding-left: .7rem; }
 .conversation-markdown pre { background: var(--terminal); border: 1px solid var(--border); border-radius: .5rem; color: var(--terminal-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .72rem; line-height: 1.5; margin: .55rem 0; max-width: 100%; overflow: auto; padding: .65rem; tab-size: 2; white-space: pre; }
 .conversation-markdown :not(pre) > code { background: var(--secondary); border: 1px solid var(--border); border-radius: .25rem; font-family: ui-monospace, monospace; font-size: .9em; padding: .08rem .22rem; }
@@ -491,7 +493,6 @@ textarea { min-height: 6.5rem; resize: vertical; }
   position: absolute;
   visibility: hidden;
 }
-.question-term-keys { flex: 0 0 auto; padding-bottom: calc(.4rem + env(safe-area-inset-bottom)); }
 .terminal-copy { display: flex; gap: .3rem; justify-content: flex-end; padding: .2rem .5rem; position: absolute; right: 0; top: 0; z-index: 2; }
 .terminal-view.find-open .terminal-copy { top: 3rem; }
 .terminal-find { align-items: center; background: var(--background); border-bottom: 1px solid var(--border); display: flex; flex: 0 0 auto; gap: .35rem; padding: .38rem .5rem; }
@@ -668,7 +669,6 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .term-content mark.terminal-find-match { background: #f2d66d; border-radius: .08rem; color: #17120a; }
 .term-content mark.terminal-find-match.active { background: #ff8a4c; box-shadow: 0 0 0 1px #fff6; color: #160a04; }
 .term-wrap { display: flex; flex: 1 1 auto; min-height: 0; position: relative; }
-.jump-bottom { background: var(--primary); border: 0; border-radius: 50%; bottom: .9rem; color: var(--primary-foreground); height: 2.5rem; position: absolute; right: 1rem; width: 2.5rem; }
 .terminal-bottom { background: var(--background); border-top: 1px solid var(--border); flex: 0 0 auto; padding-bottom: env(safe-area-inset-bottom); position: relative; }
 .term-input { align-items: flex-end; display: flex; gap: .45rem; padding: .55rem; }
 .composer-field { background: var(--input); border: 1px solid var(--border); border-radius: .68rem; display: flex; flex: 1; min-width: 0; position: relative; }
@@ -691,7 +691,6 @@ textarea { min-height: 6.5rem; resize: vertical; }
   padding: var(--composer-padding-block, .66rem) 2.2rem var(--composer-padding-block, .66rem) .68rem;
   resize: none;
 }
-.composer-field.awaiting-approval textarea { line-height: var(--composer-min-height, 2.85rem); padding: 0 .6rem; text-align: center; }
 .input-clear { background: transparent; border: 0; color: var(--muted); font-size: 1.2rem; height: 2.5rem; position: absolute; right: 0; top: 0; width: 2rem; }
 .slash-command-popover { background: var(--card); border: 1px solid var(--border); border-radius: .72rem; bottom: calc(100% + .42rem); box-shadow: 0 .8rem 2.4rem rgb(0 0 0 / .42); contain: layout paint; display: flex; flex-direction: column; left: .55rem; max-height: min(48dvh, 22rem); overflow: hidden; position: absolute; right: .55rem; z-index: 15; }
 .slash-command-header { align-items: center; border-bottom: 1px solid var(--border); display: flex; flex: 0 0 auto; justify-content: space-between; min-height: 2rem; padding: .35rem .65rem; }
@@ -713,13 +712,12 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .slash-command-status, .slash-command-limit, .slash-command-display-limit { color: var(--muted); font-size: .68rem; line-height: 1.4; margin: 0; padding: .7rem; }
 .slash-command-limit, .slash-command-display-limit { border-top: 1px solid var(--border); font-size: .6rem; padding: .35rem .65rem; }
 
-/* Keep the version-41 menu safe while an already-open client loads newer CSS. */
-.composer-field > .slash-command-menu { background: var(--card); border: 1px solid var(--border); border-radius: .72rem; bottom: calc(100% + .42rem); box-shadow: 0 .8rem 2.4rem rgb(0 0 0 / .42); left: 0; max-height: min(48dvh, 22rem); overflow-y: auto; position: absolute; right: 0; z-index: 15; }
-.composer-field > .slash-command-menu .slash-command-name em { border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .56rem; font-style: normal; margin-left: auto; padding: .08rem .28rem; text-transform: capitalize; }
 .upload-status { color: var(--success); font-size: .7rem; margin: -.2rem .75rem .45rem; }
+.draft-status { color: var(--muted); font-size: .7rem; margin: 0 .75rem .25rem; }
 .quick-actions { border-top: 1px solid var(--border); padding: .55rem; }
 .quick-actions .button { flex: 1; }
-.term-keys { align-items: center; border-top: 1px solid var(--border); display: flex; gap: .35rem; padding: .4rem .55rem; }
+.term-keys { align-items: center; border-top: 1px solid var(--border); display: flex; gap: .2rem; padding: .4rem .35rem; }
+.term-keys .button { flex-shrink: 0; font-size: .72rem; height: 2.15rem; padding: 0 .4rem; white-space: nowrap; }
 .key-feedback { background: color-mix(in srgb, var(--primary) 10%, var(--background)); border-top: 1px solid var(--border); color: var(--muted); font-size: .66rem; margin: 0; min-height: 1.55rem; padding: .35rem .65rem; }
 .key-feedback.error { color: var(--danger); }
 .term-keys .spacer { flex: 1; }
@@ -728,7 +726,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .modifier-menu .button[aria-pressed='true'] { background: var(--primary); color: var(--primary-foreground); }
 /* Inline-level buttons here would align on the text baseline, which drops Alt
    about a pixel below Shift and Ctrl because their glyph boxes differ. */
-.modifier-menu { align-items: center; display: flex; gap: .35rem; }
+.modifier-menu { align-items: center; display: flex; gap: .2rem; }
 /* 1.15rem keeps these buttons at the row's 2.15rem, unlike the 1.5rem
    .button-symbol, which makes its button taller than the lettered ones. */
 /* A drawn icon centres on the button box, but the lettered keys' ink sits about
@@ -1015,3 +1013,14 @@ textarea { min-height: 6.5rem; resize: vertical; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+
+/* Touch screens: approval and answer buttons get a 44px hit area (Apple HIG,
+   WCAG 2.5.8), in px so Interface Size cannot shrink it. */
+@media (pointer: coarse) {
+  .agent-actions .button { min-height: 44px; }
+}
+
+/* Approval choices wrap instead of being cut, and each row fills the card. */
+.agent-actions .button { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+/* A question answered from its card is shown whole. */
+.prompt-preview.prompt-full { display: block; }

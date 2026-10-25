@@ -195,7 +195,7 @@ func TestLifecycleStartsHermesWithSelectedProfile(t *testing.T) {
 				"  *) exit 2 ;;\n"+
 				"esac\n")
 
-			socketPath := filepath.Join(dir, "herdr.sock")
+			socketPath := filepath.Join(testSocketDir(t), "s")
 			startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
 			lifecycle := &Lifecycle{
 				herdr:    herdr.NewClient(bin, socketPath),
@@ -251,7 +251,7 @@ func TestLifecycleOmitsProfileFlagWhenUnset(t *testing.T) {
 		"  'agent start') printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"hermes\"}}}' ;;\n"+
 		"  *) exit 2 ;;\n"+
 		"esac\n")
-	socketPath := filepath.Join(dir, "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "s")
 	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
 	lifecycle := &Lifecycle{
 		herdr:    herdr.NewClient(bin, socketPath),

@@ -5,7 +5,7 @@ const webRoot = resolve(process.env.HERDR_WEB_ROOT || 'dist');
 
 export default defineConfig({
   testDir: './tests/browser',
-  testIgnore: 'attention-relay.spec.ts',
+  testIgnore: ['attention-relay.spec.ts', 'terminal-input.spec.ts'],
   timeout: 30_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,

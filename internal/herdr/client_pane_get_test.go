@@ -48,7 +48,7 @@ func TestPaneProcessInfoFreshUsesSocket(t *testing.T) {
 }
 
 func TestPaneGetSurfacesPaneNotFound(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)

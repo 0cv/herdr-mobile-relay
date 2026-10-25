@@ -13,19 +13,20 @@ type ClientID string
 type CommandKind string
 
 const (
-	CommandPrompt     CommandKind = "prompt"
-	CommandKeys       CommandKind = "keys"
-	CommandText       CommandKind = "text"
-	CommandInput      CommandKind = "send_input"
-	CommandFilterText CommandKind = "send_filter_text"
-	CommandSecret     CommandKind = "send_secret"
-	CommandApproval   CommandKind = "approval"
-	CommandQuestion   CommandKind = "question"
-	CommandTabRename  CommandKind = "agent_rename"
-	CommandTabReorder CommandKind = "tab_reorder"
-	CommandStop       CommandKind = "agent_stop"
-	CommandClear      CommandKind = "agent_clear"
-	CommandStart      CommandKind = "agent_start"
+	CommandPrompt       CommandKind = "prompt"
+	CommandKeys         CommandKind = "keys"
+	CommandText         CommandKind = "text"
+	CommandInput        CommandKind = "send_input"
+	CommandTerminalText CommandKind = "send_terminal_text"
+	CommandFilterText   CommandKind = "send_filter_text"
+	CommandSecret       CommandKind = "send_secret"
+	CommandApproval     CommandKind = "approval"
+	CommandQuestion     CommandKind = "question"
+	CommandTabRename    CommandKind = "agent_rename"
+	CommandTabReorder   CommandKind = "tab_reorder"
+	CommandStop         CommandKind = "agent_stop"
+	CommandClear        CommandKind = "agent_clear"
+	CommandStart        CommandKind = "agent_start"
 )
 
 type Command struct {

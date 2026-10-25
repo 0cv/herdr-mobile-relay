@@ -223,7 +223,7 @@ func TestCapabilitySameVersionRestartClearsLearnedEvidence(t *testing.T) {
 	}
 }
 func TestCapabilityRefreshDropsStaleInFlightResultAfterInvalidation(t *testing.T) {
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "herdr.sock"), Net: "unix"})
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(testSocketDir(t), "herdr.sock"), Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func recordingCapabilitySocket(
 	t.Helper()
 	var methodsMu sync.Mutex
 	var methods []string
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "herdr.sock"), Net: "unix"})
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(testSocketDir(t), "s"), Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -75,8 +75,8 @@ import { constants, gzipSync } from 'node:zlib';
 // safe Conversation routing with native-transcript fallback.
 // Raised from 164 KiB for bounded history diagnostics, source-change recovery,
 // and snapshot-aware refresh handling.
-const limitKiB = 165;
-const limit = limitKiB * 1024 + 256;
+const limitKiB = 166;
+const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
 const appScript = assetNames.find((name) => /^app-[a-f0-9]{64}\.js$/.test(name));

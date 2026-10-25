@@ -5,6 +5,7 @@ import {
   promptDraftIdentity,
   prunePromptDrafts,
   savePromptDraft,
+  unsavedPromptDraft,
 } from '$lib/prompt-drafts';
 import type { Agent } from '$lib/types';
 
@@ -15,6 +16,9 @@ function agent(overrides: Partial<Agent> = {}): Agent {
     raw_pane_id: 'pane-1',
     pane_id: 'relay-1::pane-1',
     terminal_id: 'terminal-1',
+    server_session_id: 'server-1',
+    generation: 1,
+    agent_session_id: 'session-1',
     agent: 'codex',
     cwd: '/work/project',
     ...overrides,
@@ -30,6 +34,10 @@ describe('prompt drafts', () => {
     expect(loadPromptDraft(current, 2_000)).toBe('unfinished reply');
     expect(loadPromptDraft(agent({ terminal_id: 'terminal-2' }), 2_000)).toBe('');
     expect(loadPromptDraft(agent({ relay_id: 'relay-2' }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ raw_pane_id: 'pane-2' }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ server_session_id: 'server-2' }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ generation: 2 }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ agent_session_id: 'session-2' }), 2_000)).toBe('');
   });
 
   it('expires old drafts and clears successful sends', () => {
@@ -55,6 +63,23 @@ describe('prompt drafts', () => {
     clearPromptDraft(current);
     expect(loadPromptDraft(current, 3_001)).toBe('');
     expect(localStorage.length).toBe(0);
+  });
+
+  it('reports drafts that only this page holds', () => {
+    const current = agent({ terminal_id: 'terminal-unsaved' });
+    expect(unsavedPromptDraft(1_000)).toBe(false);
+    expect(savePromptDraft(current, 'x'.repeat(64 * 1_024 + 1), 1_000)).toBe('too-large');
+    expect(unsavedPromptDraft(1_000)).toBe(true);
+    expect(unsavedPromptDraft(48 * 60 * 60 * 1_000 + 1_001)).toBe(false);
+    expect(savePromptDraft(current, 'saved now', 2_000)).toBe('saved');
+    expect(unsavedPromptDraft(2_000)).toBe(false);
+
+    const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    expect(savePromptDraft(current, 'storage refused', 3_000)).toBe('unavailable');
+    setItem.mockRestore();
+    expect(unsavedPromptDraft(3_000)).toBe(true);
+    clearPromptDraft(current);
+    expect(unsavedPromptDraft(3_000)).toBe(false);
   });
 
   it('keeps only the newest bounded set of drafts', () => {

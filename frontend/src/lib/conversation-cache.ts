@@ -78,7 +78,7 @@ export function resetConversationCacheLimits(): void {
   clearConversationPreviews();
 }
 
-export function getConversationPreview(identity: string, now = Date.now()): ConversationPreview | null {
+export function getConversationPreview(identity: string, now = Date.now(), entryLimit = limits.maxEntries): ConversationPreview | null {
   const record = cache.get(identity);
   if (!record) return null;
   if (now - record.preview.savedAt >= limits.ttlMs) {
@@ -86,7 +86,7 @@ export function getConversationPreview(identity: string, now = Date.now()): Conv
     return null;
   }
   record.lastUsed = now;
-  return clonePreview(record.preview);
+  return clonePreview(record.preview, entryLimit);
 }
 
 export function putConversationPreview(preview: ConversationPreview, now = Date.now()): boolean {
@@ -192,12 +192,12 @@ function totalCacheBytes(): number {
   return total;
 }
 
-function clonePreview(preview: ConversationPreview): ConversationPreview {
+function clonePreview(preview: ConversationPreview, entryLimit: number): ConversationPreview {
   return {
     ...preview,
     ...(preview.diagnostics ? { diagnostics: cloneDiagnostics(preview.diagnostics) } : {}),
     ...(preview.plan ? { plan: clonePlan(preview.plan) } : {}),
-    entries: cloneEntries(preview.entries),
+    entries: cloneEntries(preview.entries.slice(-Math.max(1, Math.trunc(entryLimit)))),
   };
 }
 

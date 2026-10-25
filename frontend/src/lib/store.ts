@@ -1,5 +1,9 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlEncode } from './base64url';
+import { dispatchFlag } from './composer';
+import { inputContextIdentity } from './input-target-state';
+import { terminalInputDelivery } from './terminal-input-delivery.svelte';
+import { piPromptTarget, piPromptDelivery, validPiPromptText, type PiPromptCapability, type PiPromptLease } from './pi-prompt.svelte';
 import { clearConversationPreviews, clearConversationPreviewsForRelay } from './conversation-cache-control';
 import {
   AttachmentBatchController,
@@ -148,18 +152,6 @@ const KEEPALIVE_INTERVAL_MS = 120_000;
 // radio wakeups: the keepalive stops and the connection is left to lapse.
 // Becoming visible resets the bound and resumes the keepalive.
 const HIDDEN_KEEPALIVE_MAX_MS = 60 * 60_000;
-// With the keepalive running, a healthy connection is never silent for longer
-// than its cadence plus slack. A longer gap means the page was frozen, and a
-// frozen page cannot have kept its path: the remote side's ICE consent lapses
-// in about thirty seconds and the gateway reaper fires at five minutes. So a
-// stale connection is a corpse, and probing it only delays the dial.
-//
-// The slack has to cover an intensively throttled hidden tab, where a
-// two-minute interval can drift onto the next once-a-minute wakeup and the
-// reply still has to arrive: three minutes is boundary-tight and would
-// occasionally redial a healthy connection. Four still sits a full minute
-// under the reaper, so nothing a live connection does can reach it.
-const FRESH_PROOF_MS = 240_000;
 // Gateway-relayed traffic is metered project bandwidth. Cap scrollback while
 // honoring the user's refresh rate; acknowledged deltas keep idle frames off
 // the wire and make the selected cadence affordable during normal output.
@@ -173,6 +165,7 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   send_keys: true,
   send_text: true,
   send_input: true,
+  send_terminal_text: true,
   send_filter_text: true,
   send_secret: true,
   agent_start: true,
@@ -295,6 +288,20 @@ function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
 
 const BROWSE_CURSOR_LIMIT = 2_048;
 
+function conversationCapabilities(value: unknown): import('./types').ConversationCapabilities | undefined {
+  if (value == null) return undefined;
+  const raw = browseRecord(value, true)!;
+  if (!['pi_events', 'recorded_history'].includes(raw.source)) invalidBrowse();
+  return { source: raw.source, active_branch: browseBoolean(raw.active_branch) };
+}
+
+export function normalizeConversationBatch(value: unknown): import('./types').ConversationBatch {
+  const raw = browseRecord(value, true)!;
+  if (!['batch', 'reset', 'heartbeat'].includes(raw.kind) || !Array.isArray(raw.remove) || raw.remove.length > 200 || JSON.stringify(raw).length > 2 * 1024 * 1024) invalidBrowse();
+  const page = normalizeConversationPage({ available: true, has_more: false, entries: raw.entries || [], state: 'ready', mode: 'recent', source_revision: raw.source_revision });
+  return { subscriptionId: browseString(raw.subscription_id, 128, true), kind: raw.kind, sourceRevision: page.sourceRevision || '', sequence: browseCount(raw.sequence), entries: page.entries, remove: raw.remove.map((id: unknown) => browseString(id, 256, true)), state: browseString(raw.state, 32), capabilities: conversationCapabilities(raw.capabilities) };
+}
+
 function invalidBrowse(): never {
   throw new CommandError('Relay returned invalid conversation history');
 }
@@ -345,10 +352,13 @@ export function normalizeConversationPage(value: unknown): ConversationPage {
       return [{
         id: browseIdentity(tool.id, 256), name: browseText(tool.name, 160) || 'Tool',
         input: browseText(tool.input, 1_048_576), output: browseText(tool.output, 1_048_576),
+        ...(tool.state === 'running' || tool.state === 'completed' || tool.state === 'failed' ? { state: tool.state } : {}),
+        ...(typeof tool.parent_id === 'string' ? { parentId: browseIdentity(tool.parent_id, 256) } : {}),
         error: tool.error === true, truncated: tool.truncated === true,
       }];
     });
     const normalized = {
+      ...(entry.kind === 'compaction' || entry.kind === 'notice' ? { kind: entry.kind } : {}),
       id: browseIdentity(entry.id, 256), timestamp: browseText(entry.timestamp, 128),
       role: entry.role, text, tools, truncated: entry.truncated === true,
     };
@@ -388,7 +398,11 @@ export function normalizeConversationPage(value: unknown): ConversationPage {
     retryable: browseBoolean(rawError.retryable),
   } : undefined;
   if (state === 'failed' && !error) invalidBrowse();
+  if (data.provisional != null && (!Array.isArray(data.provisional) || data.provisional.length > 16)) invalidBrowse();
   return {
+    subscriptionId: browseString(data.subscription_id, 128),
+    provisional: data.provisional ? normalizeConversationPage({ available: true, has_more: false, entries: data.provisional, mode: 'recent', state: 'ready' }).entries : undefined,
+    capabilities: conversationCapabilities(data.capabilities), sequence: browseCount(data.sequence), liveState: browseString(data.live_state, 32),
     available: data.available, reason: browseString(data.reason, 512), entries,
     nextCursor: cursor, hasMore: data.has_more, total: data.total == null ? null : browseCount(data.total),
     state: state as ConversationPage['state'], mode: mode as ConversationPage['mode'],
@@ -408,9 +422,7 @@ function normalizeAgentTargetFields(agent: Partial<Agent>): Partial<Agent> {
       ? agent.terminal_id.trim()
       : undefined,
     generation: Number.isSafeInteger(generation) && generation >= 0 ? generation : undefined,
-    agent_session_id: typeof agent.agent_session_id === 'string' && agent.agent_session_id.trim()
-      ? agent.agent_session_id.trim()
-      : undefined,
+    agent_session_id: typeof agent.agent_session_id === 'string' ? agent.agent_session_id : undefined,
   };
 }
 
@@ -559,8 +571,10 @@ class RelayStore {
   private blockedSnapshotMisses = new Map<string, number>();
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingUploads = new Map<string, PendingUpload>();
-  private pendingPaneReads = new Map<string, number>();
+  private pendingPaneReads = new Map<string, { requestId: string; requestedAt: number; startedAt: number }>();
   private paneContentFingerprints = new Map<string, string>();
+  private secretObservations = new WeakMap<TerminalFrame, RelayConnection>();
+  private secretReadAfter = new Map<string, number>();
   private watchedPanes = new Map<string, Agent>();
   // Panes this phone may hold a size lease on, kept outside TerminalView so
   // turning Resize Session off can release panes whose view already closed
@@ -948,6 +962,7 @@ class RelayStore {
   }
 
   connectRelay(relay: RelayConfig): void {
+    if (this.hidden) return;
     if (this.deferredPairingRelays.has(relay.id)) return;
     if (this.pairingRequired(relay)) {
       this.markPairingRequired(relay);
@@ -959,7 +974,7 @@ class RelayStore {
     this.emitConnections();
     connection.transport = createRelayTransport(relay, {
       onMessage: (message) => {
-        if (!this.isCurrentConnection(relay.id, connection)) return;
+        if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
         connection.lastMessageAt = Date.now();
         this.clearHealthTimer(connection);
         this.reconnectAttempts.delete(relay.id);
@@ -971,6 +986,7 @@ class RelayStore {
     }, {
       getAuthentication: () => this.relayAuthentication(relay),
       onAuthenticated: (presented, enrollment) => {
+        if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
         commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
         this.markRelayPaired(relay.id);
       },
@@ -1039,6 +1055,7 @@ class RelayStore {
   private markConnectionReady(relayId: string, connection: RelayConnection): void {
     if (!this.isCurrentConnection(relayId, connection) || connection.closed) return;
     // A completed handshake is the freshest proof of life there is.
+    this.clearHealthTimer(connection);
     connection.lastMessageAt = Date.now();
     connection.status = 'connected';
     this.emitConnections();
@@ -1134,11 +1151,18 @@ class RelayStore {
     if (this.hidden === hidden) return;
     this.hidden = hidden;
     this.hiddenSince = hidden ? Date.now() : 0;
+    if (hidden) {
+      for (const connection of this.connectionsValue.values()) {
+        clearTimeout(connection.reconnectTimer ?? undefined);
+        connection.reconnectTimer = null;
+        this.clearUpdateRestartTimer(connection);
+      }
+    }
     this.syncKeepalive();
   }
 
   revalidateConnections(timeoutMs = healthTimeoutMs()): void {
-    if (!this.reconnectEnabled) return;
+    if (!this.reconnectEnabled || this.hidden) return;
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
@@ -1157,20 +1181,14 @@ class RelayStore {
         this.connectRelay(relay);
         continue;
       }
-      // The keepalive gives every healthy connection a freshness bound, so a
-      // silence longer than FRESH_PROOF_MS is a corpse: dial now instead of
-      // spending the probe timeout proving what the silence already said.
-      if (Date.now() - connection.lastMessageAt > FRESH_PROOF_MS) {
-        this.connectRelay(relay);
-        continue;
-      }
       if (connection.healthTimer) continue;
       connection.healthTimer = setTimeout(() => {
         if (!this.isCurrentConnection(relay.id, connection)) return;
         connection.healthTimer = null;
         this.connectRelay(relay);
       }, timeoutMs);
-      if (!this.sendRaw(relay.id, { type: 'refresh_agents' })) {
+      this.sendRaw(relay.id, { type: 'refresh_agents' });
+      if (!this.sendRaw(relay.id, { type: 'ping' })) {
         this.clearHealthTimer(connection);
         this.connectRelay(relay);
       }
@@ -1220,14 +1238,6 @@ class RelayStore {
     return false;
   }
 
-  /**
-   * Sends one proof-of-life frame per connected relay and arms the health
-   * timer for the reply. `refresh_agents` is the ping: every deployed relay
-   * answers it with a small inventory snapshot, the reply doubles as the
-   * health signal, and traffic in either direction resets the gateway's idle
-   * clock. A dedicated ping type would need protocol versioning and
-   * capability gating to save a handful of bytes every two minutes.
-   */
   private sendKeepalive(): void {
     if (this.keepaliveExhausted()) {
       this.stopKeepalive();
@@ -1242,7 +1252,7 @@ class RelayStore {
         connection.healthTimer = null;
         this.failKeepalive(relayId, connection);
       }, BACKGROUND_HEALTH_TIMEOUT_MS);
-      if (this.sendRaw(relayId, { type: 'refresh_agents' })) continue;
+      if (this.sendRaw(relayId, { type: 'ping' })) continue;
       this.clearHealthTimer(connection);
       this.failKeepalive(relayId, connection);
     }
@@ -1282,7 +1292,7 @@ class RelayStore {
       this.clearUpdateRestartTimer(connection);
       return;
     }
-    if (connection.closed || connection.updateRestartTimer) return;
+    if (this.hidden || connection.closed || connection.updateRestartTimer) return;
     if (!this.isCurrentConnection(relayId, connection)) return;
     connection.updateRestartTimer = setTimeout(() => {
       if (!this.isCurrentConnection(relayId, connection)) return;
@@ -1298,7 +1308,7 @@ class RelayStore {
   }
 
   private scheduleReconnect(relay: RelayConfig, connection: RelayConnection, floorMs = 0): void {
-    if (connection.closed || !this.reconnectEnabled || connection.reconnectTimer) return;
+    if (this.hidden || connection.closed || !this.reconnectEnabled || connection.reconnectTimer) return;
     if (!this.isCurrentConnection(relay.id, connection)) return;
     const attempt = (this.reconnectAttempts.get(relay.id) || 0) + 1;
     this.reconnectAttempts.set(relay.id, attempt);
@@ -1311,6 +1321,7 @@ class RelayStore {
     connection.reconnectTimer = setTimeout(() => {
       if (!this.isCurrentConnection(relay.id, connection)) return;
       connection.reconnectTimer = null;
+      if (this.hidden || connection.closed || !this.reconnectEnabled) return;
       this.connectRelay(relay);
     }, delay);
   }
@@ -1602,15 +1613,21 @@ class RelayStore {
         || this.watchedPanes.get(paneId);
       return Boolean(agent && targetRefMatchesAgent(target, agent));
     };
-    const clearPendingPaneRead = (message: Record<string, any>): void => {
-      const target = paneMessageTarget(message);
-      const key = target && targetStoreKey(target);
-      if (key) this.pendingPaneReads.delete(key);
+    const readTarget = paneMessageTarget(message);
+    const readKey = readTarget && targetStoreKey(readTarget);
+    const pendingRead = readKey ? this.pendingPaneReads.get(readKey) : undefined;
+    if ((message.type === 'pane_content' || message.type === 'pane_unchanged')
+      && message.request_id && message.request_id !== pendingRead?.requestId) return;
+    const completePaneRead = (): number | undefined => {
+      if (!readKey || !pendingRead || message.request_id !== pendingRead.requestId) return;
+      this.pendingPaneReads.delete(readKey);
+      return !message.error ? pendingRead.startedAt : undefined;
     };
+    const inputTarget = !message.error && Object.prototype.hasOwnProperty.call(message, 'target') ? readTarget : undefined;
     if (message.type === 'pane_unchanged') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
       if (!paneMessageMatches(message)) return;
-      clearPendingPaneRead(message);
+      completePaneRead();
       if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
         this.paneContentFingerprints.set(paneId, message.content_fingerprint);
       }
@@ -1648,6 +1665,9 @@ class RelayStore {
       this.terminalFramesValue.set(paneId, {
         paneId,
         content: nextContent,
+        receivedAt: performance.now(),
+        inputTarget,
+        target: typeof message.no_echo === 'boolean' ? inputTarget : undefined,
         format: String(message.format || frame?.format || 'plain'),
         truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
         viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
@@ -1666,13 +1686,18 @@ class RelayStore {
     if (message.type === 'pane_content') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
       if (!paneMessageMatches(message)) return;
-      clearPendingPaneRead(message);
+      const readStartedAt = completePaneRead();
       if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
         this.paneContentFingerprints.set(paneId, message.content_fingerprint);
       }
       const nextFrame: TerminalFrame = {
+        readStartedAt,
         paneId,
         content: typeof message.content === 'string' ? message.content : '(empty)',
+        receivedAt: performance.now(),
+        target: inputTarget,
+        inputTarget,
+        noEcho: typeof message.no_echo === 'boolean' ? message.no_echo : undefined,
         format: String(message.format || 'plain'),
       };
       if (message.truncated === true) nextFrame.truncated = true;
@@ -1683,6 +1708,7 @@ class RelayStore {
         if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
       }
       if (message.resize_settling === true) nextFrame.resizeSettling = true;
+      if (connection && typeof nextFrame.noEcho === 'boolean' && Number.isFinite(readStartedAt)) this.secretObservations.set(nextFrame, connection);
       this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -1843,7 +1869,9 @@ class RelayStore {
       error.code = 'request_cancelled';
       return Promise.reject(error);
     }
-    const requestId = commandRequestId();
+    const requestId = payload.type === 'send_pi_prompt_unconfirmed'
+      ? `${String(payload.pi_prompt_lease?.incarnation || '')}_${commandRequestId()}`
+      : commandRequestId();
     return new Promise((resolve, reject) => {
       const abort = () => {
         clearTimeout(timer);
@@ -2045,6 +2073,66 @@ class RelayStore {
     }, timeoutMs, false, signal);
   }
 
+  async loadPiPromptCapability(agent: Agent): Promise<PiPromptCapability> {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    const target = targetRefForAgent(agent);
+    const observedAt = performance.now();
+    if (!target || !piPromptTarget(agent) || connection?.status !== 'connected'
+      || !connection.capabilities.includes('pi_prompt_unconfirmed') || this.deviceCredential(agent.relay_id)?.role !== 'controller') {
+      throw new CommandError('Pi prompt capability is unavailable');
+    }
+    const transport = connection.transport;
+    const result = await this.sendToAgent(agent, { type: 'get_pi_prompt_capability' });
+    const lease = result.data?.lease as PiPromptLease | undefined;
+    if (connection !== this.connectionsValue.get(agent.relay_id) || connection.status !== 'connected' || transport !== connection.transport
+      || result.data?.capability !== 'pi_prompt_unconfirmed' || !lease || lease.pane !== target.pane_id
+      || lease.session !== target.agent_session_id || !/^[a-f0-9]{64}$/.test(lease.instance) || !Number.isInteger(lease.pid) || lease.pid <= 0
+      || typeof lease.connection !== 'string' || !lease.connection || typeof lease.target_key !== 'string'
+      || typeof lease.token !== 'string' || lease.token.length !== 36 || typeof lease.incarnation !== 'string' || lease.incarnation.length !== 36) {
+      throw new CommandError('Pi prompt capability changed');
+    }
+    return { lease, target, observedAt, connection, transport };
+  }
+
+  piPromptReady(agent: Agent, capability: PiPromptCapability | null, frame?: TerminalFrame): boolean {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    const now = performance.now();
+    const age = now - (frame?.receivedAt ?? NaN);
+    const capabilityAge = now - (capability?.observedAt ?? NaN);
+    return Boolean(capability && piPromptTarget(agent) && targetRefMatchesAgent(capability.target, agent)
+      && capabilityAge >= 0 && capabilityAge < 10_000 && capability.connection === connection
+      && connection?.status === 'connected' && capability.transport === connection.transport
+      && connection.capabilities.includes('pi_prompt_unconfirmed') && this.deviceCredential(agent.relay_id)?.role === 'controller'
+      && !this.hidden && document.visibilityState !== 'hidden' && frame && frame.noEcho === false
+      && frame === this.terminalFramesValue.get(agent.pane_id) && this.secretObservations.get(frame) === connection
+      && frame.target && targetRefMatchesAgent(frame.target, agent) && age >= 0 && age < 3_000
+      && Number.isFinite(frame.readStartedAt) && frame.readStartedAt! > capability.observedAt);
+  }
+
+  async sendPiPrompt(agent: Agent, text: string, capability: PiPromptCapability, frame: TerminalFrame): Promise<CommandResult> {
+    const delivery = piPromptDelivery(agent);
+    const result = await delivery.withLock(async () => {
+      if (!this.piPromptReady(agent, capability, frame) || !validPiPromptText(text)) {
+        throw Object.assign(new CommandError('Wait for fresh Pi input state; attachments and hidden input are excluded.'), { data: { not_started: true } });
+      }
+      if (!delivery.begin()) return;
+      let uncertain = true;
+      let sentAt = 0;
+      try {
+        const result = await this.sendToAgent(agent, { type: 'send_pi_prompt_unconfirmed', text, pi_prompt_lease: capability.lease });
+        sentAt = result.phase === 'unconfirmed' && Number.isFinite(result.data?.sent_at) ? result.data!.sent_at : 0;
+        return result;
+      } catch (error) {
+        uncertain = dispatchFlag(error, 'dispatched_unknown');
+        throw error;
+      } finally {
+        delivery.finish(uncertain, sentAt);
+      }
+    });
+    if (!result) throw Object.assign(new CommandError(delivery.error || 'Check the previous Pi send first.'), { data: { not_started: true } });
+    return result;
+  }
+
   speakToAgent(agent: Agent, text: string, language: string): SpeechRequest {
     const speechRequestId = commandRequestId();
     const promise = this.sendToAgent(agent, {
@@ -2072,13 +2160,40 @@ class RelayStore {
    * runes so no bracketed-paste wrapper reaches a termios noecho read, and it
    * never journals the text.
    */
-  sendSecret(agent: Agent, text: string): Promise<CommandResult> {
+  secretInputReady(agent: Agent, frame?: TerminalFrame): boolean {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    const age = performance.now() - (frame?.receivedAt ?? NaN);
+    return Boolean(frame && connection?.status === 'connected' && !this.hidden && document.visibilityState !== 'hidden'
+      && frame === this.terminalFramesValue.get(agent.pane_id) && this.secretObservations.get(frame) === connection
+      && frame.noEcho === true && frame.target && targetRefMatchesAgent(frame.target, agent)
+      && Number.isFinite(age) && age >= 0 && age < 3_000 && Number.isFinite(frame.readStartedAt)
+      && frame.readStartedAt! > (this.secretReadAfter.get(agent.pane_id) ?? -Infinity));
+  }
+
+  async sendSecret(agent: Agent, text: string, frame: TerminalFrame): Promise<CommandResult> {
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('secret_input')) {
       return Promise.reject(new CommandError('This relay does not support password prompts'));
     }
     if (!text) return Promise.reject(new CommandError('Enter the password first'));
-    return this.sendToAgent(agent, { type: 'send_secret', text });
+    if (!this.secretInputReady(agent, frame)) {
+      throw new CommandError('Wait for a fresh exact-target hidden prompt.');
+    }
+    const delivery = terminalInputDelivery(agent);
+    if (!delivery.begin()) throw new CommandError('Check terminal input delivery before sending.');
+    this.secretObservations.delete(frame);
+    let uncertain = true;
+    try {
+      const result = await this.sendToAgent(agent, { type: 'send_secret', text });
+      uncertain = result.phase !== 'completed' || !result.ok;
+      return result;
+    } catch (error) {
+      uncertain = !dispatchFlag(error, 'not_started');
+      throw error;
+    } finally {
+      this.secretReadAfter.set(agent.pane_id, performance.now());
+      delivery.finish(uncertain);
+    }
   }
 
   reorderTab(agent: Agent, insertIndex: number): Promise<CommandResult> {
@@ -2375,6 +2490,10 @@ class RelayStore {
     const pending = this.pendingRequests.get(result.request_id);
     if (!pending || pending.relayId !== relayId) return;
     if (result.phase === 'accepted') {
+      if (pending.action === 'agent_start') {
+        this.showToast('Start accepted; waiting for confirmation…');
+        return;
+      }
       // The relay already acted; give the final confirmation its own window
       // instead of counting it against the original send timeout.
       clearTimeout(pending.timer);
@@ -2522,8 +2641,19 @@ class RelayStore {
       cursor,
       limit,
       retry: request.retry,
+      observe: this.connectionsValue.get(agent.relay_id)?.capabilities.includes('conversation_activity') === true,
     }, 20_000, request.signal);
     return normalizeConversationPage(result.data);
+  }
+
+  async getConversationUpdates(agent: Agent, sourceRevision: string, after: number, signal: AbortSignal, subscriptionId: string): Promise<import('./types').ConversationBatch> {
+    const result = await this.sendToAgent(agent, { type: 'get_conversation_updates', source_revision: sourceRevision, after, subscription_id: subscriptionId }, 15_000, signal);
+    return normalizeConversationBatch(result.data);
+  }
+
+  stopConversationUpdates(agent: Agent, subscriptionId: string): void {
+    if (!this.connectionsValue.get(agent.relay_id)?.capabilities.includes('conversation_activity')) return;
+    void this.sendToAgent(agent, { type: 'unwatch_conversation', subscription_id: subscriptionId }, 3000).catch(() => {});
   }
 
   /**
@@ -2538,23 +2668,26 @@ class RelayStore {
     return { lines: Math.min(lines, RELAYED_HISTORY_LINES), intervalMs };
   }
 
-  readPane(agent: Agent, force = false): void {
+  readPane(agent: Agent, force = false, lines?: number): void {
     const identity = this.agentTargetPayload(agent);
     if (!identity) return;
     const readKey = targetStoreKey(identity.target);
     if (!readKey) return;
-    const requestedAt = this.pendingPaneReads.get(readKey);
-    if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
+    const pending = this.pendingPaneReads.get(readKey);
+    if (!force && pending && Date.now() - pending.requestedAt < PANE_READ_RETRY_MS) return;
     this.paneWatchesStarted.delete(agent.pane_id);
+    const requestId = commandRequestId();
+    const startedAt = performance.now();
     const sent = this.sendRaw(agent.relay_id, {
       type: 'read_pane',
+      request_id: requestId,
       pane_id: agent.raw_pane_id,
-      lines: this.paneBudget(agent.relay_id).lines,
+      lines: lines ?? this.paneBudget(agent.relay_id).lines,
       format: 'ansi',
-      content_fingerprint: force ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
+      content_fingerprint: force || lines !== undefined ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
       ...identity,
     });
-    if (sent) this.pendingPaneReads.set(readKey, Date.now());
+    if (sent) this.pendingPaneReads.set(readKey, { requestId, startedAt, requestedAt: Date.now() });
   }
 
   watchPane(agent: Agent): void {
@@ -2963,11 +3096,7 @@ class RelayStore {
     if (!connection?.capabilities.includes('slash_commands')) {
       throw new CommandError('This relay does not provide slash-command suggestions.');
     }
-    const identity = JSON.stringify([
-      agent.relay_id, agent.server_session_id, agent.raw_pane_id,
-      agent.terminal_id, agent.generation, agent.agent_session_id,
-      agent.agent, agent.cwd,
-    ]);
+    const identity = inputContextIdentity(agent);
     const pending = this.pendingSlashCommands.get(agent.pane_id);
     if (!refresh && pending?.identity === identity) return pending.promise;
     const cached = this.slashCommandCache.get(agent.pane_id);
@@ -2998,7 +3127,7 @@ class RelayStore {
         };
         const validCommands = commandsList
           .filter((entry: Record<string, unknown>) => typeof entry?.command === 'string'
-            && /^\/[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(entry.command));
+            && entry.command.length <= 121 && /^\/[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/.test(entry.command));
         const commands = validCommands
           .slice(0, SLASH_COMMAND_MAX_ENTRIES)
           .map((entry: Record<string, unknown>): SlashCommand => ({

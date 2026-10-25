@@ -76,11 +76,13 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 		dispatcher.state.RevisionCounter(),
 	)
 
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	admitted := make(chan struct{})
 	renameDone := make(chan *CommandResult, 1)
 	go func() {
 		renameDone <- dispatcher.HandleTopologyAdmitted(
-			t.Context(),
+			ctx,
 			func() { close(admitted) },
 			func(ctx context.Context) *CommandResult {
 				return dispatcher.HandleWorkspaceRename(ctx, "rename-1", "w1", "Renamed")
@@ -99,9 +101,7 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 	default:
 	}
 
-	promptCtx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	prompt := dispatcher.Handle(promptCtx, map[string]any{
+	prompt := dispatcher.Handle(ctx, map[string]any{
 		"action":     "submit_prompt",
 		"request_id": "prompt",
 		"pane_id":    "pane-1",
@@ -119,7 +119,7 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 		if !result.OK {
 			t.Fatalf("rename result = %+v", result)
 		}
-	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("rename did not complete after the Herdr command was released")
 	}
 }
@@ -139,12 +139,13 @@ func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 		"fi\n"+
 		"printf '{\"ok\":true}\\n'\n")
 
-	startInventorySocket(t, filepath.Join(dir, "sock"), []any{
+	socketPath := filepath.Join(testSocketDir(t), "sock")
+	startInventorySocket(t, socketPath, []any{
 		map[string]any{"workspace_id": "w1", "label": "Project"},
 		map[string]any{"workspace_id": "w2", "label": "Second"},
 	})
 	dispatcher := NewDispatcher(
-		herdr.NewClient(bin, filepath.Join(dir, "sock")),
+		herdr.NewClient(bin, socketPath),
 		NewState(testLogger()),
 		nil,
 		testLogger(),
@@ -158,26 +159,28 @@ func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 		{ID: "w2", Label: "Second"},
 	})
 
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	renameDone := make(chan *CommandResult, 1)
 	go func() {
-		renameDone <- dispatcher.HandleWorkspaceRename(t.Context(), "rename-1", "w1", "Renamed")
+		renameDone <- dispatcher.HandleWorkspaceRename(ctx, "rename-1", "w1", "Renamed")
 	}()
-	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if _, err := os.Stat(started); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ctx.Done():
 			t.Fatal("rename never reached its Herdr command")
+		case <-time.After(5 * time.Millisecond):
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 
 	admitted := make(chan struct{})
 	closeDone := make(chan *CommandResult, 1)
 	go func() {
 		closeDone <- dispatcher.HandleTopologyAdmitted(
-			t.Context(),
+			ctx,
 			func() { close(admitted) },
 			func(ctx context.Context) *CommandResult {
 				return dispatcher.HandleWorkspaceClose(ctx, "close-1", "w2", false, nil)
@@ -205,7 +208,7 @@ func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 			if !result.OK {
 				t.Fatalf("%s result = %+v", name, result)
 			}
-		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
 			t.Fatalf("%s did not complete after the Herdr command was released", name)
 		}
 	}

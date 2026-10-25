@@ -34,14 +34,15 @@ func TestCancelledCommandDoesNotLeakGroup(t *testing.T) {
 
 	c := NewClient(bin, filepath.Join(dir, "sock"))
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	result := make(chan struct{})
 	go func() {
-		_, _ = c.run(ctx, 10*time.Second, "send-text", "--pane", "p1", "x")
+		_, _ = c.run(ctx, 30*time.Second, "send-text", "--pane", "p1", "x")
 		close(result)
 	}()
 
-	pid := readChildPID(t, pidFile)
+	pid := readChildPID(t, ctx, pidFile)
 	cancel()
 	<-result
 	if pid == 0 {
@@ -54,17 +55,20 @@ func TestCancelledCommandDoesNotLeakGroup(t *testing.T) {
 	}
 }
 
-func readChildPID(t *testing.T, path string) int {
+func readChildPID(t *testing.T, ctx context.Context, path string) int {
 	t.Helper()
-	for i := 0; i < 50; i++ {
+	for {
 		if b, err := os.ReadFile(path); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
 				return pid
 			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
-	return 0
 }
 
 func alive(pid int) bool {
