@@ -349,7 +349,7 @@ interface IOSHomeObservation {
   reason: string;
 }
 
-// A predicate matches type and name before visibility, whereas an XPath makes WebDriverAgent serialize and test visibility for all of SpringBoard, which hosted runners took over 16 s to do.
+// An XPath with visibility tests made WebDriverAgent serialize all of SpringBoard (over 16 s on hosted runners).
 function iosHomeObservationLocator(): Locator {
   const labels = `{${IOS_HOME_ICON_LABELS.map((label) => `'${label}'`).join(', ')}}`;
   return {
@@ -1071,7 +1071,7 @@ export class IOSPlatform implements MobilePlatform {
     await this.ensureSpringBoardForeground(phase);
     await delay(Math.min(750, phase.remainingMs), phase);
     let observation = await this.observeHomeIcon(phase);
-    observation = await this.waitForHomeIconReadiness(observation, phase);
+    observation = await this.waitForHomeIconReadiness(observation, phase, true);
     if (observation.state === 'pending' || observation.state === 'not-ready') {
       throw new Error(`IOS_CONTEXT: current SpringBoard page was not positively observed (${observation.reason})`);
     }
@@ -2023,10 +2023,13 @@ export class IOSPlatform implements MobilePlatform {
     return value;
   }
 
-  private async waitForHomeIconReadiness(observation: IOSHomeObservation, parent: PhaseBudget): Promise<IOSHomeObservation> {
-    if (observation.state !== 'not-ready') return observation;
+  // On arrival SpringBoard can still be animating, so the first observation also waits for an icon that is not yet visible.
+  private async waitForHomeIconReadiness(observation: IOSHomeObservation, parent: PhaseBudget, firstObservation = false): Promise<IOSHomeObservation> {
+    const settling = (current: IOSHomeObservation) => current.state === 'pending' || current.state === 'not-ready'
+      || (firstObservation && current.state === 'missing');
+    if (!settling(observation)) return observation;
     const phase = parent.phaseView('ios-home-readiness', IOS_NATIVE_LIST_READINESS_MS);
-    while (observation.state === 'not-ready' && phase.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS + minimumDriverRequestMs) {
+    while (settling(observation) && phase.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS + minimumDriverRequestMs) {
       if (phase.remainingMs < 250 + minimumDriverRequestMs) break;
       await delay(250, phase);
       observation = await this.observeHomeIcon(phase);

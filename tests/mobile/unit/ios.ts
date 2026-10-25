@@ -2392,7 +2392,8 @@ test('Plan13 recorded provenance retains its historical tool tuple and run ident
 });
 
 const lifecycleError = recordedIteration13.safariAUTFailure.response;
-type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' | 'loading' | 'timeout' | 'readiness-transition' | 'not-ready' | 'malformed-reference';
+type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' | 'loading' | 'timeout' | 'readiness-transition' | 'not-ready' | 'malformed-reference'
+  | 'page-settling' | 'icon-settling';
 
 async function lifecycleReplay(name: string, options: { foreground?: string; home?: HomeLaunchMode; page?: string } = {}) {
   const homeMode = options.home || 'ready';
@@ -2481,7 +2482,8 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
         if (homeMode === 'timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
         if (homeMode === 'loading') return value([]);
         homeObservations += 1;
-        const icons = homeMode === 'missing' ? [] : homeMode === 'ambiguous' ? [element('home-icon'), element('home-icon-2')] : [element('home-icon')];
+        if (homeMode === 'page-settling' && homeObservations === 1) return value([element('home-container')]);
+        const icons = homeMode === 'missing' || (homeMode === 'icon-settling' && homeObservations === 1) ? [] : homeMode === 'ambiguous' ? [element('home-icon'), element('home-icon-2')] : [element('home-icon')];
         const references: unknown[] = [element('home-container'), ...icons, element('home-page'), ...(homeMode === 'duplicate-reference' ? [element('home-icon')] : [])];
         if (homeMode === 'malformed-reference') references.push({});
         return value(references);
@@ -2654,6 +2656,16 @@ test('current-page readiness transition is polled without page navigation', asyn
   assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
   assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 2);
 });
+
+for (const mode of ['page-settling', 'icon-settling'] as const) {
+  test(`Home ${mode} on arrival is polled without page navigation`, async () => {
+    const a = await lifecycleReplay(`current-page-${mode}`, { home: mode });
+    await a.owned(() => a.platform.launchInstalledApp());
+    assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 2);
+  });
+}
 
 test('malformed current foreground identity fails before Home navigation', async () => {
   const a = await lifecycleReplay('malformed-current-foreground');
