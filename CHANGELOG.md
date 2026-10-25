@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Queue terminal key taps instead of dropping them while the previous key waits
+  for its relay acknowledgement. On a high-latency link such as a Cloudflare
+  tunnel, a quick second **Esc** was ignored because the key row disabled itself
+  until the first send was confirmed, so agents that stop on a double Esc could
+  not be stopped from the phone.
+
 ## [0.23.1] - 2026-10-25
 
 ### Added

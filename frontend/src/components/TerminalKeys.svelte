@@ -90,7 +90,7 @@
   }
 
   function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
-    if (disabled || keySending) return;
+    if (disabled) return;
     arrowsOpen = false;
     fkeysOpen = false;
     if (which === 'ctrl') ctrlArmed = !ctrlArmed;
@@ -204,13 +204,13 @@
   {#if arrowsOpen}
     <div class="arrow-popup">
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
+      <button disabled={disabled} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
+      <button disabled={disabled} aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
+      <button disabled={disabled} aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
+      <button disabled={disabled} aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
       <span aria-hidden="true"></span>
     </div>
   {/if}
@@ -221,7 +221,7 @@
     <div class="fkey-popup" role="group" aria-label="Function keys">
       {#each FUNCTION_KEYS as number (number)}
         <button
-          disabled={disabled || keySending}
+          disabled={disabled}
           onpointerdown={(event) => event.preventDefault()}
           onclick={() => sendFunctionKey(number)}
         >F{number}</button>
@@ -236,8 +236,8 @@
       <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
     {/if}
     <div class="term-keys" aria-busy={keySending}>
-      <Button variant="secondary" size="sm" disabled={disabled || keySending} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" disabled={disabled || keySending} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
       <div class="modifier-menu">
         <input
           id="modifier-key-input"
@@ -258,7 +258,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-controls="modifier-key-input"
           aria-pressed={shiftArmed}
           aria-label="Shift"
@@ -269,7 +269,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-controls="modifier-key-input"
           aria-pressed={ctrlArmed}
           aria-label="Ctrl"
@@ -280,7 +280,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-controls="modifier-key-input"
           aria-pressed={altArmed}
           title="Arm Alt; combine it with Ctrl or Shift"
@@ -293,7 +293,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-label="Function keys"
           aria-expanded={fkeysOpen}
           onpointerdown={(event) => event.preventDefault()}
@@ -305,7 +305,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-label="Arrow keys"
           aria-expanded={arrowsOpen}
           onpointerdown={(event) => event.preventDefault()}
@@ -315,7 +315,7 @@
         </Button>
         {@render arrowPopup()}
       </div>
-      <Button variant="secondary" size="sm" disabled={disabled || keySending} aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
 
 </div>
