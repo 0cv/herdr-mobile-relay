@@ -61,6 +61,10 @@ const IOS_NATIVE_GESTURE_COMMAND_MS = 8_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
 const IOS_NATIVE_LIST_READINESS_MS = 15_000;
+// The first Share sheet can start the system sharing service cold; a hosted runner took more than 15 s to publish its actions.
+const IOS_SHARE_SHEET_READINESS_MS = 30_000;
+// The install phase grows by the same amount so the Add confirmation keeps its full reserve.
+const IOS_INSTALL_PHASE_MS = 120_000 + IOS_SHARE_SHEET_READINESS_MS - IOS_NATIVE_LIST_READINESS_MS;
 const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_GESTURE_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
 
 interface ConfirmationCaptureEvidence {
@@ -850,7 +854,7 @@ export class IOSPlatform implements MobilePlatform {
   async installFromBrowser(): Promise<void> {
     this.assertOwnershipClear();
     if (this.installationAddRequested) throw new Error('IOS_SHARE: final Add was already requested');
-    const phase = this.budget.phaseView('ios-install', 120_000);
+    const phase = this.budget.phaseView('ios-install', IOS_INSTALL_PHASE_MS);
     phase.assertAvailable('start iOS installation');
     await this.driver.switchContext('NATIVE_APP', Math.max(minimumDriverRequestMs, phase.remainingMs));
     await this.setNativeObservationTarget('auto', phase);
@@ -1825,7 +1829,7 @@ export class IOSPlatform implements MobilePlatform {
     if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
     const phase = this.budget.phaseView('ios-share-search', timeoutMs);
-    let readiness = phase.phaseView('ios-share-publication', IOS_NATIVE_LIST_READINESS_MS);
+    let readiness = phase.phaseView('ios-share-publication', IOS_SHARE_SHEET_READINESS_MS);
     let expanded = false;
     let lastError = '';
     let source: string | undefined;

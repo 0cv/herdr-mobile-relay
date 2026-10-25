@@ -2935,7 +2935,8 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       if (sheet) sheetReads++;
       source = !sheet ? sources[0] : scrolls ? sources[2] : sources[1];
       if (mode === 'recorded-latency' && sheet && sheetReads < 3) source = sources[0];
-      if (mode === 'publication-tail' && sheetReads === 1) { source = sources[0]; now += 7_001; }
+      if (mode === 'publication-tail' && sheetReads === 1) { source = sources[0]; now += 22_001; }
+      if (mode === 'cold-publication' && sheetReads === 1) { source = sources[0]; now += 16_001; }
       if (mode === 'search-tail' && sheetReads === 1) now += 76_001;
       if (mode === 'malformed-source' && scrolls === 1) return value(source.slice(0, -100));
       if (mode === 'hung-source' && scrolls === 1) return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
@@ -3162,7 +3163,7 @@ async function boundedHierarchyReplay(mode: string) {
   }
 }
 
-for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'slow-search', 'slow-fallback', 'slow-gesture', 'slow-fallback-gesture', 'fallback-success']) {
+for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'cold-publication', 'slow-search', 'slow-fallback', 'slow-gesture', 'slow-fallback-gesture', 'fallback-success']) {
   test(`Plan13 hierarchy full install ${mode} completes with full source allowances and one final Add`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -3177,6 +3178,7 @@ for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publi
     assert.equal(a.requests.some(request => request.path.endsWith('/source') && request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal), false);
     assert.equal(a.scrolls, 1);
     assert.equal(a.swipes, mode.includes('fallback') ? 1 : 0);
+    if (mode === 'cold-publication') assert.ok(a.sheetReads >= 2, 'the cold Share sheet is read again after the old 15s window');
     assert.equal(a.driver.snapshot().unusable, false);
     assert.ok(a.driver.snapshot().commands.filter((r) => r.path.endsWith('/source')).every((r) => r.timeoutMs === 8_000));
     if (mode === 'slow-gesture' || mode === 'slow-fallback-gesture') {
