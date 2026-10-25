@@ -1704,7 +1704,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async nativeElementBelongsToRows(element: string, rows: NativeActionRow[], deadline: number): Promise<boolean> {
-    const timeout = Math.min(750, deadline - Date.now());
+    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
     if (timeout < minimumDriverRequestMs) return false;
     const bounds = await this.driver.elementRect(element, timeout).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
@@ -1736,14 +1736,14 @@ export class IOSPlatform implements MobilePlatform {
   ): Promise<NativeScrollContainer | undefined> {
     const actionList = nativeActionListEvidence(source, target);
     if (!actionList) return undefined;
-    const timeout = Math.min(2_000, deadline - Date.now());
+    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
     if (timeout < minimumDriverRequestMs) return undefined;
     const elements = await this.driver.findAll(iosActionCollectionLocator(), timeout).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
       return [];
     });
     for (const element of elements) {
-      const rectTimeout = Math.min(750, deadline - Date.now());
+      const rectTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
       if (rectTimeout < minimumDriverRequestMs) break;
       const bounds = await this.driver.elementRect(element, rectTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
@@ -1754,14 +1754,14 @@ export class IOSPlatform implements MobilePlatform {
         || Math.abs(actionList.collection.bounds.y - bounds.y) > 2
         || Math.abs(actionList.collection.bounds.width - bounds.width) > 2
         || Math.abs(actionList.collection.bounds.height - bounds.height) > 2) continue;
-      const enabledTimeout = Math.min(750, deadline - Date.now());
+      const enabledTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
       if (enabledTimeout < minimumDriverRequestMs) break;
       const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
         return null;
       });
       if (enabled !== 'true' && enabled !== null) continue;
-      const visibleTimeout = Math.min(750, deadline - Date.now());
+      const visibleTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
       if (visibleTimeout < minimumDriverRequestMs) break;
       const visible = await this.driver.attribute(element, 'visible', visibleTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
@@ -2286,18 +2286,18 @@ export class IOSPlatform implements MobilePlatform {
     while (!phase.exhausted) {
       phase.assertAvailable(`keyboard ${expected ? 'show' : 'hide'}`);
       await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
-      const findTimeout = Math.min(2_000, phase.remainingMs);
+      const findTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
       if (findTimeout <= 1) break;
       const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }, findTimeout);
       let visible = false;
       for (const element of elements) {
-        const rectTimeout = Math.min(1_000, phase.remainingMs);
+        const rectTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
         if (rectTimeout <= 1) break;
         const rect = await this.driver.elementRect(element, rectTimeout).catch((error: unknown) => {
           if (isFatalDriverError(error)) throw error;
           return { x: 0, y: 0, width: 0, height: 0 };
         });
-        const shownTimeout = Math.min(1_000, phase.remainingMs);
+        const shownTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
         if (shownTimeout <= 1) break;
         const shown = await this.driver.attribute(element, 'visible', shownTimeout).catch((error: unknown) => {
           if (isFatalDriverError(error)) throw error;

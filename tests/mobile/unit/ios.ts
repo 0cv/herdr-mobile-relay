@@ -3019,6 +3019,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
     }
     if (path.endsWith('/rect')) {
       assert.ok(path.includes(`-${scrolls}/`));
+      if (mode === 'slow-rect') await waitFor(1_448, signal);
       const list = nativeActionListEvidence(source, 'Add to Home Screen')!;
       return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
     }
@@ -3163,7 +3164,7 @@ async function boundedHierarchyReplay(mode: string) {
   }
 }
 
-for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'cold-publication', 'slow-search', 'slow-fallback', 'slow-gesture', 'slow-fallback-gesture', 'fallback-success']) {
+for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'cold-publication', 'slow-rect', 'slow-search', 'slow-fallback', 'slow-gesture', 'slow-fallback-gesture', 'fallback-success']) {
   test(`Plan13 hierarchy full install ${mode} completes with full source allowances and one final Add`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
