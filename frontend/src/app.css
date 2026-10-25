@@ -882,6 +882,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 /* Long-press starts a tab drag; selectable text would trigger the platform
    text-selection and search sheets instead. */
 .agent-list, .agent-rail { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+/* Per-server filter: shared .button-secondary toggles; focus uses the global outline. */
+.server-filters { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+.server-filters [aria-pressed='true'] { border-color: var(--primary); }
+.server-filters [aria-pressed='false'] { color: var(--muted); }
+.server-filters .section-count { background: var(--danger); color: #fff; font-weight: 700; }
 .workspace-tab { position: relative; }
 /* The 2.4rem floor dated from the header's removed reorder buttons; the
    label-only header hugs its tab so name and agent read as one unit. */

@@ -15,7 +15,7 @@ import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { reloadRisk } from '$lib/reload-guard';
 import { targetRefForAgent } from '$lib/resource-id';
-import { setHomeLayout } from '$lib/preferences';
+import { hiddenServers, setHomeLayout, setServerHidden } from '$lib/preferences';
 import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
@@ -1142,6 +1142,91 @@ describe('accessible Svelte interactions', () => {
     });
     expect(screen.getByText('fix-auth', { selector: 'summary strong' })).toBeInTheDocument();
     expect(screen.getByText('mobile', { selector: 'summary strong' })).toBeInTheDocument();
+  });
+
+  describe('server filter', () => {
+    const relays = ['Mac', 'Spark'].map((label) => ({ id: label.toLowerCase(), label, url: `wss://${label.toLowerCase()}.example`, token: '' }));
+    const agentOn = (relay: string, status: Agent['status'], project: string): Agent => ({
+      relay_id: relay, relay_label: relay, raw_pane_id: 'p1', pane_id: `${relay}::p1`,
+      project, agent: 'codex', status,
+    });
+    const workspaceOn = (relay: string, label: string): RelayWorkspace => ({
+      relay_id: relay, relay_label: relay, workspace_id: `${relay}-w`, number: 1, label,
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '', cwd: `/home/user/${label}`,
+    });
+    const renderList = (props: Partial<{ agents: Agent[]; relays: typeof relays; workspaces: RelayWorkspace[] }> = {}) => render(AgentList, {
+      agents: [], relays, workspaces: [], responding: new Set<string>(), onopen: vi.fn(), ...props,
+    });
+
+    afterEach(() => {
+      hiddenServers.set([]);
+      relayStore.relayConfigs.set([]);
+    });
+
+    it('stays out of the way with a single computer, even with a stale hidden id', () => {
+      hiddenServers.set(['mac']);
+      renderList({ relays: [relays[0]], agents: [agentOn('mac', 'idle', 'solo project')] });
+      expect(screen.queryByRole('group', { name: 'Show servers' })).not.toBeInTheDocument();
+      expect(screen.getAllByText('solo project').length).toBeGreaterThan(0);
+    });
+
+    it('says so when every server is hidden instead of showing onboarding', async () => {
+      renderList();
+      await fireEvent.click(screen.getByRole('button', { name: 'Mac' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Spark' }));
+      expect(screen.getByText('All servers are hidden.')).toBeInTheDocument();
+      await fireEvent.click(screen.getByRole('button', { name: 'Mac' }));
+      expect(screen.queryByText(/All servers are hidden/)).not.toBeInTheDocument();
+    });
+
+    it('hides a server\'s idle and empty workspaces too', () => {
+      setServerHidden('mac', true);
+      renderList({ workspaces: [workspaceOn('mac', 'mac-empty'), workspaceOn('spark', 'spark-empty')] });
+      expect(screen.queryByText('mac-empty')).not.toBeInTheDocument();
+      expect(screen.getByText('spark-empty')).toBeInTheDocument();
+    });
+
+    it('badges blocked and needs-inspection agents on a hidden server and keeps the choice across remounts', async () => {
+      // Approval blocks and "Needs inspection" both wait on a person; idle panes do not count.
+      const agents = [
+        { ...agentOn('mac', 'blocked', 'mac approval'), attention_kind: 'approval' as const, attention_capable: true, options: ['Approve', 'Deny'] },
+        { ...agentOn('mac', 'blocked', 'mac inspect'), raw_pane_id: 'p2', pane_id: 'mac::p2' },
+        { ...agentOn('mac', 'idle', 'mac idle'), raw_pane_id: 'p3', pane_id: 'mac::p3' },
+      ];
+      const first = renderList({ agents });
+      await fireEvent.click(screen.getByRole('button', { name: 'Mac' }));
+      first.unmount();
+      renderList({ agents });
+      expect(screen.getByRole('button', { name: /^Mac/ })).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByRole('img', { name: '2 need attention while hidden' })).toBeInTheDocument();
+      expect(screen.queryByText('mac approval')).not.toBeInTheDocument();
+    });
+
+    it('tells same-named computers apart', () => {
+      const twins = [
+        { id: 'a', label: 'Mac', url: 'wss://mac.home.lan', token: '' },
+        { id: 'b', label: 'Mac', url: 'wss://mac.office.lan', token: '' },
+      ];
+      renderList({ relays: twins });
+      expect(screen.getByRole('button', { name: 'Mac (mac.home.lan)' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Mac (mac.office.lan)' })).toBeInTheDocument();
+    });
+
+    it('falls back to the id for same-named computers without a URL', () => {
+      renderList({ relays: [{ id: 'gw-a', label: 'Mac', url: '', token: '' }, { id: 'gw-b', label: 'Mac', url: '', token: '' }] });
+      expect(screen.getByRole('button', { name: 'Mac (gw-a)' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Mac (gw-b)' })).toBeInTheDocument();
+    });
+
+    it('forgets a removed hidden server, and every hidden server once one computer is left', () => {
+      relayStore.relayConfigs.set([...relays, { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' }]);
+      setServerHidden('mac', true);
+      setServerHidden('spark', true);
+      relayStore.removeRelay('spark');
+      expect(get(hiddenServers)).toEqual(['mac']);
+      relayStore.removeRelay('fedora');
+      expect(get(hiddenServers)).toEqual([]);
+    });
   });
 
   it('drops an optimistic workspace order once an authoritative snapshot changes membership', async () => {
