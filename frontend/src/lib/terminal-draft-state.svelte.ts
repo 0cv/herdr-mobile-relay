@@ -13,7 +13,7 @@ export function terminalDraftState(agent: () => Agent, frame: () => TerminalFram
   let visible = $state(document.visibilityState !== 'hidden');
   let epoch = $state.raw<{ identity: string; startedAt: number; initialFrame?: TerminalFrame }>();
   let confirmedEpoch = $state.raw<typeof epoch>();
-  let expiry = $state(0);
+  let expiredFrame = $state.raw<TerminalFrame>();
   const target = $derived(targetRefForAgent(agent()));
   const identity = $derived(target ? inputContextIdentity(agent()) : null);
   const status = $derived(connections.current.get(agent().relay_id)?.status);
@@ -38,12 +38,17 @@ export function terminalDraftState(agent: () => Agent, frame: () => TerminalFram
   });
 
   $effect(() => {
-    void expiry;
-    const receivedAt = frame()?.receivedAt;
-    if (!Number.isFinite(receivedAt)) return;
-    const remaining = receivedAt! + 3_000 - performance.now();
-    if (remaining <= 0 || remaining > 3_000) return;
-    const timer = setTimeout(() => { expiry += 1; }, remaining);
+    const current = frame();
+    const receivedAt = current?.receivedAt;
+    if (!current || !Number.isFinite(receivedAt)) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expire = () => {
+      const remaining = receivedAt! + 3_000 - performance.now();
+      if (remaining > 3_000) return;
+      if (remaining > 0) timer = setTimeout(expire, remaining);
+      else expiredFrame = current;
+    };
+    expire();
     return () => clearTimeout(timer);
   });
 
@@ -53,11 +58,10 @@ export function terminalDraftState(agent: () => Agent, frame: () => TerminalFram
   });
 
   function ready(inputTarget: TerminalFrame['target']) {
-    void expiry;
     const current = frame();
     const age = performance.now() - (current?.receivedAt ?? NaN);
     return Boolean(target && visible && !locked && status === 'connected' && epoch && epoch.identity === identity
-      && current && current !== epoch.initialFrame && current.paneId === agent().pane_id
+      && current && current !== epoch.initialFrame && current !== expiredFrame && current.paneId === agent().pane_id
       && inputTarget && targetRefMatchesAgent(inputTarget, agent()) && Number.isFinite(current.receivedAt)
       && current.receivedAt! >= epoch.startedAt && age >= 0 && age < 3_000
       && (current.readStartedAt === undefined || (Number.isFinite(current.readStartedAt) && current.readStartedAt >= epoch.startedAt)));
