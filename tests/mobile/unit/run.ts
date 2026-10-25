@@ -2267,7 +2267,7 @@ test('mobile timing scale stretches phase views and request caps only when confi
   assert.equal(parseTimingScale(''), 1);
   assert.equal(parseTimingScale('2'), 2);
   for (const invalid of ['0.5', '5', 'fast', 'Infinity']) assert.throws(() => parseTimingScale(invalid), /MOBILE_TIMING_SCALE/u);
-  assert.equal(timingScale, 1);
+  assert.equal(timingScale, parseTimingScale(process.env.MOBILE_TIMING_SCALE));
   const budgetModule = new URL('../support/budget.ts', import.meta.url).pathname;
   const webdriverModule = new URL('../support/webdriver.ts', import.meta.url).pathname;
   const script = `
@@ -2283,12 +2283,16 @@ test('mobile timing scale stretches phase views and request caps only when confi
     await client.create({ capabilities: {} });
     await client.pageSource(1_000);
     const source = client.snapshot().commands.find((command) => command.path.endsWith('/source'));
-    console.log(JSON.stringify({ root: root.remainingMs, child: child.remainingMs, reserved: reserved.remainingMs, source: source.timeoutMs }));
+    client.setBudget(root);
+    const native = root.phaseView('native', 3_000);
+    await client.command('/window/rect', 'GET', undefined, 4_000, client.nativeRequestPolicy(native));
+    const admitted = client.snapshot().commands.find((command) => command.path.endsWith('/window/rect'));
+    console.log(JSON.stringify({ root: root.remainingMs, child: child.remainingMs, reserved: reserved.remainingMs, source: source.timeoutMs, native: admitted.timeoutMs, admitted: admitted.timing?.admitted }));
   `;
   const output = execFileSync(process.execPath, ['--no-env-file', '-e', script], {
     env: { ...process.env, MOBILE_TIMING_SCALE: '2' }, encoding: 'utf8', timeout: 30_000,
   });
-  assert.deepEqual(JSON.parse(output.trim().split('\n').at(-1)!), { root: 100_000, child: 20_000, reserved: 98_000, source: 2_000 });
+  assert.deepEqual(JSON.parse(output.trim().split('\n').at(-1)!), { root: 100_000, child: 20_000, reserved: 98_000, source: 2_000, native: 8_000, admitted: true });
 });
 
 test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {

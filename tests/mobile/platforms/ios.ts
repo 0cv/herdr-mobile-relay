@@ -333,9 +333,6 @@ export function nativeActionListEvidence(source: string, target: string): Native
 }
 
 const IOS_HOME_ICON_LABELS = ['Herdr Mobile Relay', 'Herdr Relay'] as const;
-const IOS_HOME_ICON_SCOPE_XPATH = "//XCUIElementTypeOther[@name='Home screen icons']";
-const IOS_HOME_CONTAINER_XPATH = "//XCUIElementTypeOther[@name='Home screen icons' and @visible='true' and not(ancestor::*[@visible='false'])]";
-const IOS_HOME_PAGE_INDICATOR_XPATH = "//XCUIElementTypePageIndicator[((@name='Page control') or (@label='Page control')) and @visible='true' and not(ancestor::*[@visible='false'])]";
 
 interface IOSHomePage {
   current: number;
@@ -352,18 +349,16 @@ interface IOSHomeObservation {
   reason: string;
 }
 
-function iosHomeIconXPath(): string {
-  const labels = IOS_HOME_ICON_LABELS.flatMap((label) => [
-    `@name=${xpathLiteral(label)}`,
-    `@label=${xpathLiteral(label)}`,
-  ]);
-  return `${IOS_HOME_ICON_SCOPE_XPATH}//XCUIElementTypeIcon[${labels.join(' or ')}]`;
-}
-
+// A predicate matches type and name before visibility, whereas an XPath makes WebDriverAgent serialize and test visibility for all of SpringBoard, which hosted runners took over 16 s to do.
 function iosHomeObservationLocator(): Locator {
+  const labels = `{${IOS_HOME_ICON_LABELS.map((label) => `'${label}'`).join(', ')}}`;
   return {
-    using: 'xpath',
-    value: [IOS_HOME_CONTAINER_XPATH, iosHomeIconXPath(), IOS_HOME_PAGE_INDICATOR_XPATH].join(' | '),
+    using: '-ios predicate string',
+    value: [
+      "(type == 'XCUIElementTypeOther' AND name == 'Home screen icons' AND visible == 1)",
+      `(type == 'XCUIElementTypeIcon' AND (name IN ${labels} OR label IN ${labels}) AND visible == 1)`,
+      "(type == 'XCUIElementTypePageIndicator' AND (name == 'Page control' OR label == 'Page control') AND visible == 1)",
+    ].join(' OR '),
   };
 }
 

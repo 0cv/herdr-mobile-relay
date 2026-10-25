@@ -2604,7 +2604,9 @@ test('current-page-first launch clicks a ready Page 2 icon without Home navigati
   assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
   const homeQueries = a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator'));
   assert.equal(homeQueries.length, 1);
-  assert.ok(homeQueries[0].body.value.includes("not(ancestor::*[@visible='false'])"));
+  assert.equal(homeQueries[0].body.using, '-ios predicate string');
+  assert.ok(homeQueries[0].body.value.includes("(type == 'XCUIElementTypeOther' AND name == 'Home screen icons' AND visible == 1)"));
+  assert.ok(homeQueries[0].body.value.includes("label IN {'Herdr Mobile Relay', 'Herdr Relay'}) AND visible == 1)"));
   assert.equal(homeQueries[0].body.value.includes('contains('), false);
   assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
   assert.equal(a.driver.snapshot().unusable, false);

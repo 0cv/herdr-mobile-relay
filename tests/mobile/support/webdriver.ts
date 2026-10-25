@@ -706,7 +706,8 @@ export class AppiumClient {
       if (checkSession) this.assertUsable(path);
       const operation = `${method} ${path}`;
       if (enforceBudget) this.budget?.assertAvailable(operation);
-      const operationTimeoutMs = (timeoutMs ?? this.requestTimeoutMs) * timingScale;
+      const admissionTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
+      const operationTimeoutMs = admissionTimeoutMs * timingScale;
       const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
       const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
       const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');
@@ -790,14 +791,14 @@ export class AppiumClient {
           policy.beforeDispatch();
           const dispatchTime = this.enforcementClock.now();
           const remaining = Math.min(policy.budget.remainingMs, rootBudget?.remainingMs ?? Infinity);
-          if (remaining < operationTimeoutMs) {
+          if (remaining < admissionTimeoutMs) {
             timing.admitted = false;
             timing.dispatchMs = undefined;
             timing.priorSettlementToDispatchMs = undefined;
             timing.phaseRemainingAtDispatchMs = null;
             timing.outcome = 'not-admitted';
             const error = new WebDriverError({
-              code: 'APPIUM_COMMAND_NOT_ADMITTED', message: `${operation} requires its full ${operationTimeoutMs}ms at dispatch`,
+              code: 'APPIUM_COMMAND_NOT_ADMITTED', message: `${operation} requires its full ${admissionTimeoutMs}ms at dispatch`,
               path, method, durationMs: 0, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow,
             });
             this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, error.message, timing);
