@@ -2,6 +2,7 @@ import { get, writable } from 'svelte/store';
 import {
   DEFAULT_AGENT_VIEW_KEY,
   PANE_AGENT_VIEW_OVERRIDES_KEY,
+  HIDDEN_SERVERS_KEY,
   LEGACY_FONT_KEY,
   HOME_LAYOUT_KEY,
   HOME_LAYOUTS,
@@ -111,6 +112,7 @@ export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
 export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
 export const homeLayout = writable<HomeLayout>(savedHomeLayout());
+export const hiddenServers = writable<string[]>(readHiddenServers());
 export const terminalResizeSession = writable<boolean>(readTerminalResizeSession());
 export const terminalHeightLease = writable<boolean>(
   localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',
@@ -158,6 +160,27 @@ export function setPaneAgentView(
   }
   paneAgentViewOverrides.set(next);
   return 'saved';
+}
+
+function readHiddenServers(): string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(HIDDEN_SERVERS_KEY) || '[]');
+    return Array.isArray(value) ? value.filter((id) => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setServerHidden(relayId: string, hidden: boolean): void {
+  const current = get(hiddenServers);
+  if (current.includes(relayId) === hidden) return;
+  const next = hidden ? [...current, relayId] : current.filter((id) => id !== relayId);
+  hiddenServers.set(next);
+  try {
+    localStorage.setItem(HIDDEN_SERVERS_KEY, JSON.stringify(next));
+  } catch {
+    return;
+  }
 }
 
 export function clearPaneAgentViewOverridesForRelay(relayId: string): 'saved' | 'unavailable' {

@@ -81,6 +81,7 @@ import type {
 } from './transports';
 import {
   clearPaneAgentViewOverridesForRelay,
+  setServerHidden,
   terminalHistoryLines,
   terminalRefreshInterval,
   terminalResizeSession,
@@ -836,6 +837,9 @@ class RelayStore {
     if (clearPaneAgentViewOverridesForRelay(id) === 'unavailable') {
       this.showToast('Could not clear saved pane view preferences on this device.', true);
     }
+    // Server ids derive from label and URL, so a re-paired computer would
+    // otherwise come back hidden.
+    setServerHidden(id, false);
   }
 
   connectAll(preserveAgents = false): void {
