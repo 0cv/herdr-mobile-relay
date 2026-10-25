@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ import (
 func TestDatabaseRecordedConversation(t *testing.T) {
 	for _, format := range []string{"v1", "v2", "mixed-v1", "mixed-v2", "hermes"} {
 		t.Run(format, func(t *testing.T) {
-			testDatabaseRecordedConversation(t, format, false)
+			testDatabaseRecordedConversation(t, format, false, false)
 		})
 	}
 }
@@ -30,12 +31,22 @@ func TestDatabaseRecordedConversation(t *testing.T) {
 func TestDatabaseRecordedConversationEntrypoint(t *testing.T) {
 	for _, format := range []string{"v1", "v2", "mixed-v1", "mixed-v2", "hermes"} {
 		t.Run(format, func(t *testing.T) {
-			testDatabaseRecordedConversation(t, format, true)
+			testDatabaseRecordedConversation(t, format, true, false)
 		})
 	}
 }
 
-func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint bool) {
+// The first write after a WAL truncation puts a new WAL header on disk before
+// its commit is published, so a refresh in between resets without the message.
+func TestDatabaseRecordedConversationRestartPublishedAfterRefresh(t *testing.T) {
+	for _, format := range []string{"v1", "v2", "hermes"} {
+		t.Run(format, func(t *testing.T) {
+			testDatabaseRecordedConversation(t, format, false, true)
+		})
+	}
+}
+
+func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint, lateRestart bool) {
 	root := t.TempDir()
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	t.Setenv(agentroots.HermesListEnv, root)
@@ -75,18 +86,28 @@ func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint bo
 			exec("INSERT INTO session_v2 VALUES(?,?,'Live',1,'opencode')", session, root)
 		}
 	}
-	appendMessage := func(index int, text string) {
-		t.Helper()
+	insertMessage := func(index int, text string) error {
 		id := fmt.Sprintf("m%04d", index)
 		if format == "hermes" {
-			exec("INSERT INTO messages VALUES(?,?,'assistant',?,NULL,NULL,NULL,?,1,0,'')", index, session, text, index)
-		} else if v2 {
+			_, err := db.Exec("INSERT INTO messages VALUES(?,?,'assistant',?,NULL,NULL,NULL,?,1,0,'')", index, session, text, index)
+			return err
+		}
+		if v2 {
 			raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": text}}})
-			exec("INSERT INTO session_message VALUES(?,?,'assistant',?,?,?)", id, session, index, index, string(raw))
-		} else {
-			exec("INSERT INTO message VALUES(?,?,?,'{\"role\":\"assistant\"}')", id, session, index)
-			raw, _ := json.Marshal(map[string]any{"type": "text", "text": text})
-			exec("INSERT INTO part VALUES(?,?,?)", "p"+id, id, string(raw))
+			_, err := db.Exec("INSERT INTO session_message VALUES(?,?,'assistant',?,?,?)", id, session, index, index, string(raw))
+			return err
+		}
+		if _, err := db.Exec("INSERT INTO message VALUES(?,?,?,'{\"role\":\"assistant\"}')", id, session, index); err != nil {
+			return err
+		}
+		raw, _ := json.Marshal(map[string]any{"type": "text", "text": text})
+		_, err := db.Exec("INSERT INTO part VALUES(?,?,?)", "p"+id, id, string(raw))
+		return err
+	}
+	appendMessage := func(index int, text string) {
+		t.Helper()
+		if err := insertMessage(index, text); err != nil {
+			t.Fatal(err)
 		}
 	}
 	for i := 1; i <= 220; i++ {
@@ -108,7 +129,8 @@ func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint bo
 	defer cancel()
 	feed := &conversationFeed{ctx: ctx, cancel: cancel, target: protocol.TargetRef{PaneID: agent.PaneID, TerminalID: agent.TerminalID, ServerSessionID: agent.ServerSessionID, AgentSessionID: session, Generation: agent.Generation}, agent: agent, ready: make(chan struct{}), notify: make(chan struct{})}
 	watch := browser.NewDatabaseWatch(conversationScope(agent))
-	observed := &databaseRefreshObserver{watch: watch, feed: feed}
+	late := &heldPublicationRefresh{databaseConversationRefresh: watch}
+	observed := &databaseRefreshObserver{watch: late, feed: feed}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -198,8 +220,33 @@ func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint bo
 	}
 	exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	wait("reset", "")
-	appendMessage(223, "after checkpoint")
-	wait("reset", "")
+	if lateRestart {
+		held := make(chan struct{})
+		late.mu.Lock()
+		late.hold = func() (func() error, error) {
+			defer close(held)
+			return holdWALPublication(database, func() error { return insertMessage(223, "after checkpoint") })
+		}
+		late.mu.Unlock()
+		select {
+		case <-held:
+		case <-time.After(3 * time.Second):
+			t.Fatal("feed stopped polling")
+		}
+	} else {
+		appendMessage(223, "after checkpoint")
+	}
+	restart := wait("reset", "")
+	if err := late.failure(); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := observed.result(restart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(refreshed.texts, "after checkpoint") {
+		wait("batch", "after checkpoint")
+	}
 	if format == "hermes" {
 		exec("DELETE FROM messages WHERE id=223")
 	} else if v2 {
