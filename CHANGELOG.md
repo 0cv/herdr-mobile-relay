@@ -5,12 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-10-25
+
 ### Added
 
-- Toggle individual servers above the agent list to show or hide their sessions
-  and workspaces. A hidden server shows a count of sessions that need attention.
-  Visibility is remembered on this device without changing connections,
-  notifications, or the selected home layout.
+- With two or more computers paired, toggle each one above the agent list to
+  show or hide its sessions and workspaces. A hidden computer shows a count of
+  sessions that need attention. Visibility is remembered on this device without
+  changing connections, notifications, or the selected home layout. (#76)
 
 ### Fixed
 
@@ -1868,7 +1870,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...v0.23.0
 [0.22.13]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...v0.22.13
 [0.22.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.22.12
