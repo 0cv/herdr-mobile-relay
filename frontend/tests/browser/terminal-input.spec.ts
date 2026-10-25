@@ -359,8 +359,11 @@ for (const view of manualViews) {
       await expect(context).toContainText('Delayed pre-send snapshot');
       await expect(button(page, 'I checked the terminal')).toBeDisabled();
       await expect(button(page, 'Enter')).toBeDisabled();
-      await page.clock.runFor(2_000);
-      await expect(context).toContainText('Post-outcome snapshot');
+      // The relay rejects a read that overlaps its own check of the changed screen; the next 2 s refresh reads again.
+      await expect(async () => {
+        await page.clock.runFor(2_000);
+        await expect(context).toContainText('Post-outcome snapshot', { timeout: 1_000 });
+      }).toPass();
       await expect(button(page, 'I checked the terminal')).toBeEnabled();
       await expect(button(page, 'Enter')).toBeDisabled();
       await button(page, 'I checked the terminal').click();
