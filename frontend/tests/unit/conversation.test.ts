@@ -386,6 +386,12 @@ describe('ConversationMessage awaiting states', () => {
     expect(container.textContent).toContain('No answer was recorded in this session log.');
     expect(container.querySelector('ul')).not.toBeNull();
   });
+  it('only the pending question in a mixed entry shows the notice', () => {
+    const errored: ConversationTool = { ...open, id: 'e', error: true };
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [errored, open], awaiting: 'below' });
+    expect(container.textContent?.match(/Waiting for your answer below\./g)).toHaveLength(1);
+    expect(container.querySelector('.conversation-ask.error')!.textContent).not.toContain('Waiting');
+  });
   it('an answered question ignores awaiting', () => {
     const answered = { ...open, output: 'The user answered: "Q?"="A". Read the answers carefully.' };
     const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered], awaiting: 'below' });

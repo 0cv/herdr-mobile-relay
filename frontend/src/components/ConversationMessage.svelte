@@ -99,9 +99,9 @@
             <!-- answers already shown beside their options -->
           {:else if tool.output}
             <ToolPayload label={tool.error ? 'Error' : 'Reply'} raw={tool.output} />
-          {:else if awaiting === 'below'}
+          {:else if waiting && awaiting === 'below'}
             <p role="status">Waiting for your answer below.</p>
-          {:else if awaiting === 'elsewhere'}
+          {:else if waiting && awaiting === 'elsewhere'}
             <p role="status">Waiting for an answer.</p>
           {:else}
             <p>No answer was recorded in this session log.</p>
