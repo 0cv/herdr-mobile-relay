@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import ConversationMessage from '$components/ConversationMessage.svelte';
-import { clampPayload, conversationEntries, formatToolPayload, isChosenOption, maxPayloadLines, parseAskUserQuestion } from '$lib/conversation';
+import { clampPayload, conversationEntries, formatToolPayload, isChosenOption, maxPayloadLines, parseAskUserQuestion, pendingQuestionEntryId } from '$lib/conversation';
 import type { ConversationEntry, ConversationTool } from '$lib/types';
 
 // Shapes copied from a recorded Claude Code transcript: tool arguments arrive as
@@ -350,5 +350,46 @@ describe('isChosenOption', () => {
     expect(isChosenOption(item('A, B'), 'B')).toBe(false);
     expect(isChosenOption(item('free'), 'A')).toBe(false);
     expect(isChosenOption(item(undefined), 'A')).toBe(false);
+  });
+});
+
+describe('pendingQuestionEntryId', () => {
+  const pending = (id: string, extra: Partial<ConversationTool> = {}) => turn(id, 'assistant', '', [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '', ...extra }]);
+  it('finds a question after the last user turn', () => {
+    expect(pendingQuestionEntryId([turn('u', 'user', 'hi'), pending('a'), { ...turn('n', 'assistant'), kind: 'notice' }])).toBe('a');
+  });
+  it('is null when a user turn follows, or the question has output or error, or the list is empty', () => {
+    expect(pendingQuestionEntryId([pending('a'), turn('u', 'user', 'hi')])).toBeNull();
+    expect(pendingQuestionEntryId([pending('a', { output: 'x' })])).toBeNull();
+    expect(pendingQuestionEntryId([pending('a', { error: true })])).toBeNull();
+    expect(pendingQuestionEntryId([])).toBeNull();
+  });
+});
+
+describe('ConversationMessage awaiting states', () => {
+  const viewState = () => ({ tableOffsets: [], openTools: new Set<string>() });
+  const input = JSON.stringify({ questions: [{ question: 'Q?', header: '', multiSelect: false, options: [{ label: 'A', description: '' }] }] });
+  const open: ConversationTool = { id: 't', name: 'AskUserQuestion', input, output: '' };
+  it('below: hides options and says to answer below', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [open], awaiting: 'below' });
+    expect(container.textContent).toContain('Q?');
+    expect(container.textContent).toContain('Waiting for your answer below.');
+    expect(container.querySelector('ul')).toBeNull();
+  });
+  it('elsewhere: keeps options and says waiting', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [open], awaiting: 'elsewhere' });
+    expect(container.textContent).toContain('Waiting for an answer.');
+    expect(container.querySelector('ul')).not.toBeNull();
+  });
+  it('null: reports that no answer was recorded', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [open] });
+    expect(container.textContent).toContain('No answer was recorded in this session log.');
+    expect(container.querySelector('ul')).not.toBeNull();
+  });
+  it('an answered question ignores awaiting', () => {
+    const answered = { ...open, output: 'The user answered: "Q?"="A". Read the answers carefully.' };
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered], awaiting: 'below' });
+    expect(container.textContent).not.toContain('Waiting');
+    expect(container.querySelector('li.chosen')).not.toBeNull();
   });
 });

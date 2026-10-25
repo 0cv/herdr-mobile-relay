@@ -9,8 +9,8 @@
   import ConversationMessage from '$components/ConversationMessage.svelte';
   import OmoPlan from '$components/OmoPlan.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { displayName } from '$lib/agents';
-  import { conversationEntries } from '$lib/conversation';
+  import { agentNeedsResponse, attentionKind, displayName, questionInteraction } from '$lib/agents';
+  import { conversationEntries, pendingQuestionEntryId } from '$lib/conversation';
   import {
     ConversationHistoryController,
     type ConversationHistoryControllerState,
@@ -136,6 +136,8 @@
     const pendingIds = new Set(pendingPrefix.map((entry) => entry.id));
     return compact.filter((entry) => entry.kind === 'notice' || !pendingIds.has(entry.id));
   });
+  const waitingQuestionEntryId = $derived(agentNeedsResponse(agent) && attentionKind(agent) === 'question' ? pendingQuestionEntryId(mode === 'activity' ? [...modeEntries, ...liveEntries] : modeEntries) : null);
+  const questionFormShown = $derived(!readOnly && Boolean(questionInteraction(agent)));
   const draftPersistenceAllowed = $derived(draftState.allowed);
   const screenPickerActive = $derived(frame?.paneId === agent.pane_id && terminalTextInputMode(stripAnsi(frame.content)) === 'filter');
   const delivery = $derived(terminalInputDelivery(agent));
@@ -850,7 +852,7 @@
                 {/if}
               </span>
             </header>
-            <ConversationMessage viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} />
+            <ConversationMessage viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
             {#if entry.id.startsWith('live:')}<small>Live · not saved yet</small>{/if}
             {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
           </article>

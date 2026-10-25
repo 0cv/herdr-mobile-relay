@@ -57,11 +57,13 @@
     viewState,
     tools = [],
     highlight = '',
+    awaiting = null,
   }: {
     text: string;
     viewState: ConversationMessageViewState;
     tools?: ConversationTool[];
     highlight?: string;
+    awaiting?: 'below' | 'elsewhere' | null;
   } = $props();
 
   const markdown = $derived(safeMarkdownHtml(text, highlight));
@@ -76,12 +78,13 @@
     {#each tools as tool, index (`${tool.id || tool.name}:${index}`)}
       {@const asked = tool.name === 'AskUserQuestion' && tool.input ? parseAskUserQuestion(tool.input, tool.error ? '' : tool.output) : null}
       {#if asked}
+        {@const waiting = !tool.output && !tool.error}
         <section class="conversation-ask" class:error={tool.error} aria-label="Question from the agent">
           {#each asked as item, itemIndex (itemIndex)}
             <section class="conversation-question">
               {#if item.header || item.multiSelect}<h4>{item.header ? `${item.header}${item.multiSelect ? ' · multiple choice' : ''}` : 'Multiple choice'}</h4>{/if}
               <p><strong>{item.question}</strong></p>
-              {#if item.options.length}
+              {#if item.options.length && !(waiting && awaiting === 'below')}
                 <ul role="list">
                   {#each item.options as option, optionIndex (optionIndex)}
                     {@const chosen = isChosenOption(item, option.label)}
@@ -96,8 +99,12 @@
             <!-- answers already shown beside their options -->
           {:else if tool.output}
             <ToolPayload label={tool.error ? 'Error' : 'Reply'} raw={tool.output} />
+          {:else if awaiting === 'below'}
+            <p role="status">Waiting for your answer below.</p>
+          {:else if awaiting === 'elsewhere'}
+            <p role="status">Waiting for an answer.</p>
           {:else}
-            <p>No output was captured in this session log.</p>
+            <p>No answer was recorded in this session log.</p>
           {/if}
           {#if tool.truncated}<p>Tool detail was truncated by the relay.</p>{/if}
         </section>

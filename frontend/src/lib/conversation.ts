@@ -183,3 +183,13 @@ export function isChosenOption(item: AskedQuestion, label: string): boolean {
   if (item.answer === label) return true;
   return item.multiSelect && item.answer.split(', ').includes(label);
 }
+
+/** Id of the AskUserQuestion entry still waiting for a reply after the last user turn, if any. */
+export function pendingQuestionEntryId(entries: ConversationEntry[]): string | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.role === 'user') return null;
+    if (entry.tools?.some((tool) => tool.name === 'AskUserQuestion' && !tool.output && !tool.error)) return entry.id;
+  }
+  return null;
+}
