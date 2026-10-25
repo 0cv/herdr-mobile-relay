@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Show Claude Code questions (AskUserQuestion) in **Conversation** and **Full
+  history** with their options and the chosen answer, or a waiting notice while
+  the agent waits for a reply. (#63)
+
 ## [0.23.1] - 2026-10-25
 
 ### Added
