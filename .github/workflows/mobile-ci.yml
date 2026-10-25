@@ -975,9 +975,9 @@ jobs:
           chrome_sha256="$(jq -r '.android.browserSha256' tests/mobile/toolchains.json)"
           trichrome_url="$(jq -r '.android.trichromeLibraryUrl' tests/mobile/toolchains.json)"
           trichrome_sha256="$(jq -r '.android.trichromeLibrarySha256' tests/mobile/toolchains.json)"
-          curl --fail --location --retry 3 --retry-delay 2 --output "$browser_dir/chrome.apkm" "$chrome_url"
+          curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --output "$browser_dir/chrome.apkm" "$chrome_url"
           printf '%s  %s\n' "$chrome_sha256" "$browser_dir/chrome.apkm" | sha256sum --check --status
-          curl --fail --location --retry 3 --retry-delay 2 --output "$browser_dir/trichrome-library.apk" "$trichrome_url"
+          curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --output "$browser_dir/trichrome-library.apk" "$trichrome_url"
           printf '%s  %s\n' "$trichrome_sha256" "$browser_dir/trichrome-library.apk" | sha256sum --check --status
           unzip -q "$browser_dir/chrome.apkm" -d "$browser_dir/chrome"
           mapfile -t chrome_apks < <(find "$browser_dir/chrome" -maxdepth 1 -type f -name '*.apk' -print | sort)
