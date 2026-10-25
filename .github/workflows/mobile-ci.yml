@@ -731,7 +731,7 @@ jobs:
     needs: [provenance, prepare, smoke, smoke_evidence, smoke_qualification]
     if: needs.smoke_evidence.result == 'success' && needs.smoke_qualification.result == 'success' && (inputs.suite || 'release') == 'release'
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.smoke_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60

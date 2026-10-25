@@ -189,7 +189,7 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
     assert.equal(upload?.with.overwrite, true, `${name} must overwrite its artifact when a run is rerun`);
   }
   validateNativePath(action.runs.steps, 'inputs'); validateNativePath(jobs.device.steps, 'matrix');
-  for (const name of ['smoke', 'device']) assert.equal(jobs[name].strategy['fail-fast'], false);
+  for (const name of ['smoke', 'release_smoke', 'device']) assert.equal(jobs[name].strategy['fail-fast'], false);
   auditAndroidQualificationBarrier(workflow);
   const validators = Object.entries(jobs).flatMap(([job, value]: [string, any]) => (value.steps || []).filter((step: any) => step.run?.includes('bun tests/mobile/validate-evidence.ts')).map((step: any) => ({ job, step })));
   assert.deepEqual(validators.map(value => value.job), ['android_qualification_evidence', 'smoke_evidence', 'release_evidence', 'gate']);

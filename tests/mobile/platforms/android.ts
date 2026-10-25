@@ -54,6 +54,8 @@ const ANDROID_NATIVE_LOOKUP_COMMAND_MS = 5_000;
 const ANDROID_PICKER_SOURCE_COMMAND_MS = 6_000;
 const ANDROID_LAUNCHER_PACKAGE = 'com.google.android.apps.nexuslauncher';
 const ANDROID_LAUNCHER_ACTIVITY = 'com.android.launcher3.dragndrop.AddItemActivity';
+// Chrome first tries a full web app install and only then asks the launcher for a shortcut; hosted runs have taken over 30 s to show the launcher sheet.
+const ANDROID_LAUNCHER_CONFIRMATION_MS = 90_000;
 const ANDROID_PICKER_PACKAGE = 'com.google.android.documentsui';
 const ANDROID_PICKER_ACTIVITY = 'com.android.documentsui.picker.PickActivity';
 const ANDROID_NATIVE_SCROLL_COMMAND_MS = 5_000;
@@ -588,7 +590,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async confirmLauncherShortcut(): Promise<boolean> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
+    const deadline = Date.now() + Math.min(ANDROID_LAUNCHER_CONFIRMATION_MS, this.budget.remainingMs);
     const locator = { using: 'xpath', value:
       `//*[@resource-id='${ANDROID_LAUNCHER_PACKAGE}:id/add_item_bottom_sheet_content']`
       + `[.//*[@resource-id='${ANDROID_LAUNCHER_PACKAGE}:id/widget_name' and @text='Herdr Relay' and @displayed='true']]`
