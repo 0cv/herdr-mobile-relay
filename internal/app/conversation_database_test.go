@@ -233,6 +233,9 @@ func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint, l
 		case <-time.After(3 * time.Second):
 			t.Fatal("feed stopped polling")
 		}
+		if err := late.failure(); err != nil {
+			t.Fatal(err)
+		}
 	} else {
 		appendMessage(223, "after checkpoint")
 	}
