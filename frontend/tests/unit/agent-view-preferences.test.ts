@@ -52,10 +52,10 @@ describe('agent view preference storage', () => {
     paneAgentViewOverrides.set({});
   });
 
-  it('loads Terminal when the global preference is missing or invalid', () => {
-    expect(readDefaultAgentView()).toBe('terminal');
+  it('loads Conversation when missing or invalid and respects either stored choice', () => {
+    expect(readDefaultAgentView()).toBe('conversation');
     localStorage.setItem(DEFAULT_AGENT_VIEW_KEY, 'history');
-    expect(readDefaultAgentView()).toBe('terminal');
+    expect(readDefaultAgentView()).toBe('conversation');
     localStorage.setItem(DEFAULT_AGENT_VIEW_KEY, 'terminal');
     expect(readDefaultAgentView()).toBe('terminal');
     localStorage.setItem(DEFAULT_AGENT_VIEW_KEY, 'conversation');
@@ -63,7 +63,7 @@ describe('agent view preference storage', () => {
   });
 
   it('handles global preference read failures without throwing', () => {
-    expect(readDefaultAgentView(throwingStorage())).toBe('terminal');
+    expect(readDefaultAgentView(throwingStorage())).toBe('conversation');
   });
 
   it.each([

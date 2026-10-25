@@ -9,12 +9,13 @@ mkdir -p "$PI_CODING_AGENT_DIR/extensions"
 printf '%s\n' unrelated > "$PI_CODING_AGENT_DIR/extensions/herdr.ts"
 bash "$ROOT/relay/pi-commands.sh" install
 TARGET="$PI_CODING_AGENT_DIR/extensions/herdr-mobile-relay-commands"
-[[ -s "$TARGET/index.ts" && -s "$TARGET/bridge.mjs" ]]
+[[ -s "$TARGET/index.ts" && -s "$TARGET/bridge.mjs" && -s "$TARGET/activity.mjs" ]]
 cmp "$ROOT/relay/pi-command-bridge/bridge.mjs" "$TARGET/bridge.mjs"
+cmp "$ROOT/relay/pi-command-bridge/activity.mjs" "$TARGET/activity.mjs"
 printf '%s\n' user-data > "$TARGET/unrelated"
 bash "$ROOT/relay/pi-commands.sh" install
 bash "$ROOT/relay/pi-commands.sh" remove
-[[ -f "$TARGET/unrelated" && ! -e "$TARGET/index.ts" ]]
+[[ -f "$TARGET/unrelated" && ! -e "$TARGET/index.ts" && ! -e "$TARGET/activity.mjs" ]]
 [[ "$(<"$PI_CODING_AGENT_DIR/extensions/herdr.ts")" = unrelated ]]
 if bash "$ROOT/relay/pi-commands.sh" install; then
     echo 'Overwrote an unowned directory' >&2; exit 1

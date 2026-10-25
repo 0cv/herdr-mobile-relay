@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	herdrmobilerelay "github.com/0cv/herdr-mobile-relay"
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
@@ -34,9 +35,11 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
+	"github.com/0cv/herdr-mobile-relay/internal/piintegration"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
@@ -100,6 +103,7 @@ type Server struct {
 	profiles         *profiles.Resolver
 	webH             *web.Handler
 	herdrC           *herdr.Client
+	kimiProcessBirth func(int) (string, error)
 	clipboardRead    func(context.Context) ([]byte, error)
 	clipboardWrite   func(context.Context, []byte) error
 	copyRunner       copyResponseRunner
@@ -114,6 +118,7 @@ type Server struct {
 	paneSizeM        *panesize.Manager
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
+	piIntegration    *piintegration.Manager
 	appDeployM       *appdeploy.Manager
 	hybrid           *hybridTransport
 	uploadM          *upload.Manager
@@ -139,6 +144,10 @@ type Server struct {
 	inventoryPublicationObserver func(string)
 	// Optional test hook between history loading and tuple revalidation.
 	conversationHistoryReadObserver func()
+
+	conversationLiveMu  sync.Mutex
+	conversationFeeds   map[string]*conversationFeed
+	conversationClients map[string]*conversationFeed
 
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
@@ -252,6 +261,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		conversationM:       conversationReader,
 		conversationB:       conversationBrowser,
 		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
+		piIntegration:       piintegration.New(herdrmobilerelay.PiCommandBridge(), func() []string { return agentroots.PiConfigDirs(home) }),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		uploadM:             uploadManager,
 		deviceAuth:          deviceStore,
@@ -298,6 +308,16 @@ func (s *Server) authorizeDeviceAction(client *transport.ClientConn, action prot
 }
 
 func authorizeAuthenticatedIdentity(identity transport.AuthenticatedIdentity, authenticated bool, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
+	if action.Operation == "get_pi_integration" && !authenticated {
+		apiErr := protocol.NewApiError(protocol.ErrorReaderDenied, map[string]any{"operation": action.Operation})
+		return &apiErr
+	}
+	if action.Operation == "get_pi_prompt_capability" || action.Operation == "send_pi_prompt_unconfirmed" || action.Operation == "set_pi_integration" {
+		if !authenticated || identity.Role != string(protocol.RoleController) {
+			apiErr := protocol.NewApiError(protocol.ErrorReaderDenied, map[string]any{"operation": action.Operation})
+			return &apiErr
+		}
+	}
 	deviceBoundPush := false
 	switch action.Operation {
 	case "push_open_ref", "push_policy_get", "push_policy_set", "push_snooze", "push_subscribe",
@@ -524,6 +544,9 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	// sole-transcript heuristic, inventing a title over a conversation view
 	// that Reader.Read reports as unavailable.
 	sessionID := strings.TrimSpace(agent.Session)
+	if conversation.IsKimi(agent.Agent) && agent.ConversationReason != "" {
+		sessionID = ""
+	}
 	agent.SessionID = sessionID
 	// AgentSessionID is the wire copy of SessionID. SessionID itself is
 	// json:"-", and the agents broadcast deep-copies snapshots through JSON,
@@ -534,7 +557,16 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	if sessionID == "" {
 		return
 	}
-	title := s.sessions.SessionNameWithProject(agent.Agent, projectContextForAgent(agent), sessionID)
+	title := ""
+	if conversation.IsKimi(agent.Agent) && agent.ConversationInferred {
+		id, location, code := s.conversationM.SelectKimiSession(projectContextForAgent(agent), "")
+		if id != sessionID || code != "" || conversation.KimiSourceIdentity(location) != agent.ConversationSource {
+			return
+		}
+		title = location.Title
+	} else {
+		title = s.sessions.SessionNameWithProject(agent.Agent, projectContextForAgent(agent), sessionID)
+	}
 	if title == "" {
 		return
 	}
@@ -589,6 +621,8 @@ func (s *Server) Run(ctx context.Context) error {
 		s.auditLog = auditLog
 	}
 
+	s.refreshPiIntegration()
+
 	pushDir := filepath.Join(s.cfg.RuntimeDir, "push")
 	pm, err := push.NewManager(pushDir, s.logger)
 	if err != nil {
@@ -620,6 +654,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.hub.SetOnConnect(s.sendConnectionSnapshot)
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
+		s.stopConversationFeed(client.ID(), "")
 		s.stopPaneWatch(client.ID(), "")
 		if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
 			s.pushM.SetViewedPane(identity.DeviceID, nil)
@@ -700,7 +735,10 @@ func (s *Server) Run(ctx context.Context) error {
 			admitted()
 		}
 
-		commandCtx := herdr.WithDispatchCheck(ctx, func() error {
+		commandCtx := herdr.WithDispatchCheck(client.Context(), func() error {
+			if err := client.Context().Err(); err != nil {
+				return err
+			}
 			if s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID) != nil {
 				return errors.New("device is no longer authorized")
 			}
@@ -710,6 +748,14 @@ func (s *Server) Run(ctx context.Context) error {
 			return nil
 		})
 		switch action {
+		case "get_pi_integration", "set_pi_integration":
+			s.handlePiIntegration(commandCtx, client, inbound, msg)
+		case "get_pi_prompt_capability", "send_pi_prompt_unconfirmed":
+			result := s.handlePiPrompt(commandCtx, client, inbound, msg, admitted)
+			if auditedWrite {
+				s.recordWriteAudit(client, msg, result)
+			}
+			s.hub.Send(client, commandResultMessage(result))
 		case "check_update":
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
 				"state":            "checking",
@@ -756,6 +802,7 @@ func (s *Server) Run(ctx context.Context) error {
 			s.applyPaneReadLease(client.ID(), msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
 			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
+			resp["request_id"] = inbound.RequestID
 			if inbound.Target != nil {
 				resp["target"] = *inbound.Target
 			}
@@ -772,6 +819,15 @@ func (s *Server) Run(ctx context.Context) error {
 			s.handlePaneApplied(client, msg)
 		case "get_conversation_history":
 			s.handleConversationHistory(client, inbound)
+		case "get_conversation_updates":
+			s.handleConversationUpdates(client, inbound)
+		case "unwatch_conversation":
+			if inbound.SubscriptionID == "" {
+				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation subscription is required", inbound.PaneID, nil)
+				break
+			}
+			s.stopConversationFeed(client.ID(), inbound.SubscriptionID)
+			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, nil)
 		case "device_list":
 			identity, authenticated := client.Identity()
 			if s.deviceAuth == nil || !authenticated {
@@ -1263,6 +1319,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.setInventoryPublisher(ctx)
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
+		s.enrichKimiSessions(ctx, agents)
 		for _, a := range agents {
 			s.resolveAgentSessionName(a)
 			if a.Status != "blocked" {
@@ -1459,6 +1516,7 @@ func (s *Server) effectiveCapabilities() []string {
 
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
+	capabilities = append(capabilities, "pi_prompt_unconfirmed")
 	// Never the legacy pane_size_lease names: apps up to 0.22.7 lease
 	// automatically when they see them.
 	if s.paneSizeM.Available() {
@@ -2172,16 +2230,21 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
 		return
 	}
-	page, historyErr := browser.ReadPage(client.Context(), conversation.BrowseRequest{
-		Scope: conversation.BrowseScope{
-			Provider: agent.Agent, CWD: agent.Cwd, ForegroundCWD: agent.ForegroundCwd, SessionID: agent.SessionID,
-			PaneID: agent.PaneID, ServerSessionID: agent.ServerSessionID,
-			TerminalID: agent.TerminalID, Generation: agent.Generation,
-		},
-		Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry,
-	})
+	if !s.kimiSelectionCurrent(client.Context(), agent) {
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Kimi session changed", inbound.PaneID, nil)
+		return
+	}
+	var page conversation.BrowsePage
+	var historyErr error
+	if inbound.Observe && supportsConversationActivity(agent.Agent) {
+		page, historyErr = s.conversationFeedPage(client, inbound, agent)
+	} else {
+		page, historyErr = browser.ReadPage(client.Context(), conversation.BrowseRequest{
+			Scope: conversationScope(agent), Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry,
+		})
+	}
 	if historyErr != nil {
-		s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
+		s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID)
 		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
 		return
 	}
@@ -2190,7 +2253,8 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 	}
 	current, currentExists := s.state.Agent(inbound.PaneID)
 	if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
-		!sameConversationTuple(agent, current) {
+		!sameConversationTuple(agent, current) || !s.kimiSelectionCurrent(client.Context(), agent) ||
+		s.authorizeDeviceAction(client, protocol.ActionMetadata{Operation: action, Class: protocol.ActionReadOnly}, "") != nil {
 		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
 		return
 	}
@@ -2202,7 +2266,7 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 // optional context keeps pane-only callers source compatible while live
 // completion paths pass the captured foreground hint.
 func (s *Server) latestConversationResponse(agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
-	if s.conversationM == nil || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
+	if s.conversationM == nil || conversation.IsKimi(agent) || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
 	}
 	project := conversation.ProjectContext{CWD: cwd}
@@ -2221,6 +2285,22 @@ func (s *Server) latestConversationResponse(agent, cwd, sessionID string, contex
 }
 
 func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
+	if conversation.IsKimi(agent) {
+		current, exists := s.state.Agent(paneID)
+		if !exists || current.Agent != agent || current.SessionID != sessionID || current.Cwd != cwd || s.conversationM == nil {
+			return ""
+		}
+		page, err := s.readAgentConversation(ctx, current, 1)
+		if err != nil || !page.Available {
+			return ""
+		}
+		if len(page.Entries) > 0 {
+			entry := page.Entries[len(page.Entries)-1]
+			if entry.Role == "assistant" && strings.TrimSpace(entry.Text) != "" {
+				return entry.Text
+			}
+		}
+	}
 	if response := s.latestConversationResponse(agent, cwd, sessionID, contexts...); response != "" {
 		return response
 	}
@@ -2255,7 +2335,11 @@ func sameConversationTuple(left, right *coordinator.AgentState) bool {
 	return left.Agent == right.Agent &&
 		left.Cwd == right.Cwd &&
 		leftProject == rightProject &&
-		left.SessionID == right.SessionID
+		left.SessionID == right.SessionID &&
+		left.ConversationProcess == right.ConversationProcess &&
+		left.ConversationSource == right.ConversationSource &&
+		left.ConversationReason == right.ConversationReason &&
+		left.ConversationInferred == right.ConversationInferred
 }
 func isClaudeLike(agent string) bool {
 	lower := strings.ToLower(agent)
@@ -2686,6 +2770,7 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		SpeechLanguages: speechLanguages,
 		Inventory:       inventory,
 		AgentProfiles:   s.profiles.Profiles(),
+		HermesProfiles:  hermesprofiles.List(s.home),
 		Hybrid:          s.hybridDescriptor(),
 	})
 	s.hub.Send(client, map[string]any{
@@ -2963,6 +3048,7 @@ func unchangedPaneResponse(message, response map[string]any) map[string]any {
 	paneID, _ := response["pane_id"].(string)
 	return map[string]any{
 		"type":                "pane_unchanged",
+		"request_id":          response["request_id"],
 		"pane_id":             paneID,
 		"content_fingerprint": fingerprint,
 		"target":              response["target"],
@@ -3189,10 +3275,17 @@ func auditAction(message map[string]any) string {
 }
 
 func auditWriteDetails(message map[string]any) map[string]any {
+	if auditAction(message) == "set_pi_integration" {
+		details := make(map[string]any)
+		if enabled, ok := message["enabled"].(bool); ok {
+			details["enabled"] = enabled
+		}
+		return details
+	}
 	// A secret answering a noecho prompt gets no payload digest and no keys: the
 	// digest of a low-entropy secret is crackable offline and the keys spell the
 	// secret out. Only its shape is auditable.
-	if auditAction(message) == "send_secret" {
+	if action := auditAction(message); action == "send_secret" || action == "send_terminal_text" || action == "send_pi_prompt_unconfirmed" {
 		details := make(map[string]any, 1)
 		if text, ok := message["text"].(string); ok {
 			details["text_bytes"] = len(text)
@@ -3979,11 +4072,24 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		if agentName == "" || sessionID == "" || !conversation.Supported(agentName) {
 			continue
 		}
-		cacheKey := agentName + "\x00" + project.CWD + "\x00" + project.ForegroundCWD + "\x00" + sessionID
-		page, loaded := pages[cacheKey]
-		if !loaded {
-			page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
-			pages[cacheKey] = page
+		if conversation.IsKimi(agentName) && agents[entry.PaneID] == nil {
+			continue
+		}
+		var page conversation.Page
+		if current := agents[entry.PaneID]; current != nil && conversation.IsKimi(current.Agent) {
+			var err error
+			page, err = s.readAgentConversation(context.Background(), current, 200)
+			if err != nil || !page.Available {
+				continue
+			}
+		} else {
+			cacheKey := agentName + "\x00" + project.CWD + "\x00" + project.ForegroundCWD + "\x00" + sessionID
+			var loaded bool
+			page, loaded = pages[cacheKey]
+			if !loaded {
+				page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
+				pages[cacheKey] = page
+			}
 		}
 		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {
 			entries[index].Extract = response

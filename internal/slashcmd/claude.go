@@ -2,7 +2,6 @@ package slashcmd
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -66,10 +65,11 @@ var claudeBuiltins = []Command{
 }
 
 func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	reader := newCatalogReader()
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(claudeBuiltins))
 		copy(builtins, claudeBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 	truncated := false
 	budget := maxCustomFiles
@@ -95,28 +95,28 @@ func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		projectDirs := findProjectDirs(ctx.Cwd, []string{".claude"})
 		for _, dir := range projectDirs {
 			cmdDir := filepath.Join(dir, "commands")
-			cmds, supp, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
+			cmds, supp, trunc := reader.walkCommandDirBudget(cmdDir, "project", &budget)
 			apply(cmds, supp)
 			truncated = truncated || trunc
 
 			skillDir := filepath.Join(dir, "skills")
-			cmds, supp, trunc = scanSkillDirBudget(skillDir, "project", &budget)
+			cmds, supp, trunc = reader.scanSkillDirBudget(skillDir, "project", &budget)
 			apply(cmds, supp)
 			truncated = truncated || trunc
 		}
 	}
 
 	personalCmds := filepath.Join(ctx.Home, ".claude", "commands")
-	cmds, supp, trunc := walkCommandDirBudget(personalCmds, "personal", &budget)
+	cmds, supp, trunc := reader.walkCommandDirBudget(personalCmds, "personal", &budget)
 	apply(cmds, supp)
 	truncated = truncated || trunc
 
 	personalSkills := filepath.Join(ctx.Home, ".claude", "skills")
-	cmds, supp, trunc = scanSkillDirBudget(personalSkills, "personal", &budget)
+	cmds, supp, trunc = reader.scanSkillDirBudget(personalSkills, "personal", &budget)
 	apply(cmds, supp)
 	truncated = truncated || trunc
 
-	apply(nil, claudeSkillOverrides(ctx))
+	apply(nil, reader.claudeSkillOverrides(ctx))
 	commands := make([]Command, 0, len(order))
 	for _, name := range order {
 		if command, exists := active[name]; exists {
@@ -127,7 +127,7 @@ func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
 
 func removeCommandName(values []string, name string) []string {
@@ -141,7 +141,7 @@ func removeCommandName(values []string, name string) []string {
 
 // claudeSkillOverrides reads skillOverrides from Claude's settings files.
 // Entries mapped to "off", "hidden", or "disabled" suppress the matching command.
-func claudeSkillOverrides(ctx DiscoverContext) []string {
+func (reader *catalogReader) claudeSkillOverrides(ctx DiscoverContext) []string {
 	values := make(map[string]string)
 	paths := []string{
 		filepath.Join(ctx.Home, ".claude", "settings.json"),
@@ -155,8 +155,8 @@ func claudeSkillOverrides(ctx DiscoverContext) []string {
 		}
 	}
 	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil || len(data) > maxMetadataSize {
+		data, ok := reader.readPath(path, maxMetadataSize, maxMetadataSize+1)
+		if !ok {
 			continue
 		}
 		var settings struct {

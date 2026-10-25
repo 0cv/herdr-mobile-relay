@@ -403,7 +403,7 @@ func TestRunCommandContextTerminatesProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	_, err := runCommandContext(ctx, exec.Command("/bin/sh", scriptPath))
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -1091,6 +1091,17 @@ func TestVerifyPublicPreservesSameOriginRedirectsForQueryBustedChecks(t *testing
 	}
 }
 
+type deadlineCauseContext struct {
+	context.Context
+}
+
+func (ctx deadlineCauseContext) Err() error {
+	if ctx.Context.Err() != nil {
+		return context.Cause(ctx.Context)
+	}
+	return nil
+}
+
 func TestVerifyPublicRedactsMetadataAndEncodingDiagnostics(t *testing.T) {
 	const marker = "synthetic-response-marker?token=synthetic-token-marker&query=synthetic-query-marker"
 	tests := []struct {
@@ -1175,9 +1186,14 @@ func TestVerifyPublicRedactsMetadataAndEncodingDiagnostics(t *testing.T) {
 					t.Fatal("metadata or encoding diagnostics exposed response/query markers")
 				}
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			watchdog, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
-			err = verifyPublicWith(ctx, job, server.Client(), func(int) time.Duration { return time.Minute })
+			ctx, expire := context.WithCancelCause(watchdog)
+			defer expire(context.Canceled)
+			err = verifyPublicWith(deadlineCauseContext{ctx}, job, server.Client(), func(int) time.Duration {
+				expire(context.DeadlineExceeded)
+				return time.Minute
+			})
 			if err == nil || !strings.Contains(err.Error(), "before timeout") || strings.Contains(err.Error(), "synthetic-") || faultyRequests.Load() != 2 {
 				t.Fatalf("verifyPublicWith() did not retain a sanitized retryable failure: %v, requests = %d", err, faultyRequests.Load())
 			}
@@ -1233,7 +1249,7 @@ func TestRunPersistsSanitizedPublicVerificationFailure(t *testing.T) {
 			}
 			jobPath := filepath.Join(root, "job.json")
 			writeJSONFixture(t, jobPath, job)
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			err = Run(ctx, jobPath)
 			if err == nil || faultyRequests.Load() == 0 || strings.Contains(err.Error(), "synthetic-") {

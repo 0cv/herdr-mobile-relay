@@ -160,7 +160,7 @@ describe('clampPayload', () => {
 
 describe('ConversationMessage tool cards', () => {
   it('shows decoded arguments instead of the raw JSON blob', () => {
-    const { container } = render(ConversationMessage, { messageId: 'arguments', text: '', tools: [bashTool] });
+    const { container } = render(ConversationMessage, { viewState: { tableOffsets: [], openTools: new Set<string>() }, text: '', tools: [bashTool] });
     const input = container.querySelector('pre');
     expect(input).toHaveTextContent('command: python3 /tmp/band-sample.py');
     expect(container.textContent).not.toContain('{"command"');
@@ -170,7 +170,7 @@ describe('ConversationMessage tool cards', () => {
     const user = userEvent.setup();
     const output = Array.from({ length: 200 }, (_, index) => `line-${index}`).join('\n');
     const { container } = render(ConversationMessage, {
-      messageId: 'clamped-output',
+      viewState: { tableOffsets: [], openTools: new Set<string>() },
       text: '',
       tools: [{ name: 'Bash', input: bashInput, output }],
     });
@@ -252,7 +252,7 @@ describe('AskUserQuestion hardening', () => {
 
   it('renders duplicate questions and labels without throwing, and keeps raw output for errors', () => {
     const tool = { id: 't', name: 'AskUserQuestion', input: ask([q, q]), output: 'Error: denied', error: true } as ConversationTool;
-    const { container } = render(ConversationMessage, { messageId: 'dup', text: '', tools: [tool] });
+    const { container } = render(ConversationMessage, { viewState: { tableOffsets: [], openTools: new Set<string>() }, text: '', tools: [tool] });
     expect(container.querySelectorAll('.conversation-question')).toHaveLength(2);
     expect(container.textContent).toContain('Error: denied');
     expect(container.textContent).not.toContain('Answered:');

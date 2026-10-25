@@ -22,7 +22,7 @@ func TestInstanceMatchesBridgeIdentity(t *testing.T) {
 	if len(runtimes) == 0 {
 		t.Skip("Bun or Node required for cross-runtime identity")
 	}
-	dir, err := os.MkdirTemp("/tmp", "pi-instance-")
+	dir, err := os.MkdirTemp("", "pi-")
 	if err != nil {
 		t.Fatal(err)
 	}

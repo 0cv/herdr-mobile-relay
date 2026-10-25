@@ -1,0 +1,26 @@
+{
+  "sources": ["hash-v2", "hash220", "hash-v1", "slug-v1"],
+  "verification": "Expected normalized strings and slugs were inspected against source. Hashes other than the standard empty-string SHA256 prefix are intentionally not supplied; compute them in isolated tests.",
+  "v2": [
+    {"input":"/", "normalized":"", "slug":"workspace", "expectedKey":"wd_workspace_e3b0c44298fc"},
+    {"input":"///", "normalized":"", "slug":"workspace", "sameKeyAs":0},
+    {"input":"/fixture/Kimi Project///", "normalized":"/fixture/Kimi Project", "slug":"kimi-project"},
+    {"input":"C:\\Work\\Kimi Project\\", "normalized":"C:/Work/Kimi Project", "slug":"kimi-project"},
+    {"input":"/fixture/./Kimi Project", "normalized":"/fixture/./Kimi Project", "slug":"kimi-project", "mustNotCollapseDotSegment":true},
+    {"input":"/fixture/..", "normalized":"/fixture/..", "slug":"workspace"},
+    {"input":"/fixture/---", "normalized":"/fixture/---", "slug":"workspace"},
+    {"input":"/fixture/École", "normalized":"/fixture/École", "slug":"cole"},
+    {"input":"/fixture/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "normalized":"/fixture/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "slug":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"input":"/fixture/project", "normalized":"/fixture/project", "slug":"project"},
+    {"input":"/fixture/Project", "normalized":"/fixture/Project", "slug":"project", "mustDifferFromKeyAt":9}
+  ],
+  "legacyNormalization": [
+    {"input":"/fixture/./Kimi Project/", "normalized":"/fixture/Kimi Project", "slug":"kimi-project"},
+    {"input":"C:\\Work\\Kimi Project\\", "normalized":"C:/Work/Kimi Project", "slug":"kimi-project"}
+  ],
+  "registryComparison": [
+    {"left":"C:\\Work\\Project\\", "right":"c:/work/project", "equal":true},
+    {"left":"/fixture/Project", "right":"/fixture/project", "equal":false},
+    {"left":"/fixture/./project", "right":"/fixture/project", "equal":false}
+  ]
+}

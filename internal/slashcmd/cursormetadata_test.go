@@ -132,8 +132,9 @@ func TestCursorSkillFileReadLimit(t *testing.T) {
 				writeFile(t, filepath.Join(skillDir, "SKILL.md"), strings.Repeat("x", size))
 				eligible := size > 0 && size <= 1<<20
 				data, ok := readCursorSkillFile(root, skillDir, project)
-				if ok != eligible || ok && len(data) != size {
-					t.Errorf("read returned %d bytes, ok=%v; want size=%d, ok=%v", len(data), ok, size, eligible)
+				wantSize := min(size, maxMetadataSize+1)
+				if ok != eligible || ok && len(data) != wantSize {
+					t.Errorf("read returned %d bytes, ok=%v; want size=%d, ok=%v", len(data), ok, wantSize, eligible)
 				}
 			})
 		}

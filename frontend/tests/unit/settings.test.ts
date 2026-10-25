@@ -15,8 +15,9 @@ import { currentView, navigate } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
-import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
-import { defaultAgentView, paneAgentViewOverrides, setTerminalResizeSession } from '$lib/preferences';
+import { appUpdateStatus, clearUpdateProgress, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { guardReload } from '$lib/reload-guard';
+import { defaultAgentView, paneAgentViewOverrides, readTerminalResizeSession, setTerminalResizeSession } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -58,6 +59,42 @@ class MockWebSocket {
 }
 
 describe('settings relay status', () => {
+  it('exposes Pi Integration per connected relay with reader access kept read-only', async () => {
+    const credential = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role: 'reader', deviceId: 'device' } as never);
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({ type: 'command_result', request_id: 'pi-setting', ok: true,
+      data: { instance: 'synthetic', enabled: true, profiles: [] } });
+    try {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
+      await waitFor(() => expect(toggle).toBeChecked());
+      expect(toggle).toBeDisabled();
+      expect(send).toHaveBeenCalledWith(get(relayStore.relayConfigs)[0].id, { type: 'get_pi_integration' });
+    } finally { credential.mockRestore(); send.mockRestore(); }
+  });
+
+  it('keeps Pi Integration loaded while unrelated relay updates arrive', async () => {
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValueOnce({ type: 'command_result', request_id: 'pi-setting', ok: true,
+      data: { instance: 'synthetic', enabled: true, profiles: [{ path: '/synthetic/agent', status: 'up to date' }] } })
+      .mockReturnValue(new Promise(() => {}));
+    try {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
+      await waitFor(() => expect(toggle).toBeChecked());
+      socket.server({ type: 'agents', agents: [] });
+      socket.server({ type: 'inventory_status', state: 'ready' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(toggle).toBeChecked();
+      expect(screen.getByText('/synthetic/agent: up to date')).toBeInTheDocument();
+      expect(send.mock.calls.filter(([, command]) => command.type === 'get_pi_integration')).toHaveLength(1);
+    } finally { send.mockRestore(); }
+  });
+
   const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
 
   beforeEach(() => {
@@ -82,7 +119,7 @@ describe('settings relay status', () => {
       checkedAt: 123,
       error: '',
     });
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
   });
 
   afterEach(() => {
@@ -141,7 +178,7 @@ describe('settings relay status', () => {
     expect(screen.getByText('Push: waiting for relay…')).toBeInTheDocument();
 
     socket.open();
-    relayStore.setPushStatus('fedora-wss-fedora-example', 'sent');
+    relayStore.setPushStatus(get(relayStore.relayConfigs)[0].id, 'sent');
     await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
     expect(screen.getByText('Push: syncing…')).toBeInTheDocument();
 
@@ -329,7 +366,7 @@ describe('settings relay status', () => {
     const socket = MockWebSocket.instances[0];
     socket.open();
 
-    expect(await screen.findByText('Connection: relay URL fedora.example')).toBeInTheDocument();
+    expect(await screen.findByText('Connection: relay URL 127.0.0.1:8871')).toBeInTheDocument();
   });
 
   it('shows active and latest gateway versions without regressing to an older upstream', async () => {
@@ -528,7 +565,8 @@ describe('settings relay status', () => {
     await user.click(refresh.getByRole('button', { name: '250 ms' }));
   });
 
-  it('offers Resize Session as a disclosed opt-in with a subordinate height switch', async () => {
+  it('offers Resize Session on by default with a subordinate height switch', async () => {
+    setTerminalResizeSession(readTerminalResizeSession());
     const user = userEvent.setup();
     render(SettingsView);
 
@@ -536,8 +574,9 @@ describe('settings relay status', () => {
     expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
     const resize = screen.getByRole('switch', { name: 'Resize Session' });
-    expect(resize).not.toBeChecked();
+    expect(resize).toBeChecked();
     for (const disclosure of [
+      /On by default, saved on this device\./,
       /Resizes the shared terminal to fit this phone while the phone has it open\./,
       /the laptop and SSH views of that pane look garbled/,
       /agents may leave narrow copies of their output in the scrollback/,
@@ -548,7 +587,11 @@ describe('settings relay status', () => {
     ]) expect(resize).toHaveAccessibleDescription(disclosure);
     const height = screen.getByRole('switch', { name: 'Lease Terminal Height' });
     expect(height).toBeDisabled();
+    expect(height).not.toBeChecked();
 
+    await user.click(resize);
+    expect(resize).not.toBeChecked();
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('false');
     await user.click(resize);
     expect(resize).toBeChecked();
     expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('true');
@@ -643,6 +686,39 @@ describe('settings relay status', () => {
       phase: 'scheduled',
       data: { update: { state: 'scheduled', target_revision: 'f'.repeat(40) } },
     });
+  });
+
+  it('asks again before Load Update discards work that appeared after the dialog opened', async () => {
+    const user = userEvent.setup();
+    appUpdateStatus.set({
+      state: 'reload-ready',
+      currentVersion: APP_VERSION,
+      currentAssets: APP_ASSET_VERSION,
+      deployedVersion: APP_VERSION,
+      deployedAssets: APP_ASSET_VERSION + 1,
+      upstreamVersion: APP_VERSION,
+      upstreamAssets: APP_ASSET_VERSION + 1,
+      checkedAt: 123,
+      error: '',
+    });
+    const replace = vi.fn();
+    render(SettingsView);
+    await user.click(screen.getByRole('button', { name: 'Load Update' }));
+    let dialog = screen.getByRole('dialog', { name: 'Load Update' });
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+    const release = guardReload(() => 'draft');
+    vi.stubGlobal('location', { href: 'https://app.example/', origin: 'https://app.example', replace });
+    try {
+      await user.click(within(dialog).getByRole('button', { name: 'Load Update' }));
+      expect(replace).not.toHaveBeenCalled();
+      dialog = screen.getByRole('dialog', { name: 'Load Update' });
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('A draft is not saved on this phone, and loading the app update discards it.');
+      await user.click(within(dialog).getByRole('button', { name: 'Load Update Anyway' }));
+      expect(replace).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      clearUpdateProgress();
+    }
   });
 
   it('confirms a separate app deployment through its authorized relay', async () => {

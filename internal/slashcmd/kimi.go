@@ -66,16 +66,17 @@ func (p *kimiProvider) ID() string { return "kimi" }
 // shared file budget on them, so exhaustion truncates the least important
 // skills, never the winners.
 func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	reader := newCatalogReader()
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(kimiBuiltins))
 		copy(builtins, kimiBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.
-		custom, truncated := discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(kimiBuiltins, custom), truncated
+		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+		return builtinsWithCustom(kimiBuiltins, custom), truncated || reader.truncated
 	}
 
 	configDir := filepath.Join(ctx.Home, ".kimi-code")
@@ -85,7 +86,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 	settings := kimiSkillSettings{}
 	if filepath.IsAbs(configDir) {
-		if data, ok := readSettingsFile(configDir, "config.toml"); ok {
+		if data, ok := reader.readSettingsFile(configDir, "config.toml"); ok {
 			parseKimiSkillSettings(data, &settings)
 		}
 	}
@@ -115,7 +116,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				// Never scan the headless service's unrelated working directory.
 				continue
 			}
-			cmds, trunc := scanPiSkillTree(dir, scope, nil, true, true, &budget, seenFiles, seenDirs)
+			cmds, trunc := reader.scanPiSkillTree(dir, scope, nil, true, true, &budget, seenFiles, seenDirs)
 			apply(cmds)
 			truncated = truncated || trunc
 		}
@@ -166,7 +167,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
 
 func init() { registerProvider(&kimiProvider{}) }

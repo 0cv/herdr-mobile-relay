@@ -1,0 +1,14 @@
+{
+  "type": "send_terminal_text",
+  "protocol": 3,
+  "request_id": "req-terminal-text",
+  "pane_id": "pane-1",
+  "target": {
+    "server_session_id": "primary",
+    "pane_id": "pane-1",
+    "terminal_id": "terminal-1",
+    "generation": 1,
+    "agent_session_id": " opaque/session 界 "
+  },
+  "text": "  /arbitrary 界😀  "
+}

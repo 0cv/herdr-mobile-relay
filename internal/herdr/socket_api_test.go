@@ -12,7 +12,7 @@ import (
 )
 
 func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -88,7 +88,7 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 }
 
 func TestUnaryRequestCancellationClosesBlockedPeer(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestUnaryRequestCancellationClosesBlockedPeer(t *testing.T) {
 // Herdr 0.8.0 closes the API socket after every response. A connection cached
 // by an earlier request must not surface as a failed tab move.
 func TestTabMoveRetriesWhenServerClosesEachConnection(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -199,7 +199,7 @@ func TestTabMoveRetriesWhenServerClosesEachConnection(t *testing.T) {
 }
 
 func TestWorkspaceMoveUsesSocketAPI(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -248,7 +248,7 @@ func TestWorkspaceMoveUsesSocketAPI(t *testing.T) {
 }
 
 func TestWorkspaceMoveBlockKeepsLinkedWorktreesTogether(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -301,7 +301,7 @@ func TestWorkspaceMoveBlockKeepsLinkedWorktreesTogether(t *testing.T) {
 // when a retry then fails to connect. The final error must classify as
 // dispatched-unknown, never as retry-safe.
 func TestWorkspaceMoveWrittenButUnansweredIsDispatchedUnknown(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -336,7 +336,7 @@ func TestWorkspaceMoveWrittenButUnansweredIsDispatchedUnknown(t *testing.T) {
 }
 
 func TestTabMoveWrittenButUnansweredIsDispatchedUnknown(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -380,7 +380,7 @@ func TestWorkspaceMoveConnectFailureIsRetrySafe(t *testing.T) {
 // A structured Herdr error response is a definitive refusal: the move did not
 // apply, and the code survives for phase classification.
 func TestWorkspaceMoveRefusalKeepsStructuredCode(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

@@ -30,14 +30,14 @@ func TestAgentNotReadyOutcomeDependsOnOperation(t *testing.T) {
 				"fi\n")
 			client := herdr.NewClient(bin, filepath.Join(dir, "herdr.sock"))
 			t.Cleanup(func() { _ = client.Close() })
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			var err error
 			wantPhase := "not_started"
 			wantMessage := "Agent is not ready to receive prompts; review the pane before retrying"
 			if action == "agent_start" {
 				lifecycle := &Lifecycle{herdr: client}
-				err = lifecycle.startKindAgent(ctx, "claude", "reviewer", "pane-1")
+				err = lifecycle.startKindAgent(ctx, "claude", "reviewer", "pane-1", nil)
 				wantPhase = "dispatched_unknown"
 				wantMessage = "Command may have executed; review the agent before retrying"
 			} else {

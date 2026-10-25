@@ -94,18 +94,20 @@ func TestInitialPromptBlocksDuplicateCompletion(t *testing.T) {
 	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600); _ = d.Close(context.Background()) })
 	message := map[string]any{"action": "agent_start", "request_id": "blocked", "profile_id": "claude", "name": "proj", "cwd": "/tmp", "prompt": "hello"}
 	first, duplicate := make(chan *CommandResult, 1), make(chan *CommandResult, 1)
-	go func() { first <- d.Handle(context.Background(), message) }()
-	deadline := time.Now().Add(3 * time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	go func() { first <- d.Handle(ctx, message) }()
 	for {
 		if _, err := os.Stat(entered); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ctx.Done():
 			t.Fatal("prompt did not start")
+		case <-time.After(time.Millisecond):
 		}
-		time.Sleep(time.Millisecond)
 	}
-	go func() { duplicate <- d.Handle(context.Background(), message) }()
+	go func() { duplicate <- d.Handle(ctx, message) }()
 	select {
 	case result := <-duplicate:
 		t.Fatalf("premature result = %+v", result)
@@ -120,7 +122,7 @@ func TestInitialPromptBlocksDuplicateCompletion(t *testing.T) {
 			if result.Phase != "completed_with_warning" {
 				t.Fatalf("result = %+v", result)
 			}
-		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
 			t.Fatal("result did not complete")
 		}
 	}

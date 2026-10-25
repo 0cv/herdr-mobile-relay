@@ -1,5 +1,33 @@
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
 const INLINE_PATTERN = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>"']+)/giu;
+// Markdown does not treat a number longer than nine digits as a list number.
+const LIST_ITEM = /^(\s*)(?:([-*+])|(\d{1,9})[.)])(\s+)(.+)$/u;
+const CODE_FENCE = /^\s*```\s*([A-Za-z0-9_+.-]*)\s*$/u;
+
+interface ListItem {
+  type: 'ul' | 'ol';
+  indent: number;
+  content: number;
+  start: number;
+  text: string;
+}
+
+// Tabs advance to the next multiple of four columns, as in Markdown.
+function columnAfter(whitespace: string, column = 0): number {
+  for (const character of whitespace) column = character === '\t' ? column + 4 - (column % 4) : column + 1;
+  return column;
+}
+
+function listItem(line: string): ListItem | null {
+  const match = line.match(LIST_ITEM);
+  if (!match) return null;
+  const [, lead, bullet, number, gap, text] = match;
+  const indent = columnAfter(lead);
+  const markerEnd = indent + (bullet ? 1 : number.length + 1);
+  const spaces = columnAfter(gap, markerEnd) - markerEnd;
+  // Text five or more columns after the marker is indented code, so the item's content starts one column after it.
+  return { type: bullet ? 'ul' : 'ol', indent, content: markerEnd + (spaces > 4 ? 1 : spaces), start: bullet ? 1 : Number(number), text };
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
@@ -201,7 +229,13 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
   let inCode = false;
   let codeLanguage = '';
   let codeLines: string[] = [];
-  let list: 'ul' | 'ol' | '' = '';
+  // Leading whitespace of a code fence inside a list item, removed from its code lines.
+  let codeIndent = '';
+  // Open lists, outermost first. Each level keeps its <li> open so a deeper list or code block nests inside it.
+  const lists: { type: 'ul' | 'ol'; indent: number; content: number }[] = [];
+  // Text lines of the innermost open item that are not yet written to the output.
+  let itemLines: string[] = [];
+  let itemParagraph = false;
   let paragraph: string[] = [];
 
   const flushParagraph = () => {
@@ -216,33 +250,82 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
     inCode = false;
     codeLanguage = '';
     codeLines = [];
+    codeIndent = '';
+  };
+  const flushItemLines = () => {
+    if (!itemLines.length) return;
+    const html = itemLines.map((line) => renderInline(line, highlight)).join('<br>');
+    output.push(itemParagraph ? `<p>${html}</p>` : html);
+    itemLines = [];
+    itemParagraph = false;
+  };
+  const closeLevel = () => {
+    flushItemLines();
+    const level = lists.pop();
+    if (level) output.push(`</li></${level.type}>`);
   };
   const flushList = () => {
-    if (!list) return;
-    output.push(`</${list}>`);
-    list = '';
+    while (lists.length) closeLevel();
+    itemParagraph = false;
+  };
+  const leadOf = (text: string) => text.match(/^\s*/u)?.[0] || '';
+  // The number of open items whose content a line indented this far belongs to.
+  const depthAt = (indent: number) => {
+    let depth = 0;
+    while (depth < lists.length && indent >= lists[depth].content) depth += 1;
+    return depth;
+  };
+  const openItem = (item: ListItem) => {
+    flushParagraph();
+    const depth = depthAt(item.indent);
+    while (lists.length > depth + 1) closeLevel();
+    if (lists.length > depth && lists[depth].type !== item.type) closeLevel();
+    flushItemLines();
+    if (lists.length > depth) output.push('</li><li>');
+    else output.push(item.type === 'ol' && item.start !== 1 ? `<ol start="${item.start}"><li>` : `<${item.type}><li>`);
+    lists[depth] = { type: item.type, indent: item.indent, content: item.content };
+    itemLines = [item.text];
+    itemParagraph = false;
   };
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    const fence = line.match(/^\s*```\s*([A-Za-z0-9_+.-]*)\s*$/u);
+    const fence = line.match(CODE_FENCE);
     if (fence) {
       if (inCode) flushCode();
       else {
         flushParagraph();
-        flushList();
+        const lead = leadOf(line);
+        const depth = depthAt(columnAfter(lead));
+        if (depth) {
+          while (lists.length > depth) closeLevel();
+          flushItemLines();
+          codeIndent = lead;
+        } else {
+          flushList();
+        }
         inCode = true;
         codeLanguage = fence[1] || '';
       }
       continue;
     }
     if (inCode) {
-      codeLines.push(line);
+      codeLines.push(line.startsWith(codeIndent) ? line.slice(codeIndent.length) : line.trimStart());
       continue;
     }
     if (!line.trim()) {
+      let next = index + 1;
+      while (next < lines.length && !lines[next].trim()) next += 1;
+      index = next - 1;
       flushParagraph();
-      flushList();
+      const following = lines[next];
+      if (lists.length && following !== undefined
+        && (LIST_ITEM.test(following) || columnAfter(leadOf(following)) >= lists[0].content)) {
+        flushItemLines();
+        itemParagraph = true;
+      } else {
+        flushList();
+      }
       continue;
     }
     const heading = line.match(/^\s{0,3}(#{1,4})\s+(.+)$/u);
@@ -253,26 +336,9 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
       output.push(`<h${level}>${renderInline(heading[2], highlight)}</h${level}>`);
       continue;
     }
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/u);
-    if (unordered) {
-      flushParagraph();
-      if (list !== 'ul') {
-        flushList();
-        list = 'ul';
-        output.push('<ul>');
-      }
-      output.push(`<li>${renderInline(unordered[1], highlight)}</li>`);
-      continue;
-    }
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/u);
-    if (ordered) {
-      flushParagraph();
-      if (list !== 'ol') {
-        flushList();
-        list = 'ol';
-        output.push('<ol>');
-      }
-      output.push(`<li>${renderInline(ordered[1], highlight)}</li>`);
+    const item = listItem(line);
+    if (item) {
+      openItem(item);
       continue;
     }
     const quote = line.match(/^\s*>\s?(.*)$/u);
@@ -304,12 +370,19 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
       output.push(`<div class="conversation-table"><table><thead>${renderTableRow(header, alignments, 'th', highlight)}</thead>${tbody}</table></div>`);
       continue;
     }
+    // An indented plain line continues the deepest item whose content it reaches, or the outermost item.
+    const indent = columnAfter(leadOf(line));
+    if (lists.length && indent > lists[0].indent) {
+      while (lists.length > Math.max(depthAt(indent), 1)) closeLevel();
+      itemLines.push(line.trim());
+      continue;
+    }
     flushList();
     paragraph.push(line);
   }
   flushParagraph();
-  flushList();
   flushCode();
+  flushList();
   return output.join('');
 }
 

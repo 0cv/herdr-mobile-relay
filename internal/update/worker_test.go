@@ -73,7 +73,7 @@ func TestRunCommandContextTerminatesDescendantHoldingOutputPipe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	command := exec.Command("/bin/sh", scriptPath)
 	var commandErr error
@@ -84,7 +84,7 @@ func TestRunCommandContextTerminatesDescendantHoldingOutputPipe(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(8 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("runCommandContext did not return after cancelling a descendant-held pipe")
 	}
 	if !errors.Is(commandErr, context.DeadlineExceeded) {

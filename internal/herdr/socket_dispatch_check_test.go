@@ -43,7 +43,7 @@ func TestSocketDispatchCheckAfterConnectionLock(t *testing.T) {
 // bytes on the wire, so a denial on the retry must not downgrade the outcome
 // to "not started".
 func TestSocketDispatchDenialAfterWriteStaysDispatched(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "api.sock")
+	path := filepath.Join(testSocketDir(t), "api.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestSocketDispatchDenialAfterWriteStaysDispatched(t *testing.T) {
 func TestSocketDispatchDenialWritesNothing(t *testing.T) {
 	for _, method := range []string{"workspace.close", "workspace.move", "tab.move", "pane.input"} {
 		t.Run(method, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "api.sock")
+			path := filepath.Join(testSocketDir(t), "api.sock")
 			listener, err := net.Listen("unix", path)
 			if err != nil {
 				t.Fatal(err)

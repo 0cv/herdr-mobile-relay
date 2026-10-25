@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -584,41 +585,39 @@ func recordOperation(sequence uint64, argv []string, started, completed time.Tim
 	if !completed.IsZero() {
 		op.CompletedAt = completed.Format(time.RFC3339Nano)
 	}
-	var operations []Operation
-	if data, readErr := os.ReadFile(path); readErr == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if line == "" {
-				continue
-			}
-			var existing Operation
-			if json.Unmarshal([]byte(line), &existing) == nil {
-				operations = append(operations, existing)
-			}
-		}
+	record, err := json.Marshal(op)
+	if err != nil {
+		return
 	}
-	replaced := false
-	for index := range operations {
-		if operations[index].Sequence == sequence {
-			operations[index] = op
-			replaced = true
+	record = append(record, '\n')
+	// Browser suites log thousands of reads; decoding the whole log on every
+	// call made each command slower than the last.
+	data, readErr := os.ReadFile(path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	updated := append(append([]byte(nil), data...), record...)
+	prefix := []byte(`{"sequence":` + strconv.FormatUint(sequence, 10) + `,`)
+	for start := 0; start < len(data); {
+		end := bytes.IndexByte(data[start:], '\n') + start + 1
+		if bytes.HasPrefix(data[start:end], prefix) {
+			updated = append(append(append([]byte(nil), data[:start]...), record...), data[end:]...)
 			break
 		}
-	}
-	if !replaced {
-		operations = append(operations, op)
+		start = end
 	}
 	temp := path + ".tmp." + strconv.FormatUint(sequence, 10)
 	file, err := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return
 	}
-	encoder := json.NewEncoder(file)
-	for _, operation := range operations {
-		if err := encoder.Encode(operation); err != nil {
-			_ = file.Close()
-			_ = os.Remove(temp)
-			return
-		}
+	if _, err := file.Write(updated); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temp)
+		return
 	}
 	if err := file.Close(); err != nil {
 		_ = os.Remove(temp)

@@ -7,7 +7,9 @@ export const maxPayloadChars = 2000;
 
 /**
  * conversationEntries reduces a recorded transcript to the compact view: every
- * user turn and only the latest assistant prose from each exchange.
+ * user turn, notices, the latest assistant prose of each exchange, and any
+ * assistant turn carrying an AskUserQuestion (keeping only its AskUserQuestion
+ * tools). Compaction entries are skipped.
  *
  * Intermediate agent updates and tool activity belong to Full history. When the
  * retained answer also carries tools, the compact view projects them out
@@ -39,6 +41,12 @@ export function conversationEntries(recorded: ConversationEntry[]): Conversation
   };
 
   for (const entry of recorded) {
+    if (entry.kind === 'compaction') continue;
+    if (entry.kind === 'notice') {
+      flush();
+      conversation.push(entry);
+      continue;
+    }
     if (entry.role === 'user') {
       flush();
       conversation.push(entry);

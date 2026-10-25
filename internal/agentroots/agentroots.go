@@ -45,7 +45,10 @@ import (
 // friends. For PiListEnv and OMPListEnv each entry is instead an *agent*
 // directory - the same value PI_CODING_AGENT_DIR takes - because resolve()
 // joins the leaf straight onto it, so a config-root directory there would
-// scan one level too high. The service wrapper exports every key of
+// scan one level too high. CursorListEnv is the exception to the "not
+// pre-joined" rule: Cursor has no config directory variable, and each entry is
+// already a projects directory (the same shape as ~/.cursor/projects), joined
+// with no leaf. The service wrapper exports every key of
 // relay.env into the relay process, so these belong in that file.
 const (
 	ClaudeListEnv   = "HERDR_CLAUDE_CONFIG_DIRS"
@@ -57,6 +60,7 @@ const (
 	OMOListEnv      = "HERDR_OMO_CONFIG_DIRS"
 	HermesListEnv   = "HERDR_HERMES_DATA_DIRS"
 	CursorListEnv   = "HERDR_CURSOR_PROJECTS_DIRS"
+	KimiCodeListEnv = "HERDR_KIMI_CODE_HOME_DIRS"
 )
 
 // Claude reports the transcript roots for Claude Code, honouring
@@ -85,6 +89,10 @@ func CodexHomes(home string) []string {
 // Cursor reports the project roots that hold Cursor Agent transcripts under
 // <root>/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl. List entries are the
 // projects directories themselves (the same shape as ~/.cursor/projects).
+func KimiCodeHomes(home string) []string {
+	return resolve(home, KimiCodeListEnv, "KIMI_CODE_HOME", filepath.Join(home, ".kimi-code"), "")
+}
+
 func Cursor(home string) []string {
 	return resolve(home, CursorListEnv, "", filepath.Join(home, ".cursor", "projects"), "")
 }

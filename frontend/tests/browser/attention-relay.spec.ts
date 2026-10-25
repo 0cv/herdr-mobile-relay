@@ -1,5 +1,23 @@
 import { expect, test } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+
+test.beforeEach(async ({ page }) => {
+  const path = process.env.HERDR_ATTENTION_CREDENTIALS;
+  if (!path) return;
+  try {
+    const credential = await readFile(path, 'utf8');
+    await page.addInitScript(value => localStorage.setItem('herdr_device_auth_v1', value), credential);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+});
+
+test.afterEach(async ({ page }) => {
+  const path = process.env.HERDR_ATTENTION_CREDENTIALS;
+  if (!path || page.isClosed()) return;
+  const credential = await page.evaluate(() => localStorage.getItem('herdr_device_auth_v1'));
+  if (credential) await writeFile(path, credential, { mode: 0o600 });
+});
 
 interface FakeOperation {
   argv?: string[];
@@ -20,6 +38,12 @@ async function operations(): Promise<FakeOperation[]> {
 test('drives captured attention panes through the real relay', async ({ page }) => {
   const wsURL = process.env.HERDR_ATTENTION_WS_URL;
   if (!wsURL) throw new Error('HERDR_ATTENTION_WS_URL is not configured');
+  // Both browsers share one relay fixture. Question keys are sent again on every run, but each
+  // approval is answered once, so a later run gets the first answer back without new keys.
+  const earlier = (await operations()).length;
+  const sentByThisRun = async () => (await operations()).slice(earlier);
+  const approvalsSent = async (argv: string[]) => (await operations())
+    .filter((operation) => JSON.stringify(operation.argv) === JSON.stringify(argv)).length;
   await page.addInitScript(({ relayURL }) => {
     localStorage.setItem('herdr_relays', JSON.stringify([{
       id: 'captured-attention',
@@ -121,7 +145,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await expect(page.getByRole('textbox')).toHaveCount(0);
   await page.getByRole('radio', { name: /Beach & coast/ }).check();
   await page.getByRole('button', { name: 'Next', exact: true }).click();
-  await expect.poll(async () => (await operations())
+  await expect.poll(async () => (await sentByThisRun())
     .filter((operation) =>
       operation.argv?.[1] === 'send-keys' &&
       operation.argv?.[2] === 'omp-partial-ask')
@@ -184,7 +208,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await expect(page.getByText('Question 1 of 1')).toBeVisible();
   await page.getByRole('radio', { name: /Write some code/ }).check();
   await page.getByRole('button', { name: 'Submit', exact: true }).click();
-  await expect.poll(async () => (await operations())
+  await expect.poll(async () => (await sentByThisRun())
     .filter((operation) =>
       operation.argv?.[1] === 'send-keys' &&
       operation.argv?.[2] === 'opencode-single')
@@ -224,13 +248,13 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await settingsCard.getByRole('button', {
     name: /Open qoder-settings on Captured relay/,
   }).click();
-  await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveAttribute(
-    'placeholder',
-    'Needs inspection — use terminal controls',
-  );
-  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Type in terminal', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
+  expect(await approvalsSent(['pane', 'send-keys', 'qoder-approval', 'Up', 'Up', 'Enter'])).toBe(1);
+  expect(await approvalsSent(['pane', 'send-keys', 'omp-plan-approval', 'Down', 'Down', 'Down', 'Enter'])).toBe(1);
 });
 
 test('browses a full conversation through the real relay', async ({ page }) => {
@@ -247,7 +271,7 @@ test('browses a full conversation through the real relay', async ({ page }) => {
   }, { relayURL: wsURL });
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Open conversation on Captured relay' }).click();
+  await page.getByRole('region', { name: 'conversation-history tab', exact: true }).getByRole('button', { name: 'Open conversation on Captured relay' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('history question')).toBeVisible();
   await expect(page.getByText('history answer')).toBeVisible();

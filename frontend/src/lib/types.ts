@@ -305,6 +305,7 @@ export interface Agent {
   generation?: number;
   agent_session_id?: string;
   conversation_history_available?: boolean;
+  conversation_inferred_owner?: string;
   tab_id?: string;
   tab_label?: string;
   tab_number?: number;
@@ -336,6 +337,8 @@ export interface Activity {
 export interface ConversationTool {
   id?: string;
   name: string;
+  state?: 'running' | 'completed' | 'failed';
+  parentId?: string;
   input?: string;
   output?: string;
   error?: boolean;
@@ -343,6 +346,7 @@ export interface ConversationTool {
 }
 
 export interface ConversationEntry {
+  kind?: 'compaction' | 'notice';
   id: string;
   timestamp: string;
   role: 'user' | 'assistant';
@@ -405,7 +409,28 @@ export interface ConversationHistoryRequest {
   signal?: AbortSignal;
 }
 
+export interface ConversationCapabilities {
+  source: 'pi_events' | 'recorded_history';
+  active_branch: boolean;
+}
+
+export interface ConversationBatch {
+  subscriptionId: string;
+  kind: 'batch' | 'reset' | 'heartbeat';
+  sourceRevision: string;
+  sequence: number;
+  entries: ConversationEntry[];
+  remove: string[];
+  state: string;
+  capabilities?: ConversationCapabilities;
+}
+
 export interface ConversationPage {
+  subscriptionId?: string;
+  provisional?: ConversationEntry[];
+  capabilities?: ConversationCapabilities;
+  sequence?: number;
+  liveState?: string;
   available: boolean;
   reasonCode?: string;
   reason: string;
@@ -499,6 +524,12 @@ export interface RelayConnectionView {
   speechCacheDir: string;
   speechEngineInstalled: boolean;
   agentProfiles: AgentProfile[];
+  /**
+   * Hermes Agent profiles (`hermes -p <name>`) the selected relay offers for a
+   * launch, Default first. Empty until a relay reports it, which is what a
+   * stale relay build does; the launch form then falls back to `default`.
+   */
+  hermesProfiles: string[];
   directoryBrowser: DirectoryListing | null;
   directoryLoading: boolean;
   directoryError: string;
@@ -592,6 +623,10 @@ export interface TerminalFrame {
   paneId: string;
   content: string;
   format: string;
+  receivedAt?: number;
+  readStartedAt?: number;
+  target?: FrontendTargetRef | null;
+  inputTarget?: FrontendTargetRef | null;
   truncated?: boolean;
   viewportOnly?: boolean;
   viewportRows?: number;

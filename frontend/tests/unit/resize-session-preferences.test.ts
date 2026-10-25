@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import { afterEach, expect, it, vi } from 'vitest';
 import { TERMINAL_HEIGHT_LEASE_KEY, TERMINAL_RESIZE_SESSION_KEY } from '$lib/config';
-import { readTerminalResizeSession, setTerminalResizeSession, terminalResizeSession } from '$lib/preferences';
+import { readTerminalResizeSession, setTerminalResizeSession, terminalHeightLease, terminalResizeSession } from '$lib/preferences';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -9,10 +9,13 @@ afterEach(() => {
   terminalResizeSession.set(false);
 });
 
-it('defaults off for new and upgraded installations regardless of height consent', () => {
-  expect(readTerminalResizeSession()).toBe(false);
+it('defaults on without a stored preference and leaves height off', () => {
+  expect(readTerminalResizeSession()).toBe(true);
+  expect(get(terminalResizeSession)).toBe(true);
+  expect(get(terminalHeightLease)).toBe(false);
+  expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBeNull();
   localStorage.setItem(TERMINAL_HEIGHT_LEASE_KEY, 'true');
-  expect(readTerminalResizeSession()).toBe(false);
+  expect(readTerminalResizeSession()).toBe(true);
   for (const value of ['', '1', 'TRUE', 'false', 'garbage', '{}']) {
     localStorage.setItem(TERMINAL_RESIZE_SESSION_KEY, value);
     expect(readTerminalResizeSession()).toBe(false);
@@ -20,7 +23,7 @@ it('defaults off for new and upgraded installations regardless of height consent
   expect(readTerminalResizeSession({ getItem() { throw new Error('unavailable'); } })).toBe(false);
 });
 
-it('persists explicit consent independently of height', () => {
+it('persists explicit choices independently of height', () => {
   localStorage.setItem(TERMINAL_HEIGHT_LEASE_KEY, 'true');
   expect(setTerminalResizeSession(true)).toBe('saved');
   expect(get(terminalResizeSession)).toBe(true);

@@ -3,10 +3,8 @@ package app
 import (
 	"bufio"
 	"context"
-	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -24,7 +22,7 @@ type fixtureProcesses struct {
 	replace bool
 }
 
-func (f *fixtureProcesses) PaneProcessInfo(_ context.Context, pane string) (*herdr.PaneProcessInfo, error) {
+func (f *fixtureProcesses) PaneProcessInfoFresh(_ context.Context, pane string) (*herdr.PaneProcessInfo, error) {
 	f.calls++
 	pid := f.pid
 	if f.replace && f.calls > 1 {
@@ -74,6 +72,9 @@ func TestForegroundRootRejectsAmbiguousAndShell(t *testing.T) {
 		nil, {PaneID: "other"}, {PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 1},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 3}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 2}}},
+		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 3, Name: "vim"}}},
+		{PaneID: "pane", ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}}},
+		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 0}}},
 	} {
 		if _, err := foregroundRoot(info, "pane"); err == nil {
 			t.Fatalf("accepted ambiguous root: %+v", info)
@@ -86,22 +87,15 @@ func TestRuntimePiCatalogAcrossBunSocket(t *testing.T) {
 	if err != nil {
 		t.Skip("Bun required for cross-runtime integration")
 	}
-	dir, err := os.MkdirTemp("/tmp", "pi-app-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	socket := filepath.Join(dir, "herdr.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
+	socket := testPiHerdrSocket(t)
 	instance, err := pibridge.Instance(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	directory := pibridge.Directory(instance)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	defer os.RemoveAll(directory)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

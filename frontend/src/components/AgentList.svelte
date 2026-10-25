@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import AgentLogo, { hasAgentLogo } from '$components/AgentLogo.svelte';
+  import AgentLogo, { agentDisplayName, hasAgentLogo } from '$components/AgentLogo.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import Button from '$components/ui/Button.svelte';
   import {
@@ -16,16 +16,17 @@
     sortedAgents,
     tabName,
   } from '$lib/agents';
-  import { homeLayout } from '$lib/preferences';
-  import { relayStore } from '$lib/store';
-  import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
+  import { hiddenServers, homeLayout, setServerHidden } from '$lib/preferences';
+  import { answerFailureToast, returnedInteraction } from '$lib/questions';
+  import { relayStore, type CommandError } from '$lib/store';
+  import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
-    agents,
-    relays,
+    agents: allAgents,
+    relays: allRelays,
     connections = new Map(),
-    workspaces = [],
+    workspaces: allWorkspaces = [],
     workspaceDisclosure = $bindable<Record<string, boolean>>({}),
     responding,
     onopen,
@@ -38,6 +39,32 @@
     responding: Set<string>;
     onopen: (agent: Agent) => void;
   } = $props();
+
+  const serverFilterVisible = $derived(allRelays.length > 1);
+  const hidden = $derived(serverFilterVisible ? $hiddenServers : []);
+  const relays = $derived(allRelays.filter((relay) => !hidden.includes(relay.id)));
+  const agents = $derived(allAgents.filter((agent) => !hidden.includes(agent.relay_id)));
+  const workspaces = $derived(allWorkspaces.filter((workspace) => !hidden.includes(workspace.relay_id)));
+
+  // try/catch rather than URL.canParse, which needs Safari 17.
+  function urlHost(url: string): string {
+    try {
+      return new URL(url).host;
+    } catch {
+      return '';
+    }
+  }
+
+  function serverFilterLabel(relay: RelayConfig): string {
+    const label = relay.label || relay.id;
+    if (allRelays.filter((other) => other.label === relay.label).length < 2) return label;
+    return `${label} (${urlHost(relay.url) || relay.id})`;
+  }
+
+  function hiddenNeedsAttention(relayId: string): number {
+    if (!hidden.includes(relayId)) return 0;
+    return allAgents.filter((agent) => agent.relay_id === relayId && ['blocked', 'attention'].includes(agentStatusGroup(agent))).length;
+  }
 
   const unavailableRelays = $derived(relays.filter((relay) => {
     const connection = connections.get(relay.id);
@@ -397,6 +424,37 @@
     void commitReorder(workspace, tabId, insertIndex, order);
   }
 
+  // A lone single-choice question with a few plain options is answered from the card in one
+  // tap; long questions, descriptions, multi-select, several questions or anything unexpected
+  // keep the full form.
+  function quickQuestion(interaction: QuestionInteraction): boolean {
+    return interaction.kind === 'single_select' && interaction.options.length > 0
+      && interaction.options.length <= 4 && (interaction.question_total ?? 1) <= 1 && interaction.submit_label !== 'Next'
+      && interaction.question.length <= 400
+      && interaction.options.every((option) => !option.description && !option.summary?.length);
+  }
+
+  async function quickAnswer(agent: Agent, interaction: QuestionInteraction, index: number) {
+    let fresh: QuestionInteraction | undefined;
+    try {
+      const result = await relayStore.answerQuestion(agent, interaction, { selected: new Set([index]), otherSelected: false, otherText: '' });
+      relayStore.clearResponding(agent.pane_id);
+      if (result.phase === 'confirmed') {
+        relayStore.applyQuestionInteraction(agent, null);
+        relayStore.showToast('Answer sent.');
+        return;
+      }
+      fresh = returnedInteraction(result);
+      relayStore.showToast(...answerFailureToast({ message: 'Unexpected question result.' }, fresh, interaction));
+    } catch (caught) {
+      relayStore.clearResponding(agent.pane_id);
+      // A follow-up question comes back as a failed answer that carries the new question.
+      fresh = returnedInteraction(caught as CommandError);
+      relayStore.showToast(...answerFailureToast(caught as CommandError, fresh, interaction));
+    }
+    if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
+  }
+
   async function respond(agent: Agent, index: number, total: number, option: string) {
     await relayStore.respond(agent, index, total, option);
   }
@@ -407,7 +465,7 @@
       tab && tab !== displayName(agent) ? tab : '',
       agent.session || '',
     ].filter(Boolean);
-    if (agent.agent && !hasAgentLogo(agent.agent)) labels.push(agent.agent);
+    if (agent.agent && !hasAgentLogo(agent.agent)) labels.push(agentDisplayName(agent.agent));
     return labels.join(' · ');
   }
 
@@ -500,13 +558,23 @@
             </span>
             {#if meta}<span class="agent-meta">{meta}</span>{/if}
             {#if blocked || needsInspection}
-              <span class="prompt-preview">{interaction?.question || approvalPromptPreview(agent)}</span>
+              <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{interaction?.question || approvalPromptPreview(agent)}</span>
             {/if}
           </span>
         </button>
         {#if blocked && !responding.has(agent.pane_id)}
           <div class="agent-actions" aria-label={`Actions for ${displayName(agent)}`}>
-            {#if interaction}
+            {#if interaction && quickQuestion(interaction)}
+              {#each interaction.options as option, position (`${interaction.id}:${option.index ?? position}`)}
+                <Button
+                  size="sm"
+                  disabled={!inventoryReady}
+                  title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
+                  onclick={() => quickAnswer(agent, interaction, Number.isInteger(option.index) ? option.index : position)}
+                >{option.label}</Button>
+              {/each}
+              <Button variant="secondary" size="sm" onclick={() => onopen(agent)}>More…</Button>
+            {:else if interaction}
               <Button variant="trust" size="sm" onclick={() => onopen(agent)}>
                 {interaction.kind === 'multi_select' ? 'Choose options' : 'Choose answer'} ({interaction.options.length})
               </Button>
@@ -518,7 +586,7 @@
                   disabled={!inventoryReady}
                   title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
                   onclick={() => respond(agent, index, options.length, option)}
-                >{option.length > 48 ? `${option.slice(0, 45)}...` : option}</Button>
+                >{option}</Button>
               {/each}
             {/if}
           </div>
@@ -644,6 +712,18 @@
 {/snippet}
 
 <main class="agent-list" aria-label="Agents">
+  {#if serverFilterVisible}
+    <div class="server-filters" role="group" aria-label="Show servers">
+      {#each allRelays as relay (relay.id)}
+        {@const waiting = hiddenNeedsAttention(relay.id)}
+        <Button
+          variant="secondary"
+          aria-pressed={!hidden.includes(relay.id)}
+          onclick={() => setServerHidden(relay.id, !hidden.includes(relay.id))}
+        >{serverFilterLabel(relay)}{#if waiting}<span class="section-count" role="img" aria-label={`${waiting} need attention while hidden`}>{waiting}</span>{/if}</Button>
+      {/each}
+    </div>
+  {/if}
   {#each unavailableRelays as relay (relay.id)}
     {@const inventory = connections.get(relay.id)?.inventory}
     <section class="inventory-warning" role="status" aria-label={`${relay.label} agent inventory unavailable`}>
@@ -653,7 +733,9 @@
     </section>
   {/each}
 
-  {#if !agents.length && !relays.length}
+  {#if serverFilterVisible && !relays.length}
+    <div class="empty-state" role="status">All servers are hidden.</div>
+  {:else if !agents.length && !relays.length}
     <div class="empty-state">
       <span class="empty-icon" aria-hidden="true">🐑</span>
       <h2>Herdr Mobile Relay</h2>

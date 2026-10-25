@@ -163,7 +163,15 @@ export function followInitialAgentSession(agents: Readable<Agent[]>): () => void
     previous = new Map(incoming.map((agent) => [agent.pane_id, agent]));
     if ((view.view !== 'terminal' && view.view !== 'history') || !view.target || !before) return;
     const after = previous.get(view.paneId);
-    if (!after || before.agent_session_id || !after.agent_session_id || before.agent !== after.agent
+    if (!after) return;
+    const kimi = ['kimi', 'kimicode'].includes((before.agent || '').toLowerCase().replace(/[ _-]/gu, ''));
+    const initialDiscovery = !kimi && !before.agent_session_id && Boolean(after.agent_session_id)
+      && !before.conversation_inferred_owner;
+    const inferredKimiHistory = kimi && view.view === 'history'
+      && /^[a-f0-9]{64}$/u.test(before.conversation_inferred_owner || '')
+      && before.conversation_inferred_owner === after.conversation_inferred_owner
+      && before.agent_session_id !== after.agent_session_id;
+    if ((!initialDiscovery && !inferredKimiHistory) || before.agent !== after.agent
       || !targetRefMatchesAgent(view.target, before)
       || after.generation !== view.target.generation + 1) return;
     const target = targetRefForAgent(after);

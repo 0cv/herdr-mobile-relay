@@ -37,10 +37,6 @@ export function deviceVerificationEnabled(): boolean {
 
 export function initializeDeviceSecurity(): () => void {
   automaticUnlockPending = false;
-  // The store keeps connections warm while hidden and skips the resume probe
-  // once one has gone stale, so it needs the visibility truth from every path
-  // that can flip it — not just `visibilitychange`, which some engines skip on
-  // a bfcache restore or an unfreeze.
   const syncVisibility = () => {
     relayStore.setHidden(document.visibilityState === 'hidden');
   };

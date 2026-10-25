@@ -1,0 +1,6 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1786680000000}
+{"type":"context.append_message","message":{"id":"interrupted-user","role":"user","content":[{"type":"text","text":"Interrupted prompt."}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680001000}
+{"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":"missing-step","part":{"type":"text","text":"ORPHAN_PART_MUST_NOT_APPEAR"}},"time":1786680001100}
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"interrupted-step"},"time":1786680001200}
+{"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":"interrupted-step","part":{"type":"text","text":"Recorded partial response."}},"time":1786680001300}
+{"type":"context.append_loop_event","event":{"type":"tool.call","stepUuid":"interrupted-step","toolCallId":"pending-call","name":"Shell","args":{"command":"printf pending"}},"time":1786680001400}
