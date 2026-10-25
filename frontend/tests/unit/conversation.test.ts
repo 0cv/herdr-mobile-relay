@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import ConversationMessage from '$components/ConversationMessage.svelte';
-import { clampPayload, conversationEntries, formatToolPayload, maxPayloadLines, parseAskUserQuestion } from '$lib/conversation';
+import { clampPayload, conversationEntries, formatToolPayload, isChosenOption, maxPayloadLines, parseAskUserQuestion } from '$lib/conversation';
 import type { ConversationEntry, ConversationTool } from '$lib/types';
 
 // Shapes copied from a recorded Claude Code transcript: tool arguments arrive as
@@ -294,5 +294,61 @@ describe('AskUserQuestion hardening', () => {
     expect(container.querySelectorAll('.conversation-question')).toHaveLength(2);
     expect(container.textContent).toContain('Error: denied');
     expect(container.textContent).not.toContain('Answered:');
+  });
+});
+
+describe('AskUserQuestion card visibility', () => {
+  const viewState = () => ({ tableOffsets: [], openTools: new Set<string>() });
+  const ask = (questions: unknown) => JSON.stringify({ questions });
+  const opts = [{ label: 'A', description: '' }, { label: 'B', description: '' }];
+  const tool = (questions: unknown, output = ''): ConversationTool => ({ id: 't', name: 'AskUserQuestion', input: ask(questions), output } as ConversationTool);
+  const answered = (answer: string, multiSelect = false) => tool([{ question: 'Q?', header: 'H', multiSelect, options: opts }], `The user answered: "Q?"="${answer}". Read the answers carefully.`);
+
+  it('shows an answered question without a details wrapper', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered('B')] });
+    expect(container.querySelector('details')).toBeNull();
+    expect(container.querySelector('.conversation-ask')).not.toBeNull();
+    expect(container.textContent).toContain('Q?');
+    expect(container.textContent).toContain('Answered: B');
+  });
+
+  it('keeps other tools collapsed', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [bashTool] });
+    expect(container.querySelector('details')!.open).toBe(false);
+  });
+
+  it('marks every multi-select answer as chosen and announces it', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered('A, B', true)] });
+    expect(container.querySelectorAll('li.chosen')).toHaveLength(2);
+    expect(container.textContent).toContain('(selected)');
+  });
+
+  it('shows a free-text answer without choosing an option', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered('something else')] });
+    expect(container.querySelectorAll('li.chosen')).toHaveLength(0);
+    expect(container.textContent).toContain('Answered: something else');
+  });
+
+  it('omits the list without options and labels header-less multi-select', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [tool([{ question: 'Q?', header: '', multiSelect: true, options: [] }])] });
+    expect(container.querySelector('ul')).toBeNull();
+    expect(container.querySelector('h4')!.textContent).toBe('Multiple choice');
+  });
+
+  it('shows the raw reply when the question is not answered', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [tool([{ question: 'Q?', header: '', multiSelect: false, options: opts }], 'User notes: hello')] });
+    expect(container.textContent).toContain('Q?');
+    expect(container.textContent).toContain('User notes: hello');
+  });
+});
+
+describe('isChosenOption', () => {
+  const item = (answer: string | undefined, multiSelect = false) => ({ question: 'Q', header: '', multiSelect, options: [], answer });
+  it('matches exact, multi-select and rejects the rest', () => {
+    expect(isChosenOption(item('A'), 'A')).toBe(true);
+    expect(isChosenOption(item('A, B', true), 'B')).toBe(true);
+    expect(isChosenOption(item('A, B'), 'B')).toBe(false);
+    expect(isChosenOption(item('free'), 'A')).toBe(false);
+    expect(isChosenOption(item(undefined), 'A')).toBe(false);
   });
 });

@@ -176,3 +176,10 @@ export function parseAskUserQuestion(input: string, output = ''): AskedQuestion[
   });
   return questions.every((item) => item.question) ? questions : null;
 }
+
+/** Whether an option label matches the recorded answer (comma-joined for multi-select). */
+export function isChosenOption(item: AskedQuestion, label: string): boolean {
+  if (item.answer === undefined) return false;
+  if (item.answer === label) return true;
+  return item.multiSelect && item.answer.split(', ').includes(label);
+}

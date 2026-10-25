@@ -1,6 +1,6 @@
 <script lang="ts">
   import ToolPayload from '$components/ToolPayload.svelte';
-  import { parseAskUserQuestion } from '$lib/conversation';
+  import { isChosenOption, parseAskUserQuestion } from '$lib/conversation';
   import { safeMarkdownHtml } from '$lib/markdown';
   import type { ConversationTool } from '$lib/types';
   import type { ConversationMessageViewState } from '$lib/conversation-message-state';
@@ -75,40 +75,53 @@
   <div class="conversation-tools" aria-label="Tool activity">
     {#each tools as tool, index (`${tool.id || tool.name}:${index}`)}
       {@const asked = tool.name === 'AskUserQuestion' && tool.input ? parseAskUserQuestion(tool.input, tool.error ? '' : tool.output) : null}
-      <details class:error={tool.error} use:preserveToolState={{ state: viewState, key: `${tool.id || tool.name}:${index}` }}>
-        <summary>
-          <span aria-hidden="true">{tool.error ? '!' : '›'}</span>
-          <strong>{tool.name}</strong>
-          <small>{tool.state || (tool.error ? 'failed' : tool.output ? 'completed' : 'called')}</small>
-          {#if tool.parentId}<small>nested tool</small>{/if}
-        </summary>
-        <div class="conversation-tool-detail">
-          {#if asked}
-            {#each asked as item, itemIndex (itemIndex)}
-              <section class="conversation-question">
-                {#if item.header}<h4>{item.header}{item.multiSelect ? ' · multiple choice' : ''}</h4>{/if}
-                <p><strong>{item.question}</strong></p>
-                <ul>
+      {#if asked}
+        <section class="conversation-ask" class:error={tool.error} aria-label="Question from the agent">
+          {#each asked as item, itemIndex (itemIndex)}
+            <section class="conversation-question">
+              {#if item.header || item.multiSelect}<h4>{item.header ? `${item.header}${item.multiSelect ? ' · multiple choice' : ''}` : 'Multiple choice'}</h4>{/if}
+              <p><strong>{item.question}</strong></p>
+              {#if item.options.length}
+                <ul role="list">
                   {#each item.options as option, optionIndex (optionIndex)}
-                    <li class:chosen={item.answer === option.label}><span>{option.label}</span>{#if option.description}<small>{option.description}</small>{/if}</li>
+                    {@const chosen = isChosenOption(item, option.label)}
+                    <li class:chosen><span>{option.label}</span>{#if chosen}<span class="sr-only"> (selected)</span>{/if}{#if option.description}<small>{option.description}</small>{/if}</li>
                   {/each}
                 </ul>
-                {#if item.answer !== undefined}<p class="conversation-answer">Answered: {item.answer}</p>{/if}
-              </section>
-            {/each}
-          {:else if tool.input}
-            <ToolPayload label="Input" raw={tool.input} />
-          {/if}
-          {#if asked && asked.every((item) => item.answer !== undefined)}
+              {/if}
+              {#if item.answer !== undefined}<p class="conversation-answer">Answered: {item.answer}</p>{/if}
+            </section>
+          {/each}
+          {#if asked.every((item) => item.answer !== undefined)}
             <!-- answers already shown beside their options -->
           {:else if tool.output}
-            <ToolPayload label="Output" raw={tool.output} />
+            <ToolPayload label={tool.error ? 'Error' : 'Reply'} raw={tool.output} />
           {:else}
-            <p>{tool.state === 'running' ? 'Waiting for tool output…' : 'No output was captured in this session log.'}</p>
+            <p>No output was captured in this session log.</p>
           {/if}
           {#if tool.truncated}<p>Tool detail was truncated by the relay.</p>{/if}
-        </div>
-      </details>
+        </section>
+      {:else}
+        <details class:error={tool.error} use:preserveToolState={{ state: viewState, key: `${tool.id || tool.name}:${index}` }}>
+          <summary>
+            <span aria-hidden="true">{tool.error ? '!' : '›'}</span>
+            <strong>{tool.name}</strong>
+            <small>{tool.state || (tool.error ? 'failed' : tool.output ? 'completed' : 'called')}</small>
+            {#if tool.parentId}<small>nested tool</small>{/if}
+          </summary>
+          <div class="conversation-tool-detail">
+            {#if tool.input}
+              <ToolPayload label="Input" raw={tool.input} />
+            {/if}
+            {#if tool.output}
+              <ToolPayload label="Output" raw={tool.output} />
+            {:else}
+              <p>{tool.state === 'running' ? 'Waiting for tool output…' : 'No output was captured in this session log.'}</p>
+            {/if}
+            {#if tool.truncated}<p>Tool detail was truncated by the relay.</p>{/if}
+          </div>
+        </details>
+      {/if}
     {/each}
   </div>
 {/if}
