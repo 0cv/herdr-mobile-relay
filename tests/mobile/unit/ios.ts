@@ -412,13 +412,13 @@ test('recorded 18302ms native-only discovery settles before subsequent Safari pu
     throw new Error(`unexpected Safari operation ${path}`);
   });
   const start = Date.now();
-  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget.phaseView('navigation', 86_000));
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget.phaseView('navigation', 136_000));
   assert.equal(discoveries, 2);
-  assert.ok(Date.now() - start < 46_000);
+  assert.ok(Date.now() - start < 96_000);
   assert.equal(driver.snapshot().unusable, false);
   assert.equal(driver.snapshot().firstFatal, undefined);
   assert.equal(requests.some((request) => request.body.url || request.body.script === 'mobile: activateApp'), false);
-  assert.ok(driver.snapshot().commands.filter((entry) => entry.path.endsWith('/execute/sync')).every((entry) => entry.timeoutMs === 20_000 && !entry.timedOut));
+  assert.ok(driver.snapshot().commands.filter((entry) => entry.path.endsWith('/execute/sync')).every((entry) => entry.timeoutMs === 45_000 && !entry.timedOut));
 });
 
 for (const mode of ['ready', 'absent'] as const) {
@@ -429,7 +429,7 @@ for (const mode of ['ready', 'absent'] as const) {
     const { platform, driver, requests, budget } = await adapter(`hosted-safari-${mode}`, ({ path, body }) => {
       if (body.script === 'mobile: getContexts') {
         discoveries += 1;
-        now += discoveries === 1 ? 19_889 : 19_500;
+        now += discoveries === 1 ? 44_889 : 44_500;
         return value(discoveries === 1 || mode === 'absent'
           ? [{ id: 'NATIVE_APP' }]
           : [{ id: 'WEBVIEW_46542.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
@@ -471,8 +471,8 @@ for (const mode of ['ready', 'absent'] as const) {
     assert.equal(driver.snapshot().unusable, false);
     assert.equal(driver.snapshot().firstFatal, undefined);
     assert.equal(budget.recoveryCount, 0);
-    assert.ok(now - 8_971 < 60_000);
-    assert.deepEqual(driver.snapshot().commands.filter(entry => entry.timing?.operation === 'contexts').map(entry => entry.timeoutMs), [20_000, 20_000]);
+    assert.ok(now - 8_971 < 110_000);
+    assert.deepEqual(driver.snapshot().commands.filter(entry => entry.timing?.operation === 'contexts').map(entry => entry.timeoutMs), [45_000, 45_000]);
     assert.equal(requests.some(request => request.body.url || request.body.script === 'mobile: activateApp'), false);
     if (mode === 'ready') {
       assert.deepEqual(requests.filter(request => request.path.endsWith('/context')).map(request => request.body.name), ['WEBVIEW_46542.1', 'NATIVE_APP']);
@@ -500,7 +500,7 @@ test('cold Safari attach consumes recorded backend duration plus synthetic send 
     if (path.endsWith('/url')) return value(`${origin}/`);
     throw new Error(`unexpected cold attach operation ${path}`);
   });
-  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget);
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget);
   const switches = driver.snapshot().commands.filter(entry => entry.path.endsWith('/context'));
   assert.deepEqual(switches.map(entry => entry.timeoutMs), [15_000, 1_000]);
   assert.equal(requests.filter(request => request.body.name === 'WEBVIEW_23086.1').length, 1);
@@ -513,7 +513,7 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
     let settled = false;
     const { platform, driver, requests, budget } = await adapter(`cold-attach-${mode}`, async ({ path, body }) => {
       if (body.script === 'mobile: getContexts') {
-        if (mode === 'insufficient') now = 30_000;
+        if (mode === 'insufficient') now = 80_000;
         return value([{ id: 'WEBVIEW_23086.1', bundleId: 'com.apple.mobilesafari' }]);
       }
       assert.ok(path.endsWith('/context'));
@@ -522,7 +522,7 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
       settled = true;
       return value(null);
     }, mode === 'insufficient' ? () => now : undefined);
-    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget), mode === 'insufficient' ? /IOS_NAVIGATION/u : /APPIUM_/u);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget), mode === 'insufficient' ? /IOS_NAVIGATION/u : /APPIUM_/u);
     const count = requests.length;
     assert.equal(requests.filter(request => request.path.endsWith('/context')).length, mode === 'insufficient' ? 0 : 1);
     assert.equal(requests.some(request => request.path.endsWith('/url')), false);
@@ -545,14 +545,14 @@ test('bounded discovery admits initial app wait plus settled RPC and completion 
   const { platform, driver, budget } = await adapter('discovery-envelope', async ({ path, body, signal }) => {
     if (body.script === 'mobile: getContexts') {
       await wait(5_000, undefined, { signal: signal! });
-      await wait(14_500, undefined, { signal: signal! });
+      await wait(39_500, undefined, { signal: signal! });
       return value([{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
     }
     if (path.endsWith('/context')) return value(null);
     if (path.endsWith('/url')) return value(`${origin}/`);
     throw new Error(`unexpected bounded discovery operation ${path}`);
   });
-  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget);
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget);
   assert.equal(driver.snapshot().unusable, false);
   assert.ok(driver.snapshot().commands.every((entry) => !entry.timedOut));
 });
@@ -563,12 +563,12 @@ for (const mode of ['parent', 'absent', 'backend-error', 'interrupted-body'] as 
     const { platform, driver, requests, budget } = await adapter(`safari-discovery-${mode}`, ({ body }) => {
       assert.equal(body.script, 'mobile: getContexts');
       if (mode === 'interrupted-body') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('interrupted discovery body')); } }));
-      now += 20_000;
+      now += 45_000;
       if (mode === 'backend-error') return Response.json({ value: { error: 'unknown error', message: 'discovery backend unavailable' } }, { status: 500 });
       return value([{ id: 'NATIVE_APP' }]);
     }, () => now);
-    const phase = budget.phaseView('navigation', mode === 'parent' ? 25_999 : 46_000);
-    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, phase), mode === 'interrupted-body' ? /APPIUM_/u : /IOS_NAVIGATION/u);
+    const phase = budget.phaseView('navigation', mode === 'parent' ? 50_999 : 96_000);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, phase), mode === 'interrupted-body' ? /APPIUM_/u : /IOS_NAVIGATION/u);
     assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, mode === 'parent' ? 0 : mode === 'interrupted-body' ? 1 : 2);
     assert.equal(requests.some((request) => request.path.endsWith('/context') || request.body.url), false);
     assert.equal(driver.snapshot().unusable, mode === 'interrupted-body');
@@ -581,11 +581,11 @@ for (const late of [[{ id: 'NATIVE_APP' }], [{ id: 'WEBVIEW_18099.1', bundleId: 
     let settled = false;
     const { platform, driver, requests, budget } = await adapter('late-safari-discovery', async ({ body }) => {
       assert.equal(body.script, 'mobile: getContexts');
-      await wait(20_300);
+      await wait(45_300);
       settled = true;
       return value(late);
     });
-    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget), /APPIUM_TIMEOUT/u);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget), /APPIUM_TIMEOUT/u);
     const first = driver.snapshot().firstFatal;
     const count = requests.length;
     await wait(500);
@@ -615,7 +615,7 @@ test('Safari native-only discovery retains the first cause and reserve boundary 
     if (body.script === 'mobile: getContexts') {
       assert.equal(published, false, 'late page publication must not trigger another discovery');
       discoveries += 1;
-      now = discoveries === 1 ? 20_000 : 20_001;
+      now = discoveries === 1 ? 45_000 : 45_001;
       return value(availableContexts);
     }
     throw new Error(`unexpected late-publication operation ${JSON.stringify(body)}`);
@@ -626,10 +626,10 @@ test('Safari native-only discovery retains the first cause and reserve boundary 
   let failure = '';
   try {
     await assert.rejects(
-      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget),
+      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
       (error) => {
         failure = String(error);
-        return /not enough time for WebKit discovery and Safari observation \(25999ms remains\)/u.test(failure);
+        return /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u.test(failure);
       },
     );
   } finally {
@@ -642,9 +642,9 @@ test('Safari native-only discovery retains the first cause and reserve boundary 
   assert.equal((beforeLatePublication as any).lastDiscovery.result, 'native-only');
   assert.equal((beforeLatePublication as any).lastDiscovery.cause, 'Safari did not publish a web context');
   assert.equal(discoveries, 2);
-  assert.equal((beforeLatePublication as any).lastDiscovery.remainingMs, 25_999);
+  assert.equal((beforeLatePublication as any).lastDiscovery.remainingMs, 50_999);
   assert.equal((beforeLatePublication as any).reserveExhaustion.reason, 'discovery-observation');
-  assert.equal((beforeLatePublication as any).reserveExhaustion.remainingMs, 25_999);
+  assert.equal((beforeLatePublication as any).reserveExhaustion.remainingMs, 50_999);
   assert.equal((beforeLatePublication as any).firstFailure.kind, 'discovery');
   assert.equal((beforeLatePublication as any).firstFailure.cause, 'Safari did not publish a web context');
   assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, 2);
@@ -681,7 +681,7 @@ test('Safari diagnostic inspection caps oversized metadata without changing sele
   const { platform, driver, requests, budget } = await adapter('safari-oversized-diagnostics', ({ body }) => {
     if (body.script === 'mobile: getContexts') {
       discoveries += 1;
-      now = 20_001;
+      now = 45_001;
       return value(oversizedMetadata);
     }
     throw new Error(`unexpected oversized-diagnostics operation ${JSON.stringify(body)}`);
@@ -690,8 +690,8 @@ test('Safari diagnostic inspection caps oversized metadata without changing sele
   (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
   try {
     await assert.rejects(
-      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget),
-      /not enough time for WebKit discovery and Safari observation \(25999ms remains\)/u,
+      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
+      /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u,
     );
   } finally {
     (globalThis as any).setTimeout = originalSetTimeout;
@@ -715,7 +715,7 @@ test('Safari discovery and observation evidence remain separate at reserve exhau
     if (body.script === 'mobile: getContexts') return value([{ id: 'WEBVIEW-18099.1', bundleId: 'com.apple.mobilesafari' }]);
     if (path.endsWith('/context')) return value(null);
     if (path.endsWith('/url') && !body.url) {
-      now = 30_001;
+      now = 80_001;
       return value('https://other.invalid/');
     }
     if (path.endsWith('/url') && body.url) return value(null);
@@ -723,14 +723,14 @@ test('Safari discovery and observation evidence remain separate at reserve exhau
   }, () => now);
 
   await assert.rejects(
-    () => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget),
+    () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
     /IOS_NAVIGATION: Safari fixture page was not ready/u,
   );
   const navigation = platform.evidenceSnapshot().safariNavigation as any;
   assert.equal(navigation.lastDiscovery.result, 'safari-context');
   assert.equal(navigation.lastDiscovery.cause, 'Safari web context was published');
   assert.equal(navigation.lastDiscovery.elapsedMs, 0);
-  assert.equal(navigation.lastDiscovery.remainingMs, 46_000);
+  assert.equal(navigation.lastDiscovery.remainingMs, 96_000);
   assert.equal(navigation.lastObservation.result, 'origin-mismatch');
   assert.equal(navigation.lastObservation.cause, 'Safari page did not report the fixture origin');
   assert.equal(navigation.lastObservation.remainingMs, 15_999);

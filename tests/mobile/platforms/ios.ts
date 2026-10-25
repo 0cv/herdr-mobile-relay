@@ -40,10 +40,12 @@ const IOS_OPENURL_COMMAND_MS = 90_000;
 const IOS_WEBVIEW_CONNECT_TIMEOUT_MS = 5_000;
 const IOS_WEBVIEW_CONNECT_RETRIES = 1;
 const IOS_WEBKIT_DISCOVERY_COMMAND_MS = 20_000;
+// Safari's discovery is the session's first: it locates the simulator's Web Inspector socket and connects, which hosted runners have taken more than 20 s to do.
+const IOS_SAFARI_DISCOVERY_COMMAND_MS = 45_000;
 const IOS_SAFARI_DISCOVERY_RESERVE_MS = 6_000;
 const IOS_SAFARI_ATTACH_COMMAND_MS = 15_000;
 const IOS_SAFARI_OBSERVATION_MS = IOS_SAFARI_ATTACH_COMMAND_MS + 2_000;
-const IOS_SAFARI_READINESS_PHASE_MS = 2 * IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_OBSERVATION_MS + 3_000;
+const IOS_SAFARI_READINESS_PHASE_MS = 2 * IOS_SAFARI_DISCOVERY_COMMAND_MS + IOS_SAFARI_OBSERVATION_MS + 3_000;
 const IOS_NAVIGATION_PHASE_MS = IOS_OPENURL_COMMAND_MS + IOS_SAFARI_READINESS_PHASE_MS + 10_000;
 const IOS_SAFARI_DIAGNOSTIC_CONTEXT_LIMIT = 64;
 const IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT = 2_048;
@@ -769,13 +771,13 @@ export class IOSPlatform implements MobilePlatform {
     let firstFailure: SafariNavigationFailureEvidence | undefined;
     while (!phase.exhausted) {
       try {
-        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_DISCOVERY_RESERVE_MS) {
-          this.retainSafariReserve(phase, timeoutMs, 'discovery-observation', IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_DISCOVERY_RESERVE_MS);
+        if (phase.remainingMs < IOS_SAFARI_DISCOVERY_COMMAND_MS + IOS_SAFARI_DISCOVERY_RESERVE_MS) {
+          this.retainSafariReserve(phase, timeoutMs, 'discovery-observation', IOS_SAFARI_DISCOVERY_COMMAND_MS + IOS_SAFARI_DISCOVERY_RESERVE_MS);
           lastError = `not enough time for WebKit discovery and Safari observation (${phase.remainingMs}ms remains)`;
           firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'reserve', 'WebKit discovery and Safari observation reserve was unavailable');
           break;
         }
-        const metadata = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
+        const metadata = await this.driver.contextMetadata(IOS_SAFARI_DISCOVERY_COMMAND_MS);
         this.safariLastDiscovery = this.safariDiscoveryEvidence(metadata, phase, timeoutMs);
         const context = metadata.find((candidate) => isIOSSafariBrowserBundle(candidate.bundleId)
           || (candidate.url !== undefined && this.isExpectedOrigin(candidate.url)));

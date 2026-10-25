@@ -2266,7 +2266,7 @@ test('iOS WebKit discovery retries until Safari publishes a delayed page', async
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'simulator-1',
-    budget: new PhaseBudget('ios-discovery-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
+    budget: new PhaseBudget('ios-discovery-test', { timeoutMs: 60_000, recoveryLimit: 1 }),
   });
   let discoveries = 0;
   const contexts: string[] = [];
@@ -2291,7 +2291,7 @@ test('iOS WebKit discovery retries until Safari publishes a delayed page', async
   await driver.create({ capabilities: {} });
   (platform as any).driver = driver;
   driver.setBudget((platform as any).budget);
-  await (platform as any).waitForSafariFixturePage('https://fixture.test/setup', 46_000, (platform as any).budget);
+  await (platform as any).waitForSafariFixturePage('https://fixture.test/setup', 96_000, (platform as any).budget);
   assert.ok(discoveries >= 9);
   assert.deepEqual(contexts, ['WEBVIEW_1', 'NATIVE_APP']);
 });
