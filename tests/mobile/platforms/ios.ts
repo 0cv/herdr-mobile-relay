@@ -65,8 +65,10 @@ const IOS_NATIVE_SCROLL_LIMIT = 8;
 const IOS_NATIVE_LIST_READINESS_MS = 15_000;
 // The first Share sheet can start the system sharing service cold; a hosted runner took more than 15 s to publish its actions.
 const IOS_SHARE_SHEET_READINESS_MS = 30_000;
-// The install phase grows by the same amount so the Add confirmation keeps its full reserve.
-const IOS_INSTALL_PHASE_MS = 120_000 + IOS_SHARE_SHEET_READINESS_MS - IOS_NATIVE_LIST_READINESS_MS;
+// Hosted runners have spent more than 70 s reaching Add to Home Screen through the Page Menu, Share sheet and View More, which left less than the Add confirmation's reserved allowance.
+const IOS_INSTALL_PHASE_MS = 240_000;
+// Launch combines Home observation with up to 30 s each for the provider and its web view, so slow runners need room beyond those two waits.
+const IOS_LAUNCH_PHASE_MS = 180_000;
 const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_GESTURE_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
 
 interface ConfirmationCaptureEvidence {
@@ -1063,7 +1065,7 @@ export class IOSPlatform implements MobilePlatform {
     this.assertOwnershipClear();
     await requireOwnedDevice('ios', this.udid);
     this.selectedInstalledContext = '';
-    const phase = this.budget.phaseView('ios-launch', 120_000);
+    const phase = this.budget.phaseView('ios-launch', IOS_LAUNCH_PHASE_MS);
     phase.assertAvailable('launch installed provider');
     await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
     const foreground = await this.observeCurrentNativeForeground(phase);
