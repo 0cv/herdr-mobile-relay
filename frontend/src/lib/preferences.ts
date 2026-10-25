@@ -171,16 +171,26 @@ function readHiddenServers(): string[] {
   }
 }
 
-export function setServerHidden(relayId: string, hidden: boolean): void {
-  const current = get(hiddenServers);
-  if (current.includes(relayId) === hidden) return;
-  const next = hidden ? [...current, relayId] : current.filter((id) => id !== relayId);
+function saveHiddenServers(next: string[]): void {
   hiddenServers.set(next);
   try {
     localStorage.setItem(HIDDEN_SERVERS_KEY, JSON.stringify(next));
   } catch {
-    return;
+    // Without storage the store still applies the choice until the app reloads.
   }
+}
+
+export function setServerHidden(relayId: string, hidden: boolean): void {
+  const current = get(hiddenServers);
+  if (current.includes(relayId) === hidden) return;
+  saveHiddenServers(hidden ? [...current, relayId] : current.filter((id) => id !== relayId));
+}
+
+// With one computer left the filter row disappears, so nothing may stay hidden.
+export function pruneHiddenServers(remainingRelayIds: string[]): void {
+  const current = get(hiddenServers);
+  const next = remainingRelayIds.length > 1 ? current.filter((id) => remainingRelayIds.includes(id)) : [];
+  if (next.length !== current.length) saveHiddenServers(next);
 }
 
 export function clearPaneAgentViewOverridesForRelay(relayId: string): 'saved' | 'unavailable' {

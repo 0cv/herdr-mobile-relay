@@ -886,6 +886,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .server-filters { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
 .server-filters [aria-pressed='true'] { border-color: var(--primary); }
 .server-filters [aria-pressed='false'] { color: var(--muted); }
+.server-filters .section-count { background: var(--danger); color: #fff; font-weight: 700; }
 .workspace-tab { position: relative; }
 /* The 2.4rem floor dated from the header's removed reorder buttons; the
    label-only header hugs its tab so name and agent read as one unit. */

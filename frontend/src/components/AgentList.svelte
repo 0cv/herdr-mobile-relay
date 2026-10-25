@@ -46,18 +46,19 @@
   const agents = $derived(allAgents.filter((agent) => !hidden.includes(agent.relay_id)));
   const workspaces = $derived(allWorkspaces.filter((workspace) => !hidden.includes(workspace.relay_id)));
 
+  // try/catch rather than URL.canParse, which needs Safari 17.
+  function urlHost(url: string): string {
+    try {
+      return new URL(url).host;
+    } catch {
+      return '';
+    }
+  }
+
   function serverFilterLabel(relay: RelayConfig): string {
     const label = relay.label || relay.id;
-    // Same-named computers: add the full URL host, or the id for gateway-only ones.
     if (allRelays.filter((other) => other.label === relay.label).length < 2) return label;
-    // try/catch, not URL.canParse, which needs Safari 17.
-    let host = '';
-    try {
-      host = new URL(relay.url).host;
-    } catch {
-      // Empty or invalid URL: fall back to the id.
-    }
-    return `${label} (${host || relay.id})`;
+    return `${label} (${urlHost(relay.url) || relay.id})`;
   }
 
   function hiddenNeedsAttention(relayId: string): number {

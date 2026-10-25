@@ -74,8 +74,9 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 162 KiB for global and per-pane default-view preferences and
 // safe Conversation routing with native-transcript fallback.
 // Raised from 164 KiB for bounded history diagnostics, source-change recovery,
-// and snapshot-aware refresh handling; then to 167 KiB for the per-server
-// filter on the home list (about 0.6 KiB gzip).
+// and snapshot-aware refresh handling.
+// Raised from 166 KiB for the per-server filter on the home list (about
+// 0.6 KiB gzip).
 const limitKiB = 167;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');

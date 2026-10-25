@@ -81,7 +81,7 @@ import type {
 } from './transports';
 import {
   clearPaneAgentViewOverridesForRelay,
-  setServerHidden,
+  pruneHiddenServers,
   terminalHistoryLines,
   terminalRefreshInterval,
   terminalResizeSession,
@@ -839,7 +839,7 @@ class RelayStore {
     }
     // Server ids derive from label and URL, so a re-paired computer would
     // otherwise come back hidden.
-    setServerHidden(id, false);
+    pruneHiddenServers(relays.map((relay) => relay.id));
   }
 
   connectAll(preserveAgents = false): void {

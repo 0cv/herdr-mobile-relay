@@ -1158,7 +1158,10 @@ describe('accessible Svelte interactions', () => {
       agents: [], relays, workspaces: [], responding: new Set<string>(), onopen: vi.fn(), ...props,
     });
 
-    afterEach(() => hiddenServers.set([]));
+    afterEach(() => {
+      hiddenServers.set([]);
+      relayStore.relayConfigs.set([]);
+    });
 
     it('stays out of the way with a single computer, even with a stale hidden id', () => {
       hiddenServers.set(['mac']);
@@ -1215,10 +1218,14 @@ describe('accessible Svelte interactions', () => {
       expect(screen.getByRole('button', { name: 'Mac (gw-b)' })).toBeInTheDocument();
     });
 
-    it('forgets a hidden server when it is removed, so re-pairing shows it again', () => {
+    it('forgets a removed hidden server, and every hidden server once one computer is left', () => {
+      relayStore.relayConfigs.set([...relays, { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' }]);
+      setServerHidden('mac', true);
       setServerHidden('spark', true);
       relayStore.removeRelay('spark');
-      expect(get(hiddenServers)).not.toContain('spark');
+      expect(get(hiddenServers)).toEqual(['mac']);
+      relayStore.removeRelay('fedora');
+      expect(get(hiddenServers)).toEqual([]);
     });
   });
 
