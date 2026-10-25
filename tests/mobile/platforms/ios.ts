@@ -1397,8 +1397,10 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async hideKeyboard(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP');
-    await this.driver.mobile('hideKeyboard');
+    // WebDriverAgent cannot dismiss an iPhone web view keyboard because its Done button sits in Safari's accessory bar, so blur the composer as a tap elsewhere would.
+    await this.attachToInstalledView();
+    const blurred = await this.driver.execute<boolean>("const composer = document.querySelector('textarea[aria-label=\\\"Prompt\\\"]'); if (!composer || document.activeElement !== composer) return false; composer.blur(); return true;");
+    if (blurred !== true) throw new Error('IOS_KEYBOARD: composer was not focused before dismissal');
     await this.waitForKeyboard(false);
     await this.attachToInstalledView();
     if (this.keyboardDraft) {

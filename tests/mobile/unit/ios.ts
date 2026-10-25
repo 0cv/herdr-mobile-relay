@@ -1104,11 +1104,15 @@ for (const mode of ['ready', 'unchanged', 'no-target', 'ambiguous', 'hidden', 'd
   });
 }
 
-for (const mode of ['empty', 'mixed-malformed'] as const) {
+for (const mode of ['empty', 'mixed-malformed', 'unfocused'] as const) {
   test(`keyboard dismissal ${mode} requires a valid absence observation`, async () => {
     let reattachments = 0;
     const { platform, driver, requests } = await adapter(`keyboard-hide-${mode}`, ({ path, body }) => {
-      if (path.endsWith('/context') || body.script === 'mobile: hideKeyboard') return value(null);
+      if (path.endsWith('/context')) return value(null);
+      if (body.script?.startsWith('const composer = document.querySelector')) {
+        assert.match(body.script, /document\.activeElement !== composer\) return false; composer\.blur\(\); return true;$/u);
+        return value(mode !== 'unfocused');
+      }
       if (path.endsWith('/elements')) {
         assert.deepEqual(body, { using: 'class name', value: 'XCUIElementTypeKeyboard' });
         return value(mode === 'empty' ? [] : [element('visible-keyboard'), {}]);
@@ -1121,9 +1125,13 @@ for (const mode of ['empty', 'mixed-malformed'] as const) {
     platform.attachToInstalledView = async () => { reattachments += 1; };
     (platform as any).keyboardDraft = 'retained draft';
     if (mode === 'empty') await platform.hideKeyboard();
+    else if (mode === 'unfocused') await assert.rejects(() => platform.hideKeyboard(), /IOS_KEYBOARD: composer was not focused before dismissal/u);
     else await assert.rejects(() => platform.hideKeyboard(), /APPIUM_ELEMENT: malformed element list response/u);
-    assert.equal(reattachments, mode === 'empty' ? 1 : 0);
-    assert.equal(requests.filter(request => request.path.endsWith('/elements')).length, 1);
+    assert.equal(reattachments, mode === 'empty' ? 2 : 1);
+    assert.equal(requests.filter(request => request.path.endsWith('/elements')).length, mode === 'unfocused' ? 0 : 1);
+    assert.equal(requests.some(request => request.body.script === 'mobile: hideKeyboard'), false);
+    if (mode === 'empty') assert.ok(requests.findIndex(request => request.body.script?.startsWith('const composer'))
+      < requests.findIndex(request => request.path.endsWith('/elements')));
     assert.equal(driver.snapshot().unusable, false);
   });
 }
