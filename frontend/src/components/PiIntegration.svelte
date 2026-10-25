@@ -16,9 +16,11 @@
   let generation = 0;
   const connected = $derived(connection?.status === 'connected' && connection.capabilities.includes('pi_integration'));
   const hintId = $props.id();
+  // Settings rebuilds each relay row on every relay update; only a different relay should reload this card.
+  const relay = $derived(relayId);
 
   $effect(() => {
-    const target = relayId;
+    const target = relay;
     generation++;
     integration = null;
     if (!connected) return;
