@@ -136,24 +136,21 @@ export function parseAskUserQuestion(input: string, output = ''): AskedQuestion[
   }
   const raw = (parsed as { questions?: unknown } | null)?.questions;
   if (!Array.isArray(raw) || !raw.length) return null;
-  // Only a complete `The user answered: "Q"="A", "Q2"="A2". …` envelope counts; anything
-  // ambiguous leaves the raw output visible instead of guessing at a partial match.
+  // Only a complete `Your questions have been answered:` or `The user answered:` envelope of
+  // `"Q"="A"` pairs counts; anything ambiguous leaves the raw output visible instead of guessing.
   const answers = new Map<string, string>();
   const trimmedOutput = output.trim();
-  if (trimmedOutput.startsWith('The user answered:')) {
-    const pair = /\s*"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"(,|\.|$)/y;
-    pair.lastIndex = 'The user answered:'.length;
+  // Claude Code 2.1.x writes `"Q"="A"` pairs without escaping, under one of two envelopes.
+  const prefix = ['Your questions have been answered:', 'The user answered:'].find((value) => trimmedOutput.startsWith(value));
+  if (prefix) {
+    const pair = /\s*"([^"]*)"="([^"]*)"(,|\.|$)/y;
+    pair.lastIndex = prefix.length;
     const found = new Map<string, string>();
     let match: RegExpExecArray | null;
     let complete = false;
     while ((match = pair.exec(trimmedOutput))) {
-      try {
-        const key = JSON.parse(`"${match[1]}"`);
-        if (found.has(key)) break; // duplicate question text: attribution is ambiguous
-        found.set(key, JSON.parse(`"${match[2]}"`));
-      } catch {
-        break;
-      }
+      if (found.has(match[1])) break; // duplicate question text: attribution is ambiguous
+      found.set(match[1], match[2]);
       if (match[3] !== ',') {
         complete = true;
         break;
@@ -174,7 +171,7 @@ export function parseAskUserQuestion(input: string, output = ''): AskedQuestion[
         const value = (option && typeof option === 'object' ? option : {}) as Record<string, unknown>;
         return { label: text(value.label), description: text(value.description) };
       }),
-      answer: answers.get(question),
+      answer: raw.filter((other) => text((other as Record<string, unknown> | null)?.question) === question).length === 1 ? answers.get(question) : undefined,
     };
   });
   return questions.every((item) => item.question) ? questions : null;

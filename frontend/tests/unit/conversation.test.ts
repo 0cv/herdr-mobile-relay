@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import ConversationMessage from '$components/ConversationMessage.svelte';
-import { clampPayload, conversationEntries, formatToolPayload, maxPayloadLines } from '$lib/conversation';
+import { clampPayload, conversationEntries, formatToolPayload, maxPayloadLines, parseAskUserQuestion } from '$lib/conversation';
 import type { ConversationEntry, ConversationTool } from '$lib/types';
 
 // Shapes copied from a recorded Claude Code transcript: tool arguments arrive as
@@ -188,17 +188,51 @@ describe('ConversationMessage tool cards', () => {
 describe('parseAskUserQuestion', () => {
   const input = JSON.stringify({ questions: [{ question: 'Pick one?', header: 'Pick', multiSelect: false, options: [{ label: 'A', description: 'first' }, { label: 'B', description: '' }] }] });
 
-  it('structures the question and pairs it with the recorded answer', async () => {
-    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+  it('structures the question and pairs it with the recorded answer', () => {
     const [item] = parseAskUserQuestion(input, 'The user answered: "Pick one?"="B". Read the answers carefully.')!;
     expect(item.options.map((option) => option.label)).toEqual(['A', 'B']);
     expect(item.answer).toBe('B');
   });
 
-  it('ignores other tool payloads', async () => {
-    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+  it('ignores other tool payloads', () => {
     expect(parseAskUserQuestion('{"command":"ls"}')).toBeNull();
     expect(parseAskUserQuestion('not json')).toBeNull();
+  });
+
+  it('extracts answers from the "Your questions have been answered" envelope', () => {
+    const output = 'Your questions have been answered: "Pick one?"="A". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('A');
+  });
+
+  it('extracts answers from the "The user answered" envelope with its closing sentence', () => {
+    const output = 'The user answered: "Pick one?"="B". Read the answers carefully \u2014 they may request clarification, changes, or that you not proceed \u2014 and follow what they actually say.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('B');
+  });
+
+  it('attributes two answers to the right questions', () => {
+    const two = JSON.stringify({ questions: [{ question: 'Q1', options: [] }, { question: 'Q2', options: [] }] });
+    const output = 'Your questions have been answered: "Q1"="A1", "Q2"="A2". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(two, output)!.map((item) => item.answer)).toEqual(['A1', 'A2']);
+  });
+
+  it('keeps a multi-select answer as one value', () => {
+    const output = 'Your questions have been answered: "Pick one?"="A, B". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('A, B');
+  });
+
+  it('returns backslashes unchanged', () => {
+    const output = 'Your questions have been answered: "Pick one?"="C:\\temp\\new". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('C:\\temp\\new');
+  });
+
+  it('leaves answer undefined for notes, no selection and unanswered replies', () => {
+    for (const output of [
+      'Your questions have been answered: "Pick one?"="A" notes: please hurry. You can now continue with these answers in mind.',
+      'Your questions have been answered: "Pick one?"=(no option selected). You can now continue with these answers in mind.',
+      'The user did not answer the questions.',
+      'The user answered: "Pick one?"="A" selected preview:\nsome preview',
+      'The user responded: "Pick one?"="A".',
+    ]) expect(parseAskUserQuestion(input, output)![0].answer).toBeUndefined();
   });
 });
 
@@ -236,15 +270,19 @@ describe('AskUserQuestion hardening', () => {
     expect(conversationEntries(entries).map((entry) => entry.id)).toEqual(['u1', 'a1', 'a2']);
   });
 
-  it('does not attribute answers when question text repeats', async () => {
-    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+  it('does not attribute one answer to duplicate input questions', () => {
+    const dup = JSON.stringify({ questions: [{ question: 'Q', options: [] }, { question: 'Q', options: [] }] });
+    const output = 'Your questions have been answered: "Q"="A". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(dup, output)!.map((item) => item.answer)).toEqual([undefined, undefined]);
+  });
+
+  it('does not attribute answers when question text repeats', () => {
     const dup = JSON.stringify({ questions: [{ question: 'Q', options: [] }, { question: 'Q', options: [] }] });
     const result = parseAskUserQuestion(dup, 'The user answered: "Q"="A", "Q"="B". Read the answers carefully.')!;
     expect(result.map((item) => item.answer)).toEqual([undefined, undefined]);
   });
 
-  it('only trusts a complete answered envelope', async () => {
-    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+  it('only trusts a complete answered envelope', () => {
     expect(parseAskUserQuestion(ask([q]), 'The user answered: "Q"="A". Read the answers carefully.')![0].answer).toBe('A');
     expect(parseAskUserQuestion(ask([q]), 'Error: expected "Q"="A"')![0].answer).toBeUndefined();
     expect(parseAskUserQuestion(ask([q]), 'The user answered: "Q"="use "=" here"')![0].answer).toBeUndefined();
