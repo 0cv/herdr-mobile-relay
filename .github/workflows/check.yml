@@ -102,6 +102,15 @@ jobs:
       - run: cd frontend && bun x playwright install --with-deps chromium webkit
       - run: make frontend-check
       - run: make web-release-check
+      # A hung browser leaves only a timeout in the log. The failing tests'
+      # Playwright traces (synthetic fixture data) show what the page was doing.
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-test-results
+          path: frontend/test-results/
+          retention-days: 1
+          if-no-files-found: ignore
 
   # Bundles are one of the things this workflow checks, not something it
   # publishes, so they no longer wait behind the test jobs: a red run fails on

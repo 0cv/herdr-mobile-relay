@@ -17,6 +17,7 @@ type databaseRefreshResult struct {
 	available bool
 	state     conversation.BrowseState
 	reason    string
+	texts     []string
 }
 
 type databaseRefreshObserver struct {
@@ -33,8 +34,12 @@ func (o *databaseRefreshObserver) Refresh(ctx context.Context) (conversation.Bro
 	o.feed.mu.Lock()
 	sequence := o.feed.sequence + 1
 	o.feed.mu.Unlock()
+	texts := make([]string, 0, len(page.Entries))
+	for _, entry := range page.Entries {
+		texts = append(texts, entry.Text)
+	}
 	o.mu.Lock()
-	o.results[sequence%uint64(len(o.results))] = databaseRefreshResult{sequence, page.SourceRevision, page.Available, page.State, page.ReasonCode}
+	o.results[sequence%uint64(len(o.results))] = databaseRefreshResult{sequence, page.SourceRevision, page.Available, page.State, page.ReasonCode, texts}
 	o.mu.Unlock()
 	return page, reset
 }
