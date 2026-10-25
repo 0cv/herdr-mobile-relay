@@ -56,6 +56,7 @@ const ANDROID_GMS_OWNERSHIP_TIMEOUT_MS = 2_000;
 const ANDROID_GMS_PARSE_RESERVE_MS = 1_000;
 const ANDROID_GMS_PARSE_CLEANUP_RESERVATION_MS = 40;
 const ANDROID_GMS_PERSISTENCE_TIMEOUT_MS = 1_000;
+const ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS = 1_000;
 const ANDROID_GMS_STAGE_TIMEOUT_MS = ANDROID_GMS_OWNERSHIP_TIMEOUT_MS + ANDROID_GMS_COMMAND_TIMEOUT_MS + ANDROID_GMS_PARSE_RESERVE_MS;
 const ANDROID_GMS_TOTAL_BYTES_LIMIT = ANDROID_GMS_DUMP_LIMIT * ANDROID_GMS_OBSERVATION_STAGES.length;
 const ANDROID_GMS_TOTAL_TIME_LIMIT_MS = ANDROID_GMS_STAGE_TIMEOUT_MS * ANDROID_GMS_OBSERVATION_STAGES.length;
@@ -817,7 +818,7 @@ export class AndroidEnvironmentMeasurement {
 
   private async cleanupOwnedTemporary(temporary: string, target: string): Promise<void> {
     const result = await this.io.boundedCommand(process.execPath,
-      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-cleanup-file'], 200, {
+      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-cleanup-file'], ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS, {
         label: 'remove retired Android measurement temporary file',
         maxBytes: 256,
         maxBytesPerStream: 128,
@@ -829,7 +830,7 @@ export class AndroidEnvironmentMeasurement {
 
   private async invalidateCollectorSummary(): Promise<void> {
     const result = await this.io.boundedCommand(process.execPath,
-      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-invalidate-collector'], 200, {
+      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-invalidate-collector'], ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS, {
         label: 'invalidate unconfirmed Android collector summary',
         maxBytes: 256,
         maxBytesPerStream: 128,

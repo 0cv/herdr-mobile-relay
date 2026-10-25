@@ -5891,7 +5891,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(writerFailure.result.childExited, true, details);
       assert.equal(writerFailure.result.ownedProcessesExited, true, details);
       assert.equal(writerFailure.result.stdioClosed, true, details);
-      assert.equal(existsSync(collectorPath), false);
+      assert.equal(existsSync(collectorPath), false, outcome.errors.join(' | '));
       assert.equal(outcome.assessment?.collection.status, 'UNKNOWN');
       assert.ok(outcome.errors.length > 0);
       const bundlePath = join(fixture.root, 'bundle-set.json');
