@@ -520,6 +520,47 @@ androidEventTests.push(['hosted 40306915048 helper straddling END retires normal
   }
 }]);
 
+androidEventTests.push(['hosted 40317275070 helper whose PID equals the Chrome app UID retires normally despite later UID mentions', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40317275070-helper-pid-equals-chrome-uid.log', import.meta.url), 'utf8');
+  const processes = { '366': 'zygote64', '563': 'system_server', '5502': 'com.android.chrome', '5542': 'com.android.chrome_zygote' };
+  const measureCollision = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = '40317275070';
+    after.measurement!.id = '40317275070';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const forceStop = log.split('\n').find((entry) => entry.includes('Force stopping com.android.chrome appid=10145 user=0'))!;
+  const exit = log.split('\n').find((entry) => entry.includes('Process 10145 exited cleanly (0)'))!;
+  assert.ok(forceStop && exit);
+  const retired = (value: string) => measureCollision(value).normalRetirements.some((retirement) => retirement.pid === '10145');
+  assert.deepEqual(measureCollision(log).issues, []);
+  assert.ok(retired(log));
+  for (const [name, mention] of [
+    ['UID', 'D CompatChangeReporter: Compat change id reported: 263076149; UID 10145; state: ENABLED'],
+    ['uid =', 'V GrammaticalInflectionUtils: AttributionSource: AttributionSource { uid = 10145, packageName = null }'],
+    ['uid/pid', 'D ConnectivityService: requestNetwork for uid/pid:10145/5502 activeRequest: null'],
+    ['task affinity', 'V WindowManager: Task{b7ed3bc #13 type=standard A=10145:com.android.chrome}'],
+    ['UID: [', 'I PlayCore: UID: [10145]  PID: [13185]'],
+    ['uids={', 'D InetDiagMessage: Destroyed live tcp sockets for uids={10145} in 3ms'],
+    ['uid=', 'I ActivityManager: Changes in uid=10145 state'],
+    ['uid', 'I AppWidgetServiceImpl: stopped masked state for uid 10145 package com.android.chrome'],
+    ['app:', 'I AppWidgetServiceImpl: Provider{ProviderId{user:0, app:10145, cmp:ComponentInfo{}}}'],
+  ] as [string, string][]) {
+    assert.ok(retired(log.replace(forceStop, `${forceStop}\n         1793016227.200   563   563 ${mention} fatal`)), name);
+  }
+  for (const [name, value] of [
+    ['a later crash report naming the PID', log.replace(exit, `${exit}\n         1793016189.300  5502  5502 W chromium: Renderer process crashed pid=10145`)],
+    ['a force stop naming the PID', log.replace('appid=10145 user=0', 'pid=10145 user=0')],
+    ['a signal sent to the PID', log.replace(forceStop, `${forceStop}\n         1793016227.200   563   563 I Process : Sending signal. PID: 10145 SIG: 9`)],
+    ['a fatal record naming the UID and the PID', log.replace(forceStop, `${forceStop}\n         1793016227.200   563   563 E ActivityManager: uid=10145 pid=10145 fatal`)],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    assert.ok(!retired(value), name);
+    assert.ok(measureCollision(value).fatalEvents.some((event) => event.includes('Killing 10145:')), name);
+  }
+}]);
+
 androidEventTests.push(['synthetic system-reaped helper admits a missing child exit or the kill signal only with the reaping record', async () => {
   const killed = exit.replace('cleanly (0)', 'due to signal 9 (Killed)');
   const quickKilled = quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)');
