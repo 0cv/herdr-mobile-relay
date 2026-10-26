@@ -1073,7 +1073,7 @@ export class IOSPlatform implements MobilePlatform {
     await delay(Math.min(750, phase.remainingMs), phase);
     let observation = await this.observeHomeIcon(phase);
     observation = await this.waitForHomeIconReadiness(observation, phase, true);
-    observation = await this.leaveTodayView(observation, phase, true);
+    observation = await this.leaveTodayView(observation, phase);
     if (observation.state === 'pending' || observation.state === 'not-ready') {
       throw new Error(`IOS_CONTEXT: current SpringBoard page was not positively observed (${observation.reason})`);
     }
@@ -2041,12 +2041,13 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   // The Today View left of the first page keeps the icon container published but shows no page indicator or icons.
-  private async leaveTodayView(observation: IOSHomeObservation, phase: PhaseBudget, firstObservation = false): Promise<IOSHomeObservation> {
+  private async leaveTodayView(observation: IOSHomeObservation, phase: PhaseBudget): Promise<IOSHomeObservation> {
     if (observation.state !== 'pending' || !observation.container || observation.reason !== IOS_HOME_PAGE_INDICATOR_MISSING) return observation;
     phase.assertAvailable('leave SpringBoard Today View');
+    await this.ensureSpringBoardForeground(phase);
     await this.driver.mobile('swipe', { direction: 'left' }, Math.max(2, phase.remainingMs));
     await this.ensureSpringBoardForeground(phase);
-    return this.waitForHomeIconReadiness(await this.observeHomeIcon(phase), phase, firstObservation);
+    return this.waitForHomeIconReadiness(await this.observeHomeIcon(phase), phase, true);
   }
 
   private async homeObservationElementIds(phase: PhaseBudget): Promise<string[]> {
