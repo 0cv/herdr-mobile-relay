@@ -199,7 +199,10 @@ async function fixture(run, initialMode = '') {
       ws.send(JSON.stringify({method: 'DOM.childNodeCountUpdated', params: {nodeId: 7, childNodeCount: 2}, ...(state.mode === 'event-error' ? {error: {code: -32000, message: 'not a reply'}} : {result: {ignored: true}})}));
       return;
     }
-    if ((state.mode === 'pending-event' && message.id === 4) || (state.mode === 'late-top-layer-pending' && message.id === 18)) ws.send(diagnosticEvent());
+    if ((state.mode === 'pending-event' && message.id === 4) || (state.mode === 'late-top-layer-pending' && message.id === 18)) {
+      if (state.mode === 'late-top-layer-pending') state.eventSent = true;
+      ws.send(diagnosticEvent());
+    }
     switch (message.method) {
       case 'SystemInfo.getProcessInfo':
         processReads++;
@@ -272,6 +275,7 @@ async function fixture(run, initialMode = '') {
     if (state.mode === 'result-malformed') response.result = [];
     if ((state.mode === 'between-passes' || state.mode === 'late-top-layer-between-passes') && message.id === 10) {
       ws._socket.cork();
+      if (state.mode === 'late-top-layer-between-passes') state.eventSent = true;
       try { ws.send(JSON.stringify(response)); ws.send(diagnosticEvent(BOOT)); }
       finally { ws._socket.uncork(); }
       return;
@@ -583,8 +587,8 @@ test('installed producer redacts untrusted late-event params', async () => fixtu
   });
 }));
 
-for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params']) {
-  test(`installed consumer admits the protocol-valid late top-layer notification: ${mode}`, async () => fixture(async ({inspect, state, calls}) => {
+for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params', 'late-top-layer-unselected', 'late-top-layer-pending', 'late-top-layer-between-passes']) {
+  test(`installed consumer admits a protocol-valid top-layer notification on an attached page session: ${mode}`, async () => fixture(async ({inspect, state, calls}) => {
     state.mode = mode;
     const result = await inspect();
     assert.equal(state.eventSent, true);
@@ -594,7 +598,7 @@ for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params']) {
   }));
 }
 
-for (const mode of ['late-top-layer-root', 'late-top-layer-unselected', 'late-top-layer-unknown', 'late-top-layer-malformed', 'late-top-layer-id', 'late-top-layer-result', 'late-top-layer-error', 'late-top-layer-extra-field', 'late-top-layer-pending', 'late-top-layer-between-passes']) {
+for (const mode of ['late-top-layer-root', 'late-top-layer-unknown', 'late-top-layer-malformed', 'late-top-layer-id', 'late-top-layer-result', 'late-top-layer-error', 'late-top-layer-extra-field']) {
   test(`installed consumer quarantines ${mode}`, async () => fixture(async ({inspect, state, refused}) => {
     state.mode = mode;
     let original;
@@ -602,7 +606,7 @@ for (const mode of ['late-top-layer-root', 'late-top-layer-unselected', 'late-to
       original = error;
       const diagnostic = readUncorrelatedDiagnostic(error);
       assert.equal(diagnostic.method, 'DOM.topLayerElementsUpdated');
-      assert.equal(diagnostic.phase, mode === 'late-top-layer-pending' ? 'final-snapshot' : mode === 'late-top-layer-between-passes' ? 'initial' : 'post-cdp-completion');
+      assert.equal(diagnostic.phase, 'post-cdp-completion');
       assert.equal(Object.hasOwn(diagnostic, 'params'), false);
       if (mode.endsWith('-id')) assert.equal(diagnostic.classification, 'other');
       else assert.equal(diagnostic.classification, 'event');

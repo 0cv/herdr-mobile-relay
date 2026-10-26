@@ -1136,7 +1136,7 @@ for (const mode of ['empty', 'mixed-malformed', 'unfocused'] as const) {
   });
 }
 
-for (const mode of ['shown', 'ambiguous', 'not-shown'] as const) {
+for (const mode of ['shown', 'ambiguous', 'not-shown', 'composer-missing', 'not-foreground'] as const) {
   test(`keyboard show ${mode} taps the composer natively before requiring the native keyboard`, async () => {
     let tapped = false;
     let typed = '';
@@ -1145,8 +1145,9 @@ for (const mode of ['shown', 'ambiguous', 'not-shown'] as const) {
       if (path.endsWith('/element') && body.value === 'textarea[aria-label="Prompt"]') return value(element('web-composer'));
       if (path.endsWith('/elements') && body.using === '-ios predicate string') {
         assert.match(body.value, /label == 'Prompt' AND visible == 1$/u);
-        return value(mode === 'ambiguous' ? [element('native-composer'), element('native-composer-2')] : [element('native-composer')]);
+        return value(mode === 'composer-missing' ? [] : mode === 'ambiguous' ? [element('native-composer'), element('native-composer-2')] : [element('native-composer')]);
       }
+      if (body.script === 'mobile: activeAppInfo') return value({ bundleId: mode === 'not-foreground' ? 'com.apple.mobilesafari' : 'com.apple.webapp', pid: 4242 });
       if (path.endsWith('/element/native-composer/click')) { tapped = true; return value(null); }
       if (path.endsWith('/element/web-composer/value')) { typed = body.text ?? body.value?.join(''); return value(null); }
       if (path.endsWith('/elements') && body.value === 'XCUIElementTypeKeyboard') return value(mode === 'shown' && tapped ? [element('keyboard')] : []);
@@ -1155,12 +1156,22 @@ for (const mode of ['shown', 'ambiguous', 'not-shown'] as const) {
       throw new Error(`unexpected keyboard command ${path} ${JSON.stringify(body)}`);
     });
     platform.attachToInstalledView = async () => {};
+    (platform as any).installedBundleId = 'com.apple.webapp';
+    (platform as any).springBoardRoot = 'springboard-root';
     if (mode === 'shown') await platform.showKeyboardOnComposer();
     else await assert.rejects(() => platform.showKeyboardOnComposer(),
-      mode === 'ambiguous' ? /IOS_CONTEXT_OWNERSHIP: native composer is ambiguous/u : /IOS_KEYBOARD: expected visible native keyboard/u);
-    assert.equal(tapped, mode !== 'ambiguous');
+      mode === 'ambiguous' ? /IOS_CONTEXT_OWNERSHIP: native composer is ambiguous/u
+        : mode === 'composer-missing' ? /IOS_KEYBOARD: composer was not exposed to native input/u
+        : mode === 'not-foreground' ? /IOS_CONTEXT_OWNERSHIP: native provider com\.apple\.webapp is not identified in foreground/u
+        : /IOS_KEYBOARD: expected visible native keyboard/u);
+    assert.equal(tapped, mode === 'shown' || mode === 'not-shown');
+    if (mode === 'not-foreground') assert.equal(requests.some(request => request.body.using === '-ios predicate string'), false);
+    if (tapped) {
+      const click = requests.findIndex(request => request.path.endsWith('/element/native-composer/click'));
+      assert.equal(requests[click - 1].body.script, 'mobile: activeAppInfo');
+    }
     assert.equal(requests.some(request => /\/element\/web-composer\/click$/u.test(request.path)), false);
-    if (mode !== 'ambiguous') assert.equal(typed, 'mobile-device-ci draft');
+    if (tapped) assert.equal(typed, 'mobile-device-ci draft');
     if (mode === 'shown') assert.ok(requests.findIndex(request => request.path.endsWith('/element/native-composer/click'))
       < requests.findIndex(request => request.path.endsWith('/element/web-composer/value')));
     assert.equal(driver.snapshot().unusable, false);

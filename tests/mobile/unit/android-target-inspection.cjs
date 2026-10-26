@@ -18,6 +18,7 @@ async function fixture(mode, run) {
   const timers = new Set();
   let connections = 0;
   let pidReads = 0;
+  let topLayerSent = 0;
   let directSocket;
   const browserPath = mode === 'bare' ? '/devtools/browser' : '/devtools/browser/owned';
   let serverPort;
@@ -159,9 +160,13 @@ async function fixture(mode, run) {
       try { ws.send(JSON.stringify(response)); ws.send(JSON.stringify(response)); }
       finally { ws._socket.uncork(); }
     } else {
-      if ((mode === 'pending-event' && message.id === 4) || (mode === 'late-top-layer-pending' && message.id === 18)) ws.send(diagnosticEvent());
+      if ((mode === 'pending-event' && message.id === 4) || (mode === 'late-top-layer-pending' && message.id === 18)) {
+        if (mode === 'late-top-layer-pending') topLayerSent++;
+        ws.send(diagnosticEvent());
+      }
       if ((mode === 'between-passes' || mode === 'late-top-layer-between-passes') && message.id === 10) {
         ws._socket.cork();
+        if (mode === 'late-top-layer-between-passes') topLayerSent++;
         try { ws.send(JSON.stringify(response)); ws.send(diagnosticEvent('bootstrap')); }
         finally { ws._socket.uncork(); }
         return;
@@ -194,6 +199,7 @@ async function fixture(mode, run) {
         if (directSocket.readyState === 1) {
           const count = mode === 'late-top-layer-flood' ? 401 : 1;
           for (let index = 0; index < count; index++) directSocket.send(diagnosticEvent(mode === 'late-top-layer-root' ? null : mode === 'late-top-layer-unselected' ? 'bootstrap' : mode === 'late-top-layer-unknown' ? 'unowned' : 'installed'));
+          topLayerSent += count;
           if (mode === 'late-top-layer-target-created') directSocket.send(JSON.stringify({method: 'Target.targetCreated', params: {targetInfo: target('new-target')}}));
           if (mode === 'late-top-layer-document-updated') directSocket.send(JSON.stringify({method: 'DOM.documentUpdated', sessionId: 'installed', params: {}}));
         }
@@ -214,7 +220,7 @@ async function fixture(mode, run) {
   };
   if (mode === 'expired') contract.deadline = Date.now() - 1;
   try {
-    await run({owner, contract, calls, connections: () => connections, failures: () => failures,
+    await run({owner, contract, calls, connections: () => connections, failures: () => failures, topLayerSent: () => topLayerSent,
       setUnselectedMode: value => { unselectedMode = value; }, unselectedMode: () => unselectedMode,
       unselectedDocument: () => ({href: 'https://app/', origin: 'https://app', standalone: unselectedMode === 'standalone', provider: unselectedMode === 'standalone' ? 'android-standalone' : 'browser'})});
   }
@@ -292,9 +298,10 @@ test('diagnostic event params are schema bounded and redacted', async () => fixt
   });
 }));
 
-for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params']) {
-  test(`protocol-valid top-layer notification is admitted after CDP completion: ${mode}`, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
+for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params', 'late-top-layer-unselected', 'late-top-layer-pending', 'late-top-layer-between-passes']) {
+  test(`protocol-valid top-layer notification on an attached page session is admitted: ${mode}`, async () => fixture(mode, async ({owner, contract, calls, failures, topLayerSent}) => {
     const result = await inspectTargets(owner, contract);
+    assert.ok(topLayerSent() > 0);
     assert.equal(result.processAssociation.after.requestId, 18);
     assert.equal(result.selectedHandle, 'installed');
     assert.equal(calls.length, 18);
@@ -304,15 +311,12 @@ for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params']) {
 
 for (const [mode, sessionRelation, phase] of [
   ['late-top-layer-root', 'root', 'post-cdp-completion'],
-  ['late-top-layer-unselected', 'known-local-ordinal', 'post-cdp-completion'],
   ['late-top-layer-unknown', 'unknown', 'post-cdp-completion'],
   ['late-top-layer-malformed', 'known-local-ordinal', 'post-cdp-completion'],
   ['late-top-layer-id', 'known-local-ordinal', 'post-cdp-completion'],
   ['late-top-layer-result', 'known-local-ordinal', 'post-cdp-completion'],
   ['late-top-layer-error', 'known-local-ordinal', 'post-cdp-completion'],
   ['late-top-layer-extra-field', 'known-local-ordinal', 'post-cdp-completion'],
-  ['late-top-layer-pending', 'known-local-ordinal', 'final-snapshot'],
-  ['late-top-layer-between-passes', 'known-local-ordinal', 'initial'],
 ]) test(`top-layer event refuses ${mode}`, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
   let original;
   await assert.rejects(inspectTargets(owner, contract), error => {

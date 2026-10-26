@@ -1413,17 +1413,18 @@ export class IOSPlatform implements MobilePlatform {
   // A scripted web click does not count as a user gesture, so iOS may focus the composer without showing the keyboard.
   private async tapComposerNatively(): Promise<void> {
     const phase = this.budget.phaseView('ios-composer-tap', IOS_NATIVE_LIST_READINESS_MS);
-    await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
-    while (!phase.exhausted) {
-      phase.assertAvailable('find native composer');
-      const findTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
-      if (findTimeout <= 1) break;
-      const matches = await this.driver.findAll(IOS_NATIVE_COMPOSER_LOCATOR, findTimeout);
+    const roundMs = driverRequestAllowanceMs.lookup + driverRequestAllowanceMs.click;
+    while (phase.remainingMs >= roundMs) {
+      await this.requireInstalledProviderForeground(IOS_INSTALLED_FOREGROUND_MS);
+      if (phase.remainingMs < driverRequestAllowanceMs.lookup) break;
+      const matches = await this.driver.findAll(IOS_NATIVE_COMPOSER_LOCATOR, Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs));
       if (matches.length > 1) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native composer is ambiguous (${matches.length} matches)`);
       if (matches.length === 1) {
-        await this.driver.click(matches[0], Math.max(2, phase.remainingMs));
+        await this.requireInstalledProviderForeground(IOS_INSTALLED_FOREGROUND_MS);
+        await this.driver.click(matches[0], Math.max(driverRequestAllowanceMs.click, phase.remainingMs));
         return;
       }
+      if (phase.remainingMs < roundMs + 250) break;
       await delay(250, phase);
     }
     throw new Error('IOS_KEYBOARD: composer was not exposed to native input');
@@ -2323,6 +2324,7 @@ export class IOSPlatform implements MobilePlatform {
     let last = '';
     while (!phase.exhausted) {
       phase.assertAvailable(`keyboard ${expected ? 'show' : 'hide'}`);
+      if (phase.remainingMs < driverRequestAllowanceMs.generic + driverRequestAllowanceMs.lookup) break;
       await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
       const findTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
       if (findTimeout < driverRequestAllowanceMs.lookup) break;

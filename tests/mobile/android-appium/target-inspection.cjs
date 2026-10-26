@@ -71,8 +71,9 @@ function messageClassification(message) {
   if (!hasMethod && hasId) return 'reply';
   return 'other';
 }
-function selectedTopLayerNotification(message, phase, pending, sessionTargets, selectedHandle) {
-  if (phase !== 'post-cdp-completion' || pending || message.method !== 'DOM.topLayerElementsUpdated'
+// Chrome may report top-layer changes on any page session it attached, at any time; they do not change the observed document.
+function topLayerNotification(message, sessionTargets) {
+  if (message.method !== 'DOM.topLayerElementsUpdated'
     || Object.hasOwn(message, 'id') || Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error')) return false;
   const fields = Object.keys(message);
   const validFields = Object.hasOwn(message, 'params')
@@ -80,7 +81,7 @@ function selectedTopLayerNotification(message, phase, pending, sessionTargets, s
     : fields.length === 2 && ['method', 'sessionId'].every((field) => fields.includes(field));
   if (!validFields) return false;
   const association = typeof message.sessionId === 'string' ? sessionTargets.get(message.sessionId) : undefined;
-  if (!association || association.targetId !== selectedHandle) return false;
+  if (!association) return false;
   if (!Object.hasOwn(message, 'params')) return true;
   const params = message.params;
   return Boolean(params && typeof params === 'object' && !Array.isArray(params) && Object.keys(params).length === 0);
@@ -178,7 +179,6 @@ async function inspect(owner, contract, targets) {
   let connected = false;
   let phase = 'initial';
   const sessionTargets = new Map();
-  let selectedHandle;
   const connectionId = randomUUID();
   const failure = new Promise((_, reject) => { rejectFailure = reject; });
   failure.catch(() => {});
@@ -218,7 +218,6 @@ async function inspect(owner, contract, targets) {
     state.expectedBrowserPid = expectedBrowserPid;
     timer = setTimeout(() => fail(new Error('Inspection deadline')), Math.min(contract.deadline - Date.now(), 2147483647));
     const before = await snapshot();
-    selectedHandle = before.selectedHandle;
     await bounded(() => contract.validateSnapshot(owner, before, before));
     const endpoint = record(before.endpoint);
     if (endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 || !/^\/devtools\/browser(?:\/[A-Za-z0-9-]+)?$/.test(endpoint.browserPath)) throw new Error('Invalid owner endpoint');
@@ -252,7 +251,7 @@ async function inspect(owner, contract, targets) {
           check();
           if (++messages > 400 || binary || data.length > LIMIT) throw new Error('Message limit or binary frame');
           const message = record(JSON.parse(data.toString('utf8')));
-          if (selectedTopLayerNotification(message, phase, pending, sessionTargets, selectedHandle)) return;
+          if (topLayerNotification(message, sessionTargets)) return;
           if (message.method === 'Target.attachedToTarget' && pending?.method === 'Target.attachToTarget' && !pending.attached && message.id === undefined && message.sessionId === undefined) {
             const event = record(message.params);
             if (record(event.targetInfo).targetId !== pending.params.targetId || event.waitingForDebugger !== false) throw new Error('Wrong attached target');
