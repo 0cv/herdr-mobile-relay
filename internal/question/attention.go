@@ -115,6 +115,9 @@ var (
 // Classify determines what, if anything, the live control region is asking
 // the user to do. A blocked agent status is deliberately not an input.
 func Classify(text, agent string) Classification {
+	if isAgyAgent(agent) {
+		text = agyMenuFocusPattern.ReplaceAllString(text, "${1}❯ ${2}")
+	}
 	structuredControls := Supports(agent)
 	inputReady := normalInputPrompt(text, agent)
 	if !structuredControls && !inputReady {
@@ -601,6 +604,10 @@ func approvalHeader(agent, header string) bool {
 					strings.Contains(lower, "bash") ||
 					strings.Contains(lower, "command") ||
 					strings.Contains(lower, "action"))
+	case isAgyAgent(agent):
+		return strings.Contains(lower, "requesting permission for") ||
+			strings.Contains(lower, "run this command?") ||
+			strings.Contains(lower, "do you want to proceed")
 	case strings.Contains(agent, "qoder"):
 		return strings.Contains(lower, "permission required") &&
 			(strings.Contains(lower, "apply this change") ||
@@ -657,6 +664,9 @@ func newerOutputAfterMenu(lines []string, lastMenuLine int, agent string) bool {
 			continue
 		}
 		if strings.Contains(agent, "hermes") && hermesApprovalChromeLine(line) {
+			continue
+		}
+		if isAgyAgent(agent) && agyStatusLinePattern.MatchString(line) {
 			continue
 		}
 		if strings.Contains(agent, "qoder") && qoderApprovalTailLine(line) {
@@ -787,3 +797,16 @@ func kimiInputFramePrompt(lines []string, agent string) bool {
 	}
 	return false
 }
+
+// agyMenuFocusPattern matches Antigravity's focused menu row ("> 1. Yes"). It
+// marks focus with a plain ">" where every other agent uses "❯" or "›".
+var agyMenuFocusPattern = regexp.MustCompile(`(?m)^(\s*)> (\d+\.\s)`)
+
+func isAgyAgent(agent string) bool {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	return agent == "agy" || strings.Contains(agent, "antigravity")
+}
+
+// agyStatusLinePattern matches the "Context [...]" usage bar Antigravity keeps
+// under its dialogs; it is chrome, not output newer than the menu.
+var agyStatusLinePattern = regexp.MustCompile(`^\s*Context \[`)

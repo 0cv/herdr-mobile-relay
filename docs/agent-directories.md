@@ -94,6 +94,7 @@ Every other case needs to be named explicitly:
 | `HERDR_OPENCODE_DATA_DIRS` | `${XDG_DATA_HOME:-~/.local/share}/opencode` | none |
 | `HERDR_KIMI_CODE_HOME_DIRS` | `~/.kimi-code` | `KIMI_CODE_HOME` |
 | `HERDR_HERMES_DATA_DIRS` | `~/.hermes` | `HERMES_HOME` |
+| `HERDR_AGY_DATA_DIRS` | `~/.gemini/antigravity-cli` (reads `conversations/<id>.db`) | none |
 | `HERDR_OMO_CONFIG_DIRS` | `~/.senpi/agent` plus supported `~/.omo` layouts | `OMO_CODING_AGENT_DIR`, `SENPI_CODING_AGENT_DIR`, `PI_CODING_AGENT_DIR` |
 
 Kimi entries are home directories containing `sessions`, not the sessions

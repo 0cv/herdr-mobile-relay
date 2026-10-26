@@ -118,6 +118,8 @@ func profileIDForAgentName(agent string) string {
 		return "opencode"
 	case "hermes", "hermes-agent", "hermes agent":
 		return "hermes"
+	case "agy", "antigravity", "antigravity-cli", "antigravity cli":
+		return "agy"
 	}
 	return ""
 }

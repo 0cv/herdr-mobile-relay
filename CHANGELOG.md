@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Support Antigravity CLI (`agy`) panes: its own logo and name, clean
+  **Conversation** and **Full history** from the native conversation database
+  with live updates, slash command suggestions for builtins and
+  `~/.gemini/skills`, and approval cards for its permission dialog. Approval
+  cards appear only once Herdr marks the dialog as blocked; Herdr's agy manifest
+  does not yet detect the Antigravity CLI 1.4.7 dialog.
+
 ### Changed
 
 - Replace **Type in terminal** with a **Keyboard** button in the terminal key

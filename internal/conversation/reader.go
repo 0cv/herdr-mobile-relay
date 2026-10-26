@@ -107,6 +107,7 @@ type Reader struct {
 	omoCache        map[string]omoCacheEntry
 	openCode        *openCodeReader
 	hermes          *hermesReader
+	agy             *agyReader
 	kimiMu          sync.Mutex
 	kimiSources     map[string]kimiSourceState
 	kimiSelectionMu sync.Mutex
@@ -133,7 +134,7 @@ func NewReader(home string) *Reader {
 	return &Reader{
 		home: home, locations: make(map[locationKey]locationCacheEntry),
 		locating: make(map[locationKey]chan struct{}), omoCache: make(map[string]omoCacheEntry),
-		openCode: newOpenCodeReader(home), hermes: newHermesReader(home),
+		openCode: newOpenCodeReader(home), hermes: newHermesReader(home), agy: newAgyReader(home),
 	}
 }
 
@@ -157,7 +158,8 @@ func RecordedSupported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
 		"pi", "picodingagent", "omp", "ohmypi", "cursor", "cursoragent",
-		"opencode", "hermes", "hermesagent", "omo", "ohmyopencode", "kimi", "kimicode":
+		"opencode", "hermes", "hermesagent", "omo", "ohmyopencode", "kimi", "kimicode",
+		"agy", "antigravity", "antigravitycli":
 		return true
 	default:
 		return false
@@ -202,6 +204,9 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 	}
 	if isHermesAgent(agent) {
 		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
+	}
+	if isAgyAgent(agent) {
+		return r.readAgyFor(sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "opencode" {
 		return r.readOpenCode(sessionID, before, limit)
@@ -287,6 +292,9 @@ func (r *Reader) LocateWithProject(agent string, project ProjectContext, session
 	if isHermesAgent(agent) {
 		agentKey = "hermes"
 	}
+	if isAgyAgent(agent) {
+		agentKey = "agy"
+	}
 	key := locationKey{Agent: agentKey, CWD: project.CWD, ForegroundCWD: project.ForegroundCWD, SessionID: sessionID}
 	for {
 		now := time.Now()
@@ -362,6 +370,8 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
 		return r.hermes.locate(project.CWD, sessionID)
+	case "agy", "antigravity", "antigravitycli":
+		return r.agy.locate(sessionID)
 	case "kimi", "kimicode":
 		_, location, _ := r.SelectKimiSession(project, sessionID)
 		return location

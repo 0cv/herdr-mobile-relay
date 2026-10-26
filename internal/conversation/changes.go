@@ -32,6 +32,20 @@ func (r *Reader) ChangeToken(ctx context.Context, scope BrowseScope) (string, er
 		}
 		return fmt.Sprintf("%x", digest.Sum(nil)), nil
 	}
+	if isAgyAgent(scope.Provider) {
+		digest := sha256.New()
+		for _, database := range r.agy.databasePaths(scope.SessionID) {
+			for _, path := range []string{database, database + "-wal"} {
+				info, err := os.Stat(path)
+				if err != nil {
+					fmt.Fprintln(digest, path, "unavailable")
+					continue
+				}
+				fmt.Fprintln(digest, path, fileIdentity(info), info.Size(), info.ModTime().UnixNano(), fileChangeToken(info))
+			}
+		}
+		return fmt.Sprintf("%x", digest.Sum(nil)), nil
+	}
 	if IsKimi(scope.Provider) {
 		return r.kimiChangeToken(ctx, scope)
 	}
