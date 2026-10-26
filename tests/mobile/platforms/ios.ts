@@ -22,6 +22,7 @@ import {
   buttonText,
   css,
   delay,
+  driverRequestAllowanceMs,
   isFatalDriverError,
   isRetryableElementLookupError,
   minimumDriverRequestMs,
@@ -334,6 +335,10 @@ export function nativeActionListEvidence(source: string, target: string): Native
 
 const IOS_HOME_ICON_LABELS = ['Herdr Mobile Relay', 'Herdr Relay'] as const;
 const IOS_HOME_PAGE_INDICATOR_MISSING = 'Home page indicator is missing';
+const IOS_NATIVE_COMPOSER_LOCATOR: Locator = {
+  using: '-ios predicate string',
+  value: "type IN {'XCUIElementTypeTextField', 'XCUIElementTypeTextView'} AND label == 'Prompt' AND visible == 1",
+};
 
 interface IOSHomePage {
   current: number;
@@ -1388,19 +1393,40 @@ export class IOSPlatform implements MobilePlatform {
 
   async showKeyboardOnComposer(): Promise<void> {
     await this.attachToInstalledView();
-    let composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000).catch((error: unknown) => {
+    const existing = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
       return '';
     });
-    if (!composer) {
+    if (!existing) {
       const open = await this.driver.find(css('button[aria-label^="Open "]'), 30_000);
       await this.driver.click(open);
-      composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 30_000);
+      await this.driver.find(css('textarea[aria-label="Prompt"]'), 30_000);
     }
-    await this.driver.click(composer);
+    await this.tapComposerNatively();
+    await this.attachToInstalledView();
+    const composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000);
     this.keyboardDraft = 'mobile-device-ci draft';
     await this.driver.sendKeys(composer, this.keyboardDraft);
     await this.waitForKeyboard(true);
+  }
+
+  // A scripted web click does not count as a user gesture, so iOS may focus the composer without showing the keyboard.
+  private async tapComposerNatively(): Promise<void> {
+    const phase = this.budget.phaseView('ios-composer-tap', IOS_NATIVE_LIST_READINESS_MS);
+    await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
+    while (!phase.exhausted) {
+      phase.assertAvailable('find native composer');
+      const findTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
+      if (findTimeout <= 1) break;
+      const matches = await this.driver.findAll(IOS_NATIVE_COMPOSER_LOCATOR, findTimeout);
+      if (matches.length > 1) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native composer is ambiguous (${matches.length} matches)`);
+      if (matches.length === 1) {
+        await this.driver.click(matches[0], Math.max(2, phase.remainingMs));
+        return;
+      }
+      await delay(250, phase);
+    }
+    throw new Error('IOS_KEYBOARD: composer was not exposed to native input');
   }
 
   async hideKeyboard(): Promise<void> {
@@ -2299,7 +2325,7 @@ export class IOSPlatform implements MobilePlatform {
       phase.assertAvailable(`keyboard ${expected ? 'show' : 'hide'}`);
       await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
       const findTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
-      if (findTimeout <= 1) break;
+      if (findTimeout < driverRequestAllowanceMs.lookup) break;
       const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }, findTimeout);
       let visible = false;
       for (const element of elements) {

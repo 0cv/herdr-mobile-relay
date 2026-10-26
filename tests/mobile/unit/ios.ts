@@ -1136,6 +1136,37 @@ for (const mode of ['empty', 'mixed-malformed', 'unfocused'] as const) {
   });
 }
 
+for (const mode of ['shown', 'ambiguous', 'not-shown'] as const) {
+  test(`keyboard show ${mode} taps the composer natively before requiring the native keyboard`, async () => {
+    let tapped = false;
+    let typed = '';
+    const { platform, driver, requests } = await adapter(`keyboard-show-${mode}`, ({ path, body }) => {
+      if (path.endsWith('/context')) return value(null);
+      if (path.endsWith('/element') && body.value === 'textarea[aria-label="Prompt"]') return value(element('web-composer'));
+      if (path.endsWith('/elements') && body.using === '-ios predicate string') {
+        assert.match(body.value, /label == 'Prompt' AND visible == 1$/u);
+        return value(mode === 'ambiguous' ? [element('native-composer'), element('native-composer-2')] : [element('native-composer')]);
+      }
+      if (path.endsWith('/element/native-composer/click')) { tapped = true; return value(null); }
+      if (path.endsWith('/element/web-composer/value')) { typed = body.text ?? body.value?.join(''); return value(null); }
+      if (path.endsWith('/elements') && body.value === 'XCUIElementTypeKeyboard') return value(mode === 'shown' && tapped ? [element('keyboard')] : []);
+      if (path.endsWith('/element/keyboard/rect')) return value({ x: 0, y: 500, width: 400, height: 300 });
+      if (path.endsWith('/element/keyboard/attribute/visible')) return value('true');
+      throw new Error(`unexpected keyboard command ${path} ${JSON.stringify(body)}`);
+    });
+    platform.attachToInstalledView = async () => {};
+    if (mode === 'shown') await platform.showKeyboardOnComposer();
+    else await assert.rejects(() => platform.showKeyboardOnComposer(),
+      mode === 'ambiguous' ? /IOS_CONTEXT_OWNERSHIP: native composer is ambiguous/u : /IOS_KEYBOARD: expected visible native keyboard/u);
+    assert.equal(tapped, mode !== 'ambiguous');
+    assert.equal(requests.some(request => /\/element\/web-composer\/click$/u.test(request.path)), false);
+    if (mode !== 'ambiguous') assert.equal(typed, 'mobile-device-ci draft');
+    if (mode === 'shown') assert.ok(requests.findIndex(request => request.path.endsWith('/element/native-composer/click'))
+      < requests.findIndex(request => request.path.endsWith('/element/web-composer/value')));
+    assert.equal(driver.snapshot().unusable, false);
+  });
+}
+
 type ConfirmationState = 'ready' | 'missing' | 'stale-lookup' | 'stale-enabled' | 'stale-visible' | 'stale-hittable' | 'disabled' | 'hidden' | 'not-hittable' | 'indeterminate';
 type ConfirmationFault = 'stale' | 'unrelated' | 'invalid-session' | 'misleading-404' | 'malformed' | 'malformed-value' | 'transport' | 'interrupted' | 'hung' | 'body-hung' | 'body-interrupted' | 'body-late' | 'late-missing';
 type ConfirmationBoundary = 'activity-click' | 'source' | 'foreground' | 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
