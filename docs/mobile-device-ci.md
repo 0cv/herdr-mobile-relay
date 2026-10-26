@@ -392,7 +392,9 @@ installed-app launch failure also saves one bounded native hierarchy as
 `failure-hierarchy.xml`, unless a fatal driver failure has quarantined native
 queries. The Share-sheet installation-row click records its start, acknowledgement
 or failure separately from the final Add lookup; acknowledgement alone does not
-prove the confirmation appeared.
+prove the confirmation appeared. Safari prepares the web clip and fetches the
+manifest icon before it answers this click, so the click has the same 12-second
+acknowledgement allowance as the final Add.
 
 The normal real-app journey no longer requests automatic confirmation GET
 `/source` after that acknowledgement. It proceeds directly to the existing
@@ -403,11 +405,12 @@ source requests are unchanged. Client timing is correlation, not proof of native
 cause or confirmation readiness.
 
 The unique visible Add, complete enabled/visible/hittable checks, stable identity
-and exactly one final tap are unchanged, as are settings and all deadlines:
-5-second row click, 8-second lookup, 12-second final click, 75-second confirmation,
-64-second round, 4-second restoration reserve and 1.5-second parent tail. A fatal
-or unusable driver still blocks native diagnostics and further product commands;
-settings restoration is not attempted on that session.
+and exactly one final tap are unchanged, as are settings. The deadlines are:
+12-second Add to Home Screen click, 8-second lookup, 12-second final click,
+75-second confirmation, 64-second round, 4-second restoration reserve and
+1.5-second parent tail. A fatal or unusable driver still blocks native
+diagnostics and further product commands; settings restoration is not
+attempted on that session.
 
 This retires r37's automatic pre-lookup capture recipe only for the normal journey.
 Old r37/run22 evidence and failures remain unchanged. Hosted run40004048167's

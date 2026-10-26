@@ -55,6 +55,7 @@ const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
 const IOS_CONFIRMATION_IDENTITY_MS = 12_000;
 const IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS = 12_000;
+const IOS_ADD_TO_HOME_SCREEN_ACKNOWLEDGEMENT_MS = 12_000;
 const IOS_CONFIRMATION_ROUND_MS = 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 const IOS_CONFIRMATION_COMPLETION_MS = 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 // iOS 27 shows the confirmation button labelled "Add" without guaranteeing that its accessibility name is also "Add".
@@ -921,12 +922,12 @@ export class IOSPlatform implements MobilePlatform {
     const transaction = phase.phaseView('ios-confirmation-transaction', phase.remainingMs, 1_500);
     const policy = this.driver.nativeRequestPolicy(transaction);
     try {
-      await withIOSConfirmationSettings(this.driver, transaction, IOS_NATIVE_SCROLL_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS, async (operation) => {
+      await withIOSConfirmationSettings(this.driver, transaction, IOS_ADD_TO_HOME_SCREEN_ACKNOWLEDGEMENT_MS + IOS_CONFIRMATION_ROUND_MS, async (operation) => {
         const operationPolicy = Object.freeze({ ...policy, budget: operation });
-        if (operation.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
-        this.diagnostics.record({ phase: 'ios-install', operation: 'activity-click-started', timeoutMs: IOS_NATIVE_SCROLL_COMMAND_MS });
+        if (operation.remainingMs < IOS_ADD_TO_HOME_SCREEN_ACKNOWLEDGEMENT_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
+        this.diagnostics.record({ phase: 'ios-install', operation: 'activity-click-started', timeoutMs: IOS_ADD_TO_HOME_SCREEN_ACKNOWLEDGEMENT_MS });
         try {
-          await this.driver.click(addToHomeScreen, IOS_NATIVE_SCROLL_COMMAND_MS, operationPolicy);
+          await this.driver.click(addToHomeScreen, IOS_ADD_TO_HOME_SCREEN_ACKNOWLEDGEMENT_MS, operationPolicy);
         } catch (error) {
           this.diagnostics.record({ phase: 'ios-install', operation: 'activity-click-failed', detail: { fatal: isFatalDriverError(error) } });
           throw error;

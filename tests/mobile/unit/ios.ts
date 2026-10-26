@@ -1464,7 +1464,7 @@ test('confirmation product-first proceeds directly from acknowledged row to fore
 test('confirmation product-first disposition does not depend on retired capture surplus', async () => {
   requireXmlLint();
   for (const remaining of [73_000, 72_999]) {
-    const a = await confirmationReplay(`product-first-budget-${remaining}`, { parentRemaining: 80_500, activityDuration: 75_000 - remaining });
+    const a = await confirmationReplay(`product-first-budget-${remaining}`, { parentRemaining: 87_500, activityDuration: 82_000 - remaining });
     assert.equal(a.error, undefined);
     const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
     assert.equal(capture.status, 'not-requested-product-first');
@@ -1614,7 +1614,7 @@ test('activity click timeout records its boundary without further native command
   const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
   const clicks = events.filter((event: { operation: string }) => event.operation.startsWith('activity-click-'));
   assert.deepEqual(clicks.map((event: { operation: string }) => event.operation), ['activity-click-started', 'activity-click-failed']);
-  assert.equal(clicks[0].timeoutMs, 5_000);
+  assert.equal(clicks[0].timeoutMs, 12_000);
   assert.deepEqual(clicks[1].detail, { fatal: true });
   assert.equal(a.requests.at(-1)?.path.endsWith('/element/target-1/click'), true);
 });
@@ -1642,7 +1642,7 @@ test('confirmation SM57 final Add12000 is isolated from all other caps', async (
   const history = a.driver.snapshot().commands;
   const commands = history.slice(history.findIndex(command => command.path.endsWith('/element/target-1/click')));
   assert.equal(commands.find(command => command.path.endsWith('/element/add-1/click'))?.timeoutMs, 12_000);
-  assert.equal(commands.find(command => command.path.endsWith('/element/target-1/click'))?.timeoutMs, 5_000);
+  assert.equal(commands.find(command => command.path.endsWith('/element/target-1/click'))?.timeoutMs, 12_000);
   assert.ok(commands.filter(command => command.path.endsWith('/elements')).every(command => command.timeoutMs === 12_000));
   assert.equal(commands.find(command => command.path.endsWith('/element') && command.timeoutMs === 8_000)?.timeoutMs, 8_000);
   assert.ok(commands.filter(command => command.path.includes('/add-1/attribute/')).every(command => command.timeoutMs === 5_000));
@@ -1756,15 +1756,15 @@ test('confirmation SM57 sent stale Add cannot retry or recover installation', as
 
 test('confirmation SM57 independent absolute phases and restoration tail never renew', async () => {
   requireXmlLint();
-  for (const remaining of [80_500, 80_499]) {
+  for (const remaining of [87_500, 87_499]) {
     const a = await confirmationReplay(`SM57-entry-${remaining}`, { parentRemaining: remaining });
-    if (remaining === 80_500) assert.equal(a.error, undefined);
+    if (remaining === 87_500) assert.equal(a.error, undefined);
     else assert.match(String(a.error), /insufficient whole transaction allowance/u);
     const settings = a.requests.filter(request => request.path.endsWith('/appium/settings') && 'waitForIdleTimeout' in (request.body.settings || {}));
-    assert.equal(settings.length, remaining === 80_500 ? 2 : 0);
-    assert.equal(a.lookups, remaining === 80_500 ? 1 : 0);
+    assert.equal(settings.length, remaining === 87_500 ? 2 : 0);
+    assert.equal(a.lookups, remaining === 87_500 ? 1 : 0);
   }
-  const a = await confirmationReplay('SM57-no-renewal', { parentRemaining: 81_000, replaceReadyIdentity: 'always', after: boundary => boundary === 'identity' ? 1_000 : 0 });
+  const a = await confirmationReplay('SM57-no-renewal', { parentRemaining: 88_000, replaceReadyIdentity: 'always', after: boundary => boundary === 'identity' ? 1_000 : 0 });
   assert.match(String(a.error), /confirmation control was not ready/u);
   assert.ok(a.lookups > 1);
   assert.deepEqual(a.clicks, ['share', 'target-1']);
@@ -2014,7 +2014,7 @@ test('confirmation hypothetical same-dialog Add replacement reacquires a complet
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
-for (const remaining of [81_000, 83_000]) {
+for (const remaining of [88_000, 90_000]) {
   test(`confirmation hypothetical repeated same-dialog Add replacements do not renew the ${remaining}ms child deadline`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -2151,7 +2151,7 @@ test('confirmation final click requires its complete parent allowance after all 
   if (skip) return skip;
   let identityReads = 0;
   const replay = await confirmationReplay('click-admission', {
-    parentRemaining: 81_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 63_501 : 0,
+    parentRemaining: 88_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 63_501 : 0,
   });
   assert.match(String(replay.error), /insufficient time to complete confirmation click/u);
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
@@ -3286,9 +3286,9 @@ for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publi
       assert.equal(command.timeoutMs, 8_000);
       assert.equal(command.timedOut, false);
       assert.ok(command.timing?.admitted && command.timing.sent && command.timing.completed);
-      assert.ok(a.driver.snapshot().commands
-        .filter((entry) => /\/element\/(?:share|target-[^/]+)\/click$/u.test(entry.path))
-        .every((entry) => entry.timeoutMs === 5_000), 'Share and Add-to-Home-Screen clicks retain their 5s bound');
+      const clicks = a.driver.snapshot().commands.filter((entry) => /\/element\/(?:share|target-[^/]+)\/click$/u.test(entry.path));
+      assert.ok(clicks.every((entry) => entry.timeoutMs === (entry.path.endsWith('/element/share/click') ? 5_000 : 12_000)),
+        'Share keeps its 5s bound and Add to Home Screen keeps its 12s acknowledgement bound');
       const elapsed = command.timing!.settlementMs! - command.timing!.dispatchMs!;
       assert.ok(elapsed > 5_000 && elapsed < 8_000, `gesture receipt elapsed ${elapsed}ms outside the 5s-8s bounds`);
       const admissions = a.nativeAdmissions.filter((receipt) => receipt.phase === 'ios-share-gesture');
