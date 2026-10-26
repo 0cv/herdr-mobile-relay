@@ -106,7 +106,28 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+      # The Ubuntu mirror has taken from 30 s to more than 44 min to serve the
+      # WebKit system packages, so the downloaded packages are cached as well.
+      # They are saved right after the install, even if a later check fails.
+      - id: playwright-apt
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/playwright-apt
+          key: playwright-apt-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+      - name: Keep browser system packages for the cache
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/playwright-apt/partial"
+          printf 'Dir::Cache::Archives "%s";\nAPT::Keep-Downloaded-Packages "true";\n' "$HOME/.cache/playwright-apt" \
+            | sudo tee /etc/apt/apt.conf.d/90-playwright-archives >/dev/null
       - run: cd frontend && bun x playwright install --with-deps chromium webkit
+      - name: Let the cache read the browser system packages
+        run: sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
+      - if: steps.playwright-apt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/playwright-apt
+          key: ${{ steps.playwright-apt.outputs.cache-primary-key }}
       - run: make PATH="$PATH" frontend-check
       - run: make PATH="$PATH" web-release-check
 
