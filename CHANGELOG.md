@@ -13,6 +13,14 @@ project follows [Semantic Versioning](https://semver.org/).
   until the first send was confirmed, so agents that stop on a double Esc could
   not be stopped from the phone.
 
+## [0.23.2] - 2026-10-25
+
+### Added
+
+- Show questions that Claude Code asks (AskUserQuestion) in **Conversation**
+  and **Full history**, with their options and the chosen answer. While the
+  agent waits for a reply, the question is marked as waiting. (#63)
+
 ## [0.23.1] - 2026-10-25
 
 ### Added
@@ -1878,7 +1886,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...HEAD
+[0.23.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...v0.23.0
 [0.22.13]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...v0.22.13

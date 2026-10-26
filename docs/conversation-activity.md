@@ -1,6 +1,7 @@
 # Conversation activity
 
-Conversation keeps its compact prompt/final-answer projection. **Full history**
+Conversation keeps prompts, agent questions (Claude Code AskUserQuestion) with
+their answers, and final answers. **Full history**
 shows intermediate assistant messages and tool cards. Both use browser-local
 scrolling; neither requests a pane size. Terminal
 remains available for menus, approvals and other native interactions. Composer
