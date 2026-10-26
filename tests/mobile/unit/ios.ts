@@ -1136,12 +1136,17 @@ for (const mode of ['empty', 'mixed-malformed', 'unfocused'] as const) {
   });
 }
 
-for (const mode of ['shown', 'ambiguous', 'not-shown', 'composer-missing', 'not-foreground', 'unexposed', 'unexposed-baseline', 'unexposed-zoomed', 'unexposed-baseline-zoomed', 'unexposed-baseline-error', 'unexposed-unfocused', 'unexposed-script-error', 'hidden-element'] as const) {
+for (const mode of ['shown', 'ambiguous', 'not-shown', 'composer-missing', 'not-foreground', 'unexposed', 'unexposed-threshold', 'unexposed-below-threshold', 'unexposed-baseline-covered', 'unexposed-baseline-error', 'unexposed-insufficient', 'unexposed-zoomed', 'unexposed-landscape', 'unexposed-unfocused', 'unexposed-script-error', 'hidden-element'] as const) {
   test(`keyboard show ${mode} taps the composer natively before requiring the native keyboard`, async () => {
     let tapped = false;
     let typed = '';
-    const baselineCover = 60;
-    const pageCover = mode === 'not-shown' ? baselineCover : mode === 'unexposed-baseline' ? baselineCover + 150 : baselineCover + 336;
+    const baselineCover = mode === 'unexposed-baseline-covered' ? 396 : 60;
+    const pageCover = mode === 'not-shown' ? 60 : mode === 'unexposed-insufficient' ? 210
+      : mode === 'unexposed-threshold' ? 250 : mode === 'unexposed-below-threshold' ? 249 : 396;
+    const page = (focused: boolean, cover: number, scale = 1, portrait = true) => ({
+      focused, portrait, scale, innerHeight: 812, screenHeight: 874, viewportHeight: 874 - cover, cover,
+    });
+    const accepted = ['shown', 'unexposed', 'unexposed-threshold', 'unexposed-baseline-covered', 'unexposed-baseline-error'].includes(mode);
     const { platform, driver, requests } = await adapter(`keyboard-show-${mode}`, ({ path, body }) => {
       if (path.endsWith('/context')) return value(null);
       if (path.endsWith('/element') && body.value === 'textarea[aria-label="Prompt"]') return value(element('web-composer'));
@@ -1154,9 +1159,10 @@ for (const mode of ['shown', 'ambiguous', 'not-shown', 'composer-missing', 'not-
       if (path.endsWith('/element/web-composer/value')) { typed = body.text ?? body.value?.join(''); return value(null); }
       if (path.endsWith('/execute/sync') && String(body.script).includes('visualViewport')) {
         if (!typed && mode === 'unexposed-baseline-error') return Response.json({ value: { error: 'javascript error', message: 'viewport unavailable' } }, { status: 500 });
-        if (!typed) return value({ focused: false, scale: mode === 'unexposed-baseline-zoomed' ? 1.4 : 1, cover: baselineCover });
+        if (!typed) return value(page(false, baselineCover));
         if (mode === 'unexposed-script-error') return Response.json({ value: { error: 'javascript error', message: 'viewport unavailable' } }, { status: 500 });
-        return value({ focused: mode !== 'unexposed-unfocused', scale: mode === 'unexposed-zoomed' ? 1.4 : 1, cover: pageCover });
+        const scale = mode === 'unexposed-zoomed' ? 1.4 : mode === 'unexposed-threshold' ? 1.04 : 1;
+        return value(page(mode !== 'unexposed-unfocused', pageCover, scale, mode !== 'unexposed-landscape'));
       }
       if (path.endsWith('/elements') && body.value === 'XCUIElementTypeKeyboard') return value((mode === 'shown' || mode === 'hidden-element') && tapped ? [element('keyboard')] : []);
       if (path.endsWith('/element/keyboard/rect')) return value({ x: 0, y: 500, width: 400, height: 300 });
@@ -1166,15 +1172,23 @@ for (const mode of ['shown', 'ambiguous', 'not-shown', 'composer-missing', 'not-
     platform.attachToInstalledView = async () => {};
     (platform as any).installedBundleId = 'com.apple.webapp';
     (platform as any).springBoardRoot = 'springboard-root';
-    if (mode === 'shown' || mode === 'unexposed') await platform.showKeyboardOnComposer();
+    if (accepted) await platform.showKeyboardOnComposer();
     else await assert.rejects(() => platform.showKeyboardOnComposer(),
       mode === 'ambiguous' ? /IOS_CONTEXT_OWNERSHIP: native composer is ambiguous/u
         : mode === 'composer-missing' ? /IOS_KEYBOARD: composer was not exposed to native input/u
         : mode === 'not-foreground' ? /IOS_CONTEXT_OWNERSHIP: native provider com\.apple\.webapp is not identified in foreground/u
-        : /IOS_KEYBOARD: expected visible native keyboard/u);
+        : mode === 'hidden-element' ? /IOS_KEYBOARD: expected visible native keyboard \(visible=false, element seen\)$/u
+        : mode === 'unexposed-script-error' ? /IOS_KEYBOARD: expected visible native keyboard \(visible=false\); page unmeasured$/u
+        : mode === 'unexposed-insufficient' ? /; page focused=true portrait=true scale=1 inner=812 screen=874 visual=664 cover=210 baseline=60$/u
+        : mode === 'unexposed-below-threshold' ? /; page focused=true portrait=true scale=1 inner=812 screen=874 visual=625 cover=249 baseline=60$/u
+        : mode === 'unexposed-zoomed' ? /; page focused=true portrait=true scale=1\.4 /u
+        : mode === 'unexposed-landscape' ? /; page focused=true portrait=false /u
+        : mode === 'unexposed-unfocused' ? /; page focused=false /u
+        : /IOS_KEYBOARD: expected visible native keyboard \(visible=false\); page focused=true portrait=true scale=1 inner=812 screen=874 visual=814 cover=60 baseline=60$/u);
     assert.equal(tapped, !['ambiguous', 'composer-missing', 'not-foreground'].includes(mode));
-    const pageShown = (platform as any).diagnostics.snapshot().some((event: { operation: string }) => event.operation === 'keyboard-shown-by-page-viewport');
-    assert.equal(pageShown, mode === 'unexposed');
+    const operations = (platform as any).diagnostics.snapshot().map((event: { operation: string }) => event.operation);
+    assert.equal(operations.includes('keyboard-shown-by-page-viewport'), accepted && mode !== 'shown');
+    assert.equal(operations.includes('keyboard-not-shown-by-page-viewport'), !accepted && mode !== 'hidden-element' && tapped);
     if (mode === 'not-foreground') assert.equal(requests.some(request => request.body.using === '-ios predicate string'), false);
     if (tapped) {
       const click = requests.findIndex(request => request.path.endsWith('/element/native-composer/click'));
@@ -1205,9 +1219,12 @@ for (const mode of ['restored', 'still-covered'] as const) {
       if (path.endsWith('/element/keyboard/rect')) return value({ x: 0, y: 500, width: 400, height: 300 });
       if (path.endsWith('/element/keyboard/attribute/visible')) return value('true');
       if (path.endsWith('/execute/sync') && String(body.script).includes('visualViewport')) {
-        if (!typed) return value({ focused: false, scale: 1, cover: 60 });
-        if (cycle === 2) return value({ focused: !blurred, scale: 1, cover: 396 });
-        return value({ focused: !blurred, scale: 1, cover: blurred && mode === 'restored' ? 60 : 396 });
+        const page = (focused: boolean, cover: number) => ({
+          focused, portrait: true, scale: 1, innerHeight: 812, screenHeight: 874, viewportHeight: 874 - cover, cover,
+        });
+        if (!typed) return value(page(false, 60));
+        if (cycle === 2) return value(page(!blurred, 396));
+        return value(page(!blurred, blurred && mode === 'restored' ? 60 : 396));
       }
       if (path.endsWith('/execute/sync') && String(body.script).includes('composer.blur()')) { blurred = true; return value(true); }
       if (path.endsWith('/execute/sync') && String(body.script).includes('?.value')) return value(typed);
@@ -1226,7 +1243,7 @@ for (const mode of ['restored', 'still-covered'] as const) {
       await platform.showKeyboardOnComposer();
       await platform.hideKeyboard();
     } else {
-      await assert.rejects(() => platform.hideKeyboard(), /IOS_KEYBOARD: page viewport stayed covered after dismissal \(336\)/u);
+      await assert.rejects(() => platform.hideKeyboard(), /IOS_KEYBOARD: page viewport stayed covered after dismissal; page focused=false portrait=true scale=1 inner=812 screen=874 visual=478 cover=396 baseline=60$/u);
     }
     assert.equal(blurred, true);
     assert.equal(driver.snapshot().unusable, false);

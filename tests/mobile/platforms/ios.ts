@@ -53,8 +53,8 @@ const IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT = 2_048;
 const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_KEYBOARD_PHASE_MS = 10_000;
 const IOS_PAGE_SCRIPT_MS = 5_000;
-const IOS_PAGE_KEYBOARD_MIN_COVER_PX = 200;
-const IOS_PAGE_KEYBOARD_SCRIPT = "const composer = document.querySelector('textarea[aria-label=\"Prompt\"]'); const viewport = window.visualViewport; if (!viewport) return null; return { focused: Boolean(composer) && document.activeElement === composer, scale: viewport.scale, cover: Math.round(Math.max(window.innerHeight, screen.height) - viewport.height) };";
+const IOS_PAGE_KEYBOARD_MIN_COVER_PX = 250;
+const IOS_PAGE_KEYBOARD_SCRIPT = "const composer = document.querySelector('textarea[aria-label=\"Prompt\"]'); const viewport = window.visualViewport; if (!viewport) return null; return { focused: Boolean(composer) && document.activeElement === composer, portrait: window.matchMedia('(orientation: portrait)').matches, scale: viewport.scale, innerHeight: window.innerHeight, screenHeight: screen.height, viewportHeight: viewport.height, cover: Math.round(Math.max(window.innerHeight, screen.height) - viewport.height) };";
 
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
@@ -341,7 +341,15 @@ export function nativeActionListEvidence(source: string, target: string): Native
 
 const IOS_HOME_ICON_LABELS = ['Herdr Mobile Relay', 'Herdr Relay'] as const;
 const IOS_HOME_PAGE_INDICATOR_MISSING = 'Home page indicator is missing';
-type PageKeyboardMeasure = { focused: boolean; scale: number; cover: number };
+type PageKeyboardMeasure = {
+  focused: boolean;
+  portrait: boolean;
+  scale: number;
+  innerHeight: number;
+  screenHeight: number;
+  viewportHeight: number;
+  cover: number;
+};
 
 const IOS_NATIVE_COMPOSER_LOCATOR: Locator = {
   using: '-ios predicate string',
@@ -1426,42 +1434,55 @@ export class IOSPlatform implements MobilePlatform {
     try {
       const measured = await this.driver.execute<unknown>(IOS_PAGE_KEYBOARD_SCRIPT, [], timeoutMs);
       if (!measured || typeof measured !== 'object') return undefined;
-      const { focused, scale, cover } = measured as Record<string, unknown>;
-      if (typeof focused !== 'boolean' || typeof scale !== 'number' || typeof cover !== 'number' || !Number.isFinite(scale) || !Number.isFinite(cover)) return undefined;
-      return { focused, scale, cover };
+      const { focused, portrait, scale, innerHeight, screenHeight, viewportHeight, cover } = measured as Record<string, unknown>;
+      const numbers = [scale, innerHeight, screenHeight, viewportHeight, cover];
+      if (typeof focused !== 'boolean' || typeof portrait !== 'boolean' || !numbers.every((value) => typeof value === 'number' && Number.isFinite(value))) return undefined;
+      return { focused, portrait, scale, innerHeight, screenHeight, viewportHeight, cover } as PageKeyboardMeasure;
     } catch (error) {
       if (isFatalDriverError(error)) throw error;
       return undefined;
     }
   }
 
+  private describePageKeyboard(measure: PageKeyboardMeasure | undefined): string {
+    if (!measure) return 'unmeasured';
+    const { focused, portrait, scale, innerHeight, screenHeight, viewportHeight, cover } = measure;
+    return `focused=${focused} portrait=${portrait} scale=${scale} inner=${innerHeight} screen=${screenHeight} visual=${viewportHeight} cover=${cover} baseline=${this.pageKeyboardBaseline?.cover ?? 'unmeasured'}`;
+  }
+
   private pageKeyboardCover(measure: PageKeyboardMeasure | undefined): number | undefined {
-    const baseline = this.pageKeyboardBaseline;
-    if (!baseline || !measure || Math.abs(baseline.scale - 1) > 0.01 || Math.abs(measure.scale - 1) > 0.01) return undefined;
-    return measure.cover - baseline.cover;
+    if (!measure?.portrait || Math.abs(measure.scale - 1) > 0.05) return undefined;
+    return measure.cover;
   }
 
   // On hosted iOS the keyboard shown for an installed web app is sometimes missing from the accessibility tree.
-  private async pageShowsKeyboard(): Promise<boolean> {
+  private async pageShowsKeyboard(): Promise<string | true> {
     await this.attachToInstalledView();
     const measure = await this.measurePageKeyboard();
     const cover = this.pageKeyboardCover(measure);
-    if (!measure?.focused || cover === undefined || cover < IOS_PAGE_KEYBOARD_MIN_COVER_PX) return false;
+    const shown = measure?.focused === true && cover !== undefined && cover >= IOS_PAGE_KEYBOARD_MIN_COVER_PX;
+    this.diagnostics.record({
+      phase: 'ios-keyboard',
+      operation: shown ? 'keyboard-shown-by-page-viewport' : 'keyboard-not-shown-by-page-viewport',
+      detail: { baseline: this.pageKeyboardBaseline ?? null, measure: measure ?? null },
+    });
+    if (!shown) return this.describePageKeyboard(measure);
     this.keyboardShownByPage = true;
-    this.diagnostics.record({ phase: 'ios-keyboard', operation: 'keyboard-shown-by-page-viewport', detail: { baselineCover: this.pageKeyboardBaseline?.cover, cover: measure.cover } });
     return true;
   }
 
   private async waitForPageKeyboardHidden(): Promise<void> {
     const phase = this.budget.phaseView('ios-page-keyboard', IOS_KEYBOARD_PHASE_MS);
-    let cover: number | undefined;
+    let measure: PageKeyboardMeasure | undefined;
     while (phase.remainingMs >= driverRequestAllowanceMs.lookup) {
-      cover = this.pageKeyboardCover(await this.measurePageKeyboard(Math.min(IOS_PAGE_SCRIPT_MS, phase.remainingMs)));
+      measure = await this.measurePageKeyboard(Math.min(IOS_PAGE_SCRIPT_MS, phase.remainingMs));
+      const cover = this.pageKeyboardCover(measure);
       if (cover !== undefined && cover < IOS_PAGE_KEYBOARD_MIN_COVER_PX) return;
       if (phase.remainingMs < driverRequestAllowanceMs.lookup + 250) break;
       await delay(250, phase);
     }
-    throw new Error(`IOS_KEYBOARD: page viewport stayed covered after dismissal (${cover ?? 'unmeasured'})`);
+    this.diagnostics.record({ phase: 'ios-keyboard', operation: 'keyboard-not-hidden-by-page-viewport', detail: { baseline: this.pageKeyboardBaseline ?? null, measure: measure ?? null } });
+    throw new Error(`IOS_KEYBOARD: page viewport stayed covered after dismissal; page ${this.describePageKeyboard(measure)}`);
   }
 
   // A scripted web click does not count as a user gesture, so iOS may focus the composer without showing the keyboard.
@@ -2374,7 +2395,7 @@ export class IOSPlatform implements MobilePlatform {
     }
   }
 
-  private async waitForKeyboard(expected: boolean, pageEvidence?: () => Promise<boolean>): Promise<void> {
+  private async waitForKeyboard(expected: boolean, pageEvidence?: () => Promise<string | true>): Promise<void> {
     const phase = this.budget.phaseView('ios-keyboard', IOS_KEYBOARD_PHASE_MS);
     let last = '';
     let polls = 0;
@@ -2408,14 +2429,18 @@ export class IOSPlatform implements MobilePlatform {
       if (visible === expected) return;
       await delay(250, phase);
     }
+    let pageDetail = '';
     if (expected && polls > 0 && !keyboardElementSeen && pageEvidence) {
       try {
-        if (await pageEvidence()) return;
+        const evidence = await pageEvidence();
+        if (evidence === true) return;
+        pageDetail = `; page ${evidence}`;
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
+        pageDetail = `; page unmeasured (${error instanceof Error ? error.name : 'unknown'})`;
       }
     }
-    throw new Error(`IOS_KEYBOARD: expected ${expected ? 'visible' : 'hidden'} native keyboard (${last})`);
+    throw new Error(`IOS_KEYBOARD: expected ${expected ? 'visible' : 'hidden'} native keyboard (${last}${expected && keyboardElementSeen ? ', element seen' : ''})${pageDetail}`);
   }
 
   private assertOwnershipClear(): void {
