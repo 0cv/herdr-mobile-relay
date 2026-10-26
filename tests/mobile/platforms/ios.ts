@@ -51,6 +51,11 @@ const IOS_NAVIGATION_PHASE_MS = IOS_OPENURL_COMMAND_MS + IOS_SAFARI_READINESS_PH
 const IOS_SAFARI_DIAGNOSTIC_CONTEXT_LIMIT = 64;
 const IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT = 2_048;
 const IOS_INSTALLED_FOREGROUND_MS = 8_000;
+const IOS_KEYBOARD_PHASE_MS = 10_000;
+const IOS_PAGE_SCRIPT_MS = 5_000;
+const IOS_PAGE_KEYBOARD_MIN_COVER_PX = 200;
+const IOS_PAGE_KEYBOARD_SCRIPT = "const composer = document.querySelector('textarea[aria-label=\"Prompt\"]'); const viewport = window.visualViewport; if (!viewport) return null; return { focused: Boolean(composer) && document.activeElement === composer, scale: viewport.scale, cover: Math.round(Math.max(window.innerHeight, screen.height) - viewport.height) };";
+
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
 const IOS_CONFIRMATION_IDENTITY_MS = 12_000;
@@ -336,6 +341,8 @@ export function nativeActionListEvidence(source: string, target: string): Native
 
 const IOS_HOME_ICON_LABELS = ['Herdr Mobile Relay', 'Herdr Relay'] as const;
 const IOS_HOME_PAGE_INDICATOR_MISSING = 'Home page indicator is missing';
+type PageKeyboardMeasure = { focused: boolean; scale: number; cover: number };
+
 const IOS_NATIVE_COMPOSER_LOCATOR: Locator = {
   using: '-ios predicate string',
   value: "type IN {'XCUIElementTypeTextField', 'XCUIElementTypeTextView'} AND label == 'Prompt' AND visible == 1",
@@ -447,6 +454,8 @@ export class IOSPlatform implements MobilePlatform {
   private lastIdentity?: RuntimeIdentity;
   private lastUrl = '';
   private keyboardDraft = '';
+  private pageKeyboardBaseline: PageKeyboardMeasure | undefined;
+  private keyboardShownByPage = false;
   private lastCompletion?: UpdateCompletionEvidence;
   private lastNativeActivity = '';
   private lastNativePid = '';
@@ -1403,12 +1412,56 @@ export class IOSPlatform implements MobilePlatform {
       await this.driver.click(open);
       await this.driver.find(css('textarea[aria-label="Prompt"]'), 30_000);
     }
+    this.keyboardShownByPage = false;
+    this.pageKeyboardBaseline = await this.measurePageKeyboard();
     await this.tapComposerNatively();
     await this.attachToInstalledView();
     const composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000);
     this.keyboardDraft = 'mobile-device-ci draft';
     await this.driver.sendKeys(composer, this.keyboardDraft);
-    await this.waitForKeyboard(true);
+    await this.waitForKeyboard(true, () => this.pageShowsKeyboard());
+  }
+
+  private async measurePageKeyboard(timeoutMs = IOS_PAGE_SCRIPT_MS): Promise<PageKeyboardMeasure | undefined> {
+    try {
+      const measured = await this.driver.execute<unknown>(IOS_PAGE_KEYBOARD_SCRIPT, [], timeoutMs);
+      if (!measured || typeof measured !== 'object') return undefined;
+      const { focused, scale, cover } = measured as Record<string, unknown>;
+      if (typeof focused !== 'boolean' || typeof scale !== 'number' || typeof cover !== 'number' || !Number.isFinite(scale) || !Number.isFinite(cover)) return undefined;
+      return { focused, scale, cover };
+    } catch (error) {
+      if (isFatalDriverError(error)) throw error;
+      return undefined;
+    }
+  }
+
+  private pageKeyboardCover(measure: PageKeyboardMeasure | undefined): number | undefined {
+    const baseline = this.pageKeyboardBaseline;
+    if (!baseline || !measure || Math.abs(baseline.scale - 1) > 0.01 || Math.abs(measure.scale - 1) > 0.01) return undefined;
+    return measure.cover - baseline.cover;
+  }
+
+  // On hosted iOS the keyboard shown for an installed web app is sometimes missing from the accessibility tree.
+  private async pageShowsKeyboard(): Promise<boolean> {
+    await this.attachToInstalledView();
+    const measure = await this.measurePageKeyboard();
+    const cover = this.pageKeyboardCover(measure);
+    if (!measure?.focused || cover === undefined || cover < IOS_PAGE_KEYBOARD_MIN_COVER_PX) return false;
+    this.keyboardShownByPage = true;
+    this.diagnostics.record({ phase: 'ios-keyboard', operation: 'keyboard-shown-by-page-viewport', detail: { baselineCover: this.pageKeyboardBaseline?.cover, cover: measure.cover } });
+    return true;
+  }
+
+  private async waitForPageKeyboardHidden(): Promise<void> {
+    const phase = this.budget.phaseView('ios-page-keyboard', IOS_KEYBOARD_PHASE_MS);
+    let cover: number | undefined;
+    while (phase.remainingMs >= driverRequestAllowanceMs.lookup) {
+      cover = this.pageKeyboardCover(await this.measurePageKeyboard(Math.min(IOS_PAGE_SCRIPT_MS, phase.remainingMs)));
+      if (cover !== undefined && cover < IOS_PAGE_KEYBOARD_MIN_COVER_PX) return;
+      if (phase.remainingMs < driverRequestAllowanceMs.lookup + 250) break;
+      await delay(250, phase);
+    }
+    throw new Error(`IOS_KEYBOARD: page viewport stayed covered after dismissal (${cover ?? 'unmeasured'})`);
   }
 
   // A scripted web click does not count as a user gesture, so iOS may focus the composer without showing the keyboard.
@@ -1438,6 +1491,7 @@ export class IOSPlatform implements MobilePlatform {
     if (blurred !== true) throw new Error('IOS_KEYBOARD: composer was not focused before dismissal');
     await this.waitForKeyboard(false);
     await this.attachToInstalledView();
+    if (this.keyboardShownByPage) await this.waitForPageKeyboardHidden();
     if (this.keyboardDraft) {
       const value = await this.driver.execute<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''");
       if (value !== this.keyboardDraft) throw new Error('IOS_KEYBOARD: draft was not preserved after dismissal');
@@ -2320,9 +2374,11 @@ export class IOSPlatform implements MobilePlatform {
     }
   }
 
-  private async waitForKeyboard(expected: boolean): Promise<void> {
-    const phase = this.budget.phaseView('ios-keyboard', 10_000);
+  private async waitForKeyboard(expected: boolean, pageEvidence?: () => Promise<boolean>): Promise<void> {
+    const phase = this.budget.phaseView('ios-keyboard', IOS_KEYBOARD_PHASE_MS);
     let last = '';
+    let polls = 0;
+    let keyboardElementSeen = false;
     while (!phase.exhausted) {
       phase.assertAvailable(`keyboard ${expected ? 'show' : 'hide'}`);
       if (phase.remainingMs < driverRequestAllowanceMs.generic + driverRequestAllowanceMs.lookup) break;
@@ -2330,6 +2386,8 @@ export class IOSPlatform implements MobilePlatform {
       const findTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
       if (findTimeout < driverRequestAllowanceMs.lookup) break;
       const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }, findTimeout);
+      polls++;
+      if (elements.length) keyboardElementSeen = true;
       let visible = false;
       for (const element of elements) {
         const rectTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
@@ -2349,6 +2407,13 @@ export class IOSPlatform implements MobilePlatform {
       last = `visible=${visible}`;
       if (visible === expected) return;
       await delay(250, phase);
+    }
+    if (expected && polls > 0 && !keyboardElementSeen && pageEvidence) {
+      try {
+        if (await pageEvidence()) return;
+      } catch (error) {
+        if (isFatalDriverError(error)) throw error;
+      }
     }
     throw new Error(`IOS_KEYBOARD: expected ${expected ? 'visible' : 'hidden'} native keyboard (${last})`);
   }
