@@ -481,6 +481,45 @@ androidEventTests.push(['hosted 39822066139 helper first line stamped one millis
   }
 }]);
 
+androidEventTests.push(['hosted 40306915048 helper straddling END retires normally when its kernel audit records arrive after END', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40306915048-helper-late-audit.log', import.meta.url), 'utf8');
+  const processes = { '559': 'system_server', '5526': 'com.android.chrome', '5564': 'com.android.chrome_zygote' };
+  const measureLateAudit = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = '40306915048';
+    after.measurement!.id = '40306915048';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const lines = log.split('\n');
+  const end = lines.findIndex((entry) => entry.endsWith('HerdrMeasure: 40306915048 END'));
+  const lateAudit = lines[end + 1];
+  assert.match(lateAudit, /^ +1793011715\.608 +10840 +10840 W ThreadPoolForeg: type=1400 audit\(0\.0:275\): /u);
+  assert.match(lines[end], /^ +1793011715\.612 /u);
+  const result = measureLateAudit(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => [retirement.pid, retirement.uid]), [['10840', 90022]]);
+  for (const [name, value] of [
+    ['an ordinary own record received after END but stamped before it', log.replace(lateAudit, '         1793011715.608 10840 10840 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar')],
+    ['an audit record stamped more than twenty milliseconds before the fork', log.replace(lateAudit, lateAudit.replace('1793011715.608', '1793011715.500'))],
+    ['an audit record from another security context', log.replace(lateAudit, lateAudit.replace(/scontext=\S+/u, 'scontext=u:r:untrusted_app:s0:c512,c768'))],
+    ['an audit record from another process received after END', log.replace(lateAudit, lateAudit.replace(' 10840 10840 W ', ' 10841 10841 W ').replace('denied ', 'denied pid=10840 '))],
+    ['a non-AVC audit record received after END', log.replace(lateAudit, lateAudit.replace(/avc: .*$/u, 'apparmor="STATUS" operation="profile_load"'))],
+    ['a late audit record of a helper that retired before END', (() => {
+      const endLine = lines[end];
+      const exitLine = lines.find((entry) => entry.includes('Process 10840 exited cleanly (0)'))!;
+      return log.replace(`${endLine}\n`, '').replace(`${lateAudit}\n`, '')
+        .replace(`${exitLine}\n`, `${exitLine}\n${endLine.replace('1793011715.612', '1793011715.700')}\n${lateAudit}\n`);
+    })()],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    const rejected = measureLateAudit(value);
+    assert.ok(!rejected.normalRetirements.some((retirement) => retirement.pid === '10840'), name);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('10840')), name);
+  }
+}]);
+
 androidEventTests.push(['synthetic system-reaped helper admits a missing child exit or the kill signal only with the reaping record', async () => {
   const killed = exit.replace('cleanly (0)', 'due to signal 9 (Killed)');
   const quickKilled = quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)');

@@ -357,7 +357,7 @@ bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.
 
-Hosted iOS jobs set `MOBILE_TIMING_SCALE=2`, which doubles every phase and
+Hosted iOS jobs set `MOBILE_TIMING_SCALE=3`, which triples every phase and
 WebDriver request allowance below the unchanged scenario deadline; the values
 below are the unscaled ones used locally and by unit tests.
 

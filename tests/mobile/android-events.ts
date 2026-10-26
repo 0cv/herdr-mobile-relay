@@ -221,7 +221,7 @@ export interface AndroidNormalRetirement {
   events: string[];
 }
 
-function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, startMarker: LogRecord, bounded: (record: LogRecord) => boolean, afterEnd: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
+function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, startMarker: LogRecord, bounded: (record: LogRecord) => boolean, afterEnd: (record: LogRecord) => boolean, receivedAfterEnd: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
   const result: AndroidNormalRetirement[] = [];
   const proof = (record: LogRecord) => ({ lineNumber: record.lineNumber, line: record.line });
   const processStarts: { record: LogRecord; pid: string; name: string }[] = records.flatMap((record) => {
@@ -270,7 +270,9 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     // Chrome can start a helper just before END, so its retirement may finish in the capture that continues after END.
     const straddlesEnd = [child, reaper, exit, ...deaths.map((line) => records.find((record) => record.line === line))]
       .some((record) => record && afterEnd(record));
-    const observed = (record: LogRecord) => bounded(record) || (straddlesEnd && afterEnd(record));
+    // A helper that straddles END can have its own kernel audit records delivered after END although stamped before it.
+    const lateOwnAudit = (record: LogRecord) => record.pid === pid && receivedAfterEnd(record) && parseAndroidAuditSubject(record.line) !== undefined;
+    const observed = (record: LogRecord) => bounded(record) || (straddlesEnd && (afterEnd(record) || lateOwnAudit(record)));
     // Fork, start and helper records come from independent producers, so the lifetime starts at the earliest of them by timestamp or by capture order.
     const lifetimeRecords = [fork, birth, ...records.filter((record) => record.pid === pid)];
     const lifetimeStartTime = Math.min(...lifetimeRecords.map((record) => record.time));
@@ -424,8 +426,9 @@ export function measuredAndroidEvents(
   const operationMarkers = records.filter((record) => record.tag === 'HerdrMeasure' && record.message.startsWith(`${first.id} OP_`));
   if (operationMarkers.length !== operations.length * 2) issues.push('unrecorded or incomplete planned termination markers');
   const events = androidLogEvents(log, first.processes, planned, starts[0]);
-  const afterEnd = (record: LogRecord) => record.time >= ends[0].time && record.lineNumber > ends[0].lineNumber;
-  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, starts[0], bounded, afterEnd);
+  const receivedAfterEnd = (record: LogRecord) => record.lineNumber > ends[0].lineNumber;
+  const afterEnd = (record: LogRecord) => record.time >= ends[0].time && receivedAfterEnd(record);
+  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, starts[0], bounded, afterEnd, receivedAfterEnd);
   const normalEvents = new Set(retirements.flatMap((retirement) => retirement.events));
   return { events, fatalEvents: events.filter((event) => !normalEvents.has(event)), normalRetirements: retirements, issues, boundaryDiscordances };
 }

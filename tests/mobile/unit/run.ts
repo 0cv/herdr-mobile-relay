@@ -2271,6 +2271,7 @@ test('mobile timing scale stretches phase views and request caps only when confi
   assert.equal(parseTimingScale(undefined), 1);
   assert.equal(parseTimingScale(''), 1);
   assert.equal(parseTimingScale('2'), 2);
+  assert.equal(parseTimingScale('3'), 3);
   for (const invalid of ['0.5', '5', 'fast', 'Infinity']) assert.throws(() => parseTimingScale(invalid), /MOBILE_TIMING_SCALE/u);
   assert.equal(timingScale, parseTimingScale(process.env.MOBILE_TIMING_SCALE));
   const budgetModule = new URL('../support/budget.ts', import.meta.url).pathname;

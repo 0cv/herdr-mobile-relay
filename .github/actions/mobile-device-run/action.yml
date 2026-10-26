@@ -36,7 +36,7 @@ runs:
         printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
         printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
         printf 'IOS_PLATFORM_VERSION=27.0\n' >> "$GITHUB_ENV"
-        if [ "$WORKFLOW_PLATFORM" = ios ]; then printf 'MOBILE_TIMING_SCALE=2\n' >> "$GITHUB_ENV"; fi
+        if [ "$WORKFLOW_PLATFORM" = ios ]; then printf 'MOBILE_TIMING_SCALE=3\n' >> "$GITHUB_ENV"; fi
         printf 'IOS_XCTEST_STATE_DIR=%s\n' "$RUNNER_TEMP/herdr-xctest-owner" >> "$GITHUB_ENV"
         printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
         printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
