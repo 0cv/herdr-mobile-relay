@@ -12,7 +12,7 @@ project follows [Semantic Versioning](https://semver.org/).
   tunnel, a quick second **Esc** was ignored because the key row disabled itself
   until the first send was confirmed, so agents that stop on a double Esc could
   not be stopped from the phone.
-  Queued taps also resume when the question view closes before that acknowledgement.
+  Taps queued before or after the question view closes are still sent once that acknowledgement arrives.
 
 ### Changed
 

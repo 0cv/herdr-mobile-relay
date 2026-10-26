@@ -1,12 +1,22 @@
+<script module lang="ts">
+  import type { Agent } from '$lib/types';
+
+  export interface QueuedKeyCommand {
+    keys: string[];
+    label: string;
+    target: Agent;
+    resolve: (sent: boolean) => void;
+  }
+</script>
+
 <script lang="ts">
-  import { onDestroy, type Snippet } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
-  import type { Agent } from '$lib/types';
 
-  let { agent, readOnly = false, blocked = false, sending = $bindable(false), extra }:
-    { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean; extra?: Snippet } = $props();
+  let { agent, readOnly = false, blocked = false, sending = $bindable(false), extra, queue }:
+    { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean; extra?: Snippet; queue?: QueuedKeyCommand[] } = $props();
   let modifierInputElement = $state<HTMLInputElement>(null!);
   let arrowsOpen = $state(false);
   let fkeysOpen = $state(false);
@@ -21,13 +31,9 @@
   let componentMounted = true;
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   let keyReadTimer: ReturnType<typeof setTimeout> | undefined;
-  interface QueuedKeyCommand {
-    keys: string[];
-    label: string;
-    target: Agent;
-    resolve: (sent: boolean) => void;
-  }
-  const keyQueue: QueuedKeyCommand[] = [];
+  // A queue owned by the parent survives replacement of this row.
+  const sharedQueue = untrack(() => queue);
+  const keyQueue: QueuedKeyCommand[] = sharedQueue ?? [];
   const armedModifierLabel = $derived([
     ctrlArmed ? 'Ctrl' : '',
     altArmed ? 'Alt' : '',
@@ -54,9 +60,10 @@
     if (keySending) return;
     sending = true;
     while (keyQueue.length) {
+      if (!componentMounted) break;
       const command = keyQueue.shift()!;
       const identity = targetRefForAgent(command.target);
-      if (!componentMounted || disabled || !identity || !targetRefMatchesAgent(identity, agent)) {
+      if (disabled || !identity || !targetRefMatchesAgent(identity, agent)) {
         command.resolve(false);
         continue;
       }
@@ -184,7 +191,7 @@
     componentMounted = false;
     if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
     if (keyReadTimer) clearTimeout(keyReadTimer);
-    for (const command of keyQueue.splice(0)) command.resolve(false);
+    if (!sharedQueue) for (const command of keyQueue.splice(0)) command.resolve(false);
   });
 </script>
 {#snippet arrowIcon()}

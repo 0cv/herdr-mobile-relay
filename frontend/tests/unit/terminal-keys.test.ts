@@ -88,6 +88,55 @@ describe('TerminalKeys', () => {
     view.unmount();
   });
 
+  const questionAgent = (): Agent => ({
+    ...agent, status: 'blocked', attention_kind: 'question', attention_capable: true,
+    interaction: {
+      id: 'question-1', kind: 'single_select', question: 'Choose an option',
+      options: [{ index: 0, label: 'First' }], submit_label: 'Next',
+    },
+  });
+
+  it('keeps a second Esc queued on the question row when the question closes before the first ACK', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const pending: Array<(result: CommandResult) => void> = [];
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => (
+      new Promise((resolve) => { pending.push(resolve); })
+    ));
+    const question = questionAgent();
+    const view = render(TerminalView, { agent: question, allAgents: [question], responding: new Set<string>() });
+    const escape = screen.getByRole('button', { name: 'Esc' });
+    await user.click(escape);
+    await user.click(escape);
+    expect(send).toHaveBeenCalledOnce();
+
+    await view.rerender({ agent, allAgents: [agent] });
+    pending[0](commandResult('escape-1'));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls[1][1]).toEqual({ type: 'send_keys', keys: ['Escape'], activity_label: 'Cancelled prompt' });
+    pending[1](commandResult('escape-2'));
+    await waitFor(() => expect(document.querySelector('.term-keys')).toHaveAttribute('aria-busy', 'false'));
+    view.unmount();
+  });
+
+  it('drops queued keys when the terminal view unmounts', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const pending: Array<(result: CommandResult) => void> = [];
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => (
+      new Promise((resolve) => { pending.push(resolve); })
+    ));
+    const question = questionAgent();
+    const view = render(TerminalView, { agent: question, allAgents: [question], responding: new Set<string>() });
+    const escape = screen.getByRole('button', { name: 'Esc' });
+    await user.click(escape);
+    await user.click(escape);
+    view.unmount();
+    pending[0](commandResult('escape-1'));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it('arms a modifier and queues its chord while a key send is in flight', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
