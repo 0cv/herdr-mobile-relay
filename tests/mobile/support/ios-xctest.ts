@@ -15,7 +15,6 @@ const maxStartupLogBytes = 100 * 1024 * 1024;
 const startupOutputMarker = '[startup output suppressed]\n';
 const maxStatusBytes = 65_536;
 const maxProcessCommandMs = 2_000;
-const maxReceiptLookupMs = 30_000;
 const maxRunnerCleanupMs = 10_000;
 const maxPreFreezeDiagnosticMs = 8_000;
 const maxOwnerBytes = 1_048_576;
@@ -1424,7 +1423,7 @@ async function supervise(): Promise<void> {
     }
   };
   const observeReceipt = (phase: string, persist: boolean, receiptDeadline: number, diagnostic = false, boundedHash = false): ReceiptSnapshot => {
-    const installed = realpathSync(run('xcrun', ['simctl', 'get_app_container', udid, runnerId, 'app'], Math.min(maxReceiptLookupMs, deadlineTimeout(receiptDeadline)), commandContext(phase, 'read-install-receipt', {endpoint: 'wda', port})));
+    const installed = realpathSync(run('xcrun', ['simctl', 'get_app_container', udid, runnerId, 'app'], deadlineTimeout(receiptDeadline), commandContext(phase, 'read-install-receipt', {endpoint: 'wda', port})));
     if (persist) {
       owner.receipt = installed;
       writeFileSync(join(root, 'installed-Info.plist'), installedInfoEvidence(join(installed, 'Info.plist'), phase), { mode: 0o600 });
