@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import PromptComposer from '$components/PromptComposer.svelte';
-  import TerminalKeys from '$components/TerminalKeys.svelte';
+  import TerminalKeys, { type QueuedKeyCommand } from '$components/TerminalKeys.svelte';
   import AgentInteraction from '$components/AgentInteraction.svelte';
   import TerminalInputMode from '$components/TerminalInputMode.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
@@ -139,6 +139,10 @@
   let activeFindIndex = $state(-1);
   let sendingPrompt = $state(false);
   let keySending = $state(false);
+  const keyQueue: QueuedKeyCommand[] = [];
+  onDestroy(() => {
+    for (const command of keyQueue.splice(0)) command.resolve(false);
+  });
   let terminalKeys = $state<TerminalKeys>();
   let terminalInputMode = $state<TerminalInputMode>();
   let manualInputLoading = $state(false);
@@ -1549,7 +1553,7 @@
   {/if}
   {#if questionMode && interaction && !manualInput}
     <AgentInteraction {agent} {readOnly} responding={responding.has(agent.pane_id)} blocked={inputBlocked} />
-    <TerminalKeys {agent} {readOnly} blocked={inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />
+    <TerminalKeys queue={keyQueue} {agent} {readOnly} blocked={inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />
   {/if}
   <div class:hidden={questionMode} class="terminal-view term">
   {#if findOpen}
@@ -1675,7 +1679,7 @@
     <TerminalInputMode bind:this={terminalInputMode} {agent} {frame} {readOnly} bind:manual={manualInput} bind:blocked={inputBlocked}
       bind:loading={manualInputLoading} busy={manualInputBusy} returnFocus={() => manualInputTriggerHost?.querySelector('button')?.focus()} />
     <div hidden={manualInput}>
-    {#if !questionMode && !manualInput}<TerminalKeys bind:this={terminalKeys} {agent} {readOnly} blocked={sendingFilter || inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />{/if}
+    {#if !questionMode && !manualInput}<TerminalKeys queue={keyQueue} bind:this={terminalKeys} {agent} {readOnly} blocked={sendingFilter || inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />{/if}
     {#key JSON.stringify(targetRefForAgent(agent))}
       <PromptComposer {agent} {frame} {readOnly} dispatchBlocked={manualInput || inputBlocked ? 'Check terminal input delivery before sending.' : draftState.secretReady ? '' : dispatchBlocked}
         blockExplained={manualInput || inputBlocked} attachmentsBlocked={inputLocked}

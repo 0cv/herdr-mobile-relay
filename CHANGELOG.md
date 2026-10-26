@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Queue terminal key taps instead of dropping them while the previous key waits
+  for its relay acknowledgement. On a high-latency link such as a Cloudflare
+  tunnel, a quick second **Esc** was ignored because the key row disabled itself
+  until the first send was confirmed, so agents that stop on a double Esc could
+  not be stopped from the phone.
+  Taps queued before or after the question view closes are still sent once that acknowledgement arrives.
+
 ### Changed
 
 - Replace **Type in terminal** with a **Keyboard** button in the terminal key
