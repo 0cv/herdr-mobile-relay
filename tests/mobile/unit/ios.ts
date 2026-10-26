@@ -2393,7 +2393,7 @@ test('Plan13 recorded provenance retains its historical tool tuple and run ident
 
 const lifecycleError = recordedIteration13.safariAUTFailure.response;
 type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' | 'loading' | 'timeout' | 'readiness-transition' | 'not-ready' | 'malformed-reference'
-  | 'page-settling' | 'icon-settling';
+  | 'page-settling' | 'icon-settling' | 'today-view';
 
 async function lifecycleReplay(name: string, options: { foreground?: string; home?: HomeLaunchMode; page?: string } = {}) {
   const homeMode = options.home || 'ready';
@@ -2406,6 +2406,7 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
   };
   let settings: Record<string, unknown> = { defaultActiveApplication: 'auto', respectSystemAlerts: false };
   let homeObservations = 0;
+  let todayView = homeMode === 'today-view';
   const appState = (bundle: string) => {
     if (bundle === 'com.apple.webapp' && state.stateFault !== undefined) return state.stateFault;
     if (bundle === state.foreground) return 4;
@@ -2451,6 +2452,8 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
     }
     if (body.script === 'mobile: swipe') {
       assert.equal(active(), 'com.apple.springboard');
+      if (body.args.direction === 'left') todayView = false;
+      if (homeMode === 'today-view' && body.args.direction === 'right') todayView = true;
       return value(null);
     }
     if (body.script === 'mobile: activateApp') {
@@ -2483,6 +2486,7 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
         if (homeMode === 'loading') return value([]);
         homeObservations += 1;
         if (homeMode === 'page-settling' && homeObservations === 1) return value([element('home-container')]);
+        if (todayView) return value([element('home-container')]);
         const icons = homeMode === 'missing' || (homeMode === 'icon-settling' && homeObservations === 1) ? [] : homeMode === 'ambiguous' ? [element('home-icon'), element('home-icon-2')] : [element('home-icon')];
         const references: unknown[] = [element('home-container'), ...icons, element('home-page'), ...(homeMode === 'duplicate-reference' ? [element('home-icon')] : [])];
         if (homeMode === 'malformed-reference') references.push({});
@@ -2666,6 +2670,15 @@ for (const mode of ['page-settling', 'icon-settling'] as const) {
     assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 2);
   });
 }
+
+test('Home Today View on arrival returns to the first page with one left swipe', async () => {
+  const a = await lifecycleReplay('current-page-today-view', { home: 'today-view' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  const swipes = a.requests.filter((request) => request.body.script === 'mobile: swipe');
+  assert.deepEqual(swipes.map((request) => request.body.args.direction), ['left']);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
 
 test('malformed current foreground identity fails before Home navigation', async () => {
   const a = await lifecycleReplay('malformed-current-foreground');

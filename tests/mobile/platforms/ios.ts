@@ -333,6 +333,7 @@ export function nativeActionListEvidence(source: string, target: string): Native
 }
 
 const IOS_HOME_ICON_LABELS = ['Herdr Mobile Relay', 'Herdr Relay'] as const;
+const IOS_HOME_PAGE_INDICATOR_MISSING = 'Home page indicator is missing';
 
 interface IOSHomePage {
   current: number;
@@ -1072,6 +1073,7 @@ export class IOSPlatform implements MobilePlatform {
     await delay(Math.min(750, phase.remainingMs), phase);
     let observation = await this.observeHomeIcon(phase);
     observation = await this.waitForHomeIconReadiness(observation, phase, true);
+    observation = await this.leaveTodayView(observation, phase, true);
     if (observation.state === 'pending' || observation.state === 'not-ready') {
       throw new Error(`IOS_CONTEXT: current SpringBoard page was not positively observed (${observation.reason})`);
     }
@@ -1088,6 +1090,7 @@ export class IOSPlatform implements MobilePlatform {
         await this.ensureSpringBoardForeground(phase);
         observation = await this.observeHomeIcon(phase);
         observation = await this.waitForHomeIconReadiness(observation, phase);
+        observation = await this.leaveTodayView(observation, phase);
       }
       if (observation.state === 'pending' || observation.state === 'not-ready') {
         throw new Error(`IOS_CONTEXT: current SpringBoard page was not positively observed (${observation.reason})`);
@@ -2037,6 +2040,15 @@ export class IOSPlatform implements MobilePlatform {
     return observation;
   }
 
+  // The Today View left of the first page keeps the icon container published but shows no page indicator or icons.
+  private async leaveTodayView(observation: IOSHomeObservation, phase: PhaseBudget, firstObservation = false): Promise<IOSHomeObservation> {
+    if (observation.state !== 'pending' || !observation.container || observation.reason !== IOS_HOME_PAGE_INDICATOR_MISSING) return observation;
+    phase.assertAvailable('leave SpringBoard Today View');
+    await this.driver.mobile('swipe', { direction: 'left' }, Math.max(2, phase.remainingMs));
+    await this.ensureSpringBoardForeground(phase);
+    return this.waitForHomeIconReadiness(await this.observeHomeIcon(phase), phase, firstObservation);
+  }
+
   private async homeObservationElementIds(phase: PhaseBudget): Promise<string[]> {
     phase.assertAvailable('observe current SpringBoard page');
     const queryTimeout = Math.min(IOS_NATIVE_HIERARCHY_COMMAND_MS, phase.remainingMs);
@@ -2084,7 +2096,7 @@ export class IOSPlatform implements MobilePlatform {
       this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home page indicator is ambiguous (${pages.map((element) => element.id).join(', ')})`);
     }
     if (!containers.length) return { state: 'pending', reason: 'Home screen icon container is missing' };
-    if (!pages.length) return { state: 'pending', container: containers[0].id, reason: 'Home page indicator is missing' };
+    if (!pages.length) return { state: 'pending', container: containers[0].id, reason: IOS_HOME_PAGE_INDICATOR_MISSING };
 
     const pageValue = await this.readNativeHomeAttribute(pages[0].id, 'value', phase);
     const page = typeof pageValue === 'string' ? parseIOSHomePage(pageValue) : undefined;
