@@ -54,7 +54,7 @@ const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_KEYBOARD_PHASE_MS = 10_000;
 const IOS_PAGE_SCRIPT_MS = 5_000;
 const IOS_PAGE_KEYBOARD_MIN_COVER_PX = 250;
-const IOS_PAGE_KEYBOARD_SCRIPT = "const composer = document.querySelector('textarea[aria-label=\"Prompt\"]'); const viewport = window.visualViewport; if (!viewport) return null; return { focused: Boolean(composer) && document.activeElement === composer, portrait: window.matchMedia('(orientation: portrait)').matches, scale: viewport.scale, innerHeight: window.innerHeight, screenHeight: screen.height, viewportHeight: viewport.height, cover: Math.round(Math.max(window.innerHeight, screen.height) - viewport.height) };";
+const IOS_PAGE_KEYBOARD_SCRIPT = "const composer = document.querySelector('textarea[aria-label=\"Prompt\"]'); const viewport = window.visualViewport; if (!viewport) return null; return { focused: Boolean(composer) && document.activeElement === composer, portrait: window.matchMedia('(orientation: portrait)').matches, zoom: viewport.scale, innerHeight: window.innerHeight, screenHeight: screen.height, viewportHeight: viewport.height, cover: Math.round(Math.max(window.innerHeight, screen.height) - viewport.height) };";
 
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
@@ -344,7 +344,7 @@ const IOS_HOME_PAGE_INDICATOR_MISSING = 'Home page indicator is missing';
 type PageKeyboardMeasure = {
   focused: boolean;
   portrait: boolean;
-  scale: number;
+  zoom: number;
   innerHeight: number;
   screenHeight: number;
   viewportHeight: number;
@@ -1434,10 +1434,10 @@ export class IOSPlatform implements MobilePlatform {
     try {
       const measured = await this.driver.execute<unknown>(IOS_PAGE_KEYBOARD_SCRIPT, [], timeoutMs);
       if (!measured || typeof measured !== 'object') return undefined;
-      const { focused, portrait, scale, innerHeight, screenHeight, viewportHeight, cover } = measured as Record<string, unknown>;
-      const numbers = [scale, innerHeight, screenHeight, viewportHeight, cover];
+      const { focused, portrait, zoom, innerHeight, screenHeight, viewportHeight, cover } = measured as Record<string, unknown>;
+      const numbers = [zoom, innerHeight, screenHeight, viewportHeight, cover];
       if (typeof focused !== 'boolean' || typeof portrait !== 'boolean' || !numbers.every((value) => typeof value === 'number' && Number.isFinite(value))) return undefined;
-      return { focused, portrait, scale, innerHeight, screenHeight, viewportHeight, cover } as PageKeyboardMeasure;
+      return { focused, portrait, zoom, innerHeight, screenHeight, viewportHeight, cover } as PageKeyboardMeasure;
     } catch (error) {
       if (isFatalDriverError(error)) throw error;
       return undefined;
@@ -1446,12 +1446,12 @@ export class IOSPlatform implements MobilePlatform {
 
   private describePageKeyboard(measure: PageKeyboardMeasure | undefined): string {
     if (!measure) return 'unmeasured';
-    const { focused, portrait, scale, innerHeight, screenHeight, viewportHeight, cover } = measure;
-    return `focused=${focused} portrait=${portrait} scale=${scale} inner=${innerHeight} screen=${screenHeight} visual=${viewportHeight} cover=${cover} baseline=${this.pageKeyboardBaseline?.cover ?? 'unmeasured'}`;
+    const { focused, portrait, zoom, innerHeight, screenHeight, viewportHeight, cover } = measure;
+    return `focused=${focused} portrait=${portrait} zoom=${zoom} inner=${innerHeight} screen=${screenHeight} visual=${viewportHeight} cover=${cover} baseline=${this.pageKeyboardBaseline?.cover ?? 'unmeasured'}`;
   }
 
   private pageKeyboardCover(measure: PageKeyboardMeasure | undefined): number | undefined {
-    if (!measure?.portrait || Math.abs(measure.scale - 1) > 0.05) return undefined;
+    if (!measure?.portrait || Math.abs(measure.zoom - 1) > 0.05) return undefined;
     return measure.cover;
   }
 
