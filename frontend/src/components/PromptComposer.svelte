@@ -17,9 +17,10 @@
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
-  let { agent, frame, readOnly = false, locked = false, dispatchBlocked = '', attachmentsBlocked = false, draftPersistenceAllowed = false, noEchoActive = false, noEchoPrompt = 'Password:',
+  // blockExplained: the parent already shows why sending is blocked, so the composer does not repeat dispatchBlocked.
+  let { agent, frame, readOnly = false, locked = false, dispatchBlocked = '', blockExplained = false, attachmentsBlocked = false, draftPersistenceAllowed = false, noEchoActive = false, noEchoPrompt = 'Password:',
     placeholder = 'Type a reply…', submitLabel = 'Send prompt', submitAdapter, sending = $bindable(false), onsubmitted }:
-    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; locked?: boolean; dispatchBlocked?: string; attachmentsBlocked?: boolean; draftPersistenceAllowed?: boolean; noEchoActive?: boolean; noEchoPrompt?: string;
+    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; locked?: boolean; dispatchBlocked?: string; blockExplained?: boolean; attachmentsBlocked?: boolean; draftPersistenceAllowed?: boolean; noEchoActive?: boolean; noEchoPrompt?: string;
       placeholder?: string; submitLabel?: string; submitAdapter?: ComposerSubmitAdapter; sending?: boolean; onsubmitted?: () => void } = $props();
   const connections = relayStore.connections;
   const connection = $derived($connections.get(agent.relay_id));
@@ -646,7 +647,7 @@
         <button type="button" disabled={composerLocked || $securityState.locked} onclick={() => piDelivery.acknowledge()}>I checked — allow another send</button>
       </div>
     {:else if bridgeReady && !piDelivery.pending}<p class="hint">Pi bridge: unconfirmed send, no terminal keys.</p>
-    {:else if dispatchBlocked && !readOnly && !piDelivery.pending}
+    {:else if dispatchBlocked && !blockExplained && !readOnly && !piDelivery.pending}
       <p class="hint" role="status">{piPromptTarget(agent) && !piCapability ? 'For live Pi replies, enable Settings → Pi Integration, then /reload Pi.' : dispatchBlocked}</p>
     {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}

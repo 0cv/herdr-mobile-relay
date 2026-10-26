@@ -127,12 +127,13 @@ export default async function setup() {
     readFile(join(captureRoot, 'omp-plan-approval.ansi'), 'utf8'),
     readFile(join(captureRoot, 'omp-partial-ask.ansi'), 'utf8'),
   ]);
+  // The literal-input dialogs have no input prompt line, so the relay cannot classify them: they need
+  // inspection, the composer cannot send, and the Keyboard button is offered.
   const literalDialog = [
     'scrollback-anchor-000',
     ...Array.from({ length: 199 }, (_, index) => `history-entry-${index + 1}`),
     'Destination for /violet-comet',
     'Custom answer: Where shall we go?',
-    '>',
     'enter or ctrl+q submit  esc cancel  ctrl+g external editor',
   ].join('\n');
   const scenario = {
@@ -266,7 +267,7 @@ export default async function setup() {
     ],
     content: {
       'arbitrary-dialog': literalDialog,
-      'orchestration-dialog': 'Guidance for /orchestrate-answer\nCustom answer: Add guidance\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor',
+      'orchestration-dialog': 'Guidance for /orchestrate-answer\nCustom answer: Add guidance\nenter or ctrl+q submit  esc cancel  ctrl+g external editor',
       'qoder-approval': approval,
       'qoder-notes': qoderNotes,
       'codex-notes': codexNotes,

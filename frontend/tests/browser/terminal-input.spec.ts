@@ -43,9 +43,9 @@ async function control(command: Record<string, unknown>): Promise<Record<string,
 }
 
 async function openManual(page: Page, keyboard = false) {
-  if (keyboard) { await button(page, 'Type in terminal').focus(); await page.keyboard.press('Enter'); }
-  else await button(page, 'Type in terminal').click();
-  const panel = page.locator('section[aria-label="Type in terminal"]');
+  if (keyboard) { await button(page, 'Keyboard').focus(); await page.keyboard.press('Enter'); }
+  else await button(page, 'Keyboard').click();
+  const panel = page.locator('section[aria-label="Keyboard"]');
   await expect(panel).toBeVisible();
   await expect(page.getByLabel('Terminal text', { exact: true })).toBeFocused();
   await expect(panel.getByRole('button', { name: 'Enter', exact: true })).toBeEnabled();
@@ -79,7 +79,7 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await expect(prompt).toBeEnabled();
   await prompt.fill('editable Conversation draft');
   expect((await mutations()).length).toBe(initial);
-  await expect(button(page, 'Type in terminal')).toHaveCount(0);
+  await expect(button(page, 'Keyboard')).toHaveCount(0);
   await expect(button(page, 'Enter')).toHaveCount(0);
   await expect(page.getByText('Current terminal context', { exact: true })).toHaveCount(0);
   await button(page, 'Terminal view').click();
@@ -92,7 +92,7 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await openManual(page);
   expect((await mutations()).length).toBe(initial);
   await page.getByText('Current terminal context', { exact: true }).click();
-  await expect(page.locator('section[aria-label="Type in terminal"] pre')).toContainText('/violet-comet');
+  await expect(page.locator('section[aria-label="Keyboard"] pre')).toContainText('/violet-comet');
   const literal = '  /another-command 界😀  ';
   await page.getByLabel('Terminal text', { exact: true }).fill(literal);
   await button(page, 'Send text').click();
@@ -102,11 +102,11 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await expect(page.getByText('Enter delivered.', { exact: true })).toBeVisible();
   expect((await mutations()).slice(initial + 1)).toEqual([{ argv: ['pane', 'send-keys', 'arbitrary-dialog', 'Enter'] }]);
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(literal);
-  await button(page, 'Back to prompt and structured controls').click();
-  await expect(button(page, 'Type in terminal')).toBeFocused();
+  await button(page, 'Close').click();
+  await expect(button(page, 'Keyboard')).toBeFocused();
   await expect(prompt).toHaveValue('unrelated normal draft');
   await button(page, 'Conversation history').click();
-  await expect(button(page, 'Type in terminal')).toHaveCount(0);
+  await expect(button(page, 'Keyboard')).toHaveCount(0);
   await button(page, 'Terminal view').click();
   await openManual(page);
   await page.getByLabel('Terminal text', { exact: true }).fill('terminal-only');
@@ -114,7 +114,7 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await expect(page.getByText('Text delivered; Enter not sent.', { exact: true })).toBeVisible();
   const beforeReconnect = (await mutations()).length;
   await page.evaluate(() => (window as unknown as { closePrivateRelay: () => void }).closePrivateRelay());
-  await expect(button(page, 'Type in terminal')).toBeVisible();
+  await expect(button(page, 'Keyboard')).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { privateRelayReadyState: () => number }).privateRelayReadyState())).toBe(1);
   await expect(page.locator('.prompt-composer .agent-progress, .prompt-composer [aria-atomic="true"]')).toHaveCount(0);
   await openManual(page);
@@ -129,7 +129,7 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await button(page, 'Send text').click();
   await expect(page.getByText('Text delivered; Enter not sent.', { exact: true })).toBeVisible();
   expect((await mutations()).at(-1)).toEqual({ method: 'pane.send_input', params: { pane_id: 'orchestration-dialog', text: 'generic guidance' } });
-  await button(page, 'Back to prompt and structured controls').click();
+  await button(page, 'Close').click();
   await button(page, 'Back').click();
   await button(page, 'Open qoder-approval on Captured relay').click();
   await expect(button(page, 'Allow once')).toBeVisible();
@@ -137,8 +137,8 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   const approvalTerminal = button(page, 'Terminal view');
   if (await approvalTerminal.isVisible()) await approvalTerminal.click();
   await openManual(page);
-  await button(page, 'Back to prompt and structured controls').click();
-  await expect(button(page, 'Type in terminal')).toBeFocused();
+  await button(page, 'Close').click();
+  await expect(button(page, 'Keyboard')).toBeFocused();
   await expect(button(page, 'Allow once')).toBeVisible();
   expect((await mutations()).length).toBe(beforeMode);
 });
@@ -153,14 +153,14 @@ test('Terminal question forms retain an editable draft and keyboard-accessible m
     const normal = page.getByLabel('Prompt', { exact: true });
     await expect(normal).toBeEnabled();
     await expect(normal).toBeInViewport();
-    await expect(button(page, 'Type in terminal')).toBeInViewport();
+    await expect(button(page, 'Keyboard')).toBeInViewport();
     const before = (await mutations()).length;
     await normal.fill('question-local draft');
     await openManual(page, true);
     await expect(page.getByLabel('Terminal text', { exact: true })).toBeInViewport();
-    await button(page, 'Back to prompt and structured controls').focus();
+    await button(page, 'Close').focus();
     await page.keyboard.press('Enter');
-    await expect(button(page, 'Type in terminal')).toBeFocused();
+    await expect(button(page, 'Keyboard')).toBeFocused();
     await expect(normal).toHaveValue('question-local draft');
     await expect(page.getByRole('group').first()).toBeVisible();
     expect((await mutations()).length).toBe(before);
@@ -181,12 +181,12 @@ for (const view of manualViews) {
     const initial = (await mutations()).length;
     await page.getByLabel('Terminal text', { exact: true }).fill('uncertain-fixture-text');
     await button(page, 'Send text').click();
-    const panel = page.locator('section[aria-label="Type in terminal"]');
+    const panel = page.locator('section[aria-label="Keyboard"]');
     await expect(panel.getByRole('button', { name: 'Enter', exact: true })).toBeDisabled();
-    await expect(button(page, 'Back to prompt and structured controls')).toBeEnabled();
-    await button(page, 'Back to prompt and structured controls').click();
-    await expect(button(page, 'Type in terminal')).toBeFocused();
-    await expect(page.getByText('Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.', { exact: true })).toBeVisible();
+    await expect(button(page, 'Close')).toBeEnabled();
+    await button(page, 'Close').click();
+    await expect(button(page, 'Keyboard')).toBeFocused();
+    await expect(page.getByText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.', { exact: true })).toBeVisible();
     await page.getByLabel('Prompt', { exact: true }).fill('unrelated draft after uncertainty');
     await expect(button(page, 'Send prompt')).toBeDisabled();
     await expect(button(page, 'Enter')).toBeDisabled();
@@ -202,8 +202,8 @@ for (const view of manualViews) {
     await expect(button(page, 'Send prompt')).toBeDisabled();
     await expect(button(page, 'Enter')).toBeDisabled();
     if (view === 'Terminal') await expect(page.locator('.question-form button[type="submit"]')).toBeDisabled();
-    await expect(page.getByText('Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.', { exact: true })).toBeVisible();
-    await button(page, 'Type in terminal').click();
+    await expect(page.getByText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.', { exact: true })).toBeVisible();
+    await button(page, 'Keyboard').click();
     await expect(panel).toBeVisible();
     await expect(page.getByLabel('Terminal text', { exact: true })).toBeFocused();
     await expect(page.getByLabel('Terminal text', { exact: true })).toHaveValue('');
@@ -213,7 +213,7 @@ for (const view of manualViews) {
     await expect(button(page, 'I checked the terminal')).toBeEnabled();
     await button(page, 'I checked the terminal').click();
     await expect(panel.getByRole('button', { name: 'Enter', exact: true })).toBeEnabled();
-    await button(page, 'Back to prompt and structured controls').click();
+    await button(page, 'Close').click();
     await expect(button(page, 'Enter')).toBeEnabled();
     if (view === 'Terminal') await expect(page.locator('.question-form button[type="submit"]')).toBeEnabled();
     expect((await mutations()).length).toBe(initial + 1);
@@ -235,14 +235,14 @@ for (const view of manualViews) {
     await expect(button(page, 'I checked the terminal')).toBeVisible();
     try {
       await metadata({ [target]: { cwd: '/tmp/same-target-new-directory' } });
-      await expect(button(page, 'Type in terminal')).toBeVisible();
+      await expect(button(page, 'Keyboard')).toBeVisible();
       expect(page.url()).toBe(route);
-      await expect(page.getByText('Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.', { exact: true })).toBeVisible();
+      await expect(page.getByText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.', { exact: true })).toBeVisible();
       await page.getByLabel('Prompt', { exact: true }).fill('draft after metadata changed');
       await expect(button(page, 'Send prompt')).toBeDisabled();
       await expect(button(page, 'Enter')).toBeDisabled();
       if (view === 'Terminal') await expect(page.locator('.question-form button[type="submit"]')).toBeDisabled();
-      await button(page, 'Type in terminal').click();
+      await button(page, 'Keyboard').click();
       await expect(button(page, 'I checked the terminal')).toBeEnabled();
       await expect(button(page, 'Enter')).toBeDisabled();
       await button(page, 'I checked the terminal').click();
@@ -292,17 +292,17 @@ for (const view of manualViews) {
       await page.clock.runFor(10);
       await button(page, 'Unlock').click();
       await expect(unlock).toBeHidden();
-      await expect(button(page, 'Type in terminal')).toBeVisible();
+      await expect(button(page, 'Keyboard')).toBeVisible();
       await control({ cmd: 'clear_injection', command: 'pane read' });
       await control({ cmd: 'release_barrier', barrier: beforeLock });
-      const context = page.locator('section[aria-label="Type in terminal"] pre');
+      const context = page.locator('section[aria-label="Keyboard"] pre');
       await expect(context).toContainText('Delayed pre-lock snapshot');
       await page.getByLabel('Prompt', { exact: true }).fill('draft before recovery observation');
       await expect(button(page, 'Send prompt')).toBeDisabled();
       await expect(button(page, 'Enter')).toBeDisabled();
       await control({ cmd: 'set_content', pane: 'orchestration-dialog', content: 'Post-unlock snapshot\n> ' });
       await control({ cmd: 'inject', command: 'pane read', injection: { before_response_barrier: afterUnlock } });
-      await button(page, 'Type in terminal').click();
+      await button(page, 'Keyboard').click();
       await expect(page.getByLabel('Terminal text', { exact: true })).toBeVisible();
       await expect(page.getByLabel('Terminal text', { exact: true })).toHaveValue('');
       await page.getByLabel('Terminal text', { exact: true }).fill('transient after unlock');
@@ -355,7 +355,7 @@ for (const view of manualViews) {
       await control({ cmd: 'set_content', pane: 'orchestration-dialog', content: 'Post-outcome snapshot\n> ' });
       await control({ cmd: 'release_barrier', barrier });
       await page.getByText('Current terminal context', { exact: true }).click();
-      const context = page.locator('section[aria-label="Type in terminal"] pre');
+      const context = page.locator('section[aria-label="Keyboard"] pre');
       await expect(context).toContainText('Delayed pre-send snapshot');
       await expect(button(page, 'I checked the terminal')).toBeDisabled();
       await expect(button(page, 'Enter')).toBeDisabled();
@@ -388,7 +388,7 @@ for (const { target, transition } of [
     await openDialog(page, target);
     await expect(page.getByRole('main', { name: 'Conversation', exact: true })).toBeVisible();
     const absentTerminalControls = async () => {
-      for (const name of ['Type in terminal', 'Enter', 'Tab', 'Ctrl', 'Send text', 'I checked the terminal']) await expect(button(page, name)).toHaveCount(0);
+      for (const name of ['Keyboard', 'Enter', 'Tab', 'Ctrl', 'Send text', 'I checked the terminal']) await expect(button(page, name)).toHaveCount(0);
       await expect(page.getByText('Current terminal context', { exact: true })).toHaveCount(0);
       await expect(page.getByLabel('Terminal text', { exact: true })).toHaveCount(0);
     };
@@ -404,7 +404,7 @@ for (const { target, transition } of [
     await button(page, 'Conversation history').click();
     const route = page.url();
     try {
-      await expect(page.getByText('Delivery is uncertain. You can edit drafts; open Terminal and use Type in terminal to inspect before sending.', { exact: true })).toBeVisible();
+      await expect(page.getByText('Delivery is uncertain. In Terminal, tap Keyboard to check before sending.', { exact: true })).toBeVisible();
       await absentTerminalControls();
       await page.getByLabel('Prompt', { exact: true }).fill('draft while delivery is uncertain');
       await expect(button(page, 'Send prompt')).toBeDisabled();
@@ -412,10 +412,10 @@ for (const { target, transition } of [
       await page.getByLabel('Prompt', { exact: true }).press('Control+Enter');
       if (transition === 'metadata') {
         await button(page, 'Terminal view').click();
-        await button(page, 'Type in terminal').click();
+        await button(page, 'Keyboard').click();
         await expect(page.getByLabel('Terminal text', { exact: true })).toBeVisible();
         await metadata({ [target]: { cwd: '/tmp/same-target-new-directory' } });
-        await expect(button(page, 'Type in terminal')).toBeVisible();
+        await expect(button(page, 'Keyboard')).toBeVisible();
         await button(page, 'Conversation history').click();
         expect(page.url()).toBe(route);
       } else {
@@ -427,7 +427,7 @@ for (const { target, transition } of [
       await expect(button(page, 'Send prompt')).toBeDisabled();
       await absentTerminalControls();
       await button(page, 'Terminal view').click();
-      await button(page, 'Type in terminal').click();
+      await button(page, 'Keyboard').click();
       await expect(page.getByLabel('Terminal text', { exact: true })).toBeVisible();
       await expect(page.getByLabel('Terminal text', { exact: true })).toHaveValue('');
       await expect(button(page, 'Enter')).toBeDisabled();
@@ -463,7 +463,7 @@ test('manual refresh preserves configured Terminal history across repeated reads
   const smallerReads = (await recentReads()).slice(initialReads).filter(operation => Number(operation.argv?.[4]) < 500);
   expect(smallerReads).toEqual([]);
   await expect(transcript).toHaveValue(original);
-  await button(page, 'Back to prompt and structured controls').click();
+  await button(page, 'Close').click();
   await expect(transcript).toHaveValue(original);
   expect((await mutations()).length).toBe(initialMutations);
 });
@@ -485,11 +485,11 @@ test('an authenticated reader cannot send text, keys, scroll or resize mutations
     await expect(reader.getByRole('img', { name: '1/1 relays connected', exact: true })).toBeVisible();
     await openDialog(reader, 'arbitrary-dialog');
     await expect(reader.getByLabel('Prompt', { exact: true })).toBeDisabled();
-    await expect(button(reader, 'Type in terminal')).toHaveCount(0);
+    await expect(button(reader, 'Keyboard')).toHaveCount(0);
     const before = (await mutations()).length;
     await button(reader, 'Terminal view').click();
     await expect(button(reader, 'Enter')).toBeDisabled();
-    await expect(button(reader, 'Type in terminal')).toHaveCount(0);
+    await expect(button(reader, 'Keyboard')).toHaveCount(0);
     await reader.getByRole('log').dispatchEvent('wheel', { deltaY: -120 });
     await reader.setViewportSize({ width: 390, height: 740 });
     expect((await mutations()).length).toBe(before);

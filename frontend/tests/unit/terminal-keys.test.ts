@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalKeys from '$components/TerminalKeys.svelte';
+import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
 import type { Agent, CommandResult } from '$lib/types';
 
@@ -44,7 +45,46 @@ describe('TerminalKeys', () => {
     ]);
 
     pending[1](commandResult('escape-2'));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Esc' })).toBeEnabled());
+    await waitFor(() => expect(escape.closest('.term-keys')).toHaveAttribute('aria-busy', 'false'));
+    view.unmount();
+  });
+
+  it('resumes replacement-row keys when the question closes before the previous ACK', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const pending: Array<(result: CommandResult) => void> = [];
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => (
+      new Promise((resolve) => { pending.push(resolve); })
+    ));
+    const question: Agent = {
+      ...agent, status: 'blocked', attention_kind: 'question', attention_capable: true,
+      interaction: {
+        id: 'question-1', kind: 'single_select', question: 'Choose an option',
+        options: [{ index: 0, label: 'First' }], submit_label: 'Next',
+      },
+    };
+    const view = render(TerminalView, { agent: question, allAgents: [question], responding: new Set<string>() });
+    const firstEscape = screen.getByRole('button', { name: 'Esc' });
+    await user.click(firstEscape);
+    expect(send).toHaveBeenCalledOnce();
+
+    await view.rerender({ agent, allAgents: [agent] });
+    const secondEscape = screen.getByRole('button', { name: 'Esc' });
+    expect(secondEscape).not.toBe(firstEscape);
+    expect(secondEscape).toBeEnabled();
+    await user.click(secondEscape);
+    expect(send).toHaveBeenCalledOnce();
+    expect(secondEscape.closest('.term-keys')).toHaveAttribute('aria-busy', 'true');
+
+    pending[0](commandResult('escape-1'));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls).toEqual([
+      [question, { type: 'send_keys', keys: ['Escape'], activity_label: 'Cancelled prompt' }],
+      [agent, { type: 'send_keys', keys: ['Escape'], activity_label: 'Cancelled prompt' }],
+    ]);
+    pending[1](commandResult('escape-2'));
+    await waitFor(() => expect(secondEscape.closest('.term-keys')).toHaveAttribute('aria-busy', 'false'));
+    expect(send).toHaveBeenCalledTimes(2);
     view.unmount();
   });
 
@@ -69,7 +109,7 @@ describe('TerminalKeys', () => {
     expect(send.mock.calls[1][1]).toEqual(expect.objectContaining({ type: 'send_keys', keys: ['ctrl+c'] }));
 
     pending[1](commandResult('chord-1'));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Esc' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Esc' }).closest('.term-keys')).toHaveAttribute('aria-busy', 'false'));
     view.unmount();
   });
 });

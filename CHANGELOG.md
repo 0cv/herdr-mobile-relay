@@ -12,6 +12,16 @@ project follows [Semantic Versioning](https://semver.org/).
   tunnel, a quick second **Esc** was ignored because the key row disabled itself
   until the first send was confirmed, so agents that stop on a double Esc could
   not be stopped from the phone.
+  Queued taps also resume when the question view closes before that acknowledgement.
+
+### Changed
+
+- Replace **Type in terminal** with a **Keyboard** button in the terminal key
+  row, shown only when the composer cannot send: the agent awaits an approval
+  or question answer, its pane needs inspection, or an earlier terminal send is
+  unconfirmed. It no longer takes a row of its own, which leaves more room for
+  terminal output. Delivery warnings show its icon instead of naming it, and
+  the panel's long back button is now **Close**.
 
 ## [0.23.2] - 2026-10-25
 

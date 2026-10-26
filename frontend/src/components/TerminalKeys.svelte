@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, type Snippet } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
   import type { Agent } from '$lib/types';
 
-  let { agent, readOnly = false, blocked = false, sending = $bindable(false) }:
-    { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean } = $props();
+  let { agent, readOnly = false, blocked = false, sending = $bindable(false), extra }:
+    { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean; extra?: Snippet } = $props();
   let modifierInputElement = $state<HTMLInputElement>(null!);
   let arrowsOpen = $state(false);
   let fkeysOpen = $state(false);
@@ -43,6 +43,12 @@
       void drainKeyQueue();
     });
   }
+
+  // A replacement row can inherit an in-flight send from the question row.
+  // Resume its own queue when that shared send (or blocking state) clears.
+  $effect(() => {
+    if (!keySending && keyQueue.length) void drainKeyQueue();
+  });
 
   async function drainKeyQueue() {
     if (keySending) return;
@@ -289,6 +295,8 @@
         >Alt</Button>
       </div>
       <span class="spacer"></span>
+      <!-- Contextual controls sit in the spacer so the fixed keys never move when they appear. -->
+      {@render extra?.()}
       <div class="fkey-menu">
         <Button
           variant="secondary"

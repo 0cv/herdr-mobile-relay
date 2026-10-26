@@ -523,6 +523,14 @@ characters or any available terminal key — arm `^` and type `c` to interrupt.
 A live status confirms the exact chord. Toggle the modifiers off or move focus
 to the composer to disarm them.
 
+While the composer cannot send — the agent awaits an approval or question
+answer, or its pane needs inspection — the **Keyboard** button
+joins the key row. It types one line of literal text into whatever control has
+focus in the terminal, with **Enter** sent separately, and **Close** returns to
+the composer. It also stays while an earlier terminal send is unconfirmed, so
+you can check the terminal before sending again; delivery warnings point to it
+by its icon. Agents that accept prompts do not show it.
+
 When the pane's last line is a prompt that echoes nothing — `[sudo] password
 for …`, an SSH passphrase, `gpg`, a PIN — the app names it and offers a masked
 field, even though the ordinary composer stays locked on a screen it cannot

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import Button from '$components/ui/Button.svelte';
+  import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import { agentNeedsResponse, attentionKind, approvalButtonTone, approvalOptions, questionInteraction } from '$lib/agents';
   import { relayStore } from '$lib/store';
   import { AppReloadHeld, importOrReload } from '$lib/updates';
@@ -22,7 +23,7 @@
   {:then { default: Form }}
     <Form {agent} {interaction} {responding} {blocked} />
   {:catch error}
-    <p role="alert">{error instanceof AppReloadHeld ? error.message : 'Question controls could not load. Open Terminal to use Type in terminal.'}</p>
+    <p role="alert">{#if error instanceof AppReloadHeld}{error.message}{:else}Question controls could not load. In Terminal, tap <KeyboardIcon label="Keyboard" inline /> to type an answer.{/if}</p>
   {/await}
 {:else if pending && attentionKind(agent) === 'approval'}
   <div class="quick-actions" aria-label="Approval choices">

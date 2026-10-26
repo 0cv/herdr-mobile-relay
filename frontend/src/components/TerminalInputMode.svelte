@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
-  import Button from '$components/ui/Button.svelte';
+  import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import { inputContextIdentity } from '$lib/input-target-state';
   import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
   import { piPromptDelivery } from '$lib/pi-prompt.svelte';
@@ -10,11 +10,12 @@
   import type { Agent, TerminalFrame } from '$lib/types';
   import type ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 
-  let { agent, frame, readOnly = false, busy = false, manual = $bindable(false), blocked = $bindable(false) }:
-    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; busy?: boolean; manual?: boolean; blocked?: boolean } = $props();
+  // The parent renders the trigger (inline with the terminal keys) and calls enter(); this component owns the
+  // lazily loaded panel and the delivery notices.
+  let { agent, frame, readOnly = false, busy = false, manual = $bindable(false), blocked = $bindable(false), loading = $bindable(false), returnFocus }:
+    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; busy?: boolean; manual?: boolean; blocked?: boolean; loading?: boolean; returnFocus?: () => void } = $props();
   const connections = relayStore.connections;
   let Panel = $state<typeof ManualTerminalInput>();
-  let loading = $state(false);
   let destroyed = false;
   onDestroy(() => { destroyed = true; });
   const identity = $derived(inputContextIdentity(agent));
@@ -38,7 +39,7 @@
     if (untrack(() => blocked) !== next) blocked = next;
   });
 
-  async function enter() {
+  export async function enter() {
     if (readOnly || busy || loading) return;
     const started = context;
     loading = true;
@@ -57,16 +58,13 @@
 </script>
 
 {#if !readOnly}
-  <div hidden={manual}>
-    <Button variant="secondary" size="sm" disabled={busy || loading} onclick={enter}>Type in terminal</Button>
-  </div>
   {#if Panel}
     {#key identity}
-      <Panel {agent} {frame} {readOnly} {delivery} active={manual} onexit={() => { manual = false; }} />
+      <Panel {agent} {frame} {readOnly} {delivery} active={manual} onexit={() => { manual = false; }} {returnFocus} />
     {/key}
   {/if}
   {#if !manual && delivery.uncertain}
-    <p role="alert">Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.</p>
+    <p role="alert">Delivery is uncertain. Tap <KeyboardIcon label="Keyboard" inline /> to check the terminal before sending.</p>
   {:else if !manual && delivery.pending}
     <p role="status">Waiting for terminal input delivery.</p>
   {/if}

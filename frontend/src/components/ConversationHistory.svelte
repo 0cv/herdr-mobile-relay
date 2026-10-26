@@ -9,6 +9,7 @@
   import ConversationMessage from '$components/ConversationMessage.svelte';
   import OmoPlan from '$components/OmoPlan.svelte';
   import Button from '$components/ui/Button.svelte';
+  import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import { agentNeedsResponse, attentionKind, displayName, questionInteraction } from '$lib/agents';
   import { conversationEntries, pendingQuestionEntryId } from '$lib/conversation';
   import {
@@ -862,7 +863,7 @@
   {/if}
   <div class="conversation-input-area">
     {#if !readOnly && delivery.uncertain}
-      <p role="alert">Delivery is uncertain. You can edit drafts; open Terminal and use Type in terminal to inspect before sending.</p>
+      <p role="alert">Delivery is uncertain. In Terminal, tap <KeyboardIcon label="Keyboard" inline /> to check before sending.</p>
     {:else if !readOnly && delivery.pending}
       <p role="status">Waiting for terminal input delivery.</p>
     {/if}

@@ -63,7 +63,7 @@ function fenced() {
   expect(screen.getByLabelText('Prompt')).toBeEnabled();
   expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
-  expect(screen.queryByRole('button', { name: 'Type in terminal' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Keyboard' })).not.toBeInTheDocument();
 }
 
 beforeEach(() => {
@@ -89,10 +89,12 @@ afterEach(() => {
 });
 
 it('keeps pending and uncertain literal delivery fenced while paging and switching views without blocking edits or health', async () => {
-  const terminal = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
-  await fireEvent.click(screen.getByRole('button', { name: 'Type in terminal' }));
+  // The Keyboard button is offered only while the composer cannot send; the panel stays open once the agent settles.
+  const needsInspection = { ...agent, status: 'blocked', attention_kind: 'unknown' as const };
+  const terminal = render(TerminalView, { agent: needsInspection, allAgents: [needsInspection], responding: new Set<string>() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Keyboard' }));
   await vi.waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
-  await terminal.rerender({ frame: frame() });
+  await terminal.rerender({ agent, frame: frame() });
   await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'literal draft' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Send text' }));
   expect(requests('send_terminal_text')).toHaveLength(1);
@@ -128,7 +130,7 @@ it('keeps pending and uncertain literal delivery fenced while paging and switchi
   expect(requests('submit_prompt')).toHaveLength(0);
   conversation.unmount();
   const restored = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
-  await fireEvent.click(screen.getByRole('button', { name: 'Type in terminal' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Keyboard' }));
   await vi.waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
   expect(screen.getByLabelText('Terminal text')).toHaveValue('');
   expect(screen.getByRole('button', { name: 'Enter' })).toBeDisabled();
@@ -168,7 +170,7 @@ it('retains Pi uncertainty through notice paging, mode/view switches, lock and r
   expect(delivery.uncertain).toBe(true);
   view.unmount();
   const terminal = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
-  await fireEvent.click(screen.getByRole('button', { name: 'Type in terminal' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Keyboard' }));
   await flush();
   expect(screen.getByRole('button', { name: 'Send text' })).toBeDisabled();
   securityState.set({ locked: true } as never); await flush();
