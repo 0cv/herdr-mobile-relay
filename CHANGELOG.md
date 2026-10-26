@@ -5,14 +5,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-10-26
+
 ### Fixed
 
 - Queue terminal key taps instead of dropping them while the previous key waits
   for its relay acknowledgement. On a high-latency link such as a Cloudflare
   tunnel, a quick second **Esc** was ignored because the key row disabled itself
   until the first send was confirmed, so agents that stop on a double Esc could
-  not be stopped from the phone.
-  Taps queued before or after the question view closes are still sent once that acknowledgement arrives.
+  not be stopped from the phone. Taps queued before or after the question view
+  closes are still sent once that acknowledgement arrives. (#82)
 
 ### Changed
 
@@ -1896,7 +1898,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...HEAD
+[0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...v0.23.0
