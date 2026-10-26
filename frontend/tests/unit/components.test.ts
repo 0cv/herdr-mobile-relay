@@ -799,7 +799,7 @@ describe('accessible Svelte interactions', () => {
     });
     expect(screen.getByLabelText('Prompt')).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Type in terminal' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Keyboard' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     choiceView.unmount();
 
@@ -820,7 +820,7 @@ describe('accessible Svelte interactions', () => {
     expect(screen.queryByText('must not render')).not.toBeInTheDocument();
     await user.type(terminalInput, 'custom weekend');
     expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Type in terminal' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Keyboard' })).toBeVisible();
     expect(send).not.toHaveBeenCalled();
     unknownView.unmount();
     vi.restoreAllMocks();

@@ -250,7 +250,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   }).click();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Type in terminal', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Keyboard', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
   expect(await approvalsSent(['pane', 'send-keys', 'qoder-approval', 'Up', 'Up', 'Enter'])).toBe(1);

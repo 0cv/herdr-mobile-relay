@@ -193,7 +193,7 @@ for (const name of ['Conversation', 'Terminal'] as const) {
       expect(terminalInputDelivery(agent).uncertain).toBe(true);
       socket.message({ type: 'pane_content', pane_id: 'pane', target: staleRead.target, request_id: staleRead.request_id, content: 'Password:', no_echo: true });
       await view.rerender({ frame: get(relayStore.terminalFrames).get(agent.pane_id)! });
-      await fireEvent.click(screen.getByRole('button', { name: 'Type in terminal' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Keyboard' }));
       await vi.waitFor(() => expect(screen.getByRole('button', { name: 'I checked the terminal' })).toBeVisible());
       const inspect = screen.getByRole('button', { name: 'I checked the terminal' });
       expect(inspect).toBeDisabled();
@@ -204,7 +204,7 @@ for (const name of ['Conversation', 'Terminal'] as const) {
       expect(inspect).toBeEnabled();
       await fireEvent.click(inspect);
       expect(terminalInputDelivery(agent).uncertain).toBe(false);
-      await fireEvent.click(screen.getByRole('button', { name: 'Back to prompt and structured controls' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
       expect(secretInput()).toHaveValue('');
       expect(sends()).toHaveLength(1);
       expect(JSON.stringify(localStorage)).not.toContain('one-shot-value');

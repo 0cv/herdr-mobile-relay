@@ -7,6 +7,7 @@ import { relayStore } from '$lib/store';
 import { securityState } from '$lib/security';
 import { targetRefForAgent } from '$lib/resource-id';
 import { loadPromptDraft } from '$lib/prompt-drafts';
+import { promptDispatchRestriction } from '$lib/terminal-input';
 import type { Agent, CommandResult, QuestionInteraction } from '$lib/types';
 
 const agent: Agent = { relay_id: 'conversation-controls', relay_label: 'Synthetic', raw_pane_id: 'pane', pane_id: 'conversation-controls::pane', server_session_id: 'primary', terminal_id: 'terminal', generation: 1, agent_session_id: ' exact session/界 ', agent: 'pi', project: 'Synthetic', status: 'idle' };
@@ -14,8 +15,19 @@ const connection = { status: 'connected', capabilities: ['manual_terminal_input'
 const receipt = { type: 'command_result', request_id: 'controls', ok: true, phase: 'completed' } as CommandResult;
 const frame = (current = agent, noEcho: boolean | undefined = false) => ({ paneId: current.pane_id, target: targetRefForAgent(current), inputTarget: targetRefForAgent(current), content: 'RAW TERMINAL PREVIEW\n> ', format: 'plain' as const, receivedAt: performance.now(), readStartedAt: performance.now(), noEcho });
 const button = (name: string) => screen.getByRole('button', { name });
+// Warnings name the Keyboard button through its icon's visually hidden label, outside the paragraph's own text nodes.
+const alertWithText = (text: string) => screen.getByText((_, element) => element?.getAttribute('role') === 'alert' && element.textContent === text);
 const conversation = (current = agent) => render(ConversationHistory, { agent: current });
 const terminal = (current = agent) => render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
+// The Keyboard button is offered only while the composer cannot send, so open it while the pane needs inspection.
+// The open panel survives the agent settling into another state, such as idle.
+async function terminalWithManualInput(current = agent) {
+  const view = terminal(promptDispatchRestriction(current) ? current : { ...current, status: 'blocked', attention_kind: 'unknown' });
+  await fireEvent.click(button('Keyboard'));
+  await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
+  await view.rerender({ agent: current });
+  return view;
+}
 
 beforeEach(() => {
   localStorage.clear();
@@ -33,7 +45,7 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); relayStore.connections.set(new Map()); securityState.set({ locked: false } as never); });
 
 function uncluttered() {
-  for (const name of ['Type in terminal', 'Enter', 'Esc', 'Tab', 'Ctrl', 'Send text', 'I checked the terminal']) expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+  for (const name of ['Keyboard', 'Enter', 'Esc', 'Tab', 'Ctrl', 'Send text', 'I checked the terminal']) expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Terminal text')).not.toBeInTheDocument();
   expect(screen.queryByText('Current terminal context')).not.toBeInTheDocument();
   expect(screen.queryByText(/RAW TERMINAL PREVIEW/)).not.toBeInTheDocument();
@@ -96,9 +108,7 @@ const cases = (['pending-completed', 'pending-unknown', 'accepted', 'dispatched_
 it.each(cases)('keeps $state $attention delivery fenced in Conversation across $transition', async ({ state, attention, transition }) => {
   const interaction: QuestionInteraction = { id: 'cross-view', kind: 'single_select', question: 'Choose a destination', options: [{ index: 0, label: 'North', selected: true }], can_go_back: true, can_chat: true };
   let current: Agent = { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
-  const original = terminal(current);
-  await fireEvent.click(button('Type in terminal'));
-  await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
+  const original = await terminalWithManualInput(current);
   await original.rerender({ frame: frame(current) });
   let finish!: (value: CommandResult) => void;
   if (state.startsWith('pending')) vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
@@ -148,13 +158,13 @@ it.each(cases)('keeps $state $attention delivery fenced in Conversation across $
   if (state === 'pending-completed') {
     await waitFor(() => expect(attention === 'idle' ? button('Send prompt') : attention === 'approval' ? button('Allow once') : button('Submit')).toBeEnabled());
   } else {
-    await waitFor(() => expect(screen.getByText('Delivery is uncertain. You can edit drafts; open Terminal and use Type in terminal to inspect before sending.')).toBeVisible());
+    await waitFor(() => expect(alertWithText('Delivery is uncertain. In Terminal, tap Keyboard to check before sending.')).toBeVisible());
     await history.rerender({ frame: frame(current) });
     expect(button('Send prompt')).toBeDisabled();
     history.unmount();
     const restored = terminal(current);
     await restored.rerender({ frame: stale });
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
     expect(screen.getByLabelText('Terminal text')).toHaveValue('');
     expect(button('I checked the terminal')).toBeDisabled();
@@ -177,9 +187,7 @@ it.each(cases)('keeps $state $attention delivery fenced in Conversation across $
 });
 
 it('does not transfer or clear an unresolved delivery when Conversation changes targets', async () => {
-  const original = terminal();
-  await fireEvent.click(button('Type in terminal'));
-  await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
+  const original = await terminalWithManualInput();
   await original.rerender({ frame: frame() });
   vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'accepted' });
   await fireEvent.click(button('Enter'));
@@ -206,9 +214,7 @@ it.each([true, undefined])('keeps Conversation hidden/unknown %s edits transient
 
 it.each(['pending', 'uncertain'] as const)('keeps Conversation hidden-value Enter behind a %s delivery fence', async state => {
   const secret = vi.spyOn(relayStore, 'sendSecret').mockResolvedValue(receipt);
-  const original = terminal();
-  await fireEvent.click(button('Type in terminal'));
-  await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
+  const original = await terminalWithManualInput();
   await original.rerender({ frame: frame() });
   let finish!: (value: CommandResult) => void;
   if (state === 'pending') vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));

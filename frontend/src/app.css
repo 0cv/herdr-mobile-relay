@@ -735,6 +735,13 @@ textarea { min-height: 6.5rem; resize: vertical; }
 /* Inline-level buttons here would align on the text baseline, which drops Alt
    about a pixel below Shift and Ctrl because their glyph boxes differ. */
 .modifier-menu { align-items: center; display: flex; gap: .2rem; }
+.manual-input-trigger { display: flex; }
+/* An icon standing in for a button name inside a sentence, aligned with the surrounding text. */
+.inline-icon { display: inline-block; height: 1.2em; vertical-align: -.25em; width: 1.2em; }
+/* With the Keyboard button shown, the key row is about 2px wider than a 320px screen; tighter gaps keep Enter whole. */
+@media (max-width: 340px) {
+  .term-keys, .modifier-menu { gap: .1rem; }
+}
 /* 1.15rem keeps these buttons at the row's 2.15rem, unlike the 1.5rem
    .button-symbol, which makes its button taller than the lettered ones. */
 /* A drawn icon centres on the button box, but the lettered keys' ink sits about

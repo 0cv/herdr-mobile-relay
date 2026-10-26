@@ -8,6 +8,7 @@ import { relayStore } from '$lib/store';
 import { securityState } from '$lib/security';
 import { targetRefForAgent } from '$lib/resource-id';
 import { terminalTextError } from '$lib/terminal-input-policy';
+import { promptDispatchRestriction } from '$lib/terminal-input';
 import { clearPromptDraft, loadPromptDraft } from '$lib/prompt-drafts';
 import { reloadRisk } from '$lib/reload-guard';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
@@ -19,6 +20,8 @@ const connection = { status: 'connected', capabilities: ['manual_terminal_input'
 const receipt = { type: 'command_result', request_id: 'manual', ok: true, phase: 'completed' } as CommandResult;
 const frame = (current = agent, noEcho: boolean | undefined = false) => ({ paneId: current.pane_id, target: targetRefForAgent(current), inputTarget: targetRefForAgent(current), content: 'Arbitrary extension: destination\n> ', format: 'plain' as const, receivedAt: performance.now(), readStartedAt: performance.now(), noEcho });
 const button = (name: string) => screen.getByRole('button', { name });
+// Warnings name the Keyboard button through its icon's visually hidden label, outside the paragraph's own text nodes.
+const alertWithText = (text: string) => screen.getByText((_, element) => element?.getAttribute('role') === 'alert' && element.textContent === text);
 
 beforeEach(() => {
   localStorage.clear();
@@ -34,12 +37,17 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); relayStore.connections.set(new Map()); securityState.set({ locked: false } as never); });
 
+// The Keyboard button is offered only while the composer cannot send, so open it while the pane needs inspection.
+// The open panel survives the agent settling into another state, such as idle.
+const offeringManualInput = (current: Agent): Agent => promptDispatchRestriction(current) ? current : { ...current, status: 'blocked', attention_kind: 'unknown' };
+
 async function open(view: 'Conversation' | 'Terminal', current = agent) {
-  const rendered = view === 'Conversation' ? render(ConversationHistory, { agent: current }) : render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
+  const opening = offeringManualInput(current);
+  const rendered = view === 'Conversation' ? render(ConversationHistory, { agent: opening }) : render(TerminalView, { agent: opening, allAgents: [opening], responding: new Set<string>() });
   await rendered.rerender({ frame: frame(current) });
-  await fireEvent.click(button('Type in terminal'));
+  await fireEvent.click(button('Keyboard'));
   await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
-  await rendered.rerender({ frame: frame(current) });
+  await rendered.rerender({ agent: current, frame: frame(current) });
   await waitFor(() => expect(screen.getByLabelText('Terminal text')).toHaveFocus());
   return rendered;
 }
@@ -74,6 +82,26 @@ it('preserves Unicode, spaces and the exact byte ceiling', () => {
   expect(terminalTextError('界'.repeat(21_846))).toContain('65,536');
 });
 
+it.each([
+  { state: 'working', patch: { status: 'working' }, offered: false },
+  { state: 'idle', patch: { status: 'idle' }, offered: false },
+  { state: 'blocked on chat input', patch: { status: 'blocked', attention_kind: 'chat' }, offered: false },
+  { state: 'needing inspection', patch: { status: 'blocked', attention_kind: 'unknown' }, offered: true },
+  { state: 'awaiting approval', patch: { status: 'blocked', attention_capable: true, attention_kind: 'approval', options: ['Allow once', 'Deny'] }, offered: true },
+] as const)('offers the Keyboard button in the terminal key row only while $state blocks the composer', async ({ patch, offered }) => {
+  const current = { ...agent, ...patch } as Agent;
+  const rendered = render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
+  await rendered.rerender({ frame: frame(current) });
+  const trigger = screen.queryByRole('button', { name: 'Keyboard' });
+  if (!offered) {
+    expect(trigger).not.toBeInTheDocument();
+    expect(button('Send prompt')).toBeInTheDocument();
+    return;
+  }
+  expect(trigger).toBeVisible();
+  expect(trigger!.closest('.term-keys')).toBe(button('Esc').closest('.term-keys'));
+});
+
 const manualViews: Array<'Conversation' | 'Terminal'> = ['Terminal'];
 for (const view of manualViews) describe(view, () => {
   it.each(['working','blocked','idle'])('keeps %s editing separate from dispatch', async status => {
@@ -98,7 +126,7 @@ for (const view of manualViews) describe(view, () => {
     expect(JSON.stringify(localStorage)).not.toContain('/unrelated');
     await fireEvent.click(button('Enter'));
     expect(relayStore.sendToAgent).toHaveBeenLastCalledWith(agent, { type: 'send_keys', keys: ['Enter'], activity_label: 'Manual Enter' });
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     expect(screen.getByLabelText('Prompt')).toBeVisible();
     expect(relayStore.sendToAgent).toHaveBeenCalledTimes(2);
     rendered.unmount();
@@ -120,7 +148,7 @@ for (const view of manualViews) describe(view, () => {
     expect(piDelivery.uncertain).toBe(true);
     await fireEvent.click(button('Send text'));
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     await fireEvent.click(button('I checked — allow another send'));
     expect(piDelivery.uncertain).toBe(false);
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
@@ -147,9 +175,13 @@ for (const view of manualViews) describe(view, () => {
     await fireEvent.click(button('Send text'));
     expect(button('Enter')).toBeDisabled();
     expect(button('I checked the terminal')).toBeDisabled();
-    expect(button('Back to prompt and structured controls')).toBeEnabled();
-    await fireEvent.click(button('Back to prompt and structured controls'));
-    await waitFor(() => expect(button('Type in terminal')).toHaveFocus());
+    expect(button('Close')).toBeEnabled();
+    await fireEvent.click(button('Close'));
+    await waitFor(() => expect(button('Keyboard')).toHaveFocus());
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Delivery is uncertain. Tap Keyboard to check the terminal before sending.');
+    expect(alert.querySelector('svg.inline-icon')).toBeVisible();
+    expect(screen.queryByText('Check terminal input delivery before sending.')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Prompt')).toBeVisible();
     expect(screen.getByLabelText('Prompt')).toBeEnabled();
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'unrelated normal draft' } });
@@ -157,7 +189,7 @@ for (const view of manualViews) describe(view, () => {
     expect(button('Send prompt')).toBeDisabled();
     await fireEvent.click(button('Enter'));
     expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toHaveFocus());
     expect(button('Enter')).toBeDisabled();
     expect(button('I checked the terminal')).toBeDisabled();
@@ -181,19 +213,19 @@ for (const view of manualViews) describe(view, () => {
     await fireEvent.click(button('Send text'));
     if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never));
     else securityState.set({ locked: true } as never);
-    await waitFor(() => expect(button('Type in terminal')).toBeVisible());
+    await waitFor(() => expect(button('Keyboard')).toBeVisible());
     if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, connection]] as never));
     else securityState.set({ locked: false } as never);
     await rendered.rerender({ frame: stale });
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal recovery draft' } });
-    expect(screen.getByText('Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.')).toBeVisible();
+    expect(alertWithText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.')).toBeVisible();
     expect(button('Enter')).toBeDisabled();
     expect(button('Send prompt')).toBeDisabled();
     if (attention === 'question') {
       expect(await screen.findByRole('radio', { name: 'North' })).toBeEnabled();
       for (const label of ['Submit', '← Previous', 'Chat about this']) expect(button(label)).toBeDisabled();
     } else if (attention === 'approval') expect(button('Allow once')).toBeDisabled();
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
     expect(screen.getByLabelText('Terminal text')).toHaveFocus();
     expect(screen.getByLabelText('Terminal text')).toHaveValue('');
@@ -203,7 +235,7 @@ for (const view of manualViews) describe(view, () => {
     expect(button('I checked the terminal')).toBeEnabled();
     await fireEvent.click(button('I checked the terminal'));
     expect(button('Enter')).toBeEnabled();
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     expect(button('Enter')).toBeEnabled();
     if (attention === 'idle') expect(button('Send prompt')).toBeEnabled();
     else if (attention === 'question') expect(await screen.findByRole('button', { name: 'Submit' })).toBeEnabled();
@@ -231,7 +263,7 @@ for (const view of manualViews) describe(view, () => {
     now = 130;
     securityState.set({ locked: true } as never);
     await tick();
-    expect(button('Type in terminal')).toBeVisible();
+    expect(button('Keyboard')).toBeVisible();
     now = 140;
     securityState.set({ locked: false } as never);
     await tick();
@@ -253,7 +285,7 @@ for (const view of manualViews) describe(view, () => {
       await fireEvent.click(button('Allow once'));
     }
     expect(JSON.stringify(localStorage)).not.toContain('draft before recovery observation');
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
     expect(screen.getByLabelText('Terminal text')).toHaveValue('');
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'new transient after unlock' } });
@@ -277,7 +309,7 @@ for (const view of manualViews) describe(view, () => {
     await fireEvent.click(button('I checked the terminal'));
     expect(button('Send text')).toBeEnabled();
     expect(button('Enter')).toBeEnabled();
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     expect(button('Enter')).toBeEnabled();
     if (attention === 'idle') expect(button('Send prompt')).toBeEnabled();
     else if (attention === 'question') expect(await screen.findByRole('button', { name: 'Submit' })).toBeEnabled();
@@ -297,7 +329,7 @@ for (const view of manualViews) describe(view, () => {
     await fireEvent.click(button('Send text'));
     if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never));
     else securityState.set({ locked: true } as never);
-    await waitFor(() => expect(button('Type in terminal')).toBeVisible());
+    await waitFor(() => expect(button('Keyboard')).toBeVisible());
     if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, connection]] as never));
     else securityState.set({ locked: false } as never);
     await rendered.rerender({ frame: frame(current) });
@@ -307,9 +339,9 @@ for (const view of manualViews) describe(view, () => {
     finish({ ...receipt, phase });
     if (phase === 'completed') await waitFor(() => expect(button('Send prompt')).toBeEnabled());
     else {
-      await waitFor(() => expect(screen.getByText('Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.')).toBeVisible());
+      await waitFor(() => expect(alertWithText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.')).toBeVisible());
       expect(button('Send prompt')).toBeDisabled();
-      await fireEvent.click(button('Type in terminal'));
+      await fireEvent.click(button('Keyboard'));
       await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
       expect(screen.getByLabelText('Terminal text')).toHaveFocus();
       expect(button('Enter')).toBeDisabled();
@@ -339,8 +371,8 @@ for (const view of manualViews) describe(view, () => {
       expect(screen.getByText('Waiting for terminal input delivery.')).toBeVisible();
       finish({ ...receipt, phase: 'dispatched_unknown' });
     }
-    await waitFor(() => expect(screen.getByText('Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.')).toBeVisible());
-    await fireEvent.click(button('Type in terminal'));
+    await waitFor(() => expect(alertWithText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.')).toBeVisible());
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
     expect(screen.getByLabelText('Terminal text')).toHaveValue('');
     expect(button('Enter')).toBeDisabled();
@@ -359,7 +391,7 @@ for (const view of manualViews) describe(view, () => {
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'accepted' });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'uncertain' } });
     await fireEvent.click(button('Send text'));
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     await rendered.rerender({ frame: frame(agent, true) });
     await fireEvent.input(screen.getByLabelText('Value for the hidden terminal prompt'), { target: { value: 'transient hidden value' } });
     expect(button('Send hidden value')).toBeDisabled();
@@ -382,7 +414,7 @@ for (const view of manualViews) describe(view, () => {
     const changed = { ...current, [field]: field === 'agent' ? 'claude' : '/changed-directory' };
     expect(targetRefForAgent(changed)).toEqual(targetRefForAgent(current));
     await rendered.rerender({ agent: changed, frame: frame(changed) });
-    await waitFor(() => expect(button('Type in terminal')).toBeVisible());
+    await waitFor(() => expect(button('Keyboard')).toBeVisible());
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal metadata draft' } });
     expect(button('Enter')).toBeDisabled();
     expect(button('Send prompt')).toBeDisabled();
@@ -391,9 +423,9 @@ for (const view of manualViews) describe(view, () => {
     if (state !== 'uncertain') finish({ ...receipt, phase: state === 'pending-completed' ? 'completed' : 'dispatched_unknown' });
     if (state === 'pending-completed') await waitFor(() => expect(button('Enter')).toBeEnabled());
     else {
-      await waitFor(() => expect(screen.getByText('Delivery is uncertain. You can edit drafts; reopen Type in terminal to inspect before sending.')).toBeVisible());
+      await waitFor(() => expect(alertWithText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.')).toBeVisible());
       expect(button('Enter')).toBeDisabled();
-      await fireEvent.click(button('Type in terminal'));
+      await fireEvent.click(button('Keyboard'));
       await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
       expect(button('I checked the terminal')).toBeDisabled();
       await rendered.rerender({ frame: frame(changed) });
@@ -419,11 +451,11 @@ for (const view of manualViews) describe(view, () => {
       await fireEvent.click(button('I checked the terminal'));
       expect(button('Enter')).toBeDisabled();
     }
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'unrelated draft' } });
     expect(button('Send prompt')).toBeDisabled();
     expect(button('Enter')).toBeDisabled();
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
     await rendered.rerender({ frame: frame(current) });
     expect(button('I checked the terminal')).toBeEnabled();
@@ -441,7 +473,7 @@ for (const view of manualViews) describe(view, () => {
     await fireEvent.click(button('Send text'));
     await rendered.rerender({ agent: { ...agent, [field]: field === 'generation' ? 2 : 'replacement' } });
     finish(receipt);
-    await waitFor(() => expect(button('Type in terminal')).toBeVisible());
+    await waitFor(() => expect(button('Keyboard')).toBeVisible());
     expect(screen.queryByLabelText('Terminal text')).not.toBeVisible();
     expect(screen.getByLabelText('Prompt')).toHaveValue('');
     expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
@@ -450,14 +482,14 @@ for (const view of manualViews) describe(view, () => {
   it('invalidates on disconnect and lock, requiring a fresh post-recovery frame', async () => {
     const rendered = await open(view);
     relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never));
-    await waitFor(() => expect(button('Type in terminal')).toBeVisible());
+    await waitFor(() => expect(button('Keyboard')).toBeVisible());
     relayStore.connections.set(new Map([[agent.relay_id, connection]] as never));
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(button('Enter')).toBeDisabled());
     await rendered.rerender({ frame: frame() });
     expect(button('Enter')).toBeEnabled();
     securityState.set({ locked: true } as never);
-    await waitFor(() => expect(button('Type in terminal')).toBeVisible());
+    await waitFor(() => expect(button('Keyboard')).toBeVisible());
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
   });
 
@@ -468,7 +500,7 @@ for (const view of manualViews) describe(view, () => {
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'transient-secret' } });
     await rendered.rerender({ frame: frame() });
     expect(JSON.stringify(localStorage)).not.toContain('transient-secret');
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     expect(screen.getByLabelText('Prompt')).toHaveValue('');
     expect(JSON.stringify(localStorage)).not.toContain('transient-secret');
   });
@@ -501,7 +533,7 @@ for (const view of manualViews) describe(view, () => {
     await rendered.rerender({ frame: delta() });
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'unverified recovery draft' } });
     expect(JSON.stringify(localStorage)).not.toContain('unverified recovery draft');
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'transient recovery text' } });
     for (const candidate of [delta(), { ...beforeRecovery, receivedAt: now }, { ...frame(), inputTarget: targetRefForAgent({ ...agent, generation: agent.generation! + 1 }) }]) {
@@ -554,7 +586,7 @@ for (const view of manualViews) describe(view, () => {
     await open(view, current);
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'explicit manual text' } });
     await fireEvent.click(button('Send text'));
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     expect(button('Allow once')).toBeVisible();
     expect(current.event_id).toBe('approval-identity');
     expect(current.status).toBe('blocked');
@@ -581,7 +613,7 @@ for (const view of manualViews) describe(view, () => {
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'accepted' });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'uncertain' } });
     await fireEvent.click(button('Send text'));
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     if (attention_kind === 'question') {
       expect(await screen.findByRole('radio', { name: 'North' })).toBeEnabled();
       for (const label of ['Submit', '← Previous', 'Chat about this']) {
@@ -605,22 +637,22 @@ for (const view of manualViews) describe(view, () => {
     const rendered = view === 'Conversation' ? render(ConversationHistory, { agent: current }) : render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
     expect(screen.getByLabelText('Prompt')).toBeEnabled();
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'question-local draft' } });
-    await fireEvent.click(button('Type in terminal'));
+    await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toHaveFocus());
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
-    await fireEvent.click(button('Back to prompt and structured controls'));
+    await fireEvent.click(button('Close'));
     expect(await screen.findByRole('group', { name: 'Choose a destination' })).toBeVisible();
     expect(screen.getByRole(kind === 'multi_select' ? 'checkbox' : 'radio', { name: 'Other' })).toBeVisible();
     expect(current.interaction.id).toBe('genuine');
     expect(screen.getByLabelText('Prompt')).toHaveValue('question-local draft');
-    await waitFor(() => expect(button('Type in terminal')).toHaveFocus());
+    await waitFor(() => expect(button('Keyboard')).toHaveFocus());
     rendered.unmount();
   });
 
   it('never offers manual controls to a reader', () => {
     if (view === 'Conversation') render(ConversationHistory, { agent, readOnly: true });
     else render(TerminalView, { agent, readOnly: true, allAgents: [agent], responding: new Set<string>() });
-    expect(screen.queryByRole('button', { name: 'Type in terminal' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Keyboard' })).not.toBeInTheDocument();
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
   });
 });

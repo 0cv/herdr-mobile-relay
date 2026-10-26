@@ -13,11 +13,10 @@
   import type { Agent, TerminalFrame } from '$lib/types';
   import type { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 
-  let { agent, frame, active, readOnly, delivery, onexit }:
-    { agent: Agent; frame?: TerminalFrame; active: boolean; readOnly: boolean; delivery: TerminalInputDelivery; onexit: () => void } = $props();
+  let { agent, frame, active, readOnly, delivery, onexit, returnFocus }:
+    { agent: Agent; frame?: TerminalFrame; active: boolean; readOnly: boolean; delivery: TerminalInputDelivery; onexit: () => void; returnFocus?: () => void } = $props();
   const sending = $derived(delivery.pending);
   const uncertain = $derived(delivery.uncertain);
-  let panel = $state<HTMLElement>();
   let input = $state<HTMLInputElement>();
   const connections = relayStore.connections;
   const inputState = terminalDraftState(() => agent, () => frame);
@@ -54,9 +53,7 @@
     if (sending) return;
     onexit();
     await tick();
-    if (mounted && !active && !$securityState.locked && document.visibilityState !== 'hidden') {
-      panel?.previousElementSibling?.querySelector<HTMLButtonElement>('button')?.focus();
-    }
+    if (mounted && !active && !$securityState.locked && document.visibilityState !== 'hidden') returnFocus?.();
   }
 
   function paste(event: ClipboardEvent) {
@@ -92,7 +89,7 @@
   }
 </script>
 
-<section bind:this={panel} hidden={!active} aria-label="Type in terminal">
+<section hidden={!active} aria-label="Keyboard">
   <p id="terminal-input-effect" class="hint">Writes to the terminal’s currently focused control. Characters may act as hotkeys or filters, including in approval menus. Focus can change on the computer. Nothing here is saved on this phone.</p>
   <details>
     <summary>Current terminal context</summary>
@@ -109,7 +106,7 @@
   <div class="quick-actions">
     <Button disabled={disabled || !text} onclick={() => send()}>Send text</Button>
     <Button disabled={disabled} onclick={() => send(true)}>Enter</Button>
-    <Button variant="secondary" disabled={sending} onclick={leave}>Back to prompt and structured controls</Button>
+    <Button variant="secondary" disabled={sending} onclick={leave}>Close</Button>
   </div>
   {#if !connection?.capabilities.includes('manual_terminal_input')}
     <p role="status">This relay does not support manual terminal text. No fallback command will be used.</p>

@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Replace **Type in terminal** with a **Keyboard** button in the terminal key
+  row, shown only when the composer cannot send: the agent awaits an approval
+  or question answer, its pane needs inspection, or an earlier terminal send is
+  unconfirmed. It no longer takes a row of its own, which leaves more room for
+  terminal output. Delivery warnings show its icon instead of naming it, and
+  the panel's long back button is now **Close**.
+
 ## [0.23.2] - 2026-10-25
 
 ### Added

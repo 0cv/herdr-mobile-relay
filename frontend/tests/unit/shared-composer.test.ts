@@ -293,7 +293,7 @@ describe('shared composer safety', () => {
     expect(screen.getByLabelText('Prompt')).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: 'Type in terminal' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Keyboard' })).not.toBeInTheDocument();
     expect(screen.getByText('Draft only — use structured controls or advanced input in Terminal.')).toBeVisible();
     await fireEvent.keyDown(screen.getByLabelText('Prompt'), { key: 'Enter', ctrlKey: true });
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();

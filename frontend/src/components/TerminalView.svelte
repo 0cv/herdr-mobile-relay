@@ -7,6 +7,7 @@
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import type { ComposerSubmitAdapter } from '$lib/composer';
   import Button from '$components/ui/Button.svelte';
+  import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import {
     MAX_PANE_SIZE_COLUMNS,
     MAX_PANE_SIZE_ROWS,
@@ -139,6 +140,9 @@
   let sendingPrompt = $state(false);
   let keySending = $state(false);
   let terminalKeys = $state<TerminalKeys>();
+  let terminalInputMode = $state<TerminalInputMode>();
+  let manualInputLoading = $state(false);
+  let manualInputTriggerHost = $state<HTMLElement>();
   let copyingAgentResponse = $state(false);
   let paneSizeLeaseError = $state('');
   let requestedPaneId = '';
@@ -227,6 +231,10 @@
   const inputLocked = $derived(readOnly || responsePending || inspectionMode || terminalTextMode === 'filter');
   let manualInput = $state(false);
   let inputBlocked = $state(false);
+  // Literal terminal input is the escape hatch for when the composer cannot send: the agent awaits a structured
+  // response or needs inspection, or an earlier terminal send is unconfirmed and must be inspected first.
+  const manualInputOffered = $derived(!readOnly && (Boolean(promptDispatchRestriction(agent)) || inputBlocked));
+  const manualInputBusy = $derived(sendingPrompt || keySending || responding.has(agent.pane_id));
   const dispatchBlocked = $derived(responsePending || !terminalTextMode ? promptDispatchRestriction(agent) : '');
   const draftState = terminalDraftState(() => agent, () => frame);
   const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
@@ -1495,6 +1503,14 @@
   }
 </script>
 
+{#snippet manualInputTrigger()}
+  {#if manualInputOffered}
+    <div class="manual-input-trigger" bind:this={manualInputTriggerHost}>
+      <Button variant="secondary" size="sm" aria-label="Keyboard" title="Type into the terminal" disabled={manualInputBusy || manualInputLoading}
+        onclick={() => { void terminalInputMode?.enter(); }}><KeyboardIcon /></Button>
+    </div>
+  {/if}
+{/snippet}
 {#snippet copyIcon()}
   <svg class="action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
     <rect x="9" y="9" width="11" height="12" rx="2"></rect>
@@ -1533,7 +1549,7 @@
   {/if}
   {#if questionMode && interaction && !manualInput}
     <AgentInteraction {agent} {readOnly} responding={responding.has(agent.pane_id)} blocked={inputBlocked} />
-    <TerminalKeys {agent} {readOnly} blocked={inputBlocked} bind:sending={keySending} />
+    <TerminalKeys {agent} {readOnly} blocked={inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />
   {/if}
   <div class:hidden={questionMode} class="terminal-view term">
   {#if findOpen}
@@ -1656,11 +1672,13 @@
 
   </div>
   <div class="terminal-bottom">
-    <TerminalInputMode {agent} {frame} {readOnly} bind:manual={manualInput} bind:blocked={inputBlocked} busy={sendingPrompt || keySending || responding.has(agent.pane_id)} />
+    <TerminalInputMode bind:this={terminalInputMode} {agent} {frame} {readOnly} bind:manual={manualInput} bind:blocked={inputBlocked}
+      bind:loading={manualInputLoading} busy={manualInputBusy} returnFocus={() => manualInputTriggerHost?.querySelector('button')?.focus()} />
     <div hidden={manualInput}>
-    {#if !questionMode && !manualInput}<TerminalKeys bind:this={terminalKeys} {agent} {readOnly} blocked={sendingFilter || inputBlocked} bind:sending={keySending} />{/if}
+    {#if !questionMode && !manualInput}<TerminalKeys bind:this={terminalKeys} {agent} {readOnly} blocked={sendingFilter || inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />{/if}
     {#key JSON.stringify(targetRefForAgent(agent))}
-      <PromptComposer {agent} {frame} {readOnly} dispatchBlocked={manualInput || inputBlocked ? 'Type in terminal' : draftState.secretReady ? '' : dispatchBlocked} attachmentsBlocked={inputLocked}
+      <PromptComposer {agent} {frame} {readOnly} dispatchBlocked={manualInput || inputBlocked ? 'Check terminal input delivery before sending.' : draftState.secretReady ? '' : dispatchBlocked}
+        blockExplained={manualInput || inputBlocked} attachmentsBlocked={inputLocked}
         {noEchoActive} draftPersistenceAllowed={draftState.allowed} noEchoPrompt={frame?.noEchoPrompt || 'Password:'}
         {submitAdapter} bind:sending={sendingPrompt}
         placeholder={terminalTextMode ? 'Type filter text…' : 'Type a reply…'}

@@ -1387,7 +1387,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   await expect.poll(async () => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
   const beforeManual = (await commands(page)).findLast(command => command.type === 'read_pane')?.request_id;
-  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   const terminalInput = page.getByRole('textbox', { name: 'Terminal text', exact: true });
   await expect(terminalInput).toBeEnabled();
   await expect.poll(async () => (await commands(page)).findLast(command => command.type === 'read_pane')?.request_id).not.toBe(beforeManual);
@@ -1400,7 +1400,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
     .map((command) => ({ type: command.type, text: command.text, keys: command.keys }))).toEqual([
       { type: 'send_terminal_text', text: 'custom weekend', keys: undefined },
     ]);
-  await page.getByRole('button', { name: 'Back to prompt and structured controls', exact: true }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -3801,10 +3801,10 @@ function deployedAppAgents(status = 'working') {
   };
 }
 
-async function connectDeployedApp(page: Page) {
+async function connectDeployedApp(page: Page, status = 'working') {
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { capabilities: ['conversation_history'] });
-  await server(page, 0, deployedAppAgents());
+  await server(page, 0, deployedAppAgents(status));
 }
 
 async function markCurrentDocument(page: Page) {
@@ -3930,13 +3930,14 @@ test('opens the deployed build when a deploy removed the terminal input controls
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   const deploy = await removeLazyFile(page, 'ManualTerminalInput', { newerBuild: true, missingRequests: 1 });
   await boot(page, [fedora]);
-  await connectDeployedApp(page);
+  // The Keyboard button is offered only while the composer cannot send, such as for a pane that needs inspection.
+  await connectDeployedApp(page, 'blocked');
   await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
   await markCurrentDocument(page);
-  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await waitForReloadedDocument(page);
-  await connectDeployedApp(page);
-  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await connectDeployedApp(page, 'blocked');
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Terminal text', exact: true })).toBeVisible();
   expect(deploy.fileRequests).toBe(2);
 });
@@ -3945,13 +3946,13 @@ test('keeps an unsaved draft instead of reloading when a deploy removed the term
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   const deploy = await removeLazyFile(page, 'ManualTerminalInput', { newerBuild: true });
   await boot(page, [fedora]);
-  await connectDeployedApp(page);
+  await connectDeployedApp(page, 'blocked');
   await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
   const prompt = page.getByLabel('Prompt', { exact: true });
   await prompt.fill('draft this phone has not saved');
   await expect(page.getByText(/^Not saved on this phone/)).toBeVisible();
   await markCurrentDocument(page);
-  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();
   await page.waitForTimeout(500);
   expect(deploy.reloads).toEqual([]);
@@ -3966,9 +3967,9 @@ test('keeps an unconfirmed terminal send fenced instead of reloading when a depl
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { capabilities: ['conversation_history', 'manual_terminal_input'] });
-  await server(page, 0, deployedAppAgents());
+  await server(page, 0, deployedAppAgents('blocked'));
   await button('Open Deployed app on Fedora').click();
-  await button('Type in terminal').click();
+  await button('Keyboard').click();
   await expect(page.getByLabel('Terminal text', { exact: true })).toBeVisible();
   const read = (await commands(page)).findLast(command => command.type === 'read_pane');
   expect(read).toBeTruthy();
@@ -4229,7 +4230,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
   const promptsBeforeApprovalEdit = (await commands(page)).filter(command => command.type === 'submit_prompt').length;
   await composer.press('Control+Enter');
   expect((await commands(page)).filter(command => command.type === 'submit_prompt').length).toBe(promptsBeforeApprovalEdit);
-  await expect(page.getByRole('button', { name: 'Type in terminal', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Keyboard', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Approve once', exact: true })).toBeVisible();
 
@@ -4277,7 +4278,7 @@ test(`default agent view: fresh ${provider} openings use clean Conversation`, as
   await expect(page.locator('summary').filter({ hasText: 'Default tool' })).toHaveCount(0);
   expect((await commands(page)).filter(command => command.type === 'get_conversation_history')).toHaveLength(1);
   await expect(page.getByLabel('Prompt', { exact: true })).toBeEnabled();
-  for (const name of ['Type in terminal', 'Enter', 'Tab', 'Ctrl', 'Send text']) await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
+  for (const name of ['Keyboard', 'Enter', 'Tab', 'Ctrl', 'Send text']) await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
   await expect(page.getByText('Current terminal context', { exact: true })).toHaveCount(0);
   const openingCommands = (await commands(page)).slice(before.length);
   expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(true);
@@ -4286,7 +4287,8 @@ test(`default agent view: fresh ${provider} openings use clean Conversation`, as
   expect(openingCommands.some(command => String(command.type).startsWith('agent_') || ['submit_prompt', 'send_input', 'send_keys', 'lease_pane_size', 'release_pane_size'].includes(String(command.type)))).toBe(false);
   await page.getByRole('button', { name: 'Terminal view' }).tap();
   await expect(page.getByRole('main', { name: 'Terminal for Default conversation' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Type in terminal', exact: true })).toBeVisible();
+  // A working agent accepts prompts, so literal terminal input is not offered.
+  await expect(page.getByRole('button', { name: 'Keyboard', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBeNull();
 });
@@ -4298,19 +4300,24 @@ for (const attention of ['idle', 'question', 'approval', 'pending']) {
     await boot(page, [fedora]);
     await expect.poll(() => socketCount(page)).toBe(1);
     await handshake(page, 0, { capabilities: ['conversation_history', 'manual_terminal_input', 'structured_questions', 'attention_classification'] });
-    await server(page, 0, { type: 'agents', agents: [{
-      pane_id: 'w1:p1', status: ['idle', 'pending'].includes(attention) ? 'idle' : 'blocked', project: 'Phone controls', agent: 'pi',
-      conversation_history_available: true, agent_session_id: 'phone-controls-session', attention_kind: attention === 'pending' ? 'unknown' : attention,
+    const settled = ['idle', 'pending'].includes(attention);
+    const phoneAgents = (inspecting: boolean) => ({ type: 'agents', agents: [{
+      pane_id: 'w1:p1', status: settled && !inspecting ? 'idle' : 'blocked', project: 'Phone controls', agent: 'pi',
+      conversation_history_available: true, agent_session_id: 'phone-controls-session', attention_kind: inspecting || attention === 'pending' ? 'unknown' : attention,
       options: ['Allow once', 'Deny'], event_id: 'phone-approval',
       interaction: attention === 'question' ? { id: 'phone-question', kind: 'single_select', question: 'Choose destination', options: [{ index: 0, label: 'North', selected: true }], submit_label: 'Submit' } : undefined,
     }] });
+    // The Keyboard button is offered only while the composer cannot send, so a settled agent first needs inspection.
+    await server(page, 0, phoneAgents(settled));
     await setConversationFixture(page, { entries: [{ id: 'code', timestamp: '', role: 'assistant', text: '```ts\nconst kept = true;\n```' }], total: 1 });
     await button('Open Phone controls on Fedora').click();
     await expect(page.locator('.conversation-markdown code')).toHaveText('const kept = true;\n');
-    await expect(button('Type in terminal')).toHaveCount(0);
+    await expect(button('Keyboard')).toHaveCount(0);
     await button('Terminal view').click();
-    await button('Type in terminal').click();
+    await button('Keyboard').click();
     await expect(page.getByLabel('Terminal text', { exact: true })).toBeVisible();
+    // The app keeps a blocked state through one non-blocked snapshot, so the agent settles on the second.
+    if (settled) for (let snapshot = 0; snapshot < 2; snapshot++) await server(page, 0, phoneAgents(false));
     const observe = async () => {
       const read = (await commands(page)).findLast(command => command.type === 'read_pane');
       expect(read).toBeTruthy();
@@ -4331,12 +4338,12 @@ for (const attention of ['idle', 'question', 'approval', 'pending']) {
       await expect(page.getByText('Waiting for terminal input delivery.', { exact: true })).toBeVisible();
       await unknown();
     }
-    await expect(page.getByText('Delivery is uncertain. You can edit drafts; open Terminal and use Type in terminal to inspect before sending.', { exact: true })).toBeVisible();
+    await expect(page.getByText('Delivery is uncertain. In Terminal, tap Keyboard to check before sending.', { exact: true })).toBeVisible();
     await page.getByLabel('Prompt', { exact: true }).fill('editable draft after uncertainty');
     await expect(button('Send prompt')).toBeDisabled();
     await expect(button('Attach files')).toBeDisabled();
     await page.getByLabel('Prompt', { exact: true }).press('Control+Enter');
-    for (const name of ['Type in terminal', 'Enter', 'Tab', 'Ctrl', 'Send text', 'I checked the terminal']) await expect(button(name)).toHaveCount(0);
+    for (const name of ['Keyboard', 'Enter', 'Tab', 'Ctrl', 'Send text', 'I checked the terminal']) await expect(button(name)).toHaveCount(0);
     await expect(page.getByText('Current terminal context', { exact: true })).toHaveCount(0);
     await expect(page.getByText('RAW TERMINAL PREVIEW', { exact: true })).toHaveCount(0);
     if (attention === 'question') {
@@ -4344,7 +4351,7 @@ for (const attention of ['idle', 'question', 'approval', 'pending']) {
       await expect(button('Submit')).toBeDisabled();
     } else if (attention === 'approval') await expect(button('Allow once')).toBeDisabled();
     await button('Terminal view').click();
-    await button('Type in terminal').click();
+    await button('Keyboard').click();
     await expect(page.getByLabel('Terminal text', { exact: true })).toHaveValue('');
     await expect(button('I checked the terminal')).toBeDisabled();
     await observe();
@@ -8260,7 +8267,7 @@ test('followup combined notices and Pi bridge stay fenced across paging, modes a
   await server(page, 1, { type: 'agents', agents: [agent] });
   await expect(page.getByText('Sent to Pi — not confirmed', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
-  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Send text', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Conversation history', exact: true }).click();
   await page.getByRole('button', { name: 'I checked — allow another send', exact: true }).click();
@@ -8382,7 +8389,7 @@ for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`foll
   await expect(send).toBeDisabled();
   await prompt.press('Control+Enter');
   await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
-  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Send text', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Conversation history', exact: true }).click();
   await page.getByRole('button', { name: 'I checked — allow another send', exact: true }).click();
@@ -8489,7 +8496,7 @@ test('followup blocked Pi without a bridge points to Settings without fallback i
   await page.getByRole('button', { name: 'Open Setting Pi on Fedora', exact: true }).click();
   await expect(page.getByText('For live Pi replies, enable Settings → Pi Integration, then /reload Pi.', { exact: true })).toBeVisible();
   await expectNoActivityFooter(page.locator('.prompt-composer'));
-  await expect(page.getByRole('button', { name: 'Type in terminal', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Keyboard', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
   await expect(page.getByText('For live Pi replies, enable Settings → Pi Integration, then /reload Pi.', { exact: true })).toBeVisible();
@@ -8525,10 +8532,10 @@ test('hidden secret requires correlated observation and never retries uncertain 
   await expect(send).toBeDisabled();
   await expect(page.getByText(/Delivery is uncertain/)).toBeVisible({ timeout: 20_000 });
   await server(page, 0, { type: 'command_result', request_id: secret.request_id, phase: 'completed', ok: true });
-  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await observe();
   await expect(page.getByRole('button', { name: 'I checked the terminal', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: 'Back to prompt and structured controls', exact: true }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(send).toBeDisabled();
   await expect(input).toHaveValue('');
   await input.evaluate(element => { element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
