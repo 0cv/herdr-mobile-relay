@@ -323,6 +323,11 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await validateMobileEvidence(historicalOptions);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: { ...historicalResult.phone_completion, rawPlanPresent: false } }));
   await validateMobileEvidence(historicalOptions);
+  const relayOnlyCompletion = { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'loading', visibleCompletion: true };
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: relayOnlyCompletion }));
+  await validateMobileEvidence(historicalOptions);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: { ...relayOnlyCompletion, phoneAcknowledged: true } }));
+  await assert.rejects(validateMobileEvidence(historicalOptions), /0\.20\.8 reported phone completion without a phone plan/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, origin: 'http://fixture.test' }));
   await assert.rejects(validateMobileEvidence(options), /HTTPS origin/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, final_identity: { ...result.final_identity, build: 'wrong-build' } }));

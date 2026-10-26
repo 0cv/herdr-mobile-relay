@@ -524,6 +524,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       assert.ok(!source.includes('simctl launch --terminate-running-process'));
       assert.ok(!source.includes("-name 'WebDriverAgentRunner_*.xctestrun' -print -quit"));
       assert.ok(source.includes('IOS_PLATFORM_VERSION=27.0'));
+      assert.match(source, /if \[ "\$(?:WORKFLOW|MOBILE)_PLATFORM" = ios \]; then printf 'MOBILE_TIMING_SCALE=2\\n' >> "\$GITHUB_ENV"; fi/u);
       assert.ok(!source.includes('IOS_PLATFORM_VERSION=18.6'));
       assert.ok(!source.includes('Xcode_16.4'));
       assert.ok(source.includes('xcode_application=/Applications/Xcode_27.app'));

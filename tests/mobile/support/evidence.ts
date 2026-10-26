@@ -423,7 +423,7 @@ function assertPhoneCompletion(result: Record<string, unknown>, baseline: string
     return;
   }
   if (baseline !== '0.20.8' && baseline !== '0.20.9') fail(`${baseline} has no phone plan`);
-  if (completion.phoneAcknowledged || completion.visibleCompletion) fail(`${baseline} reported phone completion without a phone plan`);
+  if (completion.phoneAcknowledged) fail(`${baseline} reported phone completion without a phone plan`);
   const controls = stringArray(result.oracle_controls, 'oracle_controls');
   if (!controls.includes(`HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:${baseline}`)) {
     fail(`${baseline} is missing its explicit historical phone-plan control`);
