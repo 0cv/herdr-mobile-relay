@@ -1381,6 +1381,7 @@ export class IOSPlatform implements MobilePlatform {
     await this.driver.mobile('terminateApp', { bundleId });
     const state = await this.driver.mobile('queryAppState', { bundleId });
     if (state !== 1) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider did not terminate');
+    this.installedBindingState = 'unselected';
     await this.driver.mobile('pressButton', { name: 'home' });
     await this.ensureSpringBoardForeground();
   }

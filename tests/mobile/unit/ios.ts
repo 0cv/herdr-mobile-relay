@@ -2402,7 +2402,7 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
     overlay: '', documentOrigin: origin, standalone: true, url: `${origin}/`,
     settingsFault: '', stateFault: undefined as unknown, activeFault: undefined as unknown,
     alertFault: false, ignoreHome: false, wrongLaunch: '', systemObservationFault: '', slowInstalledObservation: false,
-    systemName: 'SpringBoard', systemRootCount: 1,
+    systemName: 'SpringBoard', systemRootCount: 1, blankPublications: 0,
   };
   let settings: Record<string, unknown> = { defaultActiveApplication: 'auto', respectSystemAlerts: false };
   let homeObservations = 0;
@@ -2516,7 +2516,13 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
       state.installed = true;
       return value(null);
     }
-    if (body.script === 'mobile: getContexts') return value([published]);
+    if (body.script === 'mobile: getContexts') {
+      if (state.blankPublications > 0) {
+        state.blankPublications -= 1;
+        return value([{ ...published, url: 'about:blank', title: '' }]);
+      }
+      return value([published]);
+    }
     if (path.endsWith('/url')) return value(state.url);
     if (body.script?.startsWith('return {')) return value({ origin: state.documentOrigin, standalone: state.standalone, applicationInitialized: true });
     throw new Error(`unexpected lifecycle request ${path} ${JSON.stringify(body)}`);
@@ -2678,6 +2684,29 @@ test('Home Today View on arrival returns to the first page with one left swipe',
   assert.deepEqual(swipes.map((request) => request.body.args.direction), ['left']);
   assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
   assert.equal(a.driver.snapshot().unusable, false);
+});
+
+test('cold relaunch after termination waits for the new process to publish its page', async () => {
+  const a = await lifecycleReplay('cold-initial-publication');
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  await a.owned(() => a.platform.terminateInstalledApp());
+  a.state.pid = 17001;
+  a.state.blankPublications = 1;
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.platform.evidenceSnapshot().nativePid, '17001');
+  const pending = (a.platform.evidenceSnapshot().events as any[]).filter((event) => event.operation === 'initial-publication-pending');
+  assert.equal(pending.length, 1);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
+
+test('a blank page after a warm relaunch is still an ownership failure', async () => {
+  const a = await lifecycleReplay('warm-blank-publication');
+  await a.owned(() => a.platform.launchInstalledApp());
+  await a.owned(() => a.platform.backgroundApp());
+  a.state.blankPublications = 1;
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), /IOS_CONTEXT_OWNERSHIP: origin null is not/u);
 });
 
 test('malformed current foreground identity fails before Home navigation', async () => {
