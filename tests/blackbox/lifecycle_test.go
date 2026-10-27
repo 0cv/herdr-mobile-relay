@@ -54,6 +54,7 @@ func startRelayBrokenHerdr(t *testing.T) string {
 		"HERDR_RELAY_POLL_INTERVAL=0.5",
 		fmt.Sprintf("HERDR_WEB_ROOT=%s", webDir),
 		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(tmpDir, "config")),
+		stubLaunchctlPath(t),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

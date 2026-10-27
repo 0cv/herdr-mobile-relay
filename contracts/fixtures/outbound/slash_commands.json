@@ -60,6 +60,8 @@
       {"command": "/verify", "description": "Build and observe the application to verify changes", "source": "builtin", "argument_hint": "[instructions]"},
       {"command": "/voice", "description": "Configure voice dictation", "source": "builtin", "argument_hint": "[hold|tap|off]"}
     ],
-    "truncated": false
+    "truncated": false,
+    "status": "available",
+    "revision": "09ac899a9e4f86eee8382c3c7f087c689907a5fa145a29214a5bc114989456c4"
   }
 }

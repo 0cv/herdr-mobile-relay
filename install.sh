@@ -1,6 +1,11 @@
 #!/bin/sh
 # Install one exact, complete Herdr Mobile Relay release. No toolchain needed.
+set +x
 set -eu
+
+unset herdr_download_token
+herdr_download_token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+unset GH_TOKEN GITHUB_TOKEN
 
 REPO=${HERDR_RELEASE_REPOSITORY:-0cv/herdr-mobile-relay}
 BINARY=herdr-mobile-relay
@@ -29,6 +34,7 @@ run_with_timeout() {
     shift
     "$@" &
     herdr_command_pid=$!
+    exec 3<&-
     herdr_elapsed=0
     while kill -0 "$herdr_command_pid" 2>/dev/null; do
         if [ "$herdr_elapsed" -ge "$herdr_timeout_seconds" ]; then
@@ -69,6 +75,7 @@ terminate_active_command() {
 }
 
 on_install_exit() {
+    unset herdr_download_token
     terminate_active_command -TERM
     if [ -n "${work_dir:-}" ]; then
         rm -rf "$work_dir"
@@ -83,50 +90,39 @@ on_install_signal() {
 }
 
 fetch() {
-    if command -v curl >/dev/null 2>&1; then
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 curl --fail --show-error --silent --location \
-                --connect-timeout 10 --max-time 120 --output "$2" \
-                -H "Authorization: token ${GH_TOKEN}" \
-                -H "Accept: application/octet-stream" "$1"
-        else
-            run_with_timeout 120 curl --fail --show-error --silent --location \
-                --connect-timeout 10 --max-time 120 --output "$2" "$1"
-        fi
-    elif command -v wget >/dev/null 2>&1; then
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" \
-                --header="Authorization: token ${GH_TOKEN}" \
-                --header="Accept: application/octet-stream" "$1"
-        else
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" "$1"
-        fi
-    else
-        fatal "curl or wget is required"
-    fi
+    download_release "$1" "$2" application/octet-stream
 }
 
 fetch_json() {
+    download_release "$1" - application/vnd.github+json
+}
+
+download_release() {
+    set +x
+    if [ -n "$herdr_download_token" ]; then
+        case "$herdr_download_token" in
+            *[!a-zA-Z0-9_.-]*) fatal "invalid release download token" ;;
+        esac
+        case "$1" in
+            https://api.github.com/*) ;;
+            *) fatal "authenticated downloads require the GitHub API origin" ;;
+        esac
+        command -v curl >/dev/null 2>&1 || fatal "curl is required for authenticated downloads"
+        run_with_timeout 120 curl --disable --fail --show-error --silent --location \
+            --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 \
+            --config /dev/fd/3 --output "$2" -H "Accept: $3" "$1" 3<<EOF
+header = "Authorization: token $herdr_download_token"
+EOF
+        return $?
+    fi
     if command -v curl >/dev/null 2>&1; then
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 curl --fail --show-error --silent --location \
-                --connect-timeout 10 --max-time 120 \
-                -H "Authorization: token ${GH_TOKEN}" \
-                -H "Accept: application/vnd.github+json" "$1"
-        else
-            run_with_timeout 120 curl --fail --show-error --silent --location \
-                --connect-timeout 10 --max-time 120 \
-                -H "Accept: application/vnd.github+json" "$1"
-        fi
+        run_with_timeout 120 curl --disable --fail --show-error --silent --location \
+            --connect-timeout 10 --max-time 120 --output "$2" -H "Accept: $3" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" \
+            --header="Accept: $3" "$1"
     else
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document=- \
-                --header="Authorization: token ${GH_TOKEN}" \
-                --header="Accept: application/vnd.github+json" "$1"
-        else
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document=- \
-                --header="Accept: application/vnd.github+json" "$1"
-        fi
+        fatal "curl or wget is required"
     fi
 }
 
@@ -256,11 +252,20 @@ validate_legacy_root() {
     fi
 }
 
+private_owned_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    file_identity=$(stat -c '%u:%a:%h' "$1" 2>/dev/null) ||
+        file_identity=$(stat -f '%u:%Lp:%l' "$1" 2>/dev/null) || return 1
+    [ "$file_identity" = "$(id -u):600:1" ]
+}
+
 write_install_sentinel() {
     sentinel_root=$1
     root_kind=${2:-new}
     sentinel="$sentinel_root/.herdr-mobile-relay-installation"
+    [ ! -L "$sentinel" ] || fatal "installation ownership sentinel must not be a symbolic link"
     if [ -f "$sentinel" ]; then
+        private_owned_file "$sentinel" || fatal "installation ownership sentinel must be private, owned by this user, and have one link"
         canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
         grep -Fx 'product=herdr-mobile-relay' "$sentinel" >/dev/null &&
             grep -Fx "root=$canonical_root" "$sentinel" >/dev/null ||
@@ -381,7 +386,7 @@ main() {
         *) fatal "release tag did not resolve to an exact commit" ;;
     esac
     info "Downloading ${archive} from ${REPO}"
-    if [ -n "${GH_TOKEN:-}" ]; then
+    if [ -n "$herdr_download_token" ]; then
         api_url="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
         release_json_path="$work_dir/release.json"
         fetch_json "$api_url" > "$release_json_path" ||

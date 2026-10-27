@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Guided chooser for how the phone reaches this computer. Every option ends by
 # writing (or clearing) the HERDR_GATEWAY_URL candidate list in the relay
 # environment, which is the single switch the rest of the tooling reads, plus

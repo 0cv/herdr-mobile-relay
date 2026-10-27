@@ -40,11 +40,18 @@ export function agentStatusGroup(agent: Partial<Agent> | null | undefined): 'att
   return 'other';
 }
 
-export function agentStatusTone(agent: Partial<Agent> | null | undefined): 'danger' | 'warning' | 'success' | 'muted' {
+/**
+ * Indicator tone for one agent. `success` (filled green) marks a finished turn
+ * the phone has not opened yet; `ready` (green ring) marks an idle agent that
+ * is waiting for input and has no unread result; `muted` is only for states
+ * the relay cannot classify.
+ */
+export function agentStatusTone(agent: Partial<Agent> | null | undefined): 'danger' | 'warning' | 'success' | 'ready' | 'muted' {
   const group = agentStatusGroup(agent);
   if (group === 'blocked') return 'danger';
   if (group === 'attention' || group === 'working') return 'warning';
   if (group === 'done') return 'success';
+  if (group === 'ready') return 'ready';
   return 'muted';
 }
 

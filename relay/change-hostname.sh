@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Moves this relay to a different tunnel hostname. The named tunnel, its
 # credentials, the relay token, and every paired phone survive: only the route
 # and the ingress change, so a domain move costs one route and one restart

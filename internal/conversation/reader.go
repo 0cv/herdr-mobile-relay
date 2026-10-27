@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 )
 
 const (
+	UnknownTotal            = -1
 	maxConversationBytes    = 16 * 1024 * 1024
 	maxEntryBytes           = 128 * 1024
 	maxToolCount            = 128
@@ -45,6 +47,8 @@ var (
 type ToolActivity struct {
 	ID            string `json:"id,omitempty"`
 	Name          string `json:"name"`
+	State         string `json:"state,omitempty"`
+	ParentID      string `json:"parent_id,omitempty"`
 	associationID string
 	Input         string `json:"input,omitempty"`
 	Output        string `json:"output,omitempty"`
@@ -53,6 +57,7 @@ type ToolActivity struct {
 }
 
 type Entry struct {
+	Kind      string         `json:"kind,omitempty"`
 	ID        string         `json:"id"`
 	Timestamp string         `json:"timestamp,omitempty"`
 	Role      string         `json:"role"`
@@ -74,14 +79,38 @@ type Page struct {
 	ContinuationReason     string        `json:"continuation_reason,omitempty"`
 	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
 }
+
+func (page Page) MarshalJSON() ([]byte, error) {
+	type wirePage Page
+	var total *int
+	if page.Total != UnknownTotal {
+		total = &page.Total
+	}
+	return json.Marshal(struct {
+		wirePage
+		Total *int `json:"total"`
+	}{wirePage(page), total})
+}
+
+type locationKey struct {
+	Agent         string
+	CWD           string
+	ForegroundCWD string
+	SessionID     string
+}
+
 type Reader struct {
-	home      string
-	mu        sync.Mutex
-	locations map[string]locationCacheEntry
-	locating  map[string]chan struct{}
-	omoCache  map[string]omoCacheEntry
-	openCode  *openCodeReader
-	hermes    *hermesReader
+	home            string
+	mu              sync.Mutex
+	locations       map[locationKey]locationCacheEntry
+	locating        map[locationKey]chan struct{}
+	omoCache        map[string]omoCacheEntry
+	openCode        *openCodeReader
+	hermes          *hermesReader
+	kimiMu          sync.Mutex
+	kimiSources     map[string]kimiSourceState
+	kimiSelectionMu sync.Mutex
+	kimiSelections  map[string]kimiSelection
 }
 
 type locationCacheEntry struct {
@@ -102,8 +131,8 @@ type Location struct {
 // the conversation and session packages makes their root selection identical.
 func NewReader(home string) *Reader {
 	return &Reader{
-		home: home, locations: make(map[string]locationCacheEntry),
-		locating: make(map[string]chan struct{}), omoCache: make(map[string]omoCacheEntry),
+		home: home, locations: make(map[locationKey]locationCacheEntry),
+		locating: make(map[locationKey]chan struct{}), omoCache: make(map[string]omoCacheEntry),
 		openCode: newOpenCodeReader(home), hermes: newHermesReader(home),
 	}
 }
@@ -118,11 +147,17 @@ func (r *Reader) piRoots() []string { return agentroots.Pi(r.home) }
 
 func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 
+func (r *Reader) cursorRoots() []string { return agentroots.Cursor(r.home) }
+
 func Supported(agent string) bool {
+	return RecordedSupported(agent)
+}
+
+func RecordedSupported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
-		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode",
-		"hermes", "hermesagent":
+		"pi", "picodingagent", "omp", "ohmypi", "cursor", "cursoragent",
+		"opencode", "hermes", "hermesagent", "omo", "ohmyopencode", "kimi", "kimicode":
 		return true
 	default:
 		return false
@@ -138,24 +173,41 @@ func normalizedAgent(agent string) string {
 // Read resolves a conversation without project context. It is used for
 // historical activity where the pane cwd is no longer available.
 func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
-	return r.read(agent, "", sessionID, before, limit)
+	return r.ReadWithProject(agent, ProjectContext{}, sessionID, before, limit)
 }
 
 // ReadFor resolves a pane conversation using the same cwd-aware locator as the
 // session-title resolver.
 func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.read(agent, cwd, sessionID, before, limit)
+	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
 }
 
+// read preserves the old package-local helper shape for tests and legacy
+// callers; public callers should use Read or ReadFor.
 func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
+	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
+}
+
+// ReadWithProject resolves a conversation with the pane and, for Claude Code,
+// foreground directory hints. Once the anchor is located, Claude continuation
+// descendants stay in that anchor's project and root.
+func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID, before string, limit int) (Page, error) {
+	project = NormalizeProjectContext(agent, project)
+	if IsKimi(agent) {
+		projection, _, code := r.readKimi(context.Background(), project, sessionID)
+		if code != "" {
+			return unavailableCode(code, kimiReason(code)), nil
+		}
+		return kimiPage(projection, before, limit), nil
+	}
 	if isHermesAgent(agent) {
-		return r.readHermesFor(agent, cwd, sessionID, before, limit)
+		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "opencode" {
-		return r.readOpenCodeFor(cwd, sessionID, before, limit)
+		return r.readOpenCode(sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
-		return r.readOMO(cwd, sessionID, before, limit)
+		return r.readOMO(project.CWD, sessionID, before, limit)
 	}
 	if !Supported(agent) {
 		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
@@ -164,12 +216,12 @@ func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, er
 	if sessionID == "" {
 		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
-	location := r.Locate(agent, cwd, sessionID)
+	location := r.LocateWithProject(agent, project, sessionID)
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
 	if isClaudeProvider(agent) {
-		return r.readClaudeChain(cwd, sessionID, location, before, limit)
+		return r.readClaudeChain(project.CWD, sessionID, location, before, limit)
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
@@ -213,16 +265,29 @@ func unavailableCode(code, reason string) Page {
 }
 
 // Locate returns the exact contained transcript selected for agent, cwd and
-// sessionID. Root order is authoritative; within Claude/Qoder roots cwd selects
-// the project directory when it is known. Cached tuple locations are returned
+// sessionID. Root order is authoritative; within Claude roots the foreground
+// directory is tried before the pane cwd. Cached tuple locations are returned
 // before any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) Locate(agent, cwd, sessionID string) Location {
+	return r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+}
+
+// LocateWithProject returns the exact contained transcript selected for the
+// supplied project context. The effective foreground hint is part of the
+// cache and single-flight keys, so changing it cannot reuse an old hit or
+// miss.
+func (r *Reader) LocateWithProject(agent string, project ProjectContext, sessionID string) Location {
+	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
 	agentKey := normalizedAgent(agent)
+	if IsKimi(agent) {
+		_, location, _ := r.SelectKimiSession(project, sessionID)
+		return location
+	}
 	if isHermesAgent(agent) {
 		agentKey = "hermes"
 	}
-	key := agentKey + "\x00" + cwd + "\x00" + sessionID
+	key := locationKey{Agent: agentKey, CWD: project.CWD, ForegroundCWD: project.ForegroundCWD, SessionID: sessionID}
 	for {
 		now := time.Now()
 		r.mu.Lock()
@@ -240,7 +305,7 @@ func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 		break
 	}
 
-	location := r.locate(agent, cwd, sessionID)
+	location := r.locateWithProject(agent, project, sessionID)
 	ttl := locationCacheTTL
 	if location.Path == "" {
 		ttl = locationMissTTL
@@ -265,18 +330,27 @@ func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 	return location
 }
 
+// locate preserves the old package-local helper shape for tests and legacy
+// callers; public callers should use Locate or LocateWithProject.
 func (r *Reader) locate(agent, cwd, sessionID string) Location {
+	return r.locateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+}
+
+func (r *Reader) locateWithProject(agent string, project ProjectContext, sessionID string) Location {
+	project = NormalizeProjectContext(agent, project)
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.claudeRoots(), cwd, sessionID+".jsonl", claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-"))
+		return findProjectSessionWithProject(r.claudeRoots(), project, sessionID+".jsonl", func(cwd string) string {
+			return claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-")
+		})
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.qoderRoots(), cwd, sessionID+".jsonl", "")
+		return findProjectSessionWithProject(r.qoderRoots(), project, sessionID+".jsonl", func(string) string { return "" })
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
 			return Location{}
@@ -287,7 +361,12 @@ func (r *Reader) locate(agent, cwd, sessionID string) Location {
 	case "omp", "ohmypi":
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
-		return r.hermes.locate(cwd, sessionID)
+		return r.hermes.locate(project.CWD, sessionID)
+	case "kimi", "kimicode":
+		_, location, _ := r.SelectKimiSession(project, sessionID)
+		return location
+	case "cursor", "cursoragent":
+		return findCursorSession(r.cursorRoots(), project, sessionID)
 	default:
 		return Location{}
 	}
@@ -319,14 +398,54 @@ func isDir(path string) bool {
 }
 
 func findProjectSession(roots []string, cwd, filename, preferredProjectName string) Location {
+	return findProjectSessionWithProject(roots, ProjectContext{CWD: cwd}, filename, func(string) string {
+		return preferredProjectName
+	})
+}
+
+// findProjectSessionWithProject keeps roots as the outer loop. Within one root
+// the more specific foreground directory is tried before the pane cwd, and an
+// unknown-cwd scan is used only when neither known directory is available.
+func findProjectSessionWithProject(roots []string, project ProjectContext, filename string, preferredProjectName func(string) string) Location {
+	candidates := projectDirectoriesForContext(project)
 	for _, root := range roots {
-		for _, projectDir := range projectDirectories(root, cwd, preferredProjectName) {
-			if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
-				return Location{Path: path, Root: root}
+		seen := make(map[string]bool)
+		for _, cwd := range candidates {
+			preferred := ""
+			if preferredProjectName != nil {
+				preferred = preferredProjectName(cwd)
+			}
+			for _, projectDir := range projectDirectories(root, cwd, preferred) {
+				projectDir = filepath.Clean(projectDir)
+				if seen[projectDir] {
+					continue
+				}
+				seen[projectDir] = true
+				if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
+					return Location{Path: path, Root: root}
+				}
 			}
 		}
 	}
 	return Location{}
+}
+
+func projectDirectoriesForContext(project ProjectContext) []string {
+	candidates := make([]string, 0, 2)
+	if project.ForegroundCWD != "" {
+		candidates = append(candidates, project.ForegroundCWD)
+	}
+	if strings.TrimSpace(project.CWD) != "" {
+		if len(candidates) == 0 || candidates[0] != project.CWD {
+			candidates = append(candidates, project.CWD)
+		}
+	}
+	if len(candidates) == 0 {
+		// An empty cwd has historical meaning: enumerate every project in the
+		// root. It is deliberately not combined with a valid foreground hint.
+		return []string{""}
+	}
+	return candidates
 }
 
 func projectDirectories(root, cwd, preferredProjectName string) []string {
@@ -572,6 +691,11 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parseCodexRecord(record)
 		case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 			role, body = parsePiRecord(record)
+		case "cursor", "cursoragent":
+			role, body = parseCursorRecord(record)
+			if timestamp == "" {
+				timestamp = cursorTimestampFromRecord(record)
+			}
 		}
 		body = sanitizeText(body)
 		if role == "" && len(calls) > 0 {
@@ -581,7 +705,11 @@ func parseTranscript(agent, text string) []Entry {
 			continue
 		}
 		body, truncated := clampText(body, maxEntryBytes)
-		entry := Entry{Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
+		kind := ""
+		if role == "notice" {
+			kind, role = "notice", "assistant"
+		}
+		entry := Entry{Kind: kind, Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
 		normalizeEntryTools(&entry)
 		entry.ID = stableRowID(line, seenIDs)
 		entryIndex := len(entries)
@@ -636,6 +764,10 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 				failed: message["isError"] == true || message["is_error"] == true,
 			}}
 		}
+		blocks, _ := message["content"].([]any)
+		return toolsFromBlocks(blocks)
+	case "cursor", "cursoragent":
+		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
 	}
@@ -792,6 +924,9 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 	if (role != "user" && role != "assistant") || record["isSidechain"] == true {
 		return "", ""
 	}
+	if role == "user" && (record["isMeta"] == true || record["isCompactSummary"] == true) {
+		return "", ""
+	}
 	message, ok := record["message"].(map[string]any)
 	if !ok {
 		return "", ""
@@ -823,6 +958,13 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 	return role, textBlocks(content)
 }
 
+var (
+	bashOutputRow     = regexp.MustCompile(`(?s)^<bash-stdout>.*</bash-stdout><bash-stderr>.*</bash-stderr>$`)
+	bashOutputElement = regexp.MustCompile(`(?s)<bash-stdout>.*?</bash-stdout>|<bash-stderr>.*?</bash-stderr>`)
+)
+
+var commandTags = regexp.MustCompile(`(?s)<command-(?:message|name|args)>.*?</command-(?:message|name|args)>`)
+
 func humanClaudeText(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	for _, envelope := range []string{"<system-reminder>", "<local-command-caveat>", "<task-notification>", "<local-command-stdout>"} {
@@ -830,10 +972,31 @@ func humanClaudeText(raw string) string {
 			return ""
 		}
 	}
-	if strings.HasPrefix(trimmed, "<command-name>") {
-		name := innerTag(trimmed, "command-name")
-		arguments := innerTag(trimmed, "command-args")
-		return strings.TrimSpace(name + " " + arguments)
+	// Shell output rows: Claude Code writes stdout and stderr together as one
+	// row, and output may itself contain tag text, so the genuine adjacent pair is
+	// recognised first. A row made only of output elements is hidden too; a
+	// prompt that also carries other text keeps all of it.
+	if strings.HasPrefix(trimmed, "<bash-stdout>") || strings.HasPrefix(trimmed, "<bash-stderr>") {
+		if bashOutputRow.MatchString(trimmed) || strings.TrimSpace(bashOutputElement.ReplaceAllString(trimmed, "")) == "" {
+			return ""
+		}
+		return raw
+	}
+	// A shell command row is exactly one bash-input element; a prompt holding
+	// several keeps its text.
+	if strings.HasPrefix(trimmed, "<bash-input>") && strings.HasSuffix(trimmed, "</bash-input>") && strings.Count(trimmed, "<bash-input>") == 1 {
+		return "! " + strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "<bash-input>"), "</bash-input>"))
+	}
+	// A slash-command row is nothing but command-* elements; a prompt that also
+	// carries other text keeps all of it. A row without a command name is noise.
+	if strings.HasPrefix(trimmed, "<command-name>") || strings.HasPrefix(trimmed, "<command-message>") {
+		if strings.TrimSpace(commandTags.ReplaceAllString(trimmed, "")) == "" {
+			name := innerTag(trimmed, "command-name")
+			if name == "" {
+				return ""
+			}
+			return strings.TrimSpace(name + " " + innerTag(trimmed, "command-args"))
+		}
 	}
 	return raw
 }
@@ -872,6 +1035,16 @@ func parseCodexRecord(record map[string]any) (string, string) {
 }
 
 func parsePiRecord(record map[string]any) (string, string) {
+	if stringValue(record["type"]) == "custom_message" {
+		if record["display"] != true {
+			return "", ""
+		}
+		text := textBlocks(record["content"])
+		if strings.TrimSpace(sanitizeText(text)) == "" {
+			text = "Extension message has no displayable text."
+		}
+		return "notice", text
+	}
 	if stringValue(record["type"]) != "message" {
 		return "", ""
 	}

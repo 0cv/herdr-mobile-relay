@@ -4,13 +4,55 @@ import (
 	"bufio"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
-func startInventorySocket(t *testing.T, socketPath string, workspaces []any) {
+func testSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "s-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	return dir
+}
+
+func TestSocketFixtureDirectoryUsesSelectedTempAndCleanup(t *testing.T) {
+	var directory string
+	t.Run(strings.Repeat("long-test-name-", 8), func(t *testing.T) {
+		directory = testSocketDir(t)
+		if filepath.Dir(directory) != os.TempDir() {
+			t.Fatalf("socket directory %q is outside the selected temporary directory", directory)
+		}
+		info, err := os.Lstat(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("socket directory mode = %s", info.Mode())
+		}
+	})
+	if _, err := os.Lstat(directory); !os.IsNotExist(err) {
+		t.Fatalf("socket directory was not cleaned up: %v", err)
+	}
+}
+
+func startInventorySocket(t *testing.T, socketPath string, workspaces []any, panes ...herdr.Pane) {
 	t.Helper()
 	if workspaces == nil {
 		workspaces = []any{}
+	}
+	if panes == nil {
+		panes = []herdr.Pane{}
 	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -37,7 +79,7 @@ func startInventorySocket(t *testing.T, socketPath string, workspaces []any) {
 				case "workspace.list":
 					result = map[string]any{"type": "workspace_list", "workspaces": workspaces}
 				case "pane.list":
-					result = map[string]any{"type": "pane_list", "panes": []any{}}
+					result = map[string]any{"type": "pane_list", "panes": panes}
 				case "workspace.close":
 					result = map[string]any{"type": "ok"}
 				case "agent.list":

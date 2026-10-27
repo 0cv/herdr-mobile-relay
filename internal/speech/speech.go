@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 // MaxTextRunes bounds one synthesis request. The phone splits responses into
@@ -190,7 +192,7 @@ var (
 
 func sayVoices() map[string]string {
 	sayVoiceOnce.Do(func() {
-		listing, err := exec.Command("say", "-v", "?").Output()
+		listing, err := childenv.Command("say", "-v", "?").Output()
 		if err != nil {
 			sayVoiceNames = map[string]string{}
 			return
@@ -200,26 +202,35 @@ func sayVoices() map[string]string {
 	return sayVoiceNames
 }
 
-// parseSayVoices reads macOS voice listings, where a voice name is followed by
-// at least two spaces, its locale, then a sample sentence.
+var preferredSayVoices = map[string][]string{
+	"en": {"Samantha", "Daniel", "Karen", "Moira", "Tessa"},
+	"fr": {"Thomas", "Amélie", "Amelie", "Audrey"},
+	"de": {"Anna", "Markus", "Petra", "Yannick"},
+	"es": {"Mónica", "Monica", "Paulina", "Jorge"},
+	"zh": {"Tingting", "Tian-Tian", "Meijia"},
+}
+
 func parseSayVoices(listing string) map[string]string {
 	found := map[string]string{}
+	ranks := map[string]int{}
 	for _, line := range strings.Split(listing, "\n") {
-		name, rest, split := strings.Cut(line, "  ")
-		if !split {
+		description, _, _ := strings.Cut(line, "#")
+		fields := strings.Fields(description)
+		if len(fields) < 2 {
 			continue
 		}
-		name = strings.TrimSpace(name)
-		locale := strings.Fields(rest)
-		if name == "" || len(locale) == 0 {
-			continue
-		}
-		language, _, _ := strings.Cut(locale[0], "_")
-		if !offers(language) {
-			continue
-		}
-		if _, taken := found[language]; !taken {
-			found[language] = name
+		name := strings.Join(fields[:len(fields)-1], " ")
+		language, _, _ := strings.Cut(fields[len(fields)-1], "_")
+		baseName, _, _ := strings.Cut(name, " (")
+		for rank, preferred := range preferredSayVoices[language] {
+			if baseName != preferred {
+				continue
+			}
+			if currentRank, taken := ranks[language]; !taken || rank < currentRank {
+				found[language] = name
+				ranks[language] = rank
+			}
+			break
 		}
 	}
 	return found
@@ -297,7 +308,7 @@ func Synthesize(ctx context.Context, text, language string) ([]byte, error) {
 	if selected.engine.textArg {
 		args = append(args, "-t", trimmed)
 	}
-	cmd := exec.CommandContext(ctx, selected.binary, args...)
+	cmd := childenv.CommandContext(ctx, selected.binary, args...)
 	if !selected.engine.textArg {
 		cmd.Stdin = strings.NewReader(trimmed)
 	}

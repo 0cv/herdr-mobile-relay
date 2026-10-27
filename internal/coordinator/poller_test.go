@@ -89,10 +89,40 @@ func TestPollerInventoryChangePublishesCurrentState(t *testing.T) {
 	}
 }
 
+func TestAgentsFromTopologyPreservesForegroundCwd(t *testing.T) {
+	state := testState()
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	pane := herdr.Pane{
+		ID: "pane-1", Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground",
+	}
+	agents := poller.agentsFromTopology([]herdr.Pane{pane}, nil)
+	if len(agents) != 1 || agents[0].Cwd != pane.Cwd || agents[0].Project != "pane" || agents[0].ForegroundCwd != pane.ForegroundCwd {
+		t.Fatalf("topology agent = %#v, want pane project/cwd=%q foreground=%q", agents, pane.Cwd, pane.ForegroundCwd)
+	}
+	state.CommitInventory(agents, state.RevisionCounter())
+	stored, ok := state.Agent("pane-1")
+	if !ok || stored.Cwd != pane.Cwd || stored.ForegroundCwd != pane.ForegroundCwd {
+		t.Fatalf("stored agent = %#v, want both directories preserved", stored)
+	}
+
+	cleared := pane
+	cleared.ForegroundCwd = ""
+	state.CommitInventory(poller.agentsFromTopology([]herdr.Pane{cleared}, nil), state.RevisionCounter())
+	stored, ok = state.Agent("pane-1")
+	if !ok || stored.ForegroundCwd != "" {
+		t.Fatalf("cleared foreground cwd = %#v, want empty", stored)
+	}
+}
+
 func TestPollerEventCommitPublishesRecoveryAfterPausedEnrichment(t *testing.T) {
 	state := testState()
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
-	poller := NewPoller(nil, state, time.Second, testLogger())
+	socket := startPollerTestSocket(t, func(string) (any, string) {
+		return map[string]any{"type": "agent_list", "agents": []herdr.Pane{{ID: "pane-1", Agent: "codex", Status: "idle"}}}, ""
+	})
+	client := herdr.NewClient("unused", socket)
+	t.Cleanup(func() { _ = client.Close() })
+	poller := NewPoller(client, state, time.Second, testLogger())
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	poller.SetEnrich(func(context.Context, []*AgentState) {
@@ -221,7 +251,7 @@ func TestHydrateWorkspaceCwdsKeepsShellOnlyWorkspaceLaunchable(t *testing.T) {
 }
 
 func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +262,7 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 		defer listener.Close()
 		subscriptions := 0
 		snapshots := 0
-		for range 4 {
+		for range 7 {
 			conn, acceptErr := listener.Accept()
 			if acceptErr != nil {
 				serverDone <- acceptErr
@@ -262,6 +292,10 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 							},
 						})
 					}
+				case "agent.list":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"id": request.ID, "result": pollerSuccessResult(request.Method),
+					})
 				case "session.snapshot":
 					snapshots++
 					workspaces := []any{
@@ -288,7 +322,9 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 	}()
 
 	state := testState()
-	poller := NewPoller(herdr.NewClient("missing-herdr", socketPath), state, time.Second, testLogger())
+	client := herdr.NewClient("missing-herdr", socketPath)
+	t.Cleanup(func() { _ = client.Close() })
+	poller := NewPoller(client, state, time.Second, testLogger())
 	reconnects := 0
 	poller.eventReconnectWait = func(context.Context) bool {
 		reconnects++

@@ -1,15 +1,17 @@
 <script lang="ts">
   import Button from '$components/ui/Button.svelte';
-  import type { AttachmentBatchSnapshot } from '$lib/attachments';
+  import { attachmentIssueText, type AttachmentBatchSnapshot } from '$lib/attachments';
 
   let {
     snapshot,
     oncancel,
     onrestart,
+    restartDisabled = false,
   }: {
     snapshot: AttachmentBatchSnapshot;
     oncancel: () => void | Promise<void>;
     onrestart: () => void | Promise<void>;
+    restartDisabled?: boolean;
   } = $props();
 
   function stateLabel(state: string): string {
@@ -30,7 +32,7 @@
           <span>{stateLabel(item.state)}</span>
         </div>
         <progress max="100" value={Math.round(item.progress * 100)} aria-label={`${item.name} upload progress`}></progress>
-        {#if item.issue}<small role="alert">{item.issue.code.replaceAll('_', ' ')}</small>{/if}
+        {#if item.issue}<small role="alert">{attachmentIssueText(item.issue)}</small>{/if}
       </li>
     {/each}
   </ul>
@@ -38,7 +40,7 @@
     <Button variant="secondary" size="sm" onclick={() => void oncancel()}>Cancel upload</Button>
   {:else if snapshot.items.some((item) => item.state === 'interrupted')}
     <div class="attachment-actions">
-      <Button size="sm" onclick={() => void onrestart()}>Restart interrupted files</Button>
+      <Button size="sm" disabled={restartDisabled} onclick={() => void onrestart()}>Restart interrupted files</Button>
       <Button variant="secondary" size="sm" onclick={() => void oncancel()}>Discard upload</Button>
     </div>
   {/if}

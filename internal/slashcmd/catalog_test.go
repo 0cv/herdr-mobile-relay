@@ -1,10 +1,31 @@
 package slashcmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestSlashCommandLimitsMatchContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "slash_command_limits.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limits struct {
+		MaxCustomFiles int `json:"max_custom_files"`
+		MaxEntries     int `json:"max_entries"`
+	}
+	if err := json.Unmarshal(data, &limits); err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxCustomFiles != maxCustomFiles || limits.MaxEntries != maxEntries {
+		t.Fatalf("slash-command limits = %+v, want custom files %d and entries %d", limits, maxCustomFiles, maxEntries)
+	}
+	if maxWalkFiles != maxCustomFiles {
+		t.Fatalf("walk budget = %d, want shared custom-file budget %d", maxWalkFiles, maxCustomFiles)
+	}
+}
 
 func TestClaudeBuiltins(t *testing.T) {
 	catalog := CatalogFor("claude-code", "/tmp", "/nonexistent-home")
@@ -121,6 +142,18 @@ func TestClaudeBuiltinCatalogIsComplete(t *testing.T) {
 	catalog := CatalogFor("claude", "/tmp", "/nonexistent")
 	if len(catalog.Commands) != 51 {
 		t.Fatalf("Claude builtins = %d, want 51", len(catalog.Commands))
+	}
+}
+
+func TestCatalogOutputLimitAtBoundary(t *testing.T) {
+	atLimit := finalizeCatalog(make([]Command, maxEntries), false)
+	if len(atLimit.Commands) != maxEntries || atLimit.Truncated {
+		t.Fatalf("catalog at output limit = len %d, truncated %v", len(atLimit.Commands), atLimit.Truncated)
+	}
+
+	overLimit := finalizeCatalog(make([]Command, maxEntries+1), false)
+	if len(overLimit.Commands) != maxEntries || !overLimit.Truncated {
+		t.Fatalf("catalog over output limit = len %d, truncated %v", len(overLimit.Commands), overLimit.Truncated)
 	}
 }
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 LABELS=("com.herdr-mobile-relay.service" "com.herdr-remote.service")

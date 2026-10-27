@@ -3,7 +3,7 @@ set -eu
 
 REPO_DIR=$(CDPATH='' cd "${0%/*}/.." && pwd)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/herdr-install-test.XXXXXX")
-trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT INT TERM
 
 # Load the installer functions without executing main.
 sed '$d' "$REPO_DIR/install.sh" > "$WORK_DIR/install-functions.sh"
@@ -39,6 +39,30 @@ write_install_sentinel "$sentinel_root"
 canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
 grep -Fx 'product=herdr-mobile-relay' "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
 grep -Fx "root=$canonical_root" "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
+
+sentinel_target="$WORK_DIR/sentinel-target"
+mv "$sentinel_root/.herdr-mobile-relay-installation" "$sentinel_target"
+ln -s "$sentinel_target" "$sentinel_root/.herdr-mobile-relay-installation"
+if (write_install_sentinel "$sentinel_root") 2>/dev/null; then
+    echo "write_install_sentinel accepted a symlinked ownership sentinel" >&2
+    exit 1
+fi
+rm "$sentinel_root/.herdr-mobile-relay-installation"
+mv "$sentinel_target" "$sentinel_root/.herdr-mobile-relay-installation"
+
+chmod 644 "$sentinel_root/.herdr-mobile-relay-installation"
+if (write_install_sentinel "$sentinel_root") 2>/dev/null; then
+    echo "write_install_sentinel accepted a public ownership sentinel" >&2
+    exit 1
+fi
+chmod 600 "$sentinel_root/.herdr-mobile-relay-installation"
+ln "$sentinel_root/.herdr-mobile-relay-installation" "$WORK_DIR/hard-linked-sentinel"
+if (write_install_sentinel "$sentinel_root") 2>/dev/null; then
+    echo "write_install_sentinel accepted a hard-linked ownership sentinel" >&2
+    exit 1
+fi
+rm "$WORK_DIR/hard-linked-sentinel"
+write_install_sentinel "$sentinel_root"
 
 unowned_root="$WORK_DIR/unowned"
 mkdir -p "$unowned_root"

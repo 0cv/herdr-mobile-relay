@@ -8,29 +8,33 @@ import (
 )
 
 const (
-	maxWalkFiles    = 250
+	// The standalone walkers and Hermes use the same per-request custom-file
+	// budget as the other providers. maxWalkFiles remains named separately for
+	// callers that specifically reason about recursive filesystem traversal.
+	maxWalkFiles    = maxCustomFiles
 	maxGitWalkDepth = 32
 )
 
 func walkCommandDir(root, source string) []Command {
+	reader := newCatalogReader()
 	budget := maxWalkFiles
 	var suppressed []string
 	var commands []Command
 	truncated := false
-	walkDirBudget(root, "", source, &commands, &suppressed, &budget, &truncated)
+	reader.walkDirBudget(root, "", source, &commands, &suppressed, &budget, &truncated)
 	return commands
 }
 
-func walkCommandDirBudget(root, source string, budget *int) ([]Command, []string, bool) {
+func (reader *catalogReader) walkCommandDirBudget(root, source string, budget *int) ([]Command, []string, bool) {
 	var commands []Command
 	var suppressed []string
 	truncated := false
-	walkDirBudget(root, "", source, &commands, &suppressed, budget, &truncated)
+	reader.walkDirBudget(root, "", source, &commands, &suppressed, budget, &truncated)
 	return commands, suppressed, truncated
 }
 
-func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]string, budget *int, truncated *bool) {
-	if *budget <= 0 {
+func (reader *catalogReader) walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]string, budget *int, truncated *bool) {
+	if *budget <= 0 || reader.truncated {
 		*truncated = true
 		return
 	}
@@ -39,7 +43,7 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 		return
 	}
 	for _, e := range entries {
-		if *budget <= 0 {
+		if *budget <= 0 || reader.truncated {
 			*truncated = true
 			return
 		}
@@ -63,7 +67,7 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 			skillFile := filepath.Join(fullPath, "SKILL.md")
 			if info, err := os.Stat(skillFile); err == nil && info.Mode().IsRegular() {
 				*budget--
-				if cmd, suppressedName := parseSkillEntry(skillFile, name, namespace, source); cmd != nil {
+				if cmd, suppressedName := reader.parseSkillEntry(skillFile, name, namespace, source); cmd != nil {
 					*out = append(*out, *cmd)
 				} else if suppressedName != "" {
 					*suppressed = append(*suppressed, suppressedName)
@@ -74,11 +78,11 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 			if namespace != "" {
 				childNS = namespace + ":" + name
 			}
-			walkDirBudget(fullPath, childNS, source, out, suppressed, budget, truncated)
+			reader.walkDirBudget(fullPath, childNS, source, out, suppressed, budget, truncated)
 			continue
 		}
-		// A FIFO or socket named *.md would reach fileFrontmatter, whose
-		// os.ReadFile blocks on a pipe with no writer - a permanent hang in a
+		// A FIFO or socket named *.md would reach readCommandFile, whose
+		// os.Open blocks on a pipe with no writer - a permanent hang in a
 		// service that polls. Only regular files can be commands.
 		if !e.Type().IsRegular() {
 			continue
@@ -91,8 +95,12 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 			continue
 		}
 		*budget--
-		fm := fileFrontmatter(fullPath)
-		if isHidden(fm) {
+		data, ok := reader.readCommandFile(fullPath)
+		if !ok {
+			continue
+		}
+		fm, ok := parseFrontmatterBytes(data)
+		if !ok || isHidden(fm) {
 			continue
 		}
 		fullName := "/" + cmdName
@@ -105,15 +113,15 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 		}
 		*out = append(*out, Command{
 			Command:      fullName,
-			Description:  descriptionFrom(fm, fullPath),
+			Description:  descriptionFrom(fm, data),
 			Source:       source,
 			ArgumentHint: compact(fm["argument-hint"], 120),
 		})
 	}
 }
 
-func parseSkillEntry(skillFile, dirName, namespace, source string) (*Command, string) {
-	metadata, ok := readSkillMetadata(skillFile)
+func (reader *catalogReader) parseSkillEntry(skillFile, dirName, namespace, source string) (*Command, string) {
+	metadata, ok := reader.readSkillMetadata(skillFile)
 	if !ok {
 		return nil, ""
 	}
@@ -164,8 +172,9 @@ func findGitRoot(dir string) string {
 }
 
 func scanSkillDir(dir, source string) []Command {
+	reader := newCatalogReader()
 	budget := maxWalkFiles
-	cmds, _, _ := scanSkillDirBudget(dir, source, &budget)
+	cmds, _, _ := reader.scanSkillDirBudget(dir, source, &budget)
 	return cmds
 }
 
@@ -190,7 +199,7 @@ func entryIsDir(e os.DirEntry, path string) bool {
 // os.Root permits symlinks that remain inside that boundary and rejects skill
 // directories or SKILL.md links that escape it. Personal roots intentionally
 // retain their symlink-friendly behavior.
-func scopedSkillMetadata(dir, entry, source, boundary string) (map[string]string, string, bool) {
+func (reader *catalogReader) scopedSkillMetadata(dir, entry, source, boundary string) (map[string]string, string, bool) {
 	skillFile := filepath.Join(dir, entry, "SKILL.md")
 	if source != "project" {
 		info, err := os.Stat(skillFile)
@@ -201,7 +210,7 @@ func scopedSkillMetadata(dir, entry, source, boundary string) (map[string]string
 		if err != nil {
 			resolved = skillFile
 		}
-		metadata, ok := readSkillMetadata(skillFile)
+		metadata, ok := reader.readSkillMetadata(skillFile)
 		return metadata, resolved, ok
 	}
 
@@ -236,7 +245,7 @@ func scopedSkillMetadata(dir, entry, source, boundary string) (map[string]string
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, "", false
 	}
-	metadata, ok := readSkillMetadataFile(file)
+	metadata, ok := reader.readSkillMetadataFile(file)
 	if !ok {
 		return nil, "", false
 	}
@@ -247,7 +256,7 @@ func scopedSkillMetadata(dir, entry, source, boundary string) (map[string]string
 	return metadata, resolved, true
 }
 
-func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, bool) {
+func (reader *catalogReader) scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, false
@@ -257,7 +266,7 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 	seen := make(map[string]bool, len(entries))
 	truncated := false
 	for _, e := range entries {
-		if *budget <= 0 {
+		if *budget <= 0 || reader.truncated {
 			truncated = true
 			break
 		}
@@ -268,7 +277,7 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 		if !entryIsDir(e, skillDir) {
 			continue
 		}
-		metadata, resolved, ok := scopedSkillMetadata(dir, e.Name(), source, "")
+		metadata, resolved, ok := reader.scopedSkillMetadata(dir, e.Name(), source, "")
 		if !ok {
 			continue
 		}
@@ -294,11 +303,11 @@ type skillScanOptions struct {
 
 // scanSkillDirFormat scans dir for <entry>/SKILL.md and renders each skill
 // through format, which must contain exactly one "{name}".
-func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, bool) {
-	return scanSkillDirFormatOptions(dir, source, format, budget, skillScanOptions{requireDescription: true})
+func (reader *catalogReader) scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, bool) {
+	return reader.scanSkillDirFormatOptions(dir, source, format, budget, skillScanOptions{requireDescription: true})
 }
 
-func scanSkillDirFormatOptions(dir, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
+func (reader *catalogReader) scanSkillDirFormatOptions(dir, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
 	if strings.Count(format, "{name}") != 1 {
 		return nil, false
 	}
@@ -313,7 +322,7 @@ func scanSkillDirFormatOptions(dir, source, format string, budget *int, options 
 	seen := make(map[string]bool, len(entries))
 	truncated := false
 	for _, e := range entries {
-		if *budget <= 0 {
+		if *budget <= 0 || reader.truncated {
 			truncated = true
 			break
 		}
@@ -324,7 +333,7 @@ func scanSkillDirFormatOptions(dir, source, format string, budget *int, options 
 		if info, err := os.Stat(skillDir); err != nil || !info.IsDir() {
 			continue
 		}
-		metadata, real, ok := scopedSkillMetadata(dir, e.Name(), source, options.boundary)
+		metadata, real, ok := reader.scopedSkillMetadata(dir, e.Name(), source, options.boundary)
 		if !ok {
 			continue
 		}
@@ -364,8 +373,8 @@ func scanSkillDirFormatOptions(dir, source, format string, budget *int, options 
 // SKILL.md, a single Markdown skill file, or a directory of skill
 // subdirectories. It is used for explicit manifest paths, where the path itself
 // can name the skill.
-func scanSkillPathFormatOptions(path, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
-	if strings.Count(format, "{name}") != 1 || *budget <= 0 {
+func (reader *catalogReader) scanSkillPathFormatOptions(path, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
+	if strings.Count(format, "{name}") != 1 || *budget <= 0 || reader.truncated {
 		return nil, *budget <= 0
 	}
 	if options.boundary != "" && !pathWithin(path, options.boundary) {
@@ -379,7 +388,7 @@ func scanSkillPathFormatOptions(path, source, format string, budget *int, option
 		if !strings.EqualFold(filepath.Ext(path), ".md") {
 			return nil, false
 		}
-		command := skillCommandFromFile(path, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), source, format, budget, options)
+		command := reader.skillCommandFromFile(path, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), source, format, budget, options)
 		if command == nil {
 			return nil, false
 		}
@@ -390,23 +399,23 @@ func scanSkillPathFormatOptions(path, source, format string, budget *int, option
 	}
 	skillFile := filepath.Join(path, "SKILL.md")
 	if skillInfo, err := os.Stat(skillFile); err == nil && skillInfo.Mode().IsRegular() {
-		command := skillCommandFromFile(skillFile, filepath.Base(path), source, format, budget, options)
+		command := reader.skillCommandFromFile(skillFile, filepath.Base(path), source, format, budget, options)
 		if command == nil {
 			return nil, false
 		}
 		return []Command{*command}, false
 	}
-	return scanSkillDirFormatOptions(path, source, format, budget, options)
+	return reader.scanSkillDirFormatOptions(path, source, format, budget, options)
 }
 
-func skillCommandFromFile(path, fallbackName, source, format string, budget *int, options skillScanOptions) *Command {
-	if *budget <= 0 {
+func (reader *catalogReader) skillCommandFromFile(path, fallbackName, source, format string, budget *int, options skillScanOptions) *Command {
+	if *budget <= 0 || reader.truncated {
 		return nil
 	}
 	if options.boundary != "" && !pathWithin(path, options.boundary) {
 		return nil
 	}
-	metadata, ok := readSkillMetadata(path)
+	metadata, ok := reader.readSkillMetadata(path)
 	if !ok {
 		return nil
 	}
@@ -436,20 +445,11 @@ func skillCommandFromFile(path, fallbackName, source, format string, budget *int
 	}
 }
 
-func fileFrontmatter(path string) map[string]string {
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) > maxMetadataSize {
-		return map[string]string{}
-	}
-	fm, _ := parseFrontmatterBytes(data)
-	return fm
-}
-
-func descriptionFrom(fm map[string]string, path string) string {
+func descriptionFrom(fm map[string]string, data []byte) string {
 	if desc := fm["description"]; desc != "" {
 		return compact(desc, 120)
 	}
-	return extractFirstLine(path)
+	return extractFirstLineBytes(data)
 }
 
 func isHidden(fm map[string]string) bool {
@@ -461,11 +461,7 @@ func isHidden(fm map[string]string) bool {
 	}
 }
 
-func extractFirstLine(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) > maxMetadataSize {
-		return ""
-	}
+func extractFirstLineBytes(data []byte) string {
 	lines := strings.SplitN(string(data), "\n", 10)
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)

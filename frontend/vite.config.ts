@@ -5,6 +5,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 import versions from './build-versions.json' with { type: 'json' };
+import { pagesHeaders } from './scripts/pages-policy.ts';
 
 const manifest = readFileSync(fileURLToPath(new URL('../herdr-plugin.toml', import.meta.url)), 'utf8');
 const productVersion = manifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
@@ -57,10 +58,6 @@ const releaseStyleNames = [
 function compactReleaseStyleNames(source: string): string {
   for (const [from, to] of releaseStyleNames) source = source.replaceAll(from, to);
   return source;
-}
-
-function immutableHeaders(): string {
-  return `/* Stable bootstrap and metadata are deliberately revalidated. Only\n * digest-addressed build entries and assets may be stored indefinitely. */\n/herdr-bootstrap.js\n  Cache-Control: no-cache, no-store\n\n/manifest-loader.js\n  Cache-Control: no-cache, no-store\n\n/manifest.webmanifest\n  Cache-Control: no-cache, no-store\n\n/setup.webmanifest\n  Cache-Control: no-cache, no-store\n\n/sw.js\n  Cache-Control: no-cache, no-store\n\n/version.json\n  Cache-Control: no-cache, no-store\n\n/release.json\n  Cache-Control: no-cache, no-store\n\n/\n  Cache-Control: no-cache, no-store\n\n/index.html\n  Cache-Control: no-cache, no-store\n\n/builds/*\n  Cache-Control: public, max-age=31536000, immutable\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`;
 }
 
 function stableReleaseAssets(): Plugin {
@@ -183,12 +180,7 @@ function stableReleaseAssets(): Plugin {
         fileName: '_redirects',
         source: `/ /${entryPath} 302\n/index.html /${entryPath} 302\n`,
       });
-      const headers = bundle['_headers'];
-      if (!headers || headers.type !== 'asset') {
-        this.emitFile({ type: 'asset', fileName: '_headers', source: immutableHeaders() });
-      } else {
-        headers.source = immutableHeaders();
-      }
+      this.emitFile({ type: 'asset', fileName: '_headers', source: pagesHeaders() });
     },
   };
 }

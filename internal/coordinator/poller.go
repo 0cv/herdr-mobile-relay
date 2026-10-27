@@ -199,7 +199,7 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 
 	agents := make([]*AgentState, 0, len(panes))
 	for _, pane := range panes {
-		if pane.Agent == "" {
+		if pane.ID == "" {
 			continue
 		}
 		if tab, ok := tabByID[pane.TabID]; ok {
@@ -227,6 +227,7 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 			Project:         project,
 			Host:            p.hostname,
 			Session:         pane.Session,
+			SessionKind:     pane.SessionRaw.Kind,
 			ActivitySeq:     pane.StateChangeSeq,
 			PaneRevision:    pane.Revision,
 			ScrollMaxOffset: pane.Scroll.MaxOffsetFromBottom,
@@ -336,7 +337,21 @@ func (p *Poller) applyTopologyEvent(ctx context.Context, cache *herdr.SessionCac
 }
 
 func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.TopologySnapshot, baseRevision int64) {
-	agents := p.agentsFromTopology(topology.Panes, topology.Tabs)
+	if ctx.Err() != nil {
+		return
+	}
+	inventory, err := p.client.GetInventory(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		p.state.MarkInventoryFailure(err)
+		p.notifyInventoryChange()
+		p.logger.Warn("event agent inventory refresh failed", "error", err)
+		p.Wake()
+		return
+	}
+	agents := p.agentsFromTopology(inventory.Panes, topology.Tabs)
 	if p.enrich != nil {
 		p.enrich(ctx, agents)
 	}

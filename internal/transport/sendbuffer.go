@@ -7,7 +7,11 @@ import (
 
 const (
 	clientOutboundMaxItems = 64
-	clientOutboundMaxBytes = 4 * 1024 * 1024
+	// MaxOutboundMessageBytes is the largest plaintext message a client send
+	// buffer can admit. Producers must keep one serialized message within this
+	// bound; the buffer cannot split a message across frames.
+	MaxOutboundMessageBytes = 4 * 1024 * 1024
+	clientOutboundMaxBytes  = MaxOutboundMessageBytes
 )
 
 type bufferedMessage struct {

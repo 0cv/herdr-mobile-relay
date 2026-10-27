@@ -2,16 +2,13 @@ package conversation
 
 import (
 	"context"
-	"errors"
-	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
 )
 
-func TestBrowserQuotaFailureWaitsForCleanupBeforeAdvertisingRetry(t *testing.T) {
+func TestBrowserFailurePublishesAfterWorkerRelinquishesJob(t *testing.T) {
 	reader, home := testReader(t)
 	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")
 	writeRows(t, path,
@@ -22,84 +19,87 @@ func TestBrowserQuotaFailureWaitsForCleanupBeforeAdvertisingRetry(t *testing.T) 
 	options.RecentBytes = 1
 	options.SnapshotQuota = 1024
 	options.AggregateQuota = 1024 * 1024
+	options.ActiveWorkers = 2
 	browser, err := NewBrowser(reader, t.TempDir(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer browser.Close()
-	started, release := make(chan struct{}), make(chan struct{})
-	var pauseOnce, releaseOnce sync.Once
-	defer releaseOnce.Do(func() { close(release) })
-	browser.backgroundReadObserver = func(int64) {
-		pauseOnce.Do(func() { close(started); <-release })
+	finishing := make(chan *browseJob, 2)
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	browser.workerBeforeFinishObserver = func(job *browseJob) {
+		finishing <- job
+		<-release
 	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
-	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
+	latest, err := browser.ReadPage(ctx, BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.NextCursor == "" {
 		t.Fatalf("latest page = %#v, err = %v", latest, err)
 	}
-	request := BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1}
-	if _, err := browser.ReadPage(context.Background(), request); err != nil {
+	if _, err := browser.ReadPage(ctx, BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("index worker did not reach the read barrier")
-	}
-	browser.mu.Lock()
 	var job *browseJob
-	for _, candidate := range browser.jobs {
-		job = candidate
-	}
-	browser.mu.Unlock()
-	if job == nil {
-		t.Fatal("preparation job is missing")
+	select {
+	case job = <-finishing:
+	case <-ctx.Done():
+		t.Fatal("worker did not reach failure cleanup")
 	}
 	job.mu.RLock()
-	index := job.index
+	firstSnapshot := job.snapshotID
+	failure := job.err
 	job.mu.RUnlock()
-	if index == nil {
-		t.Fatal("preparation index is missing")
+	if failure == nil || failure.Code != "index_capacity_exceeded" || !failure.Retryable {
+		t.Fatalf("worker failure = %+v", failure)
 	}
-	index.mu.RLock()
-	var unlockOnce sync.Once
-	defer unlockOnce.Do(index.mu.RUnlock)
-	releaseOnce.Do(func() { close(release) })
-	deadline := time.Now().Add(3 * time.Second)
+	request := BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1, Retry: true}
+	page, err := browser.ReadPage(ctx, request)
+	if err != nil || page.State != BrowsePreparing {
+		t.Fatalf("retry during worker cleanup = %#v, err = %v", page, err)
+	}
+	job.mu.RLock()
+	unchanged := job.snapshotID == firstSnapshot && job.running && !job.queued && job.state == BrowsePreparing
+	job.mu.RUnlock()
+	if !unchanged {
+		t.Fatal("retry admitted a second worker before the first relinquished the job")
+	}
+	unblock()
 	for {
 		job.mu.RLock()
-		detached := job.index == nil && job.err != nil && job.err.Code == "index_capacity_exceeded"
+		failed, running := job.state == BrowseFailed, job.running
 		job.mu.RUnlock()
-		if detached {
+		if failed {
+			if running {
+				t.Fatal("retryable failure published while the worker still owns the job")
+			}
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("quota failure did not reach the cleanup barrier")
-		}
-		runtime.Gosched()
-	}
-	for _, retry := range []bool{false, true} {
-		request.Retry = retry
-		page, err := browser.ReadPage(context.Background(), request)
-		if err != nil || page.State != BrowsePreparing || page.Error != nil {
-			t.Errorf("cleanup blocked, retry=%v: page=%#v, err=%v", retry, page, err)
+		select {
+		case <-ctx.Done():
+			t.Fatal("failure was not published")
+		case <-time.After(time.Millisecond):
 		}
 	}
-	unlockOnce.Do(index.mu.RUnlock)
-	browser.workerWG.Wait()
+	page, err = browser.ReadPage(ctx, request)
+	if err != nil || page.State != BrowsePreparing {
+		t.Fatalf("explicit retry after failure = %#v, err = %v", page, err)
+	}
+	select {
+	case retried := <-finishing:
+		if retried != job {
+			t.Fatal("retry did not reuse the failed job")
+		}
+	case <-ctx.Done():
+		t.Fatal("explicit retry did not run")
+	}
 	job.mu.RLock()
-	failed := job.state == BrowseFailed && !job.running && job.err != nil && job.err.Retryable
+	replaced := job.snapshotID != firstSnapshot
 	job.mu.RUnlock()
-	if !failed {
-		t.Fatal("completed cleanup did not publish an idle retryable failure")
-	}
-	if _, err := os.Stat(index.path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("failed index remains after cleanup: %v", err)
-	}
-	request.Retry = true
-	retry, err := browser.ReadPage(context.Background(), request)
-	if err != nil || retry.State != BrowsePreparing {
-		t.Fatalf("explicit retry after cleanup = %#v, err = %v", retry, err)
+	if !replaced {
+		t.Fatal("explicit retry did not create a fresh index")
 	}
 }

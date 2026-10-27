@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
@@ -42,19 +43,26 @@ type StartRequest struct {
 	Name        string
 	Cwd         string
 	Prompt      string
+	// HermesProfile is the Hermes Agent profile (`hermes -p <name>`) the launch
+	// should select. It is empty for every other agent kind, and for a Hermes
+	// launch that did not pick one at all; both start the default profile.
+	HermesProfile string
 }
 
 type StartResult struct {
-	PaneID      string `json:"pane_id"`
-	Name        string `json:"name"`
-	Cwd         string `json:"cwd"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
+	Identity    LaunchIdentity `json:"-"`
+	PaneID      string         `json:"pane_id"`
+	Name        string         `json:"name"`
+	Cwd         string         `json:"cwd"`
+	WorkspaceID string         `json:"workspace_id,omitempty"`
 }
 
 type Lifecycle struct {
-	herdr    *herdr.Client
-	profiles *profiles.Resolver
-	home     string
+	state        *State
+	herdr        *herdr.Client
+	profiles     *profiles.Resolver
+	home         string
+	waitForRetry func(context.Context, time.Duration) bool
 }
 
 func NewLifecycle(client *herdr.Client, resolver *profiles.Resolver) *Lifecycle {
@@ -66,6 +74,25 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 	profile, ok := l.profiles.Profile(request.ProfileID)
 	if !ok {
 		return profiles.Profile{}, request, errors.New("profile_id is not available")
+	}
+	// A Hermes profile is a property of the Hermes launcher, not of the pane:
+	// `hermes -p x` is the only thing the relay can do with it, so any other
+	// kind that carried the field would have its value silently ignored.
+	// Rejecting here keeps the phone honest instead of starting a different
+	// agent than the form showed.
+	if request.HermesProfile != "" {
+		if profile.Kind != "hermes" {
+			return profiles.Profile{}, request, errors.New("hermes_profile is only valid for Hermes agents")
+		}
+		if !hermesprofiles.Valid(request.HermesProfile) {
+			return profiles.Profile{}, request, fmt.Errorf("hermes_profile must match %s", hermesprofiles.NamePattern)
+		}
+		// Existence is checked before any pane is created: `hermes` would
+		// otherwise fail inside the new terminal, leaving the user a dead
+		// pane to clean up and no obvious cause.
+		if !hermesprofiles.Exists(l.home, request.HermesProfile) {
+			return profiles.Profile{}, request, fmt.Errorf("hermes profile %q is not installed on this computer", request.HermesProfile)
+		}
 	}
 	if !agentNamePattern.MatchString(request.Name) {
 		return profiles.Profile{}, request, errors.New("name must match [a-z][a-z0-9_-]{0,31}")
@@ -81,10 +108,25 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 	return profile, request, nil
 }
 
-func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request StartRequest) (StartResult, error) {
-	if existing := l.reconcileExisting(ctx, profile.ID, request); existing != "" {
-		l.profiles.Remember(existing, profile.ID)
-		return StartResult{PaneID: existing, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
+func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request StartRequest) (result StartResult, resultErr error) {
+	expectedTerminal := ""
+	if l.state != nil {
+		snapshot := l.state.beginLaunch()
+		defer func() {
+			if resultErr == nil && result.PaneID != "" {
+				result.Identity = l.state.finishLaunch(snapshot, result.PaneID)
+				if expectedTerminal != "" {
+					if result.Identity.TerminalID != "" && result.Identity.TerminalID != expectedTerminal {
+						result.Identity.Valid = false
+					}
+					result.Identity.TerminalID = expectedTerminal
+				}
+			}
+		}()
+	}
+	if existing := l.reconcileExisting(ctx, profile.ID, request); existing.PaneID != "" {
+		expectedTerminal = existing.TerminalID
+		return StartResult{PaneID: existing.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -119,17 +161,38 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		return StartResult{}, err
 	}
 
-	startErr := l.startInTarget(startupCtx, profile, request.Name, target.PaneID)
+	result = StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}
+	panes, err := l.herdr.PaneList(startupCtx)
+	if err != nil {
+		return result, fmt.Errorf("verify new terminal: %w", err)
+	}
+	var ownership profiles.PaneIdentity
+	for _, pane := range panes {
+		if pane.ID == target.PaneID {
+			ownership = profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
+			break
+		}
+	}
+	expectedTerminal = ownership.TerminalID
+	if ownership.TerminalID == "" {
+		return result, errors.New("cannot verify the new terminal; agent was not started")
+	}
+	if err := l.profiles.BeginLaunchOwnership(ownership, profile.ID); err != nil {
+		return result, err
+	}
+	startErr := l.startInTarget(startupCtx, profile, request, target.PaneID)
 	if startErr != nil {
 		// The target stays open. Herdr created it, so closing it would destroy
 		// the workspace the user asked for and leave nothing to retry into. An
 		// uncertain dispatch may also have left an agent running in it, and
 		// the phone is told to review that agent before retrying.
-		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, startErr
+		return result, startErr
 	}
 
-	l.profiles.Remember(target.PaneID, profile.ID)
-	return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, nil
+	if err := l.profiles.RememberVerified(ownership, profile.ID); err != nil {
+		return result, partiallyApplied("agent started but profile ownership could not be saved", err)
+	}
+	return result, nil
 }
 
 func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd string) (*herdr.CreateResult, error) {
@@ -154,9 +217,14 @@ func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd st
 	return result, nil
 }
 
-func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile, name, paneID string) error {
+func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile, request StartRequest, paneID string) error {
+	name := request.Name
 	if profile.Kind != "" {
-		return l.startKindAgent(ctx, profile.Kind, name, paneID)
+		agentArgs, err := hermesProfileArgs(request.HermesProfile)
+		if err != nil {
+			return err
+		}
+		return l.startKindAgent(ctx, profile.Kind, name, paneID, agentArgs)
 	}
 	if len(profile.Argv) == 0 {
 		return errors.New("profile has no executable argv")
@@ -169,7 +237,10 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 	for {
 		info, err := l.herdr.AgentGet(ctx, paneID)
 		if err == nil && (info.Running || info.Status != "") {
-			return l.herdr.RenameAgent(ctx, paneID, name)
+			if err := l.herdr.RenameAgent(ctx, paneID, name); err != nil {
+				return partiallyApplied("custom agent was already started", err)
+			}
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -186,23 +257,60 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 // start with agent_pane_busy before its own --timeout window opens, so the
 // timeout the relay passes cannot cover it. The refusal proves nothing ran,
 // which makes the retry safe.
-func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID string) error {
+func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID string, agentArgs []string) error {
+	wait := l.waitForRetry
+	if wait == nil {
+		wait = waitForAgentRetry
+	}
+	return retryAgentStart(ctx, func() error {
+		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx), agentArgs...)
+		return err
+	}, wait)
+}
+
+// hermesProfileArgs is the agent-side argv that selects a Hermes profile.
+// `-p default` is passed when the phone names default explicitly: hermes
+// resolves it to the root home, and sending the choice unchanged keeps the
+// start command identical to what the user picked. An empty value means the
+// launch never chose, so no -p is sent and hermes applies its own default.
+//
+// The name is re-checked here even though ValidateStart already did: this is
+// the last frame before it becomes argv, and a name that cannot be a profile
+// must never reach the command line. A name that fails the check is an error
+// rather than a silent nil: dropping -p would start Hermes on whatever profile
+// is sticky on the host, which is a different agent than the user asked for.
+func hermesProfileArgs(name string) ([]string, error) {
+	if name == "" {
+		return nil, nil
+	}
+	if !hermesprofiles.Valid(name) {
+		return nil, fmt.Errorf("hermes_profile %q must match %s", name, hermesprofiles.NamePattern)
+	}
+	return []string{"-p", name}, nil
+}
+
+func retryAgentStart(ctx context.Context, start func() error, wait func(context.Context, time.Duration) bool) error {
 	delay := agentStartRetryInitial
 	for {
-		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx))
+		err := start()
 		if err == nil || !herdr.IsTransientRefused(err) {
 			return err
 		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			// The refusal, not the context error: it is the actual cause and
-			// it keeps the safe-to-retry classification the phone acts on.
+		if !wait(ctx, delay) {
 			return err
-		case <-timer.C:
 		}
 		delay = min(delay*2, agentStartRetryMax)
+	}
+}
+
+func waitForAgentRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -221,10 +329,10 @@ func remainingTimeoutMS(ctx context.Context) int {
 	return int(min(remaining, agentStartProcessTimeoutMS))
 }
 
-func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, request StartRequest) string {
+func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, request StartRequest) profiles.PaneIdentity {
 	inventory, err := l.herdr.GetInventory(ctx)
 	if err != nil {
-		return ""
+		return profiles.PaneIdentity{}
 	}
 	for _, pane := range inventory.Panes {
 		if pane.Name != request.Name {
@@ -237,11 +345,12 @@ func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, req
 		if request.WorkspaceID != "" && pane.WorkspaceID != request.WorkspaceID {
 			continue
 		}
-		if l.profiles.ResolvePane(pane.ID, pane.Agent) == profileID {
-			return pane.ID
+		target := profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
+		if l.profiles.OwnsTarget(target, profileID) {
+			return target
 		}
 	}
-	return ""
+	return profiles.PaneIdentity{}
 }
 
 func workspaceExists(workspaces []herdr.Workspace, workspaceID string) bool {

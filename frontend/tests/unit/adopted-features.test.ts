@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AttachmentBatchController } from '$lib/attachments';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
 import { fencedCodeText, safeMarkdownHtml, speakableText } from '$lib/markdown';
-import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
+import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
 import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
@@ -177,10 +177,11 @@ describe('workspace navigation', () => {
       agent({ pane_id: 'relay-a::pane-3', raw_pane_id: 'pane-3', workspace_id: 'work-1', status: 'idle' }),
     ]);
     expect(group).toMatchObject({ doneCount: 1, workingCount: 1, readyCount: 1 });
-    // done > working > idle
+    // done > working > ready (idle) > unknown
     expect(workspaceStateTone(group)).toBe('success');
     expect(workspaceStateTone({ ...group, doneCount: 0 })).toBe('warning');
-    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0 })).toBe('muted');
+    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0 })).toBe('ready');
+    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0, readyCount: 0 })).toBe('muted');
   });
 });
 
@@ -335,15 +336,15 @@ describe('terminal key-hint fallback', () => {
   });
 
   it('enables terminal text only while an editor is asking for submission', () => {
-    expect(terminalTextInputActive([
+    expect(terminalTextInputMode([
       'Custom answer: Which weekend?',
       '>',
       'enter or ctrl+q submit  esc cancel  ctrl+g external editor',
-    ].join('\n'))).toBe(true);
-    expect(terminalTextInputActive([
+    ].join('\n'))).toBe('submit');
+    expect(terminalTextInputMode([
       'Other (type your own)',
       'Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel',
-    ].join('\n'))).toBe(false);
+    ].join('\n'))).toBeNull();
   });
 });
 

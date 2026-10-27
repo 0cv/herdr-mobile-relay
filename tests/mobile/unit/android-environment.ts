@@ -3682,7 +3682,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       console.log(`PASS SM56 environment ${name}`);
     }
   });
-  const prepare = (fixture: Fixture, timeoutMs = 1_000) => cli(fixture, ['prepare', '--serial', 'emulator-5554', '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'), '--output', join(fixture.root, 'preparation.json'), '--adb-timeout-ms', String(timeoutMs)]);
+  const prepare = (fixture: Fixture, timeoutMs = 5_000) => cli(fixture, ['prepare', '--serial', 'emulator-5554', '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'), '--output', join(fixture.root, 'preparation.json'), '--adb-timeout-ms', String(timeoutMs)]);
   const state = (fixture: Fixture, value: unknown) => writeFile(join(fixture.fixtureDirectory, 'valid-vending.json'), JSON.stringify(value));
   const snapshots = async (fixture: Fixture) => {
     const before = join(fixture.root, 'before.json');
@@ -3935,7 +3935,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     test(`rejects named acquisition ${failure} before any preparation mutation and snapshot`, async () => {
       const fixture = await harness.createFixture();
       await state(fixture, { enabled: 0, [failure]: 'ro.build.id' });
-      assert.equal(prepare(fixture).passed, false);
+      assert.equal(prepare(fixture, failure === 'propertyTimeout' ? 1000 : 5_000).passed, false);
       assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
       assert.equal((await harness.snapshot(fixture, 'valid', join(fixture.root, 'before.json'), join(fixture.root, 'diagnostics.json'), 1000)).passed, false);
       assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);

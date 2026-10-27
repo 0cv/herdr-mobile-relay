@@ -17,6 +17,8 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/eventhook"
+	"github.com/0cv/herdr-mobile-relay/internal/launchd"
+	"github.com/0cv/herdr-mobile-relay/internal/readiness"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/speech"
@@ -74,6 +76,11 @@ func run(args []string) (int, error) {
 			return 3, err
 		}
 		return status(err)
+	case "verify-readiness":
+		if len(args) != 4 {
+			return 2, errors.New("usage: herdr-mobile-relay verify-readiness INSTANCE VERSION REVISION WEB_HASH")
+		}
+		return status(readiness.Verify(os.Stdin, readiness.Expected{Instance: args[0], Version: args[1], Revision: args[2], WebHash: args[3]}))
 	case "verify-public":
 		verifyFlags := flag.NewFlagSet("verify-public", flag.ContinueOnError)
 		verifyFlags.SetOutput(os.Stderr)
@@ -330,6 +337,9 @@ func runServe() (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if err := launchd.SweepWorkers(ctx); err != nil {
+		logger.Warn("remove finished worker jobs", "error", err)
+	}
 	srv := app.New(cfg, version, revision, logger)
 
 	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {

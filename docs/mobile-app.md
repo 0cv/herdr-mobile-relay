@@ -19,9 +19,9 @@ setup and want to know what every screen and control is for.
 - Inspect the current agent's workspace files, images, Git status, upstream
   ahead/behind counts, and unified diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, OpenCode,
-  Qoder, Pi, Oh My Pi, and Oh My OpenCode in focused conversation or
-  full-history form; validated Oh My OpenCode plans appear with their current
-  task states.
+  Qoder, Pi, Oh My Pi, Oh My OpenCode, Hermes, Cursor Agent and native Kimi Code in focused
+  conversation or full-history form; validated Oh My OpenCode plans appear with
+  their current task states.
 - Configure durable notification categories, settle delay, cooldown, snooze,
   and a neutral delivery test separately for each paired relay and device.
 - Pair named controller or reader devices. Reader devices can inspect agents,
@@ -52,11 +52,11 @@ setup and want to know what every screen and control is for.
   neural voice the relay falls back to espeak-ng, espeak, flite, or macOS `say`;
   a language it cannot speak is reported in Settings instead of failing at the
   Speak button.
-- Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
+- Detect Codex, Claude Code, Devin, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
-| Agents | Native Resize |
-| --- | --- |
-| <img src="../images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="../images/native_mobile_resolution.jpeg" alt="OMP terminal rendered at native mobile width" width="392"> |
+| Agents |
+| --- |
+| <img src="../images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> |
 
 | Plan Questions | Notifications |
 | --- | --- |
@@ -70,7 +70,55 @@ setup and want to know what every screen and control is for.
 | --- | --- |
 | <img src="../images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="392"> | <img src="../images/speech.jpeg" alt="Speech settings with the language choice and the relay's cached voices" width="392"> |
 
+### Cursor picker filters
+
+**Send filter text** appends to an open Cursor model picker without pressing
+Enter or selecting a model. It supports up to 32 ASCII letters, digits, spaces,
+and `.-_/+:()[]`. Trailing spaces, multiline text, and other characters are
+rejected without trimming. Other picker layouts may be refused.
+
+The relay sends separate characters at least 150 ms apart and checks the live
+filter after visible characters. Interior spaces are verified with the next
+visible character. Terminal readback hides trailing spaces already in the
+picker: if the first visible character reveals an unexpected prefix, delivery
+stops and is reported as uncertain. Inspect the picker before sending more;
+the full draft is not restored after uncertain or partial delivery.
+
+Terminal controls are locked while sending. Select separately afterward, or
+press Escape to close the model picker. Relay commands are serialized per pane,
+but desktop typing is not locked: avoid typing there during delivery. Fresh
+reads detect observed interference, not an atomic guarantee against it.
+
+## Settings
+
+**Pi Integration** is a computer-side setting for each relay, not a phone
+preference. It defaults to off. Paired controllers can enable it for all known
+Pi agent directories; readers see the state read-only. Each profile reports
+installed, up to date, not installed, or refused with a reason. The switch is
+on when any known profile has a valid relay-owned marker, including a manual
+CLI installation; a partial failure does not hide successful profiles.
+
+It enables live Pi commands, progress, notices and the unconfirmed phone reply
+path for blocked **Needs inspection** panes. Reload or restart Pi after changes.
+The app only shows a reload hint and never sends `/reload` or other pane input.
+At relay startup, installed owned copies refresh from the current bundle.
+Disabling removes only owned files, never Pi settings or other integrations.
+The computer-side CLI alternative is `bash relay/setup.sh --pi-install [agent-dir]`
+or `--pi-remove`. See [agent directories](agent-directories.md) for profile lookup
+and [Pi discovery](slash-command-discovery.md#pi-runtime-commands) for safety.
+
 ## Paired devices
+
+Remote relay URLs require device pairing and end-to-end encryption, even over
+`wss:`. An empty key without device credentials enables plaintext development
+only at `localhost`, a `127.x.x.x` address or `[::1]`; remote destinations are
+refused before a socket opens.
+
+An encrypted direct `wss:` connection can report that its TLS endpoint rejected
+the device. The app stops automatic retries and asks for a new invitation,
+without deleting the saved credential. This trusts the configured relay URL's
+TLS endpoint, not a gateway's close text and not an E2EE rejection proof.
+Plain `ws:` and gateway/WebRTC closes remain untrusted and recoverable.
 
 A controller opens **Settings → Devices → Invite Device** to create a ten-minute,
 one-use invitation. The relay draws both a complete setup link and its QR code;
@@ -87,6 +135,21 @@ An uncaught phone-side error appears in a bottom **App error** banner because
 mobile browsers often provide no useful console. Copy or photograph its text
 for a bug report, then tap the banner to dismiss it; a later independent error
 will display a new banner.
+
+## Opening links from other apps on iOS
+
+External links open in Safari, not the installed Home Screen app. To use those
+links, pair Safari as its own device: in the Home Screen app, choose
+**Settings → Devices → Invite Device**, open that invitation in Safari, then
+choose **Pair this browser instead** and confirm. Safari is listed and revocable
+separately; its one-use invitation cannot also pair the Home Screen app.
+Safari may clear this site's storage after a week without use; invite it again
+if that happens.
+
+Link to an agent with `https://<app>/#notify=<url-encoded {"pane_id","host"}>`,
+where the fragment value is `encodeURIComponent(JSON.stringify({ pane_id, host }))`.
+Use the agent's pane ID and computer host name. Once Safari is paired, opening
+this link from another app takes you to that agent.
 
 ## Workspace navigation and inspection
 
@@ -190,33 +253,55 @@ controls to resize it without changing the rest of the app.
 
 ## Mobile terminal
 
-Controller terminals use **Resize Session** whenever the relay advertises size
-leases. While a terminal is open and the app is visible, the relay leases the
-live PTY at the measured phone width. Reader terminals never change the shared
-PTY; they wrap desktop-width rows to the phone viewport instead. Closing a
-controller terminal restores the previous width about ten seconds later, so
-stepping back into the same agent resumes instantly instead of resizing the
-pane twice. A hidden controller page keeps renewing its lease for five minutes
-— desktop Safari reports an occluded window as hidden, so brief switches to
-another app must not resize the shared pane — after which the desktop size
-returns within about two minutes. A sleeping phone freezes sooner than that, a
-disconnecting phone and relay shutdown restore the size immediately, and
-returning to the terminal takes the phone size again.
+By default the phone shows each pane at the size Herdr gives it. Controller
+terminals keep the desktop width, with column alignment preserved, and scroll
+horizontally. Read-only reader panes wrap desktop-width text to the phone width
+instead. Prompts, keys, approvals, uploads, terminal reading, and Conversation
+work the same in both layouts.
 
-**Lease Terminal Height** (Settings → Terminal, off by default) additionally
-leases the phone's measured height, so full-screen agents redraw to fit the
-phone instead of serving a mostly empty desktop-sized grid. The shared pane
-physically shrinks to phone size on the computer, and each height change can
-strand a stale copy of an inline agent's status bar (omp, Claude Code) in the
-scrollback: the terminal reflows its primary buffer before the agent can
-repaint, and scrollback cannot be erased afterwards. Leave it off unless you
-mostly drive full-screen TUIs from the phone. While the height is leased, the
-on-screen keyboard never shrinks it — the lease keeps the resting height and
-re-measures when the keyboard closes.
+**Resize Session** (Settings → Terminal, on by default, saved per device) lets
+a controller phone resize the shared terminal's width to fit itself while it has
+the pane open. A saved off choice stays off. Turn it off to avoid these costs:
 
-Herdr 0.9.0's independent client views do not replace this option: the relay
-still reads pane snapshots and resizes the shared PTY, rather than attaching as
-a native Herdr terminal client. Clients sharing a tab still share its size.
+- **The laptop and SSH views of that pane look garbled until the phone lets
+  go.** Herdr has no way to resize a pane for one viewer, so the relay resizes
+  the pane's terminal device directly while Herdr's own grid stays at the
+  layout size ([issue 60](https://github.com/0cv/herdr-mobile-relay/issues/60)).
+- Agents redraw at the new size and may leave narrow copies of their output in
+  the scrollback, which cannot be erased afterwards. Resizing may also truncate
+  scrollback and lose older output.
+- The relay attempts to restore the previous size when the phone leaves the
+  pane: about ten seconds after closing the terminal (so stepping straight
+  back in does not resize twice), immediately when you turn Resize Session
+  off or the phone disconnects, and within two minutes if the phone just goes
+  silent. Dimensions that differ from the last leased value are left alone;
+  preserving local changes is best effort, not a guarantee. If the
+  relay cannot confirm the pane is still the terminal it resized, it writes
+  nothing; after about thirty seconds of failed attempts it logs a warning,
+  and a normal local resize puts the pane right.
+- It is available only on relays that advertise it (Linux and macOS relays
+  from this release on). Elsewhere the switch has no effect and the terminal
+  keeps the default layout; no error is shown.
+
+While a pane is leased, a hidden page keeps renewing for five minutes, because
+desktop Safari reports an occluded window as hidden and brief app switches
+must not resize the shared pane. Several phones on one pane get the narrowest
+requested size. Readers never resize anything.
+
+**Lease Terminal Height** (off by default, available only with Resize Session
+on and a relay that supports it) also fits the height, so full-screen agents
+redraw to the phone instead of serving a mostly empty desktop-sized grid. Each
+height change can strand a stale copy of an inline agent's status bar (omp,
+Claude Code) in the scrollback. While the height is leased, the on-screen
+keyboard never shrinks it. Turning Resize Session off disables height leasing
+without clearing its saved preference: a checked but disabled height switch
+is inactive and is reused when Resize Session is enabled again.
+
+Older apps (0.22.7 and earlier) resized automatically whenever a relay offered
+it. This relay no longer offers that, and refuses any resize request that does
+not carry the new opt-in, so an older app keeps the default layout. Design,
+safety checks and residual risks are in
+[pane-size-leasing.md](pane-size-leasing.md).
 
 Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
 1,000 is the default and the ceiling on the gateway-relayed path; direct
@@ -225,7 +310,9 @@ the served window exist. Use **Copy** for the latest response or
 **Conversation History** for clean, searchable earlier turns.
 
 In **Settings → Agents → Default View**, choose **Terminal** or
-**Conversation** for new agent openings. Terminal is the initial default. In
+**Conversation** for new agent openings. Conversation is the initial default
+when history is available, across all supported providers; a saved choice of
+Terminal still wins. In
 **Manage agent → Default View**, choose **Use default** or set a preference for
 that pane; the menu is available from both Terminal and Conversation. These
 preferences are stored only in this browser/app on this device and apply across
@@ -236,40 +323,89 @@ inherits the global default.
 Preference changes affect the next opening, not the screen currently shown, and
 manual Terminal/Conversation switching does not change the saved preference.
 Unsupported agents, agents without a session, or unavailable transcripts open
-in Terminal instead. Terminal remains one tap away for approvals, questions,
-and other terminal-only controls.
+in Terminal instead. Terminal remains one tap away for fullscreen TUI pickers
+and interactions that need live screen text.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. It opens on the newest turn and stays there as
 turns arrive; scrolling up to read holds your position until you return to the
-end. **Conversation** keeps each user prompt and the latest agent answer from
-that exchange. **Full history** shows every recorded message with collapsible
-tool activity. Both use an escaped Markdown subset, search filters the
+actual bottom. Scrolling to the bottom of an older loaded window reveals the
+next newer window without losing the visible message anchor; repeat until the
+newest messages, then following resumes. No jump button is needed.
+**Conversation** keeps each user prompt and the latest agent answer from
+that exchange. Questions the agent asked (Claude Code AskUserQuestion) stay
+visible with the chosen answer. **Conversation** is the initial mode. **Full history** is an explicit
+preference that shows every recorded message with collapsible tool activity
+(agent questions stay expanded);
+the app remembers either mode on this device. Both use an escaped Markdown subset, search filters the
 currently displayed view, each fenced code block has its own copy control, and
 each message can copy its original Markdown.
-The composer below the history sends ordinary multiline prompts and accepts
-one or more validated attachments from the file picker or clipboard. Supported
+Conversation and Full history share the Terminal composer: multiline prompts,
+locally shared drafts, slash-command suggestions, photos/files and pasted images.
+Slash suggestions fill the draft without sending it; Ctrl/Meta+Enter sends it.
+Both views prevent sending until an upload has finished inserting its references,
+and prevent uploads while a prompt is sending. Missing target identity disables
+attachments and sending with an explanation; upload errors remain visible even
+when an agent interaction locks ordinary input.
+The composer accepts one or more validated attachments from the file picker or clipboard. Supported
 files are images, UTF-8 text, Markdown, PDF, JSON, CSV, DOCX, XLSX, PPTX, ODT,
 ODS, and ODP. Uploads show per-file progress, can be cancelled, and interrupted
 files restart from the beginning. Live uploads are bound to the exact target
 generation; after restart, opaque references remain bound to the server
 session, pane, terminal, and agent session that created them. The relay
 revalidates the current exact target before resolving a reference. The history
-does not
-render attachments inline. Draft persistence, slash-command suggestions,
-hidden-value entry, approvals, structured questions, and terminal menus remain
-in the terminal view. The composer locks when one of those interactions needs
-attention, and the **Terminal** header button switches to the same agent without
-adding repeated view toggles to browser history.
+does not render attachments inline. Structured questions and approval buttons
+are available directly in both Conversation modes. Manual terminal text, raw
+screen previews and the terminal-key row stay in dedicated Terminal. Conversation
+keeps the normal composer without a duplicate textual activity footer; the
+header light indicates activity. Send-button busy state, actionable failures and
+pending or uncertain delivery warnings remain. Reader devices cannot use input,
+upload, hidden-value or response controls.
+
+Visible Pi extension notices appear in both modes, including recent, older and
+live history. Only text from explicit `display:true` custom messages is shown;
+hidden messages and private details are excluded. For a blocked Pi pane with
+unknown focus, a controller may send text through a live exact-session Pi bridge
+capability after a fresh normal-input check. This never sends terminal keys,
+attachments or hidden input. The UI reports **Sent to Pi — not confirmed** and
+fences further sends until explicit **I checked — allow another send**
+acknowledgement. Transcript messages, even identical later native user messages,
+do not prove delivery and never clear this fence. Acknowledging never resends.
+Before dispatch, the Pi bridge saves only an exact-target uncertainty marker on
+this browser, never reply text, transcript content or bridge credentials. Reloading
+restores the fence, including when the page closed before the result arrived.
+Only acknowledgement removes that target's marker; there is no automatic expiry.
+Same-origin pages use an exclusive Web Lock for the target through dispatch and
+result handling. Acknowledgement takes that same lock, so another page cannot
+clear a pending send. Capabilities and safe input are rechecked inside the lock.
+If browser storage or Web Locks are unavailable, Pi bridge sending stays blocked
+with an error.
+Clearing browser data or using another browser loses these local markers. Other
+Terminal delivery fences remain page-memory-only. The updated bridge must be
+loaded by the relevant Pi session before this path is
+available. Ready/working panes and structured controls keep their normal routes.
+
+Hidden prompts use the same masked, non-persisted field in both views and
+require the relay's `secret_input` capability. Ordinary draft persistence pauses
+while no-echo is active; text changed during that prompt stays unsaved even after
+the prompt clears. Conversation checks only the last 30 terminal lines every two
+seconds, without streaming terminal frames. Saving also pauses until a fresh
+check confirms ordinary input; missing, disconnected or three-second-old state
+cannot authorize saving. Text changed during that pause stays unsaved until
+cleared. A pre-existing draft is preserved when switching views.
+Fullscreen TUI pickers and detected live-screen menus remain Terminal-specific;
+the UI points there only when live screen text is needed. The **Terminal**
+header button switches to the same agent without adding repeated view toggles
+to browser history.
 
 Hidden reasoning, injected system records, and sidechain turns remain excluded.
 Claude continuation links are followed within the selected project, so a stale
 anchor session can show newer continuation sessions in order. Conversation
-History requests up to 200 records at a time but loads only enough logical
-exchanges for the current view: tool-only pages and exchanges split across page
-boundaries are followed automatically. The newest usable exchange is shown on
-open, and scrolling near the top loads earlier exchanges without a normal-path
-**Load older turns** click. A small in-memory preview can appear immediately on
+History opens with a small recent page (currently up to 24 raw records), without
+eagerly crawling tool-only pages or incomplete exchanges. Older history loads
+on upward scroll demand or explicit **Load older turns**, preserving the visible
+anchor. Changing modes or a short viewport does not automatically fetch older
+pages. A small in-memory preview can appear immediately on
 a warm reopen while the current latest page is checked; it is bounded, never
 persisted by the browser, and never authorizes a cursor or proves that history
 is empty. Loading, preparation, context search, errors, and the true beginning
@@ -286,7 +422,48 @@ and expired-cursor states are reported without exposing transcript paths or raw
 records. Pagination uses only short-lived opaque cursors; the app never
 constructs a cursor from a displayed entry ID. OpenCode and Hermes retain their
 native database pagination semantics while binding cursors to the selected
-source identity.
+source identity. OpenCode 2.x selects a recent page with lookahead, without a
+session-wide count; its total is unknown rather than estimated. Hermes and
+unindexed OpenCode 1.x may scan, sort, validate or deduplicate the entire session
+before selecting the recent page. Their cold-open cost grows with history size;
+a small response is not a bounded cold database read. Kimi Code likewise folds
+the entire bounded native main-agent journal,
+including validated 2.2.0 undo branches. Imported and human-engine-only journals,
+unknown structural records and incomplete branch trees are unavailable, with
+Terminal as the fallback. Session selection, privacy and replay bounds are
+[documented separately](conversation-activity.md#kimi-code-recorded-history).
+
+### Conversation activity updates
+
+The updated optional integration supports stock Pi 1.3.0 public events and
+active-branch history. While Full history is open, in-progress Pi text and tool
+progress stream to authorized paired devices, matching what the desktop TUI and
+Terminal mirror already show; later completion-time redactions cannot retract
+text already delivered. Other native readers are visibly recorded-only, not
+token streams.
+
+| Provider | Conversation update path |
+| --- | --- |
+| Pi with the optional integration | Live public events and recorded active branch |
+| Pi without the integration; Claude Code; Codex; Cursor Agent; Qoder; Oh My Pi | Recorded JSONL changes checked every 250 ms |
+| OpenCode 1.x/2.x SQLite, including mixed stores; Hermes | Main/WAL changes checked every 250 ms; persisted new/edited messages and tool states |
+| Oh My OpenCode | Session JSONL checked every 250 ms; validated plan changes refresh the snapshot |
+| Kimi Code native 1.5 / legacy-engine 1.4 | Main journal checked every 250 ms; validated undo branches reset history; recorded complete responses, not tokens |
+
+The recorded feed includes reader aliases such as `cursoragent`, `qodercli` and
+`ohmypi`, `hermesagent` and `ohmyopencode`. OpenCode keeps the reader's
+per-session table selection; loose JSON-file stores have no reader. Database
+updates use bounded rowid append queries and indexed checks of loaded message
+IDs, including older pages (20,000 IDs shared by viewers). Hermes checks a bounded
+per-session rowid window using a verified index because it has no message-update
+index; without that index it uses a bounded global window and resets on overflow. Missing indexes or exceeded
+row/part budgets request a fresh snapshot. Edits outside the tracked loaded
+window may wait for normal paging; explicit snapshots/paging retain native totals.
+It never requests terminal input, scrolling or resizing. These are
+scheduling intervals, not token-stream or physical-phone latency guarantees.
+The browser keeps local reading available while disconnected and mounts bounded
+loaded-history windows.
+[Source capabilities, limits, privacy, and optional activation/rollback](conversation-activity.md).
 
 ### Conversation history cache and limits
 
@@ -345,6 +522,14 @@ The terminal controls send **Esc**, **Tab** (`⇥`), **Enter**, arrow keys, and
 characters or any available terminal key — arm `^` and type `c` to interrupt.
 A live status confirms the exact chord. Toggle the modifiers off or move focus
 to the composer to disarm them.
+
+While the composer cannot send — the agent awaits an approval or question
+answer, or its pane needs inspection — the **Keyboard** button
+joins the key row. It types one line of literal text into whatever control has
+focus in the terminal, with **Enter** sent separately, and **Close** returns to
+the composer. It also stays while an earlier terminal send is unconfirmed, so
+you can check the terminal before sending again; delivery warnings point to it
+by its icon. Agents that accept prompts do not show it.
 
 When the pane's last line is a prompt that echoes nothing — `[sudo] password
 for …`, an SSH passphrase, `gpg`, a PIN — the app names it and offers a masked

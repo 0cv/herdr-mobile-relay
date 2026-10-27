@@ -110,8 +110,28 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     --revision "$EXPECTED_REVISION" \
     "$RELEASE_DIR" >/dev/null
 
+[ -f "$RELEASE_DIR/relay/native-install-transaction.sh" ] || {
+    echo "release does not contain the native installer transaction helper" >&2
+    exit 1
+}
+bash -n "$RELEASE_DIR/relay/native-install-transaction.sh"
+
+bash "$RELEASE_DIR/relay/pi-commands.sh" install "$WORK_DIR/pi-agent" >/dev/null
+cmp "$RELEASE_DIR/relay/pi-command-bridge/bridge.mjs" \
+    "$WORK_DIR/pi-agent/extensions/herdr-mobile-relay-commands/bridge.mjs"
+bash "$RELEASE_DIR/relay/pi-commands.sh" remove "$WORK_DIR/pi-agent" >/dev/null
+[ ! -e "$WORK_DIR/pi-agent/extensions/herdr-mobile-relay-commands" ]
+
+# The relay removes finished worker jobs from launchd when it starts; keep this
+# check away from the jobs of the machine running it.
+STUB_BIN="$WORK_DIR/bin"
+mkdir -p "$STUB_BIN"
+printf '#!/bin/sh\nexit 0\n' > "$STUB_BIN/launchctl"
+chmod 700 "$STUB_BIN/launchctl"
+
 PORT=$((40000 + ($$ % 20000)))
 PLUGIN_PORT=$((PORT + 1))
+PATH="$STUB_BIN:$PATH" \
 XDG_CONFIG_HOME="$CONFIG_HOME" \
 XDG_CACHE_HOME="$CACHE_HOME" \
 XDG_DATA_HOME="$DATA_HOME" \

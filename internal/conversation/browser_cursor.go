@@ -43,14 +43,21 @@ func newBrowseSigningKey() ([32]byte, error) {
 }
 
 func browseScopeID(scope BrowseScope) string {
+	provider := normalizedAgent(scope.Provider)
+	project := normalizeBrowseProjectContext(provider, scope.CWD, scope.ForegroundCWD)
 	normalized := BrowseScope{
-		Provider:        normalizedAgent(scope.Provider),
-		CWD:             strings.TrimSpace(scope.CWD),
+		Provider:        provider,
+		CWD:             project.CWD,
+		ForegroundCWD:   project.ForegroundCWD,
 		SessionID:       strings.TrimSpace(scope.SessionID),
 		PaneID:          strings.TrimSpace(scope.PaneID),
 		ServerSessionID: strings.TrimSpace(scope.ServerSessionID),
 		TerminalID:      strings.TrimSpace(scope.TerminalID),
 		Generation:      scope.Generation,
+		ProcessIdentity: scope.ProcessIdentity,
+		SelectionReason: scope.SelectionReason,
+		InferredSession: scope.InferredSession,
+		SelectionSource: scope.SelectionSource,
 	}
 	data, _ := json.Marshal(normalized)
 	digest := sha256.Sum256(data)

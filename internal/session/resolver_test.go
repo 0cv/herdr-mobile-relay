@@ -129,6 +129,27 @@ func TestClaudeSessionName(t *testing.T) {
 	}
 }
 
+func TestClaudeSessionNameWithProjectContextUsesForegroundCacheIdentity(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174324"
+	paneCWD := "/work/app "
+	foregroundCWD := "/work/app"
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "-work-app-", sessionID+".jsonl"), "Pane title")
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "-work-app", sessionID+".jsonl"), "Foreground title")
+
+	resolver := NewResolver(home)
+	if got := resolver.SessionName("claude", paneCWD, sessionID); got != "Pane title" {
+		t.Fatalf("pane-only title = %q, want pane title", got)
+	}
+	project := conversation.ProjectContext{CWD: paneCWD, ForegroundCWD: foregroundCWD}
+	if got := resolver.SessionNameWithProject("claude", project, sessionID); got != "Foreground title" {
+		t.Fatalf("foreground title = %q, want foreground title", got)
+	}
+	if got := resolver.SessionNameWithProject("claude", project, sessionID); got != "Foreground title" {
+		t.Fatalf("cached foreground title = %q, want foreground title", got)
+	}
+}
+
 func TestCodexSessionName(t *testing.T) {
 	home := t.TempDir()
 	codexDir := filepath.Join(home, ".codex")

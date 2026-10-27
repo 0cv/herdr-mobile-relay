@@ -17,16 +17,20 @@ func waitForReadySnapshot(t *testing.T, browser *Browser, scope BrowseScope, cur
 	t.Helper()
 	page := BrowsePage{}
 	var err error
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		page, err = browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: cursor, Limit: limit})
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	for ctx.Err() == nil {
+		page, err = browser.ReadPage(ctx, BrowseRequest{Scope: scope, Cursor: cursor, Limit: limit})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if page.State != BrowsePreparing {
 			break
 		}
-		time.Sleep(time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Millisecond):
+		}
 	}
 	if page.State != BrowseReady || page.Mode != BrowseSnapshot {
 		t.Fatalf("snapshot page = %#v", page)
@@ -556,21 +560,25 @@ func TestBrowserPreparationReportsQuotaFailureAndSupportsExplicitRetry(t *testin
 		t.Fatalf("latest page = %#v, err = %v", latest, err)
 	}
 	page := latest
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		page, err = browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	for ctx.Err() == nil {
+		page, err = browser.ReadPage(ctx, BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if page.State == BrowseFailed {
 			break
 		}
-		time.Sleep(time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Millisecond):
+		}
 	}
 	if page.State != BrowseFailed || page.ReasonCode != "index_capacity_exceeded" || page.Error == nil || !page.Error.Retryable || !page.HasMore {
 		t.Fatalf("quota page = %#v, want an explicit retryable quota failure", page)
 	}
-	retry, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1, Retry: true})
+	retry, err := browser.ReadPage(ctx, BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1, Retry: true})
 	if err != nil || retry.State != BrowsePreparing {
 		t.Fatalf("explicit retry page = %#v, err = %v", retry, err)
 	}

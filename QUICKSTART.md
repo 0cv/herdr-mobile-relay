@@ -45,7 +45,8 @@ Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
 the one-use bootstrap invitation in the URL fragment, which is never sent in
 the HTTP request. The installed app removes it after enrollment. iOS browser
 tabs retain it without redeeming it and direct you to the installed app, which
-prevents a disposable Safari tab from consuming the invitation. Each printed
+prevents a disposable Safari tab from consuming the invitation. To use the tab
+itself as a device, choose **Pair this browser instead** in Settings. Each printed
 link pairs one phone within ten minutes; print it again for the next phone.
 
 Keep the Quick Start pane open. Ctrl-C stops the relay, and on the tunnel path
@@ -56,6 +57,11 @@ the next run creates a new hostname and setup link.
 Run an agent in Herdr or tap **＋** in the phone app. You can inspect output,
 send prompts, answer approvals and plan questions, upload images, and manage the
 agent lifecycle.
+
+For Pi, enable **Settings → Pi Integration** for its computer, then run `/reload`
+in Pi or restart it. This is off until a controller enables it; the relay keeps
+owned copies current after updates. The CLI alternative is
+`bash relay/setup.sh --pi-install [agent-dir]`.
 
 On hosts with a published Piper runtime, setup downloads the engine and the
 English voice that reads responses aloud, cached outside the release so updates

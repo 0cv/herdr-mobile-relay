@@ -40,11 +40,13 @@ const ACTION_LABEL: Record<string, string> = {
   back: 'Back',
   cancel: 'Cancel',
   choose: 'Choose',
+  clear: 'Clear',
   close: 'Close',
   confirm: 'Confirm',
   continue: 'Continue',
   deny: 'Deny',
   down: 'Down',
+  edit: 'Edit',
   move: 'Move',
   navigate: 'Navigate',
   next: 'Next',
@@ -64,6 +66,7 @@ const SINGLE_HINT = new RegExp(`(${KEY_TOKEN})\\s*(?:to|:|=|-)?\\s*(${VERB_TOKEN
 const PAIRED_ARROWS = /([↑↓←→])\s*[/|]\s*([↑↓←→])\s*(?:to|:|=|-)?\s*(navigate|move|select|choose|previous|next)?/giu;
 const YES_NO = /\b(?:press\s+)?([yn])\s*[/|]\s*([yn])\b/iu;
 const EXPLICIT_LETTER = /\b([yn])\s*(?:to|:|=|-)+\s*(yes|no|accept|deny|confirm|cancel)\b/giu;
+const FILTER_FOOTER = /(?:^|\n)\s*type\s+to\s+filter[\s•·|]+enter\s+to\s+select(?:[\s•·|]+(?:tab\s+to\s+edit|esc\s+to\s+(?:clear|close)))*\s*$/iu;
 
 function normalizeKey(value: string): string {
   const lower = value.toLocaleLowerCase();
@@ -93,9 +96,11 @@ function cleanTitle(value: string): string {
     .slice(0, 100);
 }
 
-export function terminalTextInputActive(value: string): boolean {
+export function terminalTextInputMode(value: string): 'submit' | 'filter' | null {
   const tail = value.replace(/\r\n?/g, '\n').split('\n').slice(-8).join('\n');
-  return /\benter(?:\s+or\s+ctrl\+q)?\s+submit\b/iu.test(tail);
+  if (FILTER_FOOTER.test(tail)) return 'filter';
+  if (/\benter(?:\s+or\s+ctrl\+q)?\s+submit\b/iu.test(tail)) return 'submit';
+  return null;
 }
 
 export function detectTerminalMenu(value: string): TerminalMenu | null {

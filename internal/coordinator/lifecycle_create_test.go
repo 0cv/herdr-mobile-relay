@@ -14,6 +14,8 @@ import (
 
 func TestLifecycleStartsAgentInNestedWorkspaceCreateRootPane(t *testing.T) {
 	dir := t.TempDir()
+	writeScript(t, dir, "codex", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	home := filepath.Join(dir, "home")
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
@@ -32,8 +34,8 @@ func TestLifecycleStartsAgentInNestedWorkspaceCreateRootPane(t *testing.T) {
 		"esac\n")
 
 	resolver := profiles.NewResolver(filepath.Join(dir, "config"), nil)
-	socketPath := filepath.Join(dir, "herdr.sock")
-	startInventorySocket(t, socketPath, nil)
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
+	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
 	lifecycle := &Lifecycle{
 		herdr:    herdr.NewClient(bin, socketPath),
 		profiles: resolver,
@@ -65,6 +67,8 @@ func TestLifecycleStartsAgentInNestedWorkspaceCreateRootPane(t *testing.T) {
 
 func TestLifecycleStartsAgentInExplicitWorkspace(t *testing.T) {
 	dir := t.TempDir()
+	writeScript(t, dir, "codex", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	home := filepath.Join(dir, "home")
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
@@ -80,10 +84,10 @@ func TestLifecycleStartsAgentInExplicitWorkspace(t *testing.T) {
 		"  'agent start') printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"codex\",\"name\":\"project-codex\"}}}' ;;\n"+
 		"  *) exit 2 ;;\n"+
 		"esac\n")
-	socketPath := filepath.Join(dir, "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	startInventorySocket(t, socketPath, []any{
 		map[string]any{"workspace_id": "workspace-existing", "label": "Project"},
-	})
+	}, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-existing"})
 	lifecycle := &Lifecycle{
 		herdr:    herdr.NewClient(bin, socketPath),
 		profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),

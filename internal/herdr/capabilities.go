@@ -262,8 +262,15 @@ func (m *capabilityManager) refresh(ctx context.Context) ServerStatus {
 	} else {
 		next.Features[FeatureEndpoint] = FeatureEvidence{State: FeatureUnknown, Reason: "not_advertised"}
 	}
-	moveState, moveReason := probeWorkspaceMoveBlock(ctx, m.client.api)
-	next.Features[FeatureWorkspaceMoveBlock] = FeatureEvidence{State: moveState, Reason: moveReason}
+	// Validation-refusal probes surface as API errors in Herdr's log, so a
+	// conclusive result is reused for the same server identity. Reconnects and
+	// identity changes invalidate it, and real operations still correct it.
+	if moveFeature, ok := m.reusableFeature(FeatureWorkspaceMoveBlock, identity); ok {
+		next.Features[FeatureWorkspaceMoveBlock] = moveFeature
+	} else {
+		moveState, moveReason := probeWorkspaceMoveBlock(ctx, m.client.api)
+		next.Features[FeatureWorkspaceMoveBlock] = FeatureEvidence{State: moveState, Reason: moveReason}
+	}
 	if tabFeature, ok := m.reusableFeature(FeatureTabMove, identity); ok {
 		next.Features[FeatureTabMove] = tabFeature
 	} else {

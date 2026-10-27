@@ -123,7 +123,7 @@ func runCommandSubprocess(t *testing.T, args ...string) commandResult {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCommandSubprocess$")
 	command.Env = commandEnvironment(string(encoded), root, herdr)

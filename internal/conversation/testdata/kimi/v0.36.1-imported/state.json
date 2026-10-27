@@ -1,0 +1,22 @@
+{
+  "createdAt": "2026-08-14T00:00:00.000Z",
+  "updatedAt": "2026-08-14T00:00:00.000Z",
+  "title": "Imported prompt.",
+  "isCustomTitle": false,
+  "lastPrompt": "Imported prompt.",
+  "agents": {
+    "main": {
+      "homedir": "/fixture/kimi-home/sessions/SYNTHETIC_BUCKET/ses_00000000-0000-4000-8000-000000000003/agents/main",
+      "type": "main",
+      "parentAgentId": null
+    }
+  },
+  "custom": {
+    "imported_from_kimi_cli": true,
+    "kimi_cli_source_path": "/fixture/legacy-home/sessions/SYNTHETIC_OLD_BUCKET/00000000-0000-4000-8000-000000000003",
+    "kimi_cli_session_id": "00000000-0000-4000-8000-000000000003",
+    "kimi_cli_wire_protocol": null,
+    "imported_at": "2026-08-14T00:00:00.000Z",
+    "archived": false
+  }
+}

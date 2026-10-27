@@ -1,10 +1,64 @@
 package slashcmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestClaudeLargePersonalCatalogIncludesLateSkills(t *testing.T) {
+	isolateAgentEnv(t)
+	home := t.TempDir()
+	commandDir := filepath.Join(home, ".claude", "commands")
+	skillDir := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(commandDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	expected := make(map[string]string, len(claudeBuiltins)+30+342)
+	for _, command := range claudeBuiltins {
+		expected[command.Command] = "builtin"
+	}
+	for index := 0; index < 30; index++ {
+		name := fmt.Sprintf("custom-command-%03d", index)
+		writeTestFile(t, filepath.Join(commandDir, name+".md"), "Custom command")
+		expected["/"+name] = "personal"
+	}
+	for index := 0; index < 341; index++ {
+		name := fmt.Sprintf("personal-skill-%03d", index)
+		writeSkill(t, skillDir, name, "Personal skill")
+		expected["/"+name] = "personal"
+	}
+	// This name sorts after the numbered skills, so a small filename-ordered
+	// discovery budget would omit it even though it is a valid skill.
+	writeSkill(t, skillDir, "rrrerun", "Late personal skill")
+	expected["/rrrerun"] = "personal"
+
+	catalog := CatalogFor("claude", t.TempDir(), home)
+	if catalog.Truncated {
+		t.Fatal("large personal catalog should fit within the raised discovery budget")
+	}
+	actual := make(map[string]string, len(catalog.Commands))
+	for _, command := range catalog.Commands {
+		actual[command.Command] = command.Source
+	}
+	if len(actual) != len(expected) {
+		t.Fatalf("catalog has %d unique commands, want %d", len(actual), len(expected))
+	}
+	for name, source := range expected {
+		if actual[name] != source {
+			t.Errorf("%s source = %q, want %q", name, actual[name], source)
+		}
+	}
+	for name, source := range actual {
+		if expected[name] != source {
+			t.Errorf("unexpected command %s from %s", name, source)
+		}
+	}
+}
 
 func TestClaudeRecursiveNamespace(t *testing.T) {
 	home := t.TempDir()

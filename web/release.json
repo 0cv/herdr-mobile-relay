@@ -1,30 +1,30 @@
 {
   "schema": 1,
-  "version": "0.21.0",
-  "assets": 380,
-  "build": "80644d613e8d8a6fc13f51362f4beaf81b879b0c82130f4a192bd3239f84ee34",
-  "entry": "/builds/0.21.0-380-80644d613e8d8a6f/index.html",
+  "version": "0.23.3",
+  "assets": 477,
+  "build": "95e93e47386dac0326fbab7951f74a775ff3d473d58c1c10ed3b06cddede26ef",
+  "entry": "/builds/0.23.3-477-95e93e47386dac03/index.html",
   "files": {
     "entry": {
-      "path": "builds/0.21.0-380-80644d613e8d8a6f/index.html",
-      "sha256": "fe47b988f25b8fc5097252853997230cf16648308ea9d4af0849b9c70da43f9f",
-      "integrity": "sha256-/ke5iPJbj8UJclKFOZcjDPFmSDCOqdSvCEm5xw2kP58=",
-      "brotli_sha256": "2306d8b5dfa9a41f5feb7f0972baba80d0b0139bb693d0a216bc7fc1f5fe66e5",
-      "brotli_integrity": "sha256-IwbYtd+ppB9f638Jcrq6gNCwE5u2k9CiFrx/wfX+ZuU="
+      "path": "builds/0.23.3-477-95e93e47386dac03/index.html",
+      "sha256": "08e04a5f80c7bc7f38e8d6529c8799ade555373ca266091fef8062f8dad9012c",
+      "integrity": "sha256-COBKX4DHvH846NZSnIeZreVVNzyiZgkf74Bi+NrZASw=",
+      "brotli_sha256": "81565669294ce8625fc16969183a698bfed681ea20fb927b3542c0039092397a",
+      "brotli_integrity": "sha256-gVZWaSlM6GJfwWlpGDppi/7Wgeog+5J7NULAA5CSOXo="
     },
     "javascript": {
-      "path": "assets/app-851b02d73c77af50de50769291aa669b4bfc6f24f8a0e955f8d897b2411dd293.js",
-      "sha256": "851b02d73c77af50de50769291aa669b4bfc6f24f8a0e955f8d897b2411dd293",
-      "integrity": "sha256-hRsC1zx3r1DeUHaSkapmm0v8byT4oOlV+NiXskEd0pM=",
-      "brotli_sha256": "f392f53bb9779f3973f40a71e8d5c562bd5ed7b0f9299437237d53ed91855a2e",
-      "brotli_integrity": "sha256-85L1O7l3nzlz9Apx6NXFYr1e17D5KZQ3I31T7ZGFWi4="
+      "path": "assets/app-7f1fda749c743ceadd8e4e44f027b6a6764bba1a42d374a3c128c1f5da1b284d.js",
+      "sha256": "7f1fda749c743ceadd8e4e44f027b6a6764bba1a42d374a3c128c1f5da1b284d",
+      "integrity": "sha256-fx/adJx0POrdjk5E8Ce2pnZLuhpC03SjwSjB9dobKE0=",
+      "brotli_sha256": "d04d4dbdc09c7df7724f8ee060dc9597c7f54263c01dfea67d39b557525984b1",
+      "brotli_integrity": "sha256-0E1NvcCcffdyT47gYNyVl8f1QmPAHf6mfTm1V1JZhLE="
     },
     "stylesheet": {
-      "path": "assets/app-611124cbbefb22dc7a7b1659b85601a4499131f91cc71806aeaae86958ce0473.css",
-      "sha256": "611124cbbefb22dc7a7b1659b85601a4499131f91cc71806aeaae86958ce0473",
-      "integrity": "sha256-YREky777Itx6exZZuFYBpEmRMfkcxxgGrqroaVjOBHM=",
-      "brotli_sha256": "7092664179c94d804bc8044d2787942d9efd1cf3d964430aa657c898cac2f8a7",
-      "brotli_integrity": "sha256-cJJmQXnJTYBLyARNJ4eULZ79HPPZZEMKplfImMrC+Kc="
+      "path": "assets/app-26918f6791a7740bd67b81af0c572f99ac2fa911d87d1eec46b41f1d0572ef4d.css",
+      "sha256": "26918f6791a7740bd67b81af0c572f99ac2fa911d87d1eec46b41f1d0572ef4d",
+      "integrity": "sha256-JpGPZ5GndAvWe4GvDFcvmawvqRHYfR7sRrQfHQVy700=",
+      "brotli_sha256": "b25df3af1ccdbe7f2e6cab2d4d7209e1115d266cf3724f46530eac1090a4f9fd",
+      "brotli_integrity": "sha256-sl3zrxzNvn8ubKstTXIJ4RFdJmzzck9GUw6sEJCk+f0="
     }
   }
 }

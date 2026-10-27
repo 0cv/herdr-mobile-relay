@@ -1,7 +1,6 @@
 package slashcmd
 
 import (
-	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -10,6 +9,8 @@ import (
 var frontmatterKeyPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+):\s*(.*?)\s*$`)
 
 func parseFrontmatterBytes(data []byte) (map[string]string, bool) {
+	oversized := len(data) > maxMetadataSize
+	data = data[:min(len(data), maxMetadataSize)]
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
 		return map[string]string{}, true
@@ -34,6 +35,9 @@ func parseFrontmatterBytes(data []byte) (map[string]string, bool) {
 			value = value[1 : len(value)-1]
 		}
 		result[key] = value
+	}
+	if oversized {
+		return nil, false
 	}
 	return result, true
 }
@@ -118,19 +122,26 @@ func foldBlockScalar(rest []string, folded bool) (string, int) {
 	return strings.Join(parts, separator), consumed
 }
 
-func readSkillMetadata(path string) (map[string]string, bool) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, false
-	}
-	defer file.Close()
-	return readSkillMetadataFile(file)
-}
-
-func readSkillMetadataFile(file *os.File) (map[string]string, bool) {
-	data, err := io.ReadAll(io.LimitReader(file, maxMetadataSize+1))
-	if err != nil || len(data) > maxMetadataSize {
+func (reader *catalogReader) readSkillMetadata(path string) (map[string]string, bool) {
+	data, ok := reader.readCommandFile(path)
+	if !ok {
 		return nil, false
 	}
 	return parseFrontmatterBytes(data)
+}
+
+func (reader *catalogReader) readSkillMetadataFile(file *os.File) (map[string]string, bool) {
+	data, ok := reader.readBoundedCommandFile(file)
+	if !ok {
+		return nil, false
+	}
+	return parseFrontmatterBytes(data)
+}
+
+func (reader *catalogReader) readCommandFile(path string) ([]byte, bool) {
+	return reader.readPath(path, maxCommandFileSize, maxMetadataSize+1)
+}
+
+func (reader *catalogReader) readBoundedCommandFile(file *os.File) ([]byte, bool) {
+	return reader.readFile(file, maxCommandFileSize, maxMetadataSize+1)
 }

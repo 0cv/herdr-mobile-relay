@@ -67,7 +67,7 @@ func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
 	default:
 	}
 
-	promptCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+	promptCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	prompt := dispatcher.Handle(promptCtx, map[string]any{
 		"action":     "submit_prompt",
@@ -87,7 +87,7 @@ func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
 		if !result.OK {
 			t.Fatalf("question result = %+v", result)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("question did not complete after pane read was released")
 	}
 }

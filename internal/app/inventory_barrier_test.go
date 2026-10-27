@@ -25,9 +25,9 @@ import (
 
 // Real Unix-socket inventory operations; no State mutation or substitute
 // publisher. The atomic outcome controls only the fake Herdr process boundary.
-func inventoryBarrierFixture(t *testing.T, ctx context.Context) (*Server, *atomic.Int32) {
+func inventoryBarrierFixture(t *testing.T, ctx context.Context, agentRows ...json.RawMessage) (*Server, *atomic.Int32) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "herdr.sock")
+	path := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +73,9 @@ func inventoryBarrierFixture(t *testing.T, ctx context.Context) (*Server, *atomi
 						return
 					}
 					result = map[string]any{"type": "agent_list", "agents": []any{pane}}
+					if len(agentRows) > 0 {
+						result = json.RawMessage(`{"type":"agent_list","agents":` + string(agentRows[0]) + `}`)
+					}
 				case "workspace.list":
 					result = map[string]any{"type": "workspace_list", "workspaces": []any{workspace}}
 				case "pane.list", "tab.list":

@@ -1,15 +1,26 @@
 import { get } from 'svelte/store';
+import { fireEvent, render, screen } from '@testing-library/svelte';
+import { tick } from 'svelte';
+import { securityState } from '$lib/security';
+import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
+import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
+import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
+import { decodeTargetRoute, encodeTargetRoute, targetRefForAgent, targetStoreKey } from '$lib/resource-id';
 import { BrowserDeviceCredentialStore } from '$lib/device-auth';
 import {
   defaultAgentView,
   paneAgentViewOverrides,
   setPaneAgentView,
+  setTerminalHeightLease,
   setTerminalHistoryLines,
   setTerminalRefreshInterval,
+  setTerminalResizeSession,
 } from '$lib/preferences';
 import { paneViewPreferenceKey } from '$lib/agent-view';
+import { closeCurrentView, currentView, initializeRouter, navigate } from '$lib/router';
+import { SLASH_COMMAND_MAX_ENTRIES } from '$lib/slash-command-limits';
 import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
@@ -45,6 +56,7 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
+  get protocol() { return typeof this.protocols === 'string' ? this.protocols : ''; }
   send(payload: string) { this.sent.push(payload); }
   close() { this.readyState = MockWebSocket.CLOSED; }
   open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
@@ -99,14 +111,18 @@ describe('relay command store', () => {
     paneAgentViewOverrides.set({});
     vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
+    relayStore.toast.set(null);
     setTerminalRefreshInterval(250);
     relayStore.relayConfigs.set([]);
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
   });
 
   afterEach(() => {
     transportHijack.current = null;
     relayStore.destroy();
+    setTerminalResizeSession(false);
+    setTerminalHeightLease(false);
+    setTerminalHistoryLines(1_000);
     relayStore.relayConfigs.set([]);
     defaultAgentView.set('terminal');
     paneAgentViewOverrides.set({});
@@ -115,9 +131,74 @@ describe('relay command store', () => {
     vi.unstubAllGlobals();
   });
 
+  it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' }, capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', terminal_id: 'terminal', workspace_id: 'workspace', tab_id: 'tab', name: 'Named agent', agent: '', status: 'unknown', cwd: '/home/example/Development', conversation_history_available: false }] });
+    const row = get(relayStore.agents)[0];
+    expect(row).toMatchObject({ raw_pane_id: 'w1:p1', terminal_id: 'terminal', name: 'Named agent', agent: '', cwd: '/home/example/Development' });
+    expect(row.agent_session_id || '').toBe('');
+    expect(get(relayStore.workspaces)).toHaveLength(0);
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    expect(get(relayStore.connections).get(relayId)?.agentProfiles).toEqual([]);
+    socket.message({ type: 'agents', agents: [] });
+    expect(get(relayStore.agents)).toHaveLength(0);
+  });
+
+  it.each(['agents', 'blocked', 'agent_update'].flatMap(ingress => [
+    { label: 'padded', session: ' padded ' },
+    { label: 'Unicode', session: '  opaque/session 界😀  ' },
+    { label: 'internal whitespace', session: 'session\u2002id' },
+    { label: 'nonbreaking space', session: '\u00a0' },
+    { label: 'spaces only', session: '   ' },
+    { label: 'maximum length', session: 'x'.repeat(2048) },
+  ].map(value => ({ ingress, ...value }))))('preserves $label opaque session bytes through $ingress ingress and read/send round trips', async ({ ingress, session }) => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    const initial = { ...exactAgentFields(), pane_id: 'w1:p1', agent: 'pi', status: 'idle', pane_revision: 1, agent_session_id: 'previous-session' };
+    socket.message({ type: 'agents', agents: [initial] });
+    const incoming = { ...initial, pane_revision: 2, agent_session_id: session };
+    socket.message(ingress === 'agents' ? { type: ingress, agents: [incoming] } : { ...incoming, type: ingress });
+    const agent = get(relayStore.agents)[0];
+    expect(agent.agent_session_id).toBe(session);
+    const target = { ...exactWireScope('w1:p1', agent.relay_id).target, agent_session_id: session };
+    expect(targetRefForAgent(agent)).toEqual(target);
+    expect(decodeTargetRoute(encodeTargetRoute(target)!)).toEqual(target);
+    expect(targetStoreKey(target)).not.toBe(targetStoreKey({ ...target, agent_session_id: session + 'different' }));
+    relayStore.readPane(agent, true);
+    const read = JSON.parse(socket.sent.at(-1)!);
+    expect(read).toMatchObject({ type: 'read_pane', target });
+    const frame = () => get(relayStore.terminalFrames).get(agent.pane_id);
+    const beforeResponse = frame();
+    socket.message({ type: 'pane_content', request_id: read.request_id, pane_id: 'w1:p1', target: { ...target, agent_session_id: 'different-session' }, content: 'wrong session', format: 'ansi', no_echo: false });
+    expect(frame()).toBe(beforeResponse);
+    socket.message({ type: 'pane_content', request_id: read.request_id, pane_id: 'w1:p1', target, content: 'exact session', format: 'ansi', no_echo: false });
+    expect(frame()).toMatchObject({ inputTarget: target, target, content: 'exact session', readStartedAt: expect.any(Number) });
+    const pending = relayStore.sendToAgent(agent, { type: 'send_terminal_text', text: '  /literal 界  ' });
+    const command = JSON.parse(socket.sent.at(-1)!);
+    expect(command).toMatchObject({ type: 'send_terminal_text', pane_id: 'w1:p1', target, text: '  /literal 界  ' });
+    expect(command.keys).toBeUndefined();
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'completed' });
+    await expect(pending).resolves.toMatchObject({ ok: true, phase: 'completed' });
+  });
+
+  it.each([' invalid\n', '\tinvalid', 'x'.repeat(2049)])('does not turn an invalid opaque session into a routable identity', async session => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', agent_session_id: session }] });
+    const agent = get(relayStore.agents)[0];
+    expect(targetRefForAgent(agent)).toBeNull();
+    const before = socket.sent.length;
+    await expect(relayStore.sendToAgent(agent, { type: 'send_terminal_text', text: 'not sent' })).rejects.toThrow('exact terminal identity');
+    expect(socket.sent).toHaveLength(before);
+  });
+
   it('preserves relay URLs, protocol v3 command shapes, and confirmations', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
-    expect(socket.url).toBe('wss://fedora.example');
+    expect(socket.url).toBe('ws://127.0.0.1:8871');
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
@@ -127,6 +208,69 @@ describe('relay command store', () => {
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
+  });
+
+  it('keeps only well-formed Hermes profile names from push_config', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    // A relay that predates the picker omits the field entirely.
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
+    expect(relayStore.connection(relayId)?.hermesProfiles).toEqual([]);
+    socket.message({
+      type: 'push_config',
+      protocol: 3,
+      host: 'fedora',
+      capabilities: [],
+      agent_profiles: [],
+      hermes_profiles: ['default', 'apollo', '', 7, null],
+    });
+    expect(relayStore.connection(relayId)?.hermesProfiles).toEqual(['default', 'apollo']);
+  });
+
+  it.each(['completed', 'completed_with_warning'])('retains a launch until delayed %s', async (phase) => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'claude', name: 'project', cwd: '/tmp' });
+    const command = JSON.parse(socket.sent.at(-1)!);
+    const settled = vi.fn();
+    void pending.then(settled, settled);
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'accepted' });
+    await vi.advanceTimersByTimeAsync(52_000);
+    expect(settled).not.toHaveBeenCalled();
+    const data = phase === 'completed_with_warning' ? { warning: 'Initial prompt was not confirmed' } : {};
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase, data });
+    await expect(pending).resolves.toMatchObject({ ok: true, phase, data });
+  });
+
+  it.each(['missing', 'repeated-accepted', 'disconnect', 'abort'] as const)('bounds Hermes launch confirmation with %s results and never replays it', async outcome => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const controller = new AbortController();
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'hermes', name: 'development-hermes', cwd: '/fixture/Development' }, undefined, false, controller.signal);
+    const caught = pending.catch(error => error as CommandError);
+    const settled = vi.fn();
+    void caught.then(settled);
+    const command = JSON.parse(socket.sent.at(-1)!);
+    if (outcome === 'disconnect') socket.serverClose();
+    if (outcome === 'abort') controller.abort();
+    for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) {
+      if (outcome === 'repeated-accepted') socket.message({ type: 'command_result', request_id: command.request_id, action: 'agent_start', ok: true, phase: 'accepted' });
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    expect(settled).toHaveBeenCalledOnce();
+    const error = await caught;
+    expect(error).toBeInstanceOf(Error);
+    if (outcome !== 'abort') expect(error.data).toMatchObject({ dispatched_unknown: true });
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'completed', data: { pane_id: 'created' } });
+    expect(socket.sent.map(value => JSON.parse(value)).filter(value => value.type === 'agent_start')).toHaveLength(1);
+    expect(settled).toHaveBeenCalledOnce();
   });
 
   it('bounds conversation history payloads and requires a usable preparation cursor', async () => {
@@ -191,7 +335,7 @@ describe('relay command store', () => {
 
   it('cleans pane view overrides only when a relay is explicitly removed', () => {
     const fedoraId = get(relayStore.relayConfigs)[0].id;
-    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
+    relayStore.addRelay({ label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' });
     const macId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Mac')!.id;
     const fedoraPane = preferenceAgent(fedoraId, 'pane-1', 'terminal-1');
     const macPane = preferenceAgent(macId, 'pane-1', 'terminal-1');
@@ -490,6 +634,238 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances).toHaveLength(1);
   });
 
+  describe('explicit iOS browser pairing', () => {
+    const relayId = makeRelayId('Invited', 'wss://invited.example');
+
+    function deferBrowserPairing(invitation = true) {
+      relayStore.destroy();
+      relayStore.relayConfigs.set([]);
+      localStorage.clear();
+      MockWebSocket.instances = [];
+      vi.stubGlobal('navigator', {
+        standalone: false,
+        userAgent: 'Mozilla/5.0 (iPhone)',
+        maxTouchPoints: 5,
+      });
+      const secret = invitation ? 'A'.repeat(43) : '0123456789abcdef0123456789abcdef';
+      const hash = `#setup=${secret}&label=Invited&relay=${encodeURIComponent('wss://invited.example')}`
+        + (invitation ? `&invite=invitation-browser01&invite_version=1&invite_expires=${Date.now() + 60_000}` : '');
+      history.replaceState({ retained: true }, '', `/pair?source=test${hash}`);
+      relayStore.initialize();
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      return hash;
+    }
+
+    it('saves the invitation, clears the fragment, and dials only after opting in', () => {
+      deferBrowserPairing();
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toMatchObject({
+        kind: 'invitation', id: 'invitation-browser01', secret: 'A'.repeat(43),
+      });
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].protocols).toBe('herdr-e2ee-v2');
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(replace).toHaveBeenCalledWith({ retained: true }, '', '/pair?source=test');
+      expect(location.hash).toBe('');
+      expect(get(relayStore.toast)?.message).toBe('Pairing this browser as its own device.');
+
+      relayStore.initialize();
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(2);
+    });
+
+    it('connects a bootstrap-key link using the imported relay token', async () => {
+      deferBrowserPairing(false);
+      expect(get(relayStore.relayConfigs)[0].token).toBe('0123456789abcdef0123456789abcdef');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      const socket = MockWebSocket.instances[0];
+      expect(socket.protocols).toBe('herdr-e2ee-v2');
+      socket.open();
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+      expect(JSON.parse(socket.sent[0])).toMatchObject({ auth_kind: 'invitation', auth_id: 'bootstrap' });
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(location.hash).toBe('');
+    });
+
+    it.each([
+      { invitation: true, enrolled: false },
+      { invitation: true, enrolled: true },
+      { invitation: false, enrolled: false },
+      { invitation: false, enrolled: true },
+    ])('does not re-defer on Back/hashchange or reload: invitation=$invitation, enrolled=$enrolled', async ({ invitation, enrolled }) => {
+      const hash = deferBrowserPairing(invitation);
+      vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+      const stopRouter = initializeRouter();
+      const importOnHashChange = vi.fn(() => relayStore.importSetupLink());
+      window.addEventListener('hashchange', importOnHashChange);
+      try {
+        navigate({ view: 'activity' });
+        navigate({ view: 'settings' });
+        expect(location.hash).toBe(hash);
+        expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+        const socket = MockWebSocket.instances[0];
+        socket.open();
+        await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+        const credentials = new BrowserDeviceCredentialStore(localStorage);
+        if (enrolled) {
+          credentials.replaceInvitation(relayId, invitation ? 'invitation-browser01' : 'bootstrap', {
+            deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+            credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+          });
+        }
+        const authentication = credentials.get(relayId);
+        const connection = relayStore.connection(relayId);
+        const pairingToast = get(relayStore.toast);
+        expect(pairingToast?.message).toBe('Pairing this browser as its own device.');
+        closeCurrentView();
+        await vi.waitFor(() => expect(importOnHashChange).toHaveBeenCalledOnce());
+        expect(get(currentView)).toMatchObject({ view: 'activity' });
+        expect(get(relayStore.toast)).toBe(pairingToast);
+        closeCurrentView();
+        await vi.waitFor(() => expect(importOnHashChange).toHaveBeenCalledTimes(2));
+        expect(importOnHashChange).toHaveReturnedWith(true);
+        expect(get(currentView)).toMatchObject({ view: 'agents' });
+        expect(relayStore.connection(relayId)).toBe(connection);
+        expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+        expect(socket.readyState).toBe(MockWebSocket.OPEN);
+        expect(MockWebSocket.instances).toHaveLength(1);
+        expect(credentials.get(relayId)).toEqual(authentication);
+        expect(location.hash).toBe('');
+        expect(get(relayStore.toast)).toBe(pairingToast);
+        history.forward();
+        await vi.waitFor(() => expect(get(currentView)).toMatchObject({ view: 'activity' }));
+        expect(get(relayStore.toast)).toBe(pairingToast);
+
+        history.replaceState(history.state, '', `/pair?source=test${hash}`);
+        relayStore.destroy();
+        relayStore.initialize();
+        expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+        expect(MockWebSocket.instances).toHaveLength(2);
+        expect(credentials.get(relayId)).toEqual(authentication);
+        expect(location.hash).toBe('');
+      } finally {
+        window.removeEventListener('hashchange', importOnHashChange);
+        stopRouter();
+        currentView.set({ view: 'agents' });
+      }
+    });
+
+    it.each([
+      { entry: 'fresh', load: 'initialize' },
+      { entry: 'fresh', load: 'import' },
+      { entry: 'new session', load: 'initialize' },
+      { entry: 'new session', load: 'import' },
+    ])('defers a bootstrap link after an untrusted transport close on a $entry entry via $load', ({ entry, load }) => {
+      const hash = deferBrowserPairing(false);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      const credentials = new BrowserDeviceCredentialStore(localStorage);
+      credentials.replaceInvitation(relayId, 'bootstrap', {
+        deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+        credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+      });
+      const authentication = credentials.get(relayId);
+      const acceptedHistoryState = history.state;
+      MockWebSocket.instances[0].serverClose(4401);
+      expect(get(relayStore.connections).get(relayId)?.authRejected).toBe(false);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(sessionStorage.length).toBeGreaterThan(0);
+
+      if (entry === 'new session') sessionStorage.clear();
+      history.replaceState(entry === 'fresh' ? null : acceptedHistoryState, '', `/pair?source=test${hash}`);
+      if (load === 'initialize') {
+        relayStore.destroy();
+        relayStore.initialize();
+      } else {
+        expect(relayStore.importSetupLink()).toBe(true);
+      }
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(location.hash).toBe(hash);
+      expect(get(relayStore.toast)?.message).toContain('Home Screen');
+    });
+
+    it('keeps bootstrap pairing deferred when its session opt-in cannot be saved', () => {
+      const hash = deferBrowserPairing(false);
+      vi.spyOn(sessionStorage, 'setItem').mockImplementation(() => { throw new Error('Session storage unavailable.'); });
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      expect(get(relayStore.toast)).toMatchObject({ message: 'Session storage unavailable.', error: true });
+    });
+
+    it.each([false, true])('still defers a new invitation after accepting an earlier one: enrolled=%s', (enrolled) => {
+      const hash = deferBrowserPairing();
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      const credentials = new BrowserDeviceCredentialStore(localStorage);
+      if (enrolled) {
+        credentials.replaceInvitation(relayId, 'invitation-browser01', {
+          deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+          credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+        });
+      }
+      const authentication = credentials.get(relayId);
+      const nextHash = hash.replace('invitation-browser01', 'invitation-browser02');
+      history.replaceState(history.state, '', `/pair?source=test${nextHash}`);
+      expect(relayStore.importSetupLink()).toBe(true);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].readyState).toBe(MockWebSocket.CLOSED);
+      expect(location.hash).toBe(nextHash);
+    });
+
+    it.each(['missing', 'another relay'])('keeps deferring when the fragment is %s', (fragment) => {
+      const hash = deferBrowserPairing();
+      history.replaceState(history.state, '', fragment === 'missing'
+        ? '/pair?source=test'
+        : `/pair?source=test${hash.replace('invited.example', 'other.example')}`);
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(replace).not.toHaveBeenCalled();
+      expect(get(relayStore.toast)?.message).toBe('Open the invitation link again.');
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+    });
+
+    it('restores deferral and keeps the fragment when saving an invitation fails', () => {
+      const hash = deferBrowserPairing();
+      const save = vi.spyOn(BrowserDeviceCredentialStore.prototype, 'saveInvitation')
+        .mockImplementation(() => { throw new Error('The device invitation has expired.'); });
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(save).toHaveBeenCalledWith(relayId, expect.objectContaining({ id: 'invitation-browser01' }));
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      expect(replace).not.toHaveBeenCalled();
+      expect(get(relayStore.toast)).toMatchObject({ message: 'The device invitation has expired.', error: true });
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      save.mockRestore();
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+    });
+
+    it('does not pair a relay that is not deferred', () => {
+      deferBrowserPairing();
+      expect(relayStore.pairDeferredRelay('another-relay')).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(1);
+    });
+  });
+
   it('keeps an enrolled credential when the setup link is imported again', () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
@@ -685,7 +1061,7 @@ describe('relay command store', () => {
   });
 
 
-  it('acquires and releases validated pane-size leases for capable relays', async () => {
+  function openPaneSizeRelay(capabilities: string[]) {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -693,95 +1069,86 @@ describe('relay command store', () => {
       protocol: 3,
       version: 'abc123',
       host: 'fedora',
-      capabilities: ['pane_size_lease'],
+      capabilities,
       agent_profiles: [],
     });
     socket.message({
       type: 'agents',
       agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp', ...exactAgentFields() }],
     });
-    const agent = get(relayStore.agents)[0];
+    const sent = () => socket.sent.map((payload) => JSON.parse(payload));
+    return { socket, agent: get(relayStore.agents)[0], sent };
+  }
 
-    const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const acquire = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'lease_pane_size');
-    expect(acquire).toMatchObject({
-      type: 'lease_pane_size',
-      pane_id: 'w1:p1',
-      columns: 83,
-      protocol: 3,
-    });
-    expect(acquire.request_id).toBeTruthy();
-    expect(acquire).not.toHaveProperty('client_id');
-    // The relay does not advertise row support: rows must not be sent, and
-    // no applied height may be believed.
-    expect(acquire).not.toHaveProperty('rows');
-    socket.message({
-      type: 'command_result',
-      action: 'lease_pane_size',
-      request_id: acquire.request_id,
-      ok: true,
-      data: { columns: 83 },
-    });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 0 });
+  it('never leases against a relay that only advertises the legacy capability', async () => {
+    setTerminalResizeSession(true);
+    setTerminalHeightLease(true);
+    const { agent, sent } = openPaneSizeRelay(['pane_size_lease', 'pane_size_lease_rows']);
 
-    const release = relayStore.releasePaneSize(agent);
-    const releaseCommand = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'release_pane_size');
-    expect(releaseCommand).toMatchObject({
-      type: 'release_pane_size',
-      pane_id: 'w1:p1',
-      protocol: 3,
-    });
-    expect(releaseCommand.request_id).toBeTruthy();
-    expect(releaseCommand).not.toHaveProperty('client_id');
-    socket.message({
-      type: 'command_result',
-      action: 'release_pane_size',
-      request_id: releaseCommand.request_id,
-      ok: true,
-    });
-    await expect(release).resolves.toBeUndefined();
-    await expect(relayStore.leasePaneSize(agent, 39)).rejects.toThrow(/between 40 and 240/);
+    await expect(relayStore.leasePaneSize(agent, 83, 32)).rejects.toThrow(/unavailable on this relay/);
+    await expect(relayStore.leasePaneSize(agent, 80, 0)).rejects.toThrow(/unavailable on this relay/);
+    expect(sent().filter((message) => message.type === 'lease_pane_size')).toHaveLength(0);
   });
 
-  it('leases rows only when the relay advertises row support', async () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({
-      type: 'push_config',
-      protocol: 3,
-      version: 'abc123',
-      host: 'fedora',
-      capabilities: ['pane_size_lease', 'pane_size_lease_rows'],
-      agent_profiles: [],
-    });
-    socket.message({
-      type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp', ...exactAgentFields() }],
-    });
-    const agent = get(relayStore.agents)[0];
+  it('does not lease while Resize Session is off, even on a capable relay', async () => {
+    const { agent, sent } = openPaneSizeRelay(['pane_size_opt_in', 'pane_size_opt_in_rows']);
+    await expect(relayStore.leasePaneSize(agent, 83, 32)).rejects.toThrow(/Resize Session is off/);
+    expect(sent().filter((message) => message.type === 'lease_pane_size')).toHaveLength(0);
+  });
+
+  it('leases with opt_in and releases immediately when Resize Session is turned off', async () => {
+    setTerminalResizeSession(true);
+    const { socket, agent, sent } = openPaneSizeRelay(['pane_size_opt_in', 'pane_size_opt_in_rows']);
 
     const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const acquire = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'lease_pane_size');
-    expect(acquire).toMatchObject({
-      type: 'lease_pane_size',
-      pane_id: 'w1:p1',
-      columns: 83,
-      rows: 32,
-      protocol: 3,
+    const leaseCommand = sent().findLast((message) => message.type === 'lease_pane_size');
+    expect(leaseCommand).toMatchObject({
+      type: 'lease_pane_size', pane_id: 'w1:p1', protocol: 3, columns: 83, rows: 32, opt_in: true,
     });
+    expect(leaseCommand).not.toHaveProperty('client_id');
     socket.message({
-      type: 'command_result',
-      action: 'lease_pane_size',
-      request_id: acquire.request_id,
-      ok: true,
-      // Another client holds a shorter lease: the applied height wins.
-      data: { columns: 83, rows: 30 },
+      type: 'command_result', action: 'lease_pane_size', request_id: leaseCommand.request_id,
+      ok: true, data: { columns: 83, rows: 32 },
     });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 30 });
-    await expect(relayStore.leasePaneSize(agent, 80, 9)).rejects.toThrow(/between 10 and 120/);
+    await expect(lease).resolves.toEqual({ columns: 83, rows: 32 });
+
+    // Leaving the terminal keeps the relay's navigation grace.
+    const release = relayStore.releasePaneSize(agent);
+    const graceRelease = sent().findLast((message) => message.type === 'release_pane_size');
+    expect(graceRelease).toMatchObject({ type: 'release_pane_size', pane_id: 'w1:p1', protocol: 3 });
+    expect(graceRelease).not.toHaveProperty('immediate');
+    expect(graceRelease).not.toHaveProperty('client_id');
+    socket.message({ type: 'command_result', action: 'release_pane_size', request_id: graceRelease.request_id, ok: true });
+    await expect(release).resolves.toBeUndefined();
+
+    // Turning the switch off ends that grace at once, view or no view.
+    setTerminalResizeSession(false);
+    const releases = sent().filter((message) => message.type === 'release_pane_size');
+    expect(releases).toHaveLength(2);
+    expect(releases[1]).toMatchObject({ type: 'release_pane_size', pane_id: 'w1:p1', immediate: true });
+    socket.message({ type: 'command_result', action: 'release_pane_size', request_id: releases[1].request_id, ok: true });
+
+    // Nothing is owned any more: turning it on and off again sends nothing.
+    setTerminalResizeSession(true);
+    setTerminalResizeSession(false);
+    expect(sent().filter((message) => message.type === 'release_pane_size')).toHaveLength(2);
+  });
+
+  it('ignores a lease reply that arrives after Resize Session was turned off', async () => {
+    setTerminalResizeSession(true);
+    const { socket, agent, sent } = openPaneSizeRelay(['pane_size_opt_in']);
+    const lease = relayStore.leasePaneSize(agent, 83, 32);
+    const leaseCommand = sent().findLast((message) => message.type === 'lease_pane_size');
+    expect(leaseCommand).not.toHaveProperty('rows');
+
+    setTerminalResizeSession(false);
+    const release = sent().findLast((message) => message.type === 'release_pane_size');
+    expect(release).toMatchObject({ pane_id: 'w1:p1', immediate: true });
+    socket.message({
+      type: 'command_result', action: 'lease_pane_size', request_id: leaseCommand.request_id,
+      ok: true, data: { columns: 83, rows: 40 },
+    });
+    await expect(lease).rejects.toThrow(/turned off/);
   });
 
   it('replaces a stale connecting attempt on revalidation but keeps a young one', () => {
@@ -823,7 +1190,7 @@ describe('relay command store', () => {
     relayStore.readPane(agent);
     relayStore.readPane(agent);
     expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(1);
-    socket.message({ type: 'pane_content', pane_id: 'w1:p1', content: 'blocked', format: 'ansi' });
+    socket.message({ type: 'pane_content', request_id: JSON.parse(socket.sent.at(-1)!).request_id, pane_id: 'w1:p1', target: exactWireScope('w1:p1', agent.relay_id).target, content: 'blocked', format: 'ansi' });
     relayStore.readPane(agent);
     expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(2);
 
@@ -1137,7 +1504,7 @@ describe('relay command store', () => {
       removeListener: vi.fn(),
       dispatchEvent: vi.fn(),
     })));
-    const relay = { label: 'Fedora', url: 'wss://fedora.example', token: '' };
+    const relay = { label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' };
     const relayId = makeRelayId(relay.label, relay.url);
     relayStore.addRelay(relay);
     localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
@@ -1185,7 +1552,7 @@ describe('relay command store', () => {
       removeListener: vi.fn(),
       dispatchEvent: vi.fn(),
     })));
-    const relay = { label: 'Fedora', url: 'wss://fedora.example', token: '' };
+    const relay = { label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' };
     const relayId = makeRelayId(relay.label, relay.url);
     relayStore.addRelay(relay);
     localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
@@ -1227,6 +1594,7 @@ describe('relay command store', () => {
     relayStore.readPane(agent);
     expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
       type: 'read_pane',
+      request_id: expect.any(String),
       pane_id: 'w1:p1',
       lines: 1_000,
       format: 'ansi',
@@ -1238,6 +1606,7 @@ describe('relay command store', () => {
     relayStore.readPane(agent, true);
     expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
       type: 'read_pane',
+      request_id: expect.any(String),
       pane_id: 'w1:p1',
       lines: 500,
       format: 'ansi',
@@ -1245,6 +1614,229 @@ describe('relay command store', () => {
       ...exactWireScope('w1:p1', relayId),
     });
     setTerminalHistoryLines(1_000);
+  });
+
+  it.each([100, 500, 1_000, 10_000] as const)('preserves %i-line history during repeated manual context refreshes', async lines => {
+    vi.useFakeTimers();
+    setTerminalHistoryLines(lines);
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', agent: 'pi', ...exactAgentFields() }] });
+    const agent = get(relayStore.agents)[0];
+    const target = exactWireScope('w1:p1', agent.relay_id).target;
+    const history = Array.from({ length: 200 }, (_, index) => `history-entry-${index}`).join('\n');
+    const expected = history.split('\n').slice(-lines).join('\n');
+    socket.message({ type: 'pane_content', pane_id: 'w1:p1', target, content: expected, format: 'ansi', no_echo: false });
+    const panel = render(ManualTerminalInput, { agent, frame: get(relayStore.terminalFrames).get(agent.pane_id), active: true, readOnly: false, delivery: new TerminalInputDelivery(), onexit: () => {} });
+    for (let iteration = 0; iteration < 3; iteration++) {
+      if (iteration) await vi.advanceTimersByTimeAsync(2_000);
+      const reads = socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type === 'read_pane');
+      expect(reads).toHaveLength(iteration + 1);
+      const request = reads.at(-1)!;
+      expect(request).toMatchObject({ lines, content_fingerprint: '', target });
+      socket.message({ type: 'pane_content', request_id: request.request_id, pane_id: 'w1:p1', target, content: history.split('\n').slice(-request.lines).join('\n'), format: 'ansi', no_echo: false });
+      const refreshed = get(relayStore.terminalFrames).get(agent.pane_id)!;
+      expect(refreshed.content).toBe(expected);
+      expect(refreshed.content.split('\n').length).toBeGreaterThan(30);
+      await panel.rerender({ frame: refreshed });
+    }
+    panel.unmount();
+    expect(socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type.startsWith('send_'))).toHaveLength(0);
+  });
+
+  it('correlates inspection freshness with read issuance, not a delayed response arrival', () => {
+    let now = 10;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
+    const agent = get(relayStore.agents)[0];
+    const target = exactWireScope('w1:p1', agent.relay_id).target;
+    relayStore.readPane(agent, true);
+    const oldRead = JSON.parse(socket.sent.at(-1)!);
+    const delivery = new TerminalInputDelivery();
+    delivery.begin();
+    now = 20;
+    delivery.finish(true);
+    now = 30;
+    const oldResponse = { type: 'pane_content', request_id: oldRead.request_id, pane_id: 'w1:p1', target, content: 'before-send observation', format: 'ansi', no_echo: false };
+    socket.message(oldResponse);
+    const frame = () => get(relayStore.terminalFrames).get(agent.pane_id)!;
+    expect(frame()).toMatchObject({ readStartedAt: 10, receivedAt: 30 });
+    expect(delivery.inspect(frame().readStartedAt)).toBe(false);
+    now = 40;
+    relayStore.readPane(agent, true);
+    const newRead = JSON.parse(socket.sent.at(-1)!);
+    expect(newRead.request_id).not.toBe(oldRead.request_id);
+    now = 50;
+    socket.message({ ...oldResponse, content: 'superseded response' });
+    expect(frame().content).toBe('before-send observation');
+    expect(delivery.inspect(frame().readStartedAt)).toBe(false);
+    now = 60;
+    socket.message({ ...oldResponse, request_id: newRead.request_id, content: 'post-outcome observation' });
+    expect(frame()).toMatchObject({ readStartedAt: 40, receivedAt: 60, content: 'post-outcome observation' });
+    expect(delivery.canInspect(frame().readStartedAt)).toBe(true);
+    expect(delivery.uncertain).toBe(true);
+    socket.message(oldResponse);
+    expect(frame().content).toBe('post-outcome observation');
+    expect(delivery.inspect(frame().readStartedAt)).toBe(true);
+    expect(socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type.startsWith('send_'))).toHaveLength(0);
+  });
+
+  it('requires a post-unlock correlated read before a pane delta can authorize manual input', async () => {
+    let now = 10;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', agent: 'pi', ...exactAgentFields() }] });
+    const agent = get(relayStore.agents)[0];
+    const target = exactWireScope('w1:p1', agent.relay_id).target;
+    const security = get(securityState);
+    securityState.set({ ...security, locked: false });
+    const delivery = new TerminalInputDelivery();
+    const panel = render(ManualTerminalInput, { agent, active: true, readOnly: false, delivery, onexit: () => {} });
+    const frame = () => get(relayStore.terminalFrames).get(agent.pane_id)!;
+    const reads = () => socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type === 'read_pane');
+    try {
+      const initial = reads().at(-1)!;
+      now = 20;
+      const response = { type: 'pane_content', request_id: initial.request_id, pane_id: 'w1:p1', target, content: 'terminal context', content_fingerprint: 'same-screen', format: 'ansi', no_echo: false };
+      socket.message(response);
+      await panel.rerender({ frame: frame() });
+      expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
+      now = 30;
+      securityState.set({ ...security, locked: true });
+      await tick();
+      now = 40;
+      securityState.set({ ...security, locked: false });
+      await tick();
+      const recovery = reads().at(-1)!;
+      expect(recovery.request_id).not.toBe(initial.request_id);
+      const delta = { type: 'pane_delta', pane_id: 'w1:p1', target, base_fingerprint: 'same-screen', content_fingerprint: 'same-screen', segments: null, format: 'ansi' };
+      now = 50;
+      socket.message(delta);
+      expect(frame()).toMatchObject({ receivedAt: 50 });
+      expect(frame().readStartedAt).toBeUndefined();
+      await panel.rerender({ frame: frame() });
+      await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'unverified delta draft' } });
+      for (const label of ['Send text', 'Enter']) {
+        const button = screen.getByRole('button', { name: label });
+        expect(button).toBeDisabled();
+        await fireEvent.click(button);
+      }
+      expect(delivery.uncertain).toBe(false);
+      expect(socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type.startsWith('send_'))).toHaveLength(0);
+      now = 60;
+      socket.message({ ...response, request_id: recovery.request_id });
+      expect(frame()).toMatchObject({ readStartedAt: 40, receivedAt: 60 });
+      await panel.rerender({ frame: frame() });
+      await tick();
+      expect(screen.getByRole('button', { name: 'Send text' })).toBeEnabled();
+      now = 70;
+      socket.message(delta);
+      expect(frame().readStartedAt).toBeUndefined();
+      await panel.rerender({ frame: frame() });
+      expect(screen.getByRole('button', { name: 'Send text' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
+      expect(JSON.stringify(localStorage)).not.toContain('unverified delta draft');
+    } finally {
+      panel.unmount();
+      securityState.set(security);
+    }
+  });
+
+  it('keeps a correlated pre-lock response fenced until a post-unlock read and explicit inspection', async () => {
+    let now = 10;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', agent: 'pi', ...exactAgentFields() }] });
+    const agent = get(relayStore.agents)[0];
+    const target = exactWireScope('w1:p1', agent.relay_id).target;
+    const delivery = new TerminalInputDelivery();
+    expect(delivery.begin()).toBe(true);
+    now = 20;
+    delivery.finish(true);
+    const security = get(securityState);
+    securityState.set({ ...security, locked: false });
+    const panel = render(ManualTerminalInput, { agent, active: false, readOnly: false, delivery, onexit: () => {} });
+    const frame = () => get(relayStore.terminalFrames).get(agent.pane_id)!;
+    const reads = () => socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type === 'read_pane');
+    try {
+      now = 30;
+      relayStore.readPane(agent, true);
+      const delayed = reads().at(-1)!;
+      now = 40;
+      securityState.set({ ...security, locked: true });
+      await tick();
+      now = 50;
+      securityState.set({ ...security, locked: false });
+      await tick();
+      now = 60;
+      relayStore.readPane(agent);
+      expect(reads()).toHaveLength(1);
+      const response = { type: 'pane_content', request_id: delayed.request_id, pane_id: 'w1:p1', target, content: 'delayed pre-lock observation', format: 'ansi', no_echo: false };
+      socket.message(response);
+      expect(frame()).toMatchObject({ readStartedAt: 30, receivedAt: 60, content: 'delayed pre-lock observation' });
+      expect(delivery.canInspect(frame().readStartedAt)).toBe(true);
+      await panel.rerender({ active: true, frame: frame() });
+      const recovery = reads().at(-1)!;
+      expect(recovery.request_id).not.toBe(delayed.request_id);
+      await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'transient recovery text' } });
+      for (const label of ['Send text', 'Enter', 'I checked the terminal']) {
+        const button = screen.getByRole('button', { name: label });
+        expect(button).toBeDisabled();
+        await fireEvent.click(button);
+      }
+      expect(delivery.uncertain).toBe(true);
+      socket.message({ ...response, content: 'superseded pre-lock observation' });
+      expect(frame().content).toBe('delayed pre-lock observation');
+      now = 70;
+      socket.message({ ...response, request_id: recovery.request_id, content: 'post-unlock observation' });
+      expect(frame()).toMatchObject({ readStartedAt: 60, receivedAt: 70, content: 'post-unlock observation' });
+      await panel.rerender({ frame: frame() });
+      expect(screen.getByRole('button', { name: 'I checked the terminal' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Enter' })).toBeDisabled();
+      expect(delivery.uncertain).toBe(true);
+      await fireEvent.click(screen.getByRole('button', { name: 'I checked the terminal' }));
+      expect(delivery.uncertain).toBe(false);
+      expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send text' })).toBeEnabled();
+      expect(socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type.startsWith('send_'))).toHaveLength(0);
+      expect(JSON.stringify(localStorage)).not.toContain('transient recovery text');
+    } finally {
+      panel.unmount();
+      securityState.set(security);
+    }
+  });
+
+  it.each(['untagged', 'unknown-id', 'error', 'replacement', 'disconnected'] as const)('does not authorize inspection from a %s read response', kind => {
+    let now = 10;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
+    const agent = get(relayStore.agents)[0];
+    const target = exactWireScope('w1:p1', agent.relay_id).target;
+    const delivery = new TerminalInputDelivery();
+    delivery.begin();
+    delivery.finish(true);
+    now = 20;
+    relayStore.readPane(agent, true);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    if (kind === 'disconnected') relayStore.disconnectRelay(agent.relay_id);
+    now = 30;
+    socket.message({ type: 'pane_content', request_id: kind === 'untagged' ? undefined : kind === 'unknown-id' ? 'unsolicited' : request.request_id, pane_id: 'w1:p1', target: kind === 'replacement' ? { ...target, generation: 2 } : target, error: kind === 'error' ? 'read failed' : undefined, content: 'untrusted observation', format: 'ansi', no_echo: false });
+    const frame = get(relayStore.terminalFrames).get(agent.pane_id);
+    expect(frame?.readStartedAt).toBeUndefined();
+    expect(delivery.inspect(frame?.readStartedAt)).toBe(false);
+    if (kind === 'error') expect(frame?.inputTarget).toBeUndefined();
   });
 
   it('applies acknowledged terminal deltas and resynchronizes mismatched bases', () => {
@@ -1355,7 +1947,9 @@ describe('relay command store', () => {
     });
     socket.message({
       type: 'pane_content',
+      request_id: JSON.parse(socket.sent.at(-1)!).request_id,
       pane_id: 'w1:p1',
+      target: exactWireScope('w1:p1', relayId).target,
       content: 'resynchronized\n',
       format: 'ansi',
       content_fingerprint: 'content-3',
@@ -1368,7 +1962,7 @@ describe('relay command store', () => {
   });
 
   it('merges agents from independent relays without pane id collisions', () => {
-    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
+    relayStore.addRelay({ label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' });
     const [fedora, mac] = MockWebSocket.instances.slice(-2);
     fedora.open();
     mac.open();
@@ -1455,6 +2049,7 @@ describe('relay command store', () => {
   });
 
   it('stores terminal frames without agent-specific relay metadata', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(123);
     const socket = MockWebSocket.instances.at(-1)!;
     const relayId = get(relayStore.relayConfigs)[0].id;
     socket.message({
@@ -1466,7 +2061,56 @@ describe('relay command store', () => {
       paneId: `${relayId}::w1:p1`,
       content: 'output',
       format: 'ansi',
+      receivedAt: 123,
+      target: undefined,
+      inputTarget: undefined,
+      noEcho: undefined,
     });
+  });
+
+  it('bounds Conversation pane reads and records only received, explicit echo state', () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', ...exactAgentFields() }] });
+    const agent = get(relayStore.agents)[0];
+    relayStore.readPane(agent, false, 30);
+    relayStore.readPane(agent, false, 30);
+    expect(socket.sent.map(payload => JSON.parse(payload)).filter(message => message.type === 'read_pane')).toHaveLength(1);
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({ type: 'read_pane', lines: 30, content_fingerprint: '', target: expect.objectContaining({ generation: 1 }) });
+    const target = exactWireScope('w1:p1', agent.relay_id).target;
+    socket.message({ type: 'pane_content', pane_id: 'w1:p1', target, content: 'Ready', format: 'ansi', no_echo: false });
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)).toMatchObject({ noEcho: false, receivedAt: performance.now(), target });
+    vi.advanceTimersByTime(4_000);
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)?.receivedAt).toBe(performance.now() - 4_000);
+  });
+
+  it('never attributes untagged or inherited echo state to the current pane target', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
+    const agent = get(relayStore.agents)[0];
+    const target = exactWireScope('w1:p1', agent.relay_id).target;
+    const content = { type: 'pane_content', pane_id: 'w1:p1', content: 'Ready', content_fingerprint: 'ready', no_echo: false };
+    socket.message({ ...content, target });
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)?.target).toEqual(target);
+    const delta = { type: 'pane_delta', pane_id: 'w1:p1', base_fingerprint: 'ready', content_fingerprint: 'ready', segments: [] };
+    socket.message({ ...delta, target, no_echo: false });
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)).toMatchObject({ target, noEcho: false });
+    socket.message({ ...delta, target });
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)?.target).toBeUndefined();
+    socket.message({ ...delta, no_echo: false });
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)?.target).toBeUndefined();
+    socket.message({ ...content, target });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields(), generation: 2 }] });
+    socket.message({ ...content, target, content: 'Late old output' });
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)).toMatchObject({ target, content: 'Ready' });
+    socket.message(content);
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)?.target).toBeUndefined();
+    socket.message({ ...content, no_echo: true });
+    expect(get(relayStore.terminalFrames).get(agent.pane_id)).toMatchObject({ noEcho: true, target: undefined });
   });
 
   it('preserves Herdr scrollback truncation on terminal frames', () => {
@@ -1546,16 +2190,21 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       ...exactAgentFields(),
     };
-    await expect(relayStore.sendSecret(agent, 'hunter2')).rejects.toThrow(/does not support password prompts/);
+    await expect(relayStore.sendSecret(agent, 'hunter2', undefined!)).rejects.toThrow(/does not support password prompts/);
 
     socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: ['secret_input'], agent_profiles: [] });
-    await expect(relayStore.sendSecret(agent, '')).rejects.toThrow(/Enter the password/);
+    await expect(relayStore.sendSecret(agent, '', undefined!)).rejects.toThrow(/Enter the password/);
 
-    const pending = relayStore.sendSecret(agent, 'hunter2');
+    socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1' }] });
+    relayStore.readPane(agent, true);
+    const read = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, content: 'Password:', no_echo: true });
+    const frame = get(relayStore.terminalFrames).get(agent.pane_id)!;
+    const pending = relayStore.sendSecret(agent, 'hunter2', frame);
     const command = JSON.parse(socket.sent.at(-1)!);
     expect(command).toMatchObject({ type: 'send_secret', pane_id: 'w1:p1', text: 'hunter2' });
     expect(typeof command.request_id).toBe('string');
-    socket.message({ type: 'command_result', request_id: command.request_id, ok: true });
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'completed' });
     await expect(pending).resolves.toMatchObject({ ok: true });
   });
 
@@ -1601,6 +2250,111 @@ describe('relay command store', () => {
     expect(get(relayStore.agents)).toEqual([]);
   });
 
+  it('settles a pending health probe when a newly authenticated path becomes ready', async () => {
+    vi.useFakeTimers();
+    let current!: TransportHandlers;
+    let connects = 0;
+    transportHijack.current = (_relay, handlers) => {
+      current = handlers;
+      return {
+        kind: 'gateway', connect() { connects += 1; handlers.onStatus('connected', { path: 'gateway' }); },
+        close() {}, send() { return true; },
+      };
+    };
+    relayStore.connectAll();
+    relayStore.revalidateConnections(2_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    current.onStatus('connected', { path: 'webrtc' });
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(connects).toBe(1);
+    expect([...get(relayStore.connections).values()][0].path).toBe('webrtc');
+  });
+
+  it('does not persist enrollment from a replaced connection', async () => {
+    const callbacks: TransportAuthentication[] = [];
+    transportHijack.current = (_relay, _handlers, authentication) => {
+      callbacks.push(authentication!);
+      return { kind: 'websocket', connect() {}, close() {}, send() { return false; } };
+    };
+    relayStore.connectAll();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    const invitation = credentials.saveInvitation(relayId, {
+      id: 'synthetic-invitation', version: 1, secret: 'A'.repeat(43), expiresAt: Date.now() + 60_000,
+    });
+    relayStore.connectAll();
+    await callbacks[0].onAuthenticated?.(invitation, {
+      deviceId: 'synthetic-device', credentialId: 'synthetic-credential', credentialVersion: 1,
+      credentialSecret: 'A'.repeat(43), role: 'controller', locale: 'en',
+    });
+    expect(credentials.get(relayId)).toEqual(invitation);
+    expect(get(relayStore.relayConfigs)[0].paired).not.toBe(true);
+  });
+
+  it('keeps a responsive connection while inventory and history handlers are slow', async () => {
+    vi.useFakeTimers();
+    const sends: Record<string, unknown>[] = [];
+    let connects = 0;
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'websocket',
+      connect() { connects += 1; handlers.onStatus('connected'); },
+      close() {},
+      send(payload) {
+        sends.push(payload);
+        if (payload.type === 'ping') setTimeout(() => handlers.onMessage({ type: 'pong' }), 10);
+        if (payload.type === 'refresh_agents') setTimeout(() => handlers.onMessage({ type: 'inventory_status', state: 'ready' }), 20_000);
+        return true;
+      },
+    });
+    relayStore.connectAll();
+    relayStore.revalidateConnections(2_000);
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(connects).toBe(1);
+    expect(get(relayStore.connections).values().next().value?.status).toBe('connected');
+    expect(sends.filter((payload) => payload.type === 'ping')).toHaveLength(1);
+    expect(sends.filter((payload) => payload.type === 'refresh_agents')).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(connects).toBe(1);
+    expect(sends.every((payload) => ['ping', 'refresh_agents'].includes(String(payload.type)))).toBe(true);
+  });
+
+  it('probes a responsive long-idle socket instead of treating elapsed time as loss', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    vi.setSystemTime(Date.now() + 300_000);
+    relayStore.revalidateConnections(2_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('ping');
+    socket.message({ type: 'pong' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it('ignores late traffic from a retired connection while locked', async () => {
+    vi.useFakeTimers();
+    let abandoned!: TransportHandlers;
+    transportHijack.current = (_relay, handlers) => {
+      abandoned = handlers;
+      return { kind: 'websocket', connect() { handlers.onStatus('connected'); }, close() {}, send() { return true; } };
+    };
+    relayStore.connectAll();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    relayStore.setHidden(true);
+    securityState.update((state) => ({ ...state, locked: true }));
+    await vi.advanceTimersByTimeAsync(130_000);
+    const connection = relayStore.connection(relayId)!;
+    expect(connection.closed).toBe(true);
+    const lastMessageAt = connection.lastMessageAt;
+    abandoned.onMessage({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', ...exactAgentFields() }] });
+    abandoned.onStatus('connected');
+    expect(get(relayStore.agents)).toEqual([]);
+    expect(connection.lastMessageAt).toBe(lastMessageAt);
+    expect(connection.status).toBe('disconnected');
+    securityState.update((state) => ({ ...state, locked: false }));
+    relayStore.setHidden(false);
+  });
+
   it('replaces a half-open socket when its foreground health probe receives no traffic', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
@@ -1608,7 +2362,7 @@ describe('relay command store', () => {
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
 
     relayStore.revalidateConnections(25);
-    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
+    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('ping');
     await vi.advanceTimersByTimeAsync(24);
     expect(MockWebSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
@@ -1622,7 +2376,7 @@ describe('relay command store', () => {
     socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
 
     relayStore.revalidateConnections();
-    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
+    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('ping');
     await vi.advanceTimersByTimeAsync(1_999);
     expect(MockWebSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
@@ -1651,12 +2405,12 @@ describe('relay command store', () => {
 
   it('keeps every connected relay warm with a proof-of-life ping', async () => {
     vi.useFakeTimers();
-    relayStore.addRelay({ label: 'Debian', url: 'wss://debian.example', token: '' });
+    relayStore.addRelay({ label: 'Debian', url: 'ws://127.0.0.1:8873', token: '' });
     // Adding a relay redials both; keep only the two live sockets so a later
     // count means "nothing was redialed".
     const [connected, dialing] = MockWebSocket.instances.slice(-2);
     MockWebSocket.instances = [connected, dialing];
-    expect(dialing.url).toBe('wss://debian.example');
+    expect(dialing.url).toBe('ws://127.0.0.1:8873');
     connected.open();
     connected.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
     const sentOnConnect = connected.sent.length;
@@ -1664,7 +2418,7 @@ describe('relay command store', () => {
     await vi.advanceTimersByTimeAsync(119_999);
     expect(connected.sent).toHaveLength(sentOnConnect);
     await vi.advanceTimersByTimeAsync(1);
-    expect(JSON.parse(connected.sent.at(-1)!).type).toBe('refresh_agents');
+    expect(JSON.parse(connected.sent.at(-1)!).type).toBe('ping');
     expect(connected.sent).toHaveLength(sentOnConnect + 1);
     // The keepalive proves a live path; it never dials one, so the relay still
     // completing its handshake hears nothing.
@@ -1690,7 +2444,7 @@ describe('relay command store', () => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
       relayStore.setHidden(true);
       await vi.advanceTimersByTimeAsync(120_000);
-      expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
+      expect(JSON.parse(socket.sent.at(-1)!).type).toBe('ping');
 
       // Ten seconds of silence after the ping: the path is gone.
       await vi.advanceTimersByTimeAsync(10_000);
@@ -1720,7 +2474,7 @@ describe('relay command store', () => {
       const socket = MockWebSocket.instances.at(-1)!;
       socket.open();
       socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
-      const pings = () => socket.sent.filter((payload) => JSON.parse(payload).type === 'refresh_agents').length;
+      const pings = () => socket.sent.filter((payload) => JSON.parse(payload).type === 'ping').length;
       const onConnect = pings();
 
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -1748,38 +2502,26 @@ describe('relay command store', () => {
     }
   });
 
-  it('dials a stale resumed connection at once and only probes a fresh one', async () => {
+  it('probes resumed connections and replaces only the one that stops answering', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
-    // Fresh proof of life: keep the session and spend one probe on it, so an
-    // app switch never churns a healthy direct path.
-    relayStore.revalidateConnections(2_000);
-    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
-    expect(MockWebSocket.instances).toHaveLength(1);
-    socket.message({ type: 'inventory_status', state: 'ready' });
-    expect(relayStore.connection(relayId)?.healthTimer).toBeNull();
+    for (const idle of [0, 240_000, 240_001]) {
+      vi.setSystemTime(Date.now() + idle);
+      relayStore.revalidateConnections(2_000);
+      expect(JSON.parse(socket.sent.at(-1)!).type).toBe('ping');
+      expect(MockWebSocket.instances).toHaveLength(1);
+      socket.message({ type: 'pong' });
+      expect(relayStore.connection(relayId)?.healthTimer).toBeNull();
+    }
 
-    // A silence a throttled hidden tab could still produce stays inside the
-    // bound: a healthy connection must never be redialed for being slow.
-    vi.setSystemTime(Date.now() + 240_000);
     relayStore.revalidateConnections(2_000);
-    expect(MockWebSocket.instances).toHaveLength(1);
-    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
-    socket.message({ type: 'inventory_status', state: 'ready' });
-    const beforeResume = socket.sent.length;
-
-    // A frozen page runs no timers while the clock keeps moving, which is the
-    // gap `setSystemTime` reproduces here. The keepalive cannot have run, so
-    // the silence is proof the path died with the freeze.
-    vi.setSystemTime(Date.now() + 240_001);
-    relayStore.revalidateConnections(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(MockWebSocket.instances).toHaveLength(2);
-    // Dialed on the spot, with no probe spent on the corpse.
-    expect(socket.sent).toHaveLength(beforeResume);
+    expect(socket.readyState).toBe(MockWebSocket.CLOSED);
   });
 
   it('stamps the last-heard time on inbound traffic and clears the pending probe', async () => {
@@ -1895,36 +2637,77 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances).toHaveLength(3);
   });
 
-  it('stops reconnecting when the relay refuses this device', async () => {
+  it.each(['ws://127.0.0.1:8871', 'wss://localhost:8871'])('retains credentials and foreground recovery after an untrusted tokenless close at %s', async url => {
     vi.useFakeTimers();
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    relayStore.addRelay({ label: 'Development', url, token: '' });
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc1234' });
-
-    // 4401 says the credential is dead: retrying replays the same rejected
-    // material, which is what left a phone hammering the relay forever.
+    const credentials = localStorage.getItem('herdr_device_auth_v1');
     socket.serverClose(4401);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(MockWebSocket.instances).toHaveLength(1);
-
     const connection = get(relayStore.connections).values().next().value;
-    expect(connection?.authRejected).toBe(true);
+    expect(connection?.authRejected).toBe(false);
     expect(connection?.status).toBe('disconnected');
-    expect(get(relayStore.toast)?.message).toContain('refused this device');
-    const rejectionToast = get(relayStore.toast);
+    expect(localStorage.getItem('herdr_device_auth_v1')).toBe(credentials);
+    expect(get(relayStore.toast)?.message || '').not.toContain('refused this device');
     relayStore.revalidateConnections();
-    relayStore.revalidateConnections();
-    expect(MockWebSocket.instances).toHaveLength(1);
-    expect(get(relayStore.toast)).toBe(rejectionToast);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    MockWebSocket.instances[1].open();
+    expect(get(relayStore.connections).values().next().value?.status).toBe('connected');
+    expect(MockWebSocket.instances[1].sent.map(value => JSON.parse(value)).every(value => !['submit_prompt', 'send_terminal_text', 'send_keys'].includes(value.type))).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
 
-    // An ordinary close still reconnects.
-    relayStore.connectAll(true);
-    await vi.advanceTimersByTimeAsync(1_000);
-    const replacement = MockWebSocket.instances.at(-1)!;
-    replacement.open();
-    replacement.serverClose();
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(MockWebSocket.instances.length).toBeGreaterThan(2);
+  it.each([
+    { code: 4401, url: 'wss://relay.example', opened: true, refused: true },
+    { code: 1006, url: 'wss://relay.example', opened: true, refused: false },
+    { code: 1000, url: 'wss://relay.example', opened: true, refused: false },
+    { code: 4401, url: 'ws://127.0.0.1:8871', opened: true, refused: false },
+    { code: 4401, url: 'wss://relay.example', opened: false, refused: false },
+  ])('carries close $code at $url (opened=$opened) through the production transport into credential retry policy', async ({ code, url, opened, refused }) => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    const relay = { label: 'Paired TLS', url, token: '' };
+    const relayId = makeRelayId(relay.label, relay.url);
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    credentials.saveInvitation(relayId, { id: 'synthetic-invite', version: 1, secret: 'A'.repeat(43), expiresAt: Date.now() + 60_000 });
+    credentials.replaceInvitation(relayId, 'synthetic-invite', {
+      deviceId: 'synthetic-device', credentialId: 'synthetic-credential', credentialVersion: 1,
+      credentialSecret: 'A'.repeat(43), role: 'controller', locale: 'en',
+    });
+    const before = localStorage.getItem('herdr_device_auth_v1');
+    relayStore.addRelay(relay);
+    const socket = MockWebSocket.instances[0];
+    expect(socket.protocols).toBe('herdr-e2ee-v2');
+    if (opened) {
+      socket.open();
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+      expect(JSON.parse(socket.sent[0]).type).toBe('e2ee_client_hello');
+    }
+    expect(get(relayStore.connections).get(relayId)?.status).toBe('connecting');
+    socket.serverClose(code);
+    const connection = get(relayStore.connections).get(relayId);
+    expect(connection?.authRejected).toBe(refused);
+    expect(connection?.status).toBe('disconnected');
+    expect(localStorage.getItem('herdr_device_auth_v1')).toBe(before);
+    vi.useFakeTimers();
+    if (refused) {
+      expect(get(relayStore.toast)?.message).toContain('refused this device. Import a new invitation');
+      await vi.advanceTimersByTimeAsync(120_000);
+      relayStore.resetReconnectBackoff();
+      relayStore.revalidateConnections();
+      expect(MockWebSocket.instances).toHaveLength(1);
+    } else {
+      expect(get(relayStore.toast)?.message || '').not.toContain('refused this device');
+      relayStore.revalidateConnections();
+      expect(MockWebSocket.instances).toHaveLength(2);
+    }
+    expect(socket.sent.map(value => JSON.parse(value).type)).toEqual(opened ? ['e2ee_client_hello'] : []);
   });
 
   it('drops the reconnect backoff so a resumed page retries at once', async () => {
@@ -2214,7 +2997,7 @@ describe('relay command store', () => {
       gatewayAvailableVersion: '0.17.1',
     });
     // The legacy URL survives so the hybrid path can fall back to it.
-    expect(stored.url).toBe('wss://fedora.example');
+    expect(stored.url).toBe('ws://127.0.0.1:8871');
     expect(JSON.parse(localStorage.getItem('herdr_relays')!)).toContainEqual(
       expect.objectContaining({
         transport: 'hybrid',
@@ -2297,7 +3080,7 @@ describe('relay command store', () => {
   });
 
   it('streams an attachment only through its target relay and returns an opaque reference', async () => {
-    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
+    relayStore.addRelay({ label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' });
     const [fedoraSocket, macSocket] = MockWebSocket.instances.slice(-2);
     fedoraSocket.open();
     macSocket.open();
@@ -2462,6 +3245,24 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it('retains native OpenCode command paths without accepting malformed commands', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'opencode', cwd: '/fixture', ...exactAgentFields(),
+    };
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({
+      type: 'command_result', request_id: request.request_id, ok: true,
+      data: { commands: ['/git/review', '/valid', '/bad//path', '/bad/', '/bad/ space', '/bad\nline'].map(command => ({ command, source: 'project' })) },
+    });
+    await expect(pending).resolves.toMatchObject({ commands: [{ command: '/git/review' }, { command: '/valid' }] });
+  });
+
   it('loads and caches slash commands for one agent identity', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -2510,6 +3311,143 @@ describe('relay command store', () => {
     });
     await expect(changed).resolves.toEqual({ commands: [], truncated: false });
   });
+  it.each([
+    { server_session_id: 'replacement-server' },
+    { terminal_id: 'replacement-terminal' },
+    { generation: 99 },
+    { agent_session_id: 'replacement-agent-session' },
+  ])('invalidates slash commands when target identity changes: %j', async (replacement) => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
+    };
+    const older = relayStore.loadSlashCommands(agent);
+    const olderRequest = JSON.parse(socket.sent.at(-1)!);
+    const currentAgent = { ...agent, ...replacement };
+    const current = relayStore.loadSlashCommands(currentAgent);
+    const currentRequest = JSON.parse(socket.sent.at(-1)!);
+    expect(currentRequest.request_id).not.toBe(olderRequest.request_id);
+    socket.message({
+      type: 'command_result', request_id: currentRequest.request_id, ok: true,
+      data: { commands: [{ command: '/current', source: 'builtin' }], truncated: false },
+    });
+    await current;
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true,
+      data: { commands: [{ command: '/old', source: 'builtin' }], truncated: false },
+    });
+    await older;
+    await expect(relayStore.loadSlashCommands(currentAgent)).resolves.toMatchObject({
+      commands: [{ command: '/current' }],
+    });
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(2);
+  });
+
+  it('refreshes slash commands and prevents superseded requests from repopulating the cache', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
+    };
+    const initial = relayStore.loadSlashCommands(agent);
+    const initialRequest = JSON.parse(socket.sent.at(-1)!);
+    socket.message({
+      type: 'command_result', request_id: initialRequest.request_id, ok: true,
+      data: { commands: [{ command: '/initial', source: 'builtin' }], truncated: false },
+    });
+    await initial;
+    const older = relayStore.loadSlashCommands(agent, true);
+    const olderRequest = JSON.parse(socket.sent.at(-1)!);
+    const current = relayStore.loadSlashCommands(agent, true);
+    const currentRequest = JSON.parse(socket.sent.at(-1)!);
+    const duplicate = relayStore.loadSlashCommands(agent);
+    socket.message({
+      type: 'command_result', request_id: currentRequest.request_id, ok: true,
+      data: { commands: [{ command: '/reloaded', source: 'builtin' }], truncated: false },
+    });
+    await expect(current).resolves.toMatchObject({ commands: [{ command: '/reloaded' }] });
+    await expect(duplicate).resolves.toMatchObject({ commands: [{ command: '/reloaded' }] });
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true,
+      data: { commands: [{ command: '/stale', source: 'builtin' }], truncated: false },
+    });
+    await older;
+    await expect(relayStore.loadSlashCommands(agent)).resolves.toMatchObject({
+      commands: [{ command: '/reloaded' }],
+    });
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(3);
+  });
+
+  it('retains the frontend cap warning and late entries after normalization', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: ['slash_commands'], agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'codex', cwd: '/home/test/project',
+      ...exactAgentFields(),
+    };
+    const rawCommands = Array.from({ length: SLASH_COMMAND_MAX_ENTRIES + 1 }, (_, index) => ({
+      command: `/bulk-${String(index).padStart(4, '0')}`,
+      description: `Bulk command ${index}`,
+      source: 'project',
+    }));
+    rawCommands[350] = { command: '/late-command', description: 'Late command', source: 'project' };
+
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({
+      type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed',
+      data: { commands: rawCommands, truncated: false },
+    });
+
+    const catalog = await pending;
+    expect(catalog.commands).toHaveLength(SLASH_COMMAND_MAX_ENTRIES);
+    expect(catalog.truncated).toBe(true);
+    expect(catalog.commands.some((entry) => entry.command === '/late-command')).toBe(true);
+    expect(catalog.commands[0].command).toBe('/bulk-0000');
+    const cached = await relayStore.loadSlashCommands(agent);
+    expect(cached.truncated).toBe(true);
+    expect(cached.commands.some((entry) => entry.command === '/late-command')).toBe(true);
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1);
+  });
+
+  it('preserves runtime catalog status, revision, kind, and canonical provenance', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/fixture/project', ...exactAgentFields(),
+    };
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: request.request_id, ok: true, data: piCatalogFixture });
+    const catalog = await pending;
+    expect(catalog.status).toBe('available');
+    expect(catalog.revision).toBe(piCatalogFixture.revision);
+    expect(catalog.commands.find(command => command.command === '/review:2')).toMatchObject({
+      source: 'temporary', kind: 'extension', provenance: { source: 'cli', scope: 'temporary', origin: 'top-level' },
+    });
+    expect(catalog.commands.find(command => command.command === '/summary')?.kind).toBe('prompt');
+    expect(catalog.truncated).toBe(false);
+  });
+
   it('normalizes slash command results without data', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -2825,5 +3763,96 @@ describe('device invitation links', () => {
     await expect(relayStore.createDeviceInvitation({ relayId: 'gw-fedora', name: 'Tablet', role: 'reader' }))
       .rejects.toThrow(/no address/);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('hidden reconnect retirement', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    localStorage.clear();
+    sessionStorage.clear();
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Hidden relay', url: 'ws://127.0.0.1:8874', token: '' });
+  });
+
+  afterEach(() => {
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves a socket closed after the hidden keepalive cap until one foreground revalidation', async () => {
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    relayStore.setHidden(true);
+    for (let tick = 0; tick < 29; tick += 1) {
+      await vi.advanceTimersByTimeAsync(120_000);
+      socket.message({ type: 'pong' });
+    }
+    await vi.advanceTimersByTimeAsync(120_000);
+    const pings = socket.sent.filter(payload => JSON.parse(payload).type === 'ping').length;
+    await vi.advanceTimersByTimeAsync(300_000);
+    socket.serverClose(1000);
+    expect(relayStore.connection(relayId)?.status).toBe('disconnected');
+    expect(relayStore.connection(relayId)?.reconnectTimer).toBeNull();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    relayStore.revalidateConnections();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(socket.sent.filter(payload => JSON.parse(payload).type === 'ping')).toHaveLength(pings);
+    relayStore.setHidden(false);
+    relayStore.revalidateConnections(2_000);
+    relayStore.revalidateConnections(2_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const resumed = MockWebSocket.instances[1];
+    resumed.open();
+    resumed.message({ type: 'push_config', protocol: 3, capabilities: [] });
+    socket.serverClose(1000);
+    expect(relayStore.connection(relayId)?.status).toBe('connected');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(resumed.sent.map(payload => JSON.parse(payload).type)).not.toContain('send_prompt');
+  });
+
+  it('cancels a visible reconnect timer on hide and suppresses closes before the cap too', async () => {
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.serverClose();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    expect(relayStore.connection(relayId)?.reconnectTimer).not.toBeNull();
+    relayStore.setHidden(true);
+    expect(relayStore.connection(relayId)?.reconnectTimer).toBeNull();
+    socket.serverClose();
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    relayStore.setHidden(false);
+    relayStore.revalidateConnections(2_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it('cancels update-restart redials and a pending foreground health probe cannot dial while hidden', async () => {
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: [], update: { state: 'restarting' } });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    expect(relayStore.connection(relayId)?.updateRestartTimer).not.toBeNull();
+    relayStore.revalidateConnections(2_000);
+    relayStore.setHidden(true);
+    expect(relayStore.connection(relayId)?.updateRestartTimer).toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    relayStore.setHidden(false);
+    relayStore.revalidateConnections(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
   });
 });

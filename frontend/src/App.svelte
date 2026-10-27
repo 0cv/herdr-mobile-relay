@@ -5,7 +5,6 @@
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
   import AgentRail from '$components/AgentRail.svelte';
-  import LaunchView from '$components/LaunchView.svelte';
   import GlobalJump from '$components/GlobalJump.svelte';
   import LockScreen from '$components/LockScreen.svelte';
   import ManageDialog from '$components/ManageDialog.svelte';
@@ -42,6 +41,7 @@
   import {
     closeCurrentView,
     currentView,
+    followInitialAgentSession,
     initializeRouter,
     navigate,
     replaceView,
@@ -51,12 +51,16 @@
   import { initializeDeviceSecurity, securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
   import {
+    AppReloadHeld,
     appUpdateStatus,
     clearPendingRelayUpdate,
+    importOrReload,
     initializeAppUpdates,
     pendingRelayUpdate,
     relayServesCurrentOrigin,
+    reloadHeldMessage,
     reloadUpdatedSameOriginApp,
+    type PhoneAppTarget,
   } from '$lib/updates';
   import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
@@ -85,7 +89,9 @@
   const awaitedDeployments = new Set<string>();
   let visibilityRevision = $state(0);
   let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
-  let conversationHistoryLoadError = $state(false);
+  let conversationHistoryFailedRoute = $state.raw<ViewState | null>(null);
+  let conversationHistoryFailure = $state('');
+  let conversationHistoryLoading = false;
   let viewedRelayId = '';
   let viewedTargetSignature = '';
 
@@ -108,13 +114,26 @@
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const conversationHistoryAvailable = $derived(hasConversationHistory(activeAgent, activeConnection));
   $effect(() => {
-    if ($currentView.view !== 'history' || !activeAgent || conversationHistoryComponent) return;
-    void import('$components/ConversationHistory.svelte')
+    if ($currentView.view !== 'history' || !activeAgent || conversationHistoryComponent
+      || conversationHistoryLoading || conversationHistoryFailedRoute === $currentView) return;
+    conversationHistoryLoading = true;
+    const stillOpen = () => get(currentView).view === 'history';
+    void importOrReload(() => import('$components/ConversationHistory.svelte'), stillOpen)
       .then(({ default: component }) => {
         conversationHistoryComponent = component;
       })
-      .catch(() => {
-        conversationHistoryLoadError = true;
+      .catch((error) => {
+        if (!stillOpen()) return;
+        const route = get(currentView);
+        if (route.view === 'history' && route.fallbackToTerminalOnInitialUnavailable) {
+          replaceView({ view: 'terminal', paneId: route.paneId, target: route.target });
+        } else {
+          conversationHistoryFailure = error instanceof AppReloadHeld ? error.message : '';
+          conversationHistoryFailedRoute = route;
+        }
+      })
+      .finally(() => {
+        conversationHistoryLoading = false;
       });
   });
   const workspaceInspectionAvailable = $derived(Boolean(
@@ -164,23 +183,19 @@
   const headerIndicator = $derived.by(() => {
     if (!activeAgent) return {
       tone: inventoryUnavailable || inventoryLoading ? 'warning' : connected ? 'success' : connecting ? 'warning' : 'danger',
-      hollow: false,
       label: `${connected}/${$relays.length} relays connected${inventoryUnavailable ? `; ${inventoryUnavailable} agent inventory unavailable` : inventoryLoading ? `; ${inventoryLoading} agent inventory loading` : ''}`,
     };
     if (activeConnection?.status !== 'connected') return {
       tone: 'warning' as const,
-      hollow: false,
       label: 'Relay reconnecting',
     };
     if (activeConnection.inventory.state !== 'ready') return {
       tone: 'warning' as const,
-      hollow: false,
       label: activeConnection.inventory.state === 'error' ? 'Agent inventory unavailable' : 'Agent inventory loading',
     };
     const group = agentStatusGroup(activeAgent);
     return {
       tone: agentStatusTone(activeAgent),
-      hollow: group === 'ready',
       label: `Agent ${group === 'ready'
         ? 'idle'
         : group === 'attention'
@@ -356,6 +371,13 @@
     }
   });
 
+  function reloadIntoUpdate(version: string, target: PhoneAppTarget | null) {
+    void reloadUpdatedSameOriginApp(version, target).then((reloaded) => {
+      const held = reloadHeldMessage();
+      if (!reloaded && held) relayStore.showToast(held, true);
+    });
+  }
+
   $effect(() => {
     for (const [relayId, connection] of $connections) {
       if (connection.status !== 'connected') continue;
@@ -373,7 +395,7 @@
             build: $appUpdates.deployedBuild || '',
           }
           : null;
-        void reloadUpdatedSameOriginApp(pending.version, target);
+        reloadIntoUpdate(pending.version, target);
       }
     }
   });
@@ -400,7 +422,7 @@
           build: $appUpdates.deployedBuild || '',
         }
         : null;
-      void reloadUpdatedSameOriginApp(deployment.target_version, target);
+      reloadIntoUpdate(deployment.target_version, target);
     }
   });
 
@@ -411,6 +433,7 @@
     const stopUpdates = initializeAppUpdates();
     const stopSecurity = initializeDeviceSecurity();
     const stopRouter = initializeRouter();
+    const stopAgentRoute = followInitialAgentSession(agents);
     const setupLinkNavigation = () => {
       relayStore.importSetupLink(location, !$securityState.locked);
     };
@@ -426,6 +449,7 @@
     window.addEventListener('hashchange', setupLinkNavigation);
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
     return () => {
+      stopAgentRoute();
       stopRouter();
       releaseSpeech();
       stopSecurity();
@@ -579,7 +603,6 @@
     {/if}
     <span
       class={`status-dot status-${headerIndicator.tone}`}
-      class:hollow={headerIndicator.hollow}
       role="img"
       aria-label={headerIndicator.label}
     ></span>
@@ -647,6 +670,18 @@
             <path d="m7 9 3 3-3 3M12 15h5"></path>
           </svg>
         </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Inspect workspace"
+          disabled={!workspaceInspectionAvailable}
+          title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
+          onclick={() => { workspaceOpen = true; }}
+        >
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3 5.5h7l2 2h9v11H3z"></path>
+          </svg>
+        </Button>
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else}
         <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => toggle('workspaces')}>
@@ -680,12 +715,18 @@
   {:else if $currentView.view === 'workspaces'}
     <WorkspaceManager {readOnlyRelayIds} />
   {:else if $currentView.view === 'launch'}
-    <LaunchView
-      relayId={$currentView.relayId}
-      workspaceId={$currentView.workspaceId}
-      cwd={$currentView.cwd}
-      {readOnlyRelayIds}
-    />
+    {#await importOrReload(() => import('$components/LaunchView.svelte'), () => get(currentView).view === 'launch')}
+      <main class="page" aria-label="Opening launch form"><p role="status">Loading launch form…</p></main>
+    {:then { default: LaunchView }}
+      <LaunchView
+        relayId={$currentView.relayId}
+        workspaceId={$currentView.workspaceId}
+        cwd={$currentView.cwd}
+        {readOnlyRelayIds}
+      />
+    {:catch error}
+      <main class="page"><p role="alert">{error instanceof AppReloadHeld ? error.message : 'The launch form could not be loaded. Reload the app to try again.'}</p></main>
+    {/await}
   {:else if $currentView.view === 'activity'}
     <ActivityView />
   {:else if $currentView.view === 'activity_detail'}
@@ -698,13 +739,15 @@
         <HistoryComponent
           agent={activeAgent}
           readOnly={activeReadOnly}
+          frame={$frames.get(activeAgent.pane_id)}
+          responding={$responding}
           onInitialPage={openingRoute.fallbackToTerminalOnInitialUnavailable
             ? makeInitialPageHandler(openingRoute)
             : undefined}
         />
-      {:else if conversationHistoryLoadError}
+      {:else if conversationHistoryFailedRoute === openingRoute}
         <main class="page terminal-loading" aria-label="Conversation history failed to load">
-          <p role="alert">Conversation history could not be loaded. Reload the app to try again.</p>
+          <p role="alert">{conversationHistoryFailure || 'Conversation history could not be loaded. Reload the app to try again.'}</p>
         </main>
       {:else}
         <main class="page terminal-loading" aria-label="Opening conversation history">

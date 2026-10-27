@@ -6,8 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.21.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.21.0) · [Changelog](CHANGELOG.md)
-
+**Current version:** [`0.23.3`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.23.3) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -56,7 +55,8 @@ starts the relay and bundled app, and prints a QR code.
 Scan the QR with your phone. Keep the pane open; Ctrl-C stops the relay.
 
 Neither quick-start path needs `sudo` or a Python, Node.js, or Go toolchain.
-Treat the QR and its setup link as secrets: they carry the relay key.
+Treat the QR and its setup link as secrets: they contain a one-use device
+invitation.
 
 [QUICKSTART.md](QUICKSTART.md) has pairing detail and troubleshooting for both
 paths.
@@ -71,20 +71,27 @@ paths.
   Herdr workspace, with agents that need input pinned on top.
 - Answer approvals and structured plan questions from Codex, Claude Code,
   Hermes, Qoder, OpenCode, Oh My Pi, and Pi.
-- Send prompts, terminal keys, and slash commands; attach screenshots, photos,
-  and documents in cancellable batches.
-- Read and search each agent's native conversation, including Hermes, OpenCode
-  and Oh My OpenCode plans; inspect workspace files, images, and Git diffs
-  read-only.
+- Send prompts, terminal keys, and slash commands, including discovered Cursor
+  commands and skills; attach screenshots, photos, and documents in cancellable
+  batches. Optionally discover live Pi extension commands, skills, and templates
+  by enabling **Settings → Pi Integration** for that computer, then reloading Pi
+  ([CLI alternative](docs/slash-command-discovery.md#pi-runtime-commands)).
+- Read and search native conversations for agents with a native history reader,
+  including Hermes, OpenCode, Oh My OpenCode plans and native Kimi Code journals.
+  Kimi imports and human-engine-only histories use the Terminal fallback. Inspect workspace files, images, and Git diffs read-only.
 - Manage workspaces and Git worktrees; start, rename, clear, and stop agents.
 - Have the relay read responses aloud, even with the screen off.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.
 
-**New in 0.20.0:** named controller and reader devices with QR pairing,
-relay-synthesized speech in five languages, per-device notification categories
-with settle delay, cooldown, and snooze, multi-file attachments, and OpenCode /
-Oh My OpenCode conversations.
+**New in 0.23.0:** Clean, recent-first Conversation by default, explicit Full
+history, sticky following while streaming, and a workspace inspector button.
+Enable **Settings → Pi Integration** for live Pi text, tool activity, notices
+and unconfirmed replies to Needs inspection panes. Other supported agents get
+recorded updates and a shared prompt composer. Advanced literal input and
+terminal keys stay in Terminal. Resize Session is on by default; saved off
+choices stay off. Kimi, Hermes and older/unindexed OpenCode histories can still
+have a [history-sized cold-open cost](docs/conversation-activity.md#native-history-opening-cost).
 
 **[Full feature tour →](docs/mobile-app.md)**
 
@@ -131,6 +138,7 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 | [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
 | [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |
 | [docs/agent-directories.md](docs/agent-directories.md) | Agents that use a non-default config or profile directory |
+| [docs/slash-command-discovery.md](docs/slash-command-discovery.md) | Bounded slash-command discovery and incomplete-catalog guidance |
 | [docs/updates.md](docs/updates.md) | Verified releases, phone-driven upgrades, upgrading from 0.19.1 |
 | [docs/security.md](docs/security.md) | What is encrypted, device pairing, what an intermediary sees |
 | [docs/development.md](docs/development.md) | Building, testing, and contributing |

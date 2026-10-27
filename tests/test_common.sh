@@ -1,9 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-common-test.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
@@ -409,17 +409,23 @@ esac
 
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
-GH_TOKEN="test-private-token"
-export GH_TOKEN
+EXPECTED_TOKEN="test-private-token"
+GH_TOKEN="$EXPECTED_TOKEN"
+GITHUB_TOKEN="$EXPECTED_TOKEN"
+export GH_TOKEN GITHUB_TOKEN
 ensure_relay_env "$ENV_FILE"
 
+if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+    echo "ensure_relay_env left the raw release token in the caller's environment" >&2
+    exit 1
+fi
 if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
     echo "relay.env exposed GH_TOKEN" >&2
     exit 1
 fi
 TOKEN_FILE="$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)"
 test "$TOKEN_FILE" = "$WORK_DIR/config/github-token"
-test "$(cat "$TOKEN_FILE")" = "$GH_TOKEN"
+test "$(cat "$TOKEN_FILE")" = "$EXPECTED_TOKEN"
 if stat -c '%a' "$TOKEN_FILE" >/dev/null 2>&1; then
     mode="$(stat -c '%a' "$TOKEN_FILE")"
 else
@@ -528,12 +534,218 @@ sed -n '8p' "$LAUNCHCTL_LOG" |
     grep -Fx "kickstart -k $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
 test "$(wc -l < "$LAUNCHCTL_LOG" | tr -d ' ')" = "8"
 
-HEALTH='{"status":"ok","release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
+go build -o "$WORK_DIR/readiness-helper" "$REPO_DIR/cmd/herdr-mobile-relay"
+export HERDR_RELAY_BIN="$WORK_DIR/readiness-helper"
+export HERDR_RELAY_INSTANCE_ID=test
+
+# The inferred-identity path reads the selected binary's sibling manifest,
+# never a fabricated field in web/release.json. Use the committed descriptor
+# directly so this regression cannot accidentally reproduce the old fixture.
+READY_RELEASE_ROOT="$WORK_DIR/readiness-releases"
+READY_RELEASE="$READY_RELEASE_ROOT/releases/manifest-release"
+mkdir -p "$READY_RELEASE/web"
+cp "$WORK_DIR/readiness-helper" "$READY_RELEASE/herdr-mobile-relay"
+cp "$REPO_DIR/web/release.json" "$READY_RELEASE/web/release.json"
+printf '{"version":"dev","revision":"unknown","web_hash":"manifest-web"}\n' \
+    > "$READY_RELEASE/release-manifest.json"
+if grep -q '"bundle_hash"' "$READY_RELEASE/web/release.json"; then
+    echo "committed frontend descriptor unexpectedly contains bundle_hash" >&2
+    exit 1
+fi
+READY_CURL_LOG="$WORK_DIR/readiness-curl.log"
+READY_ATTEMPTS="$WORK_DIR/readiness-attempts"
+READY_CURL_MODE=static
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+: > "$READY_CURL_LOG"
+curl() {
+    printf '%s\n' "$*" >> "$READY_CURL_LOG"
+    if [ "$READY_CURL_MODE" = retry ]; then
+        local attempt=0
+        [ ! -f "$READY_ATTEMPTS" ] || attempt="$(<"$READY_ATTEMPTS")"
+        attempt=$((attempt + 1))
+        printf '%s\n' "$attempt" > "$READY_ATTEMPTS"
+        if [ "$attempt" -eq 1 ]; then
+            printf '%s\n' '{"status":"ok","inventory":{"state":"error"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+            return
+        fi
+    fi
+    printf '%s\n' "$READY_RESPONSE"
+}
+
+HERDR_RELAY_BIN="$READY_RELEASE/herdr-mobile-relay"
+unset HERDR_RELEASE_ROOT HERDR_WEB_ROOT
+READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+test "$(cat "$READY_CURL_LOG")" = \
+    '-fsS --max-time 2 http://127.0.0.1:8375/readyz'
+
+# HERDR_WEB_ROOT and a descriptor's tempting bundle_hash must not replace the
+# release manifest's identity.
+READY_DECOY_WEB="$WORK_DIR/readiness-decoy-web"
+mkdir -p "$READY_DECOY_WEB"
+printf '{"bundle_hash":"descriptor-decoy"}\n' > "$READY_DECOY_WEB/release.json"
+HERDR_WEB_ROOT="$READY_DECOY_WEB"
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+: > "$READY_CURL_LOG"
+READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+READY_RESPONSE=${READY_RESPONSE/manifest-web/descriptor-decoy}
+if wait_for_relay_health 8375 1 0 test >/dev/null 2>&1; then
+    echo "readiness accepted the descriptor's misleading bundle_hash" >&2
+    exit 1
+fi
+test -s "$READY_CURL_LOG"
+unset HERDR_WEB_ROOT
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+
+for invalid_health in \
+    '{"status":"ready","inventory":{"state":"ready"},"instance":"wrong-instance","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}' \
+    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"wrong-version","revision":"unknown","bundle_hash":"manifest-web","protocol":3}' \
+    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"wrong-revision","bundle_hash":"manifest-web","protocol":3}' \
+    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"wrong-web","protocol":3}' \
+    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":2}' \
+    '{"status":"ready","inventory":{"state":"error"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'; do
+    READY_RESPONSE="$invalid_health"
+    : > "$READY_CURL_LOG"
+    if wait_for_relay_health 8375 1 0 test >/dev/null 2>&1; then
+        echo "readiness accepted invalid identity or inventory: $invalid_health" >&2
+        exit 1
+    fi
+    test "$(wc -l < "$READY_CURL_LOG" | tr -d ' ')" = 1
+done
+
+# Preserve the bounded retry loop: an unready first reply is retried and a
+# matching reply on the second poll is returned unchanged.
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+READY_CURL_MODE=retry
+rm -f "$READY_ATTEMPTS"
+: > "$READY_CURL_LOG"
+READY_OUTPUT="$(wait_for_relay_health 8375 3 0 test)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+test "$(cat "$READY_ATTEMPTS")" = 2
+test "$(wc -l < "$READY_CURL_LOG" | tr -d ' ')" = 2
+READY_CURL_MODE=static
+
+# Missing, unreadable/non-file, and empty manifests fail before any HTTP poll
+# and identify the offending metadata path.
+READY_MANIFEST="$READY_RELEASE/release-manifest.json"
+READY_MANIFEST_BACKUP="$WORK_DIR/readiness-release-manifest.json"
+mv "$READY_MANIFEST" "$READY_MANIFEST_BACKUP"
+: > "$READY_CURL_LOG"
+if wait_for_relay_health 8375 1 0 test >"$WORK_DIR/missing-manifest.out" 2>"$WORK_DIR/missing-manifest.err"; then
+    echo "readiness accepted a missing release manifest" >&2
+    exit 1
+fi
+grep -F "$READY_MANIFEST" "$WORK_DIR/missing-manifest.err" >/dev/null
+test ! -s "$READY_CURL_LOG"
+mkdir "$READY_MANIFEST"
+if wait_for_relay_health 8375 1 0 test >"$WORK_DIR/unreadable-manifest.out" 2>"$WORK_DIR/unreadable-manifest.err"; then
+    echo "readiness accepted a non-file release manifest" >&2
+    exit 1
+fi
+grep -F "$READY_MANIFEST" "$WORK_DIR/unreadable-manifest.err" >/dev/null
+test ! -s "$READY_CURL_LOG"
+rmdir "$READY_MANIFEST"
+if [ "$(id -u)" -ne 0 ]; then
+    printf '{"web_hash":"unreadable-web"}\n' > "$READY_MANIFEST"
+    chmod 000 "$READY_MANIFEST"
+    if wait_for_relay_health 8375 1 0 test >"$WORK_DIR/denied-manifest.out" 2>"$WORK_DIR/denied-manifest.err"; then
+        chmod 600 "$READY_MANIFEST"
+        echo "readiness accepted an unreadable release manifest" >&2
+        exit 1
+    fi
+    grep -F "$READY_MANIFEST" "$WORK_DIR/denied-manifest.err" >/dev/null
+    test ! -s "$READY_CURL_LOG"
+    chmod 600 "$READY_MANIFEST"
+fi
+printf '{"web_hash":""}\n' > "$READY_MANIFEST"
+if wait_for_relay_health 8375 1 0 test >"$WORK_DIR/empty-hash.out" 2>"$WORK_DIR/empty-hash.err"; then
+    echo "readiness accepted an empty manifest web_hash" >&2
+    exit 1
+fi
+grep -F "$READY_MANIFEST" "$WORK_DIR/empty-hash.err" >/dev/null
+test ! -s "$READY_CURL_LOG"
+
+# An explicit expected hash wins even when the manifest is absent or conflicts.
+rm "$READY_MANIFEST"
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"explicit-web","protocol":3}'
+READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test dev unknown explicit-web)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+printf '{"web_hash":"conflicting-manifest-web"}\n' > "$READY_MANIFEST"
+READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test dev unknown explicit-web)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+mv "$READY_MANIFEST_BACKUP" "$READY_MANIFEST"
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+
+# An explicit binary override and the current symlink each select the sibling
+# manifest belonging to the chosen release, not another configured release.
+READY_OVERRIDE_ROOT="$WORK_DIR/readiness-override-root"
+READY_OVERRIDE="$READY_OVERRIDE_ROOT/releases/override"
+mkdir -p "$READY_OVERRIDE/web"
+cp "$WORK_DIR/readiness-helper" "$READY_OVERRIDE/herdr-mobile-relay"
+cp "$REPO_DIR/web/release.json" "$READY_OVERRIDE/web/release.json"
+printf '{"web_hash":"override-web"}\n' > "$READY_OVERRIDE/release-manifest.json"
+HERDR_RELEASE_ROOT="$READY_RELEASE_ROOT"
+HERDR_RELAY_BIN="$READY_OVERRIDE/herdr-mobile-relay"
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"override-web","protocol":3}'
+READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+READY_CURRENT_ROOT="$WORK_DIR/readiness-current-root"
+READY_CURRENT="$READY_CURRENT_ROOT/releases/current-target"
+mkdir -p "$READY_CURRENT/web"
+cp "$WORK_DIR/readiness-helper" "$READY_CURRENT/herdr-mobile-relay"
+cp "$REPO_DIR/web/release.json" "$READY_CURRENT/web/release.json"
+printf '{"web_hash":"current-web"}\n' > "$READY_CURRENT/release-manifest.json"
+ln -s releases/current-target "$READY_CURRENT_ROOT/current"
+unset HERDR_RELAY_BIN
+HERDR_RELEASE_ROOT="$READY_CURRENT_ROOT"
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"current-web","protocol":3}'
+READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+
+# A packaged script's own release takes precedence over a foreign override and
+# release root, and its manifest is resolved next to its selected binary.
+READY_PACKAGED="$WORK_DIR/readiness-packaged"
+mkdir -p "$READY_PACKAGED/relay" "$READY_PACKAGED/web"
+cp "$REPO_DIR/relay/common.sh" "$READY_PACKAGED/relay/common.sh"
+cp "$WORK_DIR/readiness-helper" "$READY_PACKAGED/herdr-mobile-relay"
+cp "$REPO_DIR/web/release.json" "$READY_PACKAGED/web/release.json"
+printf '{"web_hash":"packaged-web"}\n' > "$READY_PACKAGED/release-manifest.json"
+chmod 700 "$READY_PACKAGED/herdr-mobile-relay"
+HERDR_RELAY_BIN="$READY_OVERRIDE/herdr-mobile-relay"
+HERDR_RELEASE_ROOT="$READY_CURRENT_ROOT"
+READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"packaged-web","protocol":3}'
+READY_OUTPUT="$(
+    . "$READY_PACKAGED/relay/common.sh"
+    wait_for_relay_health 8375 1 0 test
+)"
+test "$READY_OUTPUT" = "$READY_RESPONSE"
+
+unset -f curl
+HERDR_RELAY_BIN="$WORK_DIR/readiness-helper"
+unset HERDR_RELEASE_ROOT HERDR_WEB_ROOT
+HEALTH='{"status":"ready","inventory":{"state":"ready"},"instance":"test","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
 if verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
     echo "release health accepted the wrong revision" >&2
     exit 1
 fi
+
+for invalid_health in \
+    '{"status":"ready","inventory":{"state":"ready"},"instance":"wrong-instance","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}' \
+    '{"status":"ready","inventory":{"state":"error"},"instance":"test","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'; do
+    (
+        curl() { printf '%s\n' "$invalid_health"; }
+        if wait_for_relay_health 8375 1 0 test 0.9.0 abc123 web456; then
+            echo 'generic readiness accepted unusable or foreign inventory' >&2
+            exit 1
+        fi
+        if wait_for_relay_release_health 8375 1 0 0.9.0 abc123 web456 test; then
+            echo 'release readiness accepted unusable or foreign inventory' >&2
+            exit 1
+        fi
+    )
+done
 
 HEALTH_ATTEMPTS="$WORK_DIR/health-attempts"
 cat > "$FAKE_LAUNCHCTL_DIR/curl" <<'EOF'
@@ -547,7 +759,7 @@ printf '%s\n' "$attempt" > "$HEALTH_ATTEMPTS"
 if [ "$attempt" -eq 1 ]; then
     printf '%s\n' '{"status":"ok","instance":"test","version":"0.8.6","protocol":2,"release_version":"0.8.6","revision":"old","bundle_hash":"old-web"}'
 else
-    printf '%s\n' '{"status":"ok","instance":"test","version":"0.9.0","protocol":2,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
+    printf '%s\n' '{"status":"ready","inventory":{"state":"ready"},"instance":"test","version":"0.9.0","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 fi
 EOF
 chmod 700 "$FAKE_LAUNCHCTL_DIR/curl"
@@ -558,6 +770,7 @@ EXACT_HEALTH="$(
 )"
 test "$(json_string_field "$EXACT_HEALTH" release_version)" = "0.9.0"
 test "$(cat "$HEALTH_ATTEMPTS")" = "2"
+unset HERDR_RELAY_BIN HERDR_RELAY_INSTANCE_ID
 
 GATEWAY_HEALTH='{"status":"ok","gateway":{"enabled":true,"registered":true,"relay_id":"AAAA","clients":1}}'
 test "$(gateway_registration_state "$GATEWAY_HEALTH")" = "true"
@@ -942,14 +1155,23 @@ esac
 EOF
 cat > "$START_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
-printf '%s\n' '{"status":"ok","instance":"start-instance","version":"9.9.9","protocol":2}'
+printf '%s\n' '{"status":"ready","inventory":{"state":"ready"},"instance":"start-instance","version":"9.9.9","release_version":"9.9.9","revision":"test-revision","bundle_hash":"test-web","protocol":3}'
 EOF
 cat > "$START_BIN_DIR/herdr" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+mkdir -p "$START_BIN_DIR/web"
+cp "$REPO_DIR/web/release.json" "$START_BIN_DIR/web/release.json"
+printf '%s\n' '{"version":"9.9.9","revision":"test-revision","web_hash":"test-web"}' \
+    > "$START_BIN_DIR/release-manifest.json"
+export HERDR_TEST_READINESS_BIN="$WORK_DIR/readiness-helper"
 cat > "$START_BIN_DIR/relay-bin" <<'EOF'
 #!/bin/sh
+case "$1" in
+    version) printf '%s\n' '{"version":"9.9.9","revision":"test-revision"}'; exit 0 ;;
+    verify-readiness) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
+esac
 printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1
 EOF
@@ -979,7 +1201,7 @@ mkdir -p "$STABLE_SWITCH_DIR"
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-install-service.sh" \
     "$STABLE_SWITCH_DIR/"
 cat > "$STABLE_SWITCH_DIR/stable-setup.sh" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$HERDR_RELAY_ENV" ||
     [ -n "${HERDR_GATEWAY_URL:-}" ]; then
     echo "stable setup still inherited the gateway" >&2
@@ -1226,7 +1448,16 @@ case "$1 $2" in
 esac
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$MOVE_BIN/service.sh"
-chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl" "$MOVE_BIN/relay-stub" "$MOVE_BIN/service.sh"
+# change-hostname.sh reinstalls the service with the repository's service.sh,
+# so report it as not loaded instead of letting that reach this machine's relay.
+cat > "$MOVE_BIN/launchctl" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+    "print gui/"*/*) exit 1 ;;
+esac
+EOF
+chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl" "$MOVE_BIN/relay-stub" "$MOVE_BIN/service.sh" \
+    "$MOVE_BIN/launchctl"
 MOVE_STATE_RECORD="$WORK_DIR/state-hostname"
 export MOVE_STATE_RECORD
 reset_move_config() {

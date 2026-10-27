@@ -1,4 +1,5 @@
-import type { Agent } from './types';
+import type { Agent, FrontendTargetRef } from './types';
+import { normalizeFrontendTargetRef, targetRefForAgent } from './resource-id';
 
 const DRAFT_PREFIX = 'herdr_prompt_draft_v1:';
 const DRAFT_VERSION = 1;
@@ -19,7 +20,7 @@ interface PromptDraftRecord {
  * keeps them alive across the remount a pane switch performs. Bounded like the
  * persisted set; lost on reload, which the composer warning states.
  */
-const memoryDrafts = new Map<string, { text: string; updatedAt: number }>();
+const memoryDrafts = new Map<string, { text: string; updatedAt: number; saved: boolean }>();
 
 function readMemoryDraft(identity: string, now: number): string {
   const draft = memoryDrafts.get(identity);
@@ -33,7 +34,7 @@ function readMemoryDraft(identity: string, now: number): string {
 
 function writeMemoryDraft(identity: string, text: string, updatedAt: number): void {
   memoryDrafts.delete(identity);
-  memoryDrafts.set(identity, { text, updatedAt });
+  memoryDrafts.set(identity, { text, updatedAt, saved: false });
   while (memoryDrafts.size > DRAFT_MAX_ENTRIES) {
     const oldest = memoryDrafts.keys().next();
     if (oldest.done) return;
@@ -41,13 +42,36 @@ function writeMemoryDraft(identity: string, text: string, updatedAt: number): vo
   }
 }
 
+/** True when a draft lives only in this page because storage refused it. */
+export function unsavedPromptDraft(now = Date.now()): boolean {
+  for (const draft of memoryDrafts.values()) {
+    if (!draft.saved && now - draft.updatedAt <= DRAFT_MAX_AGE_MS) return true;
+  }
+  return false;
+}
+
 export type PromptDraftSaveResult = 'saved' | 'cleared' | 'too-large' | 'unavailable';
 
-export function promptDraftIdentity(agent: Agent): string {
-  const paneIdentity = String(agent.terminal_id || [agent.workspace_id, agent.tab_id, agent.raw_pane_id].filter(Boolean).join(':'));
+export function promptDraftTarget(value: unknown): FrontendTargetRef | null {
+  const target = normalizeFrontendTargetRef(value);
+  const session = target?.agent_session_id;
+  if (typeof session !== 'string' || !session.trim()
+    || /[\uD800-\uDFFF]/u.test(session)) return null;
+  return target;
+}
+
+export function promptComposerScope(agent: Agent): string {
   return JSON.stringify([
-    agent.relay_id,
-    paneIdentity,
+    agent.relay_id, agent.server_session_id, agent.raw_pane_id, agent.pane_id,
+    agent.terminal_id, agent.generation, agent.agent_session_id, agent.agent, agent.cwd,
+  ]);
+}
+
+export function promptDraftIdentity(agent: Agent): string | null {
+  const target = promptDraftTarget(targetRefForAgent(agent));
+  if (!target) return null;
+  return JSON.stringify([
+    target,
     String(agent.agent || ''),
     String(agent.cwd || ''),
   ]);
@@ -75,6 +99,7 @@ function parseDraft(raw: string | null): PromptDraftRecord | null {
 
 export function loadPromptDraft(agent: Agent, now = Date.now()): string {
   const identity = promptDraftIdentity(agent);
+  if (!identity) return '';
   const key = promptDraftKey(identity);
   const live = readMemoryDraft(identity, now);
   if (live) return live;
@@ -92,6 +117,7 @@ export function loadPromptDraft(agent: Agent, now = Date.now()): string {
 
 export function savePromptDraft(agent: Agent, text: string, now = Date.now()): PromptDraftSaveResult {
   const identity = promptDraftIdentity(agent);
+  if (!identity) return 'unavailable';
   const key = promptDraftKey(identity);
   if (text) writeMemoryDraft(identity, text, now);
   else memoryDrafts.delete(identity);
@@ -109,6 +135,7 @@ export function savePromptDraft(agent: Agent, text: string, now = Date.now()): P
     const draft: PromptDraftRecord = { version: DRAFT_VERSION, identity, text, updatedAt: now };
     localStorage.setItem(key, JSON.stringify(draft));
     prunePromptDrafts(now);
+    memoryDrafts.get(identity)!.saved = true;
     return 'saved';
   } catch {
     return 'unavailable';
@@ -117,6 +144,7 @@ export function savePromptDraft(agent: Agent, text: string, now = Date.now()): P
 
 export function clearPromptDraft(agent: Agent): void {
   const identity = promptDraftIdentity(agent);
+  if (!identity) return;
   memoryDrafts.delete(identity);
   try {
     localStorage.removeItem(promptDraftKey(identity));

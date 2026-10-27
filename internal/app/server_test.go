@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,6 +63,7 @@ func publishInventoryForTest(t *testing.T, server *Server) {
 }
 func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 	mutation := protocol.ActionMetadata{Operation: "send_input", Class: protocol.ActionMutating}
+	filter := protocol.ActionMetadata{Operation: "send_filter_text", Class: protocol.ActionMutating}
 	read := protocol.ActionMetadata{Operation: "read_pane", Class: protocol.ActionReadOnly}
 
 	for _, test := range []struct {
@@ -74,6 +76,8 @@ func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 	}{
 		{name: "reader mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: mutation, wantDenied: true},
 		{name: "reader read", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: read},
+		{name: "reader filter denied", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: filter, wantDenied: true},
+		{name: "controller filter allowed", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleController)}, authenticated: true, action: filter},
 		{name: "reader self revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-current"},
 		{name: "reader other revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-other", wantDenied: true},
 		{name: "controller mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleController)}, authenticated: true, action: mutation},
@@ -411,21 +415,26 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 func TestCaptureFinishedPaneUsesOriginalConversationCwd(t *testing.T) {
 	home := t.TempDir()
 	const sessionID = "123e4567-e89b-12d3-a456-426614174321"
+	oldCWD := "/work/old-pane"
+	oldForeground := "/work/old-foreground"
+	newCWD := "/work/new-pane"
+	newForeground := "/work/new-foreground"
 	writeClaudeTranscriptAnswering(t,
-		filepath.Join(home, ".claude", "projects", "-work-old", sessionID+".jsonl"),
+		filepath.Join(home, ".claude", "projects", "-work-old-foreground", sessionID+".jsonl"),
 		"Old work", "answer from original cwd")
 	writeClaudeTranscriptAnswering(t,
-		filepath.Join(home, ".claude", "projects", "-work-new", sessionID+".jsonl"),
+		filepath.Join(home, ".claude", "projects", "-work-new-foreground", sessionID+".jsonl"),
 		"New work", "answer from current cwd")
 
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	s.state.CommitInventory([]*coordinator.AgentState{{
-		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new", SessionID: sessionID,
+		PaneID: "pane-1", Agent: "claude", Cwd: newCWD, ForegroundCwd: newForeground, SessionID: sessionID,
 	}}, s.state.RevisionCounter())
 
-	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", "/work/old", sessionID); got != "answer from original cwd" {
-		t.Fatalf("captured response = %q, want the transcript bound to the completion's original cwd", got)
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", oldCWD, sessionID,
+		conversation.ProjectContext{CWD: oldCWD, ForegroundCWD: oldForeground}); got != "answer from original cwd" {
+		t.Fatalf("captured response = %q, want the transcript bound to the completion's original project", got)
 	}
 }
 
@@ -439,7 +448,7 @@ func TestActivityBackfillKeepsHistoricalSessionCwdEmpty(t *testing.T) {
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	s.state.CommitInventory([]*coordinator.AgentState{{
-		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new",
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new", ForegroundCwd: "/work/unrelated",
 	}}, s.state.RevisionCounter())
 	s.activityView = []activity.Entry{{
 		ID:        "historical-finished",
@@ -454,6 +463,31 @@ func TestActivityBackfillKeepsHistoricalSessionCwdEmpty(t *testing.T) {
 	backfilled := s.recentActivities(1)
 	if len(backfilled) != 1 || backfilled[0].Extract != "historical answer" {
 		t.Fatalf("historical activity = %#v, want response located without current pane cwd", backfilled)
+	}
+}
+
+func TestActivityBackfillUsesLiveForegroundProject(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174398"
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-pane", sessionID+".jsonl"),
+		"Pane copy", "pane answer")
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-foreground", sessionID+".jsonl"),
+		"Foreground copy", "foreground answer")
+
+	s := testServer()
+	s.conversationM = conversation.NewReader(home)
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground", SessionID: sessionID,
+	}}, s.state.RevisionCounter())
+	s.activityView = []activity.Entry{{
+		ID: "live-finished", Kind: "finished", Status: "completed", Agent: "claude", PaneID: "pane-1", Session: sessionID,
+	}}
+
+	backfilled := s.recentActivities(1)
+	if len(backfilled) != 1 || backfilled[0].Extract != "foreground answer" {
+		t.Fatalf("live foreground activity = %#v, want foreground response", backfilled)
 	}
 }
 
@@ -479,11 +513,29 @@ func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
 	}
 }
 
+func TestForegroundClaudeTranscriptUsesConfiguredRoot(t *testing.T) {
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+	const sessionID = "123e4567-e89b-12d3-a456-426614174322"
+	path := filepath.Join(profile, "projects", "-work-foreground", sessionID+".jsonl")
+	writeInvariantRows(t, path,
+		map[string]any{"type": "assistant", "message": map[string]any{"content": "question"}})
+
+	reader := conversation.NewReader(home)
+	location := reader.LocateWithProject("claude", conversation.ProjectContext{
+		CWD: "/work/pane", ForegroundCWD: "/work/foreground",
+	}, sessionID)
+	if location.Path != path || location.Root != filepath.Join(profile, "projects") {
+		t.Fatalf("location = %#v, want foreground profile transcript %q in configured root", location, path)
+	}
+}
+
 func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 	home := t.TempDir()
 	anchor := "123e4567-e89b-12d3-a456-426614174000"
 	child := "123e4567-e89b-12d3-a456-426614174001"
-	root := filepath.Join(home, ".claude", "projects", "-work")
+	root := filepath.Join(home, ".claude", "projects", "-work-foreground")
 	writeInvariantRows(t, filepath.Join(root, anchor+".jsonl"),
 		map[string]any{"type": "assistant", "uuid": "a1", "message": map[string]any{"content": "parent response"}},
 		map[string]any{"type": "continued-in", "sessionId": anchor, "continuedInSessionId": child},
@@ -503,7 +555,7 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 	server.conversationM = reader
 	server.conversationB = browser
 	server.state.CommitInventory([]*coordinator.AgentState{{
-		PaneID: "pane-1", Agent: "claude", Cwd: "/work", SessionID: anchor,
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground", SessionID: anchor,
 		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
 	}}, server.state.RevisionCounter())
 	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
@@ -547,13 +599,131 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 			Entries []struct {
 				Text string `json:"text"`
 			} `json:"entries"`
+			NextCursor string `json:"next_cursor"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &response); err != nil {
 		t.Fatal(err)
 	}
-	if !response.OK || len(response.Data.Entries) != 1 || response.Data.Entries[0].Text != "new child response" {
+	if !response.OK || len(response.Data.Entries) != 1 || response.Data.Entries[0].Text != "new child response" || response.Data.NextCursor == "" {
 		t.Fatalf("history command response = %s", data)
+	}
+
+	olderPayload, err := json.Marshal(map[string]any{
+		"type": "get_conversation_history", "request_id": "history-2", "pane_id": "pane-1",
+		"cursor": response.Data.NextCursor, "limit": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, olderPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, data, err = conn.Read(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var older struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Entries []struct {
+				Text string `json:"text"`
+			} `json:"entries"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &older); err != nil {
+		t.Fatal(err)
+	}
+	if !older.OK || len(older.Data.Entries) != 1 || older.Data.Entries[0].Text != "parent response" {
+		t.Fatalf("older history command response = %s", data)
+	}
+}
+
+func TestConversationHistoryRejectsForegroundChangeDuringRead(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174323"
+	oldCWD := "/work/pane"
+	oldForeground := "/work/foreground"
+	newForeground := "/work/other-foreground"
+	writeInvariantRows(t, filepath.Join(home, ".claude", "projects", "-work-foreground", sessionID+".jsonl"),
+		map[string]any{"type": "assistant", "uuid": "answer", "message": map[string]any{"content": "foreground answer"}})
+
+	server := testServer()
+	if server.conversationB != nil {
+		_ = server.conversationB.Close()
+	}
+	reader := conversation.NewReader(home)
+	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.conversationM = reader
+	server.conversationB = browser
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: oldCWD, ForegroundCwd: oldForeground, SessionID: sessionID,
+		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
+	}}, server.state.RevisionCounter())
+
+	readEntered := make(chan struct{})
+	releaseRead := make(chan struct{})
+	server.conversationHistoryReadObserver = func() {
+		close(readEntered)
+		<-releaseRead
+	}
+	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		defer admitted()
+		inbound, decodeErr := protocol.DecodeMap(message)
+		if decodeErr != nil {
+			t.Errorf("decode history command: %v", decodeErr)
+			return
+		}
+		server.handleConversationHistory(client, inbound)
+	})
+	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
+	defer httpServer.Close()
+	defer func() {
+		server.hub.Shutdown(context.Background())
+		browser.Close()
+	}()
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	payload, err := json.Marshal(map[string]any{
+		"type": "get_conversation_history", "request_id": "history-stale", "pane_id": "pane-1", "limit": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-readEntered:
+	case <-ctx.Done():
+		t.Fatal("history read did not reach the deterministic barrier")
+	}
+
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: oldCWD, ForegroundCwd: newForeground, SessionID: sessionID,
+		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
+	}}, server.state.RevisionCounter())
+	close(releaseRead)
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || response.Error != "Agent changed while conversation history was loading" {
+		t.Fatalf("stale history response = %s", data)
 	}
 }
 
@@ -595,15 +765,31 @@ func TestCaptureFinishedPaneFollowsClaudeContinuation(t *testing.T) {
 	}
 }
 
+func TestForegroundCwdIsNotSerializedInAgentPayload(t *testing.T) {
+	agent := &coordinator.AgentState{Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground"}
+	data, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["cwd"] != agent.Cwd || strings.Contains(string(data), "foreground_cwd") || strings.Contains(string(data), agent.ForegroundCwd) {
+		t.Fatalf("serialized agent payload = %s, want pane cwd only", data)
+	}
+}
+
 func TestConversationTupleIncludesAgentCwdAndSession(t *testing.T) {
 	base := &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}
 	if !sameConversationTuple(base, &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}) {
 		t.Fatal("identical conversation tuples did not match")
 	}
 	for name, changed := range map[string]*coordinator.AgentState{
-		"agent":   {Agent: "qoder", Cwd: "/work", SessionID: "session"},
-		"cwd":     {Agent: "claude", Cwd: "/other", SessionID: "session"},
-		"session": {Agent: "claude", Cwd: "/work", SessionID: "other"},
+		"agent":      {Agent: "qoder", Cwd: "/work", SessionID: "session"},
+		"cwd":        {Agent: "claude", Cwd: "/other", SessionID: "session"},
+		"foreground": {Agent: "claude", Cwd: "/work", ForegroundCwd: "/work/tree", SessionID: "session"},
+		"session":    {Agent: "claude", Cwd: "/work", SessionID: "other"},
 	} {
 		if sameConversationTuple(base, changed) {
 			t.Errorf("%s change was not detected", name)
@@ -1129,8 +1315,15 @@ func TestCommittedInventoryPublicationRepairsZeroListenerRefreshAndReconnect(t *
 	reconnected.CloseNow()
 }
 
+// Cancelling the server drops in-flight socket connections, so the fixture sees
+// ordinary teardown errors that say nothing about the behaviour under test.
+func fixtureConnectionTornDown(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
 func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "s")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1154,6 +1347,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	pollReady := make(chan struct{})
 	pollFailed := make(chan struct{})
 	var inventoryCalls atomic.Int32
+	var failNextInventory atomic.Bool
 	serverDone := make(chan error, 1)
 	go func() {
 		var serveErr error
@@ -1180,8 +1374,8 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 				encoder := json.NewEncoder(conn)
 				switch request.Method {
 				case "agent.list":
-					call := inventoryCalls.Add(1)
-					if call == 2 {
+					inventoryCalls.Add(1)
+					if failNextInventory.CompareAndSwap(true, false) {
 						close(pollFailed)
 						serveErr = encoder.Encode(map[string]any{
 							"id":    request.ID,
@@ -1357,6 +1551,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	// The event operation has started and is paused before its commit. A real
 	// poll failure now races that in-flight event recovery through the installed
 	// production publisher; the later ready commit must not be lost.
+	failNextInventory.Store(true)
 	server.poller.Wake()
 	select {
 	case <-pollFailed:
@@ -1443,7 +1638,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 	cancel()
@@ -1455,7 +1650,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 }
 
 func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1676,7 +1871,7 @@ func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 }
@@ -1838,7 +2033,7 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
+func TestPreparePaneResponsePreservesHistoryForViewportOnlyRead(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
@@ -2381,7 +2576,6 @@ func TestCopyAgentResponseValidatesPaneState(t *testing.T) {
 			paneID: "pane-1",
 			setup: func(s *Server) {
 				s.state.CommitInventory([]*coordinator.AgentState{{PaneID: "pane-1", Agent: "unknown", Status: "idle"}}, s.state.RevisionCounter())
-				s.profiles.Remember("pane-1", "unknown")
 				s.clipboardRead = func(context.Context) ([]byte, error) { return nil, nil }
 				s.clipboardWrite = func(context.Context, []byte) error { return nil }
 			},
@@ -2418,7 +2612,6 @@ func TestCopyAgentResponseRejectsReplacedPane(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{
 		{PaneID: paneID, Agent: "claude", Status: "idle", PaneRevision: 4},
 	}, s.state.RevisionCounter())
-	s.profiles.Remember(paneID, "claude")
 	s.clipboardRead = func(context.Context) ([]byte, error) { return []byte("before"), nil }
 	s.clipboardWrite = func(context.Context, []byte) error { return nil }
 	s.copyRunner = func(
@@ -2446,7 +2639,6 @@ func TestCopyAgentResponseReturnsCopiedData(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{
 		{PaneID: paneID, Agent: "claude", Status: "idle", PaneRevision: 4},
 	}, s.state.RevisionCounter())
-	s.profiles.Remember(paneID, "claude")
 	s.clipboardRead = func(context.Context) ([]byte, error) { return []byte("before"), nil }
 	s.clipboardWrite = func(context.Context, []byte) error { return nil }
 	s.copyRunner = func(
@@ -2508,6 +2700,24 @@ func TestHealthz(t *testing.T) {
 	}
 	if resp["gateway_available_version"] != "0.9.0" {
 		t.Errorf("gateway_available_version = %v, want 0.9.0", resp["gateway_available_version"])
+	}
+}
+
+func TestReadyzIncludesReleaseIdentityForEmptyInventory(t *testing.T) {
+	s := testServer()
+	s.ready = true
+	s.state.CommitInventory(nil, 0)
+	w := httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest("GET", "/readyz", nil))
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || response["status"] != "ready" || response["instance"] != "test-instance" || response["release_version"] != "0.9.0" || response["revision"] != "abc123" {
+		t.Fatalf("readiness response: %d %+v", w.Code, response)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("readiness may be cached")
 	}
 }
 
@@ -3186,10 +3396,11 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 
 func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	response := map[string]any{
-		"type":    "pane_content",
-		"pane_id": "w1:p1",
-		"content": "unchanged output",
-		"format":  "ansi",
+		"request_id": "identified-read",
+		"type":       "pane_content",
+		"pane_id":    "w1:p1",
+		"content":    "unchanged output",
+		"format":     "ansi",
 		"target": protocol.TargetRef{
 			ServerSessionID: "primary",
 			PaneID:          "w1:p1",
@@ -3210,6 +3421,9 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 	if unchanged["target"] != response["target"] {
 		t.Fatalf("unchanged response lost exact target: %#v", unchanged)
+	}
+	if unchanged["request_id"] != response["request_id"] {
+		t.Fatalf("unchanged response lost read identity: %#v", unchanged)
 	}
 	if _, included := unchanged["content"]; included {
 		t.Fatalf("unchanged response included terminal content: %#v", unchanged)

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const (
@@ -53,8 +55,9 @@ func (e *OutcomeError) Error() string {
 
 // CLIError is a machine-readable failure returned by the Herdr CLI.
 type CLIError struct {
-	Code    string
-	Message string
+	Code               string
+	Message            string
+	refusedBeforeInput bool
 }
 
 func (e *CLIError) Error() string {
@@ -101,7 +104,7 @@ func refusalCode(err error) (string, bool) {
 		return "", false
 	}
 	_, refused := refusalCodes[cliErr.Code]
-	return cliErr.Code, refused
+	return cliErr.Code, refused || cliErr.refusedBeforeInput
 }
 
 func IsRefused(err error) bool {
@@ -129,6 +132,8 @@ func RefusalMessage(code string) string {
 		return "Herdr server is not running"
 	case "agent_pane_busy":
 		return "Agent pane is still starting"
+	case "agent_not_ready":
+		return "Agent is not ready to receive prompts; review the pane before retrying"
 	case "protocol_mismatch":
 		return "Herdr server protocol is incompatible with this relay"
 	case "workspace_group_close_required":
@@ -631,6 +636,45 @@ func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProce
 	return &result.ProcessInfo, nil
 }
 
+// PaneGet asks the running Herdr server for one pane over a fresh socket
+// request. Unlike the agent inventory it also covers plain shell panes, and it
+// carries the terminal incarnation (terminal_id) a pane-size lease is bound to.
+func (c *Client) PaneGet(ctx context.Context, paneID string) (*Pane, error) {
+	var result struct {
+		Pane *Pane `json:"pane"`
+	}
+	if err := c.api.requestResult(ctx, "pane.get", map[string]any{"pane_id": paneID}, "pane_info", &result); err != nil {
+		return nil, fmt.Errorf("herdr pane get: %w", err)
+	}
+	if result.Pane == nil {
+		return nil, errors.New("herdr pane get: pane.get response has no pane")
+	}
+	return result.Pane, nil
+}
+
+// PaneProcessInfoFresh reads pane.process_info over a fresh socket request,
+// without the CLI process PaneProcessInfo spawns. Pane-size identity checks
+// call it before every terminal write, so a cached answer is never reused.
+func (c *Client) PaneProcessInfoFresh(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
+	var result struct {
+		ProcessInfo *PaneProcessInfo `json:"process_info"`
+	}
+	if err := c.api.requestResult(ctx, "pane.process_info", map[string]any{"pane_id": paneID}, "pane_process_info", &result); err != nil {
+		return nil, fmt.Errorf("herdr pane process info: %w", err)
+	}
+	if result.ProcessInfo == nil {
+		return nil, errors.New("herdr pane process info: response has no process_info")
+	}
+	return result.ProcessInfo, nil
+}
+
+// IsPaneNotFound reports Herdr's structured refusal for a pane that no longer
+// exists, from either the socket API or the CLI.
+func IsPaneNotFound(err error) bool {
+	var cliErr *CLIError
+	return errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == "pane_not_found"
+}
+
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) (PaneRead, error) {
 	return c.readPane(ctx, paneID, lines, format, "recent-unwrapped")
 }
@@ -723,6 +767,10 @@ func (c *Client) SendText(ctx context.Context, paneID, text string) error {
 
 func (c *Client) Prompt(ctx context.Context, paneID, text string) error {
 	_, err := c.runCommand(ctx, "agent", "prompt", paneID, text)
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == "agent_not_ready" {
+		cliErr.refusedBeforeInput = true
+	}
 	return err
 }
 
@@ -741,21 +789,31 @@ func (c *Client) RenamePane(ctx context.Context, paneID, name string) error {
 	return c.RenameAgent(ctx, paneID, name)
 }
 
-func (c *Client) StartAgent(ctx context.Context, name, kind, paneID string, timeoutMs int) (string, error) {
+// StartAgent starts kind in paneID. agentArgs, when given, are the started
+// agent's own arguments - `hermes -p <profile>` and the like. They follow a
+// "--" separator so herdr stops parsing at that point and the agent owns
+// everything after it; without that, a profile named like a herdr flag would be
+// read as one.
+func (c *Client) StartAgent(ctx context.Context, name, kind, paneID string, timeoutMs int, agentArgs ...string) (string, error) {
 	var result CreateResult
-	if err := c.runResult(ctx, &result,
+	args := []string{
 		"agent", "start", name,
 		"--kind", kind,
 		"--pane", paneID,
 		"--timeout", strconv.Itoa(timeoutMs),
-	); err != nil {
-		return "", fmt.Errorf("herdr agent start: %w", err)
+	}
+	if len(agentArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, agentArgs...)
+	}
+	if err := c.runResult(ctx, &result, args...); err != nil {
+		return "", fmt.Errorf("herdr agent start: %w", dispatchedAfterSuccess(err))
 	}
 	if result.PaneID == "" {
 		result.PaneID = paneID
 	}
 	if result.PaneID == "" {
-		return "", errors.New("herdr agent start: response has no pane_id")
+		return "", dispatchedAfterSuccess(errors.New("herdr agent start: response has no pane_id"))
 	}
 	return result.PaneID, nil
 }
@@ -792,6 +850,27 @@ func (c *Client) run(parent context.Context, timeout time.Duration, args ...stri
 	return c.runCommand(ctx, args...)
 }
 
+type dispatchCheckKey struct{}
+
+func WithDispatchCheck(ctx context.Context, check func() error) context.Context {
+	prior, _ := ctx.Value(dispatchCheckKey{}).(func() error)
+	return context.WithValue(ctx, dispatchCheckKey{}, func() error {
+		if prior != nil {
+			if err := prior(); err != nil {
+				return err
+			}
+		}
+		return check()
+	})
+}
+
+func CheckDispatch(ctx context.Context) error {
+	if check, ok := ctx.Value(dispatchCheckKey{}).(func() error); ok {
+		return check()
+	}
+	return nil
+}
+
 func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, error) {
 	ctx := parent
 	cancel := func() {}
@@ -811,8 +890,22 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 		return nil, &OutcomeError{Started: false, Err: ctx.Err()}
 	}
 
-	cmd := exec.Command(c.bin, args...)
-	cmd.Env = append(cmd.Environ(), "HERDR_SOCKET_PATH="+c.socketPath)
+	if err := ctx.Err(); err != nil {
+		return nil, &OutcomeError{Started: false, Err: err}
+	}
+	if err := CheckDispatch(ctx); err != nil {
+		return nil, &OutcomeError{Started: false, Err: err}
+	}
+
+	cmd := childenv.Command(c.bin, args...)
+	environment := cmd.Env[:0]
+	for _, variable := range cmd.Env {
+		key, _, _ := strings.Cut(variable, "=")
+		if key != "HERDR_SOCKET_PATH" {
+			environment = append(environment, variable)
+		}
+	}
+	cmd.Env = append(environment, "HERDR_SOCKET_PATH="+c.socketPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Process-group termination owns cancellation. WaitDelay is the final
 	// backstop for inherited stdout/stderr descriptors held by a descendant

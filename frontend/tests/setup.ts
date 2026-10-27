@@ -19,6 +19,17 @@ function createMemoryStorage(): Storage {
 Object.defineProperty(globalThis, 'localStorage', { value: createMemoryStorage(), configurable: true, writable: true });
 Object.defineProperty(globalThis, 'sessionStorage', { value: createMemoryStorage(), configurable: true, writable: true });
 
+const heldLocks = new Set<string>();
+Object.defineProperty(navigator, 'locks', { configurable: true, value: {
+  async request(name: string, options: LockOptions, action: (lock: Lock | null) => unknown) {
+    if (!options.ifAvailable) throw new Error('Synthetic lock requires nonblocking acquisition');
+    if (heldLocks.has(name)) return action(null);
+    heldLocks.add(name);
+    try { return await action({ name, mode: 'exclusive' }); }
+    finally { heldLocks.delete(name); }
+  },
+} });
+
 if (!HTMLDialogElement.prototype.showModal) {
   HTMLDialogElement.prototype.showModal = function showModal() {
     this.setAttribute('open', '');

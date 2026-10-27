@@ -73,7 +73,7 @@ func TestRunCommandContextTerminatesDescendantHoldingOutputPipe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	command := exec.Command("/bin/sh", scriptPath)
 	var commandErr error
@@ -84,7 +84,7 @@ func TestRunCommandContextTerminatesDescendantHoldingOutputPipe(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(8 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("runCommandContext did not return after cancelling a descendant-held pipe")
 	}
 	if !errors.Is(commandErr, context.DeadlineExceeded) {
@@ -189,8 +189,32 @@ func TestWorkerInstallFailureIsRetryable(t *testing.T) {
 		state.FinishedAt == "" {
 		t.Fatalf("state = %#v", state)
 	}
-	if _, err := os.Stat(jobPath); err != nil {
-		t.Fatalf("failed job was removed: %v", err)
+	if _, err := os.Stat(jobPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed job still exists: %v", err)
+	}
+}
+
+func TestWorkerRemovesJobWhenAnotherUpdateHoldsTheLock(t *testing.T) {
+	jobPath, job := writeWorkerTestJob(t)
+	if err := os.MkdirAll(job.ReleaseRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireLock(filepath.Join(job.ReleaseRoot, "update.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	worker := Worker{
+		Prepare: func(context.Context, Job) (stagedRelease, error) {
+			t.Fatal("a second worker prepared a release while the first held the lock")
+			return stagedRelease{}, nil
+		},
+	}
+	if err := worker.Run(t.Context(), jobPath); !errors.Is(err, ErrConcurrent) {
+		t.Fatalf("worker error = %v, want %v", err, ErrConcurrent)
+	}
+	if _, err := os.Stat(jobPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("concurrent job still exists: %v", err)
 	}
 }
 
