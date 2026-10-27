@@ -92,6 +92,12 @@ const (
 // Options configures a Server. Every limit follows the same convention: a zero
 // value selects the documented default, and a negative value removes the limit.
 type Options struct {
+	// RegistrationToken optionally requires relays to prove knowledge of this
+	// shared secret. Empty preserves open registration.
+	RegistrationToken string
+	// AllowedRelayIDs optionally restricts registrations to these full ids.
+	// An empty map allows any id; it is independent of RegistrationToken.
+	AllowedRelayIDs map[string]bool
 	// MaxRelays caps how many relay ids may be registered at once. It bounds
 	// the registration table and the goroutines and sockets behind it on a
 	// shared public instance. Re-registering an id that is already present
@@ -134,8 +140,8 @@ type Options struct {
 	// not bind a well-known UDP port by accident. The gateway binary supplies
 	// the documented default (HERDR_GATEWAY_STUN_ADDR, ":3478").
 	STUNAddr string
-	// TrustProxyHeaders makes the gateway believe the leftmost X-Forwarded-For
-	// entry. Enable it only when a trusted reverse proxy terminates TLS.
+	// TrustProxyHeaders trusts the rightmost non-empty X-Forwarded-For entry.
+	// Enable only behind a single trusted proxy, with no direct listener access.
 	TrustProxyHeaders bool
 	// Version and Revision identify the gateway build in /healthz and hello
 	// messages. They are operational metadata, not protocol negotiation: Proto
@@ -409,19 +415,21 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusOK, whoamiResponse{IP: s.clientIP(r)})
 }
 
-// clientIP is the address the gateway attributes this request to. Behind a
-// trusted proxy the leftmost X-Forwarded-For entry wins, because that is the
-// only place the real client address survives.
+// clientIP is the address the gateway attributes this request to. A single
+// trusted reverse proxy appends (or replaces the header with) the address it
+// saw, so the rightmost non-empty entry wins, ignoring forged entries to its left.
 func (s *Server) clientIP(r *http.Request) string {
 	if s.opts.TrustProxyHeaders {
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			first := strings.TrimSpace(forwarded)
-			if comma := strings.IndexByte(first, ','); comma >= 0 {
-				first = strings.TrimSpace(first[:comma])
+		forwarded := r.Header.Get("X-Forwarded-For")
+		for forwarded != "" {
+			comma := strings.LastIndexByte(forwarded, ',')
+			if last := strings.TrimSpace(forwarded[comma+1:]); last != "" {
+				return last
 			}
-			if first != "" {
-				return first
+			if comma < 0 {
+				break
 			}
+			forwarded = forwarded[:comma]
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

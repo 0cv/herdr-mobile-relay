@@ -87,8 +87,9 @@ Open inbound TCP 80 and 443, inbound UDP 3478, and allow outbound UDP.
 
 ## What the gateway can and cannot see
 
-It holds no secrets — not the relay key, not the pairing token, not the session
-keys.
+It never holds the relay key, phone pairing credentials, or session keys. If
+registration authentication is enabled, it holds a separate shared registration
+token that grants no access to encrypted phone sessions.
 
 It sees source addresses, connection times, byte counts, frame sizes and timing,
 and two rendezvous values — the 22-character `relay_id` a relay registers under,
@@ -100,11 +101,12 @@ terminates on the phone and the relay), the WebRTC SDP and ICE candidates that
 travel inside that session, or anything derived from them: prompts, terminal
 output, uploads, push subscriptions.
 
-The gateway does not authenticate anyone. It issues a random 32-byte challenge,
+The gateway does not authenticate phones. It issues a random 32-byte challenge,
 forwards the phone's HMAC answer to the relay, and **the relay** verifies it
 before the encrypted handshake starts, using a key only it and the paired phone
 can derive. A hostile gateway, or an attacker who steals a `relay_id`, still
-cannot get past the relay.
+cannot get past the relay. Optional registration controls below restrict which
+computer relays can use your gateway.
 
 Logs hold transport events at `INFO`, with relay ids truncated to six characters;
 frame bytes, nonces, and proofs are never logged. The only thing persisted, and
@@ -223,11 +225,13 @@ server {
 }
 ```
 
-Set `HERDR_GATEWAY_TRUSTED_PROXY=true` behind a proxy, so the per-IP connect
-limit and `/probe` see the real client address. Leave it `false` when the gateway
-is exposed directly, or any client can forge `X-Forwarded-For` and bypass the
-rate limit. Do not compress these routes: the payloads are ciphertext, so
-compression buys nothing and leaks length information.
+Set `HERDR_GATEWAY_TRUSTED_PROXY=true` only behind a single trusted reverse
+proxy, and prevent clients from reaching the gateway listener directly. The
+rightmost non-empty `X-Forwarded-For` entry is the address that proxy saw; forged
+entries to its left are ignored. The proxy must append the client address or
+replace the header. Leave this `false` when exposed directly, or clients can
+forge the header and bypass per-IP limits. Do not compress these routes: the
+payloads are ciphertext, so compression buys nothing and leaks length information.
 
 ## Configuration
 
@@ -237,6 +241,8 @@ Everything is read from the environment at startup; there are no flags.
 | --- | --- | --- |
 | `HERDR_GATEWAY_ADDR` | `:8443` | Listen address. Use `127.0.0.1:8443` behind a proxy. |
 | `HERDR_GATEWAY_STUN_ADDR` | `:3478` | UDP address-discovery listener. Must be reachable directly; a proxy cannot carry it. Empty disables it. |
+| `HERDR_GATEWAY_REGISTRATION_TOKEN` | unset | Optional shared registration secret, also set on each relay. Missing or invalid HMAC proofs return `unauthorized`. |
+| `HERDR_GATEWAY_ALLOWED_RELAY_IDS` | unset | Comma/whitespace-separated full 22-character relay ids allowed to register. Invalid entries fail startup; other ids return `unauthorized`. |
 | `HERDR_GATEWAY_MAX_CLIENTS_PER_RELAY` | `8` | Concurrent phone connections per relay. Negative removes the cap. Refusals return `too_many_clients`. |
 | `HERDR_GATEWAY_MAX_RELAYS` | `1024` | Registered relays this gateway will hold. Negative removes the cap. Refusals return `at_capacity`. |
 | `HERDR_GATEWAY_MAX_CLIENTS` | `512` | Phone connections across every relay. Negative removes the cap. Refusals return `at_capacity`. |
@@ -245,7 +251,7 @@ Everything is read from the environment at startup; there are no flags.
 | `HERDR_GATEWAY_QUOTA_WARN_PERCENT` | `80` | Percentage of the quota at which the relay receives one advisory warning. Negative disables it. |
 | `HERDR_GATEWAY_IDLE_TIMEOUT` | `300` | Seconds a phone connection may carry no traffic before it is closed. Negative disables idle reaping. Relay links use ping/pong instead. |
 | `HERDR_GATEWAY_STATE` | unset | JSON file holding the byte counters. Unset keeps them in memory only. |
-| `HERDR_GATEWAY_TRUSTED_PROXY` | `false` | Believe the leftmost `X-Forwarded-For` entry. Enable only behind a proxy you control. |
+| `HERDR_GATEWAY_TRUSTED_PROXY` | `false` | Believe the rightmost non-empty `X-Forwarded-For` entry. Enable only behind a single trusted proxy you control, with no direct access to the listener. |
 | `HERDR_GATEWAY_LOG_FORMAT` | `text` | `text` or `json` structured logs on stderr. |
 
 Fixed: protocol version 1, a 10-second hello deadline, the wire protocol's
@@ -256,6 +262,25 @@ The state file, when configured, is loaded at startup and rewritten atomically �
 mode `0600` — on the 30-second save cycle and on shutdown whenever the counters
 changed. It holds quota bookkeeping and nothing else; entries from previous
 months are ignored on load and dropped from the next write.
+
+### Restrict registrations before exposing a private gateway
+
+By default registration stays open for community gateways and older relays.
+For a private gateway, generate a strong random secret (for example
+`openssl rand -hex 32`) and set `HERDR_GATEWAY_REGISTRATION_TOKEN` to that same
+value in the gateway and each relay's service environment. Restart both after
+changing it. Keep it out of source control, logs, and phone pairing links.
+The relay sends a base64url HMAC-SHA256 proof bound to its full relay id and the
+gateway's fresh nonce, never the token itself. Phone authentication is unchanged.
+
+Optionally set `HERDR_GATEWAY_ALLOWED_RELAY_IDS` on the gateway to the full relay
+ids from relay status (not the six-character log abbreviations), separated by
+commas or whitespace. The allow-list works without a token; with both set, each
+registration must pass both checks. An id alone is public, so use the token when
+you need proof that the registrant is authorized. An `unauthorized` rejection
+means the relay's token is missing/wrong or its id is not allowed. Correct the
+environment and restart; failed registrations retry with exponential backoff.
+
 
 ### Opening the gateway to other people
 
@@ -313,6 +338,11 @@ moves its session traffic off the gateway after rendezvous.
 ```sh
 HERDR_GATEWAY_URL=wss://gw.example.com
 ```
+
+If your gateway requires a registration token, also set
+`HERDR_GATEWAY_REGISTRATION_TOKEN` in this relay's environment to the same secret
+configured on the gateway. One relay token applies to every configured gateway
+candidate, so any restricted candidates must share it.
 
 A base URL with no path; a trailing slash is trimmed for you, and the relay
 appends the routes. The paired phone learns the same list from the QR payload.

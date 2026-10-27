@@ -5,6 +5,17 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Protect self-hosted gateway registrations with an optional shared registration
+  token and relay-id allow-list. Relays prove knowledge of the token without
+  sending it over the wire; both restrictions must pass when configured.
+
+### Fixed
+
+- Use the rightmost non-empty `X-Forwarded-For` entry behind a trusted reverse
+  proxy, preventing forged leftmost entries from bypassing per-IP rate limits.
+
 ## [0.23.3] - 2026-10-26
 
 ### Fixed

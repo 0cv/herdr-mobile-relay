@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -95,8 +96,7 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 	link.run()
 }
 
-// relayHello performs the challenge exchange. A relay ignores the nonce; it is
-// sent so both endpoints share one hello shape.
+// relayHello performs the challenge exchange and optional registration checks.
 func (s *Server) relayHello(ctx context.Context, conn *websocket.Conn) (string, bool) {
 	nonce, err := randomNonce()
 	if err != nil {
@@ -133,6 +133,18 @@ func (s *Server) relayHello(ctx context.Context, conn *websocket.Conn) (string, 
 	}
 	if !gatewaywire.ValidRelayID(hello.RelayID) {
 		reject(ctx, conn, gatewaywire.CodeBadHello, "relay id is malformed")
+		return "", false
+	}
+	allowed := len(s.opts.AllowedRelayIDs) == 0 || s.opts.AllowedRelayIDs[hello.RelayID]
+	if s.opts.RegistrationToken != "" {
+		challenge, nonceErr := base64.RawURLEncoding.DecodeString(nonce)
+		proof, proofErr := base64.RawURLEncoding.DecodeString(hello.RegistrationProof)
+		allowed = allowed && nonceErr == nil && proofErr == nil &&
+			gatewaywire.VerifyRegistrationProof(s.opts.RegistrationToken, hello.RelayID, challenge, proof)
+	}
+	if !allowed {
+		s.logger.Warn("relay registration unauthorized", "relay", shortID(hello.RelayID))
+		reject(ctx, conn, gatewaywire.CodeUnauthorized, "relay registration is not authorized")
 		return "", false
 	}
 	return hello.RelayID, true

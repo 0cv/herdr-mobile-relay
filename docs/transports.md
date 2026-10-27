@@ -78,6 +78,9 @@ remains the only authorization for control on every path.
   entry for the pass and takes the next healthy one. The pairing QR carries the
   whole list, so either side can fail over without a re-scan. The phone lists
   every saved candidate, in priority order, under the relay in **Settings**.
+- `HERDR_GATEWAY_REGISTRATION_TOKEN` — optional self-hosted gateway registration
+  secret. Set the same value on the gateway and relay; it is never sent on the
+  wire or included in pairing links. Empty preserves open registration.
 - `HERDR_GATEWAY_SELECTION` — `ordered`, the default, takes the first healthy
   entry in configured order, which makes a list you write yourself a priority
   list. `latency` keeps the lowest-latency healthy entry, with configured order
@@ -99,3 +102,7 @@ remains the only authorization for control on every path.
 
 - **Gateway never registers:** check `HERDR_GATEWAY_URL` and outbound HTTPS
   access; `GET /healthz` reports `gateway.registered`.
+- **Registration rejected as `unauthorized`:** set the gateway's matching
+  `HERDR_GATEWAY_REGISTRATION_TOKEN` on the relay and check that the relay's full
+  id is in the gateway's `HERDR_GATEWAY_ALLOWED_RELAY_IDS`, if configured. The
+  relay retries with exponential backoff; restart it after changing its env.
