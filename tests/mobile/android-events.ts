@@ -221,6 +221,14 @@ export interface AndroidNormalRetirement {
   events: string[];
 }
 
+// App UIDs share the PID number range, so a number that Android labels as a UID or app ID is not a reference to a process.
+function mentionsProcessId(record: LogRecord, pid: string): boolean {
+  const references = (record.tag === 'ActivityManager'
+    ? record.message.replace(/^(Killing [1-9]\d*:[^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?=\s)/u, '$1')
+    : record.message).replace(/(\b(?:appid=|UID:? \[?|uid(?: = |=| )|uids=\{|uid\/pid:|A=|app:))[1-9]\d*/gu, '$1');
+  return new RegExp(`\\b${pid}\\b`, 'u').test(references);
+}
+
 function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, startMarker: LogRecord, bounded: (record: LogRecord) => boolean, afterEnd: (record: LogRecord) => boolean, receivedAfterEnd: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
   const result: AndroidNormalRetirement[] = [];
   const proof = (record: LogRecord) => ({ lineNumber: record.lineNumber, line: record.line });
@@ -345,11 +353,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       if (possiblyDuringLifetime && record.tag === 'ActivityManager' && /^Force stopping com\.android\.chrome(?:\s|$)/u.test(record.message)
         && !/^Force stopping com\.android\.chrome appid=\d+ user=[1-9]\d*: \S.*$/u.test(record.message)) return true;
       if (possiblyDuringLifetime && /^(?:PackageManager|PackageInstaller)$/u.test(record.tag) && record.message.includes('com.android.chrome')) return true;
-      // App UIDs share the PID number range, so a number that Android labels as a UID or app ID is not a reference to the helper.
-      const pidReferences = (record.tag === 'ActivityManager'
-        ? record.message.replace(/^(Killing [1-9]\d*:[^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?=\s)/u, '$1')
-        : record.message).replace(/(\b(?:appid=|UID:? \[?|uid(?: = |=| )|uids=\{|uid\/pid:|A=|app:))[1-9]\d*/gu, '$1');
-      const mentionsPid = new RegExp(`\\b${pid}\\b`, 'u').test(pidReferences);
+      const mentionsPid = mentionsProcessId(record, pid);
       if (mentionsPid && !observed(record)) return true;
       if (record.tag === 'ActivityManager' && mentionsPid && /^(?:Killing |Process .* has died:)/u.test(record.message)
         && !deaths.includes(record.line)) return true;
@@ -362,6 +366,93 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     result.push({ pid, processName, packageName: 'com.android.chrome', uid: Number(isolated) + 90000, auditSubjects,
       proof: [...startup, fork, birth, ...(child ? [child] : []), ...(exit ? [exit] : []), ...deathRecords as LogRecord[], ...browserDeaths]
         .sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
+  }
+  return result;
+}
+
+// Chrome can still be starting or releasing helpers when the measurement starts; a helper already running then retires
+// normally when its own exit message, the system's death record and the zygote's clean exit all fall inside the measurement.
+function startHelperRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, startMarker: LogRecord, bounded: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
+  const result: AndroidNormalRetirement[] = [];
+  const proof = (record: LogRecord) => ({ lineNumber: record.lineNumber, line: record.line });
+  const helperName = /^com\.android\.chrome:sandboxed_process0:org\.chromium\.content\.app\.SandboxedProcessService0:(\d+)$/u;
+  const notAfter = (record: LogRecord, limit: LogRecord) => record.time < limit.time || (record.time === limit.time && record.lineNumber <= limit.lineNumber);
+  const beforeStart = (record: LogRecord) => record.lineNumber < startMarker.lineNumber && notAfter(record, startMarker);
+  for (const [pid, inventoryName] of Object.entries(processes)) {
+    if (!/^[1-9]\d*$/u.test(pid) || remaining[pid]) continue;
+    const births = records.filter((record) => record.tag === 'ActivityManager' && record.message.startsWith(`Start proc ${pid}:`));
+    const forks = records.filter((record) => record.tag === 'Zygote' && record.message === `Forked child process ${pid}`);
+    if (births.length > 1 || forks.length > 1 || births.length !== forks.length || ![...births, ...forks].every(beforeStart)) continue;
+    const birth: LogRecord | undefined = births[0];
+    const fork: LogRecord | undefined = forks[0];
+    const born = birth?.message.match(/^Start proc [1-9]\d*:([^/\s]+)\/u0ai(0|[1-9]\d{0,3}) for {2}\{com\.android\.chrome\/org\.chromium\.content\.app\.SandboxedProcessService0:(\d+)\}$/u);
+    if (birth && (!born || Number(born[2]) > 8999 || processes[birth.pid] !== 'system_server' || processes[fork!.pid] !== 'com.android.chrome_zygote')) continue;
+    // The START inventory can list a helper that the Chrome zygote has forked but not yet renamed.
+    const processName = helperName.test(inventoryName) ? inventoryName : inventoryName === 'com.android.chrome_zygote' && born ? born[1] : '';
+    const index = processName.match(helperName)?.[1];
+    if (!index || (born && (born[1] !== processName || born[3] !== index))) continue;
+    const isolated = born ? born[2] : index;
+    const children = records.filter((record) => record.pid === pid && record.tag === 'chromium'
+      && /^\[INFO:child_process_service\.cc\(\d+\)\] ChildProcessService: Exiting child process\.$/u.test(record.message));
+    const exits = records.filter((record) => record.tag === 'Zygote' && record.message.startsWith(`Process ${pid} exited`));
+    const deathRecords = records.filter((record) => record.tag === 'ActivityManager' && (record.message.startsWith(`Killing ${pid}:`)
+      || new RegExp(`^Process \\S+ \\(pid ${pid}\\) has died:`, 'u').test(record.message)));
+    if (children.length !== 1 || exits.length !== 1 || deathRecords.length !== 1) continue;
+    const [child] = children;
+    const [exit] = exits;
+    const [death] = deathRecords;
+    if (exit.message !== `Process ${pid} exited cleanly (0)` || processes[exit.pid] !== 'com.android.chrome_zygote' || (fork && fork.pid !== exit.pid)
+      || processes[death.pid] !== 'system_server' || (birth && birth.pid !== death.pid) || ![child, death, exit].every(bounded)
+      || !notAfter(child, exit) || !notAfter(death, exit)) continue;
+    const detail = androidEventDetails(death.line);
+    if (detail.processName !== processName) continue;
+    if (death.message.startsWith('Process ')) {
+      // The label is the process's importance when it died (Android's adjustment and state codes), never the cause.
+      if (!/^Process \S+ \(pid \d+\) has died: [a-z]{2,4} *(?:\+ ?\d+)? +[A-Z]{2,4} *$/u.test(death.message)) continue;
+    } else {
+      const uid = detail.uid?.match(/^u0a\d+i(-?\d+)$/u);
+      if (detail.reason !== 'isolated not needed' || !uid || Number(uid[1]) + 99000 !== Number(isolated) + 90000) continue;
+    }
+    const deaths = events.filter((line) => androidEventDetails(line).pid === pid);
+    if (deaths.length !== 1 || deaths[0] !== death.line) continue;
+    const own = records.filter((record) => record.pid === pid);
+    // The helper and the zygote stamp their records independently, so the helper's first lines may carry a slightly earlier time than the fork.
+    if (own.some((record) => !notAfter(record, exit) || (fork && record.time < fork.time - 20))) continue;
+    const uidRecords = own.filter((record) => record.tag === 'CompatChangeReporter');
+    if (uidRecords.some((record) => Number(record.message.match(
+      /^Compat change id reported: \d+; UID (\d+); state: (?:ENABLED|DISABLED)$/u)?.[1]) !== Number(isolated) + 90000)) continue;
+    if (own.some((record) => record.tag === 'cr_SplitCompatApp' && !record.message.endsWith(` processName=${processName} isIsolatedProcess=true`))) continue;
+    if (own.some((record) => /^type=1400\s+audit\(/u.test(record.message)
+      && [...record.message.matchAll(/\sscontext=(\S*)/gu)].some((context) => context[1] !== 'u:r:isolated_app:s0:c512,c768'))) continue;
+    const auditSubjects = own.flatMap((record) => {
+      const subject = parseAndroidAuditSubject(record.line);
+      return subject ? [{ ...subject, lineNumber: record.lineNumber }] : [];
+    });
+    if (auditSubjects.length && (!uidRecords.length || auditSubjects.some((subject) => records.filter((record) =>
+      record.message.includes(`audit(0.0:${subject.serial}):`)).length !== 1))) continue;
+    if ([exit, death].some((producerProof) => records.some((record) => {
+      if (record.time > producerProof.time && record.lineNumber > producerProof.lineNumber) return false;
+      const producerPid = producerProof.pid;
+      if (record.tag === 'Zygote' && record.message.startsWith(`Process ${producerPid} exited`)) return true;
+      if (record.tag === 'Process' && record.message.startsWith(`Sending signal. PID: ${producerPid} `)) return true;
+      if (record.tag === 'ActivityManager' && (record.message.startsWith(`Killing ${producerPid}:`)
+        || new RegExp(`^Process \\S+ \\(pid ${producerPid}\\) has died:`, 'u').test(record.message))) return true;
+      return record.pid === producerPid && record.tag === 'AndroidRuntime' && /crash|fatal/iu.test(record.message);
+    }))) continue;
+    const browserDeath = new RegExp(`^\\[WARNING:compositor_view\\.cc\\(\\d+\\)\\] Child process died \\(type=\\d+\\) pid=${pid}\\)$`, 'u');
+    const accounted = (record: LogRecord) => record === birth || record === fork || record === death || record === exit
+      || (record.tag === 'chromium' && processes[record.pid] === 'com.android.chrome' && browserDeath.test(record.message) && bounded(record));
+    const adverse = records.some((record) => {
+      if (record === death || record === exit) return false;
+      if (record.pid !== pid && mentionsProcessId(record, pid) && !accounted(record)) return true;
+      if (notAfter(record, exit) && record.tag === 'ActivityManager' && /^Force stopping com\.android\.chrome(?:\s|$)/u.test(record.message)
+        && !/^Force stopping com\.android\.chrome appid=\d+ user=[1-9]\d*: \S.*$/u.test(record.message)) return true;
+      if (notAfter(record, exit) && /^(?:PackageManager|PackageInstaller)$/u.test(record.tag) && record.message.includes('com.android.chrome')) return true;
+      return record.pid === pid && /crash|fatal|signal|replacement|replacing|force.stop/iu.test(record.message);
+    });
+    if (adverse) continue;
+    result.push({ pid, processName, packageName: 'com.android.chrome', uid: Number(isolated) + 90000, auditSubjects,
+      proof: [...(fork ? [fork] : []), ...(birth ? [birth] : []), child, death, exit].sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
   }
   return result;
 }
@@ -429,7 +520,10 @@ export function measuredAndroidEvents(
   const events = androidLogEvents(log, first.processes, planned, starts[0]);
   const receivedAfterEnd = (record: LogRecord) => record.lineNumber > ends[0].lineNumber;
   const afterEnd = (record: LogRecord) => record.time >= ends[0].time && receivedAfterEnd(record);
-  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, starts[0], bounded, afterEnd, receivedAfterEnd);
+  const retirements = issues.length ? [] : [
+    ...normalRetirements(records, events, first.processes, last.processes, starts[0], bounded, afterEnd, receivedAfterEnd),
+    ...startHelperRetirements(records, events, first.processes, last.processes, starts[0], bounded),
+  ];
   const normalEvents = new Set(retirements.flatMap((retirement) => retirement.events));
   return { events, fatalEvents: events.filter((event) => !normalEvents.has(event)), normalRetirements: retirements, issues, boundaryDiscordances };
 }

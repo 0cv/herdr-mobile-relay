@@ -561,6 +561,55 @@ androidEventTests.push(['hosted 40317275070 helper whose PID equals the Chrome a
   }
 }]);
 
+androidEventTests.push(['hosted 40427620028 helpers already running at START retire normally only with a clean, fully observed exit', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40427620028-helpers-running-at-start.log', import.meta.url), 'utf8');
+  const helper = (index: number) => `com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:${index}`;
+  const processes: Record<string, string> = { '366': 'zygote64', '556': 'system_server', '5399': 'com.android.chrome', '5439': 'com.android.chrome_zygote',
+    '5909': helper(5), '5920': helper(6), '5947': helper(7), '5956': 'com.android.chrome_zygote' };
+  const measureStart = (value: string, start = processes, end = { '366': 'zygote64', '556': 'system_server', '5399': 'com.android.chrome', '5439': 'com.android.chrome_zygote' } as Record<string, string>) => {
+    const before = snapshot('start', start);
+    const after = snapshot('end', end);
+    before.measurement!.id = '40427620028';
+    after.measurement!.id = '40427620028';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const retiredPids = (value: string, start = processes, end?: Record<string, string>) => measureStart(value, start, end).normalRetirements.map((retirement) => retirement.pid).sort();
+  const result = measureStart(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(retiredPids(log), ['5909', '5920', '5947', '5956']);
+  for (const retirement of result.normalRetirements) {
+    for (const proof of retirement.proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+  const line = (pattern: string) => log.split('\n').find((entry) => entry.includes(pattern))!;
+  const startMarker = line('40427620028 START');
+  for (const [name, value, start, end, rejected] of [
+    ['a crash naming the helper', log.replace(line('Process 5920 exited'), `${line('Process 5920 exited')}\n         1793067759.095  5399  5399 W chromium: Renderer process crashed pid=5920`), processes, undefined, '5920'],
+    ['a killed instead of clean zygote exit', log.replace('Process 5909 exited cleanly (0)', 'Process 5909 exited due to signal 9 (Killed)'), processes, undefined, '5909'],
+    ['no own child exit', log.replace(line('5947  5998 I chromium'), ''), processes, undefined, '5947'],
+    ['an unrelated START inventory name', log, { ...processes, '5956': 'com.android.chrome' }, undefined, '5956'],
+    ['a restart of the PID inside the measurement', log.replace(startMarker, `${startMarker}\n         1793067758.900   556   590 I ActivityManager: Start proc 5947:${helper(7)}/u0ai7 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:7}`), processes, undefined, '5947'],
+    ['a reaper UID for another helper', log.replace('u0a145i-8993', 'u0a145i-8990'), processes, undefined, '5947'],
+    ['an exit reported by another zygote', log.replace('5439  5439 I Zygote  : Process 5956 exited', '366   366 I Zygote  : Process 5956 exited'), processes, undefined, '5956'],
+    ['a helper still listed at END', log, processes, { '556': 'system_server', '5439': 'com.android.chrome_zygote', '5920': helper(6) }, '5920'],
+    ['an unlabelled death record', log.replace('has died: vis BTOP', 'has died: crashed'), processes, undefined, '5920'],
+    ['an unexplained system mention', log.replace(line('Process 5909 exited'), `${line('Process 5909 exited')}\n         1793067758.890   556  1759 W ActivityManager: Unable to deliver result to 5909`), processes, undefined, '5909'],
+    ['an own record after the zygote exit', log.replace(line('Process 5956 exited'), `${line('Process 5956 exited')}\n         1793067759.050  5956  5956 I chromium: late record`), processes, undefined, '5956'],
+    ['an earlier process with the same PID', log.replace(line('Forked child process 5947'), `         1793067700.000  5947  5947 I other: earlier owner\n${line('Forked child process 5947')}`), processes, undefined, '5947'],
+    ['a fork without its system start record', log.replace(line('Start proc 5956:'), ''), processes, undefined, '5956'],
+    ['a zygote that died before reporting the exit', log.replace(line('Process 5909 exited'), `         1793067758.880   556  1759 I ActivityManager: Process com.android.chrome_zygote (pid 5439) has died: fg  TOP\n${line('Process 5909 exited')}`), processes, undefined, '5909'],
+    ['a force stop of Chrome while the helper ran', log.replace(startMarker, `${startMarker}\n         1793067758.830   556  1759 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 9999`), processes, undefined, '5909'],
+    ['a package change of Chrome while the helper ran', log.replace(startMarker, `${startMarker}\n         1793067758.830   556  1759 I PackageManager: Updating package com.android.chrome`), processes, undefined, '5909'],
+  ] as [string, string, Record<string, string>, Record<string, string> | undefined, string][]) {
+    assert.ok(value.split('\n').length >= log.split('\n').length - 1, name);
+    const rejectedResult = measureStart(value, start, end);
+    assert.deepEqual(rejectedResult.issues, [], name);
+    const unaffected = ['5909', '5920', '5947', '5956'].filter((pid) => pid !== rejected);
+    assert.deepEqual(retiredPids(value, start, end), /force stop|package change|zygote that died/u.test(name) ? [] : unaffected, name);
+    assert.ok(rejectedResult.fatalEvents.some((event) => event.includes(`${rejected}:`) || event.includes(`(pid ${rejected})`)), name);
+  }
+}]);
+
 androidEventTests.push(['synthetic system-reaped helper admits a missing child exit or the kill signal only with the reaping record', async () => {
   const killed = exit.replace('cleanly (0)', 'due to signal 9 (Killed)');
   const quickKilled = quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)');
