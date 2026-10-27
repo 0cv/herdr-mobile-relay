@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `/reload` in Pi now picks up an updated relay command integration. Pi kept
+  running the previous version until it was restarted, so after a relay update
+  the phone could miss new slash-command or activity behaviour.
+
 ## [0.23.3] - 2026-10-26
 
 ### Fixed
