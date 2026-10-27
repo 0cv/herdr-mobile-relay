@@ -4,6 +4,7 @@ import type { AppiumClient } from '../support/webdriver';
 import type { RuntimeIdentity } from '../support/oracle';
 
 export interface UpdateCompletionEvidence {
+  navigationId?: string;
   phoneRequired: boolean;
   phoneAcknowledged: boolean;
   phoneState: string;
@@ -32,8 +33,8 @@ export interface MobilePlatform {
   launchInstalledApp(): Promise<void>;
   assertStandalone(origin: string): Promise<RuntimeIdentity>;
   attachToInstalledView(timeoutMs?: number): Promise<void>;
-  readRunningIdentity(): Promise<RuntimeIdentity>;
-  readUpdateCompletion(): Promise<UpdateCompletionEvidence>;
+  readRunningIdentity(deadline?: number): Promise<RuntimeIdentity>;
+  readUpdateCompletion(deadline?: number): Promise<UpdateCompletionEvidence>;
   openFixtureAgent(relayName: string): Promise<void>;
   backgroundApp(): Promise<void>;
   relaunchInstalledApp(): Promise<void>;
@@ -103,13 +104,14 @@ export function runtimeScript(): string {
   })()`;
 }
 
-export function updateCompletionScript(): string {
+export function updateCompletionScript(includeNavigationId = false): string {
   return `return (() => {
     const rawPlan = sessionStorage.getItem('herdr_update_progress') || '';
     let plan = {};
     try { plan = rawPlan ? JSON.parse(rawPlan) : {}; } catch {}
     const text = document.body?.innerText || '';
     return {
+      ${includeNavigationId ? 'navigationId: String(performance.timeOrigin),' : ''}
       phoneRequired: plan && plan.phoneAppRequired === true,
       phoneAcknowledged: plan && plan.phoneAcknowledged === true,
       phoneState: String(plan?.phoneState || ''),

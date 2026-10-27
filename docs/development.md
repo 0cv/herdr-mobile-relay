@@ -14,7 +14,12 @@ make dev-tunnel
 
 `make dev-tunnel` builds the current Go source and frontend, uses isolated ports
 and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
-installed production relay.
+installed production relay. If a Pi agent directory exists, it installs or
+updates the live-command integration there, including in noninteractive runs.
+This changes the shared Pi profile, not the isolated relay state; the integration
+remains after the tunnel stops. Run `/reload` in affected Pi panes after the
+tunnel starts. Set `HERDR_DEV_PI_COMMANDS_INSTALL=0` to skip profile changes.
+Other Pi profiles require their own installation via `relay/setup.sh --pi-install`.
 
 ## Common targets
 
@@ -95,8 +100,9 @@ passes first.
 
 ## Toolchains
 
-Backend development uses Go 1.27.0; frontend development uses Bun 1.4 (`bun
-install --cwd frontend`, then the `make` targets above). Playwright runs on
+Backend development uses Go 1.27.1; frontend development uses Node.js
+24.21.0 and Bun 1.4.2 (`bun install --cwd frontend`, then the `make` targets
+above). Playwright runs on
 Bun. CI installs both browsers natively (`bun x playwright install
 --with-deps chromium webkit`); on Fedora, `install-deps` is unsupported and
 native WebKit crashes, so `make frontend-browser` runs WebKit through

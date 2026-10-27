@@ -38,8 +38,17 @@ else if (request === 'shell dumpsys activity activities') output(`ResumedActivit
 else if (request === 'shell input keyevent KEYCODE_HOME') output('');
 else if (request === 'shell ps -A -o PID,NAME') {
   if (vending.processListFail) fail('process inventory denied\n');
-  const visibleChildren = existsSync(stoppedFile) ? vending.remainingChildren || {} : children;
-  output(vending.processList ?? `PID NAME\n${existsSync(stoppedFile) && processPid === '6538' ? '' : '6538 com.android.chrome\n'}${processPid === '6600' && !existsSync(stoppedFile) ? `6600 ${processPackage}\n` : ''}${Object.entries(visibleChildren).map(([pid, name]) => `${pid} ${name}\n`).join('')}1427 com.google.android.gms\n1486 com.google.android.googlequicksearchbox:search\n`);
+  const lingeringFile = join(directory, 'chrome-lingering-inventories');
+  const lingered = existsSync(lingeringFile) ? Number(readFileSync(lingeringFile, 'utf8')) : 0;
+  const lingering = existsSync(stoppedFile) && lingered < (vending.lingeringInventories ?? 0);
+  if (lingering) writeFileSync(lingeringFile, String(lingered + 1));
+  if (existsSync(stoppedFile) && !lingering && vending.lingeringInventories && lingered === vending.lingeringInventories) {
+    writeFileSync(lingeringFile, String(lingered + 1));
+    nativeLine('Zygote', `Process ${processPid} exited due to signal 9 (Killed)`);
+  }
+  const stopped = existsSync(stoppedFile) && !lingering;
+  const visibleChildren = stopped ? vending.remainingChildren || {} : children;
+  output(vending.processList ?? `PID NAME\n${stopped && processPid === '6538' ? '' : '6538 com.android.chrome\n'}${processPid === '6600' && !stopped ? `6600 ${processPackage}\n` : ''}${Object.entries(visibleChildren).map(([pid, name]) => `${pid} ${name}\n`).join('')}1427 com.google.android.gms\n1486 com.google.android.googlequicksearchbox:search\n`);
 }
 else if (request === 'logcat -b main -b system -v epoch -T 1') {
   if (vending.logcatFail) fail('logcat: Unexpected EOF!\n');
@@ -56,6 +65,7 @@ else if (request === `shell pidof ${processPackage}`) {
   output(`${processPid}\n`);
 } else if (request === `shell am force-stop --user 0 ${processPackage}`) {
   if (vending.forceStopFail) fail('force-stop denied\n');
+  writeFileSync(join(directory, 'chrome-lingering-inventories'), '0');
   for (const [pid, name] of Object.entries({ [processPid]: processPackage, ...children, ...vending.unobservedChildren })) {
     if (vending.omitKillingPid !== pid) nativeLine('ActivityManager', `Killing ${pid}:${name}/u0a146 (adj 0): ${vending.killReason || `stop ${processPackage} due to from pid 2000`}`);
     nativeLine('ActivityManager', `Process ${name} (pid ${pid}) has died: fg TOP`);
@@ -97,6 +107,7 @@ else if (/^shell pm list packages (?:(?:-d|-e) )?--user 0 com.android.vending$/u
   const name = packages[args[5]];
   if (args.slice(2, 5).join(' ') === 'shell dumpsys package' && name) {
     if (name === 'chrome' && state === 'adb-timeout') await sleep();
+    if (name === 'gms' && vending.gmsTimeout) await sleep();
     if (name === 'trichrome' && state === 'adb-failure') fail('Failure [static package unavailable]\n');
     output(read(`${name}.dump`));
   } else if (args.slice(2, 5).join(' ') === 'shell pm path' && name && name !== 'trichrome') output(read(`${name}.path`));
