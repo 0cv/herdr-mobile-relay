@@ -16,7 +16,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery phone-recovery-check mobile-ci-run mobile-android mobile-ios
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-ci-common-check mobile-unit-check mobile-frontend-dependencies mobile-test-dependencies mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios phone-recovery-check
 
 help:
 	@echo "Common targets:"
@@ -98,7 +98,8 @@ check: backend-check frontend-check web-release-check cross-build release-bundle
 go-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './frontend/node_modules/*'))"
 	go vet ./...
-	go test ./...
+	# Keep subprocess-based lifecycle tests deterministic when package work is busy.
+	go test -p 1 ./...
 	go test -race -p 1 ./...
 
 backend-check: go-check shell-check production-path-audit
@@ -217,14 +218,22 @@ web-deploy: web-bundle-check
 web-preview:
 	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web
 
-mobile-ci-check: mobile-retention-check mobile-composite-check
-	bun install --frozen-lockfile --cwd frontend
-	bun install --frozen-lockfile --cwd tests/mobile
+mobile-ci-check: mobile-ci-common-check mobile-unit-check
+
+mobile-ci-common-check: mobile-frontend-dependencies mobile-test-dependencies mobile-retention-check mobile-composite-check
 	bun run --cwd tests/mobile lint
 	bun run --cwd tests/mobile check
-	bun run --cwd tests/mobile test:unit
 	go test ./tests/mobile/fixture
 	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml .github/workflows/mobile-ci.yml .github/workflows/release.yml
+
+mobile-unit-check: mobile-frontend-dependencies mobile-test-dependencies
+	MOBILE_UNIT_FILTER="$(value MOBILE_UNIT_FILTER)" bun run --cwd tests/mobile test:unit
+
+mobile-frontend-dependencies:
+	bun install --frozen-lockfile --cwd frontend
+
+mobile-test-dependencies:
+	bun install --frozen-lockfile --cwd tests/mobile
 
 mobile-retention-check:
 	bun tests/mobile/retention-check.ts .github

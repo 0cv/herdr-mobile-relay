@@ -57,7 +57,7 @@ function expectedCandidate(version: string, assets: number, revision: string, ar
 async function main(): Promise<void> {
   const manifestPath = repositoryPath(option('--manifest') || 'tests/mobile/baselines.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as BaselineManifest;
-  if (manifest.schema !== 1 || !Array.isArray(manifest.baselines)) throw new Error('baseline manifest schema is invalid');
+  if (manifest.schema !== 1 || !Array.isArray(manifest.baselines) || !manifest.baselines.length) throw new Error('baseline manifest schema is invalid');
   const candidateSource = repositoryPath(requiredOption('--candidate'));
   const candidateVersion = requiredOption('--candidate-version');
   const candidateAssets = Number(requiredOption('--candidate-assets'));
@@ -73,7 +73,8 @@ async function main(): Promise<void> {
     sourceOverrides.set(name, repositoryPath(value));
   }
   const names = values('--baseline');
-  const selectedNames = names.length ? names : ['0.20.8', '0.20.9'];
+  const selectedNames = names.length ? names : [manifest.baselines[0].name];
+  if (selectedNames.length !== 1) throw new Error('exactly one selected baseline required');
   const selected = selectedNames.map((name) => {
     const value = manifest.baselines.find((entry) => entry.name === name);
     if (!value) throw new Error(`baseline ${name} is not declared in ${manifestPath}`);

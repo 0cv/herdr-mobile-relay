@@ -1,0 +1,27 @@
+         1793011646.675  5900  5900 I HerdrMeasure: 40306915048 START
+         1793011715.534  5564  5564 D Zygote  : Forked child process 10840
+         1793011715.538 10840 10840 I cessService0:22: Using CollectorTypeCMC GC.
+         1793011715.539 10840 10840 W cessService0:22: Unexpected CPU variant for x86: x86_64.
+         1793011715.539 10840 10840 W cessService0:22: Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default
+         1793011715.541 10840 10840 E cessService0:22: Not starting debugger since process cannot load the jdwp agent.
+         1793011715.548 10840 10840 D nativeloader: Load libframework-connectivity-tiramisu-jni.so using APEX ns com_android_tethering for caller /apex/com.android.tethering/javalib/framework-connectivity-t.jar: ok
+         1793011715.551   559  1683 I ActivityManager: Start proc 10840:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22/u0ai22 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:22}
+         1793011715.554 10840 10840 D CompatChangeReporter: Compat change id reported: 242716250; UID 90022; state: ENABLED
+         1793011715.562 10840 10840 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar
+         1793011715.563 10840 10840 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.sidecar.jar
+         1793011715.572 10840 10840 I LoadedApk: No resource references to update in package com.google.android.trichromelibrary
+         1793011715.574 10840 10840 I cr_SplitCompatApp: version=131.0.6778.200 (677820038) minSdkVersion=29 isBundle=true processName=com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22 isIsolatedProcess=true
+         1793011715.579 10840 10840 W SystemServiceRegistry: No service published for: uimode
+         1793011715.585 10840 10840 I cr_ChildProcessService: Creating new ChildProcessService pid=10840
+         1793011715.605 10840 10854 I cr_LibraryLoader: Successfully loaded native library
+         1793011715.606 10840 10854 I cr_CachingUmaRecorder: Flushed 3 samples from 3 histograms, 0 samples were dropped.
+         1793011715.612 10857 10857 I HerdrMeasure: 40306915048 END
+         1793011715.608 10840 10840 W ThreadPoolForeg: type=1400 audit(0.0:275): avc:  denied  { setattr } for  name="real_time_url_checks_allowlist.pb" dev="dm-46" ino=385827 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0
+         1793011715.608 10840 10840 W ThreadPoolForeg: type=1400 audit(0.0:276): avc:  denied  { setattr } for  name="real_time_url_checks_allowlist.pb" dev="dm-46" ino=385827 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0
+         1793011715.620 10840 10840 W ThreadPoolForeg: type=1400 audit(0.0:277): avc:  denied  { setattr } for  name="manifest.json" dev="dm-46" ino=385828 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0
+         1793011715.620 10840 10840 W ThreadPoolForeg: type=1400 audit(0.0:278): avc:  denied  { setattr } for  name="verified_contents.json" dev="dm-46" ino=385830 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0
+         1793011715.635 10840 10854 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+         1793011715.639   559  1683 I ActivityManager: Killing 10840:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22/u0a145i-8978 (adj 0): isolated not needed
+         1793011715.641  5526  5526 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10840)
+         1793011715.641  5526  5526 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10840)
+         1793011715.643  5564  5564 I Zygote  : Process 10840 exited cleanly (0)

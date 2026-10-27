@@ -1,0 +1,7 @@
+         1792874856.500   564   564 I HerdrMeasure: 40095544451 START
+         1792874856.540  5649  5649 D Zygote  : Forked child process 10658
+         1792874856.550   564   975 I ActivityManager: Start proc 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0ai12 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:12}
+         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed
+         1792874856.626  5609  5609 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10658)
+         1792874856.700 10755 10755 I HerdrMeasure: 40095544451 END
