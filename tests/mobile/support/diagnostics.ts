@@ -11,6 +11,8 @@ const secretPatterns = [
 ];
 const secretKeys = /(?:secret|token|password|private[_-]?key|invitation|control[_-]?header)/iu;
 const safeNumericCounterKeys = new Set(['invitationAuthCount', 'credentialAuthCount', 'connections']);
+// Android install directories contain random base64 that can look like a 43-character secret, so whole install paths are kept.
+const androidInstallPath = /^(?:package:)?\/data\/app\/(?:~~[A-Za-z0-9_-]{1,64}={0,2}\/)?[A-Za-z][A-Za-z0-9._]*-[A-Za-z0-9_-]{1,64}={0,2}(?:\/[A-Za-z0-9._-]{1,128}\.apk)?$/u;
 
 export interface DiagnosticEvent {
   at: string;
@@ -46,8 +48,8 @@ export class DiagnosticRecorder {
 }
 
 export function redactText(value: string): string {
-  return secretPatterns.reduce((result, pattern) => result.replace(pattern, (match, prefix: string) => {
-    if (prefix) return `${prefix}${REDACTED}`;
+  return secretPatterns.reduce((result, pattern) => result.replace(pattern, (match, prefix: unknown) => {
+    if (typeof prefix === 'string' && prefix) return `${prefix}${REDACTED}`;
     return REDACTED;
   }), value);
 }
@@ -57,7 +59,7 @@ export function sanitizeValue(value: unknown, key = ''): unknown {
     return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : REDACTED;
   }
   if (secretKeys.test(key)) return REDACTED;
-  if (typeof value === 'string') return redactText(value);
+  if (typeof value === 'string') return androidInstallPath.test(value) ? value : redactText(value);
   if (Array.isArray(value)) return value.map((item) => sanitizeValue(item));
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([entryKey, item]) => [entryKey, sanitizeValue(item, entryKey)]));

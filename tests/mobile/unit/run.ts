@@ -1656,6 +1656,22 @@ test('diagnostic redaction covers URL and escaped values', async () => {
   });
 });
 
+test('diagnostic redaction keeps Android install paths whose random names look like secrets', async () => {
+  const directory = '/data/app/~~Q1w2E3r4T5y6U7i8O9p0Aa==/com.google.android.trichromelibrary_677820038-AbCdEfGhIjKlMnOp-rStUv==';
+  assert.notEqual(redactText(directory), directory);
+  const identity = {
+    codePath: directory,
+    apkPaths: [`package:${directory}/base.apk`],
+    dependencyConfig: { usesLibraryFiles: [`${directory}/base.apk`] },
+  };
+  assert.deepEqual(sanitizeValue(identity), identity);
+  const secret = 'A'.repeat(43);
+  const chrome = `/data/app/com.android.chrome-${'B'.repeat(20)}/base.apk`;
+  assert.deepEqual(sanitizeValue({ withQuery: `${chrome}?setup=${secret}`, bare: `/data/app/x/${secret}` }), {
+    withQuery: `${chrome}?setup=[REDACTED]`, bare: '/data/app/x/[REDACTED]',
+  });
+});
+
 test('reload count is bounded', async () => {
   assert.doesNotThrow(() => assertBoundedReloads(2));
   assert.throws(() => assertBoundedReloads(3), /RELOAD_BOUND_EXCEEDED/);

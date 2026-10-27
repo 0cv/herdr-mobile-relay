@@ -16,7 +16,7 @@ import { AndroidProductRecorder, androidProductImpact, publicMobileSummary, vali
 import { FailureLedger, qualified, requiredExecutionPassed, type MeasurementIdentity, type MobileResultContract } from '../support/mobile-result';
 import { validateAndroidProducer, validateMobileEvidence, type EvidenceValidationOptions } from '../support/evidence';
 import { collectEnvironmentReport, serializeEnvironmentReport } from '../validate-environment';
-import { redactText, writeSanitizedJson } from '../support/diagnostics';
+import { redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
 import { repositoryPath } from '../support/paths';
 
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -470,6 +470,25 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       if (check.status === 'FAIL') await assert.rejects(validateMobileEvidence({ ...fixture.options, contract: 'qualified' }), /strict environment/u);
       else await validateMobileEvidence({ ...fixture.options, contract: 'qualified' });
     }
+  }],
+  ['Android product/environment sanitized install paths with secret-like random names keep valid hashes', async () => {
+    const directory = '/data/app/~~Q1w2E3r4T5y6U7i8O9p0Aa==/com.google.android.trichromelibrary_677820038-AbCdEfGhIjKlMnOp-rStUv==';
+    assert.notEqual(redactText(directory), directory);
+    const input = environmentFixture();
+    for (const name of ['before', 'after'] as const) {
+      const snapshot = JSON.parse(input[name]) as AndroidEnvironmentSnapshot;
+      const trichrome = snapshot.packages['com.google.android.trichromelibrary'];
+      trichrome.codePath = directory;
+      trichrome.apkPaths = [`package:${directory}/base.apk`];
+      rehashPackage(trichrome);
+      const chrome = snapshot.packages['com.android.chrome'];
+      chrome.dependencyConfig.usesLibraryFiles = [`${directory}/base.apk`];
+      rehashPackage(chrome);
+      input[name] = JSON.stringify(sanitizeValue(snapshot));
+    }
+    const check = assessAndroidEnvironment(input, measurementIdentity());
+    assert.equal(check.collection.status, 'PASS', JSON.stringify(check.collection));
+    assert.equal(check.status, 'PASS');
   }],
   ['Android product/environment SM59 02 noncomponent identity and hash rejection', async () => {
     for (const field of ['chrome-components', 'trichrome-components', 'source', 'version', 'path', 'hidden', 'library', 'hash', 'missing-hash', 'duplicate', 'unknown-section', 'withheld']) {
