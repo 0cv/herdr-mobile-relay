@@ -47,13 +47,6 @@ export function evidenceOptions(): EvidenceValidationOptions {
   candidateWebHash: option('--candidate-web-hash'),
   candidateIdentity: json<EvidenceBundleIdentity>('--candidate-identity'),
   baselineIdentities: json<EvidenceExpectedBundle[]>('--baseline-identities'),
-  syntheticWebHash: process.argv.includes('--synthetic-web-hash') ? option('--synthetic-web-hash') : undefined,
-  syntheticCandidateIdentity: process.argv.includes('--synthetic-candidate-identity')
-    ? json<EvidenceBundleIdentity>('--synthetic-candidate-identity')
-    : undefined,
-  syntheticBaselineIdentity: process.argv.includes('--synthetic-baseline-identity')
-    ? json<EvidenceBundleIdentity>('--synthetic-baseline-identity')
-    : undefined,
   };
 }
 

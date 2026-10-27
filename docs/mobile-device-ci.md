@@ -2,7 +2,9 @@
 
 `tests/mobile` exercises the release web tree on a real Android emulator or iOS simulator. It installs from the Home Screen flow, starts two local TLS/WSS relay peers, completes encrypted invitation pairing, switches the same origin to a verified candidate bundle, and checks the executing app build, credentials, preferences, lifecycle, keyboard, and bounded reload evidence.
 
-The check workflow passes its exact `release-bundles` artifact to `.github/workflows/mobile-ci.yml` after the bundle job completes. A release request first qualifies Android with one complete controlled release scenario against the latest historical baseline (`0.20.10`) before any iOS job starts. Every device qualification then runs one controlled Android and iOS smoke against that baseline; a release request then runs one complete release scenario per platform before the requested full matrix. A push to `dev` stops after the controlled latest-baseline smoke, while `main` and pull requests targeting `main` continue through the full Android and iOS release suite across all historical baselines. The release device matrix adds the current-code synthetic pair once per platform, instead of repeating it for every historical baseline. Smoke matrices remain historical-only. Each matrix entry provisions its own disposable device and Appium session. The release workflow invokes the same reusable workflow for release tags and waits for the full suite against the exact release artifact before publication. These CI paths use GitHub-hosted runners with read-only permissions and no secrets.
+The check workflow passes its exact `release-bundles` artifact to `.github/workflows/mobile-ci.yml`. Pushes to `dev`, `main` and `ci-mobile`, and pull requests into `dev` or `main`, all run the same full release scenario. The job graph is provenance → prepare → device → environment report/qualification → gate. The device matrix runs Android and iOS in parallel, once each, upgrading one selected release to the candidate from the current commit. There are no preliminary smoke runs, Android-before-iOS barrier, historical-baseline matrix or synthetic current-code device pair. Each row owns a fresh disposable device and Appium session. A new push to a pull request cancels that pull request's earlier run; every push to a branch gets its own run and is never cancelled.
+
+Both platforms upgrade from the first release in `tests/mobile/baselines.json` whose version, script or style differs from the checked-out `web/version.json`; only that baseline is prepared, and no qualifying release is an error. After each release, add the new release first and drop the oldest so the file keeps two releases. The release workflow uses the same lane against its exact artifact and waits for qualification before publication. These CI paths use GitHub-hosted runners with read-only permissions and no secrets. New pushes to a pull request cancel its previous check and mobile runs; branch pushes queue without cancelling active runs.
 
 ## Product result and environment qualification
 
@@ -15,12 +17,12 @@ original scenario/driver failure. Measurement END and collection finish before
 native teardown; the result retains a by-value pre-teardown observation receipt
 and a separate teardown snapshot.
 
-Ordinary smoke can pass with environment FAIL only for completely validated GMS
+The local product-only contract can pass with environment FAIL only for completely validated GMS
 user-0 enabled/disabled-component drift with stable remaining package, dependency,
 image and provenance fields. Component comparisons use complete arrays and
 recomputed canonical hashes, not public projections or counts. Chrome/Trichrome
 drift, changed dependency identity, firstFatal, ownership/session/target loss,
-invalid inspection or collection still blocks product smoke. Unknown child
+invalid inspection or collection still blocks the product contract. CI additionally requires strict environment PASS. Unknown child
 relation is INDETERMINATE, also blocking: different browser and child PIDs, later
 HTTP success, `isolated not needed`, or an unknown initiator do not prove a death
 unrelated. Only the complete normal-retirement and exact planned-cold policies
@@ -59,27 +61,9 @@ retain the installed-provider, runtime, fault, credential and preference checks.
 The offline Android validator checks public installed-producer manifest/hash and
 resolver parity; it does not open private APPIUM_HOME state or run the installer.
 
-The reusable workflow exposes **Product smoke evidence**, **Environment report
-publication (not qualification)** and release-only **Strict environment
-qualification**. Report publication is independent of product success, validates
-every expected row (including iOS), and visibly reports negative qualification.
-FAIL dominates UNKNOWN while incomplete subchecks remain reported. A successful
-report job means report delivery, not qualification. Missing completion,
-observation or driver proof is INCOMPLETE with a bounded EVIDENCE_INVALID reason
-and a nonzero report exit; it is not reclassified as an observed product failure.
-A recorded product FAIL with complete evidence can still be reported. Missing
-rows/artifacts or outputs never default to PASS. Console, step-summary and summary artifacts use
-bounded allowlisted projections; omitted component names retain total and
-withheld counts. Restricted diagnostics are not public summaries.
+The environment report validates every expected current-attempt row, including iOS, independently of device job success. It writes bounded product/environment outputs and a summary before requiring strict qualification, then always attempts summary artifact publication. FAIL dominates UNKNOWN. Missing completion, observation or driver proof is INCOMPLETE with an EVIDENCE_INVALID reason and a nonzero report exit, not an observed product failure. Complete negative product results remain reportable; missing rows, artifacts and outputs never default to PASS. Public summaries use bounded allowlisted projections, not restricted diagnostics.
 
-Release smoke, full-device evidence and the final release gate require qualified
-results. Only that complete gate emits `qualification_status=PASS`; ordinary
-smoke emits NOT_REQUESTED. The first release publication step asserts PASS before
-any publication action. `product_status` and `environment_status` are derived
-from validated current-attempt rows, not matrix last-writer outputs. Native
-product errors are not suppressed with continue-on-error. Existing check.yml
-scheduling, including main/ci-mobile release/all, is unchanged. GitHub protection
-rule/check-name mapping is a separate operator decision, not changed here.
+Each Android device job also runs `validate-environment.ts --require-pass` on its own result. The final gate requires successful provenance, preparation, device and report/qualification jobs, downloads only current-attempt evidence, and validates both rows with the qualified contract. Only then does it emit `qualification_status=PASS`. The release publication step asserts that output before publishing. `product_status` and `environment_status` come from validated rows, not matrix last-writer outputs. Native product errors are never suppressed with continue-on-error. GitHub protection rule/check-name mapping remains an operator decision.
 
 ## Host-only checks
 
@@ -96,13 +80,12 @@ The candidate must be a release archive with its checksum and release manifest. 
 ```sh
 bun install --frozen-lockfile --cwd tests/mobile
 bun run --cwd tests/mobile prepare:bundle -- \
-  --candidate "$PWD/dist/release/herdr-mobile-relay_0.21.0_linux_amd64.tar.gz" \
-  --candidate-version 0.21.0 \
-  --candidate-assets 367 \
+  --candidate "$PWD/dist/release/herdr-mobile-relay_0.23.3_linux_amd64.tar.gz" \
+  --candidate-version 0.23.3 \
+  --candidate-assets 477 \
   --candidate-revision "$(git rev-parse HEAD)" \
-  --candidate-sha256 "$(awk '$2 == "herdr-mobile-relay_0.21.0_linux_amd64.tar.gz" { print $1 }' dist/release/checksums.txt)" \
-  --output "$PWD/run-artifacts/mobile" \
-  --baseline 0.20.8 --baseline 0.20.9 --baseline 0.20.10
+  --candidate-sha256 "$(awk '$2 == "herdr-mobile-relay_0.23.3_linux_amd64.tar.gz" { print $1 }' dist/release/checksums.txt)" \
+  --output "$PWD/run-artifacts/mobile"
 ```
 
 For harness development only, a checked-out `web` directory can be used with `--allow-candidate-directory true`. That mode cannot prove archive provenance and is not used by CI.
@@ -318,7 +301,7 @@ receipts do not substitute for CI provenance or grant native execution authority
 ```sh
 bun run --cwd tests/mobile run -- \
   --bundle-set "$PWD/run-artifacts/mobile/bundle-set.json" \
-  --baseline 0.20.10 \
+  --baseline 0.23.3 \
   --suite release \
   --output "$PWD/run-artifacts/device" \
   --private-output "$PWD/run-artifacts/private-device"
@@ -328,13 +311,13 @@ The runner keeps fixture info, TLS keys, and relay stores under `--private-outpu
 
 ## CI inputs and evidence
 
-A manual workflow dispatch requires `artifact_run_id`, the completed successful same-repository `check` push on `main` that contains `release-bundles`; provide `source_commit` when qualifying a specific revision. The dispatch path always uses external provenance. The reusable workflow validates repository, workflow, push event, `main` branch, conclusion, source SHA, exact artifact name, archive checksums, release-manifest revision, and expiration before provisioning devices. The check and release reusable calls bind to the caller's exact artifact and its manifest revision without comparing a pull-request merge build to the pull-request head SHA; evidence records that run head separately from the build SHA. The gate downloads only evidence artifacts from the current workflow attempt and validates each expected platform/baseline/suite/source/hash/native-provider result, including the exact recorded synthetic current-code web hash once per platform. Every Actions upload declares literal `retention-days: 1`, including release bundles, derived mobile bundles, controlled-smoke evidence, full-matrix evidence, and tag-release bundles. All exact source/build/mobile inputs must be consumed within that one-day window; an expired input requires a new recorded source run rather than an unrecorded substitute build. The release workflow invokes the same file with the exact artifact produced by its `build` job, and `publish` depends on the mobile result. Preparation validates the Linux candidate for Android and the Darwin arm64 candidate for iOS against the archive checksum, release manifest, web descriptor, hashed assets, and web-tree hash. It also runs a real Chromium/Go-fixture cache-recovery check with normal browser caching: the baseline loads, the target activates, a target-only missing stylesheet response is consumed, the failed phone plan is observed, and the candidate is reached through the shipped recovery button after the fault is repaired.
+A manual dispatch requires `artifact_run_id`, a completed successful same-repository `check` push on `main` containing `release-bundles`; provide `source_commit` for a specific revision. Every dispatch runs both platforms with the release suite. External provenance verifies repository, workflow, push event, main branch, conclusion, source SHA, artifact name, archive checksums, manifest revision and expiration before devices are provisioned. Check and release calls bind to the caller's exact artifact without confusing a PR merge build with its head SHA; evidence records both identities.
 
-A release request qualifies Android before any iOS work starts. The `android_qualification` job runs one complete controlled release scenario on Android with the 0.20.10 baseline and uploads it under its own `mobile-evidence-android-qualification` prefix, separate from smoke, release-smoke and full-device evidence. `android_qualification_evidence` then validates that current-attempt result with the qualified contract and requires strict environment qualification (`validate-environment.ts --require-pass`). Controlled smoke, which starts the first iOS simulator, waits for both jobs to succeed; a failed, cancelled or skipped Android qualification therefore prevents every iOS job and fails the gate. Ordinary smoke requests skip both jobs and keep reporting `qualification_status=NOT_REQUESTED`. This barrier is additional evidence: the complete Android and iOS matrices below still run.
+Preparation verifies the Linux candidate for Android and Darwin arm64 candidate for iOS against checksums, release manifests, descriptors, hashed assets and web-tree hashes. The gate validates the exact expected platform/baseline/suite/source/hash/native-provider rows for the current attempt. All uploads retain evidence for one day, including release bundles, prepared web trees and device results; expired inputs require a new recorded source run.
 
-Each device matrix entry selects one of 0.20.8, 0.20.9, or 0.20.10 as the installed baseline. `baseline_set: latest` prepares only 0.20.10; smoke runs omit the unused synthetic bundle artifact. The controlled smoke and release suites inject one bounded corrupt candidate-script response for historical upgrades and a missing-stylesheet response for the synthetic current-code pair, prove each request was consumed and phone completion was not acknowledged, then use the shipped Try again control without reinstalling or re-pairing. It also builds two coherent temporary current-code bundles through the real frontend pipeline and runs the same fault/completion assertions against that pair. The historical 0.20.8/0.20.9 progress-format gap is reported as `HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:<version>` rather than treated as a successful acknowledgement or a failed upgrade. After recording completion evidence, the runner closes the non-dismissible update dialog, returns from Settings to the fixture's alpha agent, and only then runs the native keyboard check. Evidence artifacts contain the mobile result, screenshots, bounded fixture/Appium logs, driver versions, and platform version records. Secrets, setup fragments, relay credentials, and control headers are redacted or deleted before upload.
+Both platforms inject one bounded corrupt candidate-script response, prove it was consumed and phone completion was not acknowledged, then recover through the shipped Try again control without reinstalling or re-pairing. Phone acknowledgement is required. The runner closes the update dialog, returns from Settings to the fixture's alpha agent, and checks keyboard visibility and draft preservation alongside credentials, preferences, relay ownership, lifecycle launches and reload bounds. Evidence contains the result, screenshots, bounded redacted diagnostics and platform/toolchain identities. Secrets, setup fragments, relay credentials and control headers are redacted or deleted before upload. Synthetic bundle preparation and host browser cache-recovery tools remain available for local harness development, outside this device lane.
 
-On hosted iOS, both CI entrypoints prebuild pinned WDA 16.12.8 and use
+On hosted iOS, the device action prebuilds pinned WDA 16.12.8 and uses
 `tests/mobile/support/ios-xctest.ts` to supervise one managed
 `xcodebuild test-without-building` invocation. The helper selects exactly one
 expected xctestrun and runner for the owned simulator. It records the child PID,
@@ -420,8 +403,8 @@ lookup without this diagnostic, and its cause remains unknown. The standalone
 projection utility and hypothetical fixtures remain local regression tools,
 not observed native recovery or hosted qualification.
 
-Both mobile CI upload paths withhold `RUNNER_TEMP/appium.log` on iOS, remove
-any stale copy from the artifact directory, and emit the small static
+The mobile device upload path withholds `RUNNER_TEMP/appium.log` on iOS, removes
+any stale copy from the artifact directory, and emits the small static
 `appium-log-disposition.json` instead. Use client timing and bounded diagnostics.
 Android's existing log-copy behavior is unchanged. This privacy decision covers
 the uploaded Appium log only: private ephemeral local Appium logging remains

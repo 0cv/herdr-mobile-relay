@@ -236,14 +236,14 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
               globalThis.fetch = (async () => Response.json({requests: [{path: '/app.js', fault: 'fail', fault_id: 'owned', fault_generation: '1'}], faults: [{path: '/app.js', kind: 'fail', id: 'owned', generation: '1', remaining: 1}]})) as typeof fetch;
               try {
                 return await assertCandidateFailureObserved(platform, {} as BundleSet['candidate']['identity'], 'https://fixture.test',
-                  {identity: {version: '0.21.0'}} as BundleSet['baselines'][number], new Set(),
+                  {identity: {version: '0.21.0'}} as BundleSet['baselines'][number],
                   {app_url: '', relay_urls: [], setup_urls: [], control_url: 'http://fixture.invalid', control_secret: '', ca_certificate: '', old_release: '', candidate_release: ''},
                   '/app.js', 'fail', 'owned', '1', new QualificationFailureLatch(),
                   new PhaseBudget('failure-parent', {timeoutMs: scenario.endsWith('admission') ? 47_000 : 60_000}));
               } finally { globalThis.fetch = fetch; }
             }
             if (scenario.startsWith('completion-parent-')) return waitForPhoneCompletion(platform,
-              {identity: {version: '0.21.0'}} as BundleSet['baselines'][number], new Set(), new QualificationFailureLatch(),
+              {identity: {version: '0.21.0'}} as BundleSet['baselines'][number], new QualificationFailureLatch(),
               new PhaseBudget('completion-parent', {timeoutMs: scenario.endsWith('admission') ? 23_000 : 30_000}));
             return scenario === 'mutation-postcheck' ? platform.openSetupURLInInstalledApp('https://fixture.test/pair')
               : platform.attachToInstalledView(scenario === 'parent-admission' ? 10_000 : 30_000);

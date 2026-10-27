@@ -67,12 +67,6 @@ runs:
       with:
         name: mobile-bundles-${{ inputs.platform }}
         path: mobile-bundles
-    - name: Download current-code bundle pair
-      if: inputs.scenario == 'synthetic'
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: mobile-bundles-current
-        path: mobile-bundles-current
     - name: Build fixture
       run: go build -trimpath -o "$MOBILE_FIXTURE_BINARY" ./tests/mobile/fixture
       shell: bash
@@ -115,7 +109,11 @@ runs:
         android_device_profile="$(jq -r '.android.deviceProfile' tests/mobile/toolchains.json)"
         test "$android_system_image" = "system-images;android-35;google_apis;x86_64"
         test "$android_device_profile" = pixel_7
-        sdkmanager "platform-tools" "emulator" "build-tools;35.0.0" "$android_system_image"
+        for attempt in 1 2 3; do
+          if sdkmanager "platform-tools" "emulator" "build-tools;35.0.0" "$android_system_image"; then break; fi
+          if [ "$attempt" -eq 3 ]; then exit 1; fi
+          sleep 5
+        done
         avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
         echo no | avdmanager create avd --force --name "$avd_name" --package "$android_system_image" --device "$android_device_profile"
         avdmanager list avd
@@ -341,23 +339,11 @@ runs:
         bun tests/mobile/android-gms-settle.ts --serial "$ANDROID_SERIAL" --output "$MOBILE_OUTPUT/android-gms-settle.json"
       shell: bash
     - name: Run installed-PWA upgrade scenarios
-      if: inputs.scenario == 'historical'
       run: |
         set -euo pipefail
         bun run --cwd tests/mobile run -- \
           --bundle-set "$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json" \
           --baseline "${{ inputs.baseline }}" \
-          --suite "$MOBILE_SUITE" \
-          --output "$MOBILE_OUTPUT" \
-          --private-output "$MOBILE_PRIVATE"
-      shell: bash
-    - name: Run current-code updater fault scenario
-      if: inputs.scenario == 'synthetic'
-      run: |
-        set -euo pipefail
-        bun run --cwd tests/mobile run -- \
-          --bundle-set "$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json" \
-          --baseline current-code-baseline \
           --suite "$MOBILE_SUITE" \
           --output "$MOBILE_OUTPUT" \
           --private-output "$MOBILE_PRIVATE"
@@ -371,7 +357,6 @@ runs:
         set -euo pipefail
         jq -e '.failure == null and .bytes > 0 and .bytes <= 104857600' "$MOBILE_OUTPUT/android-environment-collector.json"
         bundle_set="$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json"
-        if [ "$EXPECTED_SCENARIO" = synthetic ]; then bundle_set="$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json"; fi
         bun tests/mobile/android-environment.ts check --contract report \
           --directory "$MOBILE_OUTPUT" --identity "$MOBILE_OUTPUT/android-environment-identity.json" \
           --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
@@ -433,9 +418,20 @@ runs:
       run: |
         set -euo pipefail
         bundle_set="$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json"
-        if [ "$EXPECTED_SCENARIO" = synthetic ]; then bundle_set="$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json"; fi
         bun tests/mobile/validate-environment.ts --result "$MOBILE_OUTPUT/mobile-result.json" --output "$MOBILE_OUTPUT/public-summary.json" \
           --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+          --suite "$MOBILE_SUITE" --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+          --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
+      shell: bash
+    - name: Require strict Android environment qualification
+      if: always() && inputs.platform == 'android'
+      env:
+        EXPECTED_BASELINE: ${{ inputs.baseline }}
+        EXPECTED_SCENARIO: ${{ inputs.scenario }}
+      run: |
+        set -euo pipefail
+        bun tests/mobile/validate-environment.ts --require-pass --result "$MOBILE_OUTPUT/mobile-result.json" \
+          --bundle-set "$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
           --suite "$MOBILE_SUITE" --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
           --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
       shell: bash

@@ -110,7 +110,7 @@ const WARM_ENVIRONMENT_SCENARIOS = [
   'stable-binary-gms-components-only', 'signal9-stop-components-combined', 'package-identity-replacement-only',
 ];
 const SOCKET_FAULTS = ['search', 'browser', 'other', 'origin', 'document', 'native-failure', 'missing', 'empty-valid'];
-const APPIUM_WORKFLOW_FILES = ['.github/actions/mobile-device-run/action.yml', '.github/workflows/mobile-ci.yml'];
+const APPIUM_WORKFLOW_FILES = ['.github/actions/mobile-device-run/action.yml'];
 
 function emitter(line: string, sourceFile: string): SourceDiagnostic {
   return { line, sourceFile };
@@ -151,7 +151,7 @@ const diagnosticEmitters = new Map<string, DiagnosticEmitter>([
     }]),
   ['Android production CLI SM56 warm lifecycle keeps independent and combined signal, stop and component drift fatal', () =>
     WARM_ENVIRONMENT_SCENARIOS.map((name) => emitter(`PASS SM56 environment ${name}`, 'android-environment.ts'))],
-  ['Android CI gates both local Appium launch paths', () => [
+  ['Android CI gates the shared local Appium launch path', () => [
     ...APPIUM_WORKFLOW_FILES.map((filename) => emitter(
       `PASS ${filename}: scoped installation, startup refusal and bounded Android integrity artifact routing`,
       'android-appium-ci.ts',

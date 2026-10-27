@@ -303,32 +303,10 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await validateMobileEvidence(options);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, phone_completion: { ...result.phone_completion, rawPlanPresent: false } }));
   await assert.rejects(validateMobileEvidence(options), /raw phone-plan/);
-  const historicalBaselineIdentity = {
-    ...expectedBaselineIdentity, version: '0.20.8', assets: 361, build: 'historical-build',
-    entry: '/historical/index.html', script: '/assets/historical.js', style: '/assets/historical.css', webHash: 'e'.repeat(64),
-  };
-  const historicalResult = {
-    ...result,
-    baseline: '0.20.8',
-    identity: { ...result.identity, baseline: '0.20.8' },
-    initial_identity: { ...result.initial_identity, ...historicalBaselineIdentity },
-    oracle_controls: ['HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:0.20.8'],
-    phone_completion: { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false },
-  };
-  const historicalOptions = {
-    ...options,
-    matrix: [{ platform: 'ios', baseline: '0.20.8', scenario: 'historical' }],
-    baselineIdentities: [{ name: '0.20.8', identity: historicalBaselineIdentity }],
-  };
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify(historicalResult));
-  await validateMobileEvidence(historicalOptions);
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: { ...historicalResult.phone_completion, rawPlanPresent: false } }));
-  await validateMobileEvidence(historicalOptions);
-  const relayOnlyCompletion = { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'loading', visibleCompletion: true };
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: relayOnlyCompletion }));
-  await validateMobileEvidence(historicalOptions);
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: { ...relayOnlyCompletion, phoneAcknowledged: true } }));
-  await assert.rejects(validateMobileEvidence(historicalOptions), /0\.20\.8 reported phone completion without a phone plan/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, phone_completion: { ...result.phone_completion, phoneRequired: false } }));
+  await assert.rejects(validateMobileEvidence(options), /has no phone plan/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, phone_completion: { ...result.phone_completion, phoneAcknowledged: false } }));
+  await assert.rejects(validateMobileEvidence(options), /completed phone acknowledgement/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, origin: 'http://fixture.test' }));
   await assert.rejects(validateMobileEvidence(options), /HTTPS origin/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, final_identity: { ...result.final_identity, build: 'wrong-build' } }));
@@ -1372,10 +1350,10 @@ test('runtime script observations satisfy baseline and candidate validation cont
   const definitions = JSON.parse(await readFile(join(repositoryRoot, 'tests/mobile/baselines.json'), 'utf8')).baselines as Array<Record<string, unknown>>;
   const origin = 'https://fixture.test';
   const candidate: BundleIdentity = {
-    version: '0.21.0',
-    assets: 999,
+    version: String(definitions[0].version),
+    assets: Number(definitions[0].assets) + 1,
     build: 'c'.repeat(64),
-    entry: `/builds/0.21.0-999-${'c'.repeat(16)}/index.html`,
+    entry: `/builds/${definitions[0].version}-${Number(definitions[0].assets) + 1}-${'c'.repeat(16)}/index.html`,
     script: '/assets/app-candidate.js',
     style: '/assets/app-candidate.css',
     scriptSha256: '1'.repeat(64),
@@ -1394,11 +1372,9 @@ test('runtime script observations satisfy baseline and candidate validation cont
       scriptSha256: '1'.repeat(64),
       styleSha256: '2'.repeat(64),
       webHash: String(definition.webHash),
-      descriptor: definition.name === '0.20.10',
+      descriptor: true,
     };
-    const metadata = definition.name === '0.20.10'
-      ? { version: expected.version, assets: expected.assets, build: expected.build, entry: expected.entry }
-      : { version: expected.version, assets: expected.assets };
+    const metadata = { version: expected.version, assets: expected.assets, build: expected.build, entry: expected.entry };
     const location = new URL(expected.entry, origin);
     const hasDescriptor = expected.descriptor;
     const document = {
@@ -1453,10 +1429,7 @@ test('runtime script observations satisfy baseline and candidate validation cont
         beta: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['beta'], connections: 1 },
       } },
       preference_preserved: true,
-      oracle_controls: expected.version === '0.20.10' ? [] : [`HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:${expected.version}`],
-      phone_completion: expected.version === '0.20.10'
-        ? { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true }
-        : { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false },
+      phone_completion: { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true },
       faults_exercised: [`corrupt:${candidate.script}`],
       fault_identity: { id: 'contract', generation: '1', kind: 'corrupt', path: candidate.script },
       fixture_requests: [{ release: 'candidate', path: candidate.script, fault: 'corrupt', fault_id: 'contract', fault_generation: '1' }],
@@ -2469,7 +2442,7 @@ for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTest
 for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests]) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', async () =>
   runIOSRegressions(selectedIOSIds, !explicitSelection));
-test('Android CI gates both local Appium launch paths', async () => {
+test('Android CI gates the shared local Appium launch path', async () => {
   await import('./android-appium-ci');
 });
 test('Android retained post-attachment and response-shape refusals', async () => {

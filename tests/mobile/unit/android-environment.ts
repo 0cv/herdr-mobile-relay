@@ -8039,35 +8039,38 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(await readFile(checkPath, 'utf8'), bytes);
     }
   });
-  test('Android-only declarations and both setup paths preserve policy, pinning and read-only postchecks', async () => {
+  test('Android-only declarations and the shared setup path preserve policy, pinning and read-only postchecks', async () => {
     const policy = JSON.parse(await readFile(repositoryPath('tests/mobile/toolchains.json'), 'utf8')).android;
     assert.equal(policy.vendingPolicy, 'absent-or-disabled-user-0');
     assert.equal(policy.systemImagePolicy, 'owned-google-apis-emulator');
     assert.equal('playStore' in policy, false);
     assert.equal(policy.browserSha256, '261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35a');
     assert.equal(policy.trichromeLibrarySha256, 'f7d82fa76a99f13980c4205484f4ae78742755d2e9b7276fd60c20e3cd7f9090');
-    for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
-      const source = await readFile(repositoryPath(path), 'utf8');
-      assert.match(source, /android-environment\.ts prepare/u);
-      assert.doesNotMatch(source, /android-environment\.ts snapshot|logcat -c|google-apis-without-play-store/u);
-      const assertPostcheck = (text: string) => {
-        const start = text.indexOf('name: Validate immutable Android environment report');
-        const end = text.indexOf('name: Sanitize bounded diagnostics');
-        assert.ok(start >= 0 && end > start);
-        const post = text.slice(start, end);
-        assert.match(post, /android-environment\.ts check --contract report/u);
-        assert.match(post, /--directory "\$MOBILE_OUTPUT"/u);
-        assert.match(post, /--identity "\$MOBILE_OUTPUT\/android-environment-identity\.json"/u);
-        assert.doesNotMatch(post, /--output|--operations|disable-user|adb |prepare|>.*android-environment-check/u);
-      };
-      assertPostcheck(source);
-      for (const binding of ['--directory "$MOBILE_OUTPUT"', '--identity "$MOBILE_OUTPUT/android-environment-identity.json"']) assert.throws(() => assertPostcheck(source.replace(binding, '--removed binding')));
-      assert.throws(() => assertPostcheck(source.replace('check --contract report', 'check --contract report --output overwrite.json')));
-      assert.throws(() => assertPostcheck(source.replace('name: Validate immutable Android environment report', 'name: Removed')));
-      assert.match(source, /apksigner verify --verbose --print-certs/u);
-      assert.match(source, /sha256sum --check --status/u);
+    const workflow = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun.YAML.parse(await readFile(repositoryPath('.github/workflows/mobile-ci.yml'), 'utf8'));
+    const device = workflow.jobs.device;
+    assert.deepEqual(device.needs, ['provenance', 'prepare']);
+    assert.equal(device.steps.filter((step: any) => step.uses === './.github/actions/mobile-device-run').length, 1);
+    assert.equal(device.steps.some((step: any) => step.run), false);
+    const source = await readFile(repositoryPath('.github/actions/mobile-device-run/action.yml'), 'utf8');
+    assert.match(source, /android-environment\.ts prepare/u);
+    assert.doesNotMatch(source, /android-environment\.ts snapshot|logcat -c|google-apis-without-play-store/u);
+    const assertPostcheck = (text: string) => {
+      const start = text.indexOf('name: Validate immutable Android environment report');
+      const end = text.indexOf('name: Sanitize bounded diagnostics');
+      assert.ok(start >= 0 && end > start);
+      const post = text.slice(start, end);
+      assert.match(post, /android-environment\.ts check --contract report/u);
+      assert.match(post, /--directory "\$MOBILE_OUTPUT"/u);
+      assert.match(post, /--identity "\$MOBILE_OUTPUT\/android-environment-identity\.json"/u);
+      assert.doesNotMatch(post, /--output|--operations|disable-user|adb |prepare|>.*android-environment-check/u);
+    };
+    assertPostcheck(source);
+    for (const binding of ['--directory "$MOBILE_OUTPUT"', '--identity "$MOBILE_OUTPUT/android-environment-identity.json"']) assert.throws(() => assertPostcheck(source.replace(binding, '--removed binding')));
+    assert.throws(() => assertPostcheck(source.replace('check --contract report', 'check --contract report --output overwrite.json')));
+    assert.throws(() => assertPostcheck(source.replace('name: Validate immutable Android environment report', 'name: Removed')));
+    assert.match(source, /apksigner verify --verbose --print-certs/u);
+    assert.match(source, /sha256sum --check --status/u);
 
-    }
   });
   return tests;
 }

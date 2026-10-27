@@ -5,6 +5,10 @@ on:
     branches: [main, dev, ci-mobile]
   pull_request:
 
+concurrency:
+  group: check-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   go:
     name: Go quality
@@ -483,9 +487,7 @@ jobs:
     name: Mobile device CI
     if: >-
       (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mobile')) ||
-      (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' ||
-        (github.event.pull_request.base.ref == 'dev' && github.event.pull_request.head.ref == 'ci-mobile' &&
-          github.event.pull_request.head.repo.full_name == github.repository)))
+      (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' || github.event.pull_request.base.ref == 'dev'))
     needs: [release, mobile-host-check, mobile-inspection-check, mobile-unit-aggregate]
     uses: ./.github/workflows/mobile-ci.yml
     with:
@@ -493,9 +495,6 @@ jobs:
       artifact_name: release-bundles
       candidate_commit: ${{ github.sha }}
       head_commit: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      platform: all
-      suite: ${{ github.ref == 'refs/heads/dev' && 'smoke' || 'release' }}
-      baseline_set: ${{ github.ref == 'refs/heads/dev' && 'latest' || 'all' }}
     permissions:
       actions: read
       contents: read

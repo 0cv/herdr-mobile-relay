@@ -2450,7 +2450,7 @@ const assertSanitizedExports = async (root: string, state: string, forbidden: st
   const output = join(root, 'export-output');
   const runnerTemp = join(root, 'export-runner-temp');
   await mkdir(runnerTemp, { recursive: true });
-  for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
+  for (const path of ['.github/actions/mobile-device-run/action.yml']) {
     await rm(output, { recursive: true, force: true });
     const source = await readFile(join(repo, path), 'utf8');
     const result = await runExportBlock(exportBlock(source), repo, {

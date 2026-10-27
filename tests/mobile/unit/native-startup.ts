@@ -222,10 +222,10 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       await rm(root, { recursive: true, force: true });
     }
   }],
-  ['Native startup export sanitizes failed-owner WDA logs on both CI paths', async () => {
+  ['Native startup shared device action sanitizes failed-owner WDA logs', async () => {
     const repo = join(import.meta.dirname, '../../..');
     const secret = 'https://example.test/?token=export-secret';
-    for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
+    for (const path of ['.github/actions/mobile-device-run/action.yml']) {
       const root = await mkdtemp(join(tmpdir(), 'herdr-export-'));
       const state = join(root, 'state');
       const runnerTemp = join(root, 'runner-temp');
@@ -273,7 +273,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       }
     }
   }],
-  ['Native startup iOS runtime capture records selected build before provisioning on both CI paths', async () => {
+  ['Native startup iOS runtime capture records selected build before provisioning in the device action', async () => {
     const repo = join(import.meta.dirname, '../../..');
     const inventory = [
       '== Runtimes ==',
@@ -282,7 +282,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       'iOS 26.6 (26.6 - 23G80) - com.apple.CoreSimulator.SimRuntime.iOS-26-6',
       '',
     ].join('\n');
-    for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
+    for (const path of ['.github/actions/mobile-device-run/action.yml']) {
       const fixture = await createIosRuntimeFixture(inventory);
       try {
         const source = await readFile(join(repo, path), 'utf8');
@@ -319,7 +319,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       ['patch-only', '== Runtimes ==\niOS 27.0.1 (27.0.1 - 24A400) - com.apple.CoreSimulator.SimRuntime.iOS-27-0-1\n'],
       ['unavailable', '== Runtimes ==\niOS 27.0 (27.0 - 24A335) - com.apple.CoreSimulator.SimRuntime.iOS-27-0 (unavailable, runtime profile not found)\n'],
     ] as const;
-    for (const [name, inventory] of cases) for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
+    for (const [name, inventory] of cases) for (const path of ['.github/actions/mobile-device-run/action.yml']) {
       const fixture = await createIosRuntimeFixture(inventory);
       try {
         const source = await readFile(join(repo, path), 'utf8');
@@ -338,7 +338,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       } finally { await rm(fixture.root, { recursive: true, force: true }); }
     }
   }],
-  ['Native startup iOS hosted target rejects mismatched Xcode identity before runtime selection on both CI paths', async () => {
+  ['Native startup iOS hosted target rejects mismatched Xcode identity before runtime selection in the device action', async () => {
     const repo = join(import.meta.dirname, '../../..');
     const inventory = '== Runtimes ==\niOS 27.0 (27.0 - 24A335) - com.apple.CoreSimulator.SimRuntime.iOS-27-0\n';
     const cases: Array<[string, XcodeIdentity, string]> = [
@@ -347,7 +347,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       ['legacy-xcode', { version: '16.4', build: '16F6', developerDirectory: hostedXcode.developerDirectory }, 'observed_xcode_version=16.4'],
       ['developer-directory', { ...hostedXcode, developerDirectory: '/Applications/Xcode_16.4.app/Contents/Developer' }, 'observed_developer_directory=/Applications/Xcode_16.4.app/Contents/Developer'],
     ];
-    for (const [name, xcode, observed] of cases) for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
+    for (const [name, xcode, observed] of cases) for (const path of ['.github/actions/mobile-device-run/action.yml']) {
       const fixture = await createIosRuntimeFixture(inventory, xcode);
       try {
         const source = await readFile(join(repo, path), 'utf8');
@@ -495,9 +495,9 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
     try { await assert.rejects(managedWdaCapabilities('82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40'), /missing IOS_XCTEST_STATE_DIR/u); }
     finally { if (old === undefined) delete process.env.IOS_XCTEST_STATE_DIR; else process.env.IOS_XCTEST_STATE_DIR = old; }
   }],
-  ['Native startup Android SDK setup requests only platform-tools on both CI paths', async () => {
+  ['Native startup Android SDK setup requests only platform-tools in the shared device action', async () => {
     const repo = join(import.meta.dirname, '../../..');
-    const paths = ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml'];
+    const paths = ['.github/actions/mobile-device-run/action.yml'];
     for (const path of paths) {
       const source = await readFile(join(repo, path), 'utf8');
       assertAndroidSdkSetupContract(source, path);
@@ -516,8 +516,8 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       ]) assert.ok(source.includes(fragment), `${path}: missing preserved Android contract: ${fragment}`);
     }
   }],
-  ['Native startup both CI paths use the shared owner and preserve pre-session ordering', async () => {
-    for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
+  ['Native startup shared device action uses the owner and preserves pre-session ordering', async () => {
+    for (const path of ['.github/actions/mobile-device-run/action.yml']) {
       const source = await readFile(join(import.meta.dirname, '../../..', path), 'utf8');
       assert.equal(source.split('bun tests/mobile/support/ios-xctest.ts start').length - 1, 1);
       assert.equal(source.split('bun tests/mobile/support/ios-xctest.ts stop').length - 1, 1);

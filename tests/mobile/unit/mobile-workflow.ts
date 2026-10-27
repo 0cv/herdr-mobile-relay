@@ -1,20 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
+import { fileSha256 } from '../support/artifacts';
 import { join } from 'node:path';
 import { repositoryPath } from '../support/paths';
 import { command, CommandError } from '../support/process';
+import { evidenceFixture } from './android-product-environment';
+import { validateMobileEvidence } from '../support/evidence';
+import { collectEnvironmentReport } from '../validate-environment';
 
 type Status = 'success' | 'failure' | 'cancelled' | 'skipped';
 type Context = Record<string, any>;
 type Row = { platform: 'android' | 'ios'; product: 'PASS' | 'FAIL' | 'INDETERMINATE'; environment: 'PASS' | 'FAIL' | 'UNKNOWN' | 'NOT_APPLICABLE'; complete: boolean; artifact: boolean; current?: boolean };
-type StageRows = { android?: Row[]; smoke: Row[]; release: Row[]; full: Row[] };
-const needed = ['provenance', 'prepare', 'android_qualification', 'android_qualification_evidence', 'smoke', 'smoke_evidence', 'smoke_environment_report', 'smoke_qualification', 'release_smoke', 'release_evidence', 'device', 'gate'];
-const strictOnly = ['android_qualification', 'android_qualification_evidence', 'smoke_qualification', 'release_smoke', 'release_evidence', 'device'];
-const iosExecutingJobs = ['smoke', 'release_smoke', 'device'];
-const qualifiedAndroid: Row[] = [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }];
-const androidQualificationMatrix = '{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"}]}';
-const iosRunner = 'xcode-27';
+const needed = ['provenance', 'prepare', 'device', 'environment_report', 'gate'];
 
 function expression(source: string, context: Context): any {
   const text = source.replace(/^\s*\$\{\{\s*|\s*\}\}\s*$/gu, '');
@@ -101,6 +100,14 @@ function validateNativePath(steps: any[], dimension: 'inputs' | 'matrix'): void 
   assert.equal(summary.if, 'always()'); assert.match(summary.run, /validate-environment.ts --result/u);
   assert.ok(steps.indexOf(summary) > steps.indexOf(sanitize));
   for (const flag of ['bundle-set', 'run-id', 'attempt', 'suite', 'platform', 'baseline', 'scenario', 'source-run-head-sha']) assert.match(summary.run, new RegExp('--' + flag + ' '));
+  const strict = steps.find(step => step.name === 'Require strict Android environment qualification');
+  assert.equal(strict.if, "always() && inputs.platform == 'android'");
+  assert.match(strict.run, /validate-environment.ts --require-pass --result/u);
+  for (const flag of ['bundle-set', 'run-id', 'attempt', 'suite', 'platform', 'baseline', 'scenario', 'source-run-head-sha']) assert.match(strict.run, new RegExp('--' + flag + ' '));
+  const scenariosRun = steps.filter(step => step.run?.includes('bun run --cwd tests/mobile run --'));
+  assert.equal(scenariosRun.length, 1);
+  assert.equal(scenariosRun[0].if, undefined);
+  assert.doesNotMatch(JSON.stringify(steps), /mobile-bundles-current|current-code-baseline/u);
   const upload = steps.find(step => step.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(upload.if, 'always()'); assert.equal(upload.with['if-no-files-found'], 'error'); assert.equal(upload.with['retention-days'], 1);
   assert.match(upload.with.name, /github.run_attempt/u);
@@ -183,162 +190,142 @@ function auditUnitShardWorkflow(check: any, source: string): void {
 function audit(workflow: any, action: any, release: any, check: any, shardSource: string): void {
   const jobs = workflow.jobs;
   auditUnitShardWorkflow(check, shardSource);
-  for (const name of needed) assert.ok(jobs[name], name);
-  for (const [job, name] of [[check.jobs.release, 'release-bundles'], [jobs.prepare, 'mobile-bundles-android'], [jobs.prepare, 'mobile-bundles-ios'], [jobs.prepare, 'mobile-bundles-current']] as const) {
+  assert.deepEqual(Object.keys(jobs), needed);
+  assert.deepEqual(jobs.prepare.needs, 'provenance');
+  assert.deepEqual(jobs.device.needs, ['provenance', 'prepare']);
+  assert.equal(jobs.device.if, undefined);
+  assert.equal(jobs.device.strategy['fail-fast'], false);
+  assert.equal(jobs.device.strategy['max-parallel'], undefined);
+  assert.equal(jobs.device.strategy.matrix, '${{ fromJSON(needs.prepare.outputs.device_matrix) }}');
+  assert.equal(jobs.device['runs-on'], '${{ matrix.runner }}');
+  assert.equal(jobs.device['timeout-minutes'], 60);
+  const device = jobs.device.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run');
+  assert.deepEqual(device.with, { platform: '${{ matrix.platform }}', baseline: '${{ matrix.baseline }}', scenario: '${{ matrix.scenario }}', suite: 'release', source_head_sha: '${{ needs.provenance.outputs.head_sha }}', evidence_prefix: 'mobile-evidence-device' });
+  assert.equal(jobs.device.steps.length, 2);
+  assert.equal(jobs.device.steps[0].with.ref, '${{ needs.provenance.outputs.source_sha }}');
+  validateNativePath(action.runs.steps, 'inputs');
+  const timing = action.runs.steps.find((step: any) => step.name === 'Initialize private runner paths').run;
+  assert.match(timing, /if \[ "\$WORKFLOW_PLATFORM" = ios \]; then printf 'MOBILE_TIMING_SCALE=3/u);
+  assert.equal(timing.match(/MOBILE_TIMING_SCALE/gu)?.length, 1);
+  assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read' });
+  for (const document of [workflow, check]) {
+    assert.equal(document.concurrency['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}");
+    assert.match(document.concurrency.group, /\$\{\{ github.event.pull_request.number \|\| github.run_id \}\}/u);
+  }
+  assert.notEqual(workflow.concurrency.group, check.concurrency.group);
+  for (const inputs of [workflow.on.workflow_call.inputs, workflow.on.workflow_dispatch.inputs, check.jobs.mobile.with, release.jobs.mobile.with]) {
+    for (const key of ['suite', 'baseline_set', 'platform']) assert.equal(inputs[key], undefined);
+  }
+  const matrix = jobs.prepare.steps.find((step: any) => step.id === 'matrix').run;
+  assert.match(matrix, /tests\/mobile\/baselines.json/u);
+  assert.match(matrix, /web\/version.json/u);
+  assert.match(matrix, /runner: "xcode-27"/u);
+  const preparations = jobs.prepare.steps.filter((step: any) => step.run?.includes('prepare:bundle'));
+  assert.equal(preparations.length, 2);
+  for (const step of preparations) assert.ok(step.run.includes('--baseline "${{ steps.matrix.outputs.baseline }}"'));
+  assert.doesNotMatch(JSON.stringify(workflow), /0\.20\.|0\.23\.3|synthetic|prepare:current|test:cache-recovery/u);
+  for (const [job, name] of [[check.jobs.release, 'release-bundles'], [jobs.prepare, 'mobile-bundles-android'], [jobs.prepare, 'mobile-bundles-ios']] as const) {
     const upload = job.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@') && step.with?.name === name);
-    assert.equal(upload?.with.overwrite, true, `${name} must overwrite its artifact when a run is rerun`);
+    assert.equal(upload?.with.overwrite, true);
   }
-  validateNativePath(action.runs.steps, 'inputs'); validateNativePath(jobs.device.steps, 'matrix');
-  for (const name of ['smoke', 'release_smoke', 'device']) assert.equal(jobs[name].strategy['fail-fast'], false);
-  auditAndroidQualificationBarrier(workflow);
-  const validators = Object.entries(jobs).flatMap(([job, value]: [string, any]) => (value.steps || []).filter((step: any) => step.run?.includes('bun tests/mobile/validate-evidence.ts')).map((step: any) => ({ job, step })));
-  assert.deepEqual(validators.map(value => value.job), ['android_qualification_evidence', 'smoke_evidence', 'release_evidence', 'gate']);
-  for (const { job, step } of validators) {
-    assert.match(step.run, new RegExp('--contract ' + (job === 'smoke_evidence' ? 'product' : 'qualified')));
-    for (const flag of ['run-id', 'attempt', 'matrix', 'candidate-commit', 'source-run-head-sha', 'candidate-web-hash', 'candidate-identity', 'baseline-identities']) assert.match(step.run, new RegExp('--' + flag + ' '));
-    assert.equal(step.env.CANDIDATE_COMMIT, '${{ needs.provenance.outputs.source_sha }}');
-    assert.equal(step.env.SOURCE_RUN_HEAD_SHA, '${{ needs.provenance.outputs.head_sha }}');
-    assert.equal(step.env.CANDIDATE_IDENTITY, '${{ needs.prepare.outputs.candidate_identity }}');
-  }
-  assert.ok(!jobs.smoke_environment_report.needs.includes('smoke_evidence'));
-  assert.equal(jobs.smoke_environment_report.if, 'always()');
-  for (const name of ['release_smoke', 'device', 'gate']) assert.ok(jobs[name].needs.includes('smoke_qualification'));
-  for (const name of ['android_qualification_evidence', 'smoke_evidence', 'smoke_environment_report', 'smoke_qualification', 'release_evidence', 'gate']) {
+  assert.deepEqual(jobs.environment_report.needs, ['provenance', 'prepare', 'device']);
+  assert.equal(jobs.environment_report.if, 'always()');
+  assert.deepEqual(jobs.gate.needs, ['provenance', 'prepare', 'device', 'environment_report']);
+  assert.equal(jobs.gate.if, 'always()');
+  for (const name of ['environment_report', 'gate']) {
     const steps = jobs[name].steps;
     const checkout = steps.findIndex((step: any) => step.uses?.startsWith('actions/checkout@'));
     const downloads = steps.filter((step: any) => step.uses?.startsWith('actions/download-artifact@'));
     assert.equal(downloads.length, 1);
     assert.ok(checkout >= 0 && checkout < steps.indexOf(downloads[0]));
     assert.equal(steps[checkout].with.ref, '${{ needs.provenance.outputs.source_sha }}');
-    assert.match(downloads[0].with.pattern, /-\*?-?\$\{\{ github.run_attempt \}\}$/u);
+    assert.equal(downloads[0].with.pattern, 'mobile-evidence-device-*-${{ github.run_attempt }}');
     assert.equal(downloads[0].with['merge-multiple'], false);
   }
-  const report = jobs.smoke_environment_report.steps.find((step: any) => step.id === 'report');
+  const report = jobs.environment_report.steps.find((step: any) => step.id === 'report');
   assert.match(report.run, /validate-environment.ts --contract product/u);
-  assert.equal(jobs.smoke_environment_report.outputs.environment_status, '${{ steps.report.outputs.environment_status }}');
-  const qualification = jobs.smoke_qualification.steps.find((step: any) => step.run?.includes('validate-environment.ts'));
-  assert.match(qualification.run, /--require-pass --contract qualified/u);
+  assert.equal(report.if, undefined);
+  const strict = jobs.environment_report.steps.find((step: any) => step.name === 'Require strict environment qualification');
+  assert.match(strict.run, /validate-environment.ts --require-pass --contract qualified/u);
+  assert.ok(jobs.environment_report.steps.indexOf(strict) > jobs.environment_report.steps.indexOf(report));
+  const validator = jobs.gate.steps.find((step: any) => step.run?.includes('validate-evidence.ts'));
+  assert.equal(validator.if, "needs.device.result == 'success'");
+  assert.match(validator.run, /--contract qualified/u);
+  for (const step of [report, strict, validator]) {
+    for (const flag of ['run-id', 'attempt', 'matrix', 'candidate-commit', 'source-run-head-sha', 'candidate-web-hash', 'candidate-identity', 'baseline-identities']) assert.match(step.run, new RegExp('--' + flag + ' '));
+    assert.match(step.run, /--suite release/u);
+    assert.equal(step.env.DEVICE_MATRIX, '${{ needs.prepare.outputs.device_matrix }}');
+    assert.equal(step.env.CANDIDATE_COMMIT, '${{ needs.provenance.outputs.source_sha }}');
+    assert.equal(step.env.SOURCE_RUN_HEAD_SHA, '${{ needs.provenance.outputs.head_sha }}');
+    assert.equal(step.env.CANDIDATE_IDENTITY, '${{ needs.prepare.outputs.candidate_identity }}');
+  }
+  for (const key of ['product_status', 'environment_status']) {
+    assert.equal(workflow.on.workflow_call.outputs[key].value, '${{ jobs.environment_report.outputs.' + key + ' }}');
+    assert.equal(jobs.environment_report.outputs[key], '${{ steps.report.outputs.' + key + ' }}');
+  }
   assert.equal(workflow.on.workflow_call.outputs.qualification_status.value, '${{ jobs.gate.outputs.qualification_status }}');
   assert.equal(jobs.gate.outputs.qualification_status, '${{ steps.qualification.outputs.qualification_status }}');
-  assert.equal(workflow.on.workflow_call.outputs.product_status.value, '${{ jobs.smoke_environment_report.outputs.product_status }}');
-  assert.equal(workflow.on.workflow_call.outputs.environment_status.value, '${{ jobs.smoke_environment_report.outputs.environment_status }}');
-  assert.deepEqual(release.jobs.mobile.with.suite, 'release'); assert.equal(release.jobs.mobile.with.platform, 'all'); assert.equal(release.jobs.mobile.with.baseline_set, 'all');
-  assert.deepEqual(release.jobs.publish.needs, ['verify', 'build', 'native-smoke', 'mobile']);
-  assert.equal(release.jobs.publish.if, undefined);
-  assert.equal(release.jobs.publish['continue-on-error'], undefined);
-  assert.equal(release.jobs.mobile.needs, 'build');
-  assert.equal(release.jobs['native-smoke'].needs, 'build');
-  const fullValidator = jobs.gate.steps.find((step: any) => step.run?.includes('validate-evidence.ts'));
-  assert.equal(fullValidator.if, "needs.device.result == 'success'");
-  assert.ok(jobs.gate.steps.indexOf(fullValidator) < jobs.gate.steps.findIndex((step: any) => step.id === 'qualification'));
+  assert.ok(jobs.gate.steps.indexOf(validator) < jobs.gate.steps.findIndex((step: any) => step.id === 'qualification'));
   assert.equal(jobs.gate.steps.find((step: any) => step.id === 'qualification').if, undefined);
   assert.deepEqual(check.jobs.mobile.needs, ['release', 'mobile-host-check', 'mobile-inspection-check', 'mobile-unit-aggregate']);
-  for (const status of ['failure', 'cancelled', 'skipped'] as const) {
-    const dependencies = Object.fromEntries(check.jobs.mobile.needs.map((name: string) => [name, { result: name === 'mobile-unit-aggregate' ? status : 'success', outputs: {} }]));
-    assert.equal(condition(check.jobs.mobile.if, { needs: dependencies, success: false, github: { ref: 'refs/heads/main', event_name: 'push' } }), false);
-  }
   assert.equal(check.jobs.mobile.uses, './.github/workflows/mobile-ci.yml');
-  assert.equal(check.jobs.mobile.with.platform, 'all');
-  for (const ref of ['dev', 'main', 'ci-mobile']) {
-    const context = { needs: {}, github: { ref: 'refs/heads/' + ref, event_name: 'push' }, success: true };
-    assert.equal(condition(check.jobs.mobile.if, context), true);
-    assert.equal(expression(check.jobs.mobile.with.suite, context), ref === 'dev' ? 'smoke' : 'release');
-    assert.equal(expression(check.jobs.mobile.with.baseline_set, context), ref === 'dev' ? 'latest' : 'all');
+  for (const ref of ['dev', 'main', 'ci-mobile', 'feature']) {
+    assert.equal(condition(check.jobs.mobile.if, { needs: {}, github: { ref: 'refs/heads/' + ref, event_name: 'push' }, success: true }), ref !== 'feature');
   }
-  for (const [base, head, sameRepository, admitted] of [['main', 'feature', false, true], ['dev', 'ci-mobile', true, true], ['dev', 'ci-mobile', false, false], ['dev', 'feature', true, false]] as const) {
-    const context = { needs: {}, success: true, github: { ref: 'refs/pull/25/merge', event_name: 'pull_request', repository: 'public/repo', event: { pull_request: { base: { ref: base }, head: { ref: head, repo: { full_name: sameRepository ? 'public/repo' : 'foreign/repo' } } } } } };
-    assert.equal(condition(check.jobs.mobile.if, context), admitted);
-    if (admitted) { assert.equal(expression(check.jobs.mobile.with.suite, context), 'release'); assert.equal(expression(check.jobs.mobile.with.baseline_set, context), 'all'); }
+  for (const base of ['dev', 'main', 'other']) for (const head of ['ci-mobile', 'feature']) for (const repository of ['public/repo', 'foreign/repo']) {
+    const github = { ref: 'refs/pull/25/merge', event_name: 'pull_request', repository: 'public/repo', event: { pull_request: { base: { ref: base }, head: { ref: head, repo: { full_name: repository } } } } };
+    assert.equal(condition(check.jobs.mobile.if, { needs: {}, success: true, github }), base !== 'other');
+    assert.equal(condition(check.jobs.mobile.if, { needs: {}, success: false, github }), false);
   }
+  assert.deepEqual(release.jobs.publish.needs, ['verify', 'build', 'native-smoke', 'mobile']);
+  assert.equal(release.jobs.mobile.needs, 'build');
+  assert.equal(release.jobs['native-smoke'].needs, 'build');
+  assert.equal(release.jobs.publish.if, undefined);
+  assert.equal(release.jobs.publish['continue-on-error'], undefined);
   const guard = release.jobs.publish.steps[0];
   assert.equal(guard.env.QUALIFICATION_STATUS, '${{ needs.mobile.outputs.qualification_status }}');
   assert.equal(guard.if, undefined);
   assert.equal(shellAssertions(guard.run, { QUALIFICATION_STATUS: 'PASS' }).passed, true);
   for (const value of ['', 'NOT_REQUESTED', 'FAIL', 'UNKNOWN']) assert.equal(shellAssertions(guard.run, { QUALIFICATION_STATUS: value }).passed, false);
-  for (const job of Object.values(jobs) as any[]) { assert.equal(job['continue-on-error'], undefined); for (const step of job.steps || []) assert.equal(step['continue-on-error'], undefined); }
-}
-function auditAndroidQualificationBarrier(workflow: any): void {
-  const jobs = workflow.jobs;
-  const names = Object.keys(jobs);
-  assert.ok(names.indexOf('android_qualification') < names.indexOf('smoke'));
-  const barrier = jobs.android_qualification;
-  assert.deepEqual(barrier.needs, ['provenance', 'prepare']);
-  assert.equal(barrier['runs-on'], 'ubuntu-24.04');
-  assert.equal(barrier.strategy, undefined);
-  const run = barrier.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run');
-  assert.deepEqual(run.with, { platform: 'android', baseline: '0.20.10', scenario: 'historical', suite: 'release', source_head_sha: '${{ needs.provenance.outputs.head_sha }}', evidence_prefix: 'mobile-evidence-android-qualification' });
-  const checkout = barrier.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
-  assert.equal(checkout.with.ref, '${{ needs.provenance.outputs.source_sha }}');
-  assert.ok(barrier.steps.indexOf(checkout) < barrier.steps.indexOf(run));
-  for (const prefix of ['mobile-evidence-smoke', 'mobile-evidence-release-smoke', 'mobile-evidence-full']) assert.equal(run.with.evidence_prefix.startsWith(prefix), false);
-  const evidence = jobs.android_qualification_evidence;
-  assert.deepEqual(evidence.needs, ['provenance', 'prepare', 'android_qualification']);
-  assert.equal(evidence.env.ANDROID_QUALIFICATION_MATRIX, androidQualificationMatrix);
-  const download = evidence.steps.find((step: any) => step.uses?.startsWith('actions/download-artifact@'));
-  assert.equal(download.with.pattern, 'mobile-evidence-android-qualification-*-${{ github.run_attempt }}');
-  const product = evidence.steps.find((step: any) => step.run?.includes('validate-evidence.ts'));
-  assert.match(product.run, /--contract qualified/u); assert.match(product.run, /--suite release/u); assert.match(product.run, /--matrix "\$ANDROID_QUALIFICATION_MATRIX"/u);
-  const strict = evidence.steps.find((step: any) => step.run?.includes('validate-environment.ts'));
-  assert.match(strict.run, /--require-pass --contract qualified/u); assert.match(strict.run, /--suite release/u); assert.match(strict.run, /--matrix "\$ANDROID_QUALIFICATION_MATRIX"/u);
-  assert.ok(evidence.steps.indexOf(product) < evidence.steps.indexOf(strict));
-  for (const name of ['android_qualification_evidence', 'smoke']) {
-    assert.match(jobs[name].if, /^!cancelled\(\) && /u, `${name} must stay cancellable`);
-    assert.doesNotMatch(jobs[name].if, /always\(\)/u);
-    assert.equal(condition(jobs[name].if, { needs: Object.fromEntries(jobs[name].needs.map((key: string) => [key, { result: 'success', outputs: {} }])), inputs: { suite: 'release' }, success: true, cancelled: true }), false);
-  }
-  const gateGuard = jobs.gate.steps.find((step: any) => step.name === 'Reject skipped evidence stages');
-  assert.equal(gateGuard.env.ANDROID_QUALIFICATION_RESULT, '${{ needs.android_qualification.result }}');
-  assert.equal(gateGuard.env.ANDROID_QUALIFICATION_EVIDENCE_RESULT, '${{ needs.android_qualification_evidence.result }}');
-  for (const suite of ['release', 'smoke']) for (const name of ['ANDROID_QUALIFICATION_RESULT', 'ANDROID_QUALIFICATION_EVIDENCE_RESULT']) {
-    const expected = suite === 'release' ? 'success' : 'skipped';
-    for (const actual of ['success', 'failure', 'cancelled', 'skipped']) {
-      const env = { EXPECTED_SUITE: suite, PROVENANCE_RESULT: 'success', PREPARE_RESULT: 'success', ANDROID_QUALIFICATION_RESULT: expected, ANDROID_QUALIFICATION_EVIDENCE_RESULT: expected, SMOKE_RESULT: 'success', SMOKE_EVIDENCE_RESULT: 'success', REPORT_RESULT: 'success',
-        QUALIFICATION_RESULT: expected, RELEASE_SMOKE_RESULT: expected, RELEASE_EVIDENCE_RESULT: expected, DEVICE_RESULT: expected, [name]: actual };
-      assert.equal(shellAssertions(gateGuard.run, env).passed, actual === expected, `gate ${suite} ${name}=${actual}`);
+  for (const job of Object.values(jobs) as any[]) {
+    assert.equal(job['continue-on-error'], undefined);
+    for (const step of job.steps || []) {
+      assert.equal(step['continue-on-error'], undefined);
+      if (step.uses && !step.uses.startsWith('./')) assert.match(step.uses, /@[0-9a-f]{40}$/u);
+      if (step.uses?.startsWith('actions/upload-artifact@')) assert.equal(step.with['retention-days'], 1);
     }
   }
-  for (const name of ['android_qualification', 'android_qualification_evidence']) {
-    assert.ok(jobs.smoke.needs.includes(name), `smoke must wait for ${name}`);
-    assert.ok(jobs.gate.needs.includes(name), `gate must require ${name}`);
-    assert.match(jobs.smoke.if, new RegExp(`needs\\.${name}\\.result == 'success'`, 'u'));
-  }
-  const matrix = jobs.prepare.steps.find((step: any) => step.id === 'matrix').run as string;
-  const runners = [...matrix.matchAll(/\{"platform":"(android|ios)","runner":"([^"]+)"/gu)];
-  assert.equal(runners.length, 24);
-  for (const [, platform, runner] of runners) assert.equal(runner, platform === 'ios' ? iosRunner : 'ubuntu-24.04');
 }
-function simulate(workflow: any, suite: string, stages: StageRows, overrides: Record<string, Status> = {}) {
+function simulate(workflow: any, rows: Row[], overrides: Record<string, Status> = {}) {
   const completed: Context = {};
+  const complete = rows.length === 2 && new Set(rows.map(row => row.platform)).size === 2 && rows.every(row => row.complete && row.artifact && row.current !== false);
+  const product = rows.every(row => row.product === 'PASS');
+  const qualified = rows.every(row => row.platform === 'ios' ? row.environment === 'NOT_APPLICABLE' : row.environment === 'PASS');
   for (const name of needed) {
     const job = workflow.jobs[name];
-    const rows = name.startsWith('android_qualification') ? stages.android ?? qualifiedAndroid : stages[['release_smoke', 'release_evidence'].includes(name) ? 'release' : ['device', 'gate'].includes(name) ? 'full' : 'smoke'];
     const invocations: string[] = [];
     const dependencies = Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : [];
     const needs = Object.fromEntries(dependencies.map((key: string) => [key, completed[key] || { result: 'failure', outputs: {} }]));
-    const context: Context = { needs, inputs: { suite }, success: dependencies.every((key: string) => needs[key].result === 'success') };
+    const context: Context = { needs, success: dependencies.every((key: string) => needs[key].result === 'success') };
     let result: Status;
     const outputs: Record<string, string> = {};
-    if (name === 'provenance' || name === 'prepare') { completed[name] = { result: overrides[name] || 'success', outputs: {} }; continue; }
+    if (name === 'provenance' || name === 'prepare') { completed[name] = { result: overrides[name] || 'success', outputs }; continue; }
     if (!condition(job.if, context)) result = 'skipped';
     else if (overrides[name]) result = overrides[name];
-    else if (['android_qualification', 'smoke', 'release_smoke', 'device'].includes(name)) result = rows.every(row => row.product === 'PASS' && row.complete && row.artifact) ? 'success' : 'failure';
+    else if (name === 'device') result = complete && product && qualified ? 'success' : 'failure';
     else {
       let succeeded = true;
       for (const step of job.steps || []) {
-        const stepContext = { ...context, success: succeeded };
-        if (!condition(step.if, stepContext)) continue;
-        if (step.run?.includes('test "$PROVENANCE_RESULT"') || step.run?.includes('test "$PRODUCT_RESULT"') || step.id === 'qualification') {
+        if (!condition(step.if, { ...context, success: succeeded })) continue;
+        if (step.run?.includes('test "$PROVENANCE_RESULT"') || step.id === 'qualification') {
           const guard = shellAssertions(step.run, envValues(step, context)); succeeded &&= guard.passed; Object.assign(outputs, guard.outputs);
         } else if (step.run?.includes('bun tests/mobile/validate-evidence.ts') || step.run?.includes('bun tests/mobile/validate-environment.ts')) {
           invocations.push(step.name);
           const isReport = step.id === 'report', strict = /--contract qualified/u.test(step.run);
-          const complete = rows.length > 0 && rows.every(row => row.complete && row.artifact && row.current !== false);
-          const product = rows.every(row => row.product === 'PASS');
-          const qualified = rows.every(row => row.platform === 'ios' ? row.environment === 'NOT_APPLICABLE' : row.environment === 'PASS');
           succeeded &&= complete && (isReport || product) && (!strict || qualified);
           if (isReport) {
-            outputs.product_status = !complete ? 'INDETERMINATE' : product ? 'PASS' : 'FAIL';
-            outputs.environment_status = rows.some(row => row.environment === 'FAIL') ? 'FAIL' : !complete || rows.some(row => row.environment === 'UNKNOWN') ? 'UNKNOWN' : rows.every(row => row.platform === 'ios') ? 'NOT_APPLICABLE' : 'PASS';
+            outputs.product_status = !complete ? 'INDETERMINATE' : rows.some(row => row.product === 'FAIL') ? 'FAIL' : product ? 'PASS' : 'INDETERMINATE';
+            outputs.environment_status = rows.some(row => row.environment === 'FAIL') ? 'FAIL' : !complete || rows.some(row => row.environment === 'UNKNOWN') ? 'UNKNOWN' : 'PASS';
           }
         }
       }
@@ -348,11 +335,111 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
   }
   return completed;
 }
-export const workflowMutationNames = ['gms-settle-order', 'gms-settle-platform', 'gms-settle-swallow', 'android-barrier-smoke-edge', 'android-barrier-gate-edge', 'android-barrier-gate-guard', 'android-barrier-uncancellable', 'android-barrier-strict', 'android-barrier-platform', 'android-barrier-prefix', 'android-barrier-skip-tolerated', 'ios-runner-label', 'strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
+  ['mobile evidence accepts exactly one shared baseline across Android and iOS', async () => {
+    const android = await evidenceFixture('android'), ios = await evidenceFixture('ios');
+    const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-two-rows-'));
+    try {
+      await cp(android.directory, join(root, 'android'), { recursive: true });
+      await cp(ios.directory, join(root, 'ios'), { recursive: true });
+      const options = { ...android.options, contract: 'qualified' as const, directory: root, matrix: [...android.options.matrix, ...ios.options.matrix] };
+      await validateMobileEvidence(options);
+      const report = await collectEnvironmentReport(options);
+      assert.equal(report.product, 'PASS');
+      assert.equal(report.environment, 'PASS');
+      assert.equal(report.rows.length, 2);
+      assert.equal(report.incomplete, false);
+      for (const matrix of [
+        [...options.matrix, ios.options.matrix[0]],
+        [android.options.matrix[0], android.options.matrix[0]],
+        [android.options.matrix[0], { ...ios.options.matrix[0], baseline: 'another-release' }],
+        [android.options.matrix[0], { ...ios.options.matrix[0], scenario: 'synthetic' }],
+      ]) {
+        await assert.rejects(validateMobileEvidence({ ...options, matrix }), /expected matrix/);
+        await assert.rejects(collectEnvironmentReport({ ...options, matrix }), /expected matrix/);
+      }
+      for (const baselineIdentities of [[], [...options.baselineIdentities, { ...options.baselineIdentities[0], name: 'another-release' }], [{ ...options.baselineIdentities[0], name: 'another-release' }]]) {
+        await assert.rejects(validateMobileEvidence({ ...options, baselineIdentities }), /prepared baseline/);
+        await assert.rejects(collectEnvironmentReport({ ...options, baselineIdentities }), /prepared baseline/);
+      }
+      await rm(join(root, 'ios'), { recursive: true });
+      await assert.rejects(validateMobileEvidence(options), /missing or duplicated/);
+      assert.equal((await collectEnvironmentReport(options)).incomplete, true);
+      await cp(ios.directory, join(root, 'ios'), { recursive: true });
+      await assert.rejects(validateMobileEvidence({ ...options, attempt: String(Number(options.attempt) + 1) }), /stale or inconsistent/);
+    } finally {
+      await Promise.all([root, android.directory, ios.directory].map(directory => rm(directory, { recursive: true, force: true })));
+    }
+  }],
+  ['mobile preparation selects one baseline from a multi-release manifest', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-default-baseline-'));
+    try {
+      const manifest = join(root, 'baselines.json');
+      const args = [repositoryPath('tests/mobile/prepare.ts'), '--manifest', manifest, '--candidate', join(root, 'absent.tar.gz'),
+        '--candidate-version', 'candidate', '--candidate-assets', '477', '--candidate-revision', 'a'.repeat(40), '--candidate-sha256', 'b'.repeat(64)];
+      const baseline = { name: 'next-release', url: 'https://fixture.invalid/release.tar.gz', archiveSha256: 'c'.repeat(64) };
+      const unused = { name: 'unused-release' };
+      for (const [baselines, selection] of [
+        [[baseline, unused], []],
+        [[unused, baseline], ['--baseline', baseline.name]],
+      ] as const) {
+        await writeFile(manifest, JSON.stringify({ schema: 1, baselines }));
+        await assert.rejects(command(process.execPath, [...args, ...selection], 10_000), (error: unknown) => error instanceof CommandError && /ARTIFACT_ROOT/u.test(error.stderr));
+      }
+      await assert.rejects(command(process.execPath, [...args, '--baseline', 'absent'], 10_000), (error: unknown) => error instanceof CommandError && /not declared/u.test(error.stderr));
+      await assert.rejects(command(process.execPath, [...args, '--baseline', baseline.name, '--baseline', unused.name], 10_000), (error: unknown) => error instanceof CommandError && /exactly one selected baseline/u.test(error.stderr));
+      await writeFile(manifest, JSON.stringify({ schema: 1, baselines: [] }));
+      await assert.rejects(command(process.execPath, args, 10_000), (error: unknown) => error instanceof CommandError && /baseline manifest schema/u.test(error.stderr));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }],
+  ['mobile preparation downloads only the selected release and writes a single-baseline bundle set', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-selected-download-'));
+    const requests: string[] = [];
+    let archiveBytes = Buffer.alloc(0);
+    const server = createServer((request, response) => {
+      requests.push(request.url || '');
+      response.end(archiveBytes);
+    });
+    try {
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== 'string');
+      const archives: Array<{ archive: string; hash: string }> = [];
+      for (const version of ['previous', 'newest']) {
+        const source = join(root, version);
+        await mkdir(join(source, 'web/assets'), { recursive: true });
+        await writeFile(join(source, 'web/version.json'), JSON.stringify({ version, assets: 1 }));
+        await writeFile(join(source, 'web/index.html'), '<html></html>');
+        await writeFile(join(source, 'web/assets/app.js'), version);
+        await writeFile(join(source, 'web/assets/app.css'), 'body{}');
+        await writeFile(join(source, 'release-manifest.json'), JSON.stringify({ version, revision: 'a'.repeat(40) }));
+        const archive = join(root, version + '.tar.gz');
+        await command('tar', ['-C', source, '-czf', archive, 'web', 'release-manifest.json'], 10_000);
+        archives.push({ archive, hash: await fileSha256(archive) });
+      }
+      archiveBytes = await readFile(archives[0].archive);
+      const manifest = join(root, 'baselines.json'), output = join(root, 'prepared');
+      await writeFile(manifest, JSON.stringify({ schema: 1, baselines: ['newest', 'previous'].map(name => ({
+        name, version: name, assets: 1, sourceRelease: name, sourceCommit: 'a'.repeat(40),
+        archiveSha256: name === 'previous' ? archives[0].hash : 'c'.repeat(64),
+        url: `http://127.0.0.1:${address.port}/${name}.tar.gz`,
+      })) }));
+      await command(process.execPath, [repositoryPath('tests/mobile/prepare.ts'), '--manifest', manifest,
+        '--candidate', archives[1].archive, '--candidate-version', 'newest', '--candidate-assets', '1',
+        '--candidate-revision', 'a'.repeat(40), '--candidate-sha256', archives[1].hash,
+        '--baseline', 'previous', '--output', output], 10_000);
+      const bundle = JSON.parse(await readFile(join(output, 'bundle-set.json'), 'utf8'));
+      assert.deepEqual(bundle.baselines.map((entry: any) => entry.name), ['previous']);
+      assert.equal(bundle.candidate.identity.version, 'newest');
+      assert.deepEqual(requests, ['/previous.tar.gz']);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  }],
   ['mobile iOS Appium log withholding executes both scoped copy branches without changing Android', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
-    for (const path of ['.github/actions/mobile-device-run/action.yml', '.github/workflows/mobile-ci.yml']) {
+    for (const path of ['.github/actions/mobile-device-run/action.yml']) {
       const document = runtime.YAML.parse(await readFile(repositoryPath(path), 'utf8')) as any;
       const groups = document.runs ? [document.runs.steps] : Object.values(document.jobs).map((job: any) => job.steps || []);
       const copies = groups.flat().filter((step: any) => step.run?.includes('"$MOBILE_OUTPUT/appium.log"'));
@@ -414,7 +501,7 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
         : [join(directory, entry.name)]));
       return nested.flat();
     };
-    for (const path of ['.github/actions/mobile-device-run/action.yml', '.github/workflows/mobile-ci.yml']) {
+    for (const path of ['.github/actions/mobile-device-run/action.yml']) {
       const document = runtime.YAML.parse(await readFile(repositoryPath(path), 'utf8')) as any;
       const groups = document.runs ? [document.runs.steps] : Object.values(document.jobs).map((job: any) => job.steps || []);
       const copies = groups.flat().filter((step: any) => step.name === 'Sanitize bounded diagnostics');
@@ -444,6 +531,29 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
       } finally {
         await rm(root, {recursive: true, force: true});
       }
+    }
+  }],
+  ['mobile Android SDK install retries three times and fails after the last attempt', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun;
+    const action = runtime.YAML.parse(await readFile(repositoryPath('.github/actions/mobile-device-run/action.yml'), 'utf8'));
+    const boot = action.runs.steps.find((step: any) => step.name === 'Create and boot Android emulator');
+    const retry = boot.run.match(/for attempt in 1 2 3; do[\s\S]*?\ndone/u)?.[0];
+    assert.ok(retry);
+    const stub = 'set -euo pipefail\nattempts=0\nandroid_system_image="system-images;android-35;google_apis;x86_64"\nsdkmanager() { attempts=$((attempts+1)); printf "install:%s:%s\\n" "$attempts" "$*" >> "$CALLS"; [ "$attempts" -ge "$SUCCEED_AT" ]; }\nsleep() { printf "pause:%s\\n" "$*" >> "$CALLS"; }\n';
+    for (const succeedAt of [1, 2, 3, 4]) {
+      const root = await mkdtemp(join(tmpdir(), 'herdr-sdk-retry-'));
+      try {
+        const calls = join(root, 'calls');
+        const run = () => command('bash', ['-c', stub + retry], 10_000, { env: { ...process.env, CALLS: calls, SUCCEED_AT: String(succeedAt) } });
+        if (succeedAt <= 3) await run();
+        else await assert.rejects(run, (error: unknown) => error instanceof CommandError && error.exitCode === 1);
+        const expected: string[] = [];
+        for (let attempt = 1; attempt <= Math.min(succeedAt, 3); attempt++) {
+          expected.push('install:' + attempt + ':platform-tools emulator build-tools;35.0.0 system-images;android-35;google_apis;x86_64');
+          if (attempt < Math.min(succeedAt, 3)) expected.push('pause:5');
+        }
+        assert.deepEqual((await readFile(calls, 'utf8')).trim().split('\n'), expected);
+      } finally { await rm(root, { recursive: true, force: true }); }
     }
   }],
   ['mobile XML bootstrap avoids hosted Azure mirror stalls and propagates setup failures', async () => {
@@ -514,88 +624,44 @@ if (mode === operation + '-timeout') process.exit(124);
       }
     }
   }],
-  ['mobile workflow SM59 10 ordinary and strict aggregation', async () => {
+  ['mobile workflow latest-release qualification and aggregation', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
-    assert.ok(runtime?.YAML);
     const parse = async (path: string) => runtime.YAML.parse(await readFile(repositoryPath(path), 'utf8')) as any;
     const workflow = await parse('.github/workflows/mobile-ci.yml'), action = await parse('.github/actions/mobile-device-run/action.yml'), release = await parse('.github/workflows/release.yml'), check = await parse('.github/workflows/check.yml');
     const shardSource = await readFile(repositoryPath('tests/mobile/unit/test-shard-ci.ts'), 'utf8');
     audit(workflow, action, release, check, shardSource);
-    const stages = (rows: Row[]): StageRows => ({ smoke: rows, release: rows, full: rows });
-    const assertAndroidBeforeIos = (candidate: any) => {
-      for (const suite of ['smoke', 'release']) {
-        const healthyRun = simulate(candidate, suite, stages([{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }]));
-        assert.equal(healthyRun.android_qualification.result, suite === 'release' ? 'success' : 'skipped');
-        assert.equal(healthyRun.android_qualification_evidence.result, suite === 'release' ? 'success' : 'skipped');
-        assert.equal(healthyRun.smoke.result, 'success');
-        assert.equal(healthyRun.gate.result, 'success');
-      }
-      for (const android of [
-        [{ platform: 'android', product: 'FAIL', environment: 'PASS', complete: true, artifact: true }],
-        [{ platform: 'android', product: 'PASS', environment: 'FAIL', complete: true, artifact: true }],
-        [{ platform: 'android', product: 'PASS', environment: 'UNKNOWN', complete: true, artifact: true }],
-        [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: false, artifact: true }],
-        [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: false }],
-      ] as Row[][]) {
-        const blocked = simulate(candidate, 'release', { ...stages([{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }]), android });
-        assert.notEqual(blocked.android_qualification_evidence.result, 'success');
-        for (const job of iosExecutingJobs) assert.equal(blocked[job].result, 'skipped', `${job} ran before Android qualification`);
-        assert.equal(blocked.gate.result, 'failure');
-        assert.notEqual(blocked.gate.outputs.qualification_status, 'PASS');
-      }
-      for (const prerequisite of ['android_qualification', 'android_qualification_evidence']) for (const status of ['failure', 'cancelled', 'skipped'] as const) {
-        const blocked = simulate(candidate, 'release', stages([{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }]), { [prerequisite]: status });
-        for (const job of iosExecutingJobs) assert.equal(blocked[job].result, 'skipped', `${prerequisite}/${status}: ${job} ran before Android qualification`);
-        assert.equal(blocked.gate.result, 'failure');
-      }
-    };
-    assertAndroidBeforeIos(workflow);
     const healthy: Row[] = [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }];
-    for (const suite of ['smoke', 'release']) for (const environment of ['PASS', 'FAIL', 'UNKNOWN'] as const) {
+    assert.equal(simulate(workflow, healthy).gate.outputs.qualification_status, 'PASS');
+    for (const prerequisite of needed.filter(name => name !== 'gate')) for (const status of ['failure', 'cancelled', 'skipped'] as const) {
+      const result = simulate(workflow, healthy, { [prerequisite]: status });
+      assert.equal(result.gate.result, 'failure', prerequisite + '/' + status);
+      assert.notEqual(result.gate.outputs.qualification_status, 'PASS');
+    }
+    for (const environment of ['FAIL', 'UNKNOWN'] as const) {
       const rows = structuredClone(healthy); rows[0].environment = environment;
-      const result = simulate(workflow, suite, stages(rows));
-      assert.equal(result.smoke_evidence.result, 'success'); assert.equal(result.smoke_environment_report.result, 'success');
-      assert.equal(result.smoke_environment_report.outputs.environment_status, environment);
-      assert.equal(result.gate.result, suite === 'smoke' || environment === 'PASS' ? 'success' : 'failure');
-      assert.equal(result.gate.outputs.qualification_status, suite === 'smoke' ? 'NOT_REQUESTED' : environment === 'PASS' ? 'PASS' : undefined);
+      const result = simulate(workflow, rows);
+      assert.equal(result.device.result, 'failure');
+      assert.equal(result.environment_report.result, 'failure');
+      assert.equal(result.environment_report.outputs.environment_status, environment);
+      assert.notEqual(result.gate.outputs.qualification_status, 'PASS');
     }
-    for (const suite of ['smoke', 'release']) for (const prerequisite of needed.filter(name => name !== 'gate' && (suite === 'release' || !strictOnly.includes(name)))) for (const status of ['failure', 'cancelled', 'skipped'] as const) {
-      const result = simulate(workflow, suite, stages(healthy), { [prerequisite]: status });
-      assert.equal(result.gate.result, 'failure', `${suite}/${prerequisite}/${status}`); assert.notEqual(result.gate.outputs.qualification_status, 'PASS');
-    }
-    for (const index of [0, 1]) for (const mode of ['product-failure', 'product-indeterminate', 'missing-artifact', 'incomplete'] as const) {
+    for (const index of [0, 1]) for (const mode of ['product-failure', 'product-indeterminate', 'missing-artifact', 'incomplete', 'stale'] as const) {
       const rows = structuredClone(healthy);
       if (mode === 'product-failure') rows[index].product = 'FAIL';
       if (mode === 'product-indeterminate') rows[index].product = 'INDETERMINATE';
       if (mode === 'missing-artifact') rows[index].artifact = false;
       if (mode === 'incomplete') rows[index].complete = false;
-      const result = simulate(workflow, 'smoke', stages(rows));
-      assert.equal(result.smoke.result, 'failure'); assert.equal(result.smoke_evidence.result, 'failure'); assert.equal(result.gate.result, 'failure');
-      assert.equal(result.smoke_environment_report.result, mode.startsWith('product') ? 'success' : 'failure');
+      if (mode === 'stale') rows[index].current = false;
+      const result = simulate(workflow, rows);
+      assert.equal(result.device.result, 'failure');
+      assert.equal(result.environment_report.result, 'failure');
+      assert.equal(result.environment_report.invocations[0], 'Publish bounded complete-row environment report');
+      assert.equal(result.gate.result, 'failure');
+      assert.notEqual(result.gate.outputs.qualification_status, 'PASS');
     }
-    assert.equal(simulate(workflow, 'smoke', stages([healthy[1]])).smoke_environment_report.outputs.environment_status, 'NOT_APPLICABLE');
-    assert.equal(simulate(workflow, 'smoke', stages([])).smoke_environment_report.result, 'failure');
-    const assertFullStage = (candidate: any) => {
-      for (const mode of ['PASS', 'FAIL', 'UNKNOWN', 'MISSING', 'STALE'] as const) {
-        const full = structuredClone(healthy);
-        if (mode === 'FAIL' || mode === 'UNKNOWN') full[0].environment = mode;
-        if (mode === 'MISSING') full.pop();
-        if (mode === 'STALE') full[0].current = false;
-        if (mode === 'MISSING') full[0].complete = false;
-        const outcome = simulate(candidate, 'release', { smoke: healthy, release: healthy, full });
-        assert.equal(outcome.smoke_qualification.result, 'success');
-        assert.equal(outcome.release_evidence.result, 'success');
-        if (mode !== 'MISSING') assert.deepEqual(outcome.gate.invocations, ['Validate full device result contracts']);
-        assert.equal(outcome.gate.outputs.qualification_status, mode === 'PASS' ? 'PASS' : undefined);
-      }
-    };
-    assertFullStage(workflow);
-    for (const environment of ['FAIL', 'UNKNOWN'] as const) {
-      const releaseRows = structuredClone(healthy); releaseRows[0].environment = environment;
-      const outcome = simulate(workflow, 'release', { smoke: healthy, release: releaseRows, full: healthy });
-      assert.equal(outcome.smoke_qualification.result, 'success');
-      assert.equal(outcome.release_evidence.result, 'failure');
-      assert.equal(outcome.release_evidence.invocations.length, 1);
+    for (const rows of [[], [healthy[0]], [healthy[1]], [healthy[0], healthy[0]]]) {
+      const outcome = simulate(workflow, rows);
+      assert.equal(outcome.gate.result, 'failure');
       assert.notEqual(outcome.gate.outputs.qualification_status, 'PASS');
     }
     const publication = (candidate: any, statuses: Record<string, Status>, qualification = 'PASS') => {
@@ -606,71 +672,100 @@ if (mode === operation + '-timeout') process.exit(124);
     for (const prerequisite of ['verify', 'build', 'native-smoke', 'mobile']) for (const status of ['failure', 'cancelled', 'skipped'] as const) assert.equal(publication(release, { [prerequisite]: status }), false);
     assert.equal(publication(release, {}), true);
     for (const status of ['', 'FAIL', 'UNKNOWN', 'NOT_REQUESTED']) assert.equal(publication(release, {}, status), false);
-    for (const mutation of workflowMutationNames) {
+    const render = (source: string, github: Context) => source.replace(/\$\{\{([^}]+)\}\}/gu, (_match, value: string) => String(expression(value, { github })));
+    for (const document of [workflow, check]) {
+      const pr = { event_name: 'pull_request', event: { pull_request: { number: 25 } }, ref: 'refs/pull/25/merge', run_id: 98 };
+      assert.equal(expression(document.concurrency['cancel-in-progress'], { github: pr }), true);
+      assert.equal(render(document.concurrency.group, pr), render(document.concurrency.group, { ...pr, sha: 'new-push', run_id: 99 }));
+      assert.notEqual(render(document.concurrency.group, pr), render(document.concurrency.group, { ...pr, event: { pull_request: { number: 26 } } }));
+      const push = { event_name: 'push', ref: 'refs/heads/dev', run_id: 25 };
+      assert.equal(expression(document.concurrency['cancel-in-progress'], { github: push }), false);
+      assert.notEqual(render(document.concurrency.group, push), render(document.concurrency.group, { ...push, sha: 'new-push', run_id: 26 }));
+      assert.notEqual(render(document.concurrency.group, push), render(document.concurrency.group, pr));
+    }
+    const mutations: Array<(w: any, a: any, r: any, k: any) => void> = [
+      w => w.jobs.device.needs.push('environment_report'),
+      w => w.jobs.device.strategy['fail-fast'] = true,
+      w => w.jobs.device['timeout-minutes'] = 45,
+      w => w.jobs.gate.needs.pop(),
+      w => w.jobs.environment_report.if = 'success()',
+      w => w.jobs.gate.if = 'success()',
+      w => w.jobs.gate.steps.find((s: any) => s.run?.includes('validate-evidence.ts')).run = 'bun tests/mobile/validate-evidence.ts --contract product',
+      w => w.jobs.gate.steps.find((s: any) => s.run?.includes('validate-evidence.ts')).if = 'false',
+      w => w.jobs.environment_report.steps.find((s: any) => s.name === 'Require strict environment qualification').run = 'true',
+      w => w.jobs.gate.steps.find((s: any) => s.uses?.startsWith('actions/download-artifact@')).with.pattern = 'mobile-evidence-device-*',
+      w => w.jobs.gate.steps.find((s: any) => s.uses?.startsWith('actions/checkout@')).with.ref = 'main',
+      w => w.on.workflow_call.outputs.qualification_status.value = '${{ jobs.environment_report.outputs.environment_status }}',
+      w => w.jobs.prepare.steps.find((s: any) => s.id === 'matrix').run = 'echo hardcoded',
+      w => w.concurrency['cancel-in-progress'] = false,
+      (_w, a) => a.runs.steps.find((s: any) => s.name === 'Run installed-PWA upgrade scenarios')['continue-on-error'] = true,
+      (_w, a) => a.runs.steps.find((s: any) => s.name === 'Require strict Android environment qualification').run = 'true',
+      (_w, a) => a.runs.steps.find((s: any) => s.uses?.startsWith('actions/upload-artifact@')).if = 'success()',
+      (_w, a) => a.runs.steps.find((s: any) => s.uses?.startsWith('actions/upload-artifact@')).with['if-no-files-found'] = 'warn',
+      (_w, a) => a.runs.steps.find((s: any) => s.run?.includes('android-environment.ts check')).run += ' --output overwrite.json',
+      (_w, a) => a.runs.steps.find((s: any) => s.run?.includes('android-gms-settle.ts')).run += ' || true',
+      (_w, a) => a.runs.steps.find((s: any) => s.run?.includes('android-gms-settle.ts')).if = 'always()',
+      (_w, a) => { const i = a.runs.steps.findIndex((s: any) => s.run?.includes('android-gms-settle.ts')); a.runs.steps.push(...a.runs.steps.splice(i, 1)); },
+      (_w, _a, r) => r.jobs.publish.steps.unshift({ run: 'echo publish' }),
+      (_w, _a, r) => r.jobs.publish.steps[0].run = 'true',
+      (_w, _a, r) => r.jobs.publish.needs.pop(),
+      (_w, _a, _r, k) => k.jobs.mobile.needs.pop(),
+      (_w, _a, _r, k) => k.jobs.mobile.if = 'always()',
+      (_w, _a, _r, k) => k.concurrency.group = 'check-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}',
+      (_w, _a, _r, k) => k.jobs['mobile-unit-aggregate'].if = 'success()',
+      (_w, _a, _r, k) => k.jobs['mobile-unit-aggregate'].needs.pop(),
+      (_w, _a, _r, k) => delete k.jobs['mobile-unit-shards'].if,
+      (_w, _a, _r, k) => k.jobs['mobile-unit-shards'].strategy['fail-fast'] = true,
+      (_w, _a, _r, k) => k.jobs['mobile-unit-shards'].steps.find((s: any) => s.id === 'install-test-dependencies').run = 'true',
+      (_w, _a, _r, k) => k.jobs['mobile-unit-aggregate'].steps.find((s: any) => s.run?.includes('test-shard-ci.ts aggregate')).run = 'echo accepted',
+      (_w, _a, _r, k) => k.jobs['mobile-unit-shards'].steps.find((s: any) => s.uses?.startsWith('oven-sh/setup-bun@')).with['bun-version'] = '1.4.3',
+      (_w, _a, _r, k) => delete k.jobs.release.steps.find((s: any) => s.with?.name === 'release-bundles').with.overwrite,
+    ];
+    for (const [index, mutate] of mutations.entries()) {
       const w = structuredClone(workflow), a = structuredClone(action), r = structuredClone(release), k = structuredClone(check);
-      let source = shardSource;
-      if (mutation === 'android-barrier-smoke-edge') {
-        w.jobs.smoke.needs = ['provenance', 'prepare'];
-        w.jobs.smoke.if = "needs.prepare.result == 'success' && needs.provenance.result == 'success'";
-        assert.throws(() => assertAndroidBeforeIos(w), mutation);
-      }
-      if (mutation === 'android-barrier-gate-edge') w.jobs.gate.needs = w.jobs.gate.needs.filter((name: string) => name !== 'android_qualification_evidence');
-      if (mutation === 'android-barrier-gate-guard') { const step = w.jobs.gate.steps.find((step: any) => step.name === 'Reject skipped evidence stages'); step.run = step.run.split('\n').filter((line: string) => !line.includes('ANDROID_QUALIFICATION')).join('\n'); }
-      if (mutation === 'android-barrier-uncancellable') w.jobs.smoke.if = w.jobs.smoke.if.replace('!cancelled()', 'always()');
-      if (mutation === 'android-barrier-strict') { const step = w.jobs.android_qualification_evidence.steps.find((step: any) => step.run?.includes('validate-environment.ts')); step.run = step.run.replace('--require-pass ', ''); }
-      if (mutation === 'android-barrier-platform') w.jobs.android_qualification.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run').with.platform = 'ios';
-      if (mutation === 'android-barrier-prefix') w.jobs.android_qualification.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run').with.evidence_prefix = 'mobile-evidence-smoke-android';
-      if (mutation === 'android-barrier-skip-tolerated') {
-        w.jobs.smoke.if = "always() && needs.prepare.result == 'success' && needs.provenance.result == 'success'";
-        assert.throws(() => assertAndroidBeforeIos(w), mutation);
-      }
-      if (mutation === 'ios-runner-label') { const step = w.jobs.prepare.steps.find((step: any) => step.id === 'matrix'); step.run = step.run.replace('"runner":"xcode-27"', '"runner":"macos-15"'); }
-      if (mutation === 'strict-edge') w.jobs.device.needs = w.jobs.device.needs.filter((name: string) => name !== 'smoke_qualification');
-      if (mutation === 'qualified-flag') { const step = w.jobs.gate.steps.find((step: any) => step.run?.includes('validate-evidence.ts')); step.run = step.run.replace('--contract qualified', '--contract product'); }
-      if (mutation === 'native-continue') a.runs.steps.find((step: any) => step.name === 'Run installed-PWA upgrade scenarios')['continue-on-error'] = true;
-      if (mutation === 'gms-settle-order') {
-        const index = a.runs.steps.findIndex((step: any) => step.run?.includes('android-gms-settle.ts'));
-        a.runs.steps.push(...a.runs.steps.splice(index, 1));
-      }
-      if (mutation === 'gms-settle-platform') w.jobs.device.steps.find((step: any) => step.run?.includes('android-gms-settle.ts')).if = 'always()';
-      if (mutation === 'gms-settle-swallow') a.runs.steps.find((step: any) => step.run?.includes('android-gms-settle.ts')).run += ' || true';
-      if (mutation === 'upload-always') a.runs.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@')).if = 'success()';
-      if (mutation === 'no-files') w.jobs.device.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@')).with['if-no-files-found'] = 'warn';
-      if (mutation === 'attempt') w.jobs.smoke_evidence.steps.find((step: any) => step.uses?.startsWith('actions/download-artifact@')).with.pattern = 'mobile-evidence-smoke-*';
-      if (mutation === 'source-ref') w.jobs.gate.steps.find((step: any) => step.uses?.startsWith('actions/checkout@')).with.ref = 'main';
-      if (mutation === 'output-map') w.on.workflow_call.outputs.qualification_status.value = '${{ jobs.smoke_environment_report.outputs.environment_status }}';
-      if (mutation === 'postcheck-contract') { const step = a.runs.steps.find((step: any) => step.run?.includes('android-environment.ts check')); step.run = step.run.replace('--contract report', '--contract qualification'); }
-      if (mutation === 'postcheck-overwrite') a.runs.steps.find((step: any) => step.run?.includes('android-environment.ts check')).run += ' --output overwrite.json';
-      if (mutation === 'publish-first') r.jobs.publish.steps.unshift({ run: 'echo publish' });
-      if (mutation === 'publish-assertion') r.jobs.publish.steps[0].run = 'test "$QUALIFICATION_STATUS" = NOT_REQUESTED';
-      if (mutation === 'report-product-dependency') w.jobs.smoke_environment_report.needs.push('smoke_evidence');
-      if (mutation === 'full-validator-skipped') {
-        w.jobs.gate.steps.find((step: any) => step.run?.includes('validate-evidence.ts')).if = 'false';
-        assert.throws(() => assertFullStage(w), mutation);
-      }
-      if (mutation === 'publish-native-edge') {
-        r.jobs.publish.needs = r.jobs.publish.needs.filter((name: string) => name !== 'native-smoke');
-        assert.equal(publication(r, { 'native-smoke': 'failure' }), true);
-      }
-      if (mutation === 'unit-aggregate-edge') k.jobs.mobile.needs = k.jobs.mobile.needs.filter((name: string) => name !== 'mobile-unit-aggregate');
-      if (mutation === 'unit-aggregate-always') k.jobs['mobile-unit-aggregate'].if = 'success()';
-      if (mutation === 'unit-aggregate-dependency') k.jobs['mobile-unit-aggregate'].needs = ['mobile-unit-prepare'];
-      if (mutation === 'unit-shards-unconditional') delete k.jobs['mobile-unit-shards'].if;
-      if (mutation === 'unit-test-dependencies') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.id === 'install-test-dependencies').run = 'true';
-      if (mutation === 'unit-fail-fast') k.jobs['mobile-unit-shards'].strategy['fail-fast'] = true;
-      if (mutation === 'unit-continue') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.run?.includes('test-shard-ci.ts execute'))['continue-on-error'] = true;
-      if (mutation === 'unit-selector') source = source.replace('--select-tests', '--selected-tests');
-      if (mutation === 'unit-runtime') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('oven-sh/setup-bun@')).with['bun-version'] = '1.4.3';
-      if (mutation === 'unit-node-runtime') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('actions/setup-node@')).with['node-version'] = '24.20.0';
-      if (mutation === 'unit-go-runtime') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('actions/setup-go@')).with['go-version'] = '1.26.0';
-      if (mutation === 'unit-source-ref') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('actions/checkout@')).with.ref = 'main';
-      if (mutation === 'unit-weak-aggregate') k.jobs['mobile-unit-aggregate'].steps.find((step: any) => step.run?.includes('test-shard-ci.ts aggregate')).run = 'echo accepted';
-      if (mutation === 'unit-admission-always') k.jobs.mobile.if = 'always()';
-      if (mutation === 'unit-aggregate-test-dependencies') {
-        k.jobs['mobile-unit-aggregate'].steps = k.jobs['mobile-unit-aggregate'].steps.filter((step: any) => step.id !== 'install-test-dependencies');
-      }
-      if (mutation === 'upload-overwrite') delete k.jobs.release.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@') && step.with?.name === 'release-bundles').with.overwrite;
-      assert.throws(() => audit(w, a, r, k, source), mutation);
+      mutate(w, a, r, k);
+      assert.throws(() => audit(w, a, r, k, shardSource), 'mutation ' + index);
+    }
+    const matrixCommand = workflow.jobs.prepare.steps.find((s: any) => s.id === 'matrix').run;
+    const manifest = JSON.parse(await readFile(repositoryPath('tests/mobile/baselines.json'), 'utf8'));
+    assert.deepEqual(manifest.baselines.map((entry: any) => entry.name), ['0.23.3', '0.23.2']);
+    const newest = manifest.baselines[0], previous = manifest.baselines[1];
+    const cases = [
+      { baselines: manifest.baselines, candidate: { ...newest, version: 'next-version' }, expected: newest.name },
+      { baselines: manifest.baselines, candidate: { ...newest, script: '/changed.js' }, expected: newest.name },
+      { baselines: manifest.baselines, candidate: { ...newest, style: '/changed.css' }, expected: newest.name },
+      { baselines: manifest.baselines, candidate: { ...newest, assets: newest.assets + 1, build: 'changed', entry: '/changed.html' }, expected: previous.name },
+      { baselines: [previous, newest], candidate: newest, expected: previous.name },
+      { baselines: [newest, { ...newest, name: previous.name }], candidate: newest, error: /no distinct release baseline/u },
+      { baselines: [], candidate: newest, error: /manifest is empty or invalid/u },
+      { baselines: [{ ...newest, name: '../invalid' }, previous], candidate: newest, error: /invalid release baseline name/u },
+      { baselines: [newest, { ...previous, name: 'invalid name' }], candidate: { ...newest, script: '/changed.js' }, error: /invalid release baseline name/u },
+    ];
+    for (const { baselines, candidate, expected, error } of cases) {
+      const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-matrix-'));
+      try {
+        await mkdir(join(root, 'tests/mobile'), { recursive: true });
+        await writeFile(join(root, 'tests/mobile/baselines.json'), JSON.stringify({ schema: 1, baselines }));
+        await mkdir(join(root, 'web'));
+        await writeFile(join(root, 'web/version.json'), JSON.stringify(candidate));
+        const output = join(root, 'output');
+        const run = () => command('bash', ['-c', matrixCommand], 10_000, { cwd: root, env: { ...process.env, GITHUB_OUTPUT: output } });
+        if (error) {
+          await assert.rejects(run, (failure: unknown) => failure instanceof CommandError && error.test(failure.stderr));
+          assert.equal(await readFile(output, 'utf8'), '');
+          continue;
+        }
+        await run();
+        const outputs = Object.fromEntries((await readFile(output, 'utf8')).trim().split('\n').map(line => {
+          const separator = line.indexOf('=');
+          return [line.slice(0, separator), line.slice(separator + 1)];
+        }));
+        assert.equal(outputs.baseline, expected);
+        assert.deepEqual(JSON.parse(outputs.device_matrix).include, [
+          { platform: 'android', runner: 'ubuntu-24.04', baseline: expected, scenario: 'historical' },
+          { platform: 'ios', runner: 'xcode-27', baseline: expected, scenario: 'historical' },
+        ]);
+      } finally { await rm(root, { recursive: true, force: true }); }
     }
     for (const unsupported of ['contains(inputs.suite, \'release\')', 'needs.*.result', 'inputs.suite + 1', 'failure()']) assert.throws(() => expression(unsupported, { needs: {}, inputs: { suite: 'release' } }));
   }],

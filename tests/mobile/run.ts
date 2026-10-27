@@ -104,7 +104,6 @@ interface RunResult {
   fixture_requests?: FixtureRequest[];
   faults_exercised?: string[];
   fault_identity?: { id: string; generation: string; kind: string; path: string };
-  oracle_controls?: string[];
   phone_completion?: UpdateCompletionEvidence;
   qualification_failure?: QualificationFailureSnapshot;
   failure_stage?: string;
@@ -268,24 +267,18 @@ async function reconnectAllRelays(info: FixtureInfo, before: RelayAuthEvidence, 
   return authEvidence(state);
 }
 
-function phonePlanContract(
+function assertPhonePlan(
   baseline: BundleSet['baselines'][number],
-  evidence: Awaited<ReturnType<MobilePlatform['readUpdateCompletion']>>,
-  controls: Set<string>,
-): boolean {
-  if (evidence.phoneRequired) return true;
-  const version = baseline.identity.version;
-  if (version === '0.20.8' || version === '0.20.9') {
-    controls.add(`HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:${version}`);
-    return false;
+  evidence: UpdateCompletionEvidence,
+): void {
+  if (!evidence.phoneRequired) {
+    throw new Error(`PHONE_PLAN_MISSING: ${baseline.identity.version} exposed no phone item in its update progress record`);
   }
-  throw new Error(`PHONE_PLAN_MISSING: ${version} exposed no phone item in its update progress record`);
 }
 
 export async function waitForPhoneCompletion(
   platform: MobilePlatform,
   baseline: BundleSet['baselines'][number],
-  controls: Set<string>,
   qualification: QualificationFailureLatch,
   budget?: PhaseBudget,
 ): Promise<UpdateCompletionEvidence> {
@@ -296,7 +289,7 @@ export async function waitForPhoneCompletion(
       const evidence = await platform.readUpdateCompletion(deadline);
       if (platform.name === 'android' && (Date.now() >= deadline || budget?.exhausted)) throw new Error('PHONE_COMPLETION_DEADLINE: late evidence refused');
       qualification.observe({ completion: evidence });
-      if (!phonePlanContract(baseline, evidence, controls)) return evidence;
+      assertPhonePlan(baseline, evidence);
       assertPhoneUpdateAcknowledged(evidence);
       return evidence;
     } catch (error) {
@@ -317,7 +310,6 @@ export async function assertCandidateFailureObserved(
   expected: BundleSet['candidate']['identity'],
   origin: string,
   baseline: BundleSet['baselines'][number],
-  controls: Set<string>,
   info: FixtureInfo,
   faultPath: string,
   faultKind: string,
@@ -340,7 +332,8 @@ export async function assertCandidateFailureObserved(
       const completion = await platform.readUpdateCompletion(deadline);
       if (platform.name === 'android' && (Date.now() >= deadline || budget?.exhausted)) throw new Error('FAILURE_OBSERVATION_DEADLINE: late completion refused');
       qualification.observe({ identity, completion });
-      if (phonePlanContract(baseline, completion, controls)) assertPhoneUpdateNotAcknowledged(completion);
+      assertPhonePlan(baseline, completion);
+      assertPhoneUpdateNotAcknowledged(completion);
       if (identity.entry !== expected.entry || identity.script !== expected.script || identity.style !== expected.style) {
         throw new Error(`UPGRADE_FAILURE_TARGET_MISMATCH: observed ${identity.entry}/${identity.script}/${identity.style}`);
       }
@@ -437,7 +430,6 @@ async function runUpgradeScenario(
   const navigationIds = new Set<string>();
   const faultsExercised: string[] = [];
   let faultIdentity: RunResult['fault_identity'];
-  const oracleControls = new Set<string>();
   const initialIdentity: RuntimeIdentity = await (async () => {
     setStage('device');
     await platform.startFreshDevice();
@@ -505,7 +497,6 @@ async function runUpgradeScenario(
       bundleSet.candidate.identity,
       info.app_url,
       baseline,
-      oracleControls,
       info,
       faultPath,
       faultKind,
@@ -523,7 +514,7 @@ async function runUpgradeScenario(
     await platform.clickWebText('Try again');
   }
   await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
-  const phoneCompletion = await waitForPhoneCompletion(platform, baseline, oracleControls, qualification, budget);
+  const phoneCompletion = await waitForPhoneCompletion(platform, baseline, qualification, budget);
   await platform.clickDialogText('update-progress-dialog', 'Close');
   const afterUpgradeAuth = await reconnectAllRelays(info, beforeAuth, budget);
   qualification.observe({ ownership: afterUpgradeAuth });
@@ -611,7 +602,6 @@ async function runUpgradeScenario(
     fixture_requests: (await fixtureState(info)).requests,
     faults_exercised: faultsExercised,
     fault_identity: faultIdentity,
-    oracle_controls: [...oracleControls].sort(),
     phone_completion: phoneCompletion,
   };
 }

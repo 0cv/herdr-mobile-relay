@@ -36,7 +36,7 @@ const bin = path.join(output, 'bin');
 fs.mkdirSync(bin, {recursive: true});
 fs.writeFileSync(path.join(bin, 'node'), `#!/usr/bin/env bash\nset -euo pipefail\nif [ "\${1:-}" = "$APPIUM_HOME/node_modules/appium/build/lib/main.js" ] && [ "\${2:-}" = --version ]; then touch "$MOBILE_START_MARKER"; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`, {mode: 0o755});
 const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: output, MOBILE_START_MARKER: marker};
-const paths = ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml'].map(file => {
+const paths = ['.github/actions/mobile-device-run/action.yml'].map(file => {
   const text = fs.readFileSync(path.join(repo, file), 'utf8');
   assert.match(text, /bash tests\/mobile\/android-appium\/ci.sh install/);
   const verify = text.split('\n').find(line => line.includes('bash tests/mobile/android-appium/ci.sh verify')).trim();
@@ -71,7 +71,7 @@ function missing(file, action) {
 }
 const append = bytes => Buffer.concat([bytes, Buffer.from('\n')]);
 run('verify', true, 'healthy complete installed contract');
-startup(true, 'both actual CI verify/start fragments');
+startup(true, 'shared CI verify/start fragments');
 run('patch', false, 'already patched producer refuses');
 const shadowAxios = path.join(home, runtime.base.root, 'build/lib/jsonwp-proxy/node_modules/axios');
 const shadowAxiosMarker = path.join(output, 'shadow-axios-executed');
@@ -149,6 +149,6 @@ try {
   for (const [file, bytes] of Object.entries({...producerSnapshot, ...authoredSnapshot})) fs.writeFileSync(path.join(root, file), bytes);
 }
 run('verify', true, 'restored complete integrity');
-startup(true, 'both actual CI paths restored and reverified');
+startup(true, 'shared CI path restored and reverified');
 fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(results, null, 2) + '\n');
-console.log(`PASS ${results.length} effective installer/startup controls across both actual CI paths`);
+console.log(`PASS ${results.length} effective installer/startup controls for the shared CI path`);

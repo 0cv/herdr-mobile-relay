@@ -60,7 +60,7 @@ if [[ "$*" == *"main.js --address"* ]]; then exit 42; fi
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, APPIUM_HOME: join(scratch, 'home'),
     RUNNER_TEMP: scratch, TRACE: trace, MOBILE_PLATFORM: 'android', IOS_XCTEST_STATE_DIR: join(scratch, 'ios-xctest'),
     GITHUB_ENV: join(scratch, 'env') };
-  for (const filename of ['.github/actions/mobile-device-run/action.yml', '.github/workflows/mobile-ci.yml']) {
+  for (const filename of ['.github/actions/mobile-device-run/action.yml']) {
     const text = await readFile(join(root, filename), 'utf8');
     const steps = text.split(/(?=^\s*- name: )/mu);
     const extract = (name: string): string => {

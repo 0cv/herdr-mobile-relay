@@ -41,9 +41,6 @@ export interface EvidenceValidationOptions {
   candidateWebHash: string;
   candidateIdentity: EvidenceBundleIdentity;
   baselineIdentities: EvidenceExpectedBundle[];
-  syntheticWebHash?: string;
-  syntheticCandidateIdentity?: EvidenceBundleIdentity;
-  syntheticBaselineIdentity?: EvidenceBundleIdentity;
 }
 
 interface RuntimeIdentity {
@@ -178,7 +175,13 @@ export function validateDriverReceipt(value: unknown): void {
 export interface EvidenceRow { filename: string; result: Record<string, unknown> & MobileResultContract; assessment?: AndroidEnvironmentCheck }
 export async function loadEvidenceRows(options: EvidenceValidationOptions, invalid?: () => void): Promise<EvidenceRow[]> {
   if (!['product', 'qualified'].includes(options.contract) || !/^[1-9]\d*$/u.test(options.runId) || !/^[1-9]\d*$/u.test(options.attempt)) fail('current contract/run/attempt required');
-  if (!Array.isArray(options.matrix) || !options.matrix.length || options.matrix.length > 8) fail('expected matrix bound');
+  if (!Array.isArray(options.matrix) || !options.matrix.length || options.matrix.length > 2) fail('expected matrix bound');
+  if (new Set(options.matrix.map(entry => entry.platform)).size !== options.matrix.length
+    || new Set(options.matrix.map(entry => entry.baseline)).size !== 1
+    || new Set(options.matrix.map(entry => entry.scenario)).size !== 1
+    || options.matrix.some(entry => !['android', 'ios'].includes(entry.platform) || !['historical', 'synthetic'].includes(entry.scenario)
+      || !/^[A-Za-z0-9._-]{1,100}$/u.test(entry.baseline))) fail('expected matrix must have one baseline and one row per platform');
+  if (options.baselineIdentities.length !== 1 || options.baselineIdentities[0].name !== options.matrix[0].baseline) fail('prepared baseline must match the expected matrix');
   let files: string[];
   try { files = (await resultFiles(options.directory)).sort(); } catch (error) {
     if (!invalid) throw error;
@@ -207,10 +210,10 @@ export async function loadEvidenceRows(options: EvidenceValidationOptions, inval
     const scenario = result.candidate === 'current-code-target' ? 'synthetic' : 'historical';
     const key = rowKey({ platform: String(result.platform), baseline: String(result.baseline), scenario });
     if (!expected.has(key)) fail('foreign or duplicate matrix row');
-    const candidate = scenario === 'synthetic' ? options.syntheticCandidateIdentity : options.candidateIdentity;
+    const candidate = options.candidateIdentity;
     if (!candidate) fail('missing prepared candidate');
     const identity = { runId: options.runId, attempt: options.attempt, suite: options.suite, platform: result.platform, baseline: result.baseline, scenario,
-      sourceCommit: options.candidateCommit, sourceRunHeadSha: options.sourceRunHeadSha, candidateWebHash: expectedHash(result, options), candidateBuild: candidate.build, measurementId: result.identity.measurementId };
+      sourceCommit: options.candidateCommit, sourceRunHeadSha: options.sourceRunHeadSha, candidateWebHash: options.candidateWebHash, candidateBuild: candidate.build, measurementId: result.identity.measurementId };
     if (!isDeepStrictEqual(result.identity, identity) || result.source_commit !== options.candidateCommit || result.source_run_head_sha !== options.sourceRunHeadSha
       || result.candidate_web_hash !== identity.candidateWebHash || result.suite !== options.suite) fail('stale or inconsistent run identity');
     const row: EvidenceRow = { filename, result };
@@ -254,14 +257,6 @@ export async function loadEvidenceRows(options: EvidenceValidationOptions, inval
     invalid();
   }
   return rows;
-}
-
-function expectedHash(result: Record<string, unknown>, options: EvidenceValidationOptions): string {
-  if (result.candidate === 'current-code-target') {
-    if (!options.syntheticWebHash) fail('synthetic web hash is required');
-    return options.syntheticWebHash;
-  }
-  return options.candidateWebHash;
 }
 
 function bundleIdentity(value: unknown, label: string): EvidenceBundleIdentity {
@@ -415,18 +410,10 @@ function assertPhoneCompletion(result: Record<string, unknown>, baseline: string
   booleanValue(completion.phoneAcknowledged, 'phone_completion.phoneAcknowledged');
   if (typeof completion.phoneState !== 'string') fail('phone_completion.phoneState must be a string');
   booleanValue(completion.visibleCompletion, 'phone_completion.visibleCompletion');
-  if (completion.phoneRequired) {
-    if (completion.rawPlanPresent !== true) fail(`${baseline} is missing raw phone-plan evidence`);
-    if (completion.phoneAcknowledged !== true || completion.phoneState !== 'loaded' || completion.visibleCompletion !== true) {
-      fail(`${baseline} is missing completed phone acknowledgement`);
-    }
-    return;
-  }
-  if (baseline !== '0.20.8' && baseline !== '0.20.9') fail(`${baseline} has no phone plan`);
-  if (completion.phoneAcknowledged) fail(`${baseline} reported phone completion without a phone plan`);
-  const controls = stringArray(result.oracle_controls, 'oracle_controls');
-  if (!controls.includes(`HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:${baseline}`)) {
-    fail(`${baseline} is missing its explicit historical phone-plan control`);
+  if (completion.phoneRequired !== true) fail(`${baseline} has no phone plan`);
+  if (completion.rawPlanPresent !== true) fail(`${baseline} is missing raw phone-plan evidence`);
+  if (completion.phoneAcknowledged !== true || completion.phoneState !== 'loaded' || completion.visibleCompletion !== true) {
+    fail(`${baseline} is missing completed phone acknowledgement`);
   }
 }
 
@@ -438,7 +425,7 @@ export async function validateMobileEvidence(options: EvidenceValidationOptions)
   if (!/^[0-9a-f]{40}$/u.test(options.candidateCommit) || !/^[0-9a-f]{40}$/u.test(options.sourceRunHeadSha)) {
     fail('source commit and run head must be 40-character SHA-1 values');
   }
-  if (!/^[0-9a-f]{64}$/u.test(options.candidateWebHash) || (options.syntheticWebHash !== undefined && !/^[0-9a-f]{64}$/u.test(options.syntheticWebHash))) {
+  if (!/^[0-9a-f]{64}$/u.test(options.candidateWebHash)) {
     fail('candidate web hashes must be 64-character SHA-256 values');
   }
   const candidateIdentity = bundleIdentity(options.candidateIdentity, 'candidate_identity');
@@ -448,15 +435,6 @@ export async function validateMobileEvidence(options: EvidenceValidationOptions)
     return [name, bundleIdentity(entry.identity, `baseline identity ${name}`)] as const;
   }));
   if (baselineIdentities.size !== options.baselineIdentities.length) fail('baseline identities contain duplicate names');
-  const syntheticCandidateIdentity = options.syntheticCandidateIdentity === undefined
-    ? undefined
-    : bundleIdentity(options.syntheticCandidateIdentity, 'synthetic_candidate_identity');
-  if (syntheticCandidateIdentity && options.syntheticWebHash !== undefined && syntheticCandidateIdentity.webHash !== options.syntheticWebHash) {
-    fail('synthetic candidate identity does not match the verified synthetic web hash');
-  }
-  const syntheticBaselineIdentity = options.syntheticBaselineIdentity === undefined
-    ? undefined
-    : bundleIdentity(options.syntheticBaselineIdentity, 'synthetic_baseline_identity');
   const rows = await loadEvidenceRows(options);
   const expected = new Map(options.matrix.map((entry) => [rowKey(entry), entry]));
   if (expected.size !== options.matrix.length) fail('expected matrix contains duplicate rows');
@@ -485,18 +463,16 @@ export async function validateMobileEvidence(options: EvidenceValidationOptions)
       if (options.contract === 'qualified' && assessment.status !== 'PASS') fail('strict environment qualification failed');
     }
     if (result.source_commit !== options.candidateCommit || result.source_run_head_sha !== options.sourceRunHeadSha) fail(`${filename} has stale source or head identity`);
-    if (result.candidate_web_hash !== expectedHash(result, options)) fail(`${filename} has the wrong candidate web hash`);
+    if (result.candidate_web_hash !== options.candidateWebHash) fail(`${filename} has the wrong candidate web hash`);
     if (typeof result.candidate_web_hash !== 'string' || !/^[0-9a-f]{64}$/u.test(result.candidate_web_hash)) fail(`${filename} has an invalid candidate web hash`);
     const candidate = stringValue(result.candidate, `${filename}.candidate`);
     const scenario = candidate === 'current-code-target' ? 'synthetic' : 'historical';
     if (scenario === 'historical' && !candidate.startsWith('candidate-')) fail(`${filename} has an invalid historical candidate identity`);
-    const expectedCandidate = scenario === 'synthetic'
-      ? syntheticCandidateIdentity
-      : candidateIdentity;
+    const expectedCandidate = candidateIdentity;
     if (!expectedCandidate) fail(`${filename} has no expected ${scenario} candidate identity`);
     const platform = stringValue(result.platform, `${filename}.platform`);
     const baseline = stringValue(result.baseline, `${filename}.baseline`);
-    const expectedBaseline = baseline === 'current-code-baseline' ? syntheticBaselineIdentity : baselineIdentities.get(baseline);
+    const expectedBaseline = baselineIdentities.get(baseline);
     if (!expectedBaseline) fail(`${filename} has no expected identity for baseline ${baseline}`);
     const key = rowKey({ platform, baseline, scenario });
     const expectedRow = expected.get(key);

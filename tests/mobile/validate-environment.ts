@@ -44,7 +44,6 @@ async function singleRowOptions(): Promise<EvidenceValidationOptions> {
     candidateCommit: bundle.candidate.provenance.sourceCommit, sourceRunHeadSha: option('--source-run-head-sha'),
     candidateWebHash: bundle.candidate.identity.webHash, candidateIdentity: bundle.candidate.identity,
     baselineIdentities: bundle.baselines.map((row: { name: string; identity: unknown }) => ({ name: row.name, identity: row.identity })),
-    ...(scenario === 'synthetic' ? { syntheticWebHash: bundle.candidate.identity.webHash, syntheticCandidateIdentity: bundle.candidate.identity, syntheticBaselineIdentity: bundle.baselines[0].identity } : {}),
   };
 }
 
@@ -71,7 +70,7 @@ export async function environmentReport(): Promise<void> {
   const bytes = serializeEnvironmentReport(report);
   if (process.argv.includes('--output')) await writeFile(option('--output'), bytes, { mode: 0o600 });
   process.stdout.write(bytes);
-  const title = `Environment qualification: ${report.environment}${['FAIL', 'UNKNOWN'].includes(report.environment) ? ' — nonblocking for ordinary product smoke' : ''}`;
+  const title = `Environment qualification: ${report.environment}`;
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${title}\n\n\`\`\`json\n${bytes}\`\`\`\n`);
   if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `product_status=${report.product}\nenvironment_status=${report.environment}\n`);
   if (report.incomplete) throw new Error('MOBILE_ENVIRONMENT: incomplete collection; report delivery failed');
