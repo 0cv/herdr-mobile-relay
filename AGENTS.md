@@ -8,7 +8,7 @@ Read `README.md` and `QUICKSTART.md` before changing behavior. `docs/` holds the
 - Merge `dev` into `main` with a merge commit, never a squash, so the two branches keep a shared history.
 - Never push directly to `dev` or `main`, never force push, and never create, move or delete tags unless the user asks.
 - Release: prepare it on `dev` (version in `herdr-plugin.toml`, `CHANGELOG.md`, `README.md`, then `make web-release`), merge `dev` into `main`, then tag `vX.Y.Z` on `main`. The tag runs `.github/workflows/release.yml`.
-- After a release, point `tests/mobile/baselines.json` at it: the mobile device lane installs the latest release and upgrades it to the build under test.
+- After a release, add it first in `tests/mobile/baselines.json` and drop the oldest entry. The mobile device lane installs a recent release and upgrades it to the build under test; see `tests/mobile/AGENTS.md`.
 
 ## Commands
 
