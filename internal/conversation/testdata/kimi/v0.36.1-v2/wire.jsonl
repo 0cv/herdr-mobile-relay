@@ -1,0 +1,22 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1786680000000}
+{"type":"turn.prompt","input":[{"type":"text","text":"Check the fixture."},{"type":"image_url","imageUrl":{"url":"https://example.invalid/DO_NOT_EXPORT_IMAGE","id":"DO_NOT_EXPORT_IMAGE_ID"}}],"origin":{"kind":"user"},"time":1786680001000}
+{"type":"context.append_message","message":{"id":"prompt-a","role":"user","content":[{"type":"text","text":"Check the fixture."},{"type":"image_url","imageUrl":{"url":"https://example.invalid/DO_NOT_EXPORT_IMAGE","id":"DO_NOT_EXPORT_IMAGE_ID"}}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680001001}
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"step-a","turnId":"turn-a","step":1},"time":1786680001100}
+{"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":"step-a","part":{"type":"think","think":"DO_NOT_EXPORT_REASONING","encrypted":"DO_NOT_EXPORT_ENCRYPTED"}},"time":1786680001200}
+{"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":"step-a","part":{"type":"text","text":"Checking."}},"time":1786680001201}
+{"type":"context.append_loop_event","event":{"type":"tool.call","stepUuid":"step-a","toolCallId":"call-0","name":"Shell","args":{"command":"printf fixture-ok"},"extras":{"signature":"DO_NOT_EXPORT_CALL_EXTRAS"}},"time":1786680001300}
+{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"call-0","result":{"output":[{"type":"text","text":"fixture-ok"},{"type":"audio_url","audioUrl":{"url":"https://example.invalid/DO_NOT_EXPORT_AUDIO"}}],"isError":false,"note":"DO_NOT_EXPORT_NOTE"}},"time":1786680001400}
+{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"step-a","turnId":"turn-a","step":1,"finishReason":"tool_calls"},"time":1786680001500}
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"step-b","turnId":"turn-a","step":2},"time":1786680001600}
+{"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":"step-b","part":{"type":"text","text":"Done."}},"time":1786680001700}
+{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"step-b","turnId":"turn-a","step":2,"finishReason":"completed"},"time":1786680001800}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"DO_NOT_EXPORT_INJECTION"}],"toolCalls":[],"origin":{"kind":"injection","variant":"fixture-reminder"}},"time":1786680001900}
+{"type":"turn.prompt","input":[{"type":"text","text":"Check the fixture."}],"origin":{"kind":"user"},"time":1786680002000}
+{"type":"context.append_message","message":{"id":"prompt-b","role":"user","content":[{"type":"text","text":"Check the fixture."}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680002001}
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"step-c","turnId":"turn-b","step":1},"time":1786680002100}
+{"type":"context.append_loop_event","event":{"type":"tool.call","stepUuid":"step-c","toolCallId":"call-0","name":"Shell","args":{"command":"printf fixture-again"}},"time":1786680002200}
+{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"call-0","result":{"output":"fixture-again","isError":false}},"time":1786680002300}
+{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"step-c","turnId":"turn-b","step":1,"finishReason":"tool_calls"},"time":1786680002400}
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"step-d","turnId":"turn-b","step":2},"time":1786680002500}
+{"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":"step-d","part":{"type":"text","text":"Again."}},"time":1786680002600}
+{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"step-d","turnId":"turn-b","step":2,"finishReason":"completed"},"time":1786680002700}

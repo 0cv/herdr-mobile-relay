@@ -372,7 +372,7 @@ func (h *pollerSignalHandler) WithGroup(string) slog.Handler {
 
 func startPollerTestSocket(t *testing.T, responder func(method string) (result any, errorCode string)) string {
 	t.Helper()
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "s")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen poller socket: %v", err)

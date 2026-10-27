@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import ConversationMessage from '$components/ConversationMessage.svelte';
-import { clampPayload, conversationEntries, formatToolPayload, maxPayloadLines } from '$lib/conversation';
+import { clampPayload, conversationEntries, formatToolPayload, isChosenOption, maxPayloadLines, parseAskUserQuestion, pendingQuestionEntryId } from '$lib/conversation';
 import type { ConversationEntry, ConversationTool } from '$lib/types';
 
 // Shapes copied from a recorded Claude Code transcript: tool arguments arrive as
@@ -160,7 +160,7 @@ describe('clampPayload', () => {
 
 describe('ConversationMessage tool cards', () => {
   it('shows decoded arguments instead of the raw JSON blob', () => {
-    const { container } = render(ConversationMessage, { messageId: 'arguments', text: '', tools: [bashTool] });
+    const { container } = render(ConversationMessage, { viewState: { tableOffsets: [], openTools: new Set<string>() }, text: '', tools: [bashTool] });
     const input = container.querySelector('pre');
     expect(input).toHaveTextContent('command: python3 /tmp/band-sample.py');
     expect(container.textContent).not.toContain('{"command"');
@@ -170,7 +170,7 @@ describe('ConversationMessage tool cards', () => {
     const user = userEvent.setup();
     const output = Array.from({ length: 200 }, (_, index) => `line-${index}`).join('\n');
     const { container } = render(ConversationMessage, {
-      messageId: 'clamped-output',
+      viewState: { tableOffsets: [], openTools: new Set<string>() },
       text: '',
       tools: [{ name: 'Bash', input: bashInput, output }],
     });
@@ -182,5 +182,220 @@ describe('ConversationMessage tool cards', () => {
 
     expect(container.textContent).toContain('line-199');
     expect(screen.getByRole('button', { expanded: true, name: 'Show less' })).toBeInTheDocument();
+  });
+});
+
+describe('parseAskUserQuestion', () => {
+  const input = JSON.stringify({ questions: [{ question: 'Pick one?', header: 'Pick', multiSelect: false, options: [{ label: 'A', description: 'first' }, { label: 'B', description: '' }] }] });
+
+  it('structures the question and pairs it with the recorded answer', () => {
+    const [item] = parseAskUserQuestion(input, 'The user answered: "Pick one?"="B". Read the answers carefully.')!;
+    expect(item.options.map((option) => option.label)).toEqual(['A', 'B']);
+    expect(item.answer).toBe('B');
+  });
+
+  it('ignores other tool payloads', () => {
+    expect(parseAskUserQuestion('{"command":"ls"}')).toBeNull();
+    expect(parseAskUserQuestion('not json')).toBeNull();
+  });
+
+  it('extracts answers from the "Your questions have been answered" envelope', () => {
+    const output = 'Your questions have been answered: "Pick one?"="A". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('A');
+  });
+
+  it('extracts answers from the "The user answered" envelope with its closing sentence', () => {
+    const output = 'The user answered: "Pick one?"="B". Read the answers carefully \u2014 they may request clarification, changes, or that you not proceed \u2014 and follow what they actually say.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('B');
+  });
+
+  it('attributes two answers to the right questions', () => {
+    const two = JSON.stringify({ questions: [{ question: 'Q1', options: [] }, { question: 'Q2', options: [] }] });
+    const output = 'Your questions have been answered: "Q1"="A1", "Q2"="A2". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(two, output)!.map((item) => item.answer)).toEqual(['A1', 'A2']);
+  });
+
+  it('keeps a multi-select answer as one value', () => {
+    const output = 'Your questions have been answered: "Pick one?"="A, B". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('A, B');
+  });
+
+  it('returns backslashes unchanged', () => {
+    const output = 'Your questions have been answered: "Pick one?"="C:\\temp\\new". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(input, output)![0].answer).toBe('C:\\temp\\new');
+  });
+
+  it('leaves answer undefined for notes, no selection and unanswered replies', () => {
+    for (const output of [
+      'Your questions have been answered: "Pick one?"="A" notes: please hurry. You can now continue with these answers in mind.',
+      'Your questions have been answered: "Pick one?"=(no option selected). You can now continue with these answers in mind.',
+      'The user did not answer the questions.',
+      'The user answered: "Pick one?"="A" selected preview:\nsome preview',
+      'The user responded: "Pick one?"="A".',
+    ]) expect(parseAskUserQuestion(input, output)![0].answer).toBeUndefined();
+  });
+});
+
+describe('conversationEntries keeps agent questions', () => {
+  it('shows an AskUserQuestion exchange even when the turn has no prose, and still drops other tools', () => {
+    const entries = [
+      { id: 'u1', role: 'user', text: 'go', timestamp: '' },
+      { id: 'a1', role: 'assistant', text: '', timestamp: '', tools: [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '' }, { id: 'b', name: 'Bash', input: '{}', output: '' }] },
+    ] as ConversationEntry[];
+    const kept = conversationEntries(entries);
+    expect(kept.map((entry) => entry.id)).toEqual(['u1', 'a1']);
+    expect(kept[1].tools?.map((tool) => tool.name)).toEqual(['AskUserQuestion']);
+  });
+});
+
+describe('AskUserQuestion hardening', () => {
+  const ask = (questions: unknown) => JSON.stringify({ questions });
+  const q = { question: 'Q', header: '', multiSelect: false, options: [{ label: 'A', description: '' }, { label: 'A', description: '' }] };
+
+  it('keeps a question when the assistant continues with prose', () => {
+    const entries = [
+      { id: 'u1', role: 'user', text: 'go', timestamp: '' },
+      { id: 'a1', role: 'assistant', text: '', timestamp: '', tools: [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '' }] },
+      { id: 'a2', role: 'assistant', text: 'Thanks, doing it.', timestamp: '' },
+    ] as ConversationEntry[];
+    expect(conversationEntries(entries).map((entry) => entry.id)).toEqual(['u1', 'a1', 'a2']);
+  });
+
+  it('keeps earlier prose when a question-only turn follows it', () => {
+    const entries = [
+      { id: 'u1', role: 'user', text: 'go', timestamp: '' },
+      { id: 'a1', role: 'assistant', text: 'Here is the answer.', timestamp: '' },
+      { id: 'a2', role: 'assistant', text: '', timestamp: '', tools: [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '' }] },
+    ] as ConversationEntry[];
+    expect(conversationEntries(entries).map((entry) => entry.id)).toEqual(['u1', 'a1', 'a2']);
+  });
+
+  it('does not attribute one answer to duplicate input questions', () => {
+    const dup = JSON.stringify({ questions: [{ question: 'Q', options: [] }, { question: 'Q', options: [] }] });
+    const output = 'Your questions have been answered: "Q"="A". You can now continue with these answers in mind.';
+    expect(parseAskUserQuestion(dup, output)!.map((item) => item.answer)).toEqual([undefined, undefined]);
+  });
+
+  it('does not attribute answers when question text repeats', () => {
+    const dup = JSON.stringify({ questions: [{ question: 'Q', options: [] }, { question: 'Q', options: [] }] });
+    const result = parseAskUserQuestion(dup, 'The user answered: "Q"="A", "Q"="B". Read the answers carefully.')!;
+    expect(result.map((item) => item.answer)).toEqual([undefined, undefined]);
+  });
+
+  it('only trusts a complete answered envelope', () => {
+    expect(parseAskUserQuestion(ask([q]), 'The user answered: "Q"="A". Read the answers carefully.')![0].answer).toBe('A');
+    expect(parseAskUserQuestion(ask([q]), 'Error: expected "Q"="A"')![0].answer).toBeUndefined();
+    expect(parseAskUserQuestion(ask([q]), 'The user answered: "Q"="use "=" here"')![0].answer).toBeUndefined();
+  });
+
+  it('renders duplicate questions and labels without throwing, and keeps raw output for errors', () => {
+    const tool = { id: 't', name: 'AskUserQuestion', input: ask([q, q]), output: 'Error: denied', error: true } as ConversationTool;
+    const { container } = render(ConversationMessage, { viewState: { tableOffsets: [], openTools: new Set<string>() }, text: '', tools: [tool] });
+    expect(container.querySelectorAll('.conversation-question')).toHaveLength(2);
+    expect(container.textContent).toContain('Error: denied');
+    expect(container.textContent).not.toContain('Answered:');
+  });
+});
+
+describe('AskUserQuestion card visibility', () => {
+  const viewState = () => ({ tableOffsets: [], openTools: new Set<string>() });
+  const ask = (questions: unknown) => JSON.stringify({ questions });
+  const opts = [{ label: 'A', description: '' }, { label: 'B', description: '' }];
+  const tool = (questions: unknown, output = ''): ConversationTool => ({ id: 't', name: 'AskUserQuestion', input: ask(questions), output } as ConversationTool);
+  const answered = (answer: string, multiSelect = false) => tool([{ question: 'Q?', header: 'H', multiSelect, options: opts }], `The user answered: "Q?"="${answer}". Read the answers carefully.`);
+
+  it('shows an answered question without a details wrapper', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered('B')] });
+    expect(container.querySelector('details')).toBeNull();
+    expect(container.querySelector('.conversation-ask')).not.toBeNull();
+    expect(container.textContent).toContain('Q?');
+    expect(container.textContent).toContain('Answered: B');
+  });
+
+  it('keeps other tools collapsed', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [bashTool] });
+    expect(container.querySelector('details')!.open).toBe(false);
+  });
+
+  it('marks every multi-select answer as chosen and announces it', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered('A, B', true)] });
+    expect(container.querySelectorAll('li.chosen')).toHaveLength(2);
+    expect(container.textContent).toContain('(selected)');
+  });
+
+  it('shows a free-text answer without choosing an option', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered('something else')] });
+    expect(container.querySelectorAll('li.chosen')).toHaveLength(0);
+    expect(container.textContent).toContain('Answered: something else');
+  });
+
+  it('omits the list without options and labels header-less multi-select', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [tool([{ question: 'Q?', header: '', multiSelect: true, options: [] }])] });
+    expect(container.querySelector('ul')).toBeNull();
+    expect(container.querySelector('h4')!.textContent).toBe('Multiple choice');
+  });
+
+  it('shows the raw reply when the question is not answered', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [tool([{ question: 'Q?', header: '', multiSelect: false, options: opts }], 'User notes: hello')] });
+    expect(container.textContent).toContain('Q?');
+    expect(container.textContent).toContain('User notes: hello');
+  });
+});
+
+describe('isChosenOption', () => {
+  const item = (answer: string | undefined, multiSelect = false) => ({ question: 'Q', header: '', multiSelect, options: [], answer });
+  it('matches exact, multi-select and rejects the rest', () => {
+    expect(isChosenOption(item('A'), 'A')).toBe(true);
+    expect(isChosenOption(item('A, B', true), 'B')).toBe(true);
+    expect(isChosenOption(item('A, B'), 'B')).toBe(false);
+    expect(isChosenOption(item('free'), 'A')).toBe(false);
+    expect(isChosenOption(item(undefined), 'A')).toBe(false);
+  });
+});
+
+describe('pendingQuestionEntryId', () => {
+  const pending = (id: string, extra: Partial<ConversationTool> = {}) => turn(id, 'assistant', '', [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '', ...extra }]);
+  it('finds a question after the last user turn', () => {
+    expect(pendingQuestionEntryId([turn('u', 'user', 'hi'), pending('a'), { ...turn('n', 'assistant'), kind: 'notice' }])).toBe('a');
+  });
+  it('is null when a user turn follows, or the question has output or error, or the list is empty', () => {
+    expect(pendingQuestionEntryId([pending('a'), turn('u', 'user', 'hi')])).toBeNull();
+    expect(pendingQuestionEntryId([pending('a', { output: 'x' })])).toBeNull();
+    expect(pendingQuestionEntryId([pending('a', { error: true })])).toBeNull();
+    expect(pendingQuestionEntryId([])).toBeNull();
+  });
+});
+
+describe('ConversationMessage awaiting states', () => {
+  const viewState = () => ({ tableOffsets: [], openTools: new Set<string>() });
+  const input = JSON.stringify({ questions: [{ question: 'Q?', header: '', multiSelect: false, options: [{ label: 'A', description: '' }] }] });
+  const open: ConversationTool = { id: 't', name: 'AskUserQuestion', input, output: '' };
+  it('below: hides options and says to answer below', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [open], awaiting: 'below' });
+    expect(container.textContent).toContain('Q?');
+    expect(container.textContent).toContain('Waiting for your answer below.');
+    expect(container.querySelector('ul')).toBeNull();
+  });
+  it('elsewhere: keeps options and says waiting', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [open], awaiting: 'elsewhere' });
+    expect(container.textContent).toContain('Waiting for an answer.');
+    expect(container.querySelector('ul')).not.toBeNull();
+  });
+  it('null: reports that no answer was recorded', () => {
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [open] });
+    expect(container.textContent).toContain('No answer was recorded in this session log.');
+    expect(container.querySelector('ul')).not.toBeNull();
+  });
+  it('only the pending question in a mixed entry shows the notice', () => {
+    const errored: ConversationTool = { ...open, id: 'e', error: true };
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [errored, open], awaiting: 'below' });
+    expect(container.textContent?.match(/Waiting for your answer below\./g)).toHaveLength(1);
+    expect(container.querySelector('.conversation-ask.error')!.textContent).not.toContain('Waiting');
+  });
+  it('an answered question ignores awaiting', () => {
+    const answered = { ...open, output: 'The user answered: "Q?"="A". Read the answers carefully.' };
+    const { container } = render(ConversationMessage, { viewState: viewState(), text: '', tools: [answered], awaiting: 'below' });
+    expect(container.textContent).not.toContain('Waiting');
+    expect(container.querySelector('li.chosen')).not.toBeNull();
   });
 });

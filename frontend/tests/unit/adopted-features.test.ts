@@ -177,10 +177,11 @@ describe('workspace navigation', () => {
       agent({ pane_id: 'relay-a::pane-3', raw_pane_id: 'pane-3', workspace_id: 'work-1', status: 'idle' }),
     ]);
     expect(group).toMatchObject({ doneCount: 1, workingCount: 1, readyCount: 1 });
-    // done > working > idle
+    // done > working > ready (idle) > unknown
     expect(workspaceStateTone(group)).toBe('success');
     expect(workspaceStateTone({ ...group, doneCount: 0 })).toBe('warning');
-    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0 })).toBe('muted');
+    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0 })).toBe('ready');
+    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0, readyCount: 0 })).toBe('muted');
   });
 });
 

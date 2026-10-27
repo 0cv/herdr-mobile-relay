@@ -13,7 +13,7 @@ import (
 )
 
 func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -117,7 +117,7 @@ func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
 }
 
 func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -534,7 +534,7 @@ func TestTopologySubscriptionsMatchHerdr075Contract(t *testing.T) {
 func TestEventSubscribeSendsGatedSubscriptionList(t *testing.T) {
 	subscribedTypes := func(t *testing.T, probe func() bool) map[string]bool {
 		t.Helper()
-		socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+		socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 		listener, err := net.Listen("unix", socketPath)
 		if err != nil {
 			t.Fatalf("listen: %v", err)

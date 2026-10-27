@@ -17,6 +17,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/eventhook"
+	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 	"github.com/0cv/herdr-mobile-relay/internal/readiness"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
@@ -336,6 +337,9 @@ func runServe() (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if err := launchd.SweepWorkers(ctx); err != nil {
+		logger.Warn("remove finished worker jobs", "error", err)
+	}
 	srv := app.New(cfg, version, revision, logger)
 
 	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {

@@ -215,7 +215,7 @@ func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
 }
 
 func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -458,10 +458,11 @@ func TestQuestionWatcherWaitsThroughTransientUnparseableFrames(t *testing.T) {
 			} else {
 				message["selected_indices"] = []any{float64(0)}
 			}
-			if accepted := d.Handle(context.Background(), message); !accepted.OK || accepted.Phase != "accepted" {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			if accepted := d.Handle(ctx, message); !accepted.OK || accepted.Phase != "accepted" {
 				t.Fatalf("accepted result = %+v", accepted)
 			}
-			timeout := time.After(3 * time.Second)
 			for {
 				select {
 				case update := <-updates:
@@ -474,7 +475,7 @@ func TestQuestionWatcherWaitsThroughTransientUnparseableFrames(t *testing.T) {
 					if update["phase"] == test.expectedPhase {
 						return
 					}
-				case <-timeout:
+				case <-ctx.Done():
 					t.Fatalf("no %s result", test.expectedPhase)
 				}
 			}
@@ -578,8 +579,10 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 		t.Fatalf("question fixtures did not parse: first=%+v second=%+v", first, second)
 	}
 
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	navigate := func(requestID string, interaction *question.Interaction) *CommandResult {
-		return d.Handle(context.Background(), map[string]any{
+		return d.Handle(ctx, map[string]any{
 			"action":         "navigate_question",
 			"request_id":     requestID,
 			"pane_id":        "pane-1",
@@ -589,14 +592,13 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 	}
 	awaitUpdate := func(requestID, phase string) map[string]any {
 		t.Helper()
-		timeout := time.After(2 * time.Second)
 		for {
 			select {
 			case update := <-updates:
 				if update["request_id"] == requestID && update["phase"] == phase {
 					return update
 				}
-			case <-timeout:
+			case <-ctx.Done():
 				t.Fatalf("no %s update for %s", phase, requestID)
 			}
 		}
@@ -619,7 +621,7 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 		t.Fatalf("navigation replay = %+v", replay)
 	}
 
-	answer := d.Handle(context.Background(), map[string]any{
+	answer := d.Handle(ctx, map[string]any{
 		"action":           "answer_question",
 		"request_id":       "answer-1",
 		"pane_id":          "pane-1",
@@ -636,7 +638,7 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 	}
 	awaitUpdate("previous-2", "navigated")
 
-	changedAnswer := d.Handle(context.Background(), map[string]any{
+	changedAnswer := d.Handle(ctx, map[string]any{
 		"action":           "answer_question",
 		"request_id":       "answer-2",
 		"pane_id":          "pane-1",

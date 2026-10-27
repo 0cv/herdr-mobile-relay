@@ -55,7 +55,7 @@ func TestSendSecretDispatchesOneKeystrokeBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, journal, testLogger())
+	d := NewDispatcher(herdr.NewClient(bin, secretReadSocket(t, "Password:", false, nil)), state, journal, testLogger())
 	t.Cleanup(func() {
 		_ = d.Close(context.Background())
 	})

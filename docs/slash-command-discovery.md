@@ -8,12 +8,26 @@ limits are shared in
 [`contracts/fixtures/slash_command_limits.json`](../contracts/fixtures/slash_command_limits.json)
 and are checked against the Go and TypeScript implementations.
 
+Command and skill files larger than 1 MiB are skipped without marking the
+catalog truncated; reads stop at that size. Cursor applies its own 1 MiB limit,
+described below.
+
 Hermes intentionally has two independent 2,000-file passes: one for its
 native project/profile skills and one for configured compatibility skill
 folders. It can therefore inspect more than 2,000 custom files in one request,
 while its final catalog and wire-size limits still apply. This preserves Hermes'
 provider precedence and configured-folder behavior; it is not a promise of an
 unbounded catalog.
+
+| Provider | Catalog source |
+| --- | --- |
+| Claude Code, Qoder | Builtins plus native command and skill files |
+| Cursor Agent | Builtins plus project commands and native/configured skills |
+| Codex | Builtins plus discovered skills |
+| Pi | Builtins and filesystem fallback; optional exact-session runtime catalog |
+| Oh My Pi | Builtins plus selected profile/project resources |
+| OpenCode | 17 builtin suggestions plus bounded native Markdown commands; skills use native `@` mentions |
+| Hermes, Kimi | Builtins plus native/configured skills |
 
 ## Cursor
 
@@ -90,10 +104,51 @@ Cache identity includes the relay, server session, pane, terminal generation,
 agent session, agent name, and working directory. This is not a filesystem watch:
 reopen the palette or use its refresh button after changing command resources.
 
+## OpenCode
+
+The filesystem catalog follows the installed OpenCode **2.0.29** Markdown
+command loader: personal `${XDG_CONFIG_HOME:-~/.config}/opencode/{command,commands}`
+and project `.opencode/{command,commands}`. Project discovery walks bounded
+ancestors through the Git root (or filesystem root outside a repository), with
+nearer projects overriding personal and outer project commands. Within a scope,
+`commands` overrides `command`. Builtin suggestions retain precedence.
+Nested filenames keep their native slash separator: `commands/git/review.md`
+is `/git/review`, not `/git:review`. Command frontmatter `hidden` and
+`user-invocable` are not native OpenCode command filters.
+
+Only command names and descriptions are exported; prompt bodies, shell
+interpolation and agent/model directives are never executed. The shared
+2,000-file budget and 1 MiB file limit apply, with at most 4,096 visited
+filesystem entries and 32 directory levels per tree. Symlink entries and special
+files are skipped; a linked root itself may be selected. Budget/depth loss sets
+`truncated`; oversized files are skipped as for other providers. Names are
+restricted to the palette's 120-character safe path format.
+
+OpenCode 2.0.29 skills are **`@id` mentions**, selected by its native `/skills`
+menu, not `/id` commands. They are deliberately not invented as slash-command
+suggestions here. Use Terminal for that native menu. This bounded filesystem
+catalog does not evaluate `opencode.json`/JSONC command definitions, remote or
+system-managed configuration, runtime plugins, policies, or configured skill
+sources; it is not a complete native-runtime catalog.
+
 ## Pi runtime commands
 
-For Pi 0.87.0, install the relay-owned metadata integration into the selected
-**agent directory** (not the directory containing it):
+Filesystem discovery follows Pi’s trust-store lookup: canonicalize the working
+directory, then look up its exact path and each canonical ancestor in
+`trust.json`. Stored keys are not rewritten through symlinks. A noncanonical
+alias cannot override a canonical decision or independently grant project
+trust; null entries defer to ancestors and then `defaultProjectTrust`.
+
+For Pi, turn on **Settings → Pi Integration** for its computer. This
+controller-only setting installs the relay-owned integration into all Pi agent
+directories known to that relay and reports each profile's result. Readers see
+it read-only. It starts off and never edits Pi settings, trust decisions,
+Herdr's integration or other extensions. It supports live command discovery,
+text/tool progress, extension notices and the exact-session unconfirmed reply
+path for blocked Pi panes.
+
+The CLI remains an alternative for a selected **agent directory** (not the
+directory containing it):
 
 ```bash
 bash relay/setup.sh --pi-install "$HOME/.pi/agent"
@@ -102,25 +157,16 @@ bash relay/setup.sh --pi-install /absolute/path/to/profile/agent
 ```
 
 With no directory argument, setup uses `PI_CODING_AGENT_DIR`, then
-`~/.pi/agent`. Normal plugin installation does not install the optional Pi
-integration. For an installed release that includes this feature, use the
-installed release's `relay/setup.sh` rather than an unrelated checkout; the
-published 0.21.3 relay cannot discover live Pi extension commands. For a
-newer installed release, the default installation path is:
+`~/.pi/agent`. App and CLI state agree because ownership is read from disk.
+At relay startup, including verified-update activation, installed marker-owned
+copies are refreshed from the relay bundle. Unowned directories and symlinked
+extension directories/files are refused. Files are mode 0600 in a mode 0700
+integration directory.
 
-```bash
-bash "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}/current/relay/setup.sh" \
-  --pi-install "$HOME/.pi/agent"
-```
-
-`make dev-tunnel` installs or updates the integration automatically when the
-selected Pi profile exists; set `HERDR_DEV_PI_COMMANDS_INSTALL=0` to skip it.
-Run `/reload` in each affected Pi pane after installation or restart Pi.
-Install the integration into every profile whose commands you want to discover.
-After updating the relay bundle, rerun the install command to copy its matching
-bridge version into each selected profile, then reload Pi. It lives
-alongside Herdr's integration and does not edit settings, trust decisions, or
-other extension files. To remove only its owned files:
+Run `/reload` in each affected Pi pane or restart Pi to activate changes. The
+relay never reloads Pi or types into a pane automatically. The setting shows a
+generic reload hint; it does not claim that a running Pi has loaded new files.
+Turning it off, or this CLI alternative, removes only marker-verified owned files:
 
 ```bash
 bash relay/setup.sh --pi-remove /absolute/path/to/profile/agent
@@ -148,9 +194,14 @@ precedence over runtime discovery.
 
 The bridge starts only in an interactive TUI session inside Herdr, with
 `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` present. Endpoint identity includes the
-Herdr socket's canonical path and inode, pane, native Pi session file path,
-PID, and process incarnation. The relay independently checks Herdr's foreground process-group leader and
-Unix peer credentials, and rechecks the process and session after discovery. Nested sessions cannot replace the root registration. Missing or
+Herdr socket's canonical path and inode, pane, exact Pi session, PID, and process
+incarnation. A native session reference may name Pi's current session ID or its
+current session file; the bridge matches the actual session manager value and
+rejects unrelated IDs or paths. The relay independently checks Herdr's whole foreground
+process group and Unix peer credentials, and rechecks the process and session
+after discovery. A shell foreground, missing shell identity, or any additional
+foreground process (including an inherited-stdio editor) makes discovery
+unavailable; merely finding the group leader is insufficient. Nested sessions cannot replace the root registration. Missing or
 ambiguous identity is not guessed from a working directory.
 
 Sockets are mode 0600 inside user-owned mode 0700 directories under

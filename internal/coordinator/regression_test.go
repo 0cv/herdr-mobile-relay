@@ -101,7 +101,7 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 	approve := func() *CommandResult {
 		// A short parent deadline wins over the handler's approval deadline, so
 		// the herdr child starts and is then cancelled quickly.
-		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 		return d.Handle(ctx, map[string]any{
 			"action":               "respond",

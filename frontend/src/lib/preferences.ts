@@ -2,6 +2,7 @@ import { get, writable } from 'svelte/store';
 import {
   DEFAULT_AGENT_VIEW_KEY,
   PANE_AGENT_VIEW_OVERRIDES_KEY,
+  HIDDEN_SERVERS_KEY,
   LEGACY_FONT_KEY,
   HOME_LAYOUT_KEY,
   HOME_LAYOUTS,
@@ -10,6 +11,7 @@ import {
   TERMINAL_HISTORY_KEY,
   TERMINAL_HISTORY_OPTIONS,
   TERMINAL_HEIGHT_LEASE_KEY,
+  TERMINAL_RESIZE_SESSION_KEY,
   TERMINAL_WAKE_LOCK_KEY,
   TERMINAL_REFRESH_KEY,
   TERMINAL_REFRESH_OPTIONS,
@@ -33,12 +35,21 @@ import {
   type PaneAgentViewOverrides,
 } from './agent-view';
 
+export function readTerminalResizeSession(storage?: Pick<Storage, 'getItem'>): boolean {
+  try {
+    const value = (storage || localStorage).getItem(TERMINAL_RESIZE_SESSION_KEY);
+    return value === null || value === 'true';
+  } catch {
+    return false;
+  }
+}
+
 export function readDefaultAgentView(storage?: Pick<Storage, 'getItem'>): AgentView {
   try {
     const value = (storage || localStorage).getItem(DEFAULT_AGENT_VIEW_KEY);
-    return isAgentView(value) ? value : 'terminal';
+    return isAgentView(value) ? value : 'conversation';
   } catch {
-    return 'terminal';
+    return 'conversation';
   }
 }
 
@@ -101,10 +112,8 @@ export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
 export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
 export const homeLayout = writable<HomeLayout>(savedHomeLayout());
-// Off by default: resizing the shared pane's height strands stale copies of
-// inline agents' status bars in the scrollback (the terminal reflows the
-// primary buffer before the agent can repaint), so only people who need
-// full-screen TUIs to fit the phone opt in.
+export const hiddenServers = writable<string[]>(readHiddenServers());
+export const terminalResizeSession = writable<boolean>(readTerminalResizeSession());
 export const terminalHeightLease = writable<boolean>(
   localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',
 );
@@ -153,6 +162,37 @@ export function setPaneAgentView(
   return 'saved';
 }
 
+function readHiddenServers(): string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(HIDDEN_SERVERS_KEY) || '[]');
+    return Array.isArray(value) ? value.filter((id) => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHiddenServers(next: string[]): void {
+  hiddenServers.set(next);
+  try {
+    localStorage.setItem(HIDDEN_SERVERS_KEY, JSON.stringify(next));
+  } catch {
+    // Without storage the store still applies the choice until the app reloads.
+  }
+}
+
+export function setServerHidden(relayId: string, hidden: boolean): void {
+  const current = get(hiddenServers);
+  if (current.includes(relayId) === hidden) return;
+  saveHiddenServers(hidden ? [...current, relayId] : current.filter((id) => id !== relayId));
+}
+
+// With one computer left the filter row disappears, so nothing may stay hidden.
+export function pruneHiddenServers(remainingRelayIds: string[]): void {
+  const current = get(hiddenServers);
+  const next = remainingRelayIds.length > 1 ? current.filter((id) => remainingRelayIds.includes(id)) : [];
+  if (next.length !== current.length) saveHiddenServers(next);
+}
+
 export function clearPaneAgentViewOverridesForRelay(relayId: string): 'saved' | 'unavailable' {
   const current = get(paneAgentViewOverrides);
   const next = { ...current } as Record<string, AgentView>;
@@ -195,6 +235,18 @@ export function setTerminalHistoryLines(value: TerminalHistoryLines): void {
 export function setTerminalRefreshInterval(value: TerminalRefreshInterval): void {
   localStorage.setItem(TERMINAL_REFRESH_KEY, String(value));
   terminalRefreshInterval.set(value);
+}
+
+export function setTerminalResizeSession(value: boolean): 'saved' | 'unavailable' {
+  // Turning off remains effective locally even if persistence is unavailable.
+  if (!value) terminalResizeSession.set(false);
+  try {
+    localStorage.setItem(TERMINAL_RESIZE_SESSION_KEY, String(value));
+  } catch {
+    return 'unavailable';
+  }
+  terminalResizeSession.set(value);
+  return 'saved';
 }
 
 export function setTerminalHeightLease(value: boolean): void {

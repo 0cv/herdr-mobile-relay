@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ type ompExtensionDir struct {
 
 // ompExtensionSkillDirs resolves configured extension packages and enabled
 // plugins. Only the nearest project .omp root participates.
-func ompExtensionSkillDirs(ctx DiscoverContext, settings ompSkillSettings) []ompExtensionDir {
+func (reader *catalogReader) ompExtensionSkillDirs(ctx DiscoverContext, settings ompSkillSettings) []ompExtensionDir {
 	var roots []ompExtensionDir
 	configuredSource := settings.extensionDirectorySource
 	if configuredSource == "" {
@@ -36,18 +37,18 @@ func ompExtensionSkillDirs(ctx DiscoverContext, settings ompSkillSettings) []omp
 		roots = append(roots, ompExtensionDir{path: extension, source: configuredSource})
 	}
 
-	disabled := ompDisabledPlugins(ctx.Cwd)
+	disabled := reader.ompDisabledPlugins(ctx.Cwd)
 	projectDirs := findProjectDirs(ctx.Cwd, []string{".omp"})
 	if len(projectDirs) > 0 {
 		dir := projectDirs[len(projectDirs)-1]
-		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(dir, "plugins", "installed_plugins.json"), "project")...)
-		roots = append(roots, installedOMPExtensions(filepath.Join(dir, "plugins"), "project", disabled)...)
+		roots = append(roots, reader.claudeMarketplaceExtensions(ctx, filepath.Join(dir, "plugins", "installed_plugins.json"), "project")...)
+		roots = append(roots, reader.installedOMPExtensions(filepath.Join(dir, "plugins"), "project", disabled)...)
 	}
 
 	if ctx.Home != "" {
-		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".claude", "plugins", "installed_plugins.json"), "personal")...)
-		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".omp", "plugins", "installed_plugins.json"), "personal")...)
-		roots = append(roots, installedOMPExtensions(filepath.Join(ctx.Home, ".omp", "plugins"), "personal", disabled)...)
+		roots = append(roots, reader.claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".claude", "plugins", "installed_plugins.json"), "personal")...)
+		roots = append(roots, reader.claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".omp", "plugins", "installed_plugins.json"), "personal")...)
+		roots = append(roots, reader.installedOMPExtensions(filepath.Join(ctx.Home, ".omp", "plugins"), "personal", disabled)...)
 	}
 
 	seen := make(map[string]bool, len(roots))
@@ -69,16 +70,18 @@ func ompExtensionSkillDirs(ctx DiscoverContext, settings ompSkillSettings) []omp
 }
 
 type claudeMarketplaceRegistry struct {
-	Plugins map[string][]struct {
-		InstallPath string `json:"installPath"`
-		Enabled     *bool  `json:"enabled"`
-		Scope       string `json:"scope"`
-		ProjectPath string `json:"projectPath"`
-	} `json:"plugins"`
+	Plugins json.RawMessage `json:"plugins"`
 }
 
-func claudeMarketplaceExtensions(ctx DiscoverContext, registryPath, source string) []ompExtensionDir {
-	data, found, ok := settingsFileIn(filepath.Dir(registryPath), filepath.Base(registryPath))
+type claudeMarketplaceInstall struct {
+	InstallPath string `json:"installPath"`
+	Enabled     *bool  `json:"enabled"`
+	Scope       string `json:"scope"`
+	ProjectPath string `json:"projectPath"`
+}
+
+func (reader *catalogReader) claudeMarketplaceExtensions(ctx DiscoverContext, registryPath, source string) []ompExtensionDir {
+	data, found, ok := reader.settingsFileIn(filepath.Dir(registryPath), filepath.Base(registryPath))
 	if !found || !ok {
 		return nil
 	}
@@ -86,8 +89,41 @@ func claudeMarketplaceExtensions(ctx DiscoverContext, registryPath, source strin
 	if json.Unmarshal(data, &registry) != nil {
 		return nil
 	}
+	decoder := json.NewDecoder(bytes.NewReader(registry.Plugins))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil
+	}
+	var plugins [][]claudeMarketplaceInstall
+	indices := make(map[string]int)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil
+		}
+		if !strings.Contains(name, "@") {
+			var ignored json.RawMessage
+			if decoder.Decode(&ignored) != nil {
+				return nil
+			}
+			continue
+		}
+		var installs []claudeMarketplaceInstall
+		if decoder.Decode(&installs) != nil {
+			return nil
+		}
+		if index, found := indices[name]; found {
+			plugins[index] = installs
+			continue
+		}
+		indices[name] = len(plugins)
+		plugins = append(plugins, installs)
+	}
 	var roots []ompExtensionDir
-	for _, installs := range registry.Plugins {
+	for _, installs := range plugins {
 		for _, install := range installs {
 			if install.Enabled != nil && !*install.Enabled {
 				continue
@@ -105,7 +141,7 @@ func claudeMarketplaceExtensions(ctx DiscoverContext, registryPath, source strin
 					continue
 				}
 			}
-			roots = append(roots, claudeMarketplaceSkillDirs(root, source)...)
+			roots = append(roots, reader.claudeMarketplaceSkillDirs(root, source)...)
 		}
 	}
 	return roots
@@ -115,9 +151,9 @@ type claudePluginManifest struct {
 	Skills json.RawMessage `json:"skills"`
 }
 
-func claudeMarketplaceSkillDirs(root, source string) []ompExtensionDir {
+func (reader *catalogReader) claudeMarketplaceSkillDirs(root, source string) []ompExtensionDir {
 	result := []ompExtensionDir{{path: root, source: source}}
-	data, found, ok := settingsFileIn(filepath.Join(root, ".claude-plugin"), "plugin.json")
+	data, found, ok := reader.settingsFileIn(filepath.Join(root, ".claude-plugin"), "plugin.json")
 	if !found || !ok {
 		return result
 	}
@@ -176,9 +212,9 @@ type ompPluginLock struct {
 	} `json:"plugins"`
 }
 
-func installedOMPExtensions(root, source string, disabled map[string]bool) []ompExtensionDir {
+func (reader *catalogReader) installedOMPExtensions(root, source string, disabled map[string]bool) []ompExtensionDir {
 	candidates := make(map[string]bool)
-	if data, found, ok := settingsFileIn(root, "package.json"); found && ok {
+	if data, found, ok := reader.settingsFileIn(root, "package.json"); found && ok {
 		var manifest ompPackageManifest
 		if json.Unmarshal(data, &manifest) == nil {
 			for name := range manifest.Dependencies {
@@ -186,7 +222,7 @@ func installedOMPExtensions(root, source string, disabled map[string]bool) []omp
 			}
 		}
 	}
-	if data, found, ok := settingsFileIn(root, "omp-plugins.lock.json"); found && ok {
+	if data, found, ok := reader.settingsFileIn(root, "omp-plugins.lock.json"); found && ok {
 		var lock ompPluginLock
 		if json.Unmarshal(data, &lock) == nil {
 			for name, plugin := range lock.Plugins {
@@ -205,7 +241,7 @@ func installedOMPExtensions(root, source string, disabled map[string]bool) []omp
 	result := make([]ompExtensionDir, 0, len(names))
 	for _, name := range names {
 		packageRoot := filepath.Join(root, "node_modules", filepath.FromSlash(name))
-		data, found, ok := settingsFileIn(packageRoot, "package.json")
+		data, found, ok := reader.settingsFileIn(packageRoot, "package.json")
 		if !found || !ok {
 			continue
 		}
@@ -222,7 +258,7 @@ type ompProjectPluginOverrides struct {
 	Disabled []string `json:"disabled"`
 }
 
-func ompDisabledPlugins(cwd string) map[string]bool {
+func (reader *catalogReader) ompDisabledPlugins(cwd string) map[string]bool {
 	disabled := make(map[string]bool)
 	if !filepath.IsAbs(cwd) {
 		return disabled
@@ -235,7 +271,7 @@ func ompDisabledPlugins(cwd string) map[string]bool {
 			if err != nil || !info.IsDir() {
 				continue
 			}
-			data, found, ok := settingsFileIn(projectConfig, "plugin-overrides.json")
+			data, found, ok := reader.settingsFileIn(projectConfig, "plugin-overrides.json")
 			if found && ok {
 				var overrides ompProjectPluginOverrides
 				if json.Unmarshal(data, &overrides) == nil {

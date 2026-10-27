@@ -11,7 +11,9 @@ GOMODCACHE="${GOMODCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-mod}" \
     GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-cache}" \
     go build -o "$TEST_RELAY_BIN" "$ROOT/cmd/herdr-mobile-relay"
 mkdir -p "$TEST_BIN_DIR/web"
-printf '{"bundle_hash":"test-web"}\n' > "$TEST_BIN_DIR/web/release.json"
+cp "$ROOT/web/release.json" "$TEST_BIN_DIR/web/release.json"
+printf '{"version":"dev","revision":"unknown","web_hash":"test-web"}\n' \
+    > "$TEST_BIN_DIR/release-manifest.json"
 
 cleanup() {
     # shellcheck disable=SC2086

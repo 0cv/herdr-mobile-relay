@@ -100,11 +100,15 @@ func (p *memoryProjector) apply(record JSONLRecord) projectionResult {
 		return result
 	}
 	body, truncated := clampText(body, maxEntryBytes)
+	kind := ""
+	if role == "notice" {
+		kind, role = "notice", "assistant"
+	}
 	entry := projectedEntry{
 		Offset: record.Start,
 		Entry: Entry{
 			ID: browserEntryID(p.revision, record.Start, record.Raw), Timestamp: timestamp,
-			Role: role, Text: body, Tools: calls, Truncated: truncated || omittedTools > 0 || omittedPayloads > 0,
+			Kind: kind, Role: role, Text: body, Tools: calls, Truncated: truncated || omittedTools > 0 || omittedPayloads > 0,
 		},
 	}
 	p.byOffset[record.Start] = len(p.entries)
@@ -128,6 +132,11 @@ func visibleRecord(agent string, record map[string]any) (string, string, string)
 		role, body = parseCodexRecord(record)
 	case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 		role, body = parsePiRecord(record)
+	case "cursor", "cursoragent":
+		role, body = parseCursorRecord(record)
+		if timestamp == "" {
+			timestamp = cursorTimestampFromRecord(record)
+		}
 	}
 	return role, timestamp, body
 }

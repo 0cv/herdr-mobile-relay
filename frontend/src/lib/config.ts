@@ -9,6 +9,7 @@ export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
+export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';
 export const TERMINAL_HEIGHT_LEASE_KEY = 'herdr_terminal_height_lease';
 export const TERMINAL_WAKE_LOCK_KEY = 'herdr_terminal_wake_lock';
 export const HOME_LAYOUT_KEY = 'herdr_home_workspace_layout';
@@ -21,6 +22,7 @@ export const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
 export const HANDLED_NOTIFICATION_ACTIONS_KEY = 'herdr_handled_notification_actions';
 export const DEFAULT_AGENT_VIEW_KEY = 'herdr_default_agent_view';
 export const PANE_AGENT_VIEW_OVERRIDES_KEY = 'herdr_pane_agent_view_overrides';
+export const HIDDEN_SERVERS_KEY = 'herdr_hidden_servers';
 
 export const APP_PROTOCOL_VERSION = __APP_PROTOCOL_VERSION__;
 export const APP_VERSION = __APP_VERSION__;
@@ -75,7 +77,7 @@ export const MIN_PANE_SIZE_ROWS = 10;
 export const MAX_PANE_SIZE_ROWS = 120;
 // A hidden page keeps renewing its pane-size lease for this long. Desktop
 // Safari reports an occluded window as hidden, so every switch to another app
-// would otherwise lapse the lease after its 30s TTL and resize the shared
+// would otherwise lapse the lease after the relay's TTL and resize the shared
 // pane twice per glance — each cycle can strand a stale copy of an inline
 // agent's status bar in the scrollback. The grace is bounded so a page that
 // stays hidden — a phone in a pocket whose open DataChannel keeps it

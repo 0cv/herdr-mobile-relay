@@ -636,6 +636,45 @@ func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProce
 	return &result.ProcessInfo, nil
 }
 
+// PaneGet asks the running Herdr server for one pane over a fresh socket
+// request. Unlike the agent inventory it also covers plain shell panes, and it
+// carries the terminal incarnation (terminal_id) a pane-size lease is bound to.
+func (c *Client) PaneGet(ctx context.Context, paneID string) (*Pane, error) {
+	var result struct {
+		Pane *Pane `json:"pane"`
+	}
+	if err := c.api.requestResult(ctx, "pane.get", map[string]any{"pane_id": paneID}, "pane_info", &result); err != nil {
+		return nil, fmt.Errorf("herdr pane get: %w", err)
+	}
+	if result.Pane == nil {
+		return nil, errors.New("herdr pane get: pane.get response has no pane")
+	}
+	return result.Pane, nil
+}
+
+// PaneProcessInfoFresh reads pane.process_info over a fresh socket request,
+// without the CLI process PaneProcessInfo spawns. Pane-size identity checks
+// call it before every terminal write, so a cached answer is never reused.
+func (c *Client) PaneProcessInfoFresh(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
+	var result struct {
+		ProcessInfo *PaneProcessInfo `json:"process_info"`
+	}
+	if err := c.api.requestResult(ctx, "pane.process_info", map[string]any{"pane_id": paneID}, "pane_process_info", &result); err != nil {
+		return nil, fmt.Errorf("herdr pane process info: %w", err)
+	}
+	if result.ProcessInfo == nil {
+		return nil, errors.New("herdr pane process info: response has no process_info")
+	}
+	return result.ProcessInfo, nil
+}
+
+// IsPaneNotFound reports Herdr's structured refusal for a pane that no longer
+// exists, from either the socket API or the CLI.
+func IsPaneNotFound(err error) bool {
+	var cliErr *CLIError
+	return errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == "pane_not_found"
+}
+
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) (PaneRead, error) {
 	return c.readPane(ctx, paneID, lines, format, "recent-unwrapped")
 }
@@ -750,14 +789,24 @@ func (c *Client) RenamePane(ctx context.Context, paneID, name string) error {
 	return c.RenameAgent(ctx, paneID, name)
 }
 
-func (c *Client) StartAgent(ctx context.Context, name, kind, paneID string, timeoutMs int) (string, error) {
+// StartAgent starts kind in paneID. agentArgs, when given, are the started
+// agent's own arguments - `hermes -p <profile>` and the like. They follow a
+// "--" separator so herdr stops parsing at that point and the agent owns
+// everything after it; without that, a profile named like a herdr flag would be
+// read as one.
+func (c *Client) StartAgent(ctx context.Context, name, kind, paneID string, timeoutMs int, agentArgs ...string) (string, error) {
 	var result CreateResult
-	if err := c.runResult(ctx, &result,
+	args := []string{
 		"agent", "start", name,
 		"--kind", kind,
 		"--pane", paneID,
 		"--timeout", strconv.Itoa(timeoutMs),
-	); err != nil {
+	}
+	if len(agentArgs) > 0 {
+		args = append(args, "--")
+		args = append(args, agentArgs...)
+	}
+	if err := c.runResult(ctx, &result, args...); err != nil {
 		return "", fmt.Errorf("herdr agent start: %w", dispatchedAfterSuccess(err))
 	}
 	if result.PaneID == "" {

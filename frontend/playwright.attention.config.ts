@@ -6,7 +6,7 @@ const webkitEndpoint = process.env.HERDR_WEBKIT_WS_ENDPOINT;
 
 export default defineConfig({
   testDir: './tests/browser',
-  testMatch: 'attention-relay.spec.ts',
+  testMatch: ['attention-relay.spec.ts', 'terminal-input.spec.ts'],
   timeout: 45_000,
   expect: { timeout: 8_000 },
   fullyParallel: false,

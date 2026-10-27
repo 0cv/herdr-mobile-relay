@@ -5,6 +5,388 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-10-26
+
+### Fixed
+
+- Queue terminal key taps instead of dropping them while the previous key waits
+  for its relay acknowledgement. On a high-latency link such as a Cloudflare
+  tunnel, a quick second **Esc** was ignored because the key row disabled itself
+  until the first send was confirmed, so agents that stop on a double Esc could
+  not be stopped from the phone. Taps queued before or after the question view
+  closes are still sent once that acknowledgement arrives. (#82)
+
+### Changed
+
+- Replace **Type in terminal** with a **Keyboard** button in the terminal key
+  row, shown only when the composer cannot send: the agent awaits an approval
+  or question answer, its pane needs inspection, or an earlier terminal send is
+  unconfirmed. It no longer takes a row of its own, which leaves more room for
+  terminal output. Delivery warnings show its icon instead of naming it, and
+  the panel's long back button is now **Close**.
+
+## [0.23.2] - 2026-10-25
+
+### Added
+
+- Show questions that Claude Code asks (AskUserQuestion) in **Conversation**
+  and **Full history**, with their options and the chosen answer. While the
+  agent waits for a reply, the question is marked as waiting. (#63)
+
+## [0.23.1] - 2026-10-25
+
+### Added
+
+- With two or more computers paired, toggle each one above the agent list to
+  show or hide its sessions and workspaces. A hidden computer shows a count of
+  sessions that need attention. Visibility is remembered on this device without
+  changing connections, notifications, or the selected home layout. (#76)
+
+### Fixed
+
+- Keep **Settings** steady while the relay sends updates. The Pi Integration
+  card no longer reloads on every update, so the page stops shifting and taps,
+  such as Back, are no longer lost.
+- Treat terminal input state as stale as soon as its 3-second limit passes, so
+  a draft typed afterwards is never saved on the phone and the waiting notice
+  appears.
+
+## [0.23.0] - 2026-10-24
+
+### Added
+
+- Open supported native histories in clean **Conversation** by default, with
+  **Full history** for intermediate messages and tool details. Terminal remains
+  one tap away and is the fallback when history is unavailable; saved view
+  preferences still win.
+- Enable the optional, computer-side **Settings → Pi Integration** to discover
+  live Pi commands and stream text, tool progress and extension notices.
+  Controllers can enable it for known profiles and inspect per-profile results;
+  readers cannot change it. It starts off, refreshes relay-owned copies after
+  updates, and requires `/reload` or a Pi restart after changes.
+- Show Pi extension notices in Conversation and Full history. A controller can
+  reply to a **Needs inspection** Pi pane through its live exact-session bridge
+  when fresh terminal evidence permits it. Sends are explicitly unconfirmed;
+  uncertainty survives reloads, fences duplicate sends across tabs, and never
+  falls back to terminal input. Earlier streamed content cannot be retracted by
+  completion-time redaction; see the [Pi privacy policy](docs/conversation-activity.md#pi-privacy-policy).
+- Refresh recorded conversation messages and tool activity for Codex, Claude
+  Code, Cursor, Qoder, Oh My Pi, OpenCode, Hermes and Oh My OpenCode through a
+  bounded 250 ms observation feed. These are updates after records reach disk,
+  not token streaming from the running terminal.
+- Read supported native Kimi Code journals, including validated undo branches.
+  Imports, human-engine-only histories and unsupported structures use Terminal
+  fallback. Hidden reasoning, media and injected origins are excluded.
+- Open the read-only workspace file and Git inspector from Conversation's
+  workspace button. Discover OpenCode custom Markdown slash commands from its
+  supported project, user and XDG directories.
+
+### Changed
+
+- Open history recent-first and mount at most 24 messages at a time. Load older
+  turns on upward demand or explicit action, preserving the reading anchor.
+  Kimi, Hermes and older/unindexed OpenCode histories can still require
+  full-session work on a cold open; small pages do not make that cost bounded.
+- Keep following new output while streaming until the reader scrolls away or
+  selects text; scrolling to the actual end resumes following. Remove Jump to
+  latest, Show newer loaded messages, Pi scroll controls and retained terminal
+  snapshots instead of cluttering Conversation with terminal controls.
+- Share prompt drafts, slash commands and attachments across both views.
+  Literal input and terminal keys remain explicit Terminal-only controls;
+  drafts stay editable while structured input or uncertain delivery blocks sends.
+- Turn **Resize Session** on by default; explicitly saved off choices stay off.
+  Terminal height leasing remains off by default. Conversation never resizes panes.
+
+### Fixed
+
+- Revalidate connections after wake, focus and network changes, preserve visible
+  output during recovery, and stop retrying a rejected paired device. Remote
+  tokenless relays cannot silently reconnect through plaintext development mode.
+- Keep updates, provisional messages, attachments and input delivery tied to the
+  exact target. Never persist text typed while terminal echo evidence is stale,
+  missing, hidden or belongs to another target.
+- Preserve Terminal's reading position and following state across structured
+  questions, layout changes and small scroll-up gestures.
+- Bound slash-catalog reads, honor Pi trust-directory decisions, retain Oh My Pi
+  registry order, and recover cached phone stylesheets without clearing storage.
+- Nest list items indented to their parent item's text in Conversation and
+  keep code blocks indented under an item inside it. Keep lists together across
+  blank lines, and keep a numbered list's numbering after a code block
+  interrupts it.
+- After a deploy, reload an already open app into the deployed build when
+  Conversation, the launch form, question controls or Type in terminal fail to
+  load. Without a newer build, an automatic Conversation opening falls back to
+  Terminal instead of an error. Automatic reloads wait while a terminal send is
+  unconfirmed or a draft is not saved on this phone, and **Load Update** names
+  what it would discard.
+- Deliver every OpenCode and Hermes conversation update. An update written
+  while the relay was reading could be missed until the next change.
+
+### Upgrade
+
+Restart the relay after upgrading. Enable or inspect **Settings → Pi Integration**
+for each computer that uses it, then `/reload` or restart its affected Pi panes.
+Existing relay-owned integrations are refreshed automatically; Herdr's own
+integration and settings are left untouched.
+
+## [0.22.13] - 2026-10-23
+
+### Changed
+
+- Show approval choices in full, wrapping long labels and paths instead of
+  cutting them off. Approval and answer buttons on agent cards have a 44px
+  minimum height on touch screens; terminal controls keep their compact size.
+- Answer a short standalone single-choice question directly from its agent
+  card when it has up to four plain options. More… opens the full form;
+  longer questions, described options, and questionnaires keep the full form.
+  Follow-up questions refresh the card in place without opening the terminal,
+  and the card and answer form show consistent follow-up messages. (#73)
+
+## [0.22.12] - 2026-10-23
+
+### Fixed
+
+- Keep the terminal at the reader's position after a small scroll up, even
+  while the agent keeps rewriting its last line. Following resumes only when
+  the reader returns to the bottom or taps Jump to latest. Long scrolls near
+  the bottom render the visible rows instead of leaving a blank viewport. (#71)
+
+- Stop filling the Herdr server log with a failed `workspace.move_block`
+  request every 30 seconds. That request is the relay's capability check, and
+  Herdr's refusal is the expected answer. The relay now checks once per Herdr
+  server and again only after a reconnect, the same as its `tab.move` and
+  `pane.read` checks. (#70)
+
+## [0.22.11] - 2026-10-21
+
+### Added
+
+- Start Devin CLI agents from relay-provided launch profiles. Herdr already
+  supports `--kind devin`; the relay now offers a `Devin` profile whenever the
+  `devin` executable is on its `PATH` or Herdr's Devin integration is
+  installed, and resolves Herdr's `devin-cli` and `devin cli` aliases to it.
+  The agent list names these panes `Devin` instead of the raw `devin`.
+- Choose a Hermes profile when starting a Hermes agent from the phone. The
+  launch form lists the profiles installed on the computer and starts Hermes
+  with `-p <profile>`. The default choice passes no profile, so Hermes keeps
+  the one set with `hermes profile use`. A profile that is missing or deleted
+  is refused before any pane is created.
+
+### Fixed
+
+- Do not offer Start Agent in the home folder. The launch form opened on the
+  home folder, which the relay refuses to start an agent in, so a launch with
+  the default folder always failed, and only after the tap. Start Agent is now
+  disabled there and the form asks for a project folder below home; any such
+  folder works as before.
+- Stop showing rows that Claude Code writes itself as your messages in Claude
+  Code conversation history. Skill bodies, compaction summaries and messages
+  relayed from other Claude sessions are hidden; scheduled `/loop` prompts
+  carry the same marker, so they are hidden too. Slash commands read as
+  `/name args`, `!` shell commands as `! command`, and the output rows of
+  those shell commands are hidden. A prompt that only starts with one of these
+  tags keeps its full text.
+- Document `HERDR_CURSOR_PROJECTS_DIRS` with the other agent directory
+  overrides in `docs/agent-directories.md`. Each entry is a Cursor projects
+  directory, the parent of `<slug>/agent-transcripts`, not the `.cursor`
+  folder above it.
+
+## [0.22.10] - 2026-10-15
+
+### Added
+
+- Read OpenCode 2.x conversation history. History, completion responses and
+  activity extracts now work for OpenCode 2.x, on fresh installs and on stores
+  upgraded from 1.x, where each session is read from whichever format holds
+  it. OpenCode 1.x stores keep working as before. Herdr reports OpenCode
+  sessions only with its OpenCode integration: run
+  `herdr integration install opencode` and restart OpenCode.
+
+### Fixed
+
+- Show OpenCode conversation history, completion responses and activity
+  extracts when a session is resumed from a directory other than the one it
+  was created in, such as a subdirectory or another project folder. OpenCode
+  resumes a session in its stored directory, so the relay now trusts the
+  session ID Herdr reports for the pane instead of rejecting it as belonging
+  to a different workspace (#61). Hermes keeps its workspace check.
+- Mark OpenCode shell commands that exit with a non-zero code as failed in
+  conversation history. OpenCode records them as completed and stores the
+  exit code separately.
+
+## [0.22.9] - 2026-10-13
+
+### Fixed
+
+- Accept Cloudflare Pages' single same-origin HTTP 308 redirect from a
+  build-specific `index.html` to its directory during phone-app deployment
+  verification. This fixes the `canonical public resource must not redirect`
+  failure introduced in 0.22.6. Query-changing redirects, additional hops and
+  JavaScript/CSS redirects remain rejected; the entry's MIME type and exact
+  content digest are still checked. If the old verifier blocks a phone-driven
+  upgrade, update the deployment-owner relay manually first, then retry app
+  deployment without clearing phone storage or pairing again.
+
+## [0.22.8] - 2026-10-13
+
+### Changed
+
+- Resize Session is now a per-device opt-in, off by default. Settings states
+  the cost before you turn it on: while the phone has a pane open, the shared
+  terminal is resized to fit it, so the laptop and SSH views of that pane look
+  garbled until the phone lets go, and agents may leave narrow copies of their
+  output in the scrollback. Resizing may also truncate scrollback and lose
+  older output. Herdr has no API to resize a pane's grid and
+  terminal together, so this cannot be avoided. Restoration is requested
+  when the phone leaves (immediately when the switch is turned off), with
+  best-effort preservation of dimensions changed on the laptop meanwhile.
+  Lease Terminal Height stays a separate, remembered opt-in, inactive while
+  Resize Session is off. Linux and macOS relays only; when off or unsupported,
+  controllers keep the desktop width with horizontal scrolling and readers
+  wrap. Relays no longer advertise the capability that made apps up to 0.22.7
+  resize automatically, and refuse resize requests that do not carry the new
+  opt-in. ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
+
+### Fixed
+
+- Guard against resizing a closed or replaced terminal. Every resize and
+  restore now opens the TTY first and then re-checks the pane's Herdr terminal,
+  shell process and TTY before writing through the held descriptor, using
+  direct ioctls instead of `stty`. A closed or replaced pane is dropped without
+  a write instead of being retried every second forever, and a restore that
+  cannot be confirmed is retried at most five times within thirty seconds,
+  then logged once with advice to resize the pane locally.
+  ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
+
+## [0.22.7] - 2026-10-05
+
+### Fixed
+
+- List command and skill files up to 1 MiB in the slash-command palette. Skills
+  larger than 64 KiB were silently left out, and commands larger than 64 KiB
+  lost their frontmatter, so hidden and non-invocable commands were listed
+  without descriptions. Larger files are skipped.
+  ([#59](https://github.com/0cv/herdr-mobile-relay/issues/59))
+
+## [0.22.6] - 2026-10-02
+
+Version 0.22.5 was withdrawn; this release skips its version and asset generation.
+
+### Fixed
+
+- Run each macOS update and app deployment worker exactly once. launchd used to
+  restart finished workers forever, so a failed update re-ran in full, app
+  deployment included, over and over and blocked later updates. The relay
+  now removes finished workers, including the endlessly restarting ones left
+  by earlier releases, when it starts, before each update or deployment, and
+  on every update check. Failed updates no longer leave their job file behind.
+  ([#57](https://github.com/0cv/herdr-mobile-relay/issues/57))
+- Show Pi's live commands on the phone when Pi runs on Bun on macOS. The Pi
+  integration could not identify Herdr's socket there, so none were listed.
+- Include a static missing-page response in generated Pages bundles and require
+  application-resource revalidation instead of one-year immutable caching.
+  Recovery from responses already cached as immutable still needs qualification.
+- Include the transaction helper required by native service installers in
+  release archives.
+- Verify hosted application resources at their canonical URLs, including MIME,
+  digest, cache policy, and missing-asset responses, so cached failures cannot
+  hide behind cache-busting deployment checks.
+- Skip withdrawn asset generations and reject withdrawn application scripts
+  when preparing a release.
+
+## [0.22.4] - 2026-10-01
+
+### Added
+
+- Read Cursor Agent conversation history from nested and flat
+  `~/.cursor/projects/<slug>/agent-transcripts` layouts, locating transcripts
+  from the pane workspace and showing user and assistant turns in History.
+
+### Fixed
+
+- Show an idle agent that is ready for input with a green ring instead of the
+  grey reserved for unknown states. A filled green dot still marks a finished
+  turn you have not opened yet.
+
+## [0.22.3] - 2026-09-30
+
+### Added
+
+- Pair an iOS browser tab as its own device with **Pair this browser instead**,
+  so links opened from other apps, such as push notifications, work in Safari.
+  Home Screen pairing stays the default. The `#notify=` agent deep link is now
+  documented. ([#54](https://github.com/0cv/herdr-mobile-relay/issues/54))
+
+## [0.22.2] - 2026-09-30
+
+### Fixed
+
+- Load conversation history whenever the relay connection is live, even when
+  the phone's browser reports itself offline. Previously the Conversation view
+  stayed blank, with no loading status or error, while the terminal kept
+  working.
+
+### Changed
+
+- Read Hermes and OpenCode conversation history through an in-process SQLite
+  backend by default (`HERDR_SQLITE_BACKEND=auto|native|cli`), so History works
+  without a system `sqlite3` CLI. The CLI path remains available as a fallback.
+  Native queries stream JSON with early size limits, encode DB paths safely for
+  spaces/special characters, and share one error-mapping helper in conversation
+  readers. Query timeouts are 10s; an overridden `sqlite3` binary path still
+  prefers the CLI (test and escape-hatch compatibility).
+
+## [0.22.1] - 2026-09-26
+
+### Fixed
+
+- Read the expected web bundle identity from the release manifest during
+  readiness checks, so stable service setup accepts healthy production releases
+  with the real frontend descriptor shape. (Issue #51.)
+
+## [0.22.0] - 2026-09-24
+
+### Added
+
+- Discover Cursor's built-in commands, Markdown commands, and project and
+  personal skills in the phone's slash-command palette, respecting Cursor's
+  naming, precedence, visibility, and discovery limits.
+- Discover live Pi extension commands, skills, and prompt templates from the
+  running session when the optional Pi integration is installed. Show partial
+  or unavailable discovery clearly while keeping manual command entry usable;
+  redact credentials from displayed command provenance.
+- Send filter text to an open Cursor model picker without selecting a model,
+  with paced keystrokes, live verification, and explicit partial-delivery
+  warnings when the picker cannot be confirmed.
+
+### Changed
+
+- Keep verified agent-profile ownership tied to the terminal across relay
+  restarts; refuse an unsafe relaunch if the profile or terminal cannot be
+  verified instead of guessing an executable from the pane.
+- Stage and verify native background-service upgrades before replacing the
+  previous service, and retain recovery state when rollback cannot be
+  confirmed.
+
+### Fixed
+
+- Deliver prompts to unnamed agents through the pane when Herdr refuses the
+  named-agent prompt, without retrying ambiguous or already-dispatched writes.
+- Keep launch results and initial prompts bound to the created terminal and
+  request ID, including across session discovery and refreshes; report
+  uncertain starts and initial-prompt failures without offering unsafe retries.
+- Recheck authorization and target identity immediately before Herdr writes,
+  so a replaced pane or revoked device cannot receive a stale action.
+- Keep release-download credentials out of process arguments, shell traces,
+  and unrelated child processes, including version probes and app deployment.
+- Use portable shell entrypoints and preserve the inherited PATH for systems
+  such as NixOS and Guix.
+- Follow symlinked skill directories in generic slash-command discovery,
+  and keep Cursor picker controls available through pane status changes while
+  rejecting stale picker footers and unsafe attachment uploads.
+- Preserve the newly launched agent's identity on the phone when its native
+  session appears, instead of dropping the terminal or conversation view.
+
 ## [0.21.3] - 2026-09-15
 
 ### Fixed
@@ -1516,7 +1898,24 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...HEAD
+[0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3
+[0.23.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...v0.23.2
+[0.23.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...v0.23.1
+[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...v0.23.0
+[0.22.13]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...v0.22.13
+[0.22.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.22.12
+[0.22.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.22.11
+[0.22.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.22.10
+[0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
+[0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8
+[0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7
+[0.22.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...v0.22.6
+[0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4
+[0.22.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...v0.22.3
+[0.22.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.1...v0.22.2
+[0.22.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.0...v0.22.1
+[0.22.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...v0.22.0
 [0.21.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...v0.21.3
 [0.21.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...v0.21.1

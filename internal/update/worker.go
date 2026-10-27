@@ -85,6 +85,7 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = os.Remove(jobPath) }()
 	started := time.Now().UTC().Format(time.RFC3339)
 	state := State{
 		State:          "scheduled",
@@ -177,11 +178,7 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	state.CheckedAt = time.Now().Unix()
 	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	state.Error = ""
-	if err := writeState(job.StatePath, state); err != nil {
-		return err
-	}
-	_ = os.Remove(jobPath)
-	return nil
+	return writeState(job.StatePath, state)
 }
 
 func installPlugin(ctx context.Context, job Job) error {

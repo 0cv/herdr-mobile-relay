@@ -33,8 +33,9 @@ func TestCursorCommandFileSizeLimit(t *testing.T) {
 				}
 				eligible := size > 0 && size <= 1<<20
 				data, ok := readCursorCommandFile(path)
-				if ok != eligible || ok && len(data) != size {
-					t.Errorf("read returned %d bytes, ok=%v; want size=%d, ok=%v", len(data), ok, size, eligible)
+				wantSize := min(size, maxMetadataSize+1)
+				if ok != eligible || ok && len(data) != wantSize {
+					t.Errorf("read returned %d bytes, ok=%v; want size=%d, ok=%v", len(data), ok, wantSize, eligible)
 				}
 				writeFile(t, filepath.Join(dir, "sibling.md"), "Sibling command\n")
 				catalog := cursorCatalog(t, t.TempDir(), home)

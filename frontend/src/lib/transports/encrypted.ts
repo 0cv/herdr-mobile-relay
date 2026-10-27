@@ -12,6 +12,7 @@ import type {
   RelayInvitation,
 } from '../device-auth';
 import {
+  DEVICE_UNAUTHORIZED_CODE,
   type FrameChannel,
   type FrameChannelFactory,
   type RelayTransport,
@@ -21,11 +22,13 @@ import {
 } from './types';
 
 export const E2EE_HANDSHAKE_TIMEOUT_MS = 10_000;
+const PAIRING_REQUIRED = 'Pair this browser before connecting to the relay';
 
 export interface EncryptedTransportOptions {
   kind: TransportKind;
-  /** Relay bootstrap/rendezvous key. Empty enables tokenless loopback development. */
+  /** Relay bootstrap/rendezvous key. */
   token: string;
+  allowPlaintext?: () => boolean;
   /** Resolves the current credential when this path actually opens. */
   getAuthentication?: () => RelayDeviceCredential | RelayInvitation | undefined;
   /**
@@ -118,18 +121,20 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
       if (finished) return;
       if (!session) {
         if (challenge) {
-          if (!presentedAuthentication) throw new Error('No device authentication is available for this relay.');
+          if (!presentedAuthentication) throw new Error(PAIRING_REQUIRED);
           const completed = await challenge.complete(frame);
           if (finished) return;
           await options.onAuthenticated?.(presentedAuthentication, completed.enrollment);
+          if (finished) return;
           session = completed.session;
           challenge = null;
           markReady();
           return;
         }
-        if (!handshake) throw new Error('Encrypted server hello arrived before the client hello.');
-        challenge = await handshake.complete(JSON.parse(String(frame)));
+        if (!handshake) throw new Error('Unexpected server hello');
+        const completed = await handshake.complete(JSON.parse(String(frame)));
         if (finished) return;
+        challenge = completed;
         handshake = null;
         channel?.sendFrame(challenge.finish);
         return;
@@ -140,7 +145,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
     }).catch((error: unknown) => {
       const reason = error instanceof Error && error.message
         ? error.message
-        : 'Encrypted relay connection failed';
+        : 'Relay encryption failed';
       finish({ reason });
     });
   }
@@ -152,6 +157,10 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
       handlers.onStatus('connecting');
       presentedAuthentication = options.getAuthentication?.();
       encrypted = Boolean(token || presentedAuthentication);
+      if (!encrypted && !options.allowPlaintext?.()) {
+        finish({ reason: PAIRING_REQUIRED });
+        return;
+      }
       channel = options.createChannel({
         onOpen(): void {
           if (finished) return;
@@ -160,21 +169,24 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
             return;
           }
           if (!presentedAuthentication) {
-            finish({ reason: 'Pair this browser before connecting to the relay' });
+            finish({ reason: PAIRING_REQUIRED });
             return;
           }
           handshakeTimer = setTimeout(() => {
-            finish({ reason: 'Encrypted relay handshake timed out' });
+            finish({ reason: 'Relay handshake timed out' });
           }, handshakeTimeoutMs);
           void createE2EEClientHandshake(presentedAuthentication, undefined, codec).then((created) => {
+            if (finished) return;
             handshake = created;
             channel?.sendFrame(JSON.stringify(created.hello));
           }).catch(() => {
-            finish({ reason: 'Could not start encrypted relay handshake' });
+            finish({ reason: 'Relay handshake failed' });
           });
         },
         onFrame: deliver,
-        onClose(detail?: TransportStatusDetail): void {
+        onClose(detail, relayTls): void {
+          if (detail?.code === DEVICE_UNAUTHORIZED_CODE
+            && !(kind === 'websocket' && encrypted && presentedAuthentication && relayTls)) detail = undefined;
           finish(detail ?? { reason: 'Relay disconnected' });
         },
       }, encrypted);
@@ -195,7 +207,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
         if (finished || channel !== activeChannel) return;
         activeChannel.sendFrame(frame);
       }).catch(() => {
-        finish({ reason: 'Could not encrypt relay message' });
+        finish({ reason: 'Relay encryption failed' });
       });
       return true;
     },

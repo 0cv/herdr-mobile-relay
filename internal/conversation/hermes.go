@@ -5,40 +5,41 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
-	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
 
 const (
-	hermesQueryTimeout = 3 * time.Second
+	hermesQueryTimeout = 10 * time.Second
 	maxHermesOutput    = 8 * 1024 * 1024
 )
 
 type hermesReader struct {
-	home   string
-	binary string
+	home     string
+	binary   string
+	executor sqliteexec.Executor
 }
 
 type hermesRow struct {
-	SessionID   string  `json:"session_id"`
-	CWD         string  `json:"cwd"`
-	Title       string  `json:"title"`
-	MessageID   int64   `json:"message_id"`
-	Role        string  `json:"role"`
-	ContentHex  string  `json:"content_hex"`
-	ToolCallID  string  `json:"tool_call_id"`
-	ToolCalls   string  `json:"tool_calls"`
-	ToolName    string  `json:"tool_name"`
-	DisplayKind string  `json:"display_kind"`
-	Timestamp   float64 `json:"timestamp"`
-	Total       int     `json:"message_total"`
-	CursorFound int     `json:"cursor_found"`
+	SchemaVersion int     `json:"schema_version"`
+	SessionID     string  `json:"session_id"`
+	CWD           string  `json:"cwd"`
+	Title         string  `json:"title"`
+	MessageID     int64   `json:"message_id"`
+	Role          string  `json:"role"`
+	ContentHex    string  `json:"content_hex"`
+	ToolCallID    string  `json:"tool_call_id"`
+	ToolCalls     string  `json:"tool_calls"`
+	ToolName      string  `json:"tool_name"`
+	DisplayKind   string  `json:"display_kind"`
+	Timestamp     float64 `json:"timestamp"`
+	Total         int     `json:"message_total"`
+	CursorFound   int     `json:"cursor_found"`
 }
 
 type hermesToolRow struct {
@@ -48,11 +49,15 @@ type hermesToolRow struct {
 }
 
 func newHermesReader(home string) *hermesReader {
-	return &hermesReader{home: home, binary: "sqlite3"}
+	return &hermesReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv()}
+}
+
+func (r *hermesReader) queryExec() sqliteexec.Executor {
+	return resolveQueryExecutor(r.executor, r.binary)
 }
 
 func (r *hermesReader) databases() ([]string, string) {
-	if _, err := exec.LookPath(r.binary); err != nil {
+	if exec := r.queryExec(); exec == nil || !exec.Ready() {
 		return nil, "source_unavailable"
 	}
 	roots := agentroots.HermesData(r.home)
@@ -96,7 +101,7 @@ func (r *hermesReader) locateContext(ctx context.Context, cwd, sessionID string)
 		if len(rows) == 0 || rows[0].SessionID != sessionID {
 			continue
 		}
-		if cwd != "" && rows[0].CWD != "" && !sameOpenCodeDirectory(cwd, rows[0].CWD) {
+		if cwd != "" && rows[0].CWD != "" && !sameHermesDirectory(cwd, rows[0].CWD) {
 			return Location{}, "invalid_session"
 		}
 		return Location{Path: database, Root: filepath.Dir(database), Title: rows[0].Title}, ""
@@ -105,6 +110,12 @@ func (r *hermesReader) locateContext(ctx context.Context, cwd, sessionID string)
 		return Location{}, firstFailure
 	}
 	return Location{}, "invalid_session"
+}
+
+func sameHermesDirectory(cwd, directory string) bool {
+	realCwd, cwdErr := filepath.EvalSymlinks(filepath.Clean(cwd))
+	realDirectory, directoryErr := filepath.EvalSymlinks(filepath.Clean(directory))
+	return cwdErr == nil && directoryErr == nil && realCwd == realDirectory
 }
 
 func (r *hermesReader) readFrom(database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
@@ -193,7 +204,7 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 			`FROM displayed AS d WHERE 1=1`+cursorFilter+
 			` ORDER BY logical_id DESC LIMIT %d`+
 			`) `+
-			`SELECT s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,`+
+			`SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,`+
 			`COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,`+
 			`hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,`+
 			`COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,`+
@@ -205,20 +216,12 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := childenv.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
-	stdout := &boundedBuffer{remaining: maxHermesOutput}
-	var stderr boundedBuffer
-	stderr.remaining = 4096
-	command.Stdout = stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		if stdout.overflow {
-			return nil, false, "output_limit"
-		}
-		return nil, false, "query_failed"
+	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	if code != "" {
+		return nil, false, code
 	}
 	var rows []hermesRow
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, false, "source_corrupt"
 	}
 	anchorCount := 0
@@ -261,6 +264,10 @@ func (r *hermesReader) attachToolResultsContext(ctx context.Context, database, s
 	if code != "" {
 		return true
 	}
+	return attachHermesToolRows(entries, rows)
+}
+
+func attachHermesToolRows(entries []Entry, rows []hermesToolRow) bool {
 	corrupt := false
 	for _, row := range rows {
 		row.ToolCallID = strings.TrimSpace(row.ToolCallID)
@@ -270,15 +277,13 @@ func (r *hermesReader) attachToolResultsContext(ctx context.Context, database, s
 			continue
 		}
 		output, truncated := clampText(sanitizeText(outputText), maxEntryBytes)
-		if output == "" {
-			continue
-		}
 		for entryIndex := range entries {
 			for toolIndex := range entries[entryIndex].Tools {
 				tool := &entries[entryIndex].Tools[toolIndex]
 				if toolAssociationID(*tool) != row.ToolCallID {
 					continue
 				}
+				tool.State = "completed"
 				if tool.Output != "" && tool.Output != output {
 					tool.Output += "\n" + output
 					tool.Output, tool.Truncated = clampText(tool.Output, maxEntryBytes)
@@ -312,20 +317,12 @@ func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessi
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := childenv.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
-	stdout := &boundedBuffer{remaining: maxHermesOutput}
-	var stderr boundedBuffer
-	stderr.remaining = 4096
-	command.Stdout = stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		if stdout.overflow {
-			return nil, "output_limit"
-		}
-		return nil, "query_failed"
+	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	if code != "" {
+		return nil, code
 	}
 	var rows []hermesToolRow
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, "source_corrupt"
 	}
 	return rows, ""
@@ -404,7 +401,9 @@ func parseHermesToolCalls(raw string) ([]ToolActivity, bool) {
 				input = firstValue(function, "arguments", "input")
 			}
 		}
-		activities = append(activities, newToolActivity(id, name, input))
+		activity := newToolActivity(id, name, input)
+		activity.State = "running"
+		activities = append(activities, activity)
 	}
 	return activities, corrupt
 }
@@ -480,7 +479,7 @@ func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) 
 	if code != "" {
 		return unavailableCode(code, "Hermes conversation history is unavailable."), nil
 	}
-	if cwd != "" && metadata.CWD != "" && !sameOpenCodeDirectory(cwd, metadata.CWD) {
+	if cwd != "" && metadata.CWD != "" && !sameHermesDirectory(cwd, metadata.CWD) {
 		return unavailableCode("invalid_session", "This conversation belongs to a different workspace."), nil
 	}
 	normalizeEntriesForResponse(entries)

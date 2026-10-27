@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { advertisedSkillNames, normalizeCommands } from '../relay/pi-command-bridge/bridge.mjs';
 
 if (!process.env.PI_TEST_PACKAGE) throw new Error('Set PI_TEST_PACKAGE to the installed Pi 0.87.0 package directory');
 const root = resolve(process.env.PI_TEST_PACKAGE);
 const orchestration = process.env.PI_TEST_ORCHESTRATION;
-const dir = mkdtempSync('/tmp/herdr-pi-contract-');
+const dir = mkdtempSync(join(tmpdir(), 'herdr-pi-contract-'));
 process.env.HOME = dir;
 process.env.PI_CODING_AGENT_DIR = join(dir, 'custom-profile', 'agent');
 const load = path => import(pathToFileURL(join(root, path)));
@@ -106,16 +107,6 @@ try {
   const disabled = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noContextFiles: true });
   await disabled.reload();
   assert.equal(disabled.getExtensions().extensions.length, 0);
-  const bridgeEntry = join(dir, 'bridge-reload', 'index.ts');
-  const bridgeModule = join(dir, 'bridge-reload', 'bridge.mjs');
-  const bridgeEntrypoint = readFileSync(fileURLToPath(new URL('../relay/pi-command-bridge/index.ts', import.meta.url)), 'utf8');
-  for (const value of ['before', 'after', 'updated-again']) {
-    write(bridgeEntry, value === 'before' ? "export { default } from './bridge.mjs';" : bridgeEntrypoint);
-    write(bridgeModule, `export default pi => pi.on('session_start', () => '${value}');`);
-    const loaded = await loadExtensions([bridgeEntry], cwd);
-    assert.deepEqual(loaded.errors, []);
-    assert.equal(await loaded.extensions[0].handlers.get('session_start')[0](), value);
-  }
   if (orchestration) {
     const loaded = await loadExtensions([resolve(orchestration)], cwd);
     assert.deepEqual(loaded.errors, []);

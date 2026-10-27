@@ -9,7 +9,7 @@ import (
 
 func TestMain(m *testing.M) {
 	if runtime.GOOS == "darwin" {
-		if tempDir, err := filepath.EvalSymlinks("/tmp"); err == nil {
+		if tempDir, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
 			_ = os.Setenv("TMPDIR", tempDir)
 		}
 	}

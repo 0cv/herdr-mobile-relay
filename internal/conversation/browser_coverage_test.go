@@ -258,6 +258,21 @@ func TestSnapshotReferenceDefersExpiryUntilReleased(t *testing.T) {
 		t.Fatal("snapshot was evicted while a reader held a reference")
 	}
 	browser.releaseJob(job)
+	// The worker publishes the ready snapshot before it clears its running flag,
+	// and a running job is never evicted.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		job.mu.RLock()
+		busy := job.running || job.queued
+		job.mu.RUnlock()
+		if !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("snapshot worker did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	job.mu.Lock()
 	job.lastAccess = time.Now().Add(-2 * options.SnapshotTTL)
 	job.mu.Unlock()
@@ -366,10 +381,14 @@ func TestBrowserTraversesLargeJSONLSource(t *testing.T) {
 		t.Fatalf("large source preparation page = %#v, err = %v", preparing, err)
 	}
 	page := preparing
-	deadline := time.Now().Add(15 * time.Second)
-	for page.State == BrowsePreparing && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-		page, err = browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: preparing.NextCursor, Limit: 128})
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	for page.State == BrowsePreparing && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Millisecond):
+		}
+		page, err = browser.ReadPage(ctx, BrowseRequest{Scope: scope, Cursor: preparing.NextCursor, Limit: 128})
 		if err != nil {
 			t.Fatal(err)
 		}

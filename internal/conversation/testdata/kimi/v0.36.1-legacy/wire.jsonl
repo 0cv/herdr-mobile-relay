@@ -1,0 +1,4 @@
+{"type":"metadata","protocol_version":"1.4","created_at":1786680000000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Legacy engine prompt."}],"toolCalls":[]},"time":1786680001000}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"think","think":"DO_NOT_EXPORT_LEGACY_REASONING","encrypted":"DO_NOT_EXPORT_LEGACY_OPAQUE"},{"type":"text","text":"Legacy engine response."}],"toolCalls":[{"type":"function","id":"legacy-call","name":"Shell","arguments":"{\"command\":\"printf legacy-ok\"}","extras":{"provider":"DO_NOT_EXPORT_LEGACY_EXTRAS"}}]},"time":1786680002000}
+{"type":"context.append_message","message":{"role":"tool","content":[{"type":"text","text":"legacy-ok"}],"toolCalls":[],"toolCallId":"legacy-call"},"time":1786680003000}

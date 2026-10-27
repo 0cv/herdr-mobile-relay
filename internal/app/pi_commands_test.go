@@ -3,10 +3,8 @@ package app
 import (
 	"bufio"
 	"context"
-	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -24,7 +22,7 @@ type fixtureProcesses struct {
 	replace bool
 }
 
-func (f *fixtureProcesses) PaneProcessInfo(_ context.Context, pane string) (*herdr.PaneProcessInfo, error) {
+func (f *fixtureProcesses) PaneProcessInfoFresh(_ context.Context, pane string) (*herdr.PaneProcessInfo, error) {
 	f.calls++
 	pid := f.pid
 	if f.replace && f.calls > 1 {
@@ -74,6 +72,9 @@ func TestForegroundRootRejectsAmbiguousAndShell(t *testing.T) {
 		nil, {PaneID: "other"}, {PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 1},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 3}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 2}}},
+		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 3, Name: "vim"}}},
+		{PaneID: "pane", ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}}},
+		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 0}}},
 	} {
 		if _, err := foregroundRoot(info, "pane"); err == nil {
 			t.Fatalf("accepted ambiguous root: %+v", info)
@@ -86,27 +87,19 @@ func TestRuntimePiCatalogAcrossBunSocket(t *testing.T) {
 	if err != nil {
 		t.Skip("Bun required for cross-runtime integration")
 	}
-	dir, err := os.MkdirTemp("/tmp", "pi-app-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	socket := filepath.Join(dir, "herdr.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
+	socket := testPiHerdrSocket(t)
 	instance, err := pibridge.Instance(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	directory := pibridge.Directory(instance)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	defer os.RemoveAll(directory)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	sessionFile := filepath.Join(dir, "2026-09-23T12-00-00-000Z_01a0c7af-665a-76ea-94ee-5e4c09cce1a7.jsonl")
-	cmd := exec.CommandContext(ctx, bun, "../../tests/fixtures/pi-bridge-server.mjs", instance, "pane", sessionFile, directory)
+	cmd := exec.CommandContext(ctx, bun, "../../tests/fixtures/pi-bridge-server.mjs", instance, "pane", "session", directory)
 	output, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -121,21 +114,21 @@ func TestRuntimePiCatalogAcrossBunSocket(t *testing.T) {
 		t.Fatal("bridge did not start")
 	}
 	processes := &fixtureProcesses{pid: cmd.Process.Pid}
-	catalog, err := runtimePiCatalog(ctx, processes, socket, "pane", sessionFile)
+	catalog, err := runtimePiCatalog(ctx, processes, socket, "pane", "session")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if catalog.Status != "available" || catalog.Metadata["/orchestrate"].Kind != "extension" || catalog.Metadata["/model"].Kind != "builtin" {
 		t.Fatalf("bad merged catalog: %+v", catalog)
 	}
-	for _, target := range [][2]string{{"other", sessionFile}, {"pane", "01a0c7af-665a-76ea-94ee-5e4c09cce1a7"}, {"pane", ""}} {
+	for _, target := range [][2]string{{"other", "session"}, {"pane", "child"}, {"pane", ""}} {
 		if _, err := runtimePiCatalog(ctx, processes, socket, target[0], target[1]); err == nil {
 			t.Fatal("accepted wrong identity")
 		}
 	}
 	processes.calls = 0
 	processes.replace = true
-	if _, err := runtimePiCatalog(ctx, processes, socket, "pane", sessionFile); err == nil {
+	if _, err := runtimePiCatalog(ctx, processes, socket, "pane", "session"); err == nil {
 		t.Fatal("accepted replaced process")
 	}
 }

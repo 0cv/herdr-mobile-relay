@@ -23,7 +23,14 @@ discovery semantics before the relay catches up.
 
 ## Pi live command metadata
 
-Install the bundled integration explicitly for each Pi profile:
+Turn on **Settings → Pi Integration** for the computer running Pi. A paired
+controller can install it for every known Pi agent directory: the home default,
+`PI_CODING_AGENT_DIR`, discovered named profiles and `HERDR_PI_CONFIG_DIRS`.
+Readers can inspect the setting but cannot change it. It defaults to off;
+per-profile results explain any refusal. The state comes from the relay-owned
+marker on disk, including installations made with the CLI.
+
+Alternatively, install for one profile from the computer:
 
 ```bash
 bash relay/setup.sh --pi-install /absolute/path/to/profile/agent
@@ -36,8 +43,13 @@ roots. The `HERDR_PI_CONFIG_DIRS` list is still needed for transcript lookup and
 filesystem fallback in relocated profiles. Installing in one profile does not
 activate the integration in other profiles.
 
-Remove only the relay-owned integration with `--pi-remove` and the same agent
-directory, then reload Pi. Herdr's own extension and settings remain untouched.
+Turning the setting off removes only marker-verified relay-owned files from
+known profiles. The CLI alternative is `--pi-remove` with the same agent
+directory. The relay refreshes installed, marker-owned copies at startup,
+including after a verified update; it never adopts an unowned directory or
+installs into a new profile without another explicit enable action. Reload Pi
+after installing, updating or removing. The relay never types `/reload` for you.
+Herdr's own extension and settings remain untouched.
 See [slash-command discovery](slash-command-discovery.md#pi-runtime-commands)
 for lifecycle, refresh, identity checks, and partial-catalog troubleshooting.
 
@@ -45,8 +57,8 @@ Standalone Kimi Code palettes follow its native roots: project
 `.kimi-code/skills` and `.agents/skills`, user
 `$KIMI_CODE_HOME/skills` (default `~/.kimi-code/skills`) and
 `~/.agents/skills`, then `extra_skill_dirs` from
-`$KIMI_CODE_HOME/config.toml`. `KIMI_CODE_HOME` relocates only Kimi's own
-configuration and skills; the shared `~/.agents/skills` root stays under the
+`$KIMI_CODE_HOME/config.toml`. `KIMI_CODE_HOME` relocates Kimi's own
+configuration, sessions and skills; the shared `~/.agents/skills` root stays under the
 user home.
 
 Pi and Oh My Pi need no configuration for their named profiles as long as the
@@ -75,23 +87,43 @@ Every other case needs to be named explicitly:
 | --- | --- | --- |
 | `HERDR_CLAUDE_CONFIG_DIRS` | `~/.claude` | `CLAUDE_CONFIG_DIR` |
 | `HERDR_QODER_CONFIG_DIRS` | `~/.qoder` | none |
+| `HERDR_CURSOR_PROJECTS_DIRS` | `~/.cursor/projects` | none |
 | `HERDR_CODEX_CONFIG_DIRS` | `~/.codex` | `CODEX_HOME` |
 | `HERDR_PI_CONFIG_DIRS` | `~/.pi/agent` | `PI_CODING_AGENT_DIR` |
 | `HERDR_OMP_CONFIG_DIRS` | `~/.omp/agent` | `PI_CODING_AGENT_DIR` (Oh My Pi is a Pi fork and shares Pi's default) |
 | `HERDR_OPENCODE_DATA_DIRS` | `${XDG_DATA_HOME:-~/.local/share}/opencode` | none |
+| `HERDR_KIMI_CODE_HOME_DIRS` | `~/.kimi-code` | `KIMI_CODE_HOME` |
 | `HERDR_HERMES_DATA_DIRS` | `~/.hermes` | `HERMES_HOME` |
 | `HERDR_OMO_CONFIG_DIRS` | `~/.senpi/agent` plus supported `~/.omo` layouts | `OMO_CODING_AGENT_DIR`, `SENPI_CODING_AGENT_DIR`, `PI_CODING_AGENT_DIR` |
+
+Kimi entries are home directories containing `sessions`, not the sessions
+leaf itself. The reader uses `sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl`
+and bounded session metadata/index evidence. It does not read Kimi configuration,
+credentials, blobs or input recall. A reported session ID wins; otherwise a sole
+live Kimi pane uses persisted, non-archived content recency for its foreground
+cwd. Multiple live panes at that cwd without reported IDs are ambiguous, not
+resolved by file modification time. See [supported Kimi histories](conversation-activity.md#kimi-code-recorded-history).
+
 Three things to get right:
 
 - The home default is always searched. Setting a list *adds* profiles; it
   never replaces the default.
-- Entries are directories, not pre-joined `projects`/`sessions` paths — the
+- Cursor entries are **projects directories directly**, such as
+  `/data/cursor/projects`; the relay does not append `projects`. For the other
+  rows, entries are directories, not pre-joined `projects`/`sessions` paths — the
   relay appends the right leaf itself. Use the same value you'd put in that
   row's own "Agent's own directory variable": a full config directory for
   Claude, Qoder, and Codex, but already the *agent* directory for Pi and Oh My
-  Pi, since that is what `PI_CODING_AGENT_DIR` takes.
+  Pi, since that is what `PI_CODING_AGENT_DIR` takes. Cursor is the
+  exception: it has no such variable, and its entry is already the projects
+  directory (see below).
 - What you configure is searched before what the relay discovered, and the home
   default is searched last.
+
+Cursor's entry is the projects directory that holds its per-project
+`<slug>/agent-transcripts` trees (`~/.cursor/projects` by default), not the
+`.cursor` root above it. Naming a relocated projects directory there is the
+remedy when a Cursor Agent conversation reads as unavailable.
 
 Separate multiple entries with a colon — the platform path-list separator, as
 in `PATH` — so a directory whose name contains a literal colon can't be

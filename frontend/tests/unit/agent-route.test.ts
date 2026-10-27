@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
-import { currentView, followInitialAgentSession, replaceView } from '$lib/router';
+import { currentView, followInitialAgentSession, navigate, replaceView, stateFromLocation, viewUrl } from '$lib/router';
 import type { Agent } from '$lib/types';
 
 function agent(overrides: Partial<Agent> = {}): Agent {
@@ -17,6 +17,125 @@ afterEach(() => {
   stopFollowing();
   currentView.set({ view: 'agents' });
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe('deferred setup navigation', () => {
+  it.each([
+    { standalone: false, userAgent: 'Mozilla/5.0 (iPhone)', deferred: true },
+    { standalone: true, userAgent: 'Mozilla/5.0 (iPhone)', deferred: false },
+    { standalone: false, userAgent: 'Mozilla/5.0 (X11; Linux x86_64)', deferred: false },
+  ])('retains the link only when pairing is deferred: $standalone / $userAgent', ({ standalone, userAgent, deferred }) => {
+    vi.stubGlobal('navigator', { standalone, userAgent, maxTouchPoints: 0 });
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    const hash = `#setup=${'a'.repeat(32)}&label=Invited&relay=${encodeURIComponent('wss://invited.example')}`;
+    history.replaceState(null, '', `/pair?source=test${hash}`);
+    navigate({ view: 'settings' });
+    expect(get(currentView)).toEqual({ view: 'settings' });
+    expect(location.hash).toBe(deferred ? hash : '#settings');
+    replaceView({ view: 'agents' });
+    expect(location.hash).toBe(deferred ? hash : '');
+    history.replaceState(history.state, '', '/pair?source=test');
+    navigate({ view: 'settings' });
+    expect(location.hash).toBe('#settings');
+  });
+});
+
+describe('notification deep links', () => {
+  it('round-trips a URL-encoded pane and host through the router', () => {
+    const target = { pane_id: 'workspace:tab/pane & 1', host: 'host name/é' };
+    const hash = `#notify=${encodeURIComponent(JSON.stringify(target))}`;
+    const state = stateFromLocation({ hash });
+    expect(state).toEqual({
+      view: 'notification',
+      target: { ...target, action: '', index: null, total: null, notification_id: '' },
+    });
+    expect(viewUrl(state)).toBe(`#notify=${encodeURIComponent(JSON.stringify({
+      ...target, action: '', index: null, total: null, notification_id: '',
+    }))}`);
+    expect(stateFromLocation({ hash: viewUrl(state) })).toEqual(state);
+  });
+});
+
+describe('inferred Kimi history navigation', () => {
+  const owner = 'a'.repeat(64);
+  const kimi = (overrides: Partial<Agent> = {}) => agent({ agent: 'Kimi-Code', agent_session_id: 'session-0', conversation_inferred_owner: owner, ...overrides });
+
+  it('follows 50 inferred session changes and unavailable history without authorizing an old target', () => {
+    const before = kimi();
+    const agents = writable([before]);
+    replaceView({ view: 'history', paneId: before.pane_id, target: targetRefForAgent(before)! });
+    stopFollowing = followInitialAgentSession(agents);
+    const push = vi.spyOn(history, 'pushState');
+    for (let i = 1; i <= 50; i++) {
+      const previous = get(currentView);
+      const after = kimi({ generation: i + 1, agent_session_id: i % 3 ? `session-${i}` : '' });
+      agents.set([after]);
+      expect(get(currentView)).toEqual({ view: 'history', paneId: before.pane_id, target: targetRefForAgent(after) });
+      if (previous.view === 'history') expect(targetRefMatchesAgent(previous.target!, after)).toBe(false);
+    }
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['changed process/cwd/pane owner', { conversation_inferred_owner: 'b'.repeat(64) }],
+    ['reported ID', { conversation_inferred_owner: undefined }],
+    ['invalid owner', { conversation_inferred_owner: '' }],
+    ['terminal replacement', { terminal_id: 'other-terminal' }],
+    ['server replacement', { server_session_id: 'other-server' }],
+    ['relay replacement', { relay_id: 'other-relay' }],
+    ['pane replacement', { raw_pane_id: 'other-pane' }],
+    ['agent replacement', { agent: 'pi' }],
+    ['skipped generation', { generation: 3 }],
+  ] satisfies [string, Partial<Agent>][])('does not follow %s', (_, override) => {
+    const before = kimi();
+    const agents = writable([before]);
+    const view = { view: 'history' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1', ...override })]);
+    expect(get(currentView)).toEqual(view);
+  });
+
+  it('does not follow snapshots without an agent provider', () => {
+    const before = kimi({ agent: undefined });
+    const agents = writable([before]);
+    const view = { view: 'history' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ agent: undefined, generation: 2, agent_session_id: 'session-1' })]);
+    expect(get(currentView)).toEqual(view);
+  });
+
+  it.each(['terminal', 'history'] as const)('does not follow an ownerless Kimi %s into a new process owner', (view) => {
+    const before = kimi({ agent_session_id: '', conversation_inferred_owner: undefined });
+    const agents = writable([before]);
+    const route = { view, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(route);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1', conversation_inferred_owner: 'b'.repeat(64) })]);
+    expect(get(currentView)).toEqual(route);
+  });
+
+  it.each(['terminal', 'history'] as const)('does not follow an unavailable inferred %s across an owner change', (view) => {
+    const before = kimi({ agent_session_id: '' });
+    const agents = writable([before]);
+    const route = { view, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(route);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1', conversation_inferred_owner: 'b'.repeat(64) })]);
+    expect(get(currentView)).toEqual(route);
+  });
+
+  it.each(['session-0', ''] as const)('never follows an inferred switch in Terminal from %s', (session) => {
+    const before = kimi({ agent_session_id: session });
+    const agents = writable([before]);
+    const view = { view: 'terminal' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    stopFollowing = followInitialAgentSession(agents);
+    agents.set([kimi({ generation: 2, agent_session_id: 'session-1' })]);
+    expect(get(currentView)).toEqual(view);
+  });
 });
 
 describe('initial native session discovery navigation', () => {

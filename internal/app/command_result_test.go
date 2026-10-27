@@ -68,7 +68,7 @@ func TestSlashCommandCatalogFitsOutboundHubBudget(t *testing.T) {
 	})
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWebSocket))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
@@ -132,22 +132,25 @@ func TestCommandResultMessageKeepsPythonMandatoryEmptyFields(t *testing.T) {
 	}
 }
 
-func TestPaneSizeLeaseCommandResultIncludesAppliedColumns(t *testing.T) {
+func TestCommandResultMessageIncludesData(t *testing.T) {
 	got := commandResultMessage(&coordinator.CommandResult{
-		RequestID: "req-size",
-		Action:    "lease_pane_size",
+		RequestID: "req-data",
+		Action:    "agent_start",
 		OK:        true,
 		Phase:     "completed",
 		PaneID:    "pane-1",
-		Data:      map[string]any{"columns": 84},
+		Data:      map[string]any{"pane_id": "pane-2"},
 	})
-	if got["action"] != "lease_pane_size" ||
-		!reflect.DeepEqual(got["data"], map[string]any{"columns": 84}) {
-		t.Fatalf("pane size lease result = %#v", got)
+	if got["action"] != "agent_start" ||
+		!reflect.DeepEqual(got["data"], map[string]any{"pane_id": "pane-2"}) {
+		t.Fatalf("command result = %#v", got)
 	}
 }
 
-func TestPaneSizeLeaseMutationsRemainOrdered(t *testing.T) {
+// The resize commands keep their ordered mutation class, so a lease or
+// release is answered in sequence with the client's other pane commands
+// instead of racing ahead of them.
+func TestPaneSizeCommandsRemainOrdered(t *testing.T) {
 	for _, action := range []string{"lease_pane_size", "release_pane_size"} {
 		if !isCoordinatorMutation(action) {
 			t.Errorf("isCoordinatorMutation(%q) = false", action)

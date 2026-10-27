@@ -15,6 +15,7 @@
     "prepare:bundle": "bun prepare.ts",
     "prepare:current": "bun prepare-current.ts",
     "test:cache-recovery": "bun integration/cache-recovery.ts",
+    "test:phone-recovery": "bun integration/phone-recovery.ts",
     "run": "bun run.ts"
   },
   "devDependencies": {

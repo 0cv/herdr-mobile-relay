@@ -1,13 +1,69 @@
 import { createServer } from 'node:net';
-import { lstat, mkdir, realpath, chmod } from 'node:fs/promises';
+import { lstat, mkdir, readlink, chmod } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { createActivitySource, startActivityServer, listenPrivateSocket } from './activity.mjs';
 
 const maxBytes = 2 * 1024 * 1024;
 const maxEntries = 4096;
 const ownerKey = Symbol.for('herdr.mobile.commandBridge');
 const probeKey = Symbol.for('herdr.mobile.commandBridge.autocomplete');
 const text = (value, limit) => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, limit) : '';
+
+export const promptCapability = 'pi_prompt_unconfirmed';
+export const maxPromptBytes = 100_000;
+
+export function validPromptText(value) {
+  return typeof value === 'string' && value.trim().length > 0 && Buffer.byteLength(value) <= maxPromptBytes
+    && !/[\x00-\x08\x0b-\x1f\x7f]/.test(value) && Buffer.from(value).toString('utf8') === value
+    && !value.includes('[attachment:') && !value.includes('Attachment: ');
+}
+
+export function createPromptIngress({ pi, identity, sessionFile, incarnation, currentSession, now = Date.now, limit = 4096 }) {
+  const leases = new Map();
+  const requests = new Map();
+  const current = request => {
+    const session = currentSession();
+    return session?.id === identity.session && session.file === sessionFile
+      && request.instance === identity.instance && request.pane === identity.pane && request.pid === identity.pid
+      && (request.session === identity.session || (sessionFile && request.session === sessionFile));
+  };
+  return request => {
+    const base = { ...identity, session: request.session, incarnation, challenge: request.challenge };
+    const refuse = () => ({ ...base, status: 'not_started' });
+    if (!current(request) || !/^[a-f0-9]{32}$/.test(request.challenge)
+      || typeof request.connection !== 'string' || !request.connection || request.connection.length > 160
+      || typeof request.target_key !== 'string' || !request.target_key || request.target_key.length > 4096) return refuse();
+    const key = JSON.stringify([request.connection, request.target_key, request.session]);
+    if (request.operation === 'prompt_capability') {
+      let lease = leases.get(key);
+      if (!lease) {
+        if (leases.size >= limit) return refuse();
+        lease = { token: randomUUID(), expires_at: 0 };
+        leases.set(key, lease);
+      }
+      lease.expires_at = now() + 15_000;
+      return { ...base, status: 'available', capability: promptCapability, connection: request.connection,
+        target_key: request.target_key, ...lease };
+    }
+    const allowed = new Set(['instance', 'pane', 'session', 'pid', 'challenge', 'operation', 'connection', 'target_key', 'incarnation', 'token', 'request_id', 'text']);
+    if (request.operation !== 'send_prompt_unconfirmed' || Object.keys(request).some(key => !allowed.has(key))
+      || request.incarnation !== incarnation || typeof request.request_id !== 'string' || !request.request_id.startsWith(`${incarnation}_`)
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(request.request_id)
+      || !validPromptText(request.text)) return refuse();
+    const digest = createHash('sha256').update(JSON.stringify([key, request.token, request.text])).digest('hex');
+    const prior = requests.get(request.request_id);
+    if (prior) return prior.digest === digest ? { ...base, ...prior.result } : refuse();
+    const lease = leases.get(key);
+    if (!lease || request.token !== lease.token || now() >= lease.expires_at || requests.size >= limit) return refuse();
+    const result = { status: 'unconfirmed', sent_at: now() };
+    requests.set(request.request_id, { digest, result });
+    try {
+      pi.sendUserMessage(request.text, { expandPromptTemplates: true, deliverAs: 'followUp' });
+    } catch {}
+    return { ...base, ...result };
+  };
+}
 
 export function sanitizeSource(source) {
   source = source.trim();
@@ -134,14 +190,44 @@ export function normalizeCommands(raw, skillNames) {
   return { commands, status: partial ? 'partial' : 'available', truncated };
 }
 
+// Bun's realpath cannot resolve macOS sockets. Walk links before handling ".."
+// so the socket identity matches the relay's filepath.EvalSymlinks result.
+async function resolveLinks(input) {
+  const pending = (input.startsWith('/') ? input : `${process.cwd()}/${input}`).split('/');
+  let resolved = '';
+  let links = 0;
+  while (pending.length > 0) {
+    const name = pending.shift();
+    if (name === '' || name === '.') continue;
+    if (name === '..') {
+      resolved = resolved.slice(0, Math.max(resolved.lastIndexOf('/'), 0));
+      continue;
+    }
+    const next = `${resolved}/${name}`;
+    const stat = await lstat(next);
+    if (!stat.isSymbolicLink()) {
+      if (pending.length > 0 && !stat.isDirectory()) {
+        throw Object.assign(new Error(`Not a directory: ${next}`), { code: 'ENOTDIR' });
+      }
+      resolved = next;
+      continue;
+    }
+    if (++links > 255) throw Object.assign(new Error(`Too many symbolic links: ${input}`), { code: 'ELOOP' });
+    const target = await readlink(next);
+    if (target.startsWith('/')) resolved = '';
+    pending.unshift(...target.split('/'));
+  }
+  return resolved || '/';
+}
+
 export async function instanceIdentity(socketPath) {
-  const path = await realpath(socketPath);
+  const path = await resolveLinks(socketPath);
   const stat = await lstat(path, { bigint: true });
   if (!stat.isSocket() || stat.uid !== BigInt(process.getuid())) throw new Error('Invalid Herdr socket');
   return createHash('sha256').update(`${path}\n${stat.dev}\n${stat.ino}`).digest('hex');
 }
 
-export async function startBridge({ instance, pane, session, pid = process.pid, directory, catalog }) {
+export async function startBridge({ instance, pane, session, sessionFile, pid = process.pid, directory, catalog, prompt }) {
   await mkdir(directory, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
   return listen();
   async function listen() {
@@ -151,6 +237,7 @@ export async function startBridge({ instance, pane, session, pid = process.pid, 
     }
     const path = join(directory, `${pid}.sock`);
     const incarnation = randomUUID();
+    const promptIngress = prompt && createPromptIngress({ ...prompt, identity: { instance, pane, session, pid }, sessionFile, incarnation });
     const sockets = new Set();
     let closed = false;
     let busy = false;
@@ -170,9 +257,10 @@ export async function startBridge({ instance, pane, session, pid = process.pid, 
       socket.on('error', () => {});
       socket.setTimeout(1000, () => socket.destroy());
       let input = '';
+      socket.setEncoding('utf8');
       socket.on('data', chunk => {
         input += chunk.toString('utf8');
-        if (input.length > 4096) { socket.destroy(); return; }
+        if (Buffer.byteLength(input) > 1024 * 1024) { socket.destroy(); return; }
         if (!input.includes('\n')) return;
         socket.removeAllListeners('data');
         void respond().catch(() => socket.destroy());
@@ -180,13 +268,21 @@ export async function startBridge({ instance, pane, session, pid = process.pid, 
       async function respond() {
         const request = JSON.parse(input);
         if (!request || typeof request !== 'object' || Array.isArray(request)
-          || busy || request.instance !== instance || request.pane !== pane || request.session !== session
-          || request.pid !== pid || !/^[a-f0-9]{32}$/.test(request.challenge)) { socket.destroy(); return; }
+          || request.instance !== instance || request.pane !== pane
+          || (request.session !== session && (!sessionFile || request.session !== sessionFile))
+          || request.pid !== pid || !/^[a-f0-9]{32}$/.test(request.challenge)
+          || closed) { socket.destroy(); return; }
+        if (['prompt_capability', 'send_prompt_unconfirmed'].includes(request.operation)) {
+          if (!promptIngress) { socket.destroy(); return; }
+          socket.end(`${JSON.stringify(promptIngress(request))}\n`);
+          return;
+        }
+        if (request.operation !== 'catalog' || busy) { socket.destroy(); return; }
         busy = true;
         try {
           const result = await abortable(Promise.resolve().then(() => catalog(controller.signal)), controller.signal);
           if (closed || socket.destroyed) return;
-          const response = { ...result, instance, pane, session, pid, incarnation, challenge: request.challenge };
+          const response = { ...result, instance, pane, session: request.session, pid, incarnation, challenge: request.challenge };
           response.revision = createHash('sha256').update(JSON.stringify([response.status, response.truncated, response.commands])).digest('hex');
           const payload = JSON.stringify(response);
           if (Buffer.byteLength(payload) >= maxBytes) { socket.destroy(); return; }
@@ -195,10 +291,7 @@ export async function startBridge({ instance, pane, session, pid = process.pid, 
         finally { busy = false; }
       }
     });
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(path, () => { server.removeListener('error', reject); resolve(); });
-    });
+    await listenPrivateSocket(server, path);
     server.on('error', () => {});
     try { await chmod(path, 0o600); }
     catch (error) { await new Promise(resolve => server.close(resolve)); throw error; }
@@ -213,6 +306,9 @@ export async function startBridge({ instance, pane, session, pid = process.pid, 
 }
 
 export default function commandBridge(pi) {
+  let activity;
+  let closeActivity;
+  for (const type of ['message_start', 'message_update', 'tool_execution_start', 'tool_execution_update', 'tool_execution_end', 'turn_end', 'session_tree', 'session_compact', 'agent_settled']) pi.on(type, (event, ctx) => activity?.event(type, event, ctx));
   let close;
   let owner;
   let provider;
@@ -223,7 +319,8 @@ export default function commandBridge(pi) {
     if (ctx.mode !== 'tui' || !process.stdin.isTTY || globalThis[ownerKey]) return;
     const pane = process.env.HERDR_PANE_ID;
     const socketPath = process.env.HERDR_SOCKET_PATH;
-    const session = ctx.sessionManager.getSessionFile();
+    const session = ctx.sessionManager.getSessionId();
+    const sessionFile = ctx.sessionManager.getSessionFile();
     if (!pane || pane.length > 160 || !socketPath || !session) return;
     owner = {};
     globalThis[ownerKey] = owner;
@@ -235,14 +332,27 @@ export default function commandBridge(pi) {
         return current;
       });
       const directory = `/tmp/herdr-pi-${process.getuid()}-${instance.slice(0, 16)}`;
-      close = await startBridge({ instance, pane, session, directory,
+      close = await startBridge({ instance, pane, session, sessionFile, directory,
         catalog: createCatalog(() => pi.getCommands(), () => ready ? provider : undefined),
+        prompt: { pi, currentSession: () => ({ id: ctx.sessionManager.getSessionId(), file: ctx.sessionManager.getSessionFile() }) },
       });
+      activity = createActivitySource(ctx.sessionManager, { incomplete: !ctx.isIdle() });
+      closeActivity = await startActivityServer({ directory, identity: { instance, pane, session, sessionFile, pid: process.pid }, source: activity });
     } catch {
+      activity?.close();
+      activity = undefined;
+      await closeActivity?.();
+      closeActivity = undefined;
+      await close?.();
+      close = undefined;
       if (globalThis[ownerKey] === owner) delete globalThis[ownerKey];
     }
   });
   pi.on('session_shutdown', async () => {
+    activity?.close();
+    activity = undefined;
+    await closeActivity?.();
+    closeActivity = undefined;
     ready = false;
     await close?.();
     close = undefined;

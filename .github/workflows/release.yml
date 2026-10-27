@@ -112,7 +112,7 @@ jobs:
 
   mobile:
     # Temporarily disabled while the installed-device harness is fixed on ci-mobile.
-    if: ${{ false }}
+    if: ${{ github.event_name == 'herdr-mobile-release-disabled' }}
     needs: build
     uses: ./.github/workflows/mobile-ci.yml
     with:

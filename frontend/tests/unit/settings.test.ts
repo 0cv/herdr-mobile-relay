@@ -1,3 +1,4 @@
+import { get } from 'svelte/store';
 import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,12 +9,15 @@ import {
   PUSH_ENABLED_KEY,
   TERMINAL_HISTORY_KEY,
   TERMINAL_REFRESH_KEY,
+  TERMINAL_RESIZE_SESSION_KEY,
 } from '$lib/config';
+import { currentView, navigate } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
-import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
-import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
+import { appUpdateStatus, clearUpdateProgress, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { guardReload } from '$lib/reload-guard';
+import { defaultAgentView, paneAgentViewOverrides, readTerminalResizeSession, setTerminalResizeSession } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -55,6 +59,42 @@ class MockWebSocket {
 }
 
 describe('settings relay status', () => {
+  it('exposes Pi Integration per connected relay with reader access kept read-only', async () => {
+    const credential = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role: 'reader', deviceId: 'device' } as never);
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({ type: 'command_result', request_id: 'pi-setting', ok: true,
+      data: { instance: 'synthetic', enabled: true, profiles: [] } });
+    try {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
+      await waitFor(() => expect(toggle).toBeChecked());
+      expect(toggle).toBeDisabled();
+      expect(send).toHaveBeenCalledWith(get(relayStore.relayConfigs)[0].id, { type: 'get_pi_integration' });
+    } finally { credential.mockRestore(); send.mockRestore(); }
+  });
+
+  it('keeps Pi Integration loaded while unrelated relay updates arrive', async () => {
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValueOnce({ type: 'command_result', request_id: 'pi-setting', ok: true,
+      data: { instance: 'synthetic', enabled: true, profiles: [{ path: '/synthetic/agent', status: 'up to date' }] } })
+      .mockReturnValue(new Promise(() => {}));
+    try {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
+      await waitFor(() => expect(toggle).toBeChecked());
+      socket.server({ type: 'agents', agents: [] });
+      socket.server({ type: 'inventory_status', state: 'ready' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(toggle).toBeChecked();
+      expect(screen.getByText('/synthetic/agent: up to date')).toBeInTheDocument();
+      expect(send.mock.calls.filter(([, command]) => command.type === 'get_pi_integration')).toHaveLength(1);
+    } finally { send.mockRestore(); }
+  });
+
   const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
 
   beforeEach(() => {
@@ -79,18 +119,56 @@ describe('settings relay status', () => {
       checkedAt: 123,
       error: '',
     });
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
   });
 
   afterEach(() => {
     transportHijack.current = null;
     relayStore.destroy();
+    setTerminalResizeSession(false);
     relayStore.relayConfigs.set([]);
     defaultAgentView.set('terminal');
     paneAgentViewOverrides.set({});
     vi.unstubAllGlobals();
     if (serviceWorkerDescriptor) Object.defineProperty(navigator, 'serviceWorker', serviceWorkerDescriptor);
     else Reflect.deleteProperty(navigator, 'serviceWorker');
+  });
+
+  it('requires confirmation to pair a deferred browser and leaves Cancel harmless', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal('navigator', {
+      standalone: false, userAgent: 'Mozilla/5.0 (iPhone)', maxTouchPoints: 5,
+    });
+    const hash = `#setup=${'A'.repeat(43)}&invite=invitation-settings01&invite_version=1`
+      + `&invite_expires=${Date.now() + 60_000}&label=Invited&relay=${encodeURIComponent('wss://invited.example')}`;
+    history.replaceState(null, '', `/pair${hash}`);
+    relayStore.importSetupLink();
+    navigate({ view: 'settings' });
+    expect(location.hash).toBe(hash);
+    const pair = vi.spyOn(relayStore, 'pairDeferredRelay');
+    try {
+      render(SettingsView);
+      expect(screen.getByText(/Waiting for the Home Screen app/)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      expect(pair).not.toHaveBeenCalled();
+      expect(screen.getByText(/This browser becomes its own device/)).toHaveAttribute('role', 'alert');
+      expect(screen.getByText(/This browser becomes its own device/)).toHaveTextContent(/Safari may clear this site's storage/);
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(pair).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Pair this browser instead' })).toHaveFocus();
+      expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      await user.click(screen.getByRole('button', { name: 'Confirm' }));
+      expect(pair).toHaveBeenCalledExactlyOnceWith('invited-wss-invited-example');
+      expect(pair).toHaveReturnedWith(true);
+      expect(location.hash).toBe('');
+      expect(get(relayStore.connections).get('invited-wss-invited-example')?.pairingDeferred).toBe(false);
+      await waitFor(() => expect(screen.queryByText(/Waiting for the Home Screen app/)).not.toBeInTheDocument());
+    } finally {
+      pair.mockRestore();
+      currentView.set({ view: 'agents' });
+    }
   });
 
   it('updates connection and push state without remounting settings', async () => {
@@ -100,7 +178,7 @@ describe('settings relay status', () => {
     expect(screen.getByText('Push: waiting for relay…')).toBeInTheDocument();
 
     socket.open();
-    relayStore.setPushStatus('fedora-wss-fedora-example', 'sent');
+    relayStore.setPushStatus(get(relayStore.relayConfigs)[0].id, 'sent');
     await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
     expect(screen.getByText('Push: syncing…')).toBeInTheDocument();
 
@@ -288,7 +366,7 @@ describe('settings relay status', () => {
     const socket = MockWebSocket.instances[0];
     socket.open();
 
-    expect(await screen.findByText('Connection: relay URL fedora.example')).toBeInTheDocument();
+    expect(await screen.findByText('Connection: relay URL 127.0.0.1:8871')).toBeInTheDocument();
   });
 
   it('shows active and latest gateway versions without regressing to an older upstream', async () => {
@@ -487,13 +565,61 @@ describe('settings relay status', () => {
     await user.click(refresh.getByRole('button', { name: '250 ms' }));
   });
 
-  it('does not expose removed terminal width choices', () => {
+  it('offers Resize Session on by default with a subordinate height switch', async () => {
+    setTerminalResizeSession(readTerminalResizeSession());
+    const user = userEvent.setup();
     render(SettingsView);
 
     expect(screen.queryByRole('group', { name: 'Terminal Width' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
-    expect(screen.getByText(/Resize Session automatically leases/)).toBeInTheDocument();
+    const resize = screen.getByRole('switch', { name: 'Resize Session' });
+    expect(resize).toBeChecked();
+    for (const disclosure of [
+      /On by default, saved on this device\./,
+      /Resizes the shared terminal to fit this phone while the phone has it open\./,
+      /the laptop and SSH views of that pane look garbled/,
+      /agents may leave narrow copies of their output in the scrollback/,
+      /Resizing may truncate scrollback and lose older output\./,
+      /previous size is restored when the phone leaves the pane, unless it was changed on the laptop meanwhile/,
+      /Unavailable on relays that do not support it\./,
+      /controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width\./,
+    ]) expect(resize).toHaveAccessibleDescription(disclosure);
+    const height = screen.getByRole('switch', { name: 'Lease Terminal Height' });
+    expect(height).toBeDisabled();
+    expect(height).not.toBeChecked();
+
+    await user.click(resize);
+    expect(resize).not.toBeChecked();
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('false');
+    await user.click(resize);
+    expect(resize).toBeChecked();
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('true');
+    // No connected relay supports leasing the height yet.
+    expect(height).toBeDisabled();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.server({
+      type: 'push_config', protocol: 3, host: 'fedora', agent_profiles: [],
+      capabilities: ['pane_size_opt_in', 'pane_size_opt_in_rows'],
+    });
+    await waitFor(() => expect(height).toBeEnabled());
+    await user.click(height);
+    expect(height).toBeChecked();
+
+    await user.click(resize);
+    expect(resize).not.toBeChecked();
+    expect(height).toBeDisabled();
+    expect(height).toBeChecked();
+    expect(height).toHaveAccessibleDescription(/The checked preference is remembered but inactive while Resize Session is off\./);
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('false');
+
+    await user.click(resize);
+    expect(height).toBeEnabled();
+    expect(height).toBeChecked();
+    // Leave the shared preferences at their defaults for subsequent tests.
+    await user.click(height);
+    await user.click(resize);
   });
 
   it('keeps notification controls out of the way until push delivery is enabled', async () => {
@@ -560,6 +686,39 @@ describe('settings relay status', () => {
       phase: 'scheduled',
       data: { update: { state: 'scheduled', target_revision: 'f'.repeat(40) } },
     });
+  });
+
+  it('asks again before Load Update discards work that appeared after the dialog opened', async () => {
+    const user = userEvent.setup();
+    appUpdateStatus.set({
+      state: 'reload-ready',
+      currentVersion: APP_VERSION,
+      currentAssets: APP_ASSET_VERSION,
+      deployedVersion: APP_VERSION,
+      deployedAssets: APP_ASSET_VERSION + 1,
+      upstreamVersion: APP_VERSION,
+      upstreamAssets: APP_ASSET_VERSION + 1,
+      checkedAt: 123,
+      error: '',
+    });
+    const replace = vi.fn();
+    render(SettingsView);
+    await user.click(screen.getByRole('button', { name: 'Load Update' }));
+    let dialog = screen.getByRole('dialog', { name: 'Load Update' });
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+    const release = guardReload(() => 'draft');
+    vi.stubGlobal('location', { href: 'https://app.example/', origin: 'https://app.example', replace });
+    try {
+      await user.click(within(dialog).getByRole('button', { name: 'Load Update' }));
+      expect(replace).not.toHaveBeenCalled();
+      dialog = screen.getByRole('dialog', { name: 'Load Update' });
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('A draft is not saved on this phone, and loading the app update discards it.');
+      await user.click(within(dialog).getByRole('button', { name: 'Load Update Anyway' }));
+      expect(replace).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      clearUpdateProgress();
+    }
   });
 
   it('confirms a separate app deployment through its authorized relay', async () => {

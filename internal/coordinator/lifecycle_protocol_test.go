@@ -19,10 +19,10 @@ func TestStartKindAgentDoesNotRetryProtocolMismatch(t *testing.T) {
 		"printf '%s\\n' '{\"error\":{\"code\":\"protocol_mismatch\",\"message\":\"incompatible\"},\"id\":\"cli:agent:start\"}' >&2\n"+
 		"exit 1\n")
 	lifecycle := &Lifecycle{herdr: herdr.NewClient(bin, filepath.Join(dir, "missing.sock"))}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	err := lifecycle.startKindAgent(ctx, "codex", "project", "pane-1")
+	err := lifecycle.startKindAgent(ctx, "codex", "project", "pane-1", nil)
 	if err == nil || !herdr.IsRefused(err) || herdr.IsTransientRefused(err) {
 		t.Fatalf("error = %v, want permanent refusal without transient retry", err)
 	}

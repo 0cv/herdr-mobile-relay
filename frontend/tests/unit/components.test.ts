@@ -2,7 +2,7 @@ import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
 import ConversationHistory from '$components/ConversationHistory.svelte';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
@@ -13,8 +13,10 @@ import LaunchView from '$components/LaunchView.svelte';
 import { CommandError, relayStore } from '$lib/store';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
-import { setHomeLayout } from '$lib/preferences';
-import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
+import { reloadRisk } from '$lib/reload-guard';
+import { targetRefForAgent } from '$lib/resource-id';
+import { hiddenServers, setHomeLayout, setServerHidden } from '$lib/preferences';
+import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
 
@@ -40,12 +42,54 @@ class SlashCommandWebSocket {
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
+  server_session_id: 'primary', terminal_id: 'terminal', generation: 1,
   project: 'relay', agent: 'codex', status: 'blocked',
   attention_kind: 'approval', attention_capable: true,
   command: 'Run make check?', options: ['Approve once', 'Always allow', 'Deny'],
 };
 
+// A ready relay for LaunchView tests: the directory browser capability is what
+// lets the form finish its initial listing and enable Start Agent.
+function launchConnection(agentProfiles: AgentProfile[], hermesProfiles: string[]): RelayConnectionView {
+  return {
+    status: 'connected',
+    inventory: { state: 'ready' },
+    capabilities: ['directory_browser'],
+    agentProfiles,
+    hermesProfiles,
+  } as unknown as RelayConnectionView;
+}
+
 describe('accessible Svelte interactions', () => {
+  it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
+    const user = userEvent.setup();
+    const relay = { id: 'invited', label: 'Invited', url: 'wss://invited.example', token: '' };
+    const connection = {
+      status: 'disconnected', pairingDeferred: true,
+    } as RelayConnectionView;
+    const pair = vi.spyOn(relayStore, 'pairDeferredRelay').mockReturnValue(true);
+    try {
+      render(AgentList, {
+        agents: [], relays: [relay], connections: new Map([[relay.id, connection]]),
+        responding: new Set<string>(), onopen: vi.fn(),
+      });
+      expect(screen.getByText('Add Herdr to the Home Screen, then open it there to finish pairing.')).toBeInTheDocument();
+      expect(screen.getByText('This browser tab keeps the setup link unused so the installed app can redeem it.')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      expect(pair).not.toHaveBeenCalled();
+      expect(screen.getByRole('alert')).toHaveTextContent(/This browser becomes its own device/);
+      expect(screen.getByRole('alert')).toHaveTextContent(/one-use secret is spent here/);
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(pair).not.toHaveBeenCalled();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      await user.click(screen.getByRole('button', { name: 'Confirm' }));
+      expect(pair).toHaveBeenCalledExactlyOnceWith(relay.id);
+    } finally {
+      pair.mockRestore();
+    }
+  });
+
   it('requires confirmation before deleting all activity', async () => {
     const user = userEvent.setup();
     relayStore.activities.set([{
@@ -98,6 +142,7 @@ describe('accessible Svelte interactions', () => {
     const user = userEvent.setup();
     const agent: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p2', pane_id: 'fedora::w1:p2',
+      server_session_id: 'primary', terminal_id: 'terminal-p2', generation: 1,
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
     };
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
@@ -140,6 +185,7 @@ describe('accessible Svelte interactions', () => {
     const user = userEvent.setup();
     const agent: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p3', pane_id: 'fedora::w1:p3',
+      server_session_id: 'primary', terminal_id: 'terminal-p3', generation: 1,
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
     };
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
@@ -179,7 +225,7 @@ describe('accessible Svelte interactions', () => {
     vi.stubGlobal('WebSocket', SlashCommandWebSocket);
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
     const socket = SlashCommandWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -258,86 +304,94 @@ describe('accessible Svelte interactions', () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(['success', 'failure'] as const)('ignores superseded catalog %s without clearing newer loading state', async (outcome) => {
-    const user = userEvent.setup();
-    const agent: Agent = {
-      relay_id: 'freshness', relay_label: 'Freshness', raw_pane_id: 'pane', pane_id: 'freshness::pane',
-      agent: 'pi', cwd: '/tmp/project', agent_session_id: 'first',
-    };
-    const requests: { resolve: (catalog: SlashCommandCatalog) => void; reject: (error: Error) => void }[] = [];
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    const load = vi.spyOn(relayStore, 'loadSlashCommands').mockImplementation(() => new Promise((resolve, reject) => {
-      requests.push({ resolve, reject });
-    }));
-    const props = { agent, allAgents: [agent], responding: new Set<string>() };
-    const view = render(TerminalView, props);
-    const composer = screen.getByRole('combobox', { name: 'Prompt' });
-    await user.type(composer, '/orches');
-    expect(load).toHaveBeenCalledTimes(1);
-    const replacement = { ...agent, agent_session_id: 'second' };
-    await view.rerender({ ...props, agent: replacement, allAgents: [replacement] });
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
-    expect(load).toHaveBeenLastCalledWith(replacement, true);
-    if (outcome === 'success') {
-      requests[0].resolve({ commands: [{ command: '/orchestrate-old', description: 'Old session', source: 'project' }], truncated: false });
-    } else {
-      requests[0].reject(new Error('Old request failed'));
-    }
-    await waitFor(() => expect(screen.getByText('Loading commands…')).toBeVisible());
-    expect(screen.queryByRole('option', { name: /orchestrate-old/ })).not.toBeInTheDocument();
-    requests[1].resolve({ commands: [{ command: '/orchestrate', description: 'Current session', source: 'project' }], truncated: false });
-    await waitFor(() => expect(screen.getByRole('option', { name: /orchestrate/ })).toBeVisible());
-    await user.click(screen.getByRole('button', { name: 'Refresh commands' }));
-    expect(load).toHaveBeenCalledTimes(3);
-    expect(screen.getByText('Refreshing commands…')).toBeVisible();
-    requests[2].resolve({ commands: [], truncated: false });
-    await waitFor(() => expect(screen.queryByRole('option')).not.toBeInTheDocument());
-    await user.clear(composer);
-    await user.type(composer, '/orches');
-    expect(load).toHaveBeenCalledTimes(4);
-    view.unmount();
-    requests[3].resolve({ commands: [{ command: '/orchestrate', description: 'After unmount', source: 'project' }], truncated: false });
-    await Promise.resolve();
-    expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
-    clearPromptDraft(agent);
-    vi.restoreAllMocks();
-  });
+  describe('catalog request lifecycle', () => {
+    afterEach(() => vi.restoreAllMocks());
 
-  it('revalidates an open palette on reconnect without fetching for each keystroke', async () => {
-    const user = userEvent.setup();
-    const agent: Agent = {
-      relay_id: 'reconnect', relay_label: 'Reconnect', raw_pane_id: 'pane', pane_id: 'reconnect::pane',
-      agent: 'pi', cwd: '/tmp/project',
-    };
-    const connected = { status: 'connected', capabilities: ['slash_commands'] };
-    relayStore.connections.set(new Map([['reconnect', connected as never]]));
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    const load = vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
-      commands: [{ command: '/orchestrate', description: 'Orchestrate', source: 'project' }], truncated: false,
-    });
-    const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
-    const composer = screen.getByRole('combobox', { name: 'Prompt' });
-    await user.type(composer, '/orches');
-    expect(load).toHaveBeenCalledTimes(1);
-    for (let update = 0; update < 3; update++) {
-      relayStore.connections.set(new Map([['reconnect', { ...connected } as never]]));
+    it.each(['success', 'failure'] as const)('ignores superseded catalog %s without clearing newer loading state', async (outcome) => {
+      const user = userEvent.setup();
+      const agent: Agent = {
+        relay_id: 'freshness', relay_label: 'Freshness', raw_pane_id: 'pane', pane_id: 'freshness::pane',
+        server_session_id: 'primary', terminal_id: 'terminal', generation: 1,
+        agent: 'pi', cwd: '/tmp/project', agent_session_id: 'first',
+      };
+      const requests: { resolve: (catalog: SlashCommandCatalog) => void; reject: (error: Error) => void }[] = [];
+      vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+      const load = vi.spyOn(relayStore, 'loadSlashCommands').mockImplementation(() => new Promise((resolve, reject) => {
+        requests.push({ resolve, reject });
+      }));
+      const props = { agent, allAgents: [agent], responding: new Set<string>() };
+      const view = render(TerminalView, props);
+      const composer = screen.getByRole('combobox', { name: 'Prompt' });
+      await user.type(composer, '/orches');
+      expect(load).toHaveBeenCalledTimes(1);
+      const replacement = { ...agent, cwd: '/tmp/other-project' };
+      expect(targetRefForAgent(agent)).not.toBeNull();
+      expect(targetRefForAgent(replacement)).toEqual(targetRefForAgent(agent));
+      await view.rerender({ ...props, agent: replacement, allAgents: [replacement] });
+      const replacementComposer = screen.getByRole('combobox', { name: 'Prompt' });
+      expect(replacementComposer).toBe(composer);
+      expect(replacementComposer).toHaveValue('');
+      expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
+      expect(load).toHaveBeenCalledTimes(1);
+      await user.type(replacementComposer, '/orches');
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      expect(load).toHaveBeenLastCalledWith(replacement, true);
+      if (outcome === 'success') {
+        requests[0].resolve({ commands: [{ command: '/orchestrate-old', description: 'Old session', source: 'project' }], truncated: false });
+      } else {
+        requests[0].reject(new Error('Old request failed'));
+      }
       await tick();
-    }
-    expect(load).toHaveBeenCalledTimes(1);
-    relayStore.connections.set(new Map([['reconnect', { ...connected, status: 'disconnected' } as never]]));
-    await waitFor(() => expect(screen.getByText('Suggestions unavailable — you can still send this command.')).toBeVisible());
-    expect(load).toHaveBeenCalledTimes(1);
-    relayStore.connections.set(new Map([['reconnect', connected as never]]));
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
-    await user.type(composer, 'trate');
-    expect(load).toHaveBeenCalledTimes(2);
-    await user.keyboard('{Escape}');
-    await user.type(composer, '-');
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
-    view.unmount();
-    clearPromptDraft(agent);
-    relayStore.connections.set(new Map());
-    vi.restoreAllMocks();
+      await waitFor(() => expect(screen.getByText('Loading commands…')).toBeVisible());
+      expect(screen.queryByText('Suggestions unavailable — you can still send this command.')).not.toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: /orchestrate-old/ })).not.toBeInTheDocument();
+      requests[1].resolve({ commands: [{ command: '/orchestrate', description: 'Current session', source: 'project' }], truncated: false });
+      await waitFor(() => expect(screen.getByRole('option', { name: /orchestrate/ })).toBeVisible());
+      await user.click(screen.getByRole('button', { name: 'Refresh commands' }));
+      expect(load).toHaveBeenCalledTimes(3);
+      expect(screen.getByText('Refreshing commands…')).toBeVisible();
+      requests[2].resolve({ commands: [], truncated: false });
+      await waitFor(() => expect(screen.queryByRole('option')).not.toBeInTheDocument());
+      await user.clear(replacementComposer);
+      await user.type(replacementComposer, '/orches');
+      expect(load).toHaveBeenCalledTimes(4);
+      view.unmount();
+      requests[3].resolve({ commands: [{ command: '/orchestrate', description: 'After unmount', source: 'project' }], truncated: false });
+      await Promise.resolve();
+      expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
+      clearPromptDraft(agent);
+    });
+
+    it('revalidates an open palette on reconnect without fetching for each keystroke', async () => {
+      const user = userEvent.setup();
+      const agent: Agent = {
+        relay_id: 'reconnect', relay_label: 'Reconnect', raw_pane_id: 'pane', pane_id: 'reconnect::pane',
+        agent: 'pi', cwd: '/tmp/project',
+      };
+      const connected = { status: 'connected', capabilities: ['slash_commands'] };
+      relayStore.connections.set(new Map([['reconnect', connected as never]]));
+      vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+      const load = vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
+        commands: [{ command: '/orchestrate', description: 'Orchestrate', source: 'project' }], truncated: false,
+      });
+      const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
+      const composer = screen.getByRole('combobox', { name: 'Prompt' });
+      await user.type(composer, '/orches');
+      expect(load).toHaveBeenCalledTimes(1);
+      relayStore.connections.set(new Map([['reconnect', { ...connected, status: 'disconnected' } as never]]));
+      await waitFor(() => expect(screen.getByText('Suggestions unavailable — you can still send this command.')).toBeVisible());
+      expect(load).toHaveBeenCalledTimes(1);
+      relayStore.connections.set(new Map([['reconnect', connected as never]]));
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      await user.type(composer, 'trate');
+      expect(load).toHaveBeenCalledTimes(2);
+      await user.keyboard('{Escape}');
+      await user.type(composer, '-');
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+      view.unmount();
+      clearPromptDraft(agent);
+      relayStore.connections.set(new Map());
+    });
   });
 
   it.each([
@@ -373,7 +427,7 @@ describe('accessible Svelte interactions', () => {
     respond.mockRestore();
   });
 
-  it.each(['filter', 'prompt', 'editor'] as const)('restores a refused %s draft after a same-target agent update, but not replacement or navigation', async (route) => {
+  it.each(['filter', 'prompt'] as const)('restores a refused %s draft after a same-target agent update, but not replacement or navigation', async (route) => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
@@ -385,7 +439,7 @@ describe('accessible Svelte interactions', () => {
       status: route === 'prompt' ? 'done' : 'blocked',
     };
     const content = route === 'filter' ? 'Available models\nType to filter • Enter to select • Tab to edit'
-      : route === 'editor' ? 'Custom answer: Which weekend?\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor' : 'Ready';
+      : 'Ready';
     for (const update of [
       {},
       { generation: 2 },
@@ -498,10 +552,12 @@ describe('accessible Svelte interactions', () => {
     expect(input).toBeDisabled();
     for (const attention_kind of ['approval', 'question'] as const) {
       await view.rerender({ readOnly: false, agent: { ...agent, attention_kind } });
-      expect(input).toBeDisabled();
+      expect(input).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send filter text' })).toBeDisabled();
     }
     await view.rerender({ agent, frame: { paneId: agent.pane_id, content: 'Available models', format: 'plain' } });
-    expect(input).toBeDisabled();
+    expect(input).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
     await view.rerender({
       agent,
       frame: {
@@ -509,7 +565,8 @@ describe('accessible Svelte interactions', () => {
         content: 'Type to filter • Enter to select • Tab to edit\nNeeds inspection\n>',
       },
     });
-    expect(input).toBeDisabled();
+    expect(input).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
     view.unmount();
     vi.restoreAllMocks();
   });
@@ -576,6 +633,30 @@ describe('accessible Svelte interactions', () => {
     });
     view.unmount();
     vi.restoreAllMocks();
+  });
+
+  it('holds automatic app reloads until a sent prompt settles, even after its view closes', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let settle: (result: CommandResult) => void = () => {};
+    vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    const agent: Agent = { ...blockedAgent, agent: 'codex', status: 'done', attention_kind: undefined, options: undefined };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: { paneId: agent.pane_id, content: 'Ready for the next request.', format: 'plain' },
+    });
+    try {
+      await user.type(screen.getByPlaceholderText('Type a reply…'), 'Continue');
+      await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+      expect(relayStore.sendToAgent).toHaveBeenCalledExactlyOnceWith(agent, { type: 'submit_prompt', text: 'Continue' });
+      view.unmount();
+      expect(reloadRisk()).toBe('delivery');
+      settle({ type: 'command_result', request_id: 'held-reload', ok: true });
+      await waitFor(() => expect(reloadRisk()).not.toBe('delivery'));
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it.each(['cursor', 'codex'])('submits normal prompts when %s output mentions filtering', async (agentName) => {
@@ -678,7 +759,7 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
-  it('enables blocked terminal text only while its editor is active', async () => {
+  it('keeps blocked terminal drafts editable and offers explicit manual input for custom controls', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
@@ -716,7 +797,9 @@ describe('accessible Svelte interactions', () => {
       },
       responding: new Set<string>(),
     });
-    expect(screen.getByPlaceholderText('Needs inspection — use terminal controls')).toBeDisabled();
+    expect(screen.getByLabelText('Prompt')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Keyboard' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     choiceView.unmount();
 
@@ -730,20 +813,15 @@ describe('accessible Svelte interactions', () => {
       },
       responding: new Set<string>(),
     });
-    const terminalInput = screen.getByPlaceholderText('Type terminal input…');
+    const terminalInput = screen.getByLabelText('Prompt');
     expect(terminalInput).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
     expect(screen.queryByText('must not render')).not.toBeInTheDocument();
     await user.type(terminalInput, 'custom weekend');
-    await user.click(screen.getByRole('button', { name: 'Submit terminal text' }));
-    expect(send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith(unknown, {
-      type: 'send_input',
-      text: 'custom weekend',
-      keys: ['Enter'],
-      activity_label: 'Submitted terminal text',
-    });
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Keyboard' })).toBeVisible();
+    expect(send).not.toHaveBeenCalled();
     unknownView.unmount();
     vi.restoreAllMocks();
   });
@@ -903,6 +981,23 @@ describe('accessible Svelte interactions', () => {
     expect(container.querySelector('.agent-meta')).toHaveTextContent('custom-agent');
   });
 
+  it('names Devin panes without a dedicated logo', () => {
+    const agents: Agent[] = ['devin', 'devin-cli'].map((agent, index) => ({
+      relay_id: 'fedora',
+      relay_label: 'Fedora',
+      raw_pane_id: `w4:p${index}`,
+      pane_id: `fedora::w4:p${index}`,
+      project: `devin-${index}`,
+      agent,
+      status: 'working',
+    }));
+    const { container } = render(AgentList, { agents, relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    expect(screen.getAllByRole('img', { name: 'Devin' })).toHaveLength(2);
+    expect(container.querySelectorAll('.agent-logo-generic')).toHaveLength(2);
+    const meta = [...container.querySelectorAll('.agent-meta')].map((element) => element.textContent?.trim());
+    expect(meta).toEqual(['Devin', 'Devin']);
+  });
+
   it('keeps a structured answer local until Submit', async () => {
     const interaction: QuestionInteraction = {
       id: 'question-1', kind: 'single_select', question: 'Where should the adapter live?',
@@ -1047,6 +1142,91 @@ describe('accessible Svelte interactions', () => {
     });
     expect(screen.getByText('fix-auth', { selector: 'summary strong' })).toBeInTheDocument();
     expect(screen.getByText('mobile', { selector: 'summary strong' })).toBeInTheDocument();
+  });
+
+  describe('server filter', () => {
+    const relays = ['Mac', 'Spark'].map((label) => ({ id: label.toLowerCase(), label, url: `wss://${label.toLowerCase()}.example`, token: '' }));
+    const agentOn = (relay: string, status: Agent['status'], project: string): Agent => ({
+      relay_id: relay, relay_label: relay, raw_pane_id: 'p1', pane_id: `${relay}::p1`,
+      project, agent: 'codex', status,
+    });
+    const workspaceOn = (relay: string, label: string): RelayWorkspace => ({
+      relay_id: relay, relay_label: relay, workspace_id: `${relay}-w`, number: 1, label,
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '', cwd: `/home/user/${label}`,
+    });
+    const renderList = (props: Partial<{ agents: Agent[]; relays: typeof relays; workspaces: RelayWorkspace[] }> = {}) => render(AgentList, {
+      agents: [], relays, workspaces: [], responding: new Set<string>(), onopen: vi.fn(), ...props,
+    });
+
+    afterEach(() => {
+      hiddenServers.set([]);
+      relayStore.relayConfigs.set([]);
+    });
+
+    it('stays out of the way with a single computer, even with a stale hidden id', () => {
+      hiddenServers.set(['mac']);
+      renderList({ relays: [relays[0]], agents: [agentOn('mac', 'idle', 'solo project')] });
+      expect(screen.queryByRole('group', { name: 'Show servers' })).not.toBeInTheDocument();
+      expect(screen.getAllByText('solo project').length).toBeGreaterThan(0);
+    });
+
+    it('says so when every server is hidden instead of showing onboarding', async () => {
+      renderList();
+      await fireEvent.click(screen.getByRole('button', { name: 'Mac' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Spark' }));
+      expect(screen.getByText('All servers are hidden.')).toBeInTheDocument();
+      await fireEvent.click(screen.getByRole('button', { name: 'Mac' }));
+      expect(screen.queryByText(/All servers are hidden/)).not.toBeInTheDocument();
+    });
+
+    it('hides a server\'s idle and empty workspaces too', () => {
+      setServerHidden('mac', true);
+      renderList({ workspaces: [workspaceOn('mac', 'mac-empty'), workspaceOn('spark', 'spark-empty')] });
+      expect(screen.queryByText('mac-empty')).not.toBeInTheDocument();
+      expect(screen.getByText('spark-empty')).toBeInTheDocument();
+    });
+
+    it('badges blocked and needs-inspection agents on a hidden server and keeps the choice across remounts', async () => {
+      // Approval blocks and "Needs inspection" both wait on a person; idle panes do not count.
+      const agents = [
+        { ...agentOn('mac', 'blocked', 'mac approval'), attention_kind: 'approval' as const, attention_capable: true, options: ['Approve', 'Deny'] },
+        { ...agentOn('mac', 'blocked', 'mac inspect'), raw_pane_id: 'p2', pane_id: 'mac::p2' },
+        { ...agentOn('mac', 'idle', 'mac idle'), raw_pane_id: 'p3', pane_id: 'mac::p3' },
+      ];
+      const first = renderList({ agents });
+      await fireEvent.click(screen.getByRole('button', { name: 'Mac' }));
+      first.unmount();
+      renderList({ agents });
+      expect(screen.getByRole('button', { name: /^Mac/ })).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByRole('img', { name: '2 need attention while hidden' })).toBeInTheDocument();
+      expect(screen.queryByText('mac approval')).not.toBeInTheDocument();
+    });
+
+    it('tells same-named computers apart', () => {
+      const twins = [
+        { id: 'a', label: 'Mac', url: 'wss://mac.home.lan', token: '' },
+        { id: 'b', label: 'Mac', url: 'wss://mac.office.lan', token: '' },
+      ];
+      renderList({ relays: twins });
+      expect(screen.getByRole('button', { name: 'Mac (mac.home.lan)' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Mac (mac.office.lan)' })).toBeInTheDocument();
+    });
+
+    it('falls back to the id for same-named computers without a URL', () => {
+      renderList({ relays: [{ id: 'gw-a', label: 'Mac', url: '', token: '' }, { id: 'gw-b', label: 'Mac', url: '', token: '' }] });
+      expect(screen.getByRole('button', { name: 'Mac (gw-a)' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Mac (gw-b)' })).toBeInTheDocument();
+    });
+
+    it('forgets a removed hidden server, and every hidden server once one computer is left', () => {
+      relayStore.relayConfigs.set([...relays, { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' }]);
+      setServerHidden('mac', true);
+      setServerHidden('spark', true);
+      relayStore.removeRelay('spark');
+      expect(get(hiddenServers)).toEqual(['mac']);
+      relayStore.removeRelay('fedora');
+      expect(get(hiddenServers)).toEqual([]);
+    });
   });
 
   it('drops an optimistic workspace order once an authoritative snapshot changes membership', async () => {
@@ -1257,6 +1437,148 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
+  const homeListing = { current: { path: '/home/user', label: '~' }, parent: '', directories: [] };
+  const projectListing = { current: { path: '/home/user/project', label: '~/project' }, parent: '/home/user', directories: [] };
+  it.each([
+    ['the home folder, which the relay refuses', '/home/user', homeListing, () => Promise.resolve(homeListing), true],
+    ['a project folder below it', '/home/user/project', projectListing, () => Promise.resolve(projectListing), false],
+    // A failed reload keeps the older listing, which must not veto the selected project folder.
+    ['a project folder whose reload failed over an older home listing', '/home/user/project', homeListing, () => Promise.reject(new CommandError('Relay timed out')), false],
+  ])('offers Start Agent only for a project folder: %s', async (_case, cwd, shown, load, refused) => {
+    const hint = 'Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.';
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' }, capabilities: ['directory_browser'],
+      agentProfiles: [{ id: 'claude', label: 'Claude Code' }],
+      directoryBrowser: shown, directoryLoading: false, directoryError: '',
+    } as unknown as RelayConnectionView;
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    relayStore.connections.set(new Map([['fedora', connection as never]]));
+    const list = vi.spyOn(relayStore, 'listDirectories').mockImplementation(load as never);
+    try {
+      render(LaunchView, { relayId: 'fedora', cwd });
+      const start = screen.getByRole('button', { name: 'Start Agent' }) as HTMLButtonElement;
+      await vi.waitFor(() => expect(list).toHaveBeenCalled());
+      await vi.waitFor(() => expect(start.disabled).toBe(refused));
+      expect(start).toHaveAccessibleDescription(refused ? hint : '');
+      expect(Boolean(screen.queryByText(hint))).toBe(refused);
+    } finally {
+      list.mockRestore();
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('shows the Hermes profile picker only for the Hermes agent', async () => {
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue({
+      current: { path: '/home/user/project', label: 'project' }, parent: '', directories: [],
+    });
+    try {
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'codex', label: 'Codex' }], ['apollo']) as never],
+      ]));
+      render(LaunchView);
+      await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'Agent' })).toHaveValue('codex'));
+      expect(screen.queryByRole('combobox', { name: 'Hermes profile' })).not.toBeInTheDocument();
+
+      // A custom profile whose label mentions Hermes must not open the picker:
+      // only the builtin agent id is accepted by the relay's start validation.
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'project-hermes', label: 'Hermes staging' }], ['apollo']) as never],
+      ]));
+      await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'Agent' })).toHaveValue('project-hermes'));
+      expect(screen.queryByRole('combobox', { name: 'Hermes profile' })).not.toBeInTheDocument();
+
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'hermes', label: 'Hermes' }], ['apollo']) as never],
+      ]));
+      await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'Hermes profile' })).toBeInTheDocument());
+    } finally {
+      list.mockRestore();
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('offers the sticky default as the first Hermes profile option', async () => {
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue({
+      current: { path: '/home/user/project', label: 'project' }, parent: '', directories: [],
+    });
+    try {
+      // hermesprofiles.List always returns Default first, then the named
+      // profiles, so this is the payload the relay really sends.
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'hermes', label: 'Hermes' }], ['default', 'apollo', 'work']) as never],
+      ]));
+      render(LaunchView);
+      const select = screen.getByRole('combobox', { name: 'Hermes profile' }) as HTMLSelectElement;
+      await vi.waitFor(() => expect(select.options.length).toBe(4));
+      // The empty choice and the literal "default" start different profiles, so
+      // they must not read the same. The empty option is the initial selection:
+      // submitting it omits -p and leaves Hermes on its sticky active_profile.
+      expect([...select.options].map((option) => option.value)).toEqual(['', 'default', 'apollo', 'work']);
+      expect([...select.options].map((option) => option.textContent?.trim())).toEqual([
+        'Use my usual setup', 'Main profile (default)', 'apollo', 'work',
+      ]);
+      expect(select.value).toBe('');
+    } finally {
+      list.mockRestore();
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('omits hermes_profile for the default option and sends an explicit choice', async () => {
+    const user = userEvent.setup();
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue({
+      current: { path: '/home/user/project', label: 'project' }, parent: '', directories: [],
+    });
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({
+      type: 'command_result', request_id: 'launch-1', ok: true, data: { pane_id: 'pane-new' },
+    } as CommandResult);
+    vi.spyOn(relayStore, 'waitForAgent').mockResolvedValue(null);
+    vi.spyOn(relayStore, 'showToast').mockImplementation(() => {});
+    try {
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'hermes', label: 'Hermes' }], ['default', 'apollo']) as never],
+      ]));
+      render(LaunchView);
+      const start = screen.getByRole('button', { name: 'Start Agent' });
+      await vi.waitFor(() => expect(start).toBeEnabled());
+
+      await user.click(start);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+      const defaultPayload = send.mock.calls[0][1];
+      expect(defaultPayload.profile_id).toBe('hermes');
+      expect('hermes_profile' in defaultPayload).toBe(false);
+
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Hermes profile' }), 'apollo');
+      // A successful launch clears the name field, so the form needs it again.
+      await user.type(screen.getByLabelText('Name'), 'project-hermes');
+      await vi.waitFor(() => expect(start).toBeEnabled());
+      await user.click(start);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+      expect(send.mock.calls[1][1].hermes_profile).toBe('apollo');
+
+      // Picking the literal default is its own choice: it pins the root home,
+      // unlike the empty option above, so the field must travel.
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Hermes profile' }), 'default');
+      await user.type(screen.getByLabelText('Name'), 'project-hermes');
+      await vi.waitFor(() => expect(start).toBeEnabled());
+      await user.click(start);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+      expect(send.mock.calls[2][1].hermes_profile).toBe('default');
+    } finally {
+      send.mockRestore();
+      list.mockRestore();
+      vi.restoreAllMocks();
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
   it('drops a stale worktree listing that resolves under another workspace dialog', async () => {
     const user = userEvent.setup();
     const workspace = (id: string, label: string): RelayWorkspace => ({
@@ -1352,6 +1674,7 @@ describe('accessible Svelte interactions', () => {
     const user = userEvent.setup();
     const agent: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p9', pane_id: 'fedora::w1:p9',
+      server_session_id: 'primary', terminal_id: 'terminal-p9', generation: 1, agent_session_id: 'draft-session',
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
     };
     vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
@@ -1361,21 +1684,28 @@ describe('accessible Svelte interactions', () => {
       type: 'command_result', request_id: 'prompt-1', ok: true,
     });
     try {
+      relayStore.connections.set(new Map([['fedora', { status: 'connected', capabilities: [] }]] as never));
+      vi.spyOn(relayStore, 'readPane').mockImplementation(() => {});
+      const freshFrame = () => ({ paneId: agent.pane_id, target: { relay_id: agent.relay_id, pane_id: agent.raw_pane_id, server_session_id: agent.server_session_id!, terminal_id: agent.terminal_id!, generation: agent.generation!, agent_session_id: agent.agent_session_id }, content: 'Ready', format: 'plain', noEcho: false, receivedAt: performance.now() });
       const first = render(ConversationHistory, { agent });
-      await user.type(screen.getByRole('textbox', { name: 'Prompt' }), 'Keep me around');
+      await first.rerender({ frame: freshFrame() });
+      await user.type(screen.getByRole('combobox', { name: 'Prompt' }), 'Keep me around');
       first.unmount();
 
       const second = render(ConversationHistory, { agent });
-      expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('Keep me around');
+      expect(screen.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
+      await second.rerender({ frame: freshFrame() });
+      expect(screen.getByRole('combobox', { name: 'Prompt' })).toHaveValue('Keep me around');
       await user.click(screen.getByRole('button', { name: 'Send prompt' }));
       expect(send).toHaveBeenCalledWith(agent, { type: 'submit_prompt', text: 'Keep me around' });
       second.unmount();
 
       render(ConversationHistory, { agent });
-      expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('');
+      expect(screen.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
     } finally {
       clearPromptDraft(agent);
       vi.restoreAllMocks();
+      relayStore.connections.set(new Map());
     }
   });
 });

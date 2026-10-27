@@ -1,0 +1,2 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1786680000000}
+{"type":"context.append_message","message":{"id":"rewritten-user","role":"user","content":[{"type":"text","text":"New same-size."}],"toolCalls":[],"origin":{"kind":"user"}},"time":1786680001000}
