@@ -63,12 +63,11 @@ func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
 	if snapshot.Protocol != 19 || len(snapshot.Agents) != 1 {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
-	events := collectBootstrapTestEvents(t, stream, buffered)
-	if len(events) != 1 || events[0].Event != "pane.closed" {
-		t.Fatalf("events = %#v", events)
+	if len(buffered) != 1 || buffered[0].Event != "pane.closed" {
+		t.Fatalf("buffered events = %#v", buffered)
 	}
 	cache := NewSessionCache(snapshot)
-	changed, err := cache.Apply(events[0])
+	changed, err := cache.Apply(buffered[0])
 	if err != nil || !changed {
 		t.Fatalf("Apply() changed=%v err=%v", changed, err)
 	}
@@ -291,23 +290,6 @@ func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T
 	}
 	if err := stream.Close(); err != nil {
 		t.Fatalf("close fallback stream: %v", err)
-	}
-}
-
-func collectBootstrapTestEvents(t *testing.T, stream *EventStream, buffered []Event) []Event {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	events := append([]Event(nil), buffered...)
-	for {
-		event, err := stream.Next(ctx)
-		if err == io.EOF {
-			return events
-		}
-		if err != nil {
-			t.Fatalf("Next() error = %v", err)
-		}
-		events = append(events, event)
 	}
 }
 
