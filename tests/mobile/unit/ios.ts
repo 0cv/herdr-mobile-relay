@@ -2822,6 +2822,22 @@ test('cold relaunch after termination waits for the new process to publish its p
   assert.equal(a.driver.snapshot().unusable, false);
 });
 
+test('cold relaunch keeps waiting for a first page that publishes after the ordinary attachment window', async () => {
+  const a = await lifecycleReplay('cold-late-publication');
+  await a.owned(() => a.platform.launchInstalledApp());
+  await a.owned(() => a.platform.terminateInstalledApp());
+  a.state.pid = 17001;
+  a.state.blankPublications = 20;
+  const started = Date.now();
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  assert.ok(Date.now() - started > 4_000);
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.platform.evidenceSnapshot().nativePid, '17001');
+  const pending = (a.platform.evidenceSnapshot().events as any[]).filter((event) => event.operation === 'initial-publication-pending');
+  assert.equal(pending.length, 20);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
+
 test('a blank page after a warm relaunch is still an ownership failure', async () => {
   const a = await lifecycleReplay('warm-blank-publication');
   await a.owned(() => a.platform.launchInstalledApp());

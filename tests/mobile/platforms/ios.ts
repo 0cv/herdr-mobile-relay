@@ -8,7 +8,7 @@ import {
   type RuntimeIdentity,
 } from '../support/oracle';
 import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
-import { PhaseBudget } from '../support/budget';
+import { PhaseBudget, timingScale } from '../support/budget';
 import { initializeIOSConfirmationSettings, withIOSConfirmationSettings } from '../support/confirmation-settings';
 import { CommandError, command, commandOutput } from '../support/process';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, iosReceiptWriteStatus, observeIOSReceiptWrite, type IOSLaunchReceipt } from '../support/ios-launch-receipt';
@@ -74,8 +74,11 @@ const IOS_NATIVE_LIST_READINESS_MS = 15_000;
 const IOS_SHARE_SHEET_READINESS_MS = 30_000;
 // Hosted runners have spent more than 70 s reaching Add to Home Screen through the Page Menu, Share sheet and View More, which left less than the Add confirmation's reserved allowance.
 const IOS_INSTALL_PHASE_MS = 240_000;
-// Launch combines Home observation with up to 30 s each for the provider and its web view, so slow runners need room beyond those two waits.
+// Launch combines Home observation with up to 30 s for the provider and 60 s for its web view, so slow runners need room beyond those two waits.
 const IOS_LAUNCH_PHASE_MS = 180_000;
+// A hosted runner took 67 s to start the web view's content process after a cold launch, so the first page can publish late.
+// Like other phase limits, this window is tripled on hosted iOS.
+const IOS_LAUNCH_ATTACHMENT_MS = 60_000;
 const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_GESTURE_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
 
 interface ConfirmationCaptureEvidence {
@@ -1135,7 +1138,7 @@ export class IOSPlatform implements MobilePlatform {
           await this.requireInstalledProviderForeground(foregroundTimeout);
           this.launchObservation.enter('attachment');
           await delay(Math.min(750, phase.remainingMs), phase);
-          await this.attachToInstalledView(Math.min(30_000, phase.remainingMs));
+          await this.attachToInstalledView(Math.min(IOS_LAUNCH_ATTACHMENT_MS, Math.floor(phase.remainingMs / timingScale)));
           this.launchObservation.enter('complete');
           return;
         }
