@@ -262,21 +262,26 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       && record.message.startsWith(`Killing ${pid}:`));
     // The system reaps an isolated helper once Chrome stops binding it; the zygote then reports either the helper's own exit or the kill.
     const reaper = reapers.length === 1 && androidEventDetails(reapers[0].line).reason === 'isolated not needed' ? reapers[0] : undefined;
+    // A helper can also leave on its own while still bound; then the system only records its death with an importance label.
+    const departures = !exits.length && !reapers.length ? records.filter((record) => record.tag === 'ActivityManager' && record.pid === birth.pid
+      && new RegExp(`^Process \\S+ \\(pid ${pid}\\) has died: [a-z]{2,4} *(?:\\+ ?\\d+)? +[A-Z]{2,4} *$`, 'u').test(record.message)) : [];
+    const ending = reaper ?? (departures.length === 1 ? departures[0] : undefined);
+    const departed = !reaper && ending !== undefined;
     const cleanExit = exit?.message === `Process ${pid} exited cleanly (0)`;
     const killedByReaper = Boolean(reaper && exit?.message === `Process ${pid} exited due to signal 9 (Killed)`
       && (reaper.time <= exit.time || reaper.lineNumber < exit.lineNumber));
     const after = (record: LogRecord, previous: LogRecord) => record.time > previous.time
       || (record.time === previous.time && record.lineNumber > previous.lineNumber);
-    const browserDeaths = !exit && reaper ? records.filter((record) => record.tag === 'chromium'
+    const browserDeaths = !exit && ending ? records.filter((record) => record.tag === 'chromium'
       && isChromeBrowserAt(record)
       && new RegExp(`^\\[WARNING:compositor_view\\.cc\\(\\d+\\)\\] Child process died \\(type=\\d+\\) pid=${pid}\\)$`, 'u').test(record.message)
-      && after(record, reaper)) : [];
+      && after(record, ending)) : [];
     // The helper and the zygote stamp their records independently, so the helper's first lines may carry a slightly earlier time than the fork.
     const earliestHelperTime = fork.time - 20;
     const startup = records.filter((record) => record.pid === pid && record.lineNumber < fork.lineNumber);
     const deaths = events.filter((line) => androidEventDetails(line).pid === pid);
     // Chrome can start a helper just before END, so its retirement may finish in the capture that continues after END.
-    const straddlesEnd = [child, reaper, exit, ...deaths.map((line) => records.find((record) => record.line === line))]
+    const straddlesEnd = [child, ending, exit, ...deaths.map((line) => records.find((record) => record.line === line))]
       .some((record) => record && afterEnd(record));
     // A helper that straddles END can have its own kernel audit records delivered after END although stamped before it.
     const lateOwnAudit = (record: LogRecord) => record.pid === pid && receivedAfterEnd(record) && parseAndroidAuditSubject(record.line) !== undefined;
@@ -292,7 +297,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
         && zygoteBirths[0].time <= fork.time && zygoteBirths[0].lineNumber < fork.lineNumber
         && !records.some((record) => record.tag === 'Zygote' && record.message.startsWith(`Process ${fork.pid} exited`)));
     if (!chromeZygote || (exit && (fork.pid !== exit.pid || !(cleanExit || killedByReaper)))
-      || (!exit && (!child || !reaper || reapers.length !== 1 || !after(reaper, child) || !browserDeaths.length))) continue;
+      || (!exit && (!child || !ending || !after(ending, child) || !browserDeaths.length))) continue;
     const conflictingAuditSubject = records.some((record) => record.pid === pid
       && /^type=1400\s+audit\(/u.test(record.message)
       && [...record.message.matchAll(/\sscontext=(\S*)/gu)].some((context) => context[1] !== 'u:r:isolated_app:s0:c512,c768'));
@@ -312,18 +317,18 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     if (records.some((record) => record.pid === pid && record.tag === 'cr_SplitCompatApp'
       && !record.message.endsWith(` processName=${processName} isIsolatedProcess=true`))) continue;
     if (!bounded(fork) || !bounded(birth)
-      || [...(child ? [child] : []), ...(reaper ? [reaper] : []), ...(exit ? [exit] : []), ...browserDeaths,
+      || [...(child ? [child] : []), ...(ending ? [ending] : []), ...(exit ? [exit] : []), ...browserDeaths,
         ...records.filter((record) => record.pid === pid)].some((record) => !observed(record))) continue;
-    const helperEnd = exit || reaper;
+    const helperEnd = exit || ending;
     if (!helperEnd || records.some((record) => (record.tag === 'ActivityManager'
       && [fork.pid, birth.pid].some((producerPid) => record.message.startsWith(`Start proc ${producerPid}:`)))
       || (record.pid === pid && (record.time < earliestHelperTime || record.time > helperEnd.time
         || (!exit && record.time === helperEnd.time && record.lineNumber > helperEnd.lineNumber))))) continue;
     if (deaths.length !== (killedByReaper ? 2 : 1) || (killedByReaper && !deaths.includes(exit!.line))
-      || (!exit && (!reaper || deaths[0] !== reaper.line))) continue;
+      || (!exit && (!ending || deaths[0] !== ending.line))) continue;
     const deathRecords = deaths.filter((line) => line !== exit?.line)
       .map((line) => records.find((record) => record.line === line));
-    if (reaper && !deathRecords.includes(reaper)) continue;
+    if (ending && !deathRecords.includes(ending)) continue;
     if (deathRecords.some((record) => !record || !observed(record) || record.time < earliestHelperTime
       || record.tag !== 'ActivityManager' || record.pid !== birth.pid
       || (() => {
@@ -355,6 +360,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       if (possiblyDuringLifetime && /^(?:PackageManager|PackageInstaller)$/u.test(record.tag) && record.message.includes('com.android.chrome')) return true;
       const mentionsPid = mentionsProcessId(record, pid);
       if (mentionsPid && !observed(record)) return true;
+      if (departed && mentionsPid && record.pid !== pid && ![fork, birth, ending, ...browserDeaths].includes(record)) return true;
       if (record.tag === 'ActivityManager' && mentionsPid && /^(?:Killing |Process .* has died:)/u.test(record.message)
         && !deaths.includes(record.line)) return true;
       if (record.tag === 'Process' && mentionsPid && /Sending signal/u.test(record.message)) return true;

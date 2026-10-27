@@ -1,0 +1,24 @@
+         1793078334.617  5845  5845 I HerdrMeasure: 40445020397 START
+         1793078340.626  5509  5509 D Zygote  : Forked child process 6048
+         1793078340.630  6048  6048 I ocessService0:9: Using CollectorTypeCMC GC.
+         1793078340.631  6048  6048 W ocessService0:9: Unexpected CPU variant for x86: x86_64.
+         1793078340.631  6048  6048 W ocessService0:9: Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default
+         1793078340.645  6048  6048 E ocessService0:9: Not starting debugger since process cannot load the jdwp agent.
+         1793078340.647  6048  6048 D nativeloader: Load libframework-connectivity-tiramisu-jni.so using APEX ns com_android_tethering for caller /apex/com.android.tethering/javalib/framework-connectivity-t.jar: ok
+         1793078340.671   568  2001 I ActivityManager: Start proc 6048:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9/u0ai9 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:9}
+         1793078340.692  6048  6048 D CompatChangeReporter: Compat change id reported: 242716250; UID 90009; state: ENABLED
+         1793078340.699  6048  6048 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar
+         1793078340.699  6048  6048 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.sidecar.jar
+         1793078340.708  6048  6048 I LoadedApk: No resource references to update in package com.google.android.trichromelibrary
+         1793078340.713  6048  6048 I cr_SplitCompatApp: version=131.0.6778.200 (677820038) minSdkVersion=29 isBundle=true processName=com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9 isIsolatedProcess=true
+         1793078340.718  6048  6048 W SystemServiceRegistry: No service published for: uimode
+         1793078340.723  6048  6048 I cr_ChildProcessService: Creating new ChildProcessService pid=6048
+         1793078340.767  6048  6058 I cr_LibraryLoader: Successfully loaded native library
+         1793078340.776  6048  6058 I cr_CachingUmaRecorder: Flushed 3 samples from 3 histograms, 0 samples were dropped.
+         1793078340.791  6048  6058 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+         1793078340.784  6048  6048 W ThreadPoolForeg: type=1400 audit(0.0:231): avc:  denied  { setattr } for  name="model-info.pb" dev="dm-46" ino=361710 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0
+         1793078340.796   568  1224 I ActivityManager: Process com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9 (pid 6048) has died: vis BTOP
+         1793078340.796   568  1224 W ActivityManager: Scheduling restart of crashed service com.android.chrome/org.chromium.content.app.SandboxedProcessService0:9 in 1000ms for connection
+         1793078340.796  5467  5467 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=6048)
+         1793078340.784  6048  6048 W ThreadPoolForeg: type=1400 audit(0.0:232): avc:  denied  { setattr } for  name="model.tflite" dev="dm-46" ino=361744 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0
+         1793078394.980 10695 10695 I HerdrMeasure: 40445020397 END

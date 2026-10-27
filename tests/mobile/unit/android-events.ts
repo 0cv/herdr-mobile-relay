@@ -669,6 +669,50 @@ androidEventTests.push(['hosted 40095544451 Chrome helper without a Zygote exit 
   ]) assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === expected), expected);
 }]);
 
+androidEventTests.push(['hosted 40445020397 helper that leaves while bound retires without a zygote exit only with its own exit and browser observation', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40445020397-helper-departure-without-zygote-exit.log', import.meta.url), 'utf8');
+  const processes = { '369': 'zygote64', '568': 'system_server', '5467': 'com.android.chrome', '5509': 'com.android.chrome_zygote' };
+  const measureDeparture = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = '40445020397';
+    after.measurement!.id = '40445020397';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const line = (pattern: string) => log.split('\n').find((entry) => entry.includes(pattern))!;
+  const death = line('(pid 6048) has died: vis BTOP');
+  const selfExit = line('ChildProcessService: Exiting child process.');
+  const browserDeath = line('Child process died (type=6) pid=6048)');
+  assert.ok(death && selfExit && browserDeath);
+  const result = measureDeparture(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['6048']);
+  assert.deepEqual(result.normalRetirements[0].events, [death]);
+  for (const expected of [selfExit, death, browserDeath]) assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === expected), expected);
+  const at = (time: string, rest: string) => `         ${time} ${rest}`;
+  for (const [name, value] of [
+    ['a death label that names a cause', log.replace('has died: vis BTOP', 'has died: crashed')],
+    ['no own exit message', log.replace(`${selfExit}\n`, '')],
+    ['no browser observation', log.replace(`${browserDeath}\n`, '')],
+    ['a browser observation before the death record', log.replace(`${browserDeath}\n`, '').replace(death, `${browserDeath.replace('1793078340.796', '1793078340.795')}\n${death}`)],
+    ['a low-memory kill naming the helper', log.replace(death, `${at('1793078340.793', '  300   300 I lowmemorykiller: Kill \'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9\' (6048), uid 90009, oom_score_adj 100')}\n${death}`)],
+    ['a native crash in the helper', log.replace(selfExit, `${at('1793078340.790', ' 6048  6058 F libc    : Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0 in tid 6058')}\n${selfExit}`)],
+    ['a crash report from another process naming the helper', log.replace(death, `${at('1793078340.794', ' 6100  6100 F DEBUG   : pid: 6048, tid: 6058, name: ThreadPoolForeg')}\n${death}`)],
+    ['a second death record', log.replace(death, `${death}\n${death.replace('1793078340.796', '1793078340.797')}`)],
+    ['a helper record after the death record', log.replace(browserDeath, `${browserDeath}\n${at('1793078340.800', ' 6048  6058 I chromium: late record')}`)],
+    ['a zygote exit by signal', log.replace(browserDeath, `${browserDeath}\n${at('1793078340.798', ' 5509  5509 I Zygote  : Process 6048 exited due to signal 9 (Killed)')}`)],
+    ['a death record from a process other than the system server', log.replace('   568  1224 I ActivityManager: Process', '  5467  1224 I ActivityManager: Process')],
+    ['a system kill for another reason', log.replace(death, `${at('1793078340.794', '  568  1224 I ActivityManager: Killing 6048:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9/u0a145i-8991 (adj 0): stop com.android.chrome')}\n${death}`)],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    const rejected = measureDeparture(value);
+    assert.deepEqual(rejected.issues, [], name);
+    assert.deepEqual(rejected.normalRetirements, [], name);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('(pid 6048)')), name);
+  }
+}]);
+
 androidEventTests.push(['synthetic missing-Zygote-exit retirement rejects incomplete or adverse helper observations', async () => {
   const log = await hostedMissingExitLog();
   const selfExit = '         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.\n';
