@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +16,7 @@ import {
   type BundleExpectation,
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
-import { PhaseBudget } from '../support/budget';
+import { parseTimingScale, PhaseBudget, timingScale } from '../support/budget';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
@@ -40,6 +40,7 @@ import {
   assertNoRelayInstall,
   assertPhoneUpdateAcknowledged,
   assertPhoneUpdateNotAcknowledged,
+  assertUpdateProgressClosed,
   assertRunningIdentity,
   assertStandalone,
   assertStandaloneOwnership,
@@ -51,16 +52,29 @@ import {
 } from '../support/oracle';
 
 import { androidTransitionTests } from './android-transitions';
-import { androidEnvironmentTests } from './android-environment';
+import { androidEventTests } from './android-events';
+import { androidGmsSettleTests } from './android-gms-settle';
+import { androidEnvironmentTests, validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnosticEvent, type FakeAdbDiagnosticStage, type FakeAdbExitCategory, type FakeAdbFixturePathCategory } from './android-environment';
 import { androidTransportTests } from './android-transport';
-import { runIOSRegressions } from './ios';
+import { nativeStartupTests } from './native-startup';
+import { xctestOwnerTests } from './xctest-owner';
+import { xctestOutputTests } from './xctest-output';
+import { iosRegressionCases, runIOSRegressions } from './ios';
 import { confirmationSettingsTests } from './confirmation-settings';
 import { initialSettingsTests } from './initial-settings';
 import { scenarioRunnerTests } from './scenario-runner';
+import { androidProductEnvironmentTests, checkCLI, measurementIdentity, persistAndroidProof, resultContract, driverFixture } from './android-product-environment';
+import { mobileWorkflowTests } from './mobile-workflow';
 import { webdriverInterruptionTests } from './webdriver-interruption';
+import { stableTestIdentities, type TestCaseIdentity } from './test-registry';
+import { testShardTests } from './test-shards-tests';
+import { testShardCiTests } from './test-shard-ci-tests';
+import { testOutputTests } from './test-output-tests';
 
 type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
+let selectedIOSIds: readonly string[] | undefined;
+let explicitSelection = false;
 function test(name: string, body: () => Promise<TestOutcome>): void {
   tests.push([name, body]);
 }
@@ -212,11 +226,13 @@ test('evidence validation enforces matrix identity and platform-specific native 
     script: '/assets/old.js', style: '/assets/old.css', webHash: 'd'.repeat(64),
   };
   const expectedCandidateIdentity = {
-    version: '0.21.0', assets: 364, build: 'new-build', entry: '/new/index.html',
+    version: '0.21.0', assets: 364, build: 'd'.repeat(64), entry: '/new/index.html',
     script: '/assets/new.js', style: '/assets/new.css', webHash,
   };
   const result = {
-    schema: 1, result: 'passed', suite: 'release', platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
+    ...resultContract(measurementIdentity({ platform: 'ios', suite: 'release', measurementId: 'ios-not-applicable' })),
+    evidence: { driver: driverFixture(), teardown: { driver: driverFixture(true) } },
+    suite: 'release', platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
     origin: 'https://fixture.test', source_commit: sourceCommit, source_run_head_sha: headSha, candidate_web_hash: webHash,
     initial_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
@@ -246,6 +262,7 @@ test('evidence validation enforces matrix identity and platform-specific native 
   assert.equal(serialized.credential_evidence.relays.alpha.invitationAuthCount, 1);
   assert.equal(serialized.credential_evidence.relays.beta.credentialAuthCount, 2);
   const options = {
+    contract: 'product' as const, runId: result.identity.runId, attempt: result.identity.attempt,
     directory: root,
     matrix: [{ platform: 'ios', baseline: '0.20.10', scenario: 'historical' }],
     suite: 'release', candidateCommit: sourceCommit, sourceRunHeadSha: headSha, candidateWebHash: webHash,
@@ -286,26 +303,10 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await validateMobileEvidence(options);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, phone_completion: { ...result.phone_completion, rawPlanPresent: false } }));
   await assert.rejects(validateMobileEvidence(options), /raw phone-plan/);
-  const historicalBaselineIdentity = {
-    ...expectedBaselineIdentity, version: '0.20.8', assets: 361, build: 'historical-build',
-    entry: '/historical/index.html', script: '/assets/historical.js', style: '/assets/historical.css', webHash: 'e'.repeat(64),
-  };
-  const historicalResult = {
-    ...result,
-    baseline: '0.20.8',
-    initial_identity: { ...result.initial_identity, ...historicalBaselineIdentity },
-    oracle_controls: ['HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:0.20.8'],
-    phone_completion: { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false },
-  };
-  const historicalOptions = {
-    ...options,
-    matrix: [{ platform: 'ios', baseline: '0.20.8', scenario: 'historical' }],
-    baselineIdentities: [{ name: '0.20.8', identity: historicalBaselineIdentity }],
-  };
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify(historicalResult));
-  await validateMobileEvidence(historicalOptions);
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: { ...historicalResult.phone_completion, rawPlanPresent: false } }));
-  await validateMobileEvidence(historicalOptions);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, phone_completion: { ...result.phone_completion, phoneRequired: false } }));
+  await assert.rejects(validateMobileEvidence(options), /has no phone plan/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, phone_completion: { ...result.phone_completion, phoneAcknowledged: false } }));
+  await assert.rejects(validateMobileEvidence(options), /completed phone acknowledgement/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, origin: 'http://fixture.test' }));
   await assert.rejects(validateMobileEvidence(options), /HTTPS origin/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, final_identity: { ...result.final_identity, build: 'wrong-build' } }));
@@ -316,10 +317,11 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await assert.rejects(validateMobileEvidence({ ...options, candidateWebHash: 'd'.repeat(64) }), /wrong candidate web hash/);
   await mkdir(join(root, 'duplicate'), { recursive: true });
   await writeFile(join(root, 'duplicate', 'mobile-result.json'), JSON.stringify(result));
-  await assert.rejects(validateMobileEvidence(options), /expected 1 result files, found 2/);
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, platform: 'android' }));
+  await assert.rejects(validateMobileEvidence(options), /missing or duplicated/);
+  const androidIdentity = measurementIdentity();
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, ...resultContract(androidIdentity), ...await persistAndroidProof(root, androidIdentity), platform: 'android', suite: 'smoke' }));
   await rm(join(root, 'duplicate'), { recursive: true, force: true });
-  await assert.rejects(validateMobileEvidence({ ...options, matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /invalid android provider|nativeActivity/);
+  await assert.rejects(validateMobileEvidence({ ...options, suite: 'smoke', matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /invalid android provider|nativeActivity/);
 });
 
 test('final evidence checkout precedes artifact download', async () => {
@@ -530,6 +532,29 @@ test('Android emulator-console parser handles names, terminators, and errors', a
   assert.equal(parseAndroidAvdName('OK\n'), undefined);
   assert.equal(parseAndroidAvdName('KO: unknown command\n'), undefined);
   assert.equal(parseAndroidAvdName('\r\n'), undefined);
+  const event = (stage: FakeAdbDiagnosticStage, logExists: boolean, fixturePathCategory: FakeAdbFixturePathCategory = 'expected-owned-path', childExitCategory?: FakeAdbExitCategory): FakeAdbDiagnosticEvent => ({
+    stage, logExists, fixturePathCategory, ...(childExitCategory ? { childExitCategory } : {}),
+  });
+  const valid: FakeAdbDiagnostic = {
+    schema: 1,
+    fixtureCreate: event('fixture-create', false),
+    children: [{ events: [
+      event('fake-child-launch', false),
+      event('log-producer-append', true),
+      event('fake-child-exit', true, 'expected-owned-path', 'success'),
+    ] }],
+  };
+  assert.doesNotThrow(() => validateFakeAdbDiagnostic(valid));
+  const invalid = [
+    { ...valid, children: [] },
+    { ...valid, children: [{ events: [event('fake-child-launch', false), event('fake-child-exit', true, 'expected-owned-path', 'success')] }] },
+    { ...valid, children: [{ events: [
+      event('fake-child-launch', false, 'mismatched'),
+      event('log-producer-append', true, 'mismatched'),
+      event('fake-child-exit', true, 'mismatched', 'success'),
+    ] }] },
+  ];
+  for (const diagnostic of invalid) assert.throws(() => validateFakeAdbDiagnostic(diagnostic), /FAKE_ADB_DIAGNOSTIC/u);
 });
 
 test('Android environment events require authoritative package or process evidence', async () => {
@@ -542,6 +567,7 @@ interface AndroidEnvironmentFixture {
   root: string;
   fixtureDirectory: string;
   log: string;
+  diagnostic: string;
   environment: NodeJS.ProcessEnv;
 }
 
@@ -661,14 +687,92 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
   const gms = await readFile(join(fixtureDirectory, 'module-change-gms.dump'), 'utf8');
   await writeFile(join(fixtureDirectory, 'module-change-gms.dump'), gms.replace('    flags=', '    usesLibraryFiles:\n      /data/app/module-changed/base.apk\n    flags='));
   const log = join(root, 'adb.log');
+  const diagnostic = join(root, 'fake-adb-diagnostic.json');
+  const initialDiagnostic: FakeAdbDiagnostic = {
+    schema: 1,
+    fixtureCreate: { stage: 'fixture-create', logExists: existsSync(log), fixturePathCategory: 'expected-owned-path' },
+    children: [],
+  };
   const adb = join(binDirectory, 'adb');
-  await writeFile(adb, `#!${process.execPath}\nimport ${JSON.stringify(repositoryPath('tests/mobile/unit/android-fake-adb.ts'))};\n`, { mode: 0o700 });
+  await writeFile(adb, `#!${process.execPath}
+import { basename, dirname } from 'node:path';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+const diagnosticFile = ${JSON.stringify(diagnostic)};
+const observedLog = () => process.env.FAKE_ANDROID_LOG || '';
+const logExists = () => {
+  const path = observedLog();
+  return path ? existsSync(path) : false;
+};
+const logSize = () => {
+  const path = observedLog();
+  if (!path) return -1;
+  try { return statSync(path).size; } catch { return -1; }
+};
+const fixturePathCategory = () => {
+  const path = observedLog();
+  if (!path) return 'absent';
+  const fixtureDirectory = process.env.FAKE_ANDROID_FIXTURE_DIR || '';
+  if (!fixtureDirectory) return 'mismatched';
+  const name = basename(path);
+  return dirname(path) === dirname(fixtureDirectory) && (name === 'adb.log' || name === 'requests.log')
+    ? 'expected-owned-path' : 'mismatched';
+};
+const diagnosticEvent = (stage, childExitCategory) => {
+  const event = { stage, logExists: logExists(), fixturePathCategory: fixturePathCategory() };
+  if (childExitCategory) event.childExitCategory = childExitCategory;
+  return event;
+};
+const readDiagnostic = () => JSON.parse(readFileSync(diagnosticFile, 'utf8'));
+const writeDiagnostic = value => writeFileSync(diagnosticFile, JSON.stringify(value));
+let childIndex = -1;
+try {
+  const value = readDiagnostic();
+  value.children.push({ events: [diagnosticEvent('fake-child-launch')] });
+  childIndex = value.children.length - 1;
+  writeDiagnostic(value);
+} catch {}
+const initialLogSize = logSize();
+const record = (stage, childExitCategory) => {
+  if (childIndex < 0) return;
+  try {
+    const value = readDiagnostic();
+    const child = value.children[childIndex];
+    if (!child) return;
+    child.events.push(diagnosticEvent(stage, childExitCategory));
+    writeDiagnostic(value);
+  } catch {}
+};
+let signaled = false;
+const signalCodes = new Map([['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]);
+for (const [signal, exitCode] of signalCodes) process.once(signal, () => {
+  signaled = true;
+  process.exit(exitCode);
+});
+let importFailed = false;
+process.once('exit', code => {
+  const currentLogSize = logSize();
+  if (currentLogSize >= 0 && (initialLogSize < 0 || currentLogSize > initialLogSize)) record('log-producer-append');
+  record('fake-child-exit', signaled ? 'signal' : importFailed ? 'launch-error' : code === 0 ? 'success' : 'nonzero');
+});
+try {
+  await import(${JSON.stringify(repositoryPath('tests/mobile/unit/android-fake-adb.ts'))});
+} catch {
+  importFailed = true;
+  process.exitCode = 1;
+}
+`, { mode: 0o700 });
   await writeFile(join(root, 'ownership'), 'android:emulator-5554\n');
   await mkdir(join(root, 'avd', 'herdr-mobile-ci-fixture.avd'), { recursive: true });
   await mkdir(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64'), { recursive: true });
   await writeFile(join(root, 'avd', 'herdr-mobile-ci-fixture.avd', 'config.ini'), 'image.sysdir.1=system-images/android-35/google_apis/x86_64/\ntag.id=google_apis\nabi.type=x86_64\n');
   await writeFile(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64', 'source.properties'), 'Pkg.Revision=12\nAndroidVersion.ApiLevel=35\nSystemImage.TagId=google_apis\nSystemImage.Abi=x86_64\n');
   await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nif [ "$*" != "-no-window -version" ]; then\n  printf "qemu-system-x86_64: error while loading shared libraries: libpulse.so.0\\n" >&2\n  exit 127\nfi\nprintf "Android emulator version 35.0.2.0\\n"\n', { mode: 0o700 });
+  // macOS scans a newly written executable on its first launch, which can exceed the short adb timeouts these tests use.
+  // The warm-up runs before the diagnostic file exists and without a log path, so it records nothing.
+  for (const [tool, args] of [[adb, ['version']], [join(binDirectory, 'emulator'), ['-no-window', '-version']]] as const) {
+    spawnSync(tool, args, { env: { PATH: process.env.PATH || '' }, stdio: 'ignore', timeout: 30_000 });
+  }
+  await writeFile(diagnostic, JSON.stringify(initialDiagnostic));
   const properties = {
     'ro.build.fingerprint': 'fixture/fingerprint',
     'ro.build.id': 'AP4A',
@@ -689,6 +793,7 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
     root,
     fixtureDirectory,
     log,
+    diagnostic,
     environment: {
       ...process.env,
       PATH: `${binDirectory}:${process.env.PATH || ''}`,
@@ -747,18 +852,7 @@ async function runAndroidEnvironmentFixtureCheck(
   const output = join(fixture.root, 'check.json');
   await writeFile(logFile, `09-10 08:45:00.000 2000 2000 I HerdrMeasure: android-test START\n${log}09-10 08:46:00.000 2000 2000 I HerdrMeasure: android-test END\n`);
   await writeFile(join(fixture.root, 'operations.json'), '[]');
-  let passed = true;
-  try {
-    execFileSync('bun', [
-      process.env.ANDROID_ENVIRONMENT_SOURCE || 'tests/mobile/android-environment.ts', 'check', '--before', before, '--after', after, '--log', logFile, '--output', output,
-      '--operations', join(fixture.root, 'operations.json'),
-    ], { cwd: repositoryRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch {
-    passed = false;
-  }
-  const result = JSON.parse(await readFile(output, 'utf8')) as { passed: boolean; issues: string[] };
-  assert.equal(result.passed, passed);
-  return result;
+  return checkCLI(fixture, { before, after, log: logFile, operations: join(fixture.root, 'operations.json'), output });
 }
 
 test('Android recorded package evidence remains complete and separate from source-derived listings', async () => {
@@ -972,41 +1066,9 @@ test('Android launch failures are classified without hiding command diagnostics'
   assert.equal(androidLaunchFailureKind(new Error('command timed out')), 'timeout');
 });
 
-test('Android final launch verifies readiness only after bootstrap teardown', async () => {
-  const platform = new AndroidPlatform({
-    origin: 'https://fixture.test',
-    appiumUrl: 'http://fake.test',
-    outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '',
-    setupUrl: '',
-    deviceId: 'emulator-5554',
-    budget: new PhaseBudget('android-launch-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
-  });
-  const shortcut = {
-    id: 'shortcut-id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
-    url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac',
-  };
-  const events: string[] = [];
-  const driver = platform.driver as any;
-  (platform as any).waitForChromeShortcut = async () => { events.push('shortcut'); return shortcut; };
-  driver.close = async () => { events.push('close'); };
-  (platform as any).launchChromeShortcut = async () => { events.push('launch'); };
-  (platform as any).waitForInstalledTarget = async () => { events.push('target'); };
-  (platform as any).waitForChromeDevTools = async () => { events.push('devtools'); };
-  (platform as any).createChromeSession = async () => { events.push('create'); };
-  (platform as any).attachToInstalledView = async () => { events.push('attach'); };
-  const ownershipRoot = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-ownership-'));
-  const ownershipFile = join(ownershipRoot, 'owned');
-  await writeFile(ownershipFile, 'android:emulator-5554\n');
-  const previousOwnershipFile = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
-  process.env.MOBILE_DEVICE_OWNERSHIP_FILE = ownershipFile;
-  try {
-    await platform.launchInstalledApp();
-  } finally {
-    if (previousOwnershipFile === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
-    else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousOwnershipFile;
-  }
-  assert.deepEqual(events, ['shortcut', 'close', 'launch', 'target', 'devtools', 'create', 'attach']);
+test('Android initial launch retains bootstrap and verifies readiness after signed launch', async () => {
+  const { runAndroidRetainedLaunchRegressions } = await import('./android-retained-launch');
+  await runAndroidRetainedLaunchRegressions(['recorded-two-page']);
 });
 
 test('Android Chrome DevTools readiness recognizes the published socket', async () => {
@@ -1015,37 +1077,20 @@ test('Android Chrome DevTools readiness recognizes the published socket', async 
 });
 
 test('Android installed attachment selects the owned standalone window instead of a browser window', async () => {
-  const platform = new AndroidPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'emulator-5554',
-    budget: new PhaseBudget('android-attachment-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
-  });
-  (platform as any).installedTarget = {
-    packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity',
-    shortcut: { id: 'id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay', url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac' },
-  };
-  (platform as any).isInstalledTargetForeground = async () => true;
-  const driver = platform.driver as any;
-  let selectedWindow = '';
-  driver.contexts = async () => ['NATIVE_APP', 'CHROMIUM'];
-  driver.contextMetadataRaw = async () => [];
-  driver.switchContext = async () => undefined;
-  driver.windowHandles = async () => ['browser-window', 'installed-window'];
-  driver.switchWindow = async (handle: string) => { selectedWindow = handle; };
-  driver.currentUrl = async () => 'https://fixture.test/';
-  driver.execute = async () => selectedWindow === 'installed-window'
-    ? { origin: 'https://fixture.test', standalone: true, provider: 'android-standalone' }
-    : { origin: 'https://fixture.test', standalone: false, provider: 'browser' };
-  await platform.attachToInstalledView();
-  assert.equal((platform as any).selectedInstalledWindow, 'installed-window');
+  const { runAndroidRetainedLaunchRegressions } = await import('./android-retained-launch');
+  await runAndroidRetainedLaunchRegressions(['recorded-two-page']);
 });
 
 test('Android web controls use supported locators and preserve ownership failures', async () => {
+  const { retainedFixture } = await import('./android-retained-fixture');
   type ControlMode = 'settings' | 'ordinary' | 'disabled' | 'hidden' | 'none';
   const makeHarness = async (initialMode: ControlMode, timeoutMs = 30_000) => {
     const budget = new PhaseBudget(`android-web-control-${initialMode}`, { timeoutMs, recoveryLimit: 1 });
     let mode = initialMode;
-    let selected = '';
+    const handle = '753D4398F5ABC414D3DAABBF0B329743';
+    const startedAt = Date.now();
+    let failedNative = false;
+    let selected = handle;
     let attachmentChecks = 0;
     let requests = 0;
     const locators: Array<{ using: string; value: string }> = [];
@@ -1060,6 +1105,7 @@ test('Android web controls use supported locators and preserve ownership failure
       if (path === '/session') return response({});
       if (path.endsWith('/contexts')) return response(['NATIVE_APP', 'CHROMIUM']);
       if (path.endsWith('/window/handles')) return response(['installed-window']);
+      if (path.endsWith('/window') && init?.method === 'GET') return response(selected);
       if (path.endsWith('/window') && init?.method === 'POST') {
         selected = String(body.handle || '');
         return response(null);
@@ -1067,7 +1113,14 @@ test('Android web controls use supported locators and preserve ownership failure
       if (path.endsWith('/url')) return response('https://fixture.test/');
       if (path.endsWith('/execute/sync')) {
         if (body.script === 'mobile: getContexts') return response([]);
-        return response({ origin: 'https://fixture.test', standalone: selected === 'installed-window', provider: selected === 'installed-window' ? 'android-standalone' : 'browser' });
+        if (body.script === 'mobile: inspectRetainedChromeTargets') {
+          attachmentChecks++;
+          const result = retainedFixture([handle], selected, handle, startedAt);
+          result.original.sessionId = 'session';
+          if (failedNative) result.after.native.activity = 'com.android.launcher3.Launcher';
+          return response(result);
+        }
+        return response({ origin: 'https://fixture.test', standalone: selected === handle, provider: selected === handle ? 'android-standalone' : 'browser' });
       }
       if (path.endsWith('/element') && init?.method === 'POST') {
         const locator = { using: String(body.using || ''), value: String(body.value || '') };
@@ -1104,10 +1157,7 @@ test('Android web controls use supported locators and preserve ownership failure
       shortcut: { id: 'id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay', url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac' },
     };
     (platform as any).installedPackage = 'com.android.chrome';
-    (platform as any).foregroundEvidence = async () => {
-      attachmentChecks += 1;
-      return { packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity', pid: '1', raw: '' };
-    };
+    (platform as any).retainedOwner = { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([handle], handle, handle, startedAt).original };
     return {
       platform,
       client,
@@ -1116,6 +1166,7 @@ test('Android web controls use supported locators and preserve ownership failure
       get requests() { return requests; },
       get attachmentChecks() { return attachmentChecks; },
       setMode(value: ControlMode) { mode = value; },
+      failNative() { failedNative = true; },
     };
   };
 
@@ -1129,9 +1180,7 @@ test('Android web controls use supported locators and preserve ownership failure
   assert.ok(harness.locators.some((locator) => locator.value.includes('starts-with(@aria-label')));
 
   const beforeOwnershipFailure = harness.requests;
-  (harness.platform as any).foregroundEvidence = async () => ({
-    packageName: 'com.google.android.apps.nexuslauncher', activity: 'com.android.launcher3.Launcher', pid: '2', raw: '',
-  });
+  harness.failNative();
   await assert.rejects(() => harness.platform.clickWebText('Mixed'), /ANDROID_CONTEXT_OWNERSHIP/);
   const afterOwnershipFailure = harness.requests;
   await assert.rejects(() => harness.platform.clickWebText('Mixed'), /ANDROID_CONTEXT_OWNERSHIP/);
@@ -1140,7 +1189,7 @@ test('Android web controls use supported locators and preserve ownership failure
 
   for (const mode of ['disabled', 'hidden', 'none'] as const) {
     const blocked = await makeHarness(mode, 1_200);
-    await assert.rejects(() => blocked.platform.clickWebText(mode === 'none' ? 'Missing' : mode[0].toUpperCase() + mode.slice(1)), /APPIUM_BUTTON|PHASE_BUDGET_EXHAUSTED|disabled|hidden|not found/iu);
+    await assert.rejects(() => blocked.platform.clickWebText(mode === 'none' ? 'Missing' : mode[0].toUpperCase() + mode.slice(1)), /APPIUM_BUTTON|PHASE_BUDGET_EXHAUSTED|ANDROID_CONTEXT_OWNERSHIP|disabled|hidden|not found/iu);
     assert.equal(blocked.clicks.length, 0);
   }
 
@@ -1231,7 +1280,9 @@ test('Android Chrome shortcut output preserves the signed launch fields', async 
   assert.deepEqual(shortcuts[0], {
     id: 'shortcut-id', flags: '0x28a', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
     url: 'https://localhost:38289/', scope: 'https://localhost:38289/', mac: 'mac+/=',
-    source: '7', displayMode: '3', orientation: '0',
+    source: '7', displayMode: '3', orientation: '0', intentId: 'shortcut-id',
+    action: 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP',
+    packageName: 'com.android.chrome', component: undefined,
   });
   const args = androidChromeShortcutArgs('emulator-5554', shortcuts[0]);
   const platform = new AndroidPlatform({
@@ -1299,10 +1350,10 @@ test('runtime script observations satisfy baseline and candidate validation cont
   const definitions = JSON.parse(await readFile(join(repositoryRoot, 'tests/mobile/baselines.json'), 'utf8')).baselines as Array<Record<string, unknown>>;
   const origin = 'https://fixture.test';
   const candidate: BundleIdentity = {
-    version: '0.21.0',
-    assets: 999,
+    version: String(definitions[0].version),
+    assets: Number(definitions[0].assets) + 1,
     build: 'c'.repeat(64),
-    entry: `/builds/0.21.0-999-${'c'.repeat(16)}/index.html`,
+    entry: `/builds/${definitions[0].version}-${Number(definitions[0].assets) + 1}-${'c'.repeat(16)}/index.html`,
     script: '/assets/app-candidate.js',
     style: '/assets/app-candidate.css',
     scriptSha256: '1'.repeat(64),
@@ -1321,11 +1372,9 @@ test('runtime script observations satisfy baseline and candidate validation cont
       scriptSha256: '1'.repeat(64),
       styleSha256: '2'.repeat(64),
       webHash: String(definition.webHash),
-      descriptor: definition.name === '0.20.10',
+      descriptor: true,
     };
-    const metadata = definition.name === '0.20.10'
-      ? { version: expected.version, assets: expected.assets, build: expected.build, entry: expected.entry }
-      : { version: expected.version, assets: expected.assets };
+    const metadata = { version: expected.version, assets: expected.assets, build: expected.build, entry: expected.entry };
     const location = new URL(expected.entry, origin);
     const hasDescriptor = expected.descriptor;
     const document = {
@@ -1359,7 +1408,9 @@ test('runtime script observations satisfy baseline and candidate validation cont
     const directory = await mkdtemp(join(tmpdir(), 'herdr-mobile-runtime-contract-'));
     const sourceCommit = 'a'.repeat(40);
     const result = {
-      schema: 1, result: 'passed', suite: 'smoke', platform: 'android', baseline: expected.version,
+      ...resultContract(measurementIdentity({ baseline: expected.version, sourceRunHeadSha: sourceCommit, candidateWebHash: candidate.webHash, candidateBuild: candidate.build })),
+      ...await persistAndroidProof(directory, measurementIdentity({ baseline: expected.version, sourceRunHeadSha: sourceCommit, candidateWebHash: candidate.webHash, candidateBuild: candidate.build })),
+      suite: 'smoke', platform: 'android', baseline: expected.version,
       candidate: 'candidate-proof', origin, source_commit: sourceCommit, source_run_head_sha: sourceCommit,
       candidate_web_hash: candidate.webHash,
       initial_identity: initial,
@@ -1378,16 +1429,14 @@ test('runtime script observations satisfy baseline and candidate validation cont
         beta: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['beta'], connections: 1 },
       } },
       preference_preserved: true,
-      oracle_controls: expected.version === '0.20.10' ? [] : [`HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:${expected.version}`],
-      phone_completion: expected.version === '0.20.10'
-        ? { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true }
-        : { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false },
+      phone_completion: { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true },
       faults_exercised: [`corrupt:${candidate.script}`],
       fault_identity: { id: 'contract', generation: '1', kind: 'corrupt', path: candidate.script },
       fixture_requests: [{ release: 'candidate', path: candidate.script, fault: 'corrupt', fault_id: 'contract', fault_generation: '1' }],
     };
     await writeFile(join(directory, 'mobile-result.json'), JSON.stringify(result));
     await validateMobileEvidence({
+      contract: 'product', runId: result.identity.runId, attempt: result.identity.attempt,
       directory,
       matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
       suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
@@ -1401,6 +1450,7 @@ test('runtime script observations satisfy baseline and candidate validation cont
         final_identity: { ...result.final_identity, buildFromApplication: false },
       }));
       await assert.rejects(validateMobileEvidence({
+        contract: 'product', runId: result.identity.runId, attempt: result.identity.attempt,
         directory,
         matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
         suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
@@ -1484,6 +1534,14 @@ test('oracle observes phone completion instead of only runtime readiness', async
   assert.throws(() => assertPhoneUpdateAcknowledged({
     phoneRequired: true, phoneAcknowledged: false, phoneState: 'loading', visibleCompletion: false, rawPlanPresent: true,
   }), /PHONE_COMPLETION_MISSING/);
+  assert.doesNotThrow(() => assertUpdateProgressClosed({
+    phoneRequired: false, phoneAcknowledged: false, phoneState: '', visibleCompletion: false, rawPlanPresent: false,
+  }));
+  for (const reopened of [
+    { phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true, rawPlanPresent: true },
+    { phoneRequired: false, phoneAcknowledged: false, phoneState: '', visibleCompletion: false, rawPlanPresent: true },
+    { phoneRequired: false, phoneAcknowledged: false, phoneState: '', visibleCompletion: true, rawPlanPresent: false },
+  ]) assert.throws(() => assertUpdateProgressClosed(reopened), /UPDATE_PROGRESS_REOPENED/);
   assert.throws(() => assertPhoneUpdateNotAcknowledged({
     phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false, rawPlanPresent: true,
   }), /PHONE_PLAN_MISSING/);
@@ -1583,6 +1641,22 @@ test('diagnostic redaction covers URL and escaped values', async () => {
   });
   assert.deepEqual(sanitizeValue({ invitationAuthCount: 2, credentialAuthCount: 'credential-secret', connections: 1 }), {
     invitationAuthCount: 2, credentialAuthCount: '[REDACTED]', connections: 1,
+  });
+});
+
+test('diagnostic redaction keeps Android install paths whose random names look like secrets', async () => {
+  const directory = '/data/app/~~Q1w2E3r4T5y6U7i8O9p0Aa==/com.google.android.trichromelibrary_677820038-AbCdEfGhIjKlMnOp-rStUv==';
+  assert.notEqual(redactText(directory), directory);
+  const identity = {
+    codePath: directory,
+    apkPaths: [`package:${directory}/base.apk`],
+    dependencyConfig: { usesLibraryFiles: [`${directory}/base.apk`] },
+  };
+  assert.deepEqual(sanitizeValue(identity), identity);
+  const secret = 'A'.repeat(43);
+  const chrome = `/data/app/com.android.chrome-${'B'.repeat(20)}/base.apk`;
+  assert.deepEqual(sanitizeValue({ withQuery: `${chrome}?setup=${secret}`, bare: `/data/app/x/${secret}` }), {
+    withQuery: `${chrome}?setup=[REDACTED]`, bare: '/data/app/x/[REDACTED]',
   });
 });
 
@@ -1851,6 +1925,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
     pageSource: async () => iosShareHierarchy(0),
     findAll: async () => { throw fatal; },
     mobile: async () => { iosScrolls += 1; },
+    nativeRequestPolicy: (phase: PhaseBudget) => ({ budget: phase }),
   };
   await assert.rejects(() => (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Missing' }], 'Missing', 20_000), (error: unknown) => error === fatal);
   assert.equal(iosScrolls, 0);
@@ -1895,6 +1970,7 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
       : { x: 16, y: 700 - iosScrolls * 50, width: 361, height: 40 },
     attribute: async () => 'true',
     mobile: async () => { iosScrolls += 1; },
+    nativeRequestPolicy: (phase: PhaseBudget) => ({ budget: phase }),
   };
   assert.equal(await (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Target' }], 'Target', 20_000), 'ios-target');
   assert.equal(iosScrolls, 1);
@@ -1922,6 +1998,7 @@ test('iOS native scrolling rejects a hidden match when the hierarchy shows no pr
     : { x: 16, y: 700, width: 361, height: 40 };
   driver.attribute = async (element: string, name: string) => element === 'target' && name === 'visible' ? 'false' : 'true';
   driver.mobile = async () => { gestures += 1; };
+  driver.nativeRequestPolicy = (phase: PhaseBudget) => ({ budget: phase });
   await assert.rejects(
     () => (platform as any).findNativeScrollable([{ using: 'accessibility id', value: 'Add to Home Screen' }], 'Add to Home Screen', 20_000),
     /made no verified progress/,
@@ -1946,6 +2023,7 @@ test('iOS native action controls stop when readiness is indeterminate', async ()
     : { x: 16, y: 200, width: 361, height: 40 };
   driver.attribute = async (_element: string, name: string) => name === 'hittable' ? null : 'true';
   driver.mobile = async () => { gestures += 1; };
+  driver.nativeRequestPolicy = (phase: PhaseBudget) => ({ budget: phase });
   await assert.rejects(
     () => (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 20_000),
     /control readiness is indeterminate/,
@@ -1981,6 +2059,7 @@ test('iOS progress ignores browser bars and rejects a dismissed action list', as
       if (dismissAfterGesture) dismissed = true;
       else bars = '50%';
     };
+    driver.nativeRequestPolicy = (phase: PhaseBudget) => ({ budget: phase });
     let failure = '';
     try {
       await (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 20_000);
@@ -2008,6 +2087,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   let sheetOpen = false;
   let scrolls = 0;
   let shareSourceReads = 0;
+  let confirming = false;
   const savedConfirmationSettings = { waitForIdleTimeout: 7, animationCoolOffTimeout: 0.8 };
   const initialSettings = { ...savedConfirmationSettings, snapshotMaxDepth: 50 };
   let settings: Record<string, unknown> = { ...initialSettings };
@@ -2015,6 +2095,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   const settingsReads: Array<Record<string, unknown>> = [];
   const scrollArguments: Array<Record<string, unknown>> = [];
   const clicks: string[] = [];
+  const requests: Array<{ path: string; script?: string }> = [];
   const source = () => {
     if (!sheetOpen) return iosSafariHierarchy();
     if (shareSourceReads++ === 0) return iosShareHierarchy(0, false);
@@ -2025,6 +2106,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   const driver = new AppiumClient('http://fake.test', 100, async (input, init) => {
     const path = new URL(String(input)).pathname;
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, any> : {};
+    requests.push({ path, script: body.script });
     if (path === '/session') return new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 });
     if (path.endsWith('/context')) return new Response(JSON.stringify({ value: null }), { status: 200 });
     if (path.endsWith('/appium/settings')) {
@@ -2038,7 +2120,10 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     }
     if (path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert' } }, { status: 404 });
     if (body.script === 'mobile: queryAppState') return Response.json({ value: 4 });
-    if (path.endsWith('/source')) return new Response(JSON.stringify({ value: source() }), { status: 200 });
+    if (path.endsWith('/source')) {
+      if (confirming) return new Response('confirmation source must not be requested', { status: 500 });
+      return new Response(JSON.stringify({ value: source() }), { status: 200 });
+    }
     if (path.endsWith('/screenshot')) return new Response(JSON.stringify({ value: '' }), { status: 200 });
     if (path.endsWith('/execute/sync')) {
       if (body.script === 'mobile: activeAppInfo') return new Response(JSON.stringify({ value: { bundleId: 'com.apple.mobilesafari', pid: '42' } }), { status: 200 });
@@ -2063,8 +2148,8 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     if (path.endsWith('/element') && init?.method === 'POST') {
       const value = String(body.value || '');
       if (value.includes('ShareButton')) return new Response(JSON.stringify({ value: element('share') }), { status: 200 });
+      if (value.includes('XCUIElementTypeNavigationBar')) return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
       if (value.includes('Add to Home Screen') && sheetOpen && scrolls >= 1) return new Response(JSON.stringify({ value: element('add-home') }), { status: 200 });
-      if (value.includes('Add')) return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
       return absent();
     }
     if (path.includes('/attribute/')) {
@@ -2084,6 +2169,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
       const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
       clicks.push(id);
       if (id === 'share') sheetOpen = true;
+      if (id === 'add-home') confirming = true;
       if (id === 'add-button') {
         assert.equal(settings.waitForIdleTimeout, 1);
         assert.equal(settings.animationCoolOffTimeout, 0.2);
@@ -2105,6 +2191,21 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     { element: 'container', direction: 'down', distance: 0.75 },
   ]);
   assert.deepEqual(clicks, ['share', 'add-home', 'add-button']);
+  const capture = platform.evidenceSnapshot().confirmationCapture as any;
+  assert.equal(capture.status, 'not-requested-product-first');
+  assert.equal(capture.source, undefined);
+  assert.equal(capture.projection, undefined);
+  assert.equal(capture.acknowledgement.completed, true);
+  assert.equal(capture.acknowledgement.outcome, 'success');
+  const rowClick = requests.findIndex(request => request.path.endsWith('/element/add-home/click'));
+  assert.ok(rowClick >= 0);
+  const following = requests.slice(rowClick + 1);
+  assert.equal(following[0].script, 'mobile: activeAppInfo');
+  assert.ok(following[1].path.endsWith('/element'));
+  assert.equal(following.some(request => /\/(?:source|screenshot)$/u.test(request.path)), false);
+  const foreground = driver.snapshot().commands.find(command => command.timing?.dispatchedOrdinal === capture.acknowledgement.dispatchedOrdinal + 1);
+  assert.equal(foreground?.path, following[0].path);
+  assert.equal(foreground?.timing?.scope, 'ios-install-confirmation');
   const observationSettings = { defaultActiveApplication: 'auto', respectSystemAlerts: true };
   const confirmationSettings = { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 };
   assert.deepEqual(settingsWrites, [observationSettings, confirmationSettings, savedConfirmationSettings]);
@@ -2170,11 +2271,45 @@ test('iOS openurl failures distinguish transient, terminal, and timeout outcomes
   assert.equal(iosOpenURLFailureKind(new Error('ETIMEDOUT')), 'timeout');
 });
 
+test('mobile timing scale stretches phase views and request caps only when configured', async () => {
+  assert.equal(parseTimingScale(undefined), 1);
+  assert.equal(parseTimingScale(''), 1);
+  assert.equal(parseTimingScale('2'), 2);
+  assert.equal(parseTimingScale('3'), 3);
+  for (const invalid of ['0.5', '5', 'fast', 'Infinity']) assert.throws(() => parseTimingScale(invalid), /MOBILE_TIMING_SCALE/u);
+  assert.equal(timingScale, parseTimingScale(process.env.MOBILE_TIMING_SCALE));
+  const budgetModule = new URL('../support/budget.ts', import.meta.url).pathname;
+  const webdriverModule = new URL('../support/webdriver.ts', import.meta.url).pathname;
+  const script = `
+    const { PhaseBudget } = await import(${JSON.stringify(budgetModule)});
+    const { AppiumClient } = await import(${JSON.stringify(webdriverModule)});
+    let now = 0;
+    const root = new PhaseBudget('root', { timeoutMs: 100_000, now: () => now });
+    const child = root.phaseView('child', 10_000);
+    const reserved = root.phaseView('reserved', 200_000, 1_000);
+    const client = new AppiumClient('http://fake.test', 30_000, async (input) => new URL(String(input)).pathname === '/session'
+      ? new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 })
+      : new Response(JSON.stringify({ value: '<AppiumAUT></AppiumAUT>' }), { status: 200 }));
+    await client.create({ capabilities: {} });
+    await client.pageSource(1_000);
+    const source = client.snapshot().commands.find((command) => command.path.endsWith('/source'));
+    client.setBudget(root);
+    const native = root.phaseView('native', 3_000);
+    await client.command('/window/rect', 'GET', undefined, 4_000, client.nativeRequestPolicy(native));
+    const admitted = client.snapshot().commands.find((command) => command.path.endsWith('/window/rect'));
+    console.log(JSON.stringify({ root: root.remainingMs, child: child.remainingMs, reserved: reserved.remainingMs, source: source.timeoutMs, native: admitted.timeoutMs, admitted: admitted.timing?.admitted }));
+  `;
+  const output = execFileSync(process.execPath, ['--no-env-file', '-e', script], {
+    env: { ...process.env, MOBILE_TIMING_SCALE: '2' }, encoding: 'utf8', timeout: 30_000,
+  });
+  assert.deepEqual(JSON.parse(output.trim().split('\n').at(-1)!), { root: 100_000, child: 20_000, reserved: 98_000, source: 2_000, native: 8_000, admitted: true });
+});
+
 test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'simulator-1',
-    budget: new PhaseBudget('ios-discovery-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
+    budget: new PhaseBudget('ios-discovery-test', { timeoutMs: 60_000, recoveryLimit: 1 }),
   });
   let discoveries = 0;
   const contexts: string[] = [];
@@ -2199,7 +2334,7 @@ test('iOS WebKit discovery retries until Safari publishes a delayed page', async
   await driver.create({ capabilities: {} });
   (platform as any).driver = driver;
   driver.setBudget((platform as any).budget);
-  await (platform as any).waitForSafariFixturePage('https://fixture.test/setup', 46_000, (platform as any).budget);
+  await (platform as any).waitForSafariFixturePage('https://fixture.test/setup', 96_000, (platform as any).budget);
   assert.ok(discoveries >= 9);
   assert.deepEqual(contexts, ['WEBVIEW_1', 'NATIVE_APP']);
 });
@@ -2298,25 +2433,255 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
   assert.deepEqual(contexts, ['NATIVE_APP', 'WEBVIEW_OLD', 'NATIVE_APP', 'WEBVIEW_NEW']);
 });
 
-for (const [name, body] of androidTransitionTests) test(name, body);
+for (const [name, body] of [...androidTransitionTests, ...androidEventTests, ...androidGmsSettleTests]) test(name, body);
 for (const [name, body] of scenarioRunnerTests) test(name, body);
+for (const [name, body] of androidProductEnvironmentTests) test(name, body);
+for (const [name, body] of mobileWorkflowTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
-for (const [name, body] of androidTransportTests) test(name, body);
-test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
+for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests]) test(name, body);
+test('iOS recorded publication, installation and navigation protocol regressions', async () =>
+  runIOSRegressions(selectedIOSIds, !explicitSelection));
+test('Android CI gates the shared local Appium launch path', async () => {
+  await import('./android-appium-ci');
+});
+test('Android retained post-attachment and response-shape refusals', async () => {
+  const { runAndroidRetainedResponseRegressions } = await import('./android-retained-responses');
+  await runAndroidRetainedResponseRegressions();
+});
+test('Android retained passive inspection decoder and ownership regressions', async () => {
+  const { runAndroidRetainedInspectionRegressions } = await import('./android-retained-inspection');
+  await runAndroidRetainedInspectionRegressions();
+});
+test('Android retained signed launch and explicit lifecycle regressions', async () => {
+  const { runAndroidRetainedLaunchRegressions } = await import('./android-retained-launch');
+  await runAndroidRetainedLaunchRegressions();
+});
+test('Android attachment command refusals latch without discovery retry', async () => {
+  const { runAndroidAttachmentRefusalRegressions } = await import('./android-attachment-refusal');
+  await runAndroidAttachmentRefusalRegressions();
+});
 test('Android socket metadata preserves fresh native and selected document ownership', async () => {
   const { runAndroidSocketRegressions } = await import('./android-socket');
   await runAndroidSocketRegressions();
 });
-
-let failures = 0;
-for (const [name, body] of tests) {
+for (const [name, body] of [...testShardTests, ...testShardCiTests, ...testOutputTests]) test(name, body);
+test('unit runner registration sentinel', async () => {
+  const filename = process.env.MOBILE_UNIT_REGISTRATION_SENTINEL;
+  if (filename) await writeFile(filename, 'body-ran');
+});
+test('unit runner registry ids distinguish repeated display titles', async () => {
+  const first = stableTestIdentities('outer', ['Repeated title', 'Repeated title']);
+  const second = stableTestIdentities('outer', ['Repeated title', 'Repeated title']);
+  assert.notEqual(first[0]!.id, first[1]!.id);
+  assert.deepEqual(first, second);
+});
+test('unit runner listing and selection interface is deterministic and registration-only', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-unit-registry-'));
+  const marker = join(root, 'body-ran');
+  const runner = repositoryPath('tests/mobile/unit/run.ts');
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    BUN_OPTIONS: '--no-env-file',
+    MOBILE_UNIT_FILTER: '^unit runner registration sentinel$',
+    MOBILE_UNIT_REGISTRATION_SENTINEL: marker,
+  };
+  delete environment.IOS_TEST_FILTER;
+  const invoke = (args: string[]) => execFileSync(process.execPath, ['--no-env-file', runner, ...args], {
+    cwd: repositoryRoot, env: environment, encoding: 'utf8', timeout: 15_000, maxBuffer: 1_000_000,
+  });
+  const assertRejected = (args: string[], expected: RegExp) => {
+    const result = spawnSync(process.execPath, ['--no-env-file', runner, ...args], {
+      cwd: repositoryRoot, env: environment, encoding: 'utf8', timeout: 15_000, maxBuffer: 1_000_000, stdio: 'pipe',
+    });
+    assert.equal(result.error, undefined, `runner could not reject arguments: ${args.join(' ')}`);
+    assert.equal(result.status, 2, `runner accepted invalid arguments: ${args.join(' ')}`);
+    assert.equal(result.stdout, '');
+    assert.match(String(result.stderr), expected);
+  };
   try {
-    const outcome = await body();
-    process.stdout.write(outcome ? `ok - ${name} # SKIP ${outcome}\n` : `ok - ${name}\n`);
-  } catch (error) {
-    failures += 1;
-    process.stderr.write(`not ok - ${name}: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+    const first = invoke(['--list-tests']);
+    const second = invoke(['--list-tests']);
+    assert.equal(first, second);
+    assert.equal(existsSync(marker), false);
+    const listing = JSON.parse(first) as { schema: number; cases: UnitTestCase[] };
+    assert.equal(listing.schema, 1);
+    assert.deepEqual(listing.cases, unitTestInventory);
+    assert.equal(new Set(listing.cases.map((entry) => entry.id)).size, listing.cases.length);
+    assert.ok(listing.cases.some((entry) => entry.scope === 'ios-inner'));
+    for (const entry of listing.cases.filter((candidate) => candidate.scope === 'ios-inner')) {
+      assert.equal(entry.parentId, iosWrapperId);
+    }
+    assertRejected(['--select-tests', 'unknown-registration-id'], /unknown test id/u);
+    assertRejected(['--select-tests', 'first,,second'], /malformed test selection/u);
+    assertRejected(['--list-tests', 'unexpected'], /does not accept additional arguments/u);
+    const innerCase = unitTestInventory.find((entry) => entry.scope === 'ios-inner');
+    assert.ok(innerCase);
+    assertRejected(['--select-tests', `${iosWrapperId},${innerCase.id}`], /select either the iOS wrapper/u);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
+});
+test('unit runner explicit selection matches default filtered execution', async () => {
+  const name = 'Android launch failures are classified without hiding command diagnostics';
+  const selected = unitTestInventory.filter((entry) => entry.scope === 'outer' && entry.name === name);
+  assert.equal(selected.length, 1);
+  const runner = repositoryPath('tests/mobile/unit/run.ts');
+  const environment: NodeJS.ProcessEnv = { ...process.env, BUN_OPTIONS: '--no-env-file' };
+  delete environment.MOBILE_UNIT_FILTER;
+  delete environment.IOS_TEST_FILTER;
+  const invoke = (args: string[], env: NodeJS.ProcessEnv) => {
+    const result = spawnSync(process.execPath, ['--no-env-file', runner, ...args], {
+      cwd: repositoryRoot, env, encoding: 'utf8', timeout: 15_000, maxBuffer: 1_000_000, stdio: 'pipe',
+    });
+    assert.equal(result.error, undefined, `runner could not run: ${args.join(' ')}`);
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.equal(result.stderr, '', `healthy selected or filtered runs must keep stderr empty for shard output validation: ${args.join(' ')}`);
+    return result.stdout;
+  };
+  const selectedOutput = invoke(['--select-tests', selected[0]!.id], environment);
+  const filteredOutput = invoke([], { ...environment, MOBILE_UNIT_FILTER: `^${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$` });
+  assert.equal(selectedOutput, filteredOutput);
+  assert.equal(selectedOutput, `ok - ${name}\n`);
+  const selectedWithUnrelatedFilters = invoke(['--select-tests', selected[0]!.id], {
+    ...environment, MOBILE_UNIT_FILTER: '^no selected outer case$', IOS_TEST_FILTER: '^no selected inner case$',
+  });
+  assert.equal(selectedWithUnrelatedFilters, selectedOutput);
+  const innerName = 'iOS recorded initial publication waits passively for the same page before actual document binding';
+  const selectedInner = unitTestInventory.find((entry) => entry.scope === 'ios-inner' && entry.name === innerName);
+  assert.ok(selectedInner);
+  const selectedInnerOutput = invoke(['--select-tests', selectedInner.id], environment);
+  const filteredInnerOutput = invoke([], {
+    ...environment,
+    MOBILE_UNIT_FILTER: `^${iosWrapperName.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`,
+    IOS_TEST_FILTER: `^${innerName.slice('iOS '.length).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`,
+  });
+  assert.equal(selectedInnerOutput, filteredInnerOutput);
+  assert.equal(selectedInnerOutput, `ok - iOS ${innerName.slice('iOS '.length)}\nok - ${iosWrapperName}\n`);
+  const selectedInnerWithUnrelatedFilters = invoke(['--select-tests', selectedInner.id], {
+    ...environment, MOBILE_UNIT_FILTER: '^no selected outer case$', IOS_TEST_FILTER: '^no selected inner case$',
+  });
+  assert.equal(selectedInnerWithUnrelatedFilters, selectedInnerOutput);
+});
+test('unit runner filters fail closed when no cases match', async () => {
+  const names = tests.map(([name]) => name);
+  assert.throws(() => matchingUnitTestNames('(?!)', names), /MOBILE_UNIT_FILTER matched no test cases/u);
+  assert.equal(matchingUnitTestNames('^unit runner registration sentinel$', names).size, 1);
+
+  const previousFilter = process.env.IOS_TEST_FILTER;
+  process.env.IOS_TEST_FILTER = '(?!)';
+  try {
+    await assert.rejects(() => runIOSRegressions(undefined, true), /no cases matched IOS_TEST_FILTER/u);
+  } finally {
+    if (previousFilter === undefined) delete process.env.IOS_TEST_FILTER;
+    else process.env.IOS_TEST_FILTER = previousFilter;
+  }
+});
+
+type UnitTestCase = TestCaseIdentity & { parentId?: string };
+type UnitRunnerOptions = { mode: 'list' } | { mode: 'run'; selectedIds?: string[] };
+const iosWrapperName = 'iOS recorded publication, installation and navigation protocol regressions';
+const outerTestIdentities = stableTestIdentities('outer', tests.map(([name]) => name));
+const iosWrapperId = outerTestIdentities.find((entry) => entry.name === iosWrapperName)?.id;
+if (!iosWrapperId) throw new Error('iOS regression wrapper is not registered');
+const unitTestInventory: UnitTestCase[] = [
+  ...outerTestIdentities,
+  ...iosRegressionCases.map((entry) => ({ ...entry, parentId: iosWrapperId })),
+];
+if (new Set(unitTestInventory.map((entry) => entry.id)).size !== unitTestInventory.length) {
+  throw new Error('unit test registration ids are not unique');
 }
-if (failures) process.exitCode = 1;
+
+function parseUnitRunnerOptions(args: string[]): UnitRunnerOptions {
+  if (args.length === 0) return { mode: 'run' };
+  if (args[0] === '--list-tests') {
+    if (args.length !== 1) throw new Error('--list-tests does not accept additional arguments');
+    return { mode: 'list' };
+  }
+  let selection: string;
+  if (args[0] === '--select-tests' && args.length === 2) selection = args[1]!;
+  else if (args.length === 1 && args[0]!.startsWith('--select-tests=')) selection = args[0]!.slice('--select-tests='.length);
+  else throw new Error('usage: unit/run.ts [--list-tests | --select-tests <comma-separated-ids>]');
+  const selectedIds = selection.split(',');
+  if (!selection || selection.trim() !== selection || selectedIds.some((id) => !id || id.trim() !== id)
+    || new Set(selectedIds).size !== selectedIds.length) {
+    throw new Error('malformed test selection');
+  }
+  const knownIds = new Set(unitTestInventory.map((entry) => entry.id));
+  const unknownId = selectedIds.find((id) => !knownIds.has(id));
+  if (unknownId) throw new Error(`unknown test id: ${unknownId}`);
+  return { mode: 'run', selectedIds };
+}
+
+function matchingUnitTestNames(filter: string, names: readonly string[]): Set<string> {
+  const matcher = new RegExp(filter, 'u');
+  const matchedNames = new Set(names.filter((name) => matcher.test(name)));
+  if (!matchedNames.size) throw new Error('MOBILE_UNIT_FILTER matched no test cases');
+  return matchedNames;
+}
+
+async function runUnitTests(): Promise<void> {
+  let options: UnitRunnerOptions;
+  try {
+    options = parseUnitRunnerOptions(process.argv.slice(2));
+  } catch (error) {
+    process.stderr.write(`unit runner arguments: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  if (options.mode === 'list') {
+    process.stdout.write(`${JSON.stringify({ schema: 1, cases: unitTestInventory })}\n`);
+    return;
+  }
+  explicitSelection = options.selectedIds !== undefined;
+  let selectedOuterIds: Set<string> | undefined;
+  if (options.selectedIds) {
+    const selectedCases = options.selectedIds.map((id) => unitTestInventory.find((entry) => entry.id === id)!);
+    const selectedInnerCases = selectedCases.filter((entry) => entry.scope === 'ios-inner');
+    const selectsIOSWrapper = options.selectedIds.includes(iosWrapperId!);
+    if (selectedInnerCases.length && selectsIOSWrapper) {
+      process.stderr.write('unit runner arguments: select either the iOS wrapper or nested iOS ids, not both\n');
+      process.exitCode = 2;
+      return;
+    }
+    selectedOuterIds = new Set(selectedCases.filter((entry) => entry.scope === 'outer').map((entry) => entry.id));
+    if (selectedInnerCases.length) {
+      selectedOuterIds.add(iosWrapperId!);
+      selectedIOSIds = selectedInnerCases.map((entry) => entry.id);
+    }
+  }
+  let filteredNames: Set<string> | undefined;
+  if (!explicitSelection && process.env.MOBILE_UNIT_FILTER) {
+    try {
+      filteredNames = matchingUnitTestNames(process.env.MOBILE_UNIT_FILTER, tests.map(([name]) => name));
+    } catch (error) {
+      process.stderr.write(`unit runner filter: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  let failures = 0;
+  let executedTests = 0;
+  for (const [index, [name, body]] of tests.entries()) {
+    if (selectedOuterIds && !selectedOuterIds.has(outerTestIdentities[index]!.id)) continue;
+    if (filteredNames && !filteredNames.has(name)) continue;
+    executedTests++;
+    try {
+      const outcome = await body();
+      process.stdout.write(outcome ? `ok - ${name} # SKIP ${outcome}\n` : `ok - ${name}\n`);
+    } catch (error) {
+      failures += 1;
+      process.stderr.write(`not ok - ${name}: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+    }
+  }
+  if (!executedTests) {
+    const reason = explicitSelection ? 'explicit test selection' : process.env.MOBILE_UNIT_FILTER ? 'MOBILE_UNIT_FILTER' : 'registered cases';
+    process.stderr.write(`unit runner: no test cases matched ${reason}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (failures) process.exitCode = 1;
+}
+
+await runUnitTests();

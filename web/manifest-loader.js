@@ -166,4 +166,47 @@
     ? '/setup.webmanifest'
     : '/manifest.webmanifest';
   document.head.append(manifestLink);
+
+  function claimStaleBuildRedirect(deployedEntry, arrivalToken, token) {
+    const key = 'herdr_stale_build_redirect';
+    try {
+      let previous = null;
+      try {
+        previous = JSON.parse(sessionStorage.getItem(key) || 'null');
+      } catch {
+        previous = null;
+      }
+      const elapsed = Date.now() - Number(previous?.at);
+      const repeated = arrivalToken
+        ? arrivalToken === previous?.token
+        : elapsed >= 0 && elapsed < 30_000;
+      if (previous?.entry === deployedEntry && repeated) return false;
+      sessionStorage.setItem(key, JSON.stringify({ entry: deployedEntry, token, at: Date.now() }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // A Home Screen app can keep a build-specific address and reopen that build
+  // from the browser cache after an update; open the deployed build instead.
+  const documentEntry = location.pathname.replace(/index\.html$/, '');
+  const documentReload = new URLSearchParams(location.search).get('herdr_reload') || '';
+  if (/^\/builds\/[A-Za-z0-9._-]+\/$/.test(documentEntry)) {
+    const checkStarted = performance.now();
+    fetch('/version.json', { cache: 'no-store' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((deployed) => {
+        const deployedEntry = typeof deployed?.entry === 'string' ? deployed.entry.replace(/index\.html$/, '') : '';
+        if (!/^\/builds\/[A-Za-z0-9._-]+\/$/.test(deployedEntry) || deployedEntry === documentEntry) return;
+        const token = `stale-${Date.now()}`;
+        if (performance.now() - checkStarted > 30_000 || !claimStaleBuildRedirect(deployedEntry, documentReload, token)) return;
+        const target = new URL('/index.html', location.origin);
+        target.search = location.search;
+        target.searchParams.set('herdr_reload', token);
+        target.hash = location.hash;
+        location.replace(target.href);
+      })
+      .catch(() => {});
+  }
 })();
