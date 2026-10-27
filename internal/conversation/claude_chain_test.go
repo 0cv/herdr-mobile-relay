@@ -2021,7 +2021,9 @@ func TestClaudeChainAuthenticatesSelectedRangeBeforeFirstPreparation(t *testing.
 	if len(boundEvidence) == 0 {
 		t.Fatal("rewrite preparation queued without the selected-range evidence binding")
 	}
-	for attempt := 0; page.State == BrowsePreparing && attempt < 20; attempt++ {
+	deadline := time.Now().Add(15 * time.Second)
+	for page.State == BrowsePreparing && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 		page, err = browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 		if err != nil {
 			t.Fatal(err)

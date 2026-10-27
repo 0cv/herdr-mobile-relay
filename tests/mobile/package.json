@@ -3,15 +3,17 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "engines": {
-    "bun": ">=1.4.0",
-    "node": "24.12.0"
+    "bun": ">=1.4.2",
+    "node": "24.21.0"
   },
   "scripts": {
     "lint": "eslint .",
     "check": "tsc --noEmit",
     "test:unit": "bun unit/run.ts",
+    "test:android-inspection": "bash unit/android-inspection-check.sh",
+    "test:android-attachment": "bun unit/android-retained-launch.ts --recorded-two-page",
     "prepare:bundle": "bun prepare.ts",
     "prepare:current": "bun prepare-current.ts",
     "test:cache-recovery": "bun integration/cache-recovery.ts",
@@ -20,10 +22,10 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@types/node": "26.2.0",
-    "eslint": "10.8.1",
-    "globals": "17.11.0",
+    "@types/node": "24.13.5",
+    "eslint": "10.10.0",
+    "globals": "17.12.0",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.67.0"
+    "typescript-eslint": "8.70.0"
   }
 }

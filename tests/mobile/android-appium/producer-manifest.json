@@ -1,0 +1,140 @@
+{
+  "compiler": "6.0.3",
+  "method": "exact unchanged-character relocation; no declaration compiler emit claimed",
+  "files": {
+    "lib/commands/context/exports.ts": {
+      "before": "b7e79648fed5ea20bc4b156909c800c865ab8d564471e307351bf33f8f02d84e",
+      "after": "a96797fe004d84c299ab2410a826b82e545e4d2ca22e8b48945057396a2a5a54"
+    },
+    "build/lib/commands/context/exports.d.ts": {
+      "before": "c5934848eace52582caea25590a9b4ded5d490bcfb7a32bbdba6d21f7a07b899",
+      "after": "c5934848eace52582caea25590a9b4ded5d490bcfb7a32bbdba6d21f7a07b899"
+    },
+    "build/lib/commands/context/exports.d.ts.map": {
+      "before": "aecedcc9bbf6e30aeed5e38f9e6656aef8038848e4221ba602ac496f492dfc26",
+      "after": "15aa6cd823b578f4dc5a8c222b5952d7c1f0e5b293fb9c249657ed70d183edaa"
+    },
+    "build/lib/commands/context/exports.js": {
+      "before": "036e18f793b271286cd9a11f139d57e45f75463de90f9b80f7b581d261870382",
+      "after": "cbc4591e872ac03327f985d73cc51f37707767d6da99a278cc70b767a1600879"
+    },
+    "build/lib/commands/context/exports.js.map": {
+      "before": "1469550f39137a76c15b6e4638b06f611b49a18d8a361f1bae93922f043d83b6",
+      "after": "2b993814a95b257f8e6fb44d8afb2d3f751cc52870a69f18f6d8e98e8b3f91c5"
+    },
+    "lib/commands/context/helpers.ts": {
+      "before": "86330af558911f7a80a1608d5dc180fe2572b30382e6269f41125ad31840b069",
+      "after": "214861d002e9fad67b25d9f6c1cf68d211f06254362af778e41427ed1d010401"
+    },
+    "build/lib/commands/context/helpers.d.ts": {
+      "before": "bb9f014c162817fa339161417d67d59e5a97516d17b0ea8a5cda501217407b82",
+      "after": "bb9f014c162817fa339161417d67d59e5a97516d17b0ea8a5cda501217407b82"
+    },
+    "build/lib/commands/context/helpers.d.ts.map": {
+      "before": "d91c3fc73a2b934ad167af9c846b0091cd88503ce168c748cff42d7ba63effb2",
+      "after": "560705ca9a129211e599c505c51871a732cb31436104da5aa0703a0178c1ad70"
+    },
+    "build/lib/commands/context/helpers.js": {
+      "before": "4e1635e86a1ddb130d931ece4c104ae569a35992368fc93e3dc53a0907de21ff",
+      "after": "14d4111197345f9ff9fd3a6d9e065e805a3b677e9fda85f014363dd12407536d"
+    },
+    "build/lib/commands/context/helpers.js.map": {
+      "before": "e44f8eedcb0b935b898a8d770a73bbad631783a49a86b93a20b0aa9e636f5ef5",
+      "after": "9a11e429648a6d427f5b3ed45ff0a3b044621a4994b07de87b0ca6edefd51bba"
+    }
+  },
+  "checks": {
+    "exports": {
+      "publicSurfaceIdentical": true,
+      "explicitExportReturnTypes": true,
+      "declarationBytesUnchanged": true,
+      "declarationMappedPositions": 360,
+      "runtimeMappedPositions": 2370,
+      "runtimeMapEmbedsExactTransformedSource": true,
+      "sourceMappingURLsResolve": true
+    },
+    "helpers": {
+      "publicSurfaceIdentical": true,
+      "explicitExportReturnTypes": true,
+      "declarationBytesUnchanged": true,
+      "declarationMappedPositions": 237,
+      "runtimeMappedPositions": 4299,
+      "runtimeMapEmbedsExactTransformedSource": true,
+      "sourceMappingURLsResolve": true
+    }
+  },
+  "authoredMethod": "Byte-for-byte authored CommonJS and declaration inputs in source and runtime directories; no compiler output or source map claimed for these files",
+  "authored": {
+    "lib/commands/context/adb-inspection.cjs": {
+      "source": "adb-inspection.cjs",
+      "sha256": "88b27e6a9b52a8c22aa47c44f75314cbd155c717ce33589c5215148ee7aa9aa1"
+    },
+    "lib/commands/context/adb-inspection.d.cts": {
+      "source": "adb-inspection.d.cts",
+      "sha256": "1a33c105cf0a43846215241e0ffd2f85a642200ae2116540f22bf2b3ce61f2a1"
+    },
+    "lib/commands/context/retained-inspection.cjs": {
+      "source": "retained-inspection.cjs",
+      "sha256": "8d22a5ad4523802d19303a7947be4f97179c1b962c087c63f95b57e08cdcda5a"
+    },
+    "lib/commands/context/retained-inspection.d.cts": {
+      "source": "retained-inspection.d.cts",
+      "sha256": "863cc166ea0304af7cf822457e083a557649d32df77f907fa257f37770e6e20c"
+    },
+    "lib/commands/context/target-inspection.cjs": {
+      "source": "target-inspection.cjs",
+      "sha256": "c75d4ac660c00c685f3da113fe0044d6c07039e495645c712e21c58af173c690"
+    },
+    "lib/commands/context/target-inspection.d.cts": {
+      "source": "target-inspection.d.cts",
+      "sha256": "13c33343d646c50262bbc049b403425a51137a784713c953cc5fcdcc324136a1"
+    },
+    "build/lib/commands/context/adb-inspection.cjs": {
+      "source": "adb-inspection.cjs",
+      "sha256": "88b27e6a9b52a8c22aa47c44f75314cbd155c717ce33589c5215148ee7aa9aa1"
+    },
+    "build/lib/commands/context/adb-inspection.d.cts": {
+      "source": "adb-inspection.d.cts",
+      "sha256": "1a33c105cf0a43846215241e0ffd2f85a642200ae2116540f22bf2b3ce61f2a1"
+    },
+    "build/lib/commands/context/retained-inspection.cjs": {
+      "source": "retained-inspection.cjs",
+      "sha256": "8d22a5ad4523802d19303a7947be4f97179c1b962c087c63f95b57e08cdcda5a"
+    },
+    "build/lib/commands/context/retained-inspection.d.cts": {
+      "source": "retained-inspection.d.cts",
+      "sha256": "863cc166ea0304af7cf822457e083a557649d32df77f907fa257f37770e6e20c"
+    },
+    "build/lib/commands/context/target-inspection.cjs": {
+      "source": "target-inspection.cjs",
+      "sha256": "c75d4ac660c00c685f3da113fe0044d6c07039e495645c712e21c58af173c690"
+    },
+    "build/lib/commands/context/target-inspection.d.cts": {
+      "source": "target-inspection.d.cts",
+      "sha256": "13c33343d646c50262bbc049b403425a51137a784713c953cc5fcdcc324136a1"
+    },
+    "lib/commands/context/kernel-namespace.cjs": {
+      "source": "kernel-namespace.cjs",
+      "sha256": "1b61dc13c290bb86607c234e1252915a58d8088dba8f5869d9e9cf96099f1f48"
+    },
+    "lib/commands/context/kernel-namespace.d.cts": {
+      "source": "kernel-namespace.d.cts",
+      "sha256": "24786c39c8563ab29d2ca8820d8dbfdab32d0e7e6154f1e0e95bb35cf9f1a057"
+    },
+    "build/lib/commands/context/kernel-namespace.cjs": {
+      "source": "kernel-namespace.cjs",
+      "sha256": "1b61dc13c290bb86607c234e1252915a58d8088dba8f5869d9e9cf96099f1f48"
+    },
+    "build/lib/commands/context/kernel-namespace.d.cts": {
+      "source": "kernel-namespace.d.cts",
+      "sha256": "24786c39c8563ab29d2ca8820d8dbfdab32d0e7e6154f1e0e95bb35cf9f1a057"
+    }
+  },
+  "inputs": {
+    "appium-runtime-manifest.json": "1d14bd9592fb1bf076abdd520f3e96c0f9007361cda17cf1e2cc5fe99e5e4063",
+    "declaration-map.ts": "a69a5e8d10082bee60f98c84c14d8e51073fa546f530833f43e361dafea9519c",
+    "gate.ts": "7dab383e84fc32490e7a82be4969f370ba1bf7f819835360fa920305e458a7bb",
+    "producer-transform.json": "7f8166dc99ec6d9487104299904357e1732a087bfa5e33eba5e1d666ade003de",
+    "runtime-manifest.json": "d8418ab84297f350737b4318b43b01b4e406918329cc569c2d0ab780fdda2dce"
+  }
+}
