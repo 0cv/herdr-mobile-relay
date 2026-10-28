@@ -59,7 +59,7 @@ const assertAndroidSdkSetupContract = (source: string, path: string): void => {
   const steps = androidSdkSetupSteps(source);
   assert.equal(steps.length, 1, `${path}: expected one Android SDK setup step`);
   const step = steps[0];
-  assert.match(step, /^\s+uses: android-actions\/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4\.0\.1\s*$/mu);
+  assert.match(step, /^\s+uses: android-actions\/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4\.0\.4\s*$/mu);
   const lines = step.split('\n');
   const stepIndent = lineIndent(lines[0]);
   const withLines = lines.flatMap((line, index) => line.trim() === 'with:' && lineIndent(line) === stepIndent + 2 ? [index] : []);
