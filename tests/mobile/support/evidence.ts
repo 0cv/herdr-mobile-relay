@@ -136,7 +136,7 @@ export async function validateAndroidProducer(path: string): Promise<void> {
   };
   const manifest = JSON.parse((await source('producer-manifest.json')).toString());
   const packages = { appium: JSON.parse((await source('appium-runtime-manifest.json')).toString()), ...JSON.parse((await source('runtime-manifest.json')).toString()) };
-  if (data.node !== '24.21.0' || typeof data.home !== 'string' || !data.home.startsWith('/') || data.home.includes('..')) fail('producer runtime identity mismatch');
+  if (data.node !== '26.13.0' || typeof data.home !== 'string' || !data.home.startsWith('/') || data.home.includes('..')) fail('producer runtime identity mismatch');
   if (!isDeepStrictEqual(data.inputs, manifest.inputs)) fail('producer input set mismatch');
   for (const [leaf, hash] of Object.entries(manifest.inputs)) if (sha256(await source(leaf)) !== hash) fail('producer source input hash mismatch');
   if (!isDeepStrictEqual(Object.keys(data.authored || {}).sort(), Object.keys(manifest.authored).sort())) fail('producer authored set mismatch');

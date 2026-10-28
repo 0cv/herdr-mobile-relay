@@ -6,7 +6,7 @@
   "packageManager": "bun@1.4.2",
   "engines": {
     "bun": ">=1.4.2",
-    "node": "24.21.0"
+    "node": "26.13.0"
   },
   "scripts": {
     "lint": "eslint .",
@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@types/node": "24.19.2",
+    "@types/node": "26.6.5",
     "eslint": "10.13.0",
     "globals": "17.13.0",
     "typescript": "6.0.3",

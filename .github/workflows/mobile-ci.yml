@@ -74,11 +74,11 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -201,11 +201,11 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -218,7 +218,7 @@ jobs:
         run: |
           jq -e '
             .schema == 1 and
-            .node == "24.21.0" and
+            .node == "26.13.0" and
             .bun == "1.4.2" and
             .appium == "3.7.0" and
             .appiumLogger == "2.0.11" and
@@ -461,12 +461,12 @@ jobs:
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - name: Install Bun for final evidence validation
         if: needs.provenance.result == 'success' && needs.device.result == 'success'

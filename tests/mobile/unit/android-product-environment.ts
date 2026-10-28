@@ -134,7 +134,7 @@ export async function producerFixture(): Promise<Record<string, any>> {
   const source = async (name: string) => JSON.parse(await readFile(repositoryPath(`tests/mobile/android-appium/${name}`), 'utf8'));
   const manifest = await source('producer-manifest.json');
   const packages = { appium: await source('appium-runtime-manifest.json'), ...await source('runtime-manifest.json') };
-  const data: Record<string, any> = { node: '24.21.0', home: '/public/synthetic-appium', inputs: manifest.inputs, authored: Object.fromEntries(Object.entries(manifest.authored).map(([name, value]: [string, any]) => [name, value.sha256])) };
+  const data: Record<string, any> = { node: '26.13.0', home: '/public/synthetic-appium', inputs: manifest.inputs, authored: Object.fromEntries(Object.entries(manifest.authored).map(([name, value]: [string, any]) => [name, value.sha256])) };
   const entries: Record<string, string> = {};
   for (const [id, value] of Object.entries(packages) as Array<[string, any]>) {
     const root = posix.join(data.home, value.root), entry = new URL(`file://${posix.join(root, value.entry)}`).href;

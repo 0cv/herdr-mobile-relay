@@ -7094,7 +7094,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     }
   });
   test('bounded child commands count mixed output on failure, stop overflow and kill SIGTERM-resistant children', async () => {
-    assert.equal(execFileSync('node', ['--version'], { encoding: 'utf8' }).trim(), 'v24.21.0');
+    assert.equal(execFileSync('node', ['--version'], { encoding: 'utf8' }).trim(), 'v26.13.0');
     const code = `const fs=require('node:fs');const chunk=Buffer.alloc(1100000,65);const write=fd=>{let offset=0;while(offset<chunk.length)offset+=fs.writeSync(fd,chunk,offset,chunk.length-offset)};write(1);write(2);setTimeout(()=>{process.exitCode=7},250)`;
     let failed: BoundedCommandError | undefined;
     try {
@@ -7301,7 +7301,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     }
   });
   test('failed GMS commands account for both streams against the aggregate byte ceiling', async () => {
-    assert.equal(execFileSync('node', ['--version'], { encoding: 'utf8' }).trim(), 'v24.21.0');
+    assert.equal(execFileSync('node', ['--version'], { encoding: 'utf8' }).trim(), 'v26.13.0');
     const fixture = await harness.createFixture();
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);
@@ -7385,7 +7385,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     }
   });
   test('timed-out GMS child bytes remain in the aggregate allowance after an event-loop stall', async () => {
-    assert.equal(execFileSync('node', ['--version'], { encoding: 'utf8' }).trim(), 'v24.21.0');
+    assert.equal(execFileSync('node', ['--version'], { encoding: 'utf8' }).trim(), 'v26.13.0');
     const fixture = await harness.createFixture();
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);

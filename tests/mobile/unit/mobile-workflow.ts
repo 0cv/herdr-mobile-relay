@@ -133,7 +133,7 @@ function auditUnitShardWorkflow(check: any, source: string): void {
     const cache = job.steps.find((step: any) => step.id === 'mobile-unit-cache');
     assert.ok(cache?.uses?.startsWith('actions/cache@'));
     assert.equal(cache.with.path, 'frontend/node_modules\ntests/mobile/node_modules\n');
-    assert.equal(cache.with.key, "mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}");
+    assert.equal(cache.with.key, "mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}");
     const install = job.steps.find((step: any) => step.id === 'install-test-dependencies');
     assert.equal(install.if, "steps.mobile-unit-cache.outputs.cache-hit != 'true'");
     assert.ok(install.run.includes('bun install --frozen-lockfile --cwd frontend'));
@@ -147,7 +147,7 @@ function auditUnitShardWorkflow(check: any, source: string): void {
     assert.equal(job.env.GOTOOLCHAIN, 'local');
     const checkout = job.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
     assert.equal(checkout.with.ref, '${{ github.sha }}', `${name} must use the event merge/source SHA`);
-    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('actions/setup-node@') && step.with['node-version'] === '24.21.0'));
+    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('actions/setup-node@') && step.with['node-version'] === '26.13.0'));
     assert.ok(job.steps.some((step: any) => step.uses?.startsWith('oven-sh/setup-bun@') && step.with['bun-version'] === '1.4.2'));
     assert.ok(job.steps.some((step: any) => step.uses?.startsWith('actions/setup-go@') && step.with['go-version'] === '1.27.1'));
     assert.ok(job.steps.some((step: any) => step.run?.includes('go env GOTOOLCHAIN') && step.run.includes('tar --version') && step.run.includes('xmllint --version')));
