@@ -95,8 +95,10 @@ Rerun that command to move to a newer candidate.
 
 ## Contributing
 
-Work lands on `main`; open pull requests against it and make sure `make check`
-passes first.
+Work lands on `dev`: branch from `dev`, open pull requests into `dev`, and make
+sure `make check` passes first. `main` only receives merges of `dev` at release
+time, and a pull request into `main` from any other branch fails its check. See
+`AGENTS.md` for the full branch and release flow.
 
 ## Toolchains
 
