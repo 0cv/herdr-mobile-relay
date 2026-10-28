@@ -270,7 +270,7 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
   assert.deepEqual(check.jobs.mobile.needs, ['release', 'mobile-host-check', 'mobile-inspection-check', 'mobile-unit-aggregate']);
   assert.equal(check.jobs.mobile.uses, './.github/workflows/mobile-ci.yml');
   for (const ref of ['dev', 'main', 'ci-mobile', 'feature']) {
-    assert.equal(condition(check.jobs.mobile.if, { needs: {}, github: { ref: 'refs/heads/' + ref, event_name: 'push' }, success: true }), ref !== 'feature');
+    assert.equal(condition(check.jobs.mobile.if, { needs: {}, github: { ref: 'refs/heads/' + ref, event_name: 'push' }, success: true }), ref === 'dev' || ref === 'main');
   }
   for (const base of ['dev', 'main', 'other']) for (const head of ['ci-mobile', 'feature']) for (const repository of ['public/repo', 'foreign/repo']) {
     const github = { ref: 'refs/pull/25/merge', event_name: 'pull_request', repository: 'public/repo', event: { pull_request: { base: { ref: base }, head: { ref: head, repo: { full_name: repository } } } } };
@@ -728,7 +728,7 @@ if (mode === operation + '-timeout') process.exit(124);
     }
     const matrixCommand = workflow.jobs.prepare.steps.find((s: any) => s.id === 'matrix').run;
     const manifest = JSON.parse(await readFile(repositoryPath('tests/mobile/baselines.json'), 'utf8'));
-    assert.deepEqual(manifest.baselines.map((entry: any) => entry.name), ['0.23.3', '0.23.2']);
+    assert.deepEqual(manifest.baselines.map((entry: any) => entry.name), ['0.23.4', '0.23.3']);
     const newest = manifest.baselines[0], previous = manifest.baselines[1];
     const cases = [
       { baselines: manifest.baselines, candidate: { ...newest, version: 'next-version' }, expected: newest.name },

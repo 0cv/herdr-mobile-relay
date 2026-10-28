@@ -6,6 +6,22 @@
   },
   "baselines": [
     {
+      "name": "0.23.4",
+      "version": "0.23.4",
+      "assets": 478,
+      "sourceRelease": "v0.23.4",
+      "sourceCommit": "8564bee1f4f540da99cd9657ccb332dfe26a016e",
+      "archive": "herdr-mobile-relay_0.23.4_linux_amd64.tar.gz",
+      "url": "https://github.com/0cv/herdr-mobile-relay/releases/download/v0.23.4/herdr-mobile-relay_0.23.4_linux_amd64.tar.gz",
+      "archiveSha256": "9475799851be5d443f87f64f7f284497de87c31c628df28f4a1432d981c88e3e",
+      "webHash": "8e3c2bd855a360f1694ab262a2238e8379f81418f4c9769338de33aaaa7d1e72",
+      "revision": "8564bee1f4f540da99cd9657ccb332dfe26a016e",
+      "entry": "/builds/0.23.4-478-3ac9f075d8f9019f/index.html",
+      "script": "/assets/app-18f01da7e66ec20424be626bab41390db6ec344fd1f91a98f3dc0c45d131e36f.js",
+      "style": "/assets/app-26918f6791a7740bd67b81af0c572f99ac2fa911d87d1eec46b41f1d0572ef4d.css",
+      "build": "3ac9f075d8f9019ff312fa51d265e583ac31b3f9255a62b1766bb7e34a31b1f5"
+    },
+    {
       "name": "0.23.3",
       "version": "0.23.3",
       "assets": 476,
@@ -20,22 +36,6 @@
       "script": "/assets/app-8676c877cad2264a53bf22cd8a6278bf951264565207148d7e6a25327199c8ce.js",
       "style": "/assets/app-26918f6791a7740bd67b81af0c572f99ac2fa911d87d1eec46b41f1d0572ef4d.css",
       "build": "32215fb1dd3140be659a9b179b298164b91d45dbf51b2fa0e8e7fc748cd5d797"
-    },
-    {
-      "name": "0.23.2",
-      "version": "0.23.2",
-      "assets": 472,
-      "sourceRelease": "v0.23.2",
-      "sourceCommit": "497d4a27561a7c92ebf1388c9e5bc8cdc72b6b3a",
-      "archive": "herdr-mobile-relay_0.23.2_linux_amd64.tar.gz",
-      "url": "https://github.com/0cv/herdr-mobile-relay/releases/download/v0.23.2/herdr-mobile-relay_0.23.2_linux_amd64.tar.gz",
-      "archiveSha256": "25e78b669838c79e7dfbe33eb071cc70262172f6547cdb9917cfb3414298ffa8",
-      "webHash": "0c0a398ea52322a9e5c57c60b6e4df802f5a1db94f0e67401c3aa6890ac5dc3d",
-      "revision": "497d4a27561a7c92ebf1388c9e5bc8cdc72b6b3a",
-      "entry": "/builds/0.23.2-472-e744e7c59c2e50ee/index.html",
-      "script": "/assets/app-afaa84c394797e45f7a9eeeb63db55778db6d12b6bd1464de4f1f6493582ec86.js",
-      "style": "/assets/app-bcc772e5499e6690583e62580b1dc1e7aab1468b21553f325a5ca5e49594cab1.css",
-      "build": "e744e7c59c2e50ee25d4516b7e98891b42ea3e0beccb16386733627d6a7458d0"
     }
   ]
 }
