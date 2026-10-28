@@ -1935,7 +1935,7 @@ const terminalBuild = (hardDeadlineNs?: bigint): Promise<TerminalBuild> => {
   const goroot = dirname(dirname(go));
   const version = await readFile(join(goroot, 'VERSION'), 'utf8');
   assert.equal(version.split('\n')[0], 'go1.27.3', 'pinned Go VERSION prerequisite');
-  assert.match(await readFile(join(import.meta.dirname, '../../../go.mod'), 'utf8'), /^go 1\.27\.1$/mu);
+  assert.match(await readFile(join(import.meta.dirname, '../../../go.mod'), 'utf8'), /^go 1\.27\.3$/mu);
   const goos = process.platform;
   const goarch = process.arch === 'x64' ? 'amd64' : 'arm64';
   const env = terminalNoEnvEnvironment({
