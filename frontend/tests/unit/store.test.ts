@@ -2413,13 +2413,13 @@ describe('relay command store', () => {
     expect(dialing.url).toBe('ws://127.0.0.1:8873');
     connected.open();
     connected.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
-    const sentOnConnect = connected.sent.length;
+    const sentTypes = () => connected.sent.map((message) => JSON.parse(message).type);
+    const typesOnConnect = sentTypes();
 
     await vi.advanceTimersByTimeAsync(119_999);
-    expect(connected.sent).toHaveLength(sentOnConnect);
+    expect(sentTypes()).toEqual(typesOnConnect);
     await vi.advanceTimersByTimeAsync(1);
-    expect(JSON.parse(connected.sent.at(-1)!).type).toBe('ping');
-    expect(connected.sent).toHaveLength(sentOnConnect + 1);
+    expect(sentTypes()).toEqual([...typesOnConnect, 'ping']);
     // The keepalive proves a live path; it never dials one, so the relay still
     // completing its handshake hears nothing.
     expect(dialing.sent).toEqual([]);
@@ -2428,7 +2428,7 @@ describe('relay command store', () => {
     // past the gateway's five-minute idle reaper.
     connected.message({ type: 'inventory_status', state: 'ready' });
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(connected.sent).toHaveLength(sentOnConnect + 2);
+    expect(sentTypes()).toEqual([...typesOnConnect, 'ping', 'ping']);
     expect(MockWebSocket.instances).toHaveLength(2);
   });
 
