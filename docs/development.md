@@ -103,7 +103,7 @@ time, and a pull request into `main` from any other branch fails its check. See
 ## Toolchains
 
 Backend development uses Go 1.27.1; frontend development uses Node.js
-24.21.0 and Bun 1.4.2 (`bun install --cwd frontend`, then the `make` targets
+26.13.0 and Bun 1.4.2 (`bun install --cwd frontend`, then the `make` targets
 above). Bun installs the packages and runs the repository's own scripts; Vite,
 ESLint, Vitest and Playwright run on Node, because `bun run` honours their
 `#!/usr/bin/env node` line whenever Node is on `PATH` (without Node it falls

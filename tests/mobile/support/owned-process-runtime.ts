@@ -348,7 +348,12 @@ function encode(value: RecordValue): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-function parseLines(stream: ControlChannel | Duplex, receive: (value: RecordValue) => void,
+interface LineSource extends EventEmitter {
+  setEncoding(encoding: BufferEncoding): unknown;
+  destroy(error?: Error): unknown;
+}
+
+function parseLines(stream: LineSource, receive: (value: RecordValue) => void,
   onReceiveError: (error: Error) => void = error => stream.destroy(error)): void {
   let pending = '';
   stream.setEncoding('utf8');

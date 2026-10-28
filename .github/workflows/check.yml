@@ -90,11 +90,11 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -160,11 +160,11 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -229,11 +229,11 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -259,7 +259,7 @@ jobs:
           ref: ${{ github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -277,7 +277,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
           test "$(bun --version)" = 1.4.2
           test "$(go version | awk '{print $3}')" = go1.27.1
@@ -290,7 +290,7 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
@@ -332,7 +332,7 @@ jobs:
           ref: ${{ github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -350,7 +350,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
           test "$(bun --version)" = 1.4.2
           test "$(go version | awk '{print $3}')" = go1.27.1
@@ -363,7 +363,7 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
@@ -408,7 +408,7 @@ jobs:
           ref: ${{ github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -426,7 +426,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
           test "$(bun --version)" = 1.4.2
           test "$(go version | awk '{print $3}')" = go1.27.1
@@ -439,7 +439,7 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
@@ -471,11 +471,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:

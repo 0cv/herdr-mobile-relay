@@ -2193,7 +2193,7 @@ const terminalEndpoint = async (session: TerminalSession, port: number, deadline
   let bytes = Buffer.alloc(0);
   try {
     for (;;) {
-      const part = await terminalBound(reader.read(), deadline);
+      const part: Awaited<ReturnType<typeof reader.read>> = await terminalBound(reader.read(), deadline);
       if (part.done) break;
       assert.ok(bytes.length + part.value.length <= 1024, 'endpoint response size');
       bytes = Buffer.concat([bytes, part.value]);
@@ -3453,7 +3453,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         const raceOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
         const racePrivateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
         assert.equal(raceOwner.firstFailure.stage, initialRaceStages[mode]);
-        assert.equal(raceOwner.firstFailure.phase, 'initial', raceOwner.firstFailure.phase === 'initial' ? undefined
+        assert.equal(raceOwner.firstFailure.phase, 'initial', raceOwner.firstFailure.phase === 'initial' ? 'phase is initial'
           : pendingPinSnapshot(root, testMode, child, {
             exit: 'initial-race-failure', elapsedMs: Date.now() - supervisorStarted,
             startupRemainingMs: Math.max(0, deadline - Date.now()),
