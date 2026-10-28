@@ -104,8 +104,10 @@ time, and a pull request into `main` from any other branch fails its check. See
 
 Backend development uses Go 1.27.1; frontend development uses Node.js
 24.21.0 and Bun 1.4.2 (`bun install --cwd frontend`, then the `make` targets
-above). Playwright runs on
-Bun. CI installs both browsers natively (`bun x playwright install
+above). Bun installs the packages and runs the repository's own scripts; Vite,
+ESLint, Vitest and Playwright run on Node, because `bun run` honours their
+`#!/usr/bin/env node` line whenever Node is on `PATH` (without Node it falls
+back to Bun). CI installs both browsers natively (`bun x playwright install
 --with-deps chromium webkit`); on Fedora, `install-deps` is unsupported and
 native WebKit crashes, so `make frontend-browser` runs WebKit through
 Playwright's official container via podman (Chromium runs natively — its dnf
