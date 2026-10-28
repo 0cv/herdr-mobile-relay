@@ -71,7 +71,7 @@ Each Android device job also runs `validate-environment.ts --require-pass` on it
 make mobile-ci-check
 ```
 
-This runs the pinned Bun lint/type check/unit suite and the Go fixture tests. It does not pretend to validate Home Screen installation. A device run requires the platform tools and Appium listed in `tests/mobile/toolchains.json`.
+This runs the pinned Bun lint/type check/unit suite and the Go fixture tests. It does not pretend to validate Home Screen installation. Device runs happen only in the hosted lane, with the tools and Appium versions pinned in `tests/mobile/toolchains.json`.
 
 ## Preparing bundles locally
 
@@ -92,32 +92,7 @@ For harness development only, a checked-out `web` directory can be used with `--
 
 Preparation requires a fresh output destination and refuses repository-root or input-overlapping paths rather than deleting caller files. The resulting `bundle-set.json` uses paths relative to its own directory, so it can be moved as an artifact without silently pointing at another checkout. After the archive checksum, manifest, and web-tree checks, preparation retains only each exact web tree, its release manifest, and bundle metadata; downloaded archives and native release files are not uploaded as mobile transport. Archive preparation requires GNU tar because safe extraction uses the GNU ownership and directory controls; on macOS install `gtar` and set `MOBILE_GNU_TAR` rather than weakening extraction.
 
-## Local device run
-
-Build the fixture and install the harness dependencies first:
-
-```sh
-mkdir -p run-artifacts
-go build -trimpath -o "$PWD/run-artifacts/herdr-mobile-fixture" ./tests/mobile/fixture
-bun install --frozen-lockfile --cwd tests/mobile
-```
-
-For Android, create exactly one disposable emulator and record an ownership marker before running. The adapter refuses a physical or unmarked target, because it clears browser data and removes installed web providers:
-
-```sh
-android_system_image="$(jq -r '.android.systemImage' tests/mobile/toolchains.json)"
-android_device_profile="$(jq -r '.android.deviceProfile' tests/mobile/toolchains.json)"
-avdmanager create avd --force --name herdr-mobile-ci --package "$android_system_image" --device "$android_device_profile"
-emulator -avd herdr-mobile-ci -no-window -no-audio -no-boot-anim -no-snapshot &
-export MOBILE_PLATFORM=android
-export ANDROID_SERIAL=emulator-5554
-export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/android-owned"
-printf 'android:%s\n' "$ANDROID_SERIAL" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
-npm install --global appium@3.7.0
-appium driver install uiautomator2@8.7.0
-appium --address 127.0.0.1 --port 4723 &
-export MOBILE_FIXTURE_BINARY="$PWD/run-artifacts/herdr-mobile-fixture"
-```
+## Hosted device environment
 
 Hosted Android installs the pinned Chrome/Trichrome pair declared in
 `tests/mobile/toolchains.json` before Appium starts. The current reproducible
@@ -229,83 +204,7 @@ version selector to `pm path`. The binary URLs are an APK.now mirror fallback be
 APKMirror is Cloudflare blocked; replace them only with another source carrying
 the same hashes and signing certificates.
 
-For iOS, select the Xcode/runtime declared in `toolchains.json`, create one disposable iPhone 17 simulator, and record its ownership marker. Hosted iOS runs on the `xcode-27` label with Xcode 27.0 (27A266a) at `/Applications/Xcode_27.app` and the iOS 27.0 simulator runtime. iOS 27 is the only supported iOS target, so WDA is also built with `IPHONEOS_DEPLOYMENT_TARGET=27.0`. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead. Before any simulator exists, the hosted entrypoints check the selected developer directory and the Xcode version/build and fail without installing or falling back. They retain `ios-hosted-target.txt` (expected and observed Xcode identity plus the runner's `ImageOS`, `ImageVersion` and macOS version/build), the complete runtime inventory, and the selected inventory line, identifier, version, and build as `ios-runtime-inventory.txt` and `ios-runtime-selection.txt` in uploaded output, even when later provisioning or WDA steps fail. GitHub does not let a workflow pin a hosted image revision, so the image identity is recorded rather than enforced:
-
-Locally, pass the developer directory explicitly instead of changing the global Xcode selector; hosted CI also runs `sudo xcode-select -s /Applications/Xcode_27.app` and requires `xcode-select -p` to report the same developer directory:
-
-```sh
-export DEVELOPER_DIR=/Applications/Xcode_27.app/Contents/Developer
-xcodebuild -version  # must report Xcode 27.0 and Build version 27A266a
-export IOS_PLATFORM_VERSION=27.0
-runtime_inventory="$PWD/run-artifacts/ios-runtime-inventory.txt"
-runtime_selection="$PWD/run-artifacts/ios-runtime-selection.txt"
-if ! xcrun simctl list runtimes | tee "$runtime_inventory" >/dev/null; then
-  printf 'expected_platform_version=%s\ninventory_command=failed\n' "$IOS_PLATFORM_VERSION" > "$runtime_selection"
-  exit 1
-fi
-runtime_line="$(awk -v prefix="iOS $IOS_PLATFORM_VERSION (" 'index($0, prefix) == 1 && $0 !~ /unavailable/ { print; exit }' "$runtime_inventory")"
-runtime="$(printf '%s\n' "$runtime_line" | sed -nE 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+).*/\1/p')"
-runtime_version="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS ([0-9]+\.[0-9]+) \(.*/\1/p')"
-runtime_build="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS [0-9]+\.[0-9]+ \([^)]* - ([^)]+)\) - .*/\1/p')"
-printf 'expected_platform_version=%s\ninventory_line=%s\nselected_identifier=%s\nselected_version=%s\nselected_build=%s\n' \
-  "$IOS_PLATFORM_VERSION" "$runtime_line" "$runtime" "$runtime_version" "$runtime_build" > "$runtime_selection"
-test "$runtime_version" = "$IOS_PLATFORM_VERSION"
-test -n "$runtime"
-test -n "$runtime_build"
-device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 17 \(/ { print $2; exit }')"
-export IOS_SIMULATOR_UDID="$(xcrun simctl create herdr-mobile-ci "$device_type" "$runtime")"
-export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/ios-owned"
-printf 'ios:%s\n' "$IOS_SIMULATOR_UDID" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
-xcrun simctl boot "$IOS_SIMULATOR_UDID"
-xcrun simctl bootstatus "$IOS_SIMULATOR_UDID" -b
-npm install --global appium@3.7.0
-appium driver install xcuitest@12.12.4
-appium --address 127.0.0.1 --port 4723 &
-export MOBILE_PLATFORM=ios
-export MOBILE_FIXTURE_BINARY="$PWD/run-artifacts/herdr-mobile-fixture"
-```
-
-### Local iOS 27 operator prerequisite
-
-Hosted CI targets the `xcode-27` image described above. A local host still needs
-its own preparation: stable Xcode 27 requires macOS Tahoe 26.6 or newer, so a
-local qualification is not possible on an older host.
-
-Before a local iOS 27 qualification, an operator must use the Apple release
-information at [Apple's iOS 27 support page](https://support.apple.com/en-us/100100),
-the [Xcode support matrix](https://developer.apple.com/support/xcode/), and the
-[Apple developer downloads](https://developer.apple.com/download/all/) to:
-
-1. confirm supported Mac hardware and record measured free disk space with
-   `df -h /` (reserve enough for macOS, Xcode, the iOS 27 simulator runtime, and
-   WDA derived data; this project does not invent a fixed disk-size threshold);
-2. upgrade macOS to at least 26.6 during an approved maintenance window;
-3. install the stable Xcode 27 release and the exact iOS 27 simulator runtime,
-   accept the license, and complete first-launch components with operator
-   credentials; and
-4. use an isolated developer directory and owned simulator while recording
-   `DEVELOPER_DIR=/Applications/Xcode_27.app/Contents/Developer xcodebuild -version`
-   and `DEVELOPER_DIR=/Applications/Xcode_27.app/Contents/Developer xcrun simctl list runtimes`.
-
-After those identities are recorded, rebuild WDA from the pinned XCUITest
-12.12.4/WDA 16.12.8 tree, run the managed XCTest/Appium qualification on an
-owned iOS 27 simulator, and retain the runtime/build provenance. Do not use a
-beta Xcode, a `macos-latest` label, or an unmeasured runtime. Do not change the
-local global Xcode selector for this qualification; pass `DEVELOPER_DIR`
-explicitly to each `xcodebuild`/`xcrun` command.
-
-Run one baseline at a time. Supply explicit positive `GITHUB_RUN_ID` and
-`GITHUB_RUN_ATTEMPT` identifiers plus the exact `MOBILE_SOURCE_RUN_HEAD_SHA`; local
-receipts do not substitute for CI provenance or grant native execution authority:
-
-```sh
-bun run --cwd tests/mobile run -- \
-  --bundle-set "$PWD/run-artifacts/mobile/bundle-set.json" \
-  --baseline 0.23.3 \
-  --suite release \
-  --output "$PWD/run-artifacts/device" \
-  --private-output "$PWD/run-artifacts/private-device"
-```
+Hosted iOS runs on the `xcode-27` label with Xcode 27.0 (27A266a) at `/Applications/Xcode_27.app` and the iOS 27.0 simulator runtime. iOS 27 is the only supported iOS target, so WDA is also built with `IPHONEOS_DEPLOYMENT_TARGET=27.0`. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead. Before any simulator exists, the hosted entrypoints check the selected developer directory and the Xcode version/build and fail without installing or falling back. They retain `ios-hosted-target.txt` (expected and observed Xcode identity plus the runner's `ImageOS`, `ImageVersion` and macOS version/build), the complete runtime inventory, and the selected inventory line, identifier, version, and build as `ios-runtime-inventory.txt` and `ios-runtime-selection.txt` in uploaded output, even when later provisioning or WDA steps fail. GitHub does not let a workflow pin a hosted image revision, so the image identity is recorded rather than enforced.
 
 The runner keeps fixture info, TLS keys, and relay stores under `--private-output`, separate from the evidence directory. It attempts every acquired-resource cleanup in `finally`, retaining individual failures; workflow cleanup also attempts removal after failures. Persistence or cleanup failures produce nonzero execution, not a guarantee that an artifact can be recovered. Only screenshots, `mobile-result.json`, and bounded redacted diagnostics belong in uploaded evidence. Do not copy `fixture-info.json` or relay state outside the private run directory.
 

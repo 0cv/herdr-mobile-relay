@@ -16,7 +16,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-ci-common-check mobile-unit-check mobile-frontend-dependencies mobile-test-dependencies mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios phone-recovery-check
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-ci-common-check mobile-unit-check mobile-frontend-dependencies mobile-test-dependencies mobile-retention-check mobile-composite-check mobile-cache-recovery phone-recovery-check
 
 help:
 	@echo "Common targets:"
@@ -40,9 +40,6 @@ help:
 	@echo "  make mobile-ci-check            Check the host-only installed-PWA harness"
 	@echo "  make phone-recovery-check       Run private Chromium and WebKit cache-recovery scenarios"
 	@echo "  make mobile-cache-recovery MOBILE_ARGS=...  Check cached stylesheet recovery with a bundle set"
-	@echo "  make mobile-ci-run MOBILE_ARGS=...  Run a configured device scenario"
-	@echo "  make mobile-android MOBILE_ARGS=... Run the installed Android suite"
-	@echo "  make mobile-ios MOBILE_ARGS=...    Run the installed iOS suite"
 	@echo "  make gateway                    Build the self-hostable blind gateway binary"
 	@echo "  make check                      Run backend and frontend checks"
 
@@ -266,13 +263,3 @@ phone-recovery-check:
 	printf 'Sanitized evidence: %s\n' "$$root/evidence/result.json"; \
 	exit "$$status"
 
-mobile-ci-run:
-	bun run --cwd tests/mobile run -- $(MOBILE_ARGS)
-
-mobile-android:
-	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
-	MOBILE_PLATFORM=android $(MAKE) mobile-ci-run MOBILE_ARGS="$(MOBILE_ARGS)"
-
-mobile-ios:
-	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
-	MOBILE_PLATFORM=ios $(MAKE) mobile-ci-run MOBILE_ARGS="$(MOBILE_ARGS)"
