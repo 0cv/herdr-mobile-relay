@@ -2,7 +2,7 @@
 
 `tests/mobile` exercises the release web tree on a real Android emulator or iOS simulator. It installs from the Home Screen flow, starts two local TLS/WSS relay peers, completes encrypted invitation pairing, switches the same origin to a verified candidate bundle, and checks the executing app build, credentials, preferences, lifecycle, keyboard, and bounded reload evidence.
 
-The check workflow passes its exact `release-bundles` artifact to `.github/workflows/mobile-ci.yml`. Pushes to `dev`, `main` and `ci-mobile`, and pull requests into `dev` or `main`, all run the same full release scenario. The job graph is provenance → prepare → device → environment report/qualification → gate. The device matrix runs Android and iOS in parallel, once each, upgrading one selected release to the candidate from the current commit. There are no preliminary smoke runs, Android-before-iOS barrier, historical-baseline matrix or synthetic current-code device pair. Each row owns a fresh disposable device and Appium session. A new push to a pull request cancels that pull request's earlier run; every push to a branch gets its own run and is never cancelled.
+The check workflow passes its exact `release-bundles` artifact to `.github/workflows/mobile-ci.yml`. Pushes to `dev` and `main`, and pull requests into `dev` or `main`, all run the same full release scenario. The job graph is provenance → prepare → device → environment report/qualification → gate. The device matrix runs Android and iOS in parallel, once each, upgrading one selected release to the candidate from the current commit. There are no preliminary smoke runs, Android-before-iOS barrier, historical-baseline matrix or synthetic current-code device pair. Each row owns a fresh disposable device and Appium session. A new push to a pull request cancels that pull request's earlier run; every push to a branch gets its own run and is never cancelled.
 
 Both platforms upgrade from the first release in `tests/mobile/baselines.json` whose version, script or style differs from the checked-out `web/version.json`; only that baseline is prepared, and no qualifying release is an error. After each release, add the new release first and drop the oldest so the file keeps two releases. The release workflow uses the same lane against its exact artifact and waits for qualification before publication. These CI paths use GitHub-hosted runners with read-only permissions and no secrets. New pushes to a pull request cancel its previous check and mobile runs; branch pushes queue without cancelling active runs.
 
@@ -80,11 +80,11 @@ The candidate must be a release archive with its checksum and release manifest. 
 ```sh
 bun install --frozen-lockfile --cwd tests/mobile
 bun run --cwd tests/mobile prepare:bundle -- \
-  --candidate "$PWD/dist/release/herdr-mobile-relay_0.23.3_linux_amd64.tar.gz" \
-  --candidate-version 0.23.3 \
-  --candidate-assets 477 \
+  --candidate "$PWD/dist/release/herdr-mobile-relay_0.23.4_linux_amd64.tar.gz" \
+  --candidate-version 0.23.4 \
+  --candidate-assets 478 \
   --candidate-revision "$(git rev-parse HEAD)" \
-  --candidate-sha256 "$(awk '$2 == "herdr-mobile-relay_0.23.3_linux_amd64.tar.gz" { print $1 }' dist/release/checksums.txt)" \
+  --candidate-sha256 "$(awk '$2 == "herdr-mobile-relay_0.23.4_linux_amd64.tar.gz" { print $1 }' dist/release/checksums.txt)" \
   --output "$PWD/run-artifacts/mobile"
 ```
 
