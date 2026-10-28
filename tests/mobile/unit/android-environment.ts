@@ -403,7 +403,7 @@ async function createAndroidTransportTestEndpoint(unresponsive = false,
     let acquisition = '';
     socket.on('error', () => undefined);
     socket.on('data', chunk => {
-      pending = Buffer.concat([pending, chunk]);
+      pending = Buffer.concat([pending, Buffer.from(chunk)]);
       while (pending.length >= 4) {
         const length = Number.parseInt(pending.subarray(0, 4).toString(), 16);
         if (!Number.isSafeInteger(length) || pending.length < length + 4) return;
@@ -6176,7 +6176,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(dispatches, 0);
       assert.deepEqual(endpoint.completed, ['guest-clock']);
       assert.equal(existsSync(transportFixture.acquisitionLogFile), false);
-      assert.equal(outcome.assessment?.collection.status, 'PASS', outcome.assessment?.collection.status === 'PASS' ? undefined
+      assert.equal(outcome.assessment?.collection.status, 'PASS', outcome.assessment?.collection.status === 'PASS' ? 'collection passed'
         : redactText(JSON.stringify({ errors: outcome.errors, collection: outcome.assessment?.collection }))
           .split(fixture.root).join('<root>').slice(0, 8192));
     } finally {
