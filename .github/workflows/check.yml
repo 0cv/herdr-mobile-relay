@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Format
         run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
@@ -39,7 +39,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Run opt-in user-journal integration test
         env:
@@ -59,7 +59,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: go test -race -p 1 ./...
 
@@ -73,15 +73,15 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: make shell-check production-path-audit
 
   frontend:
-    name: Frontend and mobile browsers (Bun 1.4.2)
+    name: Frontend and mobile browsers
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -98,10 +98,10 @@ jobs:
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: bun install --frozen-lockfile --cwd frontend
       # Native browsers instead of the multi-GB Playwright container image:
@@ -168,11 +168,11 @@ jobs:
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - name: Build, manifest, checksum, and offline-verify four targets
         run: |
           make cross-build
@@ -237,10 +237,10 @@ jobs:
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: make PATH="$PATH" mobile-ci-common-check
 
@@ -262,10 +262,10 @@ jobs:
           node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Install XML test tools
         run: |
@@ -279,8 +279,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
-          test "$(bun --version)" = 1.4.2
-          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(bun --version)" = 1.4.4
+          test "$(go version | awk '{print $3}')" = go1.27.3
           test "$(go env GOTOOLCHAIN)" = local
           tar --version | grep -q '^tar (GNU tar)'
           xmllint --version >/dev/null 2>&1
@@ -290,7 +290,7 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.4-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
@@ -335,10 +335,10 @@ jobs:
           node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Install XML test tools
         run: |
@@ -352,8 +352,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
-          test "$(bun --version)" = 1.4.2
-          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(bun --version)" = 1.4.4
+          test "$(go version | awk '{print $3}')" = go1.27.3
           test "$(go env GOTOOLCHAIN)" = local
           tar --version | grep -q '^tar (GNU tar)'
           xmllint --version >/dev/null 2>&1
@@ -363,7 +363,7 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.4-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
@@ -411,10 +411,10 @@ jobs:
           node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Install XML test tools
         run: |
@@ -428,8 +428,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
-          test "$(bun --version)" = 1.4.2
-          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(bun --version)" = 1.4.4
+          test "$(go version | awk '{print $3}')" = go1.27.3
           test "$(go env GOTOOLCHAIN)" = local
           tar --version | grep -q '^tar (GNU tar)'
           xmllint --version >/dev/null 2>&1
@@ -439,7 +439,7 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.4-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
@@ -479,7 +479,7 @@ jobs:
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile --cwd tests/mobile
       - run: bun run --cwd tests/mobile test:android-inspection
 

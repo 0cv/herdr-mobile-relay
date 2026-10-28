@@ -1934,7 +1934,7 @@ const terminalBuild = (hardDeadlineNs?: bigint): Promise<TerminalBuild> => {
   const go = await realpath(selected);
   const goroot = dirname(dirname(go));
   const version = await readFile(join(goroot, 'VERSION'), 'utf8');
-  assert.equal(version.split('\n')[0], 'go1.27.1', 'pinned Go VERSION prerequisite');
+  assert.equal(version.split('\n')[0], 'go1.27.3', 'pinned Go VERSION prerequisite');
   assert.match(await readFile(join(import.meta.dirname, '../../../go.mod'), 'utf8'), /^go 1\.27\.1$/mu);
   const goos = process.platform;
   const goarch = process.arch === 'x64' ? 'amd64' : 'arm64';
@@ -1965,7 +1965,7 @@ const terminalBuild = (hardDeadlineNs?: bigint): Promise<TerminalBuild> => {
     assert.deepEqual(metadata, {code: 0, signal: null, error: false});
     await terminalOwnedClose([settled], deadline);
     assert.equal(oversized, false);
-    assert.deepEqual(output.trim().split('\n'), ['go1.27.1', goroot, goos, goarch]);
+    assert.deepEqual(output.trim().split('\n'), ['go1.27.3', goroot, goos, goarch]);
     stage = 'compile';
     assert.ok(Date.now() < deadline, 'terminal build deadline');
     const compileOwnerDeadline = Math.min(hardDeadline, Date.now() + 39_000);

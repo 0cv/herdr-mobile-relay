@@ -3,7 +3,7 @@
   "verified": false,
   "verificationNote": "The repository host cannot prove macOS simulator feasibility, Android device/module qualification, or local ARM64 browser alignment. The first hosted run must record the selected image, browser, package, and module identities before this file is marked verified.",
   "node": "26.13.0",
-  "bun": "1.4.2",
+  "bun": "1.4.4",
   "appium": "3.7.0",
   "appiumLogger": "2.0.11",
   "wda": "16.12.8",
