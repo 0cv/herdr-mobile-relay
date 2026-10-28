@@ -22,7 +22,7 @@ Read `README.md` and `QUICKSTART.md` before changing behavior. `docs/` holds the
 ## Generated files
 
 - `web/` is the committed release bundle. Never edit it by hand: `make web-release` bumps `frontend/build-versions.json`, builds the frontend and replaces `web/`. `frontend/dist` and `web/` must stay identical.
-- The initial payload has a 167 KiB gzip budget (`frontend/scripts/check-size.mjs`). Dependency upgrades alone can exceed it.
+- The initial payload has a 168 KiB gzip budget (`frontend/scripts/check-size.mjs`). Dependency upgrades alone can exceed it.
 - Update `go.sum` with `go mod tidy`, not by hand.
 
 ## Code
