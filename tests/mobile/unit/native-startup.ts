@@ -9,6 +9,7 @@ import { AndroidStartupLog } from '../support/android-startup-log';
 import { managedWdaCapabilities, validWdaStatus } from '../support/ios-xctest';
 import { AndroidPlatform } from '../platforms/android';
 import { WebDriverError } from '../support/webdriver';
+import { androidStartupSessionTests } from './android-startup-session';
 
 class Socket extends EventEmitter {
   writes: string[] = [];
@@ -171,6 +172,7 @@ const createIosRuntimeFixture = async (inventory: string, xcode: XcodeIdentity =
 };
 
 export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
+  ...androidStartupSessionTests,
   ['Native startup diagnostic shell-v2 fragmented output and remote exit', async () => {
     const root = await mkdtemp(join(tmpdir(), 'herdr-startup-'));
     const socket = new Socket();

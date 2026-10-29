@@ -47,6 +47,7 @@ function isFatalDriverError(error: unknown): boolean {
 
 function isAdbTransportLoss(error: unknown): boolean {
   return error instanceof WebDriverError && error.code === 'APPIUM_COMMAND' && error.status === 500
+    && error.path === '/session' && error.method === 'POST' && !isFatalDriverError(error)
     && /\badb: device offline\b/u.test(error.message);
 }
 
@@ -313,7 +314,7 @@ export class AndroidPlatform implements MobilePlatform {
     // trust configuration during process startup, so installing it after a
     // browser session has already launched can leave the current target unable
     // to use the newly trusted certificate.
-    await this.createFirstSession({
+    await this.createSetupSession({
       capabilities: {
         platformName: 'Android',
         'appium:automationName': 'UiAutomator2',
@@ -337,10 +338,14 @@ export class AndroidPlatform implements MobilePlatform {
     await this.verifyFixtureEndpoint();
   }
 
-  // Hosted emulators have dropped their adb connection for under a second while UiAutomator2 first started, which also clears adb reverse mappings.
-  private async createFirstSession(options: SessionOptions): Promise<void> {
+  // ADB can disconnect during either setup session, clearing reverse mappings.
+  // Recover once before retaining a Chrome process or starting measurement.
+  private async createSetupSession(options: SessionOptions): Promise<void> {
+    if (!this.setupAttempted || !this.lifecycleActive || this.retainedOwner || this.initialLaunchAttempted) {
+      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'session recovery is limited to fresh device setup');
+    }
     const adb = process.env.ADB || 'adb';
-    const reverses = adbReverseMappings(await commandOutput(adb, ['-s', this.serial, 'reverse', '--list']));
+    const reverses = adbReverseMappings(await commandOutput(adb, ['-s', this.serial, 'reverse', '--list'], 30_000, { budget: this.budget }));
     this.assertDriverClear();
     try {
       await this.driver.create(options);
@@ -348,12 +353,15 @@ export class AndroidPlatform implements MobilePlatform {
     } catch (error) {
       const driver = this.driver.snapshot();
       if (!isAdbTransportLoss(error) || driver.sessionId || driver.unusable || driver.firstFatal) throw error;
-      this.diagnostics.record({ phase: 'android-setup', operation: 'adb-transport-reconnect', detail: { error: String(error), reverses } });
+      this.budget.recovery('android-setup-adb-reconnect');
+      this.diagnostics.record({ phase: 'android-setup', operation: 'adb-transport-reconnect', detail: {
+        session: options.capabilities.browserName === 'Chrome' ? 'chrome' : 'settings', error: String(error), reverses,
+      } });
     }
-    await command(adb, ['-s', this.serial, 'wait-for-device'], 60_000);
+    await command(adb, ['-s', this.serial, 'wait-for-device'], 60_000, { budget: this.budget });
     this.assertDriverClear();
     for (const [remote, local] of reverses) {
-      await command(adb, ['-s', this.serial, 'reverse', remote, local]);
+      await command(adb, ['-s', this.serial, 'reverse', remote, local], 30_000, { budget: this.budget });
       this.assertDriverClear();
     }
     await this.driver.create(options);
@@ -1367,11 +1375,13 @@ export class AndroidPlatform implements MobilePlatform {
     if (this.budget.remainingMs < 70_000) throw new Error('ANDROID_SESSION: insufficient parent allowance including retained producer startup');
     if (this.driver.snapshot().sessionId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'previous session was not retired before creation');
     this.ownedSessionClose = undefined;
-    await this.driver.create({
+    const options: SessionOptions = {
       capabilities: androidChromeCapabilities(this.serial, attachToRunningApp),
       requestTimeoutMs: 70_000,
       budget: this.budget,
-    });
+    };
+    if (!attachToRunningApp && this.setupAttempted) await this.createSetupSession(options);
+    else await this.driver.create(options);
     this.assertDriverClear();
     if (reserveMs) this.requireLifecycleAllowance(20_000 + 5_000 + reserveMs);
     await this.configureNativeSettings(reserveMs + (reserveMs ? 5_000 : 0));
