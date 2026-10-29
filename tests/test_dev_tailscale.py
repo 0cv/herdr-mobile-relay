@@ -1793,9 +1793,31 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
 
     selection_production_before = snapshot_tree(production)
 
+    # Use an exec'd stdlib shim, not preexec_fn: terminal setup runs in a
+    # fresh interpreter, without Python hooks using inherited fork-time locks.
+    # setsid alone does not make an already-open PTY the controlling terminal.
+    selection_terminal_exec = '''
+import fcntl
+import os
+import sys
+import termios
+
+pid = os.getpid()
+if os.getsid(0) != pid or os.getpgrp() != pid:
+    raise SystemExit("origin fixture requires its own session and process group")
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+os.tcsetpgrp(0, pid)
+if os.tcgetpgrp(0) != pid:
+    raise SystemExit("origin fixture requires foreground terminal ownership")
+os.execv(sys.argv[1], sys.argv[1:])
+'''
+
     def run_selection(checkout: Path, answers: bytes | None = None, *, terminal: bool = True,
                       overrides: dict[str, str] | None = None, action: str = "setup",
-                      cancel_signal: int | None = None) -> tuple[int, bytes, list[str]]:
+                      cancel_signal: int | None = None,
+                      expect_prompt: bool = False) -> tuple[int, bytes, list[str]]:
+        if (expect_prompt and not terminal) or (cancel_signal is not None and not expect_prompt):
+            raise AssertionError("origin fixture prompt/signal requires terminal prompt ownership")
         record = checkout / "events"
         before = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
         settings = dict(positive_env, HERDR_DEV_TAILSCALE_CLI_DIR="",
@@ -1805,41 +1827,104 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
         settings.update(overrides or {})
         master, slave = pty.openpty() if terminal else (None, None)
         process = None
+        failure = None
         prefix = b""
+        deadline = time.monotonic() + 30
+        command = [str(checkout / "relay" / "dev-tailscale-cli.sh"), action]
+        if terminal:
+            command = [sys.executable, "-I", "-S", "-c", selection_terminal_exec, *command]
         try:
             process = subprocess.Popen(
-                [str(checkout / "relay" / "dev-tailscale-cli.sh"), action],
-                env=settings, cwd=checkout, stdin=slave if terminal else subprocess.PIPE,
+                command, env=settings, cwd=checkout, stdin=slave if terminal else subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
             )
             if slave is not None:
                 os.close(slave)
                 slave = None
-            if cancel_signal is not None:
-                deadline = time.monotonic() + 10
+            # Only fresh-origin cases expect this handshake. Saved, preselected,
+            # incomplete-saved and non-setup cases must still never prompt.
+            if expect_prompt:
+                prompt_deadline = min(deadline, time.monotonic() + 10)
                 while origin_prompt not in prefix:
-                    remaining = deadline - time.monotonic()
+                    remaining = prompt_deadline - time.monotonic()
                     if remaining <= 0 or not select.select([process.stderr], [], [], remaining)[0]:
-                        raise AssertionError("origin cancellation fixture never reached the prompt")
+                        raise AssertionError("origin selection fixture never reached the prompt")
                     chunk = os.read(process.stderr.fileno(), 4096)
                     if not chunk:
-                        raise AssertionError(f"origin cancellation fixture exited before prompt: {prefix!r}")
+                        raise AssertionError("origin selection fixture exited before prompt")
                     prefix += chunk
+            if cancel_signal is not None:
+                # start_new_session creates this exact child-owned group; the
+                # shim exec preserves its PID. Never use a discovered PGID.
                 os.killpg(process.pid, cancel_signal)
             elif terminal:
                 os.write(master, answers if answers is not None else b"\x04")
-            stdout, stderr = process.communicate(input=None if terminal else answers, timeout=30)
+            stdout, stderr = process.communicate(
+                input=None if terminal else answers, timeout=max(0, deadline - time.monotonic()),
+            )
             events = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
             if snapshot_tree(production) != selection_production_before or sentinel.exists() or tool_sentinel.exists():
                 raise AssertionError("origin selection changed production baseline or invoked an external tool")
             return process.returncode, stdout + prefix + stderr, events[len(before):]
+        except BaseException as error:
+            failure = error
+            if isinstance(error, subprocess.TimeoutExpired):
+                reached_prompt = origin_prompt in prefix + (error.stderr or b"")
+                print(f"origin selection timeout: prompt-reached={reached_prompt}", file=sys.stderr)
+            raise
         finally:
-            if process is not None and process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=5)
+            cleanup_problems = []
+            if process is not None:
+                cleanup_deadline = time.monotonic() + 5
+                # Do not poll/reap first: the unreaped child pins its PID even
+                # if it exited while a descendant still holds a captured pipe.
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # No group remains; still drain and reap below.
+                    except OSError:
+                        cleanup_problems.append("group-signal")
+                        # Popen still owns this unreaped direct child. This
+                        # fallback cannot prove group retirement and never
+                        # turns a refused group signal into a passing cleanup.
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        except OSError:
+                            cleanup_problems.append("child-signal")
+                    try:
+                        process.communicate(timeout=max(0, cleanup_deadline - time.monotonic()))
+                    except (OSError, subprocess.TimeoutExpired):
+                        cleanup_problems.append("pipe-drain")
+                # POSIX communicate uses no reader threads. Close every owned
+                # pipe even if draining failed, then separately reap the child
+                # within the SAME cleanup budget, not another five seconds.
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            cleanup_problems.append("pipe-close")
+                if process.returncode is None:
+                    try:
+                        process.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
+                    except (OSError, subprocess.TimeoutExpired):
+                        cleanup_problems.append("child-reap")
             for descriptor in (slave, master):
                 if descriptor is not None:
-                    os.close(descriptor)
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        cleanup_problems.append("pty-close")
+            if cleanup_problems:
+                message = "origin selection cleanup incomplete: " + ",".join(cleanup_problems)
+                if failure is None:
+                    raise AssertionError(message)
+                # Preserve the initial timeout/prompt/signal failure; print only
+                # fixed stages, never environment or arbitrary captured output.
+                print(message + "; original failure retained", file=sys.stderr)
 
     def assert_no_selection_effects(checkout: Path, events: list[str]) -> None:
         if ((checkout / "relay" / ".dev-tailscale-cli").exists() or
@@ -1869,7 +1954,7 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
     )
     for index, value in enumerate(invalid_origins):
         checkout = selection_checkout(f"invalid-{index}")
-        status, output, events = run_selection(checkout, value + b"\n" + route_confirmation)
+        status, output, events = run_selection(checkout, value + b"\n" + route_confirmation, expect_prompt=True)
         if (status == 0 or output.count(origin_prompt) != 1 or
             b"canonical HTTPS phone-app origin is required" not in output or
             events != ["selection|normalize-external-origin"]):
@@ -1881,13 +1966,13 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
                           ("eof", b"\x04"),
                           ("partial-eof", b"https://app.fixture.invalid\x04\x04")):
         checkout = selection_checkout(case)
-        status, output, events = run_selection(checkout, answers)
+        status, output, events = run_selection(checkout, answers, expect_prompt=True)
         if status == 0 or output.count(origin_prompt) != 1 or b"Cancelled" not in output or events:
             raise AssertionError(f"{case}: did not cancel before setup: {output!r} {events!r}")
         assert_no_selection_effects(checkout, events)
     for cancel_signal, expected_status in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
         checkout = selection_checkout(f"signal-{cancel_signal}")
-        status, output, events = run_selection(checkout, cancel_signal=cancel_signal)
+        status, output, events = run_selection(checkout, cancel_signal=cancel_signal, expect_prompt=True)
         if status != expected_status or output.count(origin_prompt) != 1 or events:
             raise AssertionError(f"signal did not cancel origin selection: {status} {output!r} {events!r}")
         assert_no_selection_effects(checkout, events)
@@ -1907,7 +1992,7 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
     for case, selected_origin, prompted, overrides in successful_selections:
         checkout = selection_checkout(case)
         answers = (selected_origin.encode() + b"\n" if prompted else b"") + route_confirmation
-        status, output, events = run_selection(checkout, answers, overrides=overrides)
+        status, output, events = run_selection(checkout, answers, overrides=overrides, expect_prompt=prompted)
         selected_env = checkout / "relay" / ".dev-tailscale-cli" / "relay.env"
         if (status != 0 or output.count(origin_prompt) != int(prompted) or
             events.count("selection|normalize-external-origin") != int(prompted) or
@@ -1952,7 +2037,9 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
     # reserve, admit or arm. Do not move consent into shell origin selection.
     for case, confirmation in (("origin-only-eof", b"\x04"), ("origin-is-not-consent", b"y\n")):
         checkout = selection_checkout(case)
-        status, output, events = run_selection(checkout, b"https://app.fixture.invalid\n" + confirmation)
+        status, output, events = run_selection(
+            checkout, b"https://app.fixture.invalid\n" + confirmation, expect_prompt=True,
+        )
         if (status == 0 or output.count(origin_prompt) != 1 or
             not any(event.startswith("manager|workflow preflight ") for event in events) or
             any(event.startswith(("manager|workflow reserve ", "manager|workflow publish ",
