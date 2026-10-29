@@ -12,7 +12,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
 import { AppiumClient, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
-import { PhaseBudget } from '../support/budget';
+import { PhaseBudget, timingScale } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
 import { CommandError, command, type CommandResult } from '../support/process';
 import recorded from './fixtures/ios/publication.json';
@@ -339,6 +339,48 @@ test('recorded initial publication waits passively for the same page before actu
   assert.equal(pending.nativeProvider, 'com.apple.webapp');
   assert.equal(pending.detail.nativePid, String(recorded.foreground.pid));
   assert.equal(driver.snapshot().unusable, false);
+});
+
+test('installed discovery timeout preserves the hosted phase and ignores late listing replies', async () => {
+  let clockMs = 0;
+  let discoveries = 0;
+  let reply!: (response: Response) => void;
+  const now = () => clockMs;
+  const budget = new PhaseBudget('recorded-hosted-discovery', { timeoutMs: 45 * 60_000, now, recoveryLimit: 0 });
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
+  const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
+    if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
+    assert.equal(JSON.parse(String(init?.body)).script, 'mobile: getContexts');
+    discoveries++;
+    return new Promise<Response>(resolve => { reply = resolve; });
+  }, now, {
+    now,
+    timer: (callback, ms) => setTimeout(() => { clockMs += ms; callback(); }, 0),
+    clear: timer => clearTimeout(timer),
+  });
+  await driver.create({ capabilities: {} });
+  driver.setBudget(budget);
+  (platform as any).driver = driver;
+  await assert.rejects(() => platform.attachToInstalledView(60_000), /APPIUM_TIMEOUT/u);
+  const snapshot = driver.snapshot();
+  const receipt = snapshot.lastCommand!;
+  assert.equal(receipt.timeoutMs, 20_000 * timingScale);
+  assert.equal(receipt.timing?.phaseRemainingAtEntryMs, 60_000 * timingScale);
+  assert.equal(receipt.timing?.phaseRemainingAtSettlementMs, 40_000 * timingScale);
+  assert.equal(receipt.timing?.responseAvailableMs, undefined);
+  assert.equal(receipt.timing?.outcome, 'timeout');
+  assert.equal(snapshot.unusable, true);
+  assert.equal(discoveries, 1);
+  assert.equal(budget.recoveryCount, 0);
+  const frozen = JSON.stringify(snapshot);
+  reply(value(recorded.contexts));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(driver.snapshot()), frozen, 'late replies must not change terminal timeout evidence');
+  assert.equal(platform.evidenceSnapshot().installedDocumentBound, false);
+  assert.equal(platform.evidenceSnapshot().selectedInstalledContext, '');
+  await assert.rejects(() => platform.attachToInstalledView(60_000), /APPIUM_SESSION_UNUSABLE/u);
+  await assert.rejects(() => driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(discoveries, 1, 'no recovery or subsequent Appium dispatch is permitted');
 });
 
 for (const mode of ['delayed', 'hung'] as const) {

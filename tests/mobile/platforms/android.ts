@@ -16,7 +16,7 @@ import {
   type RuntimeIdentity,
 } from '../support/oracle';
 import { DiagnosticRecorder, redactText, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
-import { PhaseBudget, PhaseBudgetError } from '../support/budget';
+import { PhaseBudget, PhaseBudgetError, timingScale } from '../support/budget';
 import { CommandError, command, commandOutput, type CommandResult } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import type { AndroidEnvironmentMeasurement, AndroidGmsObservationStage } from '../android-measurement';
@@ -47,7 +47,34 @@ function isFatalDriverError(error: unknown): boolean {
 
 function isAdbTransportLoss(error: unknown): boolean {
   return error instanceof WebDriverError && error.code === 'APPIUM_COMMAND' && error.status === 500
+    && error.path === '/session' && error.method === 'POST' && !isFatalDriverError(error)
     && /\badb: device offline\b/u.test(error.message);
+}
+
+function isInstrumentationStartupDeadline(error: unknown): boolean {
+  return error instanceof WebDriverError && error.code === 'APPIUM_COMMAND' && error.status === 500
+    && error.path === '/session' && error.method === 'POST' && !isFatalDriverError(error)
+    && error.message.startsWith('APPIUM_COMMAND: HTTP 500: {"error":"unknown error","message":"The instrumentation process cannot be initialized within 30000ms timeout. Make sure the application under test does not crash and investigate the logcat output.');
+}
+
+function completeAdbReverseMappings(listing: string): Array<[string, string]> | undefined {
+  if (!listing.trim()) return;
+  const lines = listing.trim().split(/\r?\n/u);
+  const remotes = new Set<string>();
+  const locals = new Set<string>();
+  let transport = '';
+  const mappings: Array<[string, string]> = [];
+  for (const line of lines) {
+    const fields = line.match(/^(\S+)\s+(tcp:[1-9]\d{0,4})\s+(tcp:[1-9]\d{0,4})$/u);
+    if (!fields || (transport && transport !== fields[1])) return;
+    const [, owner, remote, local] = fields;
+    if (Number(remote.slice(4)) > 65535 || Number(local.slice(4)) > 65535 || remotes.has(remote) || locals.has(local)) return;
+    transport = owner;
+    remotes.add(remote);
+    locals.add(local);
+    mappings.push([remote, local]);
+  }
+  return mappings;
 }
 
 function adbReverseMappings(listing: string): Array<[string, string]> {
@@ -223,6 +250,7 @@ export class AndroidPlatform implements MobilePlatform {
   private readonly diagnostics: DiagnosticRecorder;
   private startupLog?: AndroidStartupLog;
   private setupAttempted = false;
+  private setupRecoveryFailure?: WebDriverError;
   private installedPackage = '';
   private initialLaunchAttempted = false;
   private retainedOwner?: RetainedNativeIdentity & { driver: AppiumClient; assertSession: () => void };
@@ -277,8 +305,9 @@ export class AndroidPlatform implements MobilePlatform {
       await this.prepareFreshDevice();
       this.assertDriverClear();
     } catch (error) {
-      this.failLifecycle(error);
+      this.failLifecycle(error, this.setupRecoveryFailure !== undefined && error === this.setupRecoveryFailure);
     } finally {
+      this.setupRecoveryFailure = undefined;
       this.endLifecycle();
     }
   }
@@ -313,7 +342,7 @@ export class AndroidPlatform implements MobilePlatform {
     // trust configuration during process startup, so installing it after a
     // browser session has already launched can leave the current target unable
     // to use the newly trusted certificate.
-    await this.createFirstSession({
+    await this.createSetupSession({
       capabilities: {
         platformName: 'Android',
         'appium:automationName': 'UiAutomator2',
@@ -337,24 +366,85 @@ export class AndroidPlatform implements MobilePlatform {
     await this.verifyFixtureEndpoint();
   }
 
-  // Hosted emulators have dropped their adb connection for under a second while UiAutomator2 first started, which also clears adb reverse mappings.
-  private async createFirstSession(options: SessionOptions): Promise<void> {
+  // ADB can disconnect during either setup session, clearing reverse mappings.
+  // Recover once before retaining a Chrome process or starting measurement.
+  private async createSetupSession(options: SessionOptions): Promise<void> {
+    const marker = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    const check = (): void => {
+      this.assertDriverClear();
+      if (!this.setupAttempted || !this.lifecycleActive || this.retainedOwner || this.initialLaunchAttempted
+        || this.driver.snapshot().sessionId || process.env.MOBILE_DEVICE_OWNERSHIP_FILE !== marker) {
+        this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'session recovery is limited to fresh owned device setup');
+      }
+    };
+    const checkOwned = async (): Promise<void> => {
+      check();
+      await requireOwnedDevice('android', this.serial);
+      check();
+    };
+    await checkOwned();
     const adb = process.env.ADB || 'adb';
-    const reverses = adbReverseMappings(await commandOutput(adb, ['-s', this.serial, 'reverse', '--list']));
-    this.assertDriverClear();
+    const before = await command(adb, ['-s', this.serial, 'reverse', '--list'], 30_000, { budget: this.budget });
+    check();
+    let reverses = adbReverseMappings(before.stdout);
     try {
       await this.driver.create(options);
       return;
     } catch (error) {
       const driver = this.driver.snapshot();
-      if (!isAdbTransportLoss(error) || driver.sessionId || driver.unusable || driver.firstFatal) throw error;
-      this.diagnostics.record({ phase: 'android-setup', operation: 'adb-transport-reconnect', detail: { error: String(error), reverses } });
-    }
-    await command(adb, ['-s', this.serial, 'wait-for-device'], 60_000);
-    this.assertDriverClear();
-    for (const [remote, local] of reverses) {
-      await command(adb, ['-s', this.serial, 'reverse', remote, local]);
-      this.assertDriverClear();
+      if (!(error instanceof WebDriverError) || isFatalDriverError(error) || driver.sessionId || driver.unusable || driver.firstFatal) throw error;
+      const offline = isAdbTransportLoss(error);
+      if (!offline && !isInstrumentationStartupDeadline(error)) throw error;
+      let stage = 'setup-health';
+      try {
+        const replacementMs = (options.requestTimeoutMs || 60_000) * timingScale;
+        const checkReplacement = (): void => { check(); this.requireLifecycleAllowance(replacementMs); };
+        checkReplacement();
+        await checkOwned();
+        checkReplacement();
+        if (!offline) {
+          stage = 'reverse-baseline';
+          const complete = before.stderr.trim() ? undefined : completeAdbReverseMappings(before.stdout);
+          if (!complete) throw new Error('ANDROID_SETUP: incomplete reverse baseline', { cause: error });
+          stage = 'reverse-inspection';
+          const after = await command(adb, ['-s', this.serial, 'reverse', '--list'], 30_000, { budget: this.budget });
+          checkReplacement();
+          await checkOwned();
+          checkReplacement();
+          // Only raw-empty successful output proves all baseline mappings disappeared.
+          if (after.stdout !== '' || after.stderr.trim()) throw new Error('ANDROID_SETUP: reverse loss not proven', { cause: error });
+          reverses = complete;
+        }
+        stage = 'recovery-admission';
+        checkReplacement();
+        this.budget.recovery('android-setup-adb-reconnect');
+        this.diagnostics.record({ phase: 'android-setup', operation: 'adb-transport-reconnect', detail: {
+          session: options.capabilities.browserName === 'Chrome' ? 'chrome' : 'settings',
+          proof: offline ? 'device-offline' : 'all-reverses-lost', mappingCount: reverses.length,
+        } });
+        stage = 'device-wait';
+        await checkOwned();
+        checkReplacement();
+        await command(adb, ['-s', this.serial, 'wait-for-device'], 60_000, { budget: this.budget });
+        checkReplacement();
+        for (const [remote, local] of reverses) {
+          stage = 'reverse-restore';
+          await checkOwned();
+          checkReplacement();
+          await command(adb, ['-s', this.serial, 'reverse', ...(!offline ? ['--no-rebind'] : []), remote, local], 30_000, { budget: this.budget });
+          checkReplacement();
+        }
+        stage = 'replacement-admission';
+        await checkOwned();
+        checkReplacement();
+      } catch (secondary) {
+        this.setupRecoveryFailure = error;
+        this.diagnostics.record({ phase: 'android-setup', operation: 'adb-recovery-refused', detail: {
+          stage, failure: secondary instanceof Error ? secondary.name : 'unknown',
+          code: secondary instanceof PhaseBudgetError ? secondary.code : secondary instanceof CommandError ? secondary.code : 'ANDROID_SETUP_GUARD',
+        } });
+        throw error;
+      }
     }
     await this.driver.create(options);
   }
@@ -522,9 +612,11 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  private failLifecycle(error: unknown): never {
+  private failLifecycle(error: unknown, preservePrimary = false): never {
     this.coldHandoff = undefined;
     this.lifecycleFailure ||= this.ownershipFailure || (error instanceof Error ? error : new Error(String(error)));
+    // Setup recovery can trip a secondary guard; retain its fence without replacing the create failure.
+    if (preservePrimary) throw error;
     throw this.lifecycleFailure;
   }
 
@@ -1367,11 +1459,13 @@ export class AndroidPlatform implements MobilePlatform {
     if (this.budget.remainingMs < 70_000) throw new Error('ANDROID_SESSION: insufficient parent allowance including retained producer startup');
     if (this.driver.snapshot().sessionId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'previous session was not retired before creation');
     this.ownedSessionClose = undefined;
-    await this.driver.create({
+    const options: SessionOptions = {
       capabilities: androidChromeCapabilities(this.serial, attachToRunningApp),
       requestTimeoutMs: 70_000,
       budget: this.budget,
-    });
+    };
+    if (!attachToRunningApp && this.setupAttempted) await this.createSetupSession(options);
+    else await this.driver.create(options);
     this.assertDriverClear();
     if (reserveMs) this.requireLifecycleAllowance(20_000 + 5_000 + reserveMs);
     await this.configureNativeSettings(reserveMs + (reserveMs ? 5_000 : 0));

@@ -5,6 +5,35 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.5] - 2026-10-29
+
+### Added
+
+- Protect self-hosted gateway registrations with an optional shared registration
+  token and relay-id allow-list. Relays prove knowledge of the token without
+  sending it over the wire; both restrictions must pass when configured.
+- Support Antigravity CLI (`agy`) panes: its own logo and name, clean
+  **Conversation** and **Full history** from the native conversation database
+  with live updates, slash command suggestions for builtins and
+  `~/.gemini/skills`, and approval cards for its permission dialog. Approval
+  cards appear only once Herdr marks the dialog as blocked; Herdr's agy manifest
+  does not yet detect the Antigravity CLI 1.4.7 dialog.
+
+### Fixed
+
+- Use the rightmost non-empty `X-Forwarded-For` entry across all header fields
+  behind a trusted reverse proxy, preventing forged earlier fields or entries
+  from bypassing per-IP rate limits.
+- Forward the optional registration token and relay-id allow-list from generated
+  deployment bundles into the gateway container.
+- Preserve existing gateway `.env` settings when regenerating or uploading a
+  deployment bundle, so normal upgrades cannot clear registration protection.
+- Detect Antigravity conversation commits even when the relay polls between
+  WAL writes and commit publication.
+- Recognize ANSI-styled Antigravity approval menus and keep pending approvals
+  valid when focus or the quota countdown changes, while still rejecting
+  responses to a changed command.
+
 ## [0.23.4] - 2026-10-27
 
 ### Fixed
@@ -1909,7 +1938,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...HEAD
+[0.23.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...v0.23.5
 [0.23.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...v0.23.4
 [0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...v0.23.2

@@ -338,17 +338,39 @@ function readableStream(child: ChildProcess, index: number): NodeJS.ReadableStre
   return value as NodeJS.ReadableStream;
 }
 
-function writableStream(child: ChildProcess, index: number): NodeJS.WritableStream {
+export function releaseOwnedInputOnFinish(stream: Writable): void {
+  const cleanup = () => {
+    stream.off('finish', finish);
+    stream.off('error', cleanup);
+    stream.off('close', cleanup);
+  };
+  const finish = () => {
+    cleanup();
+    if (stream.writableFinished && !stream.errored && !stream.destroyed && !stream.closed) stream.destroy();
+  };
+  if (stream.destroyed || stream.closed || stream.errored) return;
+  if (stream.writableFinished) { finish(); return; }
+  stream.once('finish', finish);
+  stream.once('error', cleanup);
+  stream.once('close', cleanup);
+}
+
+function writableStream(child: ChildProcess, index: number): Writable {
   const value = child.stdio[index];
   if (!value || !('write' in value)) throw new Error(`owned process stream ${index} was not created`);
-  return value as NodeJS.WritableStream;
+  return value as Writable;
 }
 
 function encode(value: RecordValue): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-function parseLines(stream: ControlChannel | Duplex, receive: (value: RecordValue) => void,
+interface LineSource extends EventEmitter {
+  setEncoding(encoding: BufferEncoding): unknown;
+  destroy(error?: Error): unknown;
+}
+
+function parseLines(stream: LineSource, receive: (value: RecordValue) => void,
   onReceiveError: (error: Error) => void = error => stream.destroy(error)): void {
   let pending = '';
   stream.setEncoding('utf8');
@@ -2058,6 +2080,8 @@ function runSupervisor(): void {
     const anchorInput = writableStream(anchor, 6);
     anchorInput.on('error', error => stop('caller-input-failed', error.message));
     input.on('error', error => stop('caller-input-failed', error.message));
+    // This one-way endpoint must release only after all writes and finalization succeed.
+    releaseOwnedInputOnFinish(anchorInput);
     input.pipe(anchorInput);
     inputObservation.connected(anchorInput);
     relay(readableStream(anchor, 4), stdout, observeStdout, 'stdout',

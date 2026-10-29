@@ -170,17 +170,7 @@ func New(opts Options) (*Manager, error) {
 		return nil, fmt.Errorf("webrtclink: listen udp: %w", err)
 	}
 
-	// ICE v4.4.2 still starts connWorker from NewUDPMuxDefault before the
-	// universal mux has assigned its embedded UDPMux field. A datagram that
-	// lands during construction can therefore observe a half-written struct.
-	// Holding reads until the constructor returns closes that window without
-	// reaching into pion's internals; ICE v4.4.3 cannot be used until the
-	// compatible WebRTC release is published. The current WebRTC v4.2.20 uses the
-	// transport/v4 API, so selecting ICE v4.4.3 would make the module graph fail
-	// to compile rather than provide a safe upgrade.
-	gated := &gatedConn{UDPConn: udp, open: make(chan struct{})}
-	mux := ice.NewUniversalUDPMuxDefault(ice.UniversalUDPMuxParams{UDPConn: gated})
-	close(gated.open)
+	mux := ice.NewUniversalUDPMuxDefault(ice.UniversalUDPMuxParams{UDPConn: udp})
 
 	m := &Manager{
 		logger:      logger,

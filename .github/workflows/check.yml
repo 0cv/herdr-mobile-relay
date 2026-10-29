@@ -2,7 +2,7 @@ name: check
 
 on:
   push:
-    branches: [main, dev, ci-mobile]
+    branches: [main, dev]
   pull_request:
 
 concurrency:
@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Format
         run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
@@ -39,7 +39,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Run opt-in user-journal integration test
         env:
@@ -59,7 +59,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: go test -race -p 1 ./...
 
@@ -73,35 +73,35 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: make shell-check production-path-audit
 
   frontend:
-    name: Frontend and mobile browsers (Bun 1.4.2)
+    name: Frontend and mobile browsers
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: bun install --frozen-lockfile --cwd frontend
       # Native browsers instead of the multi-GB Playwright container image:
@@ -140,7 +140,7 @@ jobs:
       # A hung browser leaves only a timeout in the log. The failing tests'
       # Playwright traces (synthetic fixture data) show what the page was doing.
       - if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: playwright-test-results
           path: frontend/test-results/
@@ -158,21 +158,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - name: Build, manifest, checksum, and offline-verify four targets
         run: |
           make cross-build
@@ -181,7 +181,7 @@ jobs:
           scripts/check-installed-release.sh \
             "dist/release/herdr-mobile-relay_${version}_linux_amd64.tar.gz" \
             dist/release/checksums.txt "$version" "$GITHUB_SHA" linux/amd64
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-bundles
           path: dist/release/
@@ -206,7 +206,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-bundles
           path: dist/release
@@ -227,20 +227,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - run: make PATH="$PATH" mobile-ci-common-check
 
@@ -257,15 +257,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Install XML test tools
         run: |
@@ -277,10 +277,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
-          test "$(bun --version)" = 1.4.2
-          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(bun --version)" = 1.4.4
+          test "$(go version | awk '{print $3}')" = go1.27.3
           test "$(go env GOTOOLCHAIN)" = local
           tar --version | grep -q '^tar (GNU tar)'
           xmllint --version >/dev/null 2>&1
@@ -290,7 +290,7 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.4-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
@@ -305,7 +305,7 @@ jobs:
           --source-sha "$GITHUB_SHA"
           --run-id "$GITHUB_RUN_ID"
           --attempt "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: unit-ci-plan-try-${{ github.run_attempt }}
@@ -330,15 +330,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Install XML test tools
         run: |
@@ -350,10 +350,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
-          test "$(bun --version)" = 1.4.2
-          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(bun --version)" = 1.4.4
+          test "$(go version | awk '{print $3}')" = go1.27.3
           test "$(go env GOTOOLCHAIN)" = local
           tar --version | grep -q '^tar (GNU tar)'
           xmllint --version >/dev/null 2>&1
@@ -363,14 +363,14 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.4-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
         run: |
           bun install --frozen-lockfile --cwd frontend
           bun install --frozen-lockfile --cwd tests/mobile
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: unit-ci-plan-try-${{ github.run_attempt }}
           path: ${{ runner.temp }}/unit-ci-prepared
@@ -383,7 +383,7 @@ jobs:
           --source-sha "$GITHUB_SHA"
           --run-id "$GITHUB_RUN_ID"
           --attempt "$GITHUB_RUN_ATTEMPT"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: unit-ci-${{ matrix.group_id }}-try-${{ github.run_attempt }}
@@ -406,15 +406,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
       - name: Install XML test tools
         run: |
@@ -426,10 +426,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
-          test "$(bun --version)" = 1.4.2
-          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(bun --version)" = 1.4.4
+          test "$(go version | awk '{print $3}')" = go1.27.3
           test "$(go env GOTOOLCHAIN)" = local
           tar --version | grep -q '^tar (GNU tar)'
           xmllint --version >/dev/null 2>&1
@@ -439,14 +439,14 @@ jobs:
           path: |
             frontend/node_modules
             tests/mobile/node_modules
-          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+          key: mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.4-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
       - name: Install mobile unit dependencies
         id: install-test-dependencies
         if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
         run: |
           bun install --frozen-lockfile --cwd frontend
           bun install --frozen-lockfile --cwd tests/mobile
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: always()
         with:
           pattern: unit-ci-*-try-${{ github.run_attempt }}
@@ -469,24 +469,24 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 26.13.0
       - name: Assert shell Node runtime
         run: |
           set -euo pipefail
-          test "$(node --version)" = v24.21.0
+          test "$(node --version)" = v26.13.0
           test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile --cwd tests/mobile
       - run: bun run --cwd tests/mobile test:android-inspection
 
   mobile:
     name: Mobile device CI
     if: >-
-      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mobile')) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')) ||
       (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' || github.event.pull_request.base.ref == 'dev'))
     needs: [release, mobile-host-check, mobile-inspection-check, mobile-unit-aggregate]
     uses: ./.github/workflows/mobile-ci.yml

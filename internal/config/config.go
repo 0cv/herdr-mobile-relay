@@ -45,6 +45,8 @@ type Config struct {
 	// transport may select another healthy entry at runtime.
 	GatewayURL  string
 	GatewayURLs []string
+	// GatewayRegistrationToken is the optional self-hosted registration secret.
+	GatewayRegistrationToken string
 	// GatewaySelection is how the transport picks among GatewayURLs: "ordered"
 	// registers with the first healthy entry in configured order, "latency"
 	// with the lowest-latency healthy one. The loader normalises it, so no
@@ -101,6 +103,7 @@ func Load() (*Config, error) {
 	// entries concurrently; HERDR_GATEWAY_SELECTION decides what the order
 	// means. A single value is one entry and behaves exactly as it always did.
 	cfg.GatewayURLs = parseGatewayURLs(os.Getenv("HERDR_GATEWAY_URL"))
+	cfg.GatewayRegistrationToken = os.Getenv("HERDR_GATEWAY_REGISTRATION_TOKEN")
 	if len(cfg.GatewayURLs) > 0 {
 		cfg.GatewayURL = cfg.GatewayURLs[0]
 	}

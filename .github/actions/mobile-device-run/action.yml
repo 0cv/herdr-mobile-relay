@@ -45,25 +45,25 @@ runs:
       shell: bash
     - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
-        bun-version: 1.4.2
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        bun-version: 1.4.4
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
-        node-version: 24.21.0
+        node-version: 26.13.0
     - name: Assert shell Node runtime
       run: |
         set -euo pipefail
-        test "$(node --version)" = v24.21.0
+        test "$(node --version)" = v26.13.0
         test "$(command -v node)" = "$(node -p 'process.execPath')"
       shell: bash
     - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27.1'
+        go-version: '1.27.3'
         cache: true
     - name: Install mobile harness dependencies
       run: bun install --frozen-lockfile --cwd tests/mobile
       shell: bash
     - name: Download verified bundle set
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: mobile-bundles-${{ inputs.platform }}
         path: mobile-bundles
@@ -168,9 +168,9 @@ runs:
         chrome_sha256="$(jq -r '.android.browserSha256' tests/mobile/toolchains.json)"
         trichrome_url="$(jq -r '.android.trichromeLibraryUrl' tests/mobile/toolchains.json)"
         trichrome_sha256="$(jq -r '.android.trichromeLibrarySha256' tests/mobile/toolchains.json)"
-        curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --output "$browser_dir/chrome.apkm" "$chrome_url"
+        curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 --speed-limit 51200 --speed-time 30 --output "$browser_dir/chrome.apkm" "$chrome_url"
         printf '%s  %s\n' "$chrome_sha256" "$browser_dir/chrome.apkm" | sha256sum --check --status
-        curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --output "$browser_dir/trichrome-library.apk" "$trichrome_url"
+        curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 --speed-limit 51200 --speed-time 30 --output "$browser_dir/trichrome-library.apk" "$trichrome_url"
         printf '%s  %s\n' "$trichrome_sha256" "$browser_dir/trichrome-library.apk" | sha256sum --check --status
         unzip -q "$browser_dir/chrome.apkm" -d "$browser_dir/chrome"
         mapfile -t chrome_apks < <(find "$browser_dir/chrome" -maxdepth 1 -type f -name '*.apk' -print | sort)
@@ -389,6 +389,7 @@ runs:
         if [ "$MOBILE_PLATFORM" = ios ]; then
           rm -f "$MOBILE_OUTPUT/appium.log"
           printf '%s\n' '{"platform":"ios","appiumLog":"withheld","reason":"Payload-bearing Appium log is not uploaded; use client request timing and bounded confirmation diagnostics. Private ephemeral runner logging is unchanged."}' >"$MOBILE_OUTPUT/appium-log-disposition.json"
+          bun tests/mobile/support/ios-webkit-output.ts "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/ios-webkit-discovery.json"
         elif [ -f "$RUNNER_TEMP/appium.log" ]; then
           bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
         fi
@@ -437,7 +438,7 @@ runs:
       shell: bash
     - name: Upload mobile evidence
       if: always()
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ inputs.evidence_prefix }}-${{ inputs.platform }}-${{ inputs.baseline }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/herdr-mobile-output

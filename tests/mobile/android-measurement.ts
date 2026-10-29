@@ -55,12 +55,14 @@ const ANDROID_GMS_COMMAND_OUTPUT_LIMIT = ANDROID_GMS_DUMP_LIMIT * 2;
 const ANDROID_GMS_OWNERSHIP_TIMEOUT_MS = 2_000;
 const ANDROID_GMS_PARSE_RESERVE_MS = 1_000;
 const ANDROID_GMS_PARSE_CLEANUP_RESERVATION_MS = 40;
-const ANDROID_GMS_PERSISTENCE_TIMEOUT_MS = 1_000;
+const ANDROID_GMS_PERSISTENCE_TIMEOUT_MS = 5_000;
+const ANDROID_MEASUREMENT_JSON_WRITE_TIMEOUT_MS = 1_000;
 const ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS = 1_000;
 const ANDROID_GMS_STAGE_TIMEOUT_MS = ANDROID_GMS_OWNERSHIP_TIMEOUT_MS + ANDROID_GMS_COMMAND_TIMEOUT_MS + ANDROID_GMS_PARSE_RESERVE_MS;
 const ANDROID_GMS_TOTAL_BYTES_LIMIT = ANDROID_GMS_DUMP_LIMIT * ANDROID_GMS_OBSERVATION_STAGES.length;
 const ANDROID_GMS_TOTAL_TIME_LIMIT_MS = ANDROID_GMS_STAGE_TIMEOUT_MS * ANDROID_GMS_OBSERVATION_STAGES.length;
-const ANDROID_GMS_TOTAL_PERSISTENCE_LIMIT_MS = ANDROID_GMS_PERSISTENCE_TIMEOUT_MS * (ANDROID_GMS_OBSERVATION_STAGES.length + 1);
+// A slower owned worker may use spare time, but cannot expand the measurement's shared persistence pool.
+const ANDROID_GMS_TOTAL_PERSISTENCE_LIMIT_MS = 6_000;
 const ANDROID_GMS_HASH_ENCODING = 'sha256-hex-dot-separated-v1' as const;
 const ANDROID_GMS_OBSERVATION_FILE_LIMIT = 8_000_000;
 const ANDROID_MEASUREMENT_JSON_FILES = new Set(['android-environment-collector.json', 'android-environment-completion.json',
@@ -683,7 +685,7 @@ export class AndroidEnvironmentMeasurement {
         throw new Error('GMS observation persistence request exceeds its input bound');
       }
       const commandRemaining = Math.floor(Math.min(operationDeadline - this.io.monotonicNow(), budget?.remainingMs ?? timeoutMs));
-      const cleanupReserve = Math.min(200, Math.floor(commandRemaining / 4));
+      const cleanupReserve = Math.min(ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS, Math.floor(commandRemaining / 4));
       const writerTimeoutMs = Math.floor(commandRemaining - cleanupReserve - 25);
       if (writerTimeoutMs < 1) throw new Error('GMS observation evidence has no persistence time remaining');
       temporary = candidateTemporary;
@@ -717,7 +719,8 @@ export class AndroidEnvironmentMeasurement {
       this.gmsObservations.persistenceRetirement = retired ? 'retired' : 'pending-temporary-write';
       if (!retired) this.gmsObservations.temporaryEvidenceCleanup = 'pending';
       if (temporary && retired) {
-        const cleanupTimeout = Math.floor(Math.min(200, operationDeadline - this.io.monotonicNow(), budget?.remainingMs ?? timeoutMs));
+        const cleanupTimeout = Math.floor(Math.min(ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS,
+          operationDeadline - this.io.monotonicNow(), budget?.remainingMs ?? timeoutMs));
         if (cleanupTimeout < 1) {
           this.gmsObservations.persistenceRetirement = 'pending-temporary-write';
           this.gmsObservations.temporaryEvidenceCleanup = 'pending';
@@ -793,7 +796,7 @@ export class AndroidEnvironmentMeasurement {
     try {
       const result = await this.io.boundedCommand(process.execPath,
         [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), `--android-measurement-persist-${mode}`],
-        mode === 'text' ? ANDROID_MEASUREMENT_FILE_WRITE_TIMEOUT_MS : ANDROID_GMS_PERSISTENCE_TIMEOUT_MS, {
+        mode === 'text' ? ANDROID_MEASUREMENT_FILE_WRITE_TIMEOUT_MS : ANDROID_MEASUREMENT_JSON_WRITE_TIMEOUT_MS, {
           label: `persist Android measurement ${basename(target)}`,
           maxBytes: 1_024,
           maxBytesPerStream: 512,

@@ -2,12 +2,11 @@
 // gateway, the computer relay that registers with it, and the phone app that
 // connects through it.
 //
-// The gateway copies opaque frames. It never learns the relay key, never sees
-// plaintext, SDP, or push subscriptions, and holds no long-lived secret of its
-// own. Phone connections are authenticated by a challenge-response HMAC that
-// the gateway forwards to the relay; the relay is the only party that can
-// verify it, because only the relay and the paired phone can derive the
-// rendezvous key from the relay key.
+// The gateway copies opaque frames. It never learns the relay key or sees
+// plaintext, SDP, or push subscriptions. It may hold a separate registration
+// token to restrict relay access. Phone connections are authenticated by a
+// challenge-response HMAC that the gateway forwards to the relay; only the
+// relay and paired phone can derive the rendezvous key from the relay key.
 //
 // Two identifiers are derived one-way from the relay key, so the QR payload is
 // unchanged and the gateway learns nothing about the relay key:
@@ -76,11 +75,12 @@ const RelayIDBytes = 16
 const RelayIDLength = 22
 
 const (
-	hkdfSalt         = "herdr-gateway-v1"
-	relayIDInfo      = "herdr-gw-id"
-	rendezvousInfo   = "herdr-gw-auth"
-	connectProofTag  = "herdr-gw-connect\x00"
-	rendezvousKeyLen = 32
+	hkdfSalt             = "herdr-gateway-v1"
+	relayIDInfo          = "herdr-gw-id"
+	rendezvousInfo       = "herdr-gw-auth"
+	connectProofTag      = "herdr-gw-connect\x00"
+	registrationProofTag = "herdr-gateway-register-v1"
+	rendezvousKeyLen     = 32
 )
 
 // ErrShortFrame reports a multiplex frame smaller than the fixed header.
@@ -121,6 +121,24 @@ func VerifyConnectProof(rendezvousKey []byte, relayID string, nonce, proof []byt
 		return false
 	}
 	return hmac.Equal(proof, ConnectProof(rendezvousKey, relayID, nonce))
+}
+
+// RegistrationProof binds a relay registration to the gateway's fresh challenge.
+// The shared registration token itself never travels on the wire.
+func RegistrationProof(token string, relayID string, nonce []byte) []byte {
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte(registrationProofTag))
+	_, _ = mac.Write([]byte(relayID))
+	_, _ = mac.Write(nonce)
+	return mac.Sum(nil)
+}
+
+// VerifyRegistrationProof checks a relay registration proof in constant time.
+func VerifyRegistrationProof(token string, relayID string, nonce, proof []byte) bool {
+	if len(nonce) != NonceBytes || len(proof) != sha256.Size {
+		return false
+	}
+	return hmac.Equal(proof, RegistrationProof(token, relayID, nonce))
 }
 
 // ValidRelayID reports whether an identifier is shaped like a derived relay id.
@@ -166,7 +184,7 @@ func DecodeFrame(frame []byte) (op byte, connID uint32, payload []byte, err erro
 }
 
 // ServerHello is the first message the gateway sends on any connection. The
-// nonce is the challenge a phone answers; a relay ignores it.
+// nonce challenges phones and, when configured, authenticates relay registrations.
 //
 // StunPort advertises the gateway's own STUN listener so both peers can learn
 // their mapped address without router configuration. Only the port travels: each
@@ -183,9 +201,10 @@ type ServerHello struct {
 
 // RegisterHello claims a relay id for the multiplexed relay link.
 type RegisterHello struct {
-	Type    string `json:"type"`
-	Proto   int    `json:"proto"`
-	RelayID string `json:"relay_id"`
+	Type              string `json:"type"`
+	Proto             int    `json:"proto"`
+	RelayID           string `json:"relay_id"`
+	RegistrationProof string `json:"registration_proof,omitempty"`
 }
 
 // ConnectHello asks to be paired with a registered relay.
@@ -242,6 +261,7 @@ const (
 // Error codes returned in ErrorMessage.
 const (
 	CodeBadHello      = "bad_hello"
+	CodeUnauthorized  = "unauthorized"
 	CodeUnknownRelay  = "unknown_relay"
 	CodeRateLimited   = "rate_limited"
 	CodeTooManyClient = "too_many_clients"

@@ -105,7 +105,7 @@ if [[ "$*" == *"main.js --address"* ]]; then exit 42; fi
     await writeFile(integrity, proof);
     assertExit(runBash(['-c', capture], { ...env, MOBILE_OUTPUT: output }), 0, `${filename}: Android integrity export`);
     assert.equal(await readFile(artifact, 'utf8'), proof);
-    assert.ok(text.indexOf('- name: Sanitize bounded diagnostics') < text.indexOf('uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', text.indexOf('- name: Sanitize bounded diagnostics')));
+    assert.ok(text.indexOf('- name: Sanitize bounded diagnostics') < text.indexOf('uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9', text.indexOf('- name: Sanitize bounded diagnostics')));
     assert.ok(text.indexOf('- name: Upload mobile evidence') < text.indexOf('- name: Stop owned mobile processes and devices'));
     assert.match(text.slice(text.indexOf('- name: Upload mobile evidence')), /path: \$\{\{ runner.temp \}\}\/herdr-mobile-output/u);
     await rm(artifact);
