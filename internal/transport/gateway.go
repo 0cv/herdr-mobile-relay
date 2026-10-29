@@ -105,6 +105,8 @@ type GatewayOptions struct {
 	// RelayKey is the relay's pairing secret. Both gateway identifiers are
 	// derived from it; the key itself never leaves the process.
 	RelayKey string
+	// RegistrationToken is the optional shared gateway registration secret.
+	RegistrationToken string
 	// MaxClients bounds the phone connections accepted through the gateway.
 	MaxClients int
 	Logger     *slog.Logger
@@ -121,11 +123,12 @@ type GatewayClient struct {
 	urls []string
 	// selection is the rule for picking among healthy candidates. Anything but
 	// config.GatewaySelectionLatency is ordered.
-	selection     string
-	relayID       string
-	rendezvousKey []byte
-	maxClients    int
-	logger        *slog.Logger
+	selection         string
+	relayID           string
+	rendezvousKey     []byte
+	registrationToken string
+	maxClients        int
+	logger            *slog.Logger
 
 	backoffBase     time.Duration
 	backoffMax      time.Duration
@@ -190,19 +193,20 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 		logger = slog.Default()
 	}
 	return &GatewayClient{
-		hub:            hub,
-		urls:           urls,
-		selection:      opts.Selection,
-		relayID:        relayID,
-		rendezvousKey:  rendezvousKey,
-		maxClients:     maxClients,
-		logger:         logger,
-		backoffBase:    gatewayBackoffBase,
-		backoffMax:     gatewayBackoffMax,
-		probeTimeout:   gatewayProbeTimeout,
-		healthInterval: gatewayHealthInterval,
-		probe:          measureGatewayRTT,
-		conns:          make(map[uint32]*gatewayConn),
+		hub:               hub,
+		urls:              urls,
+		selection:         opts.Selection,
+		relayID:           relayID,
+		rendezvousKey:     rendezvousKey,
+		registrationToken: opts.RegistrationToken,
+		maxClients:        maxClients,
+		logger:            logger,
+		backoffBase:       gatewayBackoffBase,
+		backoffMax:        gatewayBackoffMax,
+		probeTimeout:      gatewayProbeTimeout,
+		healthInterval:    gatewayHealthInterval,
+		probe:             measureGatewayRTT,
+		conns:             make(map[uint32]*gatewayConn),
 	}, nil
 }
 
@@ -627,11 +631,20 @@ func (c *GatewayClient) registerLink(parent context.Context, conn *websocket.Con
 	c.setGatewayBuild(hello.Version, hello.Revision)
 	c.setSTUNPort(hello.StunPort)
 
-	register, err := json.Marshal(gatewaywire.RegisterHello{
+	registration := gatewaywire.RegisterHello{
 		Type:    gatewaywire.TypeRegister,
 		Proto:   gatewaywire.Proto,
 		RelayID: c.relayID,
-	})
+	}
+	if c.registrationToken != "" {
+		nonce, err := base64.RawURLEncoding.DecodeString(hello.Nonce)
+		if err != nil || len(nonce) != gatewaywire.NonceBytes {
+			return errors.New("gateway registration challenge is malformed")
+		}
+		registration.RegistrationProof = base64.RawURLEncoding.EncodeToString(
+			gatewaywire.RegistrationProof(c.registrationToken, c.relayID, nonce))
+	}
+	register, err := json.Marshal(registration)
 	if err != nil {
 		return fmt.Errorf("encode register hello: %w", err)
 	}
@@ -666,6 +679,9 @@ func (c *GatewayClient) registerLink(parent context.Context, conn *websocket.Con
 		var rejection gatewaywire.ErrorMessage
 		if err := json.Unmarshal(rawReply, &rejection); err != nil {
 			return fmt.Errorf("decode gateway error: %w", err)
+		}
+		if rejection.Code == gatewaywire.CodeUnauthorized {
+			rejection.Message = "registration token missing or wrong: set HERDR_GATEWAY_REGISTRATION_TOKEN to match the gateway; also check the gateway's HERDR_GATEWAY_ALLOWED_RELAY_IDS"
 		}
 		return &gatewayRejectedError{code: rejection.Code, message: rejection.Message}
 	default:

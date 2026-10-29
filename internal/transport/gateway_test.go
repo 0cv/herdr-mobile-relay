@@ -1415,3 +1415,150 @@ func TestGatewaySweepsStalledAssemblies(t *testing.T) {
 		return harness.client.Status().Clients == 0
 	})
 }
+
+func TestRegisterLinkRegistrationProof(t *testing.T) {
+	for _, token := range []string{"", "registration-secret"} {
+		t.Run("token="+token, func(t *testing.T) {
+			nonce := bytes.Repeat([]byte{9}, gatewaywire.NonceBytes)
+			received := make(chan map[string]json.RawMessage, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.CloseNow()
+				ctx, cancel := context.WithTimeout(r.Context(), gatewayTestTimeout)
+				defer cancel()
+				hello, _ := json.Marshal(gatewaywire.ServerHello{Type: gatewaywire.TypeServerHello, Proto: gatewaywire.Proto, Nonce: base64.RawURLEncoding.EncodeToString(nonce)})
+				if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
+					return
+				}
+				_, raw, err := conn.Read(ctx)
+				if err != nil {
+					return
+				}
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(raw, &fields) != nil {
+					return
+				}
+				received <- fields
+				ready, _ := json.Marshal(gatewaywire.ReadyMessage{Type: gatewaywire.TypeReady, Proto: gatewaywire.Proto})
+				_ = conn.Write(ctx, websocket.MessageText, ready)
+			}))
+			defer server.Close()
+			hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
+				defer cancel()
+				hub.Shutdown(ctx)
+			}()
+			client, err := NewGatewayClient(hub, GatewayOptions{URL: "ws" + strings.TrimPrefix(server.URL, "http"), RelayKey: gatewayTestRelayKey, RegistrationToken: token})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, client.CurrentURL(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.CloseNow()
+			if err := client.registerLink(ctx, conn); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case fields := <-received:
+				raw, present := fields["registration_proof"]
+				if token == "" {
+					if present {
+						t.Fatal("unconfigured registration sent a proof")
+					}
+					return
+				}
+				var encoded string
+				if err := json.Unmarshal(raw, &encoded); err != nil {
+					t.Fatal(err)
+				}
+				proof, err := base64.RawURLEncoding.DecodeString(encoded)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !gatewaywire.VerifyRegistrationProof(token, client.RelayID(), nonce, proof) {
+					t.Fatal("invalid registration proof")
+				}
+			case <-ctx.Done():
+				t.Fatal("registration was not received")
+			}
+		})
+	}
+}
+
+func TestGatewayUnauthorizedUsesBackoff(t *testing.T) {
+	attempts := make(chan time.Time, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		ctx, cancel := context.WithTimeout(r.Context(), gatewayTestTimeout)
+		defer cancel()
+		hello, _ := json.Marshal(gatewaywire.ServerHello{Type: gatewaywire.TypeServerHello, Proto: gatewaywire.Proto})
+		if conn.Write(ctx, websocket.MessageText, hello) != nil {
+			return
+		}
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		attempts <- time.Now()
+		reply, _ := json.Marshal(gatewaywire.ErrorMessage{Type: gatewaywire.TypeError, Code: gatewaywire.CodeUnauthorized})
+		_ = conn.Write(ctx, websocket.MessageText, reply)
+	}))
+	defer server.Close()
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
+		defer cancel()
+		if err := hub.Shutdown(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	client, err := NewGatewayClient(hub, GatewayOptions{URL: "ws" + strings.TrimPrefix(server.URL, "http"), RelayKey: gatewayTestRelayKey, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.backoffBase = 100 * time.Millisecond
+	client.backoffMax = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); client.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(gatewayTestTimeout):
+			t.Error("gateway run did not stop")
+		}
+	}()
+	var previous time.Time
+	for i := range 3 {
+		select {
+		case now := <-attempts:
+			if i > 0 {
+				minimum := time.Duration(float64(client.backoffBase*time.Duration(1<<(i-1))) * 0.8)
+				if elapsed := now.Sub(previous); elapsed < minimum {
+					t.Fatalf("retry %d after %s, want at least %s", i, elapsed, minimum)
+				}
+			}
+			previous = now
+		case <-time.After(gatewayTestTimeout):
+			t.Fatal("timed out waiting for registration attempt")
+		}
+	}
+	waitFor(t, "actionable unauthorized error", func() bool {
+		message := client.Status().LastError
+		return strings.Contains(message, gatewaywire.CodeUnauthorized) &&
+			strings.Contains(message, "HERDR_GATEWAY_REGISTRATION_TOKEN") &&
+			strings.Contains(message, "HERDR_GATEWAY_ALLOWED_RELAY_IDS")
+	})
+}

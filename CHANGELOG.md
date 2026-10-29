@@ -7,6 +7,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Protect self-hosted gateway registrations with an optional shared registration
+  token and relay-id allow-list. Relays prove knowledge of the token without
+  sending it over the wire; both restrictions must pass when configured.
 - Support Antigravity CLI (`agy`) panes: its own logo and name, clean
   **Conversation** and **Full history** from the native conversation database
   with live updates, slash command suggestions for builtins and
@@ -16,6 +19,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Use the rightmost non-empty `X-Forwarded-For` entry across all header fields
+  behind a trusted reverse proxy, preventing forged earlier fields or entries
+  from bypassing per-IP rate limits.
+- Forward the optional registration token and relay-id allow-list from generated
+  deployment bundles into the gateway container.
+- Preserve existing gateway `.env` settings when regenerating or uploading a
+  deployment bundle, so normal upgrades cannot clear registration protection.
 - Detect Antigravity conversation commits even when the relay polls between
   WAL writes and commit publication.
 - Recognize ANSI-styled Antigravity approval menus and keep pending approvals
