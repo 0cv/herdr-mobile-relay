@@ -45,7 +45,7 @@ runs:
       shell: bash
     - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
-        bun-version: 1.4.2
+        bun-version: 1.4.4
     - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: 26.13.0
@@ -57,7 +57,7 @@ runs:
       shell: bash
     - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27.1'
+        go-version: '1.27.3'
         cache: true
     - name: Install mobile harness dependencies
       run: bun install --frozen-lockfile --cwd tests/mobile
