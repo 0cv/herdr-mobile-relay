@@ -642,6 +642,10 @@ move, and the phone learns the new base from the next QR or setup link.
 - **Change limits**: edit `.env`, then `docker compose up -d`.
 - **Update the gateway**: `docker compose build --pull gateway && docker compose
   up -d`.
+- **Redeploy with the wizard**: existing local and server `.env` files are
+  preserved, including registration controls and pinned image/version settings.
+  Edit the server's `.env` explicitly when changing these settings; new defaults
+  in a generated bundle do not replace existing operator configuration.
 - **Quotas**: relayed-byte counters live on the `gateway-state` volume and
   survive restarts. Certificates live on `caddy-data`; keep it so renewals do
   not restart from scratch.
@@ -802,7 +806,7 @@ install_remote_docker() {
 
 upload_bundle() {
     tar -C "$BUNDLE_DIR" -czf - . |
-        remote_shell "mkdir -p $REMOTE_DIR && tar -xzf - -C $REMOTE_DIR"
+        remote_shell "set -e; mkdir -p $REMOTE_DIR; if [ -e $REMOTE_DIR/.env ] || [ -L $REMOTE_DIR/.env ]; then [ -f $REMOTE_DIR/.env ] && [ -r $REMOTE_DIR/.env ] || { echo \"Existing gateway .env is not a readable regular file; refusing deployment.\" >&2; exit 1; }; tar --exclude=./.env -xzf - -C $REMOTE_DIR; else tar -xzf - -C $REMOTE_DIR; fi"
 }
 
 remote_compose_up() {
@@ -1180,7 +1184,15 @@ BUNDLE_NAME="$(basename "$BUNDLE_DIR")"
 
 write_compose_file "$BUNDLE_DIR/docker-compose.yml"
 write_caddyfile "$BUNDLE_DIR/Caddyfile"
-write_env_file "$BUNDLE_DIR/.env"
+# Existing configuration belongs to the operator, including registration policy.
+if [ -e "$BUNDLE_DIR/.env" ] || [ -L "$BUNDLE_DIR/.env" ]; then
+    if [ ! -f "$BUNDLE_DIR/.env" ] || [ ! -r "$BUNDLE_DIR/.env" ]; then
+        echo "Existing bundle .env is not a readable regular file; refusing deployment." >&2
+        exit 1
+    fi
+else
+    write_env_file "$BUNDLE_DIR/.env"
+fi
 write_readme "$BUNDLE_DIR/README.md"
 if ! copy_gateway_source "$BUNDLE_DIR/gateway-source"; then
     exit 1

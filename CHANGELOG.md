@@ -18,6 +18,8 @@ project follows [Semantic Versioning](https://semver.org/).
   from bypassing per-IP rate limits.
 - Forward the optional registration token and relay-id allow-list from generated
   deployment bundles into the gateway container.
+- Preserve existing gateway `.env` settings when regenerating or uploading a
+  deployment bundle, so normal upgrades cannot clear registration protection.
 
 ## [0.23.4] - 2026-10-27
 

@@ -291,8 +291,11 @@ allow-list containing whitespace, for example
 `HERDR_GATEWAY_ALLOWED_RELAY_IDS="AAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBB"`.
 Compose explicitly passes these settings to the gateway container; the relay's
 matching token still belongs in its own service environment. The deployment
-wizard replaces `.env` on redeploy, so reapply these private settings after a
-wizard redeploy before reopening registration traffic.
+wizard preserves existing local and server `.env` files on redeploy, so upgrades
+do not clear registration restrictions. Other operator settings, including
+image/version pins, are preserved too; edit the server `.env` explicitly to
+change them. A fresh deployment receives the generated defaults. An existing
+unreadable or non-file `.env` aborts deployment before container recreation.
 
 
 ### Opening the gateway to other people

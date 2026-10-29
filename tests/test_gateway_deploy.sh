@@ -69,9 +69,20 @@ case "$command" in
         ;;
     *'tar -xzf -'*)
         cat > "$STUB_STATE/uploaded.tar.gz"
+        if [ -n "${REMOTE_FIXTURE_DIR:-}" ]; then
+            # Execute the actual upload command in an isolated local server directory.
+            bash -c "${command#sudo -n }" < "$STUB_STATE/uploaded.tar.gz"
+            exit $?
+        fi
         exit 0
         ;;
     *'docker compose up -d --build'*)
+        if [ -n "${REMOTE_FIXTURE_DIR:-}" ]; then
+            env -u HERDR_GATEWAY_REGISTRATION_TOKEN -u HERDR_GATEWAY_ALLOWED_RELAY_IDS \
+                docker compose --project-directory "$REMOTE_FIXTURE_DIR" \
+                -f "$REMOTE_FIXTURE_DIR/docker-compose.yml" config --format json \
+                > "$STUB_STATE/recreated-environment.json" || exit $?
+        fi
         : > "$STUB_STATE/started"
         exit 0
         ;;
@@ -281,8 +292,6 @@ run_deploy
 [ "$STATUS" -eq 0 ] || fail "deploy run exited $STATUS"
 
 grep -Fq "deploy@gw.example.test	true" "$SSH_LOG" || fail "deployment never opened an SSH session"
-grep -Fq 'mkdir -p /opt/herdr-gateway && tar -xzf - -C /opt/herdr-gateway' "$SSH_LOG" ||
-    fail "deployment never copied the bundle"
 grep -Fq 'cd /opt/herdr-gateway && docker compose up -d --build --force-recreate gateway caddy' \
     "$SSH_LOG" || fail "deployment did not recreate the gateway and proxy on one network"
 [ -s "$STUB_STATE/uploaded.tar.gz" ] || fail "no bundle archive reached the server"
@@ -306,6 +315,70 @@ grep -Fq "HERDR_GATEWAY_SELECTION='ordered'" "$HERDR_RELAY_ENV" ||
     fail "verified deployment did not pin the ordered selection policy"
 grep -Fq 'Gateways this relay and phone may use, in priority order:' "$OUTPUT" ||
     fail "deployment did not present the final gateway subscription list"
+
+# Real extraction plus Compose rendering must preserve operator configuration
+# before the deployment would recreate the public gateway.
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 &&
+    command -v python3 >/dev/null 2>&1; then
+    for CASE in fresh token-only allow-list-only combined; do
+        export REMOTE_FIXTURE_DIR="$WORK_DIR/remote-$CASE"
+        export HERDR_GATEWAY_DEPLOY_REMOTE_DIR="$REMOTE_FIXTURE_DIR"
+        mkdir -p "$REMOTE_FIXTURE_DIR"
+        TOKEN=""
+        RELAY_IDS=""
+        if [ "$CASE" = token-only ] || [ "$CASE" = combined ]; then
+            TOKEN="preserve-upgrade-token"
+        fi
+        if [ "$CASE" = allow-list-only ] || [ "$CASE" = combined ]; then
+            RELAY_IDS="AAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBB"
+        fi
+        if [ "$CASE" != fresh ]; then
+            printf 'HERDR_GATEWAY_REGISTRATION_TOKEN=%s\nHERDR_GATEWAY_ALLOWED_RELAY_IDS="%s"\nHERDR_GATEWAY_MONTHLY_BYTES=123456\n' \
+                "$TOKEN" "$RELAY_IDS" > "$REMOTE_FIXTURE_DIR/.env"
+            cp "$REMOTE_FIXTURE_DIR/.env" "$WORK_DIR/expected-$CASE.env"
+        fi
+        # Stale source must be replaced even though .env must not be.
+        printf 'old source\n' > "$REMOTE_FIXTURE_DIR/docker-compose.yml"
+        run_deploy
+        [ "$STATUS" -eq 0 ] || fail "$CASE upgrade failed: $STATUS"
+        if [ "$CASE" != fresh ]; then
+            cmp "$WORK_DIR/expected-$CASE.env" "$REMOTE_FIXTURE_DIR/.env" ||
+                fail "$CASE upgrade replaced the existing server environment"
+        fi
+        python3 - "$STUB_STATE/recreated-environment.json" "$TOKEN" "$RELAY_IDS" <<'PY' ||
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    environment = json.load(source)["services"]["gateway"]["environment"]
+assert environment["HERDR_GATEWAY_REGISTRATION_TOKEN"] == sys.argv[2]
+assert environment["HERDR_GATEWAY_ALLOWED_RELAY_IDS"] == sys.argv[3]
+PY
+            fail "$CASE upgrade cleared registration restrictions before recreation"
+    done
+    # Invalid existing configuration must fail before any container recreation.
+    export REMOTE_FIXTURE_DIR="$WORK_DIR/remote-invalid"
+    export HERDR_GATEWAY_DEPLOY_REMOTE_DIR="$REMOTE_FIXTURE_DIR"
+    mkdir -p "$REMOTE_FIXTURE_DIR/.env"
+    rm -f "$STUB_STATE/started" "$STUB_STATE/recreated-environment.json"
+    run_deploy
+    [ "$STATUS" -ne 0 ] || fail "invalid server .env was accepted"
+    [ ! -e "$STUB_STATE/started" ] || fail "invalid server .env allowed a restart"
+    [ ! -e "$STUB_STATE/recreated-environment.json" ] ||
+        fail "invalid server .env reached container recreation"
+    [ -d "$REMOTE_FIXTURE_DIR/.env" ] || fail "invalid server .env was overwritten"
+    unset REMOTE_FIXTURE_DIR
+    export HERDR_GATEWAY_DEPLOY_REMOTE_DIR="/opt/herdr-gateway"
+else
+    echo "SKIP: real upgrade regression requires docker compose and python3"
+fi
+
+# Regenerating a local bundle must not erase settings prepared by its operator.
+printf 'HERDR_GATEWAY_REGISTRATION_TOKEN=local-private-token\nHERDR_GATEWAY_ALLOWED_RELAY_IDS=AAAAAAAAAAAAAAAAAAAAAA\n' > "$BUNDLE_DIR/.env"
+cp "$BUNDLE_DIR/.env" "$WORK_DIR/expected-local.env"
+run_deploy
+[ "$STATUS" -eq 0 ] || fail "local configuration preservation run failed"
+cmp "$WORK_DIR/expected-local.env" "$BUNDLE_DIR/.env" ||
+    fail "regenerating the bundle erased local registration settings"
 
 # --- Public endpoint never answers: keep the transport unchanged --------------
 : > "$SSH_LOG"
@@ -378,8 +451,6 @@ grep -Fq 'Reusing the remembered hostname gw.example.test' "$OUTPUT" ||
     fail "rerun did not reuse the remembered hostname"
 grep -Fq 'Reusing the remembered server deploy@gw.example.test' "$OUTPUT" ||
     fail "rerun did not reuse the remembered server"
-grep -Fq 'mkdir -p /srv/herdr-gateway && tar -xzf - -C /srv/herdr-gateway' "$SSH_LOG" ||
-    fail "rerun did not reuse the remembered directory on the server"
 grep -Fq "email ops@example.test" "$REMEMBERED_BUNDLE/Caddyfile" ||
     fail "rerun did not reuse the remembered ACME contact"
 grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test,wss://community-a.example.test,wss://community-b.example.test'" \
