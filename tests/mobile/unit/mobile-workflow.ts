@@ -9,6 +9,7 @@ import { command, CommandError } from '../support/process';
 import { evidenceFixture } from './android-product-environment';
 import { validateMobileEvidence } from '../support/evidence';
 import { collectEnvironmentReport } from '../validate-environment';
+import { collectIOSWebKitOutput, IOSWebKitOutputDiagnostics } from '../support/ios-webkit-output';
 
 type Status = 'success' | 'failure' | 'cancelled' | 'skipped';
 type Context = Record<string, any>;
@@ -437,6 +438,108 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
       await rm(root, { recursive: true, force: true });
     }
   }],
+  ['mobile iOS WebKit trace distinguishes pending listing from completed discovery without retaining payloads', async () => {
+    const secret = '秘密 https://private.test/?token=private-invitation arbitrary-application-label';
+    const frame = (component: string, message: string) => `2026-10-29 11:04:34:000 - [${component}] ${message}\n`;
+    const lines = [
+      frame('RemoteDebugger', 'Remote Debugger version 17.4.2'),
+      frame('1234abcd][XCUITestDriver@abcd', 'Getting list of available contexts'),
+      frame('XCUITestDriver@abcd', 'Retrieving contexts and views'),
+      frame('RemoteDebugger', 'Selecting application'),
+      frame('RemoteDebugger', "Attempting app 'PID:123'"),
+      frame('RemoteDebugger', "Sending '_rpc_forwardGetListing:' message to app 'PID:123' (id: 42): 'connectToApp'"),
+    ];
+    const stalled = new IOSWebKitOutputDiagnostics();
+    for (const part of lines.join('')) stalled.observe(part);
+    stalled.finish();
+    assert.equal(stalled.data.events.at(-1)?.stage, 'listing-send');
+    assert.equal(stalled.data.events.at(-1)?.messageId, 42);
+    assert.equal(stalled.data.remoteDebuggerVersion, '17.4.2');
+    assert.equal(stalled.data.diagnosticOnly, true);
+    const completed = new IOSWebKitOutputDiagnostics();
+    const source = lines.join('')
+      + frame('RemoteDebugger', `Received response from send (id: 42): '${secret}'`)
+        .replace('[RemoteDebugger]', '\u001b[38;5;41m[1234abcd]\u001b[0m\u001b[38;5;141m[RemoteDebugger]\u001b[0m')
+      + frame('RemoteDebugger', 'Finally selecting app PID:123')
+      + frame('RemoteDebugger', 'Selected app after 55000ms')
+      + frame('XCUITestDriver@abcd', 'Found webview context after 55001ms')
+      + frame('XCUITestDriver@abcd', `No available web pages after 1 retry: ${secret}`)
+      + frame('RemoteDebugger', `The application PID:123 is not connectable yet: ${secret}`)
+      + frame('RemoteDebugger', 'Debugger socket disconnected')
+      + frame('RemoteDebugger', secret)
+      + frame('HTTP', secret);
+    for (let offset = 0; offset < source.length; offset += 13) completed.observe(source.slice(offset, offset + 13));
+    completed.finish();
+    assert.deepEqual(completed.data.events.map(event => event.stage), [
+      'debugger-version', 'contexts-start', 'views-start', 'select-app-start', 'app-attempt', 'listing-send',
+      'rpc-response', 'app-selected', 'select-app-end', 'contexts-ready', 'page-search-error', 'app-not-connectable', 'socket-disconnected',
+    ]);
+    assert.equal(completed.data.events.find(event => event.stage === 'rpc-response')?.messageId, 42);
+    assert.equal(completed.data.events.find(event => event.stage === 'select-app-end')?.durationMs, 55000);
+    assert.equal(completed.data.unknownRecords, 2);
+    const serialized = JSON.stringify(completed.data);
+    assert.doesNotMatch(serialized, /秘密|private.test|invitation|application-label|Received response/u);
+    assert.ok(completed.data.events.every(event => event.timestampMs === Date.UTC(2026, 9, 29, 11, 4, 34)));
+  }],
+  ['mobile iOS WebKit trace bounds framing input events and missing evidence', async () => {
+    const line = '2026-10-29 11:04:34:000 - [RemoteDebugger] Selecting application\n';
+    const trace = new IOSWebKitOutputDiagnostics(true);
+    trace.observe(line); // This may be a suffix of a payload at the tail boundary.
+    trace.observe('秘'.repeat(4096));
+    trace.observe('\n');
+    for (let count = 0; count < 300; count++) trace.observe(line);
+    trace.observe(line.slice(0, -1));
+    trace.finish();
+    trace.finish();
+    trace.observe(line);
+    assert.equal(trace.data.recognizedRecords, 300);
+    assert.equal(trace.data.events.length, 256);
+    assert.equal(trace.data.events[0].ordinal, 45);
+    assert.equal(trace.data.droppedEvents, 44);
+    assert.equal(trace.data.oversizedRecords, 1);
+    assert.equal(trace.data.incompleteRecords, 1);
+    assert.equal(trace.data.inputTruncated, true);
+    const root = await mkdtemp(join(tmpdir(), 'herdr-webkit-trace-'));
+    try {
+      const input = join(root, 'appium.log');
+      const output = join(root, 'trace.json');
+      await collectIOSWebKitOutput(input, output);
+      const missing = JSON.parse(await readFile(output, 'utf8'));
+      assert.equal(missing.status, 'missing');
+      assert.equal(missing.scannedBytes, 0);
+      await writeFile(input, '');
+      await collectIOSWebKitOutput(input, output);
+      assert.equal(JSON.parse(await readFile(output, 'utf8')).status, 'captured');
+      await writeFile(input, 'x'.repeat(8 * 1024 * 1024) + '\n' + line);
+      await collectIOSWebKitOutput(input, output);
+      const bounded = JSON.parse(await readFile(output, 'utf8'));
+      assert.equal(bounded.status, 'captured');
+      assert.equal(bounded.inputTruncated, true);
+      assert.equal(bounded.scannedBytes, 8 * 1024 * 1024);
+      assert.equal(bounded.events.length, 1);
+      assert.equal(bounded.events[0].stage, 'select-app-start');
+      assert.ok((await readFile(output)).length < 1024);
+      const driver = join(root, 'node_modules/appium-xcuitest-driver');
+      const remote = join(driver, 'node_modules/appium-remote-debugger');
+      await mkdir(remote, { recursive: true });
+      const manifest = (version: string) => JSON.stringify({ version, exports: { './package.json': './package.json' }, privatePayload: '秘密 https://private.test/' });
+      await writeFile(join(driver, 'package.json'), manifest('12.12.4'));
+      await writeFile(join(remote, 'package.json'), manifest('17.4.9'));
+      await collectIOSWebKitOutput(input, output, root);
+      const resolved = JSON.parse(await readFile(output, 'utf8'));
+      assert.deepEqual(resolved.runtimeVersions, {
+        xcuitest: { status: 'available', version: '12.12.4' }, remoteDebugger: { status: 'available', version: '17.4.9' },
+      });
+      assert.doesNotMatch(JSON.stringify(resolved), /秘密|private.test/u);
+      for (const invalid of [manifest('秘密 https://private.test/'), 'x'.repeat(16_385), '{invalid']) {
+        await writeFile(join(remote, 'package.json'), invalid);
+        await collectIOSWebKitOutput(input, output, root);
+        const unavailable = JSON.parse(await readFile(output, 'utf8'));
+        assert.deepEqual(unavailable.runtimeVersions.remoteDebugger, { status: 'unavailable' });
+        assert.doesNotMatch(JSON.stringify(unavailable), /秘密|private.test|invalid/u);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }],
   ['mobile iOS Appium log withholding executes both scoped copy branches without changing Android', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
     for (const path of ['.github/actions/mobile-device-run/action.yml']) {
@@ -482,9 +585,15 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
           assert.equal(disposition.appiumLog, 'withheld');
           assert.match(disposition.reason, /client request timing and bounded confirmation diagnostics/u);
           assert.doesNotMatch(JSON.stringify(disposition), /秘密|private.test|application-label/u);
+          const trace = JSON.parse(await readFile(join(output, 'ios-webkit-discovery.json'), 'utf8'));
+          assert.equal(trace.status, 'captured');
+          assert.equal(trace.recognizedRecords, 0);
+          assert.equal(trace.unknownRecords, 1);
+          assert.doesNotMatch(JSON.stringify(trace), /秘密|private.test|application-label/u);
         } else {
           assert.equal(await readFile(join(output, 'appium.log'), 'utf8'), raw);
           await assert.rejects(() => readFile(join(output, 'appium-log-disposition.json')), { code: 'ENOENT' });
+          await assert.rejects(() => readFile(join(output, 'ios-webkit-discovery.json')), { code: 'ENOENT' });
         }
         await rm(root, { recursive: true, force: true });
       }

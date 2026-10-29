@@ -208,6 +208,15 @@ Hosted iOS runs on the `xcode-27` label with Xcode 27.0 (27A266a) at `/Applicati
 
 The runner keeps fixture info, TLS keys, and relay stores under `--private-output`, separate from the evidence directory. It attempts every acquired-resource cleanup in `finally`, retaining individual failures; workflow cleanup also attempts removal after failures. Persistence or cleanup failures produce nonzero execution, not a guarantee that an artifact can be recovered. Only screenshots, `mobile-result.json`, and bounded redacted diagnostics belong in uploaded evidence. Do not copy `fixture-info.json` or relay state outside the private run directory.
 
+The owned-process supervisor releases only its one-way manager-input endpoint
+(fd6) with normal stream destruction after successful writable `finish`, including
+all write and final callbacks. Source EOF or an empty queue is not sufficient.
+Control and output endpoints and the other input edges keep their existing owners.
+`owned input finish` unit cases exercise real TCP sockets, byte digests, natural
+peer EOF, gated callbacks and failure cleanup under Bun and Node. This addresses
+a reproduced finished-but-open endpoint; the initiating Bun/physical-FD cause
+remains unproved. Deadlines and retirement evidence are unchanged.
+
 ## CI inputs and evidence
 
 A manual dispatch requires `artifact_run_id`, a completed successful same-repository `check` push on `main` containing `release-bundles`; provide `source_commit` for a specific revision. Every dispatch runs both platforms with the release suite. External provenance verifies repository, workflow, push event, main branch, conclusion, source SHA, artifact name, archive checksums, manifest revision and expiration before devices are provisioned. Check and release calls bind to the caller's exact artifact without confusing a PR merge build with its head SHA; evidence records both identities.
@@ -238,6 +247,22 @@ alone is not sufficient. Supply the already-built WDA product,
 bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.
+
+Android fresh CI setup permits at most one additional create per setup-session
+helper invocation, before any retained Chrome owner or initial installed launch.
+The existing literal `adb: device offline` path is unchanged. A completed HTTP 500
+session-create instrumentation 30000 ms deadline error also qualifies only when a
+nonempty, wholly valid, unique TCP reverse baseline becomes raw-empty stdout with
+blank stderr in a successful same-device inspection. Partial, unchanged or
+unreadable mappings do not qualify. Restoration uses `reverse --no-rebind`; a
+conflict or any inspection/restoration failure preserves the original Appium error
+and records a bounded secondary failure. Ownership, lifecycle and driver health
+are rechecked across awaits, with the full normal replacement allowance under the
+original deadline and recovery cap. Fresh Appium creation installs its own
+forward; the harness does not repair Appium ports. Fatal/time-out drivers never
+inspect or recover. Startup logs remain diagnostic-only, not recovery authority.
+This is pre-product CI setup repair, not a product retry or historical CI
+qualification; the initiating device/adbd versus daemon-reset cause is unknown.
 
 Hosted iOS jobs set `MOBILE_TIMING_SCALE=3`, which triples every phase and
 WebDriver request allowance below the unchanged scenario deadline; the values
@@ -309,6 +334,16 @@ Android's existing log-copy behavior is unchanged. This privacy decision covers
 the uploaded Appium log only: private ephemeral local Appium logging remains
 enabled, and the startup-only console dump remains unchanged. It does
 not claim removal of other existing restricted diagnostic artifacts.
+
+`ios-webkit-discovery.json` extracts only fixed server-stage enums, numeric
+application/message IDs, UTC timestamps and durations from that private log.
+It also records the resolved XCUITest and remote-debugger package versions.
+Collection reads at most the final 8 MiB, drops partial/oversized 4 KiB records,
+and retains at most 256 events with omission counters and explicit missing-log
+or unavailable-version observations. URLs, labels, page data and error bodies
+are never copied. These post-run observations are diagnostic only: they help
+locate a pending Web Inspector listing but do not establish its cause or alter
+the fatal timeout, ownership checks, product result or qualification.
 
 The XCTest owner retains at most 128 recognized activity enums with host receipt
 timestamps, plus unknown, oversized, incomplete and dropped-event counts.

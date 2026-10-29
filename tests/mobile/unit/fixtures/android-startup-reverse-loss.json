@@ -1,0 +1,27 @@
+{
+  "source": {
+    "runId": "40871496810",
+    "attempt": 2,
+    "sourceRunHeadSha": "26ba0323de767d81ee4cfd4ffac506efd750371c",
+    "trimmed": "message and generic stacktrace header only; no device logs"
+  },
+  "status": 500,
+  "value": {
+    "error": "unknown error",
+    "message": "The instrumentation process cannot be initialized within 30000ms timeout. Make sure the application under test does not crash and investigate the logcat output. You could also try to increase the value of 'uiautomator2ServerLaunchTimeout' capability",
+    "stacktrace": "UnknownError: The instrumentation process cannot be initialized within 30000ms timeout. Make sure the application under test does not crash and investigate the logcat output. You could also try to in"
+  },
+  "client": {
+    "durationMs": 40413,
+    "requestTimeoutMs": 70000,
+    "unusable": false,
+    "firstFatal": null
+  },
+  "observations": {
+    "adbStreamClosedAt": "13:37:44.046",
+    "instrumentationExitAt": "13:37:44.048",
+    "instrumentationExitCode": 255,
+    "fixtureReversesAbsentAtTeardown": 3,
+    "initiatingCause": "unknown"
+  }
+}

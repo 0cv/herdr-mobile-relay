@@ -1,13 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { cp, mkdtemp, mkdir, readFile, writeFile, rm, realpath, symlink } from 'node:fs/promises';
 import { existsSync, readFileSync, writeFileSync, renameSync, statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, isAbsolute } from 'node:path';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
-import type { Readable, Writable } from 'node:stream';
+import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { managedWdaCapabilities } from '../support/ios-xctest';
 import { monotonicNowNs, spawnOwnedProcess, type OwnedProcess, type SpawnBinding } from '../support/owned-process';
 import { IOSPlatform } from '../platforms/ios';
@@ -2518,6 +2518,119 @@ function isSystemLogQuery(command: string): boolean {
 }
 
 export const xctestOwnerTests: Array<[string, () => Promise<void>]> = [];
+
+for (const mode of ['slow-valid', 'preflight-hung-first', 'preflight-hung-second', 'cleanup-hung-first', 'cleanup-hung-second', 'occupied', 'invalid-pid', 'command-error', 'cleanup-unknown'] as const) {
+  xctestOwnerTests.push([`Native startup listener phase budget ${mode}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-listener-budget-'));
+    const state = join(root, 'state');
+    const product = join(root, 'products/WebDriverAgentRunner-Runner.app');
+    const support = join(root, 'support');
+    const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
+    const startedAt = 1_700_000_000_000;
+    try {
+      await Promise.all([mkdir(state), mkdir(product, {recursive: true}), mkdir(support)]);
+      await writeFile(join(product, 'WebDriverAgentRunner-Runner'), 'exact built runner');
+      await writeFile(join(root, 'products/WebDriverAgentRunner_test.xctestrun'), '{}');
+      await writeFile(join(root, 'owned'), `ios:${udid}`);
+      await writeFile(join(state, 'deadline'), String(startedAt + 300_000));
+      for (const file of ['diagnostics.ts', 'xctest-output.ts']) {
+        await cp(join(import.meta.dirname, '../support', file), join(support, file));
+      }
+      const source = await readFile(join(import.meta.dirname, '../support/ios-xctest.ts'), 'utf8');
+      const marker = "spawnSync(file, args, {encoding: 'utf8', timeout, maxBuffer})";
+      assert.equal(source.split(marker).length, 2);
+      // Inject only command execution and its clock; run the actual supervisor,
+      // listener parser, failure recording and cleanup without real-time sleeps.
+      const injection = `
+let fakeNow = ${startedAt};
+Date.now = () => fakeNow;
+const fakeMode = ${JSON.stringify(mode)};
+const fakeCounts = {preflight: 0, cleanup: 0};
+function fakeCommand(file: string, args: string[], timeout: number, phase?: string) {
+  if (file === 'plutil') {
+    // A controlled downstream failure proves preflight completed, without
+    // launching a fake WDA or pretending endpoint absence proves readiness.
+    return {status: 2, signal: null, stdout: '', stderr: ''};
+  }
+  if (file !== 'lsof' || !args.includes('-t') || (phase !== 'preflight' && phase !== 'cleanup')) {
+    throw new Error('unexpected fake command');
+  }
+  const index = ++fakeCounts[phase];
+  const hung = fakeMode === phase + '-hung-' + (index === 1 ? 'first' : 'second');
+  const duration = index === 1 ? 6540 : 3800;
+  fakeNow += hung ? timeout : Math.min(duration, timeout);
+  if (hung || duration > timeout) return {
+    status: null, signal: 'SIGTERM', stdout: '', stderr: '',
+    error: Object.assign(new Error('fake command timeout'), {code: 'ETIMEDOUT'}),
+  };
+  if (phase === 'preflight' && index === 1) {
+    if (fakeMode === 'occupied') return {status: 0, signal: null, stdout: '123\\n', stderr: ''};
+    if (fakeMode === 'invalid-pid') return {status: 0, signal: null, stdout: '2147483648\\n', stderr: ''};
+    if (fakeMode === 'command-error') return {status: 2, signal: null, stdout: '', stderr: ''};
+  }
+  if (phase === 'cleanup' && index === 1 && fakeMode === 'cleanup-unknown') {
+    return {status: 0, signal: null, stdout: '123\\n', stderr: ''};
+  }
+  return {status: 1, signal: null, stdout: '', stderr: ''};
+}
+`;
+      const variant = injection + source.replace(marker, 'fakeCommand(file, args, timeout, context?.phase)');
+      const path = join(support, 'ios-xctest.ts');
+      await writeFile(path, variant);
+      const result = spawnSync(process.execPath, [path, 'supervise'], {
+        env: {...process.env, MOBILE_TIMING_SCALE: '3', IOS_XCTEST_STATE_DIR: state,
+          IOS_SIMULATOR_UDID: udid, IOS_WDA_PORT: '8100', IOS_WDA_MJPEG_PORT: '9100',
+          IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'),
+          MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned')},
+        encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL', maxBuffer: 4096,
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, 'fake supervisor must settle normally');
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, '');
+      const owner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
+      const commands = owner.diagnostics.commands;
+      const preflight = commands.filter((command: {phase: string}) => command.phase === 'preflight');
+      const cleanup = commands.filter((command: {phase: string}) => command.phase === 'cleanup');
+      const earlyFailure = ['preflight-hung-first', 'preflight-hung-second', 'occupied', 'invalid-pid', 'command-error'].includes(mode);
+      const expectedError = mode.startsWith('preflight-hung') ? 'XCTEST: startup deadline' : 'XCTEST: supervisor-error';
+      assert.equal(owner.error, expectedError);
+      assert.equal(owner.firstFailure.message, expectedError);
+      const initialListeners = preflight.filter((command: {operation: string}) => command.operation === 'inspect-listener');
+      assert.deepEqual(initialListeners.map((command: {timeoutMs: number}) => command.timeoutMs),
+        earlyFailure && mode !== 'preflight-hung-second' ? [300_000] : [300_000, 293_460]);
+      assert.equal(preflight.some((command: {operation: string}) => command.operation === 'select-xctestrun'), !earlyFailure);
+      if (!earlyFailure) assert.equal(preflight.at(-1).status, 2);
+      // One 18s inspection/termination phase, reserving the existing 10s+2s
+      // child stop tail within the unchanged 30s overall cleanup deadline.
+      assert.deepEqual(cleanup.map((command: {timeoutMs: number}) => command.timeoutMs),
+        mode === 'cleanup-hung-first' ? [18_000] : [18_000, 11_460]);
+      assert.equal(owner.cleanupListenerObservation.endpoints.wda.observation.status,
+        mode === 'cleanup-hung-first' ? 'error' : 'evaluated');
+      assert.equal(owner.cleanupListenerObservation.endpoints.mjpeg.observation.status,
+        mode === 'cleanup-hung-first' ? 'not-evaluated' : mode === 'cleanup-hung-second' ? 'error' : 'evaluated');
+      for (const command of commands) {
+        if (command.error) {
+          assert.equal(command.error.category, 'timeout');
+          assert.equal(command.signal, 'SIGTERM');
+        }
+      }
+      const lifecycle = owner.diagnostics.lifecycle;
+      assert.equal(lifecycle.some((event: {event: string}) => event.event === 'child-stop-skipped'), true);
+      assert.equal(lifecycle.some((event: {event: string}) => ['child-spawned', 'runner-frozen', 'ready-admitted', 'owned-listener-termination-requested'].includes(event.event)), false);
+      if (mode.startsWith('cleanup-hung') || mode === 'cleanup-unknown') {
+        assert.equal(lifecycle.some((event: {event: string; detail?: {category: string}}) => event.event === 'failure-observed'
+          && event.detail?.category === (mode === 'cleanup-unknown' ? 'cleanup-unknown-listener' : 'cleanup-listener-error')), true);
+      }
+      assert.equal(owner.ready, false);
+      assert.ok(owner.endedAt);
+      assert.equal(existsSync(join(state, 'wda-status.json')), false);
+    } finally {
+      await rm(root, {recursive: true, force: true});
+    }
+  }]);
+}
+
 xctestOwnerTests.push(['mobile XCTest fake command trace detects system-log queries', async () => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-command-trace-'));
   const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
@@ -3730,7 +3843,8 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         finally { for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key]; Object.assign(process.env, previous); }
         await writeFile(join(state, 'stop'), 'test finalization');
       }
-      await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('test supervisor deadline')), 15_000))]);
+      // The fixture must allow the unchanged 30s cleanup deadline to settle.
+      await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('test supervisor deadline')), 35_000))]);
       const owner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
       assert.ok(owner.endedAt);
       assert.equal(owner.ready, false);
@@ -5530,11 +5644,12 @@ xctestOwnerTests.push(['Native startup XCTest HOST no-env terminal factory', asy
   if (primaryFailed) throw primary;
   if (cleanupFailure) throw cleanupFailure;
 }]);
-xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated environment and cwd', async () => {
+const terminalTargetEnvironment = async (deferStdoutUntilTargetClose = false): Promise<void> => {
   const deadline = Date.now() + 40_000;
   const root = await terminalBound(mkdtemp(join(tmpdir(), 'sm63-terminal-target-')), deadline);
   let positive: ReturnType<typeof spawnOwnedProcess> | undefined;
   let negative: ReturnType<typeof spawnOwnedProcess> | undefined;
+  let stdout: Readable | undefined;
   let primary: unknown;
   try {
     for (const name of ['home', 'tmp', 'cache']) await terminalBound(mkdir(join(root, name)), deadline);
@@ -5578,7 +5693,12 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
       terminalTarget: {cwd: root, env},
     });
     let output = '';
-    positive.stdout.on('data', bytes => { output += String(bytes); });
+    // Buffer delayed delivery in memory without pausing the process socket.
+    stdout = deferStdoutUntilTargetClose ? positive.stdout.pipe(new PassThrough()) : positive.stdout;
+    stdout.on('data', bytes => { output += String(bytes); });
+    const stdoutEnded = once(stdout, 'end');
+    void stdoutEnded.catch(() => undefined);
+    if (deferStdoutUntilTargetClose) stdout.pause();
     positive.stderr.resume();
     await terminalBound(positive.ready, deadline);
     positive.start();
@@ -5587,6 +5707,12 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
     assert.deepEqual(await terminalBound(positive.terminalTransport!.targetCallback, deadline), {...binding, callback: 'spawn'});
     assert.deepEqual(await terminalBound(positive.targetExit, deadline), {code: 0, signal: null});
     assert.deepEqual(await terminalBound(positive.targetClose, deadline), {code: 0, signal: null});
+    if (deferStdoutUntilTargetClose) {
+      assert.equal(output, '', 'target close must precede stdout consumption in the regression');
+      queueMicrotask(() => stdout?.resume());
+    }
+    // Target close uses a separate control pipe; caller stdout can still be in flight.
+    await terminalBound(stdoutEnded, deadline);
     const observed = JSON.parse(output);
     assert.equal(observed.cwd, canonicalRoot);
     assert.equal(observed.bun, true);
@@ -5631,8 +5757,10 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
   } catch (error) {
     primary = error;
   } finally {
+    stdout?.resume();
     for (const owned of [positive, negative]) {
       if (!owned) continue;
+      owned.stdout.resume();
       owned.stop('terminal-target-test-cleanup');
       try { await terminalBound(owned.retire('terminal-target-test-cleanup'), deadline); }
       catch (error) { primary ??= error; }
@@ -5643,7 +5771,9 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
     }
   }
   if (primary) throw primary;
-}]);
+};
+xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated environment and cwd', async () => { await terminalTargetEnvironment(); }]);
+xctestOwnerTests.push(['Native startup XCTest terminal target drains stdout after target close', async () => { await terminalTargetEnvironment(true); }]);
 xctestOwnerTests.push(['Native startup XCTest terminal witness registration failure', async () => { await terminalControl(true); }]);
 const terminalPositiveFromUnitRunner = async (): Promise<void> => {
   const localStartNs = process.hrtime.bigint();

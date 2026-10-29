@@ -59,6 +59,7 @@ import { androidTransportTests } from './android-transport';
 import { nativeStartupTests } from './native-startup';
 import { xctestOwnerTests } from './xctest-owner';
 import { xctestOutputTests } from './xctest-output';
+import { ownedInputTests } from './owned-input';
 import { iosRegressionCases, runIOSRegressions } from './ios';
 import { confirmationSettingsTests } from './confirmation-settings';
 import { initialSettingsTests } from './initial-settings';
@@ -2439,7 +2440,7 @@ for (const [name, body] of androidProductEnvironmentTests) test(name, body);
 for (const [name, body] of mobileWorkflowTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
-for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests]) test(name, body);
+for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests, ...ownedInputTests]) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', async () =>
   runIOSRegressions(selectedIOSIds, !explicitSelection));
 test('Android CI gates the shared local Appium launch path', async () => {

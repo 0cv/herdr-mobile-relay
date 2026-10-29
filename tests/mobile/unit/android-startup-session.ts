@@ -6,6 +6,7 @@ import { AndroidPlatform } from '../platforms/android';
 import { AndroidStartupLog } from '../support/android-startup-log';
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient, WebDriverError } from '../support/webdriver';
+import { androidSetupReverseLossTests } from './android-setup-reverse-loss';
 
 type Mode = 'reconnect' | 'repeated' | 'timeout' | 'other' | 'active-session' | 'sticky-driver' | 'expired-budget' | 'restore-failure';
 
@@ -138,4 +139,4 @@ async function replay(mode: Mode): Promise<void> {
 
 export const androidStartupSessionTests: Array<[string, () => Promise<void>]> = (
   ['reconnect', 'repeated', 'timeout', 'other', 'active-session', 'sticky-driver', 'expired-budget', 'restore-failure'] as const
-).map(mode => [`Native startup Android Chrome session ${mode} preserves startup recovery boundaries`, () => replay(mode)]);
+).map<[string, () => Promise<void>]>(mode => [`Native startup Android Chrome session ${mode} preserves startup recovery boundaries`, () => replay(mode)]).concat(androidSetupReverseLossTests);
