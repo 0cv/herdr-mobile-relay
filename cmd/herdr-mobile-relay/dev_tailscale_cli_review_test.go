@@ -579,7 +579,7 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		newDevelopmentForegroundServer = func(*config.Config, *tailscalecli.DevelopmentWorkflow, io.Writer) (developmentForegroundServer, error) {
 			return nil, constructionFailure
 		}
-		setupConfirmation := tailscalecli.PublishRouteConfirmation("node-fixture", reviewOrigin, 8443, 18377)
+		setupConfirmation := "yes"
 		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "setup"}, setupConfirmation+"\n")
 		if code == 0 || !errors.Is(err, constructionFailure) {
 			t.Fatalf("setup with failing relay construction returned code=%d err=%v\nstderr=%s", code, err, stderr)
@@ -617,7 +617,7 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 			assertReservationState(t, fixture, tailscalecli.StatePublishPending, laterReservationID)
 			return nil, constructionFailure
 		}
-		setupConfirmation := tailscalecli.PublishRouteConfirmation("node-fixture", reviewOrigin, 8443, 18377)
+		setupConfirmation := "yes"
 		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "setup"}, setupConfirmation+"\n")
 		if code == 0 || !errors.Is(err, constructionFailure) {
 			t.Fatalf("setup with failing relay construction returned code=%d err=%v\nstderr=%s", code, err, stderr)
@@ -715,7 +715,7 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 				writeCommandFixtureFile(t, fixture.serveFile+".lose-ack", "fixture\n", 0o600)
 				var callbackCount atomic.Int32
 				installFixtureAppFactory(t, nil, nil, func(string) { callbackCount.Add(1) })
-				input := tailscalecli.PublishRouteConfirmation("node-fixture", reviewOrigin, 8443, 18377) + "\n"
+				input := "yes\n"
 				code, stdout, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "setup"}, input)
 				if err == nil || code == 0 {
 					t.Fatalf("ambiguous publication returned code=%d err=%v stderr=%s", code, err, stderr)
@@ -830,7 +830,7 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 				newDevelopmentForegroundServer = oldFactory
 				developmentCLICommandContext = oldContextFactory
 			})
-			input := tailscalecli.PublishRouteConfirmation("node-fixture", reviewOrigin, 8443, 18377) + "\n"
+			input := "yes\n"
 			result, stdoutPath := startDevelopmentCommandDispatch(t, []string{"dev-tailscale-cli", "setup"}, input)
 			commandDone := false
 			t.Cleanup(func() {

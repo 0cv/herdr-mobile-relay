@@ -154,7 +154,7 @@ func TestDevelopmentTailscaleCLICommandEntrypointInventory(t *testing.T) {
 			action:      "setup",
 			input:       "PUBLISH DEVELOPMENT ROUTE node=other-node origin=https://other.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n",
 			wantCode:    2,
-			wantMessage: "route-bound confirmation did not exactly match the selected node, listener and backend",
+			wantMessage: "route-bound confirmation declined; nothing was published",
 		},
 		{
 			name:        "standalone preflight refuses",

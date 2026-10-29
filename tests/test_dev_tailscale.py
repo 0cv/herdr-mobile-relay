@@ -1391,8 +1391,7 @@ if [ "$1" = dev-tailscale-cli ]; then
             done
             if [ "$action" = setup ]; then
                 IFS= read -r answer || exit 2
-                expected="PUBLISH DEVELOPMENT ROUTE node=$HERDR_TAILSCALE_CLI_NODE_ID origin=$HERDR_TAILSCALE_CLI_ORIGIN https-port=8443 backend=127.0.0.1:18377"
-                [ "$answer" = "$expected" ] || exit 2
+                case "$answer" in y|Y|yes|YES|Yes) ;; *) exit 2 ;; esac
                 printf 'manager|workflow reserve --development-root %s --scope development\\n' "$HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT" >> "$DEV_FIXTURE_LOG"
                 printf 'runtime|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' \\
                     "$HERDR_RELAY_TRANSPORT" "$HERDR_RELAY_HOST" "$HERDR_RELAY_PORT" \\
@@ -1563,8 +1562,7 @@ exit 0
         raise AssertionError("development phone setup-link action was not refused before route effects")
     setup_cli = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh")], env=positive_env,
-        cwd=root, input=(b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
-                        b"origin=https://relay.fixture.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n"),
+        cwd=root, input=b"yes\n",
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
     )
     if setup_cli.returncode != 0:
@@ -1754,8 +1752,7 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
         migration_failure = subprocess.run(
             [str(root / "relay" / "dev-tailscale-cli.sh"), "setup"],
             env=dict(migration_setup_env, **failure_settings), cwd=root,
-            input=(b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
-                   b"origin=https://relay.fixture.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n"),
+            input=b"yes\n",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
         )
         if (migration_failure.returncode == 0 or cli_dev_env_file.read_bytes() != legacy_bytes or
@@ -1766,8 +1763,7 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
     migration_setup = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh"), "setup"], env=migration_setup_env,
         cwd=root,
-        input=(b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
-               b"origin=https://relay.fixture.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n"),
+        input=b"yes\n",
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
     )
     migrated_values = relay_env_values(cli_dev_env_file)
@@ -1882,8 +1878,7 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
     )
     selection_git.chmod(0o700)
     discovery_boundary = b"Go-owned read-only discovery selected node"
-    route_confirmation = (b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
-                          b"origin=https://relay.fixture.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n")
+    route_confirmation = b"yes\n"
 
     def selection_checkout(case: str) -> Path:
         checkout = selection_base / case
@@ -2252,7 +2247,8 @@ os.execv(sys.argv[1], sys.argv[1:])
         if (checkout / "frontend" / "node_modules").exists():
             raise AssertionError("fresh setup fixture unexpectedly has frontend dependencies")
         status, output, events = run_selection(
-            checkout, route_confirmation, terminal=terminal, overrides={"NODE_ENV": "production"},
+            checkout, b"y\n" if terminal else route_confirmation, terminal=terminal,
+            overrides={"NODE_ENV": "production"},
         )
         if ("build|bun-install" not in events or "build|bun" not in events or
             events.index("build|bun-install") >= events.index("build|bun")):
@@ -2361,18 +2357,19 @@ os.execv(sys.argv[1], sys.argv[1:])
     finally:
         saved_marker.write_bytes(saved_marker_bytes)
 
-    # Automatic app discovery never substitutes for independent exact route
-    # confirmation. EOF, generic yes and wrong exact identity all refuse.
+    # Automatic discovery never substitutes for a separate affirmative answer.
+    # EOF, blank, no and unrecognized input refuse before route effects.
     for case, confirmation in (("discovery-only-eof", b""),
-                               ("discovery-is-not-consent", b"y\n"),
-                               ("wrong-exact-route", route_confirmation.replace(b"dev-node-fixture", b"other-node"))):
+                               ("blank-route-consent", b"\n"),
+                               ("discovery-is-not-consent", b"no\n"),
+                               ("wrong-exact-route", b"PUBLISH DEVELOPMENT ROUTE node=other-node\n")):
         checkout = selection_checkout(case)
         status, output, events = run_selection(checkout, confirmation, terminal=False)
         if (status == 0 or discovery_boundary not in output or
             not any(event.startswith("manager|workflow preflight ") for event in events) or
             any(event.startswith(("manager|workflow reserve ", "manager|workflow publish ",
                                   "runtime|", "control|")) for event in events)):
-            raise AssertionError(f"discovery replaced exact route consent: {output!r} {events!r}")
+            raise AssertionError(f"discovery bypassed yes/no route consent: {output!r} {events!r}")
 
     checkout = selection_checkout("dependency-install-failure-retry")
     status, output, events = run_selection(

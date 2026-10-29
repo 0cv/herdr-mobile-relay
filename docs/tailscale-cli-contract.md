@@ -5,7 +5,8 @@
 named `tailscale-cli`. It is a distinct, persistent CLI-owned background Serve
 route and is not an alias for the existing foreground LocalAPI transport
 (`tailscale`) or operator-owned transport (`tailscale-external`). Only isolated
-foreground development is enabled, with exact route-bound stdin consent.
+foreground development is enabled, with yes/no stdin consent internally bound
+to the displayed route.
 Production and installed-service activation remain disabled until physical-phone
 qualification is recorded and separate production enablement is authorized.
 
@@ -369,9 +370,11 @@ state whenever identity, readback, readiness, or a command result is uncertain.
    isolated roots and config, release/web identity, local Herdr socket, and
    fixed tuple before CLI inspection or mutation. The only allowed route is
    HTTPS 8443 -> `http://127.0.0.1:18377`, with the plugin listener on
-   `127.0.0.1:18378`. Review the complete Serve snapshot and the four displayed
-   residual risks. Enter only the exact node/origin/HTTPS/backend phrase shown
-   by Go on stdin. There is no environment-variable consent. The fixed plugin
+   `127.0.0.1:18378`. Review the complete Serve snapshot and the residual risks
+   described above. Go shows the development address and persistent-route warning;
+   answer `y` or `yes` to publish. Blank, no, EOF or unrecognized input cancels.
+   Go binds consent to that exact node/origin/HTTPS/backend tuple internally.
+   There is no environment-variable consent. The fixed plugin
    UDP listener must bind before the backend can become ready; an occupied
    `127.0.0.1:18378` aborts startup before any Serve publication. Go waits for
    the foreground server's own backend-bind signal, then obtains a process-local
@@ -464,7 +467,7 @@ selection or state access.
 | `tailscale-cli activation-check` | No | Production remains disabled; development output points to the profile-checked workflow but grants no server or CLI authority. |
 | `tailscale-cli preflight` and other standalone inspection/manager operations | No | Refuse before executable or state access. |
 | `dev-tailscale-cli preflight` | Read-only only | `PreflightDevelopmentWorkflow` validates the complete private layout, explicit opt-in, exact Darwin/arm64 profile path, and fixed tuple before status/version/Serve inspection; returns no manager and cannot start a server. |
-| `dev-tailscale-cli setup` | Yes, after consent | Go validates the complete private layout and requires exact typed confirmation against the configured node/origin before CLI contact; read-only preflight then verifies that identity before any route mutation. |
+| `dev-tailscale-cli setup` | Yes, after consent | Go validates the complete private layout, displays the configured address and requires y/yes on stdin before CLI contact; consent is internally bound to the configured node/origin; read-only preflight then verifies that identity before any route mutation. |
 | `dev-tailscale-cli` update/status/recover/reconcile/assert-ready/release/repair-missing/abandon-missing/unpublish | Yes | `NewDevelopmentWorkflow` validates isolation before CLI preflight and retains the manager only in-process; operations repeat isolation, identity, profile and fixed-tuple checks. Reconcile and missing-route recovery require exact operation-bound operator input and never infer ownership from observed Serve state. |
 | `config.Load` / `serve`, `app.New`, `app.NewOwned` | No | Refuse CLI transport startup without a workflow. `LoadDevelopmentCLI` and `app.NewDevelopmentCLI` require the same bound workflow and exact tuple. |
 | `relay/dev-tailscale-cli.sh` | No direct CLI | May use `resolve-binary` for filesystem selection, then calls only `dev-tailscale-cli preflight` for real-CLI reads; it never calls standalone preflight or a Tailscale executable itself. |
@@ -472,8 +475,8 @@ selection or state access.
 
 The development command validates the explicit opt-in, production/service
 separation, complete private layout and fixed port tuple. Setup first requires
-exact typed confirmation bound to the private configuration's node and origin,
-then performs read-only CLI preflight and verifies that identity before any
+yes/no confirmation for the displayed address, internally bound to the private
+configuration's node and origin, then performs read-only CLI preflight and verifies that identity before any
 route mutation. It retains the manager only in-process, starts the app server,
 and uses the local control API for admission and the authorized one-use owner
 setup link. Status/recovery and scoped cleanup use the same workflow boundary

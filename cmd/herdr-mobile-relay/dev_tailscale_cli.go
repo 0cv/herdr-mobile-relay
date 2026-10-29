@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -211,15 +212,31 @@ func readDevelopmentSetupConfirmation(stdin io.Reader, stderr io.Writer) (string
 	}
 	nodeID := os.Getenv("HERDR_TAILSCALE_CLI_NODE_ID")
 	origin := os.Getenv("HERDR_TAILSCALE_CLI_ORIGIN")
-	confirmation := tailscalecli.PublishRouteConfirmation(nodeID, origin,
-		tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
-	_, _ = fmt.Fprintln(stderr, "This is development enablement, not runtime or phone qualification.")
-	_, _ = fmt.Fprintln(stderr, "The HTTPS route persists after the foreground relay stops.")
-	_, _ = fmt.Fprintln(stderr, "Consent includes the CLI check-to-write race, backend port reuse, no global rollback, and no remote-drain guarantee.")
-	_, _ = fmt.Fprintln(stderr, "The configured node and origin will be checked against read-only CLI preflight before any route mutation.")
-	_, _ = fmt.Fprintln(stderr, "Missing-route repair requires a separate operation-bound confirmation after complete absence is reverified.")
-	_, _ = fmt.Fprintf(stderr, "Type exactly on stdin:\n%s\n", confirmation)
-	return readRouteConfirmation(stdin, confirmation)
+	return confirmDevelopmentPublication(stdin, stderr, nodeID, origin)
+}
+
+// The operator confirms the displayed address; the workflow still receives the
+// exact identity binding and rechecks it against CLI preflight before publication.
+func confirmDevelopmentPublication(stdin io.Reader, stderr io.Writer, nodeID, origin string) (string, error) {
+	if _, err := fmt.Fprintf(stderr, "Development address: %s\nForwarding to: http://127.0.0.1:%d\nThe route stays configured after stop; another app on this local port could receive its traffic.\nOther Tailscale changes can interfere; failures are not automatically rolled back and connections may remain open.\nPublish this route? [y/N] ",
+		origin, tailscalecli.DevelopmentBackendPort); err != nil {
+		return "", err
+	}
+	if stdin == nil {
+		return "", errors.New("route-bound confirmation must be supplied on stdin")
+	}
+	reader := bufio.NewReaderSize(stdin, 512)
+	line, err := reader.ReadSlice('\n')
+	if err != nil || len(line) > 512 {
+		return "", errors.New("route-bound confirmation line is missing or oversized")
+	}
+	switch strings.ToLower(strings.TrimSpace(string(line))) {
+	case "y", "yes":
+		return tailscalecli.PublishRouteConfirmation(nodeID, origin,
+			tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort), nil
+	default:
+		return "", errors.New("route-bound confirmation declined; nothing was published")
+	}
 }
 
 type developmentForegroundServer interface {

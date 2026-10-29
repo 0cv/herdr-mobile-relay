@@ -473,6 +473,12 @@ ALLOWED = (
     "tests/test_tailscale_process_groups_darwin.py",
     # Interactive developer-menu opt-in propagation; route consent stays separate.
     "relay/dev-tunnel.sh",
+    # Yes/no development-publication prompt and its direct source regressions/docs.
+    "cmd/herdr-mobile-relay/tailscale_cli_test.go",
+    "cmd/herdr-mobile-relay/dev_tailscale_cli_entrypoint_test.go",
+    "cmd/herdr-mobile-relay/dev_tailscale_cli_review_test.go",
+    "docs/tailscale-cli-contract.md",
+    "docs/tailscale-cli-qualification.md",
     # Shared Go origin discovery used by the isolated development launcher.
     "cmd/herdr-mobile-relay/dev_tailscale_cli.go",
     "internal/tailscalecli/development_isolation.go",
@@ -5597,6 +5603,15 @@ def offline_check(group):
             require(ALLOWED.count(menu) == 1
                     and candidate_scope_allowed([*minimal, menu]) and candidate_scope_allowed([menu, *minimal]),
                     "offline_candidate_scope_developer_menu")
+            consent = ("cmd/herdr-mobile-relay/tailscale_cli_test.go",
+                       "cmd/herdr-mobile-relay/dev_tailscale_cli_entrypoint_test.go",
+                       "cmd/herdr-mobile-relay/dev_tailscale_cli_review_test.go",
+                       "docs/tailscale-cli-contract.md",
+                       "docs/tailscale-cli-qualification.md")
+            require(all(ALLOWED.count(path) == 1 and candidate_scope_allowed([*minimal, path])
+                        and candidate_scope_allowed([path, *minimal]) for path in consent)
+                    and candidate_scope_allowed([*minimal, *consent]),
+                    "offline_candidate_scope_yes_no_consent")
             discovery = ("cmd/herdr-mobile-relay/dev_tailscale_cli.go",
                          "internal/tailscalecli/development_isolation.go",
                          "internal/tailscalecli/development_root.go",
@@ -5631,6 +5646,12 @@ def offline_check(group):
                 menu + ".bak", menu.upper(), "x/" + menu, menu + "/child",
                 "relay/dev-tunnel-other.sh", "relay/dev-*.sh", "relay", "relay/"))
             invalid.append([*minimal, menu, menu])
+            for path in consent:
+                invalid.extend([*minimal, lookalike] for lookalike in (
+                    path + ".bak", path.upper(), "x/" + path, path + "/child",
+                    path.rsplit(".", 1)[0] + "-other." + path.rsplit(".", 1)[1],
+                    path.rsplit("/", 1)[0] + "/*"))
+                invalid.append([*minimal, path, path])
             for path in discovery:
                 invalid.extend([*minimal, lookalike] for lookalike in (
                     path + ".bak", path.upper(), "x/" + path, path + "/child",

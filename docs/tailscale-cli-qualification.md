@@ -293,9 +293,10 @@ listed below. Do not substitute another node, account, profile, device, action
 or scope.
 
 The only authorized route tuple is HTTPS 8443 -> `127.0.0.1:18377`, with plugin
-listener 18378, in isolated foreground development. Runtime publication and
-cleanup each still require the Go workflow's displayed, exact, typed
-route-bound confirmation; no environment variable supplies consent. This
+listener 18378, in isolated foreground development. Publication shows the address
+and requires `y` or `yes` on stdin; Go binds that answer to the exact route
+internally. Cleanup still requires its displayed exact typed confirmation.
+No environment variable supplies consent. This
 sequence does not authorize installed-service activation/migration, production
 access or mutation, a production route, deployment, release, or broader
 qualification. These source/documentation changes establish none of those
@@ -327,9 +328,10 @@ outcomes and do not themselves establish live qualification.
    isolation and the exact profile before real CLI access. Publication must
    refuse if HTTPS 8443, backend 18377 or plugin 18378 is occupied or conflicts,
    or the selected listener has an unrecorded/unknown mapping. Review the complete
-   Serve baseline and all four accepted limits. Enter only the displayed exact
-   node/origin/8443/`127.0.0.1:18377` typed runtime confirmation. EOF or any
-   mismatch cancels before mutation; never clear a conflicting resource.
+   Serve baseline and all four accepted limits. Check the displayed development
+   address and answer `y` or `yes` to publish. Blank, no, EOF or unrecognized
+   input cancels before mutation. Go rechecks the exact node/origin/ports binding;
+   never clear a conflicting resource.
 3. **Readback, identity, bundle and readiness.** After setup, compare the
    complete supported Serve configuration: only the intended HTTPS 8443 path
    `/` -> `http://127.0.0.1:18377` may have been added; all unrelated mappings

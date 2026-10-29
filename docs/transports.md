@@ -86,9 +86,11 @@ default.
 A separate `tailscale-cli` transport supports isolated foreground development
 only for the exact recognized macOS/arm64 App Store Tailscale 1.102.4 profile.
 That profile is development-enabled, not runtime-qualified. `make dev-tailscale-cli`
-requires explicit development opt-in, read-only profile and node preflight, and
-an exact route-bound confirmation on stdin for the selected node, HTTPS origin,
-listener and loopback backend. An environment variable cannot consent. The
+requires explicit development opt-in and read-only profile and node preflight.
+It shows the development address and asks for `y` or `yes` on stdin before
+publication; blank, no or EOF cancels. Go binds consent internally to the exact
+node, HTTPS origin, listener and loopback backend and rechecks them before
+publication. An environment variable cannot consent. The
 persistent route survives relay stop and Ctrl-C; removal is a separate
 explicitly authorized cleanup operation. Only the Go-owned in-process
 `DevelopmentWorkflow` carries the real-operation manager. Markers, executable

@@ -61,7 +61,7 @@ usage() {
     echo "Fresh setup discovers the node ID and canonical HTTPS origin; optional configured identities must match." >&2
     echo "Interactive: make dev-tailscale-cli (development opt-in; then route publication consent)." >&2
     echo "Scripted transport opt-in: HERDR_DEV_TAILSCALE_CLI_ENABLE=1 make dev-tailscale-cli"
-    echo "Route publication still requires an exact node/origin/listener/backend confirmation on stdin; no environment variable can consent." >&2
+    echo "Route publication shows the address and asks for y/yes on stdin; no environment variable can consent." >&2
     echo "Optional: HERDR_DEV_TAILSCALE_CLI_DIR, HERDR_DEV_TAILSCALE_CLI_BIN," >&2
     echo "  HERDR_DEV_TAILSCALE_CLI_ORIGIN, HERDR_DEV_TAILSCALE_CLI_NODE_ID, HERDR_DEV_HERDR_BIN." >&2
     echo "Lifecycle: setup, repair-missing, status, recover, reconcile, abandon-missing, release-reservation, update, unpublish, and stop (Ctrl-C)." >&2
@@ -594,7 +594,7 @@ fi
 
 if [ "$ACTION" = setup ]; then
     echo "Development qualification is profile-gated; runtime and phone qualification remain pending."
-    echo "The Go-owned foreground workflow will show the exact route and require route-bound stdin consent before publication."
+    echo "The launcher will show the address and ask before publishing the route."
     [ -f "$ENV_FILE" ] || true
 else
     [ -f "$ENV_FILE" ] || { echo "✗ Update requires existing isolated CLI development state." >&2; exit 1; }

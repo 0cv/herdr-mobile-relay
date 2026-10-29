@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,6 +127,47 @@ func TestRouteConfirmationReaderBindsExactInputAndRejectsTokens(t *testing.T) {
 			t.Fatalf("accepted non-exact route confirmation %q", input)
 		}
 	}
+}
+
+func TestDevelopmentPublicationConfirmation(t *testing.T) {
+	const node = "node-example"
+	const origin = "https://relay.example.test:8443"
+	expected := tailscalecli.PublishRouteConfirmation(node, origin, 8443, 18377)
+	for _, answer := range []string{"y\n", "Y\n", "yes\n", "YES\n", " Yes \r\n"} {
+		var prompt bytes.Buffer
+		got, err := confirmDevelopmentPublication(strings.NewReader(answer), &prompt, node, origin)
+		if err != nil || got != expected {
+			t.Fatalf("affirmative answer %q = %q, %v", answer, got, err)
+		}
+		for _, want := range []string{origin, "127.0.0.1:18377", "stays configured", "Publish this route? [y/N]"} {
+			if !strings.Contains(prompt.String(), want) {
+				t.Fatalf("prompt is missing %q: %q", want, prompt.String())
+			}
+		}
+		if strings.Contains(prompt.String(), node) || strings.Contains(prompt.String(), "Type exactly") ||
+			strings.Contains(prompt.String(), "PUBLISH DEVELOPMENT ROUTE") {
+			t.Fatalf("prompt asks the operator to retype internal identities: %q", prompt.String())
+		}
+	}
+	for _, answer := range []string{"", "\n", "n\n", "no\n", "publish\n", "y", "yes", expected + "\n", "\ny\n", strings.Repeat("y", 600) + "\n"} {
+		got, err := confirmDevelopmentPublication(strings.NewReader(answer), io.Discard, node, origin)
+		if err == nil || got != "" || developmentSetupConfirmationExitCode(err) != 2 {
+			t.Fatalf("refused answer %q = %q, %v", answer, got, err)
+		}
+	}
+	if got, err := confirmDevelopmentPublication(nil, io.Discard, node, origin); err == nil || got != "" {
+		t.Fatalf("nil stdin = %q, %v", got, err)
+	}
+	input := strings.NewReader("yes\n")
+	if got, err := confirmDevelopmentPublication(input, developmentConsentFailedWriter{}, node, origin); !errors.Is(err, io.ErrClosedPipe) || got != "" || input.Len() != len("yes\n") {
+		t.Fatalf("failed prompt accepted or read consent: %q, %v", got, err)
+	}
+}
+
+type developmentConsentFailedWriter struct{}
+
+func (developmentConsentFailedWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
 }
 
 func TestTailscalePreflightExitClassification(t *testing.T) {

@@ -78,7 +78,8 @@ checks fail, option 2 is unavailable rather than falling back. Its description
 says which mode is selected and whether the route survives stopping the relay.
 Choosing 2 is the development opt-in; it does not ask for that opt-in again.
 CLI-backed setup/update installs the locked frontend dependencies, including build
-tools, before building. The separate exact-route consent remains required.
+tools, before building. The launcher shows the address and asks for a normal
+yes/no confirmation before publishing; no node IDs or command phrases to retype.
 That development chooser's checks read local files and platform metadata only;
 they never run Tailscale. The App Store Install CLI's exact forwarding wrapper is treated as an
 alias of its bundle executable; all other distinct executables or wrappers stay
@@ -94,8 +95,9 @@ Conflicting saved identity, failed or changed discovery, or failed full-layout
 preflight refuse before route publication. Discovery does not deploy an app or
 verify readiness: trusted TLS, the exact release bundle and relay/route identity
 still have to pass before pairing.
-Selection still requires the separate exact route confirmation on stdin and
-persistent-route risk consent; stopping the relay leaves that route configured.
+Publication still requires an explicit `y` or `yes` on stdin after the address
+is shown; blank, no or EOF cancels. Consent remains bound to that exact route
+internally, and stopping the relay leaves the route configured.
 Runtime and physical-phone qualification remain pending. See
 [development](docs/development.md#running-from-a-checkout) for requirements and
 [Transports](docs/transports.md#managed-tailscale-serve) for the separate
