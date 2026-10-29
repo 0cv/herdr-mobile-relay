@@ -31,6 +31,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 
 
@@ -1827,7 +1828,7 @@ os.execv(sys.argv[1], sys.argv[1:])
                         DEV_FIXTURE_CHECKOUT=str(checkout), DEV_FIXTURE_LOG=str(record),
                         PATH=f"{selection_tools}:{fixture_bin}:/usr/bin:/bin")
         settings.update(overrides or {})
-        master, slave = pty.openpty() if terminal else (None, None)
+        master, slave = None, None
         process = None
         failure = None
         cleanup_deadline = None
@@ -1842,6 +1843,12 @@ os.execv(sys.argv[1], sys.argv[1:])
         if terminal:
             command = [sys.executable, "-I", "-S", "-c", selection_terminal_exec, *command]
         try:
+            if terminal:
+                master, slave = pty.openpty()
+                # This PTY supplies input only; unused echo can hold Darwin terminal-exit draining.
+                attrs = termios.tcgetattr(slave)
+                attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+                termios.tcsetattr(slave, termios.TCSANOW, attrs)
             process = subprocess.Popen(
                 command, env=settings, cwd=checkout, stdin=slave if terminal else subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
