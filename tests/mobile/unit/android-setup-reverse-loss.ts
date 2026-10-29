@@ -116,7 +116,8 @@ async function replay(test: Replay): Promise<void> {
       'elif [ "$3" = wait-for-device ]; then stage=wait;',
       'elif [ "$3" = reverse ]; then stage=restore; fi',
       test.boundary && test.boundary !== 'create' ? `if [ "$stage" = '${test.boundary}' ] && [ ! -f "$root/release" ]; then
-        printf '%s' "$stage" > "$root/gate"
+        printf '%s' "$stage" > "$root/gate.tmp"
+        mv "$root/gate.tmp" "$root/gate"
         count=0
         while [ ! -f "$root/release" ] && [ "$count" -lt 200 ]; do sleep 0.01; count=$((count+1)); done
         [ -f "$root/release" ] || exit 2
