@@ -116,6 +116,9 @@ var (
 // the user to do. A blocked agent status is deliberately not an input.
 func Classify(text, agent string) Classification {
 	if isAgyAgent(agent) {
+		// ANSI styling can precede or split the focus marker and menu number.
+		// Normalize only after removing it, before any dialog parser runs.
+		text = ansiPattern.ReplaceAllString(text, "")
 		text = agyMenuFocusPattern.ReplaceAllString(text, "${1}❯ ${2}")
 	}
 	structuredControls := Supports(agent)
@@ -169,20 +172,24 @@ func Classify(text, agent string) Classification {
 
 func approvalSummaryLines(text, agent string) []string {
 	normalized := strings.ToLower(agent)
-	if !strings.Contains(normalized, "hermes") {
+	isHermes := strings.Contains(normalized, "hermes")
+	isAgy := isAgyAgent(normalized)
+	if !isHermes && !isAgy {
 		return paneSummaryLines(text)
 	}
-	// Remove volatile Hermes chrome before applying the summary tail limit. A
-	// repaint must not evict stable dialog content from the fingerprint inputs.
+	// Remove volatile chrome before applying the summary tail limit. A repaint
+	// must not evict stable dialog content from the fingerprint inputs.
 	filtered := make([]string, 0)
 	for _, line := range cleanLines(text) {
 		if line == "" || chromePattern.MatchString(line) ||
-			promptSkipPattern.MatchString(line) || hermesApprovalChromeLine(line) {
+			promptSkipPattern.MatchString(line) ||
+			isHermes && hermesApprovalChromeLine(line) ||
+			isAgy && agyStatusLinePattern.MatchString(line) {
 			continue
 		}
 		if match := menuPattern.FindStringSubmatch(line); match != nil {
 			label := compact(match[3], 500)
-			if hermesApprovalAuxiliaryOption(label) {
+			if isHermes && hermesApprovalAuxiliaryOption(label) {
 				continue
 			}
 			// Menu focus and the native number-column padding are presentation.

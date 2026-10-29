@@ -43,6 +43,7 @@ func (r *Reader) ChangeToken(ctx context.Context, scope BrowseScope) (string, er
 				}
 				fmt.Fprintln(digest, path, fileIdentity(info), info.Size(), info.ModTime().UnixNano(), fileChangeToken(info))
 			}
+			fmt.Fprintln(digest, walIndexHeader(database))
 		}
 		return fmt.Sprintf("%x", digest.Sum(nil)), nil
 	}

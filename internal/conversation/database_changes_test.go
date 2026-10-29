@@ -200,3 +200,81 @@ func TestDatabaseReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
 		t.Fatalf("read after publication = %+v", entries)
 	}
 }
+
+func TestAgyReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(agentroots.AgyListEnv, root)
+	conversations := filepath.Join(root, "conversations")
+	if err := os.MkdirAll(conversations, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(conversations, agySessionID+".db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec("PRAGMA journal_mode=WAL")
+	exec(`CREATE TABLE steps(idx INTEGER PRIMARY KEY,step_type INTEGER,status INTEGER,metadata BLOB,step_payload BLOB)`)
+	appendMessage := func(index int, text string) {
+		t.Helper()
+		exec("INSERT INTO steps VALUES(?,?,3,?,?)", index, agyStepAssistant, []byte{}, agyAssistantStep(uint64(index), text))
+	}
+	appendMessage(1, "seed")
+	reader := NewReader(t.TempDir())
+	scope := BrowseScope{Provider: "agy", SessionID: agySessionID}
+	read := func() []Entry {
+		t.Helper()
+		page, err := reader.ReadFor(scope.Provider, root, scope.SessionID, "", 10)
+		if err != nil || !page.Available {
+			t.Fatalf("read failed: %+v %v", page, err)
+		}
+		return page.Entries
+	}
+	if entries := read(); len(entries) != 1 || entries[0].Text != "seed" {
+		t.Fatalf("seed entries = %+v", entries)
+	}
+
+	shm, err := os.OpenFile(database+"-shm", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shm.Close()
+	var published, unpublished [96]byte
+	if _, err := shm.ReadAt(unpublished[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	appendMessage(2, "appended")
+	if _, err := shm.ReadAt(published[:], 0); err != nil || published == unpublished {
+		t.Fatalf("commit did not change the WAL index: %v", err)
+	}
+	// Keep the appended WAL frames but hide their publication, as a writer
+	// does between writing the WAL and publishing its WAL-index header.
+	if _, err := shm.WriteAt(unpublished[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := reader.ChangeToken(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries := read(); len(entries) != 1 || entries[0].Text != "seed" {
+		t.Fatalf("reader saw the unpublished commit: %+v", entries)
+	}
+	if _, err := shm.WriteAt(published[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	current, err := reader.ChangeToken(t.Context(), scope)
+	if err != nil || current == pending {
+		t.Fatalf("publishing the commit left the change token unchanged: %v", err)
+	}
+	if entries := read(); len(entries) != 2 || entries[1].Text != "appended" {
+		t.Fatalf("read after publication = %+v", entries)
+	}
+}

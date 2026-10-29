@@ -14,6 +14,14 @@ project follows [Semantic Versioning](https://semver.org/).
   cards appear only once Herdr marks the dialog as blocked; Herdr's agy manifest
   does not yet detect the Antigravity CLI 1.4.7 dialog.
 
+### Fixed
+
+- Detect Antigravity conversation commits even when the relay polls between
+  WAL writes and commit publication.
+- Recognize ANSI-styled Antigravity approval menus and keep pending approvals
+  valid when focus or the quota countdown changes, while still rejecting
+  responses to a changed command.
+
 ## [0.23.4] - 2026-10-27
 
 ### Fixed
