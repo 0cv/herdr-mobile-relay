@@ -7,6 +7,14 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ['android-appium/*.cjs', 'unit/android-*.cjs', 'unit/android-*.mjs'],
+    languageOptions: { globals: globals.node },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+    },
+  },
+  {
     files: ['**/*.ts'],
     languageOptions: {
       globals: {

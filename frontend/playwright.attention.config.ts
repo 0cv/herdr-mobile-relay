@@ -11,6 +11,10 @@ export default defineConfig({
   expect: { timeout: 8_000 },
   fullyParallel: false,
   workers: 1,
+  // WebKit crashes mid-test on GitHub's shared runners, as described in playwright.config.ts.
+  // The same retries apply here: a deterministic failure still fails every attempt, and local
+  // runs keep zero retries.
+  retries: process.env.GITHUB_ACTIONS ? 2 : 0,
   globalSetup: './tests/browser/attention-relay.setup.ts',
   use: {
     baseURL: 'http://127.0.0.1:4173',

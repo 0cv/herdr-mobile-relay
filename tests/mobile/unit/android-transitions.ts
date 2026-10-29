@@ -49,7 +49,7 @@ state.calls.push(cmd);
 if (cmd === 'dumpsys activity activities') {
   console.log(state.foregrounds[Math.min(state.count++, state.foregrounds.length - 1)]);
 } else if (cmd === 'cmd shortcut get-shortcuts --user 0 --flags 15 com.android.chrome') {
-  if (state.clicked) console.log('ShortcutInfo {id=replay-id, flags=0x28a, shortLabel=Herdr Relay, org.chromium.chrome.browser.webapp_name=Herdr Mobile Relay, org.chromium.chrome.browser.webapp_url=https://fixture.test/, org.chromium.chrome.browser.webapp_scope=https://fixture.test/, org.chromium.chrome.browser.webapp_mac=replay-signed-mac}');
+  if (state.clicked) console.log('ShortcutInfo {id=replay-id, flags=0x28a, shortLabel=Herdr Relay, org.chromium.chrome.browser.webapp_name=Herdr Mobile Relay, org.chromium.chrome.browser.webapp_url=https://fixture.test/, org.chromium.chrome.browser.webapp_scope=https://fixture.test/, org.chromium.chrome.browser.webapp_mac=cmVwbGF5, org.chromium.chrome.browser.webapp_id=replay-id, intents=[Intent { act=com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP pkg=com.android.chrome }]} ');
 } else if (cmd !== 'input keyevent KEYCODE_HOME') process.exit(3);
 await Bun.write(file, JSON.stringify(state));\n`);
   await chmod(adb, 0o700);
@@ -191,7 +191,7 @@ test('Android recorded class-tagged launcher transition uses one standard click 
     assert.equal(await platform.confirmLauncherShortcut(), true);
     assert.equal(state().clicks, 1);
     assert.ok((await adbState()).count >= recorded.launcher.precedingChromeObservations + 1);
-    assert.equal((await platform.waitForChromeShortcut(2_000)).mac, 'replay-signed-mac');
+    assert.equal((await platform.waitForChromeShortcut(2_000)).mac, 'cmVwbGF5');
     assert.ok(requests.some((item: any) => /\/element\/[^/]+\/click$/u.test(item.path)));
     assert.equal(requests.filter((item: any) => item.path === '/execute/sync').length, 0);
     assert.equal(client.snapshot().unusable, false);
@@ -327,10 +327,9 @@ for (const [name, overrides] of [
   ['missing readiness', { enabled: null }],
 ] as const) {
   test(`Android hypothetical Chrome confirmation rejects ${name} before the sole click`, async () => {
-    await replay({ browserInstall: true, foregrounds: [chromeForeground], attributeOverrides: overrides }, async ({ platform, state, root }) => {
+    await replay({ browserInstall: true, foregrounds: [chromeForeground], attributeOverrides: overrides }, async ({ platform, state }) => {
       await assert.rejects(() => platform.installFromBrowser(), /selected confirmation control is not a ready Chrome button/u);
       assert.equal(state().clicks, 2);
-      assert.equal(await readFile(join(root, 'android-chrome-before-confirmation.xml'), 'utf8'), hypotheticalChromeXML);
     });
   });
 }
@@ -346,27 +345,27 @@ for (const replaceIdentity of [false, true]) {
 }
 
 test('Android hypothetical Chrome confirmation refuses an incomplete whole operation', async () => {
-  await replay({ browserInstall: true, budgetMs: 44_999 }, async ({ platform, state, requests }) => {
+  await replay({ browserInstall: true, budgetMs: 34_999 }, async ({ platform, state, requests }) => {
     await assert.rejects(() => platform.installFromBrowser(), /insufficient confirmation observation allowance/u);
     assert.equal(state().clicks, 2);
     assert.equal(requests.some((request: any) => request.path === '/source'), false);
   });
 });
 
-test('Android hypothetical Chrome confirmation does not issue a doomed observation after phase-tail consumption', async () => {
+test('Android hypothetical Chrome confirmation does not issue a full hierarchy request after phase-tail consumption', async () => {
   await replay({ browserInstall: true, foregrounds: [chromeForeground], advanceMs: 10_001 }, async ({ platform, state, requests }) => {
-    await assert.rejects(() => platform.installFromBrowser(), /insufficient confirmation observation allowance/u);
-    assert.equal(state().clicks, 2);
-    assert.equal(requests.at(-1).path, '/source');
+    await assert.rejects(() => platform.installFromBrowser(), /ANDROID_LAUNCHER/u);
+    assert.equal(state().clicks, 3);
+    assert.equal(requests.some((request: any) => request.path === '/source'), false);
   });
 });
 
-test('Android hypothetical Chrome confirmation hung hierarchy quarantines without a click or post-observation', async () => {
-  await replay({ browserInstall: true, hangPath: /\/source$/u }, async ({ platform, client, state, requests }) => {
-    await assert.rejects(() => platform.installFromBrowser(), /APPIUM_TIMEOUT/u);
-    assert.equal(state().clicks, 2);
-    assert.equal(requests.at(-1).path, '/source');
-    assert.equal(client.snapshot().unusable, true);
+test('Android hypothetical Chrome confirmation avoids a redundant full hierarchy source', async () => {
+  await replay({ browserInstall: true, foregrounds: [chromeForeground], advanceMs: 6_000, hangPath: /\/source$/u }, async ({ platform, client, state, requests }) => {
+    await assert.rejects(() => platform.installFromBrowser(), /ANDROID_LAUNCHER/u);
+    assert.equal(state().clicks, 3);
+    assert.equal(requests.some((request: any) => request.path === '/source'), false);
+    assert.equal(client.snapshot().unusable, false);
   });
 });
 
@@ -383,27 +382,27 @@ for (const [name, chromeXML] of [
 }
 
 test('Android hypothetical Chrome late click cannot authorize post-observation or another action', async () => {
-  await replay({ browserInstall: true, foregrounds: [chromeForeground], hangPath: /\/element\/element-2\/click$/u }, async ({ platform, client, requests, root }) => {
+  await replay({ browserInstall: true, foregrounds: [chromeForeground], hangPath: /\/element\/element-2\/click$/u }, async ({ platform, client, requests }) => {
     await assert.rejects(() => platform.installFromBrowser(), /APPIUM_TIMEOUT/u);
     assert.equal(requests.at(-1).path, '/element/element-2/click');
-    assert.equal(requests.filter((request: any) => request.path === '/source').length, 1);
-    await assert.rejects(() => readFile(join(root, 'android-chrome-after-confirmation.xml')), /ENOENT/u);
+    assert.equal(requests.filter((request: any) => request.path === '/source').length, 0);
     assert.equal(client.snapshot().unusable, true);
   });
 });
 
-test('Android hypothetical Chrome remaining dialog is captured but never retried or accepted as installation', async () => {
-  await replay({ browserInstall: true, chromeRemains: true, foregrounds: [chromeForeground] }, async ({ platform, state, root }) => {
+test('Android hypothetical Chrome remaining dialog is never retried or accepted as installation', async () => {
+  await replay({ browserInstall: true, chromeRemains: true, foregrounds: [chromeForeground], advanceMs: 6_000 }, async ({ platform, state, requests }) => {
     await assert.rejects(() => platform.installFromBrowser(), /ANDROID_LAUNCHER/u);
     assert.equal(state().clicks, 3);
-    assert.equal(await readFile(join(root, 'android-chrome-after-confirmation.xml'), 'utf8'), hypotheticalChromeXML);
+    assert.equal(requests.some((request: any) => request.path === '/source'), false);
   });
 });
 
 test('Android browser installation requires the scoped launcher click before the signed postcondition and HOME', async () => {
-  await replay({ browserInstall: true, foregrounds: [chromeForeground, chromeForeground, recorded.launcher.foreground] }, async ({ platform, state, adbState }) => {
+  await replay({ browserInstall: true, foregrounds: [chromeForeground, chromeForeground, recorded.launcher.foreground] }, async ({ platform, state, requests, adbState }) => {
     await platform.installFromBrowser();
     assert.equal(state().clicks, 4);
+    assert.equal(requests.some((request: any) => request.path === '/source'), false);
     const { calls } = await adbState();
     assert.match(calls.at(-2), /^cmd shortcut get-shortcuts/u);
     assert.equal(calls.at(-1), 'input keyevent KEYCODE_HOME');

@@ -1,12 +1,22 @@
+<script module lang="ts">
+  import type { Agent } from '$lib/types';
+
+  export interface QueuedKeyCommand {
+    keys: string[];
+    label: string;
+    target: Agent;
+    resolve: (sent: boolean) => void;
+  }
+</script>
+
 <script lang="ts">
-  import { onDestroy, type Snippet } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
-  import type { Agent } from '$lib/types';
 
-  let { agent, readOnly = false, blocked = false, sending = $bindable(false), extra }:
-    { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean; extra?: Snippet } = $props();
+  let { agent, readOnly = false, blocked = false, sending = $bindable(false), extra, queue }:
+    { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean; extra?: Snippet; queue?: QueuedKeyCommand[] } = $props();
   let modifierInputElement = $state<HTMLInputElement>(null!);
   let arrowsOpen = $state(false);
   let fkeysOpen = $state(false);
@@ -21,13 +31,9 @@
   let componentMounted = true;
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   let keyReadTimer: ReturnType<typeof setTimeout> | undefined;
-  interface QueuedKeyCommand {
-    keys: string[];
-    label: string;
-    target: Agent;
-    resolve: (sent: boolean) => void;
-  }
-  const keyQueue: QueuedKeyCommand[] = [];
+  // A queue owned by the parent survives replacement of this row.
+  const sharedQueue = untrack(() => queue);
+  const keyQueue: QueuedKeyCommand[] = sharedQueue ?? [];
   const armedModifierLabel = $derived([
     ctrlArmed ? 'Ctrl' : '',
     altArmed ? 'Alt' : '',
@@ -44,13 +50,20 @@
     });
   }
 
+  // A replacement row can inherit an in-flight send from the question row.
+  // Resume its own queue when that shared send (or blocking state) clears.
+  $effect(() => {
+    if (!keySending && keyQueue.length) void drainKeyQueue();
+  });
+
   async function drainKeyQueue() {
     if (keySending) return;
     sending = true;
     while (keyQueue.length) {
+      if (!componentMounted) break;
       const command = keyQueue.shift()!;
       const identity = targetRefForAgent(command.target);
-      if (!componentMounted || disabled || !identity || !targetRefMatchesAgent(identity, agent)) {
+      if (disabled || !identity || !targetRefMatchesAgent(identity, agent)) {
         command.resolve(false);
         continue;
       }
@@ -90,7 +103,7 @@
   }
 
   function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
-    if (disabled || keySending) return;
+    if (disabled) return;
     arrowsOpen = false;
     fkeysOpen = false;
     if (which === 'ctrl') ctrlArmed = !ctrlArmed;
@@ -178,7 +191,7 @@
     componentMounted = false;
     if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
     if (keyReadTimer) clearTimeout(keyReadTimer);
-    for (const command of keyQueue.splice(0)) command.resolve(false);
+    if (!sharedQueue) for (const command of keyQueue.splice(0)) command.resolve(false);
   });
 </script>
 {#snippet arrowIcon()}
@@ -204,13 +217,13 @@
   {#if arrowsOpen}
     <div class="arrow-popup">
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
+      <button disabled={disabled} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
+      <button disabled={disabled} aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
+      <button disabled={disabled} aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
       <span aria-hidden="true"></span>
-      <button disabled={disabled || keySending} aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
+      <button disabled={disabled} aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
       <span aria-hidden="true"></span>
     </div>
   {/if}
@@ -221,7 +234,7 @@
     <div class="fkey-popup" role="group" aria-label="Function keys">
       {#each FUNCTION_KEYS as number (number)}
         <button
-          disabled={disabled || keySending}
+          disabled={disabled}
           onpointerdown={(event) => event.preventDefault()}
           onclick={() => sendFunctionKey(number)}
         >F{number}</button>
@@ -236,8 +249,8 @@
       <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
     {/if}
     <div class="term-keys" aria-busy={keySending}>
-      <Button variant="secondary" size="sm" disabled={disabled || keySending} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" disabled={disabled || keySending} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
       <div class="modifier-menu">
         <input
           id="modifier-key-input"
@@ -258,7 +271,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-controls="modifier-key-input"
           aria-pressed={shiftArmed}
           aria-label="Shift"
@@ -269,7 +282,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-controls="modifier-key-input"
           aria-pressed={ctrlArmed}
           aria-label="Ctrl"
@@ -280,7 +293,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-controls="modifier-key-input"
           aria-pressed={altArmed}
           title="Arm Alt; combine it with Ctrl or Shift"
@@ -295,7 +308,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-label="Function keys"
           aria-expanded={fkeysOpen}
           onpointerdown={(event) => event.preventDefault()}
@@ -307,7 +320,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || keySending}
+          disabled={disabled}
           aria-label="Arrow keys"
           aria-expanded={arrowsOpen}
           onpointerdown={(event) => event.preventDefault()}
@@ -317,7 +330,7 @@
         </Button>
         {@render arrowPopup()}
       </div>
-      <Button variant="secondary" size="sm" disabled={disabled || keySending} aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
 
 </div>
