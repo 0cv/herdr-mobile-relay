@@ -389,7 +389,26 @@ case "$HERDR_DEV_HERDR_SOCKET" in /*) ;; *) echo "✗ Herdr socket path must be 
 CONFIGURED_ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-${HERDR_TAILSCALE_CLI_ORIGIN:-}}"
 PHONE_APP="${HERDR_DEV_PHONE_APP_URL:-${HERDR_PHONE_APP_URL:-}}"
 CONFIGURED_NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-${HERDR_TAILSCALE_CLI_NODE_ID:-}}"
-[ -n "$PHONE_APP" ] || { echo "✗ Set the exact verified phone-app origin." >&2; exit 2; }
+if [ -z "$PHONE_APP" ]; then
+    if [ "$ACTION" != setup ] || [ -e "$ENV_FILE" ] || [ ! -t 0 ]; then
+        echo "✗ Set HERDR_DEV_PHONE_APP_URL (or HERDR_PHONE_APP_URL) to the exact canonical HTTPS phone-app origin; fresh setup can ask only with terminal stdin." >&2
+        exit 2
+    fi
+    # Selection is not verification or route consent. Do not infer an app
+    # address from the configured relay or the preflight placeholder.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    echo "Enter the exact canonical HTTPS origin intended to serve the phone app (no path or trailing slash)." >&2
+    echo "This selects an address only; trusted TLS, exact app bundle and route readiness must still pass before pairing." >&2
+    printf 'Phone-app HTTPS origin (q to cancel): ' >&2
+    IFS= read -r PHONE_APP || { echo "Cancelled; no phone-app origin was selected." >&2; exit 2; }
+    case "$PHONE_APP" in q|Q) echo "Cancelled; no phone-app origin was selected." >&2; exit 2 ;; esac
+    PHONE_APP="$(cli_relay_call normalize-external-origin "$PHONE_APP")" || {
+        echo "✗ A canonical HTTPS phone-app origin is required; nothing was started." >&2
+        exit 2
+    }
+    trap - INT TERM
+fi
 NEEDS_PREFLIGHT=0
 BOOTSTRAP_ORIGIN="https://preflight.invalid:8443"
 BOOTSTRAP_NODE_ID="node-preflight-pending"

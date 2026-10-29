@@ -8,16 +8,126 @@ packaged CLI-backed app only inside its disposable network-disabled container.
 """
 
 import os
+
+# Admission precedes helper imports, source discovery, roots and subprocesses.
+if (os.name != "posix" or os.getuid() == 0 or os.geteuid() == 0 or
+        os.environ.get("GITHUB_ACTIONS") != "true" or
+        os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or
+        os.environ.get("HERDR_TAILSCALE_LAUNCHER_CI") != "1"):
+    raise SystemExit(
+        "Development launcher fixtures require non-root POSIX GitHub-hosted CI with "
+        "GITHUB_ACTIONS=true, RUNNER_ENVIRONMENT=github-hosted and HERDR_TAILSCALE_LAUNCHER_CI=1"
+    )
+
 from pathlib import Path
 import pty
+import select
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import time
 
-if os.environ.get("HERDR_TAILSCALE_LAUNCHER_CI") != "1":
-    raise SystemExit("Refusing development launcher tests outside hosted CI")
+
+def check_negative_admission() -> None:
+    # Only an actually admitted parent reaches this regression. Children lose
+    # admission from that inherited environment; none gains hosted markers or
+    # a fabricated UID. Compile/execute the complete exact candidate, not an
+    # extracted guard or fixture body. -I -S excludes local/site startup hooks.
+    candidate = Path(__file__).resolve()
+    source = candidate.read_bytes()
+    if len(source) > 256 * 1024:
+        raise AssertionError("launcher admission candidate exceeds the probe source bound")
+    harness = r'''
+import builtins
+import os
+import sys
+
+candidate = sys.argv[1]
+source = sys.stdin.buffer.read(256 * 1024 + 1)
+code = compile(source, candidate, "exec")
+sys.argv = [candidate]
+
+def trip():
+    os.write(2, b"launcher admission probe containment tripped\n")
+    os._exit(97)
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    # Even cached helpers must not be imported after a missing/regressed guard.
+    if name == "os" and not fromlist and level == 0:
+        return os
+    trip()
+
+def before_effect(event, args):
+    # The sole permitted audited operation is execution of this complete code
+    # object. In particular, file opens, directory enumeration, sockets, forks,
+    # subprocess dispatch and further compilation/exec are refused.
+    if event != "exec" or args[0] is not code:
+        trip()
+
+builtins.__import__ = guarded_import
+sys.addaudithook(before_effect)
+try:
+    exec(code, {"__name__": "__main__", "__file__": candidate})
+except SystemExit as refusal:
+    if type(refusal.code) is not str:
+        trip()
+    # Match normal Python's string SystemExit diagnostic/status, then exit
+    # directly so interpreter-shutdown audit events cannot mask the result.
+    os.write(2, refusal.code.encode("utf-8") + b"\n")
+    os._exit(1)
+except BaseException:
+    trip()
+trip()
+'''
+    expected = (
+        b"Development launcher fixtures require non-root POSIX GitHub-hosted CI with "
+        b"GITHUB_ACTIONS=true, RUNNER_ENVIRONMENT=github-hosted and HERDR_TAILSCALE_LAUNCHER_CI=1\n"
+    )
+    cases = (
+        ("all-admission-absent", {"HERDR_TAILSCALE_LAUNCHER_CI": None,
+                                  "GITHUB_ACTIONS": None, "RUNNER_ENVIRONMENT": None}),
+        ("launcher-marker-only", {"GITHUB_ACTIONS": None, "RUNNER_ENVIRONMENT": None}),
+        ("launcher-marker-absent", {"HERDR_TAILSCALE_LAUNCHER_CI": None}),
+        ("launcher-marker-invalid", {"HERDR_TAILSCALE_LAUNCHER_CI": "0"}),
+        ("github-marker-absent", {"GITHUB_ACTIONS": None}),
+        ("github-marker-invalid", {"GITHUB_ACTIONS": "false"}),
+        ("runner-marker-absent", {"RUNNER_ENVIRONMENT": None}),
+        ("self-hosted-runner", {"RUNNER_ENVIRONMENT": "self-hosted"}),
+    )
+    for case, removals in cases:
+        environment = dict(os.environ)
+        for name, value in removals.items():
+            if value is None:
+                environment.pop(name, None)
+            else:
+                environment[name] = value
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-B", "-c", harness, str(candidate)],
+            env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, start_new_session=True,
+        )
+        try:
+            try:
+                stdout, stderr = process.communicate(input=source, timeout=5)
+            except subprocess.TimeoutExpired:
+                raise AssertionError(f"{case}: launcher admission probe timed out") from None
+        finally:
+            # Only this newly created child is owned here; the audit sentinel
+            # forbids it from starting descendants. Do not signal host jobs.
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=2)
+        if process.returncode != 1 or stdout != b"" or stderr != expected:
+            # Do not print arbitrary child output or private environment data.
+            raise AssertionError(f"{case}: exact early launcher admission refusal not observed")
+    print("PASS launcher admission: negative environments refuse before helper imports or effects")
+
+
+check_negative_admission()
 
 root = Path(__file__).resolve().parents[1]
 script = root / "relay" / "dev-tailscale.sh"
@@ -1224,6 +1334,7 @@ exit 0
     go_fixture = fixture_bin / "go"
     go_fixture.write_text(
         '''#!/bin/sh
+printf 'build|go\\n' >> "$DEV_FIXTURE_LOG"
 out=
 while [ $# -gt 0 ]; do
     if [ "$1" = -o ]; then out=$2; shift 2; else shift; fi
@@ -1231,22 +1342,10 @@ done
 [ -n "$out" ] || exit 97
 cat > "$out" <<'APP'
 #!/bin/sh
-if [ "$1" = json-field ]; then
-    case "$3" in
-        status) printf 'ok\\n' ;;
-        readiness) printf 'ready\\n' ;;
-        transport) printf 'tailscale-cli\\n' ;;
-        instance) printf '%s\\n' "$HERDR_RELAY_INSTANCE_ID" ;;
-        tailscale_cli_origin) printf '%s\\n' "$HERDR_TAILSCALE_CLI_ORIGIN" ;;
-        ready|persistent_route_ready|invitation_armed) printf 'true\\n' ;;
-        *) exit 1 ;;
-    esac
-    exit 0
-fi
-if [ "$1" = normalize-external-origin ]; then
-    printf '%s\\n' "$2"
-    exit 0
-fi
+# Use the compiled strict contracts, not permissive fixture URL/JSON parsing.
+case "$1" in
+    json-field|normalize-external-origin) exec "$DEV_FIXTURE_NORMALIZER" "$@" ;;
+esac
 if [ "$1" = dev-tailscale-cli ] && [ "$2" = preflight ]; then
     printf 'manager|workflow preflight --development-root %s\\n' "$HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT" >> "$DEV_FIXTURE_LOG"
     printf '%s\\n' '{"node_id":"dev-node-fixture","dns_name":"relay.fixture.invalid","origin":"https://relay.fixture.invalid:8443","profile":"fixture"}'
@@ -1304,15 +1403,7 @@ chmod 700 "$out"
     positive_gate = cli_dev_fixture / "positive-gate-relay"
     positive_gate.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = json-field ]; then\n"
-        "  case \"$3\" in\n"
-        "    node_id) printf '%s\\n' dev-node-fixture ;;\n"
-        "    dns_name) printf '%s\\n' relay.fixture.invalid ;;\n"
-        "    origin) printf '%s\\n' https://relay.fixture.invalid:8443 ;;\n"
-        "    *) exit 1 ;;\n"
-        "  esac\n"
-        "  exit 0\n"
-        "fi\n"
+        "if [ \"$1\" = json-field ]; then exec \"$DEV_FIXTURE_NORMALIZER\" \"$@\"; fi\n"
         "case \"$1\" in\n"
         "  tailscale-cli)\n"
         "    case \"$2\" in\n"
@@ -1322,7 +1413,9 @@ chmod 700 "$out"
         "      reserve-backend-port) printf 'manager|%s\\n' \"$*\" >> \"$DEV_FIXTURE_LOG\"; exit 0 ;;\n"
         "      release-backend-port) exit 0 ;;\n"
         "    esac ;;\n"
-        "  normalize-external-origin) printf '%s\\n' \"$2\"; exit 0 ;;\n"
+        "  normalize-external-origin)\n"
+        "    printf 'selection|normalize-external-origin\\n' >> \"$DEV_FIXTURE_LOG\"\n"
+        "    exec \"$DEV_FIXTURE_NORMALIZER\" \"$@\" ;;\n"
         "esac\n"
         "exit 97\n",
         encoding="utf-8",
@@ -1332,6 +1425,7 @@ chmod 700 "$out"
     bun_fixture.write_text(
         '''#!/bin/sh
 if [ "$1" = run ]; then
+    printf 'build|bun\\n' >> "$DEV_FIXTURE_LOG"
     [ "$2" = --cwd ] || exit 97
     frontend=$3
     [ "$4" = build ] || exit 97
@@ -1385,7 +1479,8 @@ exit 0
         "HERDR_DEV_HERDR_SOCKET": str(cli_dev_fixture / "herdr.sock"),
         "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(home / ".local" / "state" / "herdr-mobile-relay" / "tailscale-cli-coordination"),
         "HERDR_DEV_TAILSCALE_CLI_FIXTURE_LOG": str(fixture_log),
-        "DEV_FIXTURE_LOG": str(fixture_log), "GH_TOKEN": "fixture-only-secret",
+        "DEV_FIXTURE_LOG": str(fixture_log),
+        "DEV_FIXTURE_NORMALIZER": str(readiness_helper), "GH_TOKEN": "fixture-only-secret",
         "PATH": f"{fixture_bin}:/usr/bin:/bin",
     })
     for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG",
@@ -1658,6 +1753,229 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
             (old_path_kind == "socket" and not old_path.is_socket()) or
             (old_path_kind == "symlink" and not old_path.is_symlink())):
             raise AssertionError(f"{name}: unsafe migration or non-fail-closed outcome")
+    # Exercise the byte-identical launcher in private checkout fixtures so its
+    # default root can start absent. Nothing here qualifies TLS, a real route or
+    # a phone: only the strict origin helper is real; builds/runtime are inert.
+    selection_base = base / "origin-selection"
+    selection_base.mkdir(mode=0o700)
+    selection_tools = selection_base / "tools"
+    selection_tools.mkdir(mode=0o700)
+    selection_git = selection_tools / "git"
+    selection_git.write_text(
+        '#!/bin/sh\n[ "$#" = 4 ] && [ "$1" = -C ] && '
+        '[ "$2" = "$DEV_FIXTURE_CHECKOUT" ] && [ "$3" = rev-parse ] && '
+        '[ "$4" = HEAD ] || exit 97\n'
+        "printf '%s\\n' 1111111111111111111111111111111111111111\n",
+        encoding="utf-8",
+    )
+    selection_git.chmod(0o700)
+    origin_prompt = b"Phone-app HTTPS origin (q to cancel): "
+    route_confirmation = (b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
+                          b"origin=https://relay.fixture.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n")
+
+    def selection_checkout(case: str) -> Path:
+        checkout = selection_base / case
+        (checkout / "relay").mkdir(mode=0o700, parents=True)
+        (checkout / "frontend").mkdir(mode=0o700)
+        for name in ("dev-tailscale-cli.sh", "common.sh"):
+            shutil.copy2(root / "relay" / name, checkout / "relay" / name)
+        shutil.copy2(root / "herdr-plugin.toml", checkout / "herdr-plugin.toml")
+        return checkout
+
+    def snapshot_tree(directory: Path) -> dict | None:
+        if not directory.exists():
+            return None
+        return {str(path.relative_to(directory)): (
+                    path.stat().st_mode & 0o777,
+                    os.readlink(path) if path.is_symlink() else
+                    path.read_bytes() if path.is_file() else None)
+                for path in (directory, *sorted(directory.rglob("*")))}
+
+    selection_production_before = snapshot_tree(production)
+
+    def run_selection(checkout: Path, answers: bytes | None = None, *, terminal: bool = True,
+                      overrides: dict[str, str] | None = None, action: str = "setup",
+                      cancel_signal: int | None = None) -> tuple[int, bytes, list[str]]:
+        record = checkout / "events"
+        before = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
+        settings = dict(positive_env, HERDR_DEV_TAILSCALE_CLI_DIR="",
+                        HERDR_DEV_PHONE_APP_URL="", HERDR_PHONE_APP_URL="",
+                        DEV_FIXTURE_CHECKOUT=str(checkout), DEV_FIXTURE_LOG=str(record),
+                        PATH=f"{selection_tools}:{fixture_bin}:/usr/bin:/bin")
+        settings.update(overrides or {})
+        master, slave = pty.openpty() if terminal else (None, None)
+        process = None
+        prefix = b""
+        try:
+            process = subprocess.Popen(
+                [str(checkout / "relay" / "dev-tailscale-cli.sh"), action],
+                env=settings, cwd=checkout, stdin=slave if terminal else subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            )
+            if slave is not None:
+                os.close(slave)
+                slave = None
+            if cancel_signal is not None:
+                deadline = time.monotonic() + 10
+                while origin_prompt not in prefix:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not select.select([process.stderr], [], [], remaining)[0]:
+                        raise AssertionError("origin cancellation fixture never reached the prompt")
+                    chunk = os.read(process.stderr.fileno(), 4096)
+                    if not chunk:
+                        raise AssertionError(f"origin cancellation fixture exited before prompt: {prefix!r}")
+                    prefix += chunk
+                os.killpg(process.pid, cancel_signal)
+            elif terminal:
+                os.write(master, answers if answers is not None else b"\x04")
+            stdout, stderr = process.communicate(input=None if terminal else answers, timeout=30)
+            events = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
+            if snapshot_tree(production) != selection_production_before or sentinel.exists() or tool_sentinel.exists():
+                raise AssertionError("origin selection changed production baseline or invoked an external tool")
+            return process.returncode, stdout + prefix + stderr, events[len(before):]
+        finally:
+            if process is not None and process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=5)
+            for descriptor in (slave, master):
+                if descriptor is not None:
+                    os.close(descriptor)
+
+    def assert_no_selection_effects(checkout: Path, events: list[str]) -> None:
+        if ((checkout / "relay" / ".dev-tailscale-cli").exists() or
+            any(event.startswith(("build|", "manager|", "runtime|", "control|")) for event in events)):
+            raise AssertionError(f"refused origin selection created state, built or entered runtime: {events!r}")
+
+    for case, terminal, answers in (
+        ("unattended-absence", False, None),
+        ("piped-origin-is-not-terminal-input", False, b"https://app.fixture.invalid\n" + route_confirmation),
+    ):
+        checkout = selection_checkout(case)
+        status, output, events = run_selection(checkout, answers, terminal=terminal)
+        if (status == 0 or origin_prompt in output or
+            b"HERDR_DEV_PHONE_APP_URL" not in output or b"HERDR_PHONE_APP_URL" not in output or events):
+            raise AssertionError(f"{case}: missing actionable nonterminal refusal: {output!r}")
+        assert_no_selection_effects(checkout, events)
+
+    invalid_origins = (
+        b"", b"http://app.fixture.invalid", b"app.fixture.invalid",
+        b"https://app.fixture.invalid/", b"https://app.fixture.invalid/path",
+        b"https://app.fixture.invalid?x=1", b"https://app.fixture.invalid#fragment",
+        b"https://user@app.fixture.invalid", b"https://app.fixture.invalid:443",
+        b"https://app.fixture.invalid:0", b"https://app.fixture.invalid:65536",
+        b"https://app.fixture.invalid:08443", b"https://APP.fixture.invalid",
+        b" https://app.fixture.invalid", b"https://app.fixture.invalid ",
+        b"https://app.fixture.invalid\\path", b"https://app_fixture.invalid",
+    )
+    for index, value in enumerate(invalid_origins):
+        checkout = selection_checkout(f"invalid-{index}")
+        status, output, events = run_selection(checkout, value + b"\n" + route_confirmation)
+        if (status == 0 or output.count(origin_prompt) != 1 or
+            b"canonical HTTPS phone-app origin is required" not in output or
+            events != ["selection|normalize-external-origin"]):
+            raise AssertionError(f"invalid origin was accepted, rewritten or retried: {output!r} {events!r}")
+        assert_no_selection_effects(checkout, events)
+
+    for case, answers in (("quit-lower", b"q\n" + route_confirmation),
+                          ("quit-upper", b"Q\n" + route_confirmation),
+                          ("eof", b"\x04"),
+                          ("partial-eof", b"https://app.fixture.invalid\x04\x04")):
+        checkout = selection_checkout(case)
+        status, output, events = run_selection(checkout, answers)
+        if status == 0 or output.count(origin_prompt) != 1 or b"Cancelled" not in output or events:
+            raise AssertionError(f"{case}: did not cancel before setup: {output!r} {events!r}")
+        assert_no_selection_effects(checkout, events)
+    for cancel_signal, expected_status in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+        checkout = selection_checkout(f"signal-{cancel_signal}")
+        status, output, events = run_selection(checkout, cancel_signal=cancel_signal)
+        if status != expected_status or output.count(origin_prompt) != 1 or events:
+            raise AssertionError(f"signal did not cancel origin selection: {status} {output!r} {events!r}")
+        assert_no_selection_effects(checkout, events)
+
+    # A selected origin is passed through exactly, with no prompt or normalizer
+    # call. Development override precedence and saved identity checks stay intact.
+    successful_selections = (
+        ("terminal-app", "https://app.fixture.invalid", True, {}),
+        ("terminal-intended-relay", "https://relay.fixture.invalid:8443", True, {}),
+        ("terminal-ipv6", "https://[fd7a:115c:a1e0::1]:8443", True, {}),
+        ("preselected-dev-precedence", "https://app.fixture.invalid:8443", False,
+         {"HERDR_DEV_PHONE_APP_URL": "https://app.fixture.invalid:8443",
+          "HERDR_PHONE_APP_URL": "https://other.fixture.invalid"}),
+        ("preselected-standard", "https://app.fixture.invalid", False,
+         {"HERDR_PHONE_APP_URL": "https://app.fixture.invalid"}),
+    )
+    for case, selected_origin, prompted, overrides in successful_selections:
+        checkout = selection_checkout(case)
+        answers = (selected_origin.encode() + b"\n" if prompted else b"") + route_confirmation
+        status, output, events = run_selection(checkout, answers, overrides=overrides)
+        selected_env = checkout / "relay" / ".dev-tailscale-cli" / "relay.env"
+        if (status != 0 or output.count(origin_prompt) != int(prompted) or
+            events.count("selection|normalize-external-origin") != int(prompted) or
+            relay_env_values(selected_env).get("HERDR_PHONE_APP_URL") != selected_origin or
+            not any(event.startswith("manager|workflow publish ") for event in events) or
+            "control|localcontrol admit" not in events or "control|localcontrol arm_bootstrap" not in events or
+            (prompted and b"This selects an address only" not in output)):
+            raise AssertionError(f"{case}: origin choice did not remain exact and separate: {output!r} {events!r}")
+        if case != "terminal-app":
+            continue
+        saved_checkout = checkout
+        saved_origin = selected_origin
+
+    status, output, events = run_selection(saved_checkout, route_confirmation)
+    saved_root = saved_checkout / "relay" / ".dev-tailscale-cli"
+    if (status != 0 or origin_prompt in output or "selection|normalize-external-origin" in events or
+        relay_env_values(saved_root / "relay.env").get("HERDR_PHONE_APP_URL") != saved_origin):
+        raise AssertionError("saved origin was prompted for, normalized or replaced")
+    saved_before = snapshot_tree(saved_root)
+    status, output, events = run_selection(
+        saved_checkout, route_confirmation,
+        overrides={"HERDR_DEV_PHONE_APP_URL": "https://different.fixture.invalid"},
+    )
+    if (status == 0 or origin_prompt in output or events or snapshot_tree(saved_root) != saved_before or
+        b"Existing CLI profile/origin changed; registration requires explicit recovery" not in output):
+        raise AssertionError(f"persisted origin mismatch did not retain state: {output!r} {events!r}")
+    saved_file = saved_root / "relay.env"
+    saved_bytes = saved_file.read_bytes()
+    try:
+        saved_file.write_bytes(b"\n".join(line for line in saved_bytes.split(b"\n")
+                                          if not line.startswith(b"HERDR_PHONE_APP_URL=")))
+        incomplete_before = snapshot_tree(saved_root)
+        status, output, events = run_selection(saved_checkout, b"https://app.fixture.invalid\n" + route_confirmation)
+        if (status == 0 or origin_prompt in output or events or snapshot_tree(saved_root) != incomplete_before or
+            b"HERDR_DEV_PHONE_APP_URL" not in output):
+            raise AssertionError("incomplete saved configuration entered the fresh origin prompt or changed state")
+    finally:
+        saved_file.write_bytes(saved_bytes)
+
+    # Route confirmation is intentionally later in the Go-owned workflow, after
+    # private staging. A valid origin alone (or a generic yes) must not publish,
+    # reserve, admit or arm. Do not move consent into shell origin selection.
+    for case, confirmation in (("origin-only-eof", b"\x04"), ("origin-is-not-consent", b"y\n")):
+        checkout = selection_checkout(case)
+        status, output, events = run_selection(checkout, b"https://app.fixture.invalid\n" + confirmation)
+        if (status == 0 or output.count(origin_prompt) != 1 or
+            not any(event.startswith("manager|workflow preflight ") for event in events) or
+            any(event.startswith(("manager|workflow reserve ", "manager|workflow publish ",
+                                  "runtime|", "control|")) for event in events)):
+            raise AssertionError(f"origin selection replaced exact route consent: {output!r} {events!r}")
+
+    for action in ("update", "recover", "repair-missing", "status"):
+        checkout = selection_checkout(f"no-fresh-prompt-{action}")
+        status, output, events = run_selection(checkout, b"https://app.fixture.invalid\n", action=action)
+        if status == 0 or origin_prompt in output or events:
+            raise AssertionError(f"{action} entered fresh origin selection: {output!r} {events!r}")
+        assert_no_selection_effects(checkout, events)
+    status, output, events = run_selection(
+        saved_checkout, action="update",
+        overrides={"HERDR_DEV_TAILSCALE_CLI_RELAY_BIN": str(saved_root / "current" / "bin" / "herdr-mobile-relay")},
+    )
+    if (status != 0 or origin_prompt in output or "selection|normalize-external-origin" in events or
+        events.count(f"manager|workflow assert-ready --development-root {saved_root}") != 2 or
+        "control|localcontrol admit" not in events or
+        relay_env_values(saved_root / "relay.env").get("HERDR_PHONE_APP_URL") != saved_origin or
+        any(event.startswith(("manager|workflow publish ", "control|localcontrol arm_bootstrap")) for event in events)):
+        raise AssertionError(f"saved update entered origin selection or publication: {output!r} {events!r}")
+    print("PASS CLI origin selection fixtures: terminal exact choice, strict refusals, cancellation, precedence, saved identity and separate route consent")
     positive_socket.close()
     print("PASS CLI development lifecycle fixture: isolated setup/update, setup migration, one-time rewrite, refusal preservation, production state preserved")
 

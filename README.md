@@ -81,8 +81,20 @@ they never run Tailscale. The App Store Install CLI's exact forwarding wrapper i
 alias of its bundle executable; all other distinct executables or wrappers stay
 ambiguous. Explicit absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or
 `HERDR_TAILSCALE_CLI_BIN` overrides still take precedence, and invalid overrides
-fail closed. Selection still follows the existing consent and route-confirmation
-gates. See
+fail closed. Fresh CLI-backed checkout setup prompts for the exact canonical
+`https://host[:port]` phone-app origin when none is selected and stdin is a
+terminal (no path, query, fragment or trailing slash). Enter a known intended
+app address, including the relay-served origin only if you explicitly intend
+to use it; no address is guessed, discovered or deployed. For unattended origin
+selection, set `HERDR_DEV_PHONE_APP_URL` (preferred) or `HERDR_PHONE_APP_URL`;
+without one, nonterminal stdin refuses. Selected/saved origins are retained
+without a prompt. At the origin prompt, blank/invalid input, q/Q, EOF or
+interruption starts nothing. Origin selection checks syntax only, not app
+readiness: trusted TLS, the exact
+release bundle and relay/route identity still have to pass before pairing.
+Selection still requires the separate exact route confirmation on stdin and
+persistent-route risk consent; stopping the relay leaves that route configured.
+Runtime and physical-phone qualification remain pending. See
 [development](docs/development.md#running-from-a-checkout) for requirements and
 [Transports](docs/transports.md#managed-tailscale-serve) for the separate
 lifecycle and platform limits.

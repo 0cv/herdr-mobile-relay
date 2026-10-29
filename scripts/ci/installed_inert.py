@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-# Legacy six-group API; suite selection below always includes the supplement.
+# Legacy six-group API; selection always includes the supplement and promotion.
 INVENTORY = None
 
 
@@ -42,6 +42,18 @@ def load_inventory(path):
 
 INVENTORY = load_inventory(Path(__file__).with_name("installed-inert-inventory.json"))
 SUPPLEMENTAL = load_inventory(Path(__file__).with_name("installed-inert-supplemental-inventory.json"))
+# Additive to the frozen six-plus-fifteen historical groups, never optional.
+# Go testing rewrites the fixture's ASCII spaces to underscores.
+PROMOTION = {
+    "package": "github.com/0cv/herdr-mobile-relay/cmd/herdr-mobile-relay",
+    "tagged": True,
+    "tests": [
+        "TestInstalledProductionPromotionInert",
+        "TestInstalledProductionPromotionInert/owned_update_and_scoped_removal",
+        "TestInstalledProductionPromotionInert/uncertain_stop_retains_authority",
+        "TestInstalledProductionPromotionInert/consented_missing_route_removal",
+    ],
+}
 PACKAGES = {"github.com/0cv/herdr-mobile-relay/" + suffix for suffix in (
     "internal/config", "internal/tailscalecli", "internal/app", "internal/deviceauth",
     "internal/localcontrol", "cmd/herdr-mobile-relay")}
@@ -67,7 +79,7 @@ def selection(os_name, base=None, supplemental=None):
     selected = {}
     for system in ("Darwin", "Linux"):
         groups, seen = [], set()
-        for index, group in enumerate(base + supplemental["groups"]):
+        for index, group in enumerate(base + supplemental["groups"] + [PROMOTION]):
             keys = {"package", "tagged", "tests"}
             if index == 15:  # frozen handoff group, never optional
                 keys.add("os_tests")
@@ -97,7 +109,9 @@ def selection(os_name, base=None, supplemental=None):
                 raise ValueError("missing root")
             groups.append(dict(package=group["package"], tagged=group["tagged"], tests=names))
         if (sum(len(g["tests"]) for g in groups[:6]) != 183
-                or sum(len(g["tests"]) for g in groups[6:]) != supplemental["countByOS"][system]):
+                or sum(len(g["tests"]) for g in groups[6:21]) != supplemental["countByOS"][system]
+                or len(groups) != 22 or len(groups[21]["tests"]) != 4
+                or sum(len(g["tests"]) for g in groups) != {"Darwin": 737, "Linux": 739}[system]):
             raise ValueError("invalid coverage count")
         selected[system] = groups
     return selected[os_name]
@@ -174,6 +188,15 @@ def run_suite(mode, execute_command=execute):
     return results
 
 
+def authorized():
+    # Context consistency only; the workflow separately verifies checkout provenance.
+    system = platform.system()
+    return (system in {"Linux", "Darwin"}
+            and os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+            and os.environ.get("RUNNER_OS") == {"Linux": "Linux", "Darwin": "macOS"}[system])
+
+
 def main(argv=None, execute_command=execute):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["normal", "race"], required=True)
@@ -183,9 +206,13 @@ def main(argv=None, execute_command=execute):
     parser.add_argument("--attempt", required=True)
     parser.add_argument("--evidence", required=True)
     args = parser.parse_args(argv)
-    if (not re.fullmatch(r"[0-9a-f]{40}", args.sha)
+    if (not authorized()
+            or not re.fullmatch(r"[0-9a-f]{40}", args.sha)
             or not all(re.fullmatch(r"[1-9][0-9]*", x) for x in (args.run_id, args.attempt))
-            or args.os != platform.system() or (args.os == "Darwin" and args.mode == "race")):
+            or args.os != platform.system() or (args.os == "Darwin" and args.mode == "race")
+            or args.sha != os.environ.get("GITHUB_SHA")
+            or args.run_id != os.environ.get("GITHUB_RUN_ID")
+            or args.attempt != os.environ.get("GITHUB_RUN_ATTEMPT")):
         return 1
     # Exclusive creation: stale evidence can never be reused or overwritten.
     try:

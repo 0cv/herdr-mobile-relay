@@ -1,8 +1,8 @@
-"""Offline tests of the exact workflow entrypoint; no subprocess fixtures."""
+"""Offline policy tests with fake executors; never launch Go or set hosted markers."""
 import importlib.util
 import json
 from pathlib import Path
-import platform
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -32,9 +32,22 @@ CANARIES = ("ICI003_SECRET_7e9c2a61", "/private/ici003-7e9c2a61/token",
             "ICI003_RAW_OUTPUT_7e9c2a61")
 
 
-def expected_receipt(system, failed_index):
+# Independent literal oracle: never copied from the runner's promotion group.
+PROMOTION_GROUP = {
+    "package": "github.com/0cv/herdr-mobile-relay/cmd/herdr-mobile-relay",
+    "tagged": True,
+    "tests": [
+        "TestInstalledProductionPromotionInert",
+        "TestInstalledProductionPromotionInert/owned_update_and_scoped_removal",
+        "TestInstalledProductionPromotionInert/uncertain_stop_retains_authority",
+        "TestInstalledProductionPromotionInert/consented_missing_route_removal",
+    ],
+}
+
+
+def expected_receipt(system, failed_index, mode="normal"):
     return dict(schema_version=1, candidate_sha="a" * 40, run_id="123",
-                run_attempt="2", os=system, mode="normal",
+                run_attempt="2", os=system, mode=mode,
                 result="pass" if failed_index is None else "fail",
                 invocations=[
                     dict(package=g["package"], tagged=g["tagged"],
@@ -63,7 +76,127 @@ def assert_minimized(case, actual, expected, canaries):
     case.assertTrue(serialized == public, "receipt differs from exact projection")
 
 
+# Synthetic observation data only; never install these values in os.environ.
+def context_values(runner_os):
+    return {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": runner_os, "GITHUB_SHA": "a" * 40,
+            "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}
+
+
+def admission_cases():
+    for system, runner_os in (("Linux", "Linux"), ("Darwin", "macOS")):
+        valid = context_values(runner_os)
+        yield system + "-matching", system, valid, True
+        yield system + "-absent", system, {}, False
+        for key, values in (
+                ("GITHUB_ACTIONS", (None, "", "false", "True", "1", "true ")),
+                ("RUNNER_ENVIRONMENT", (None, "", "self-hosted", "github-hosted ")),
+                ("RUNNER_OS", (None, "", "macOS" if system == "Linux" else "Linux",
+                               "Darwin", "macos", "Windows", runner_os + " "))):
+            for value in values:
+                observed = dict(valid)
+                if value is None:
+                    observed.pop(key)
+                else:
+                    observed[key] = value
+                yield f"{system}-{key}-{value!r}", system, observed, False
+    for system in ("Windows", "FreeBSD", "linux"):
+        for runner_os in (None, "Linux"):
+            yield f"unsupported-{system}-{runner_os}", system, context_values(runner_os), False
+
+
 class EvidenceTests(unittest.TestCase):
+    def assert_main_refused_without_effects(self, system, context, overrides=None, parser_error=False):
+        for preexisting in (False, True):
+            with self.subTest(preexisting=preexisting), tempfile.TemporaryDirectory() as root:
+                path = Path(root) / "receipt.json"
+                sentinel = b"existing evidence sentinel\n"
+                if preexisting:
+                    path.write_bytes(sentinel)
+                    before = path.stat()
+                options = {"--mode": "normal", "--os": "Darwin" if system == "Darwin" else "Linux",
+                           "--sha": "a" * 40, "--run-id": "123", "--attempt": "2"}
+                if overrides:
+                    options.update(overrides)
+                argv = [part for key, value in options.items() if value is not None for part in (key, value)]
+                argv += ["--evidence", str(path)]
+                def forbidden(*args, **kwargs):
+                    self.fail("refused context reached an effect")
+                # Mock observations, not process/child environment contents. The
+                # actual admission and identity comparison logic remains active.
+                with patch.object(ci.platform, "system", return_value=system), \
+                     patch.object(ci.os.environ, "get", side_effect=context.get), \
+                     patch("builtins.open", side_effect=forbidden) as opened, \
+                     patch.object(ci.os, "chmod", side_effect=forbidden) as chmod, \
+                     patch.object(ci, "run_suite", side_effect=forbidden) as dispatched, \
+                     patch.object(ci.sys, "stderr"):
+                    if parser_error:
+                        with self.assertRaises(SystemExit) as stopped:
+                            ci.main(argv, forbidden)
+                        self.assertEqual(stopped.exception.code, 2)
+                    else:
+                        self.assertEqual(ci.main(argv, forbidden), 1)
+                    opened.assert_not_called()
+                    chmod.assert_not_called()
+                    dispatched.assert_not_called()
+                if preexisting:
+                    self.assertEqual(path.read_bytes(), sentinel)
+                    self.assertEqual(path.stat().st_mode, before.st_mode)
+                    self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+                else:
+                    self.assertFalse(path.exists())
+
+    def test_hosted_context_predicate(self):
+        for label, system, context, expected in admission_cases():
+            with self.subTest(label=label), \
+                 patch.object(ci.platform, "system", return_value=system), \
+                 patch.object(ci.os.environ, "get", side_effect=context.get):
+                self.assertIs(ci.authorized(), expected)
+
+    def test_main_hosted_context_refusals(self):
+        for label, system, context, admitted in admission_cases():
+            if not admitted:
+                with self.subTest(label=label):
+                    self.assert_main_refused_without_effects(system, context)
+
+    def test_main_identity_binding_refusals(self):
+        for system, runner_os in (("Linux", "Linux"), ("Darwin", "macOS")):
+            for key, values in (
+                    ("GITHUB_SHA", (None, "", "A" * 40, "a" * 39, "b" * 40)),
+                    ("GITHUB_RUN_ID", (None, "", "0", "0123", "124")),
+                    ("GITHUB_RUN_ATTEMPT", (None, "", "0", "02", "3"))):
+                for value in values:
+                    context = context_values(runner_os)
+                    if value is None:
+                        context.pop(key)
+                    else:
+                        context[key] = value
+                    with self.subTest(system=system, key=key, value=value):
+                        self.assert_main_refused_without_effects(system, context)
+
+    def test_main_argument_os_and_mode_refusals(self):
+        for system, runner_os in (("Linux", "Linux"), ("Darwin", "macOS")):
+            for key, option, values in (
+                    ("GITHUB_SHA", "--sha", ("", "A" * 40, "a" * 39, "a" * 40 + "\n")),
+                    ("GITHUB_RUN_ID", "--run-id", ("", "0", "01", "-1", "123\n")),
+                    ("GITHUB_RUN_ATTEMPT", "--attempt", ("", "0", "02", "-1", "2\n"))):
+                for value in values:
+                    context = context_values(runner_os)
+                    context[key] = value  # Matching malformed metadata cannot bypass grammar.
+                    with self.subTest(system=system, option=option, value=value):
+                        self.assert_main_refused_without_effects(system, context, {option: value})
+                with self.subTest(system=system, missing=option):
+                    self.assert_main_refused_without_effects(
+                        system, context_values(runner_os), {option: None}, parser_error=True)
+            context = context_values(runner_os)
+            for overrides, parser_error in (
+                    ({"--os": "Darwin" if system == "Linux" else "Linux"}, False),
+                    ({"--os": "Windows"}, True), ({"--mode": "unknown"}, True)):
+                with self.subTest(system=system, overrides=overrides):
+                    self.assert_main_refused_without_effects(system, context, overrides, parser_error)
+            if system == "Darwin":
+                self.assert_main_refused_without_effects(system, context, {"--mode": "race"})
+
     def test_fail_closed(self):
         group = ci.INVENTORY[1]
         good = events(group)
@@ -93,29 +226,130 @@ class EvidenceTests(unittest.TestCase):
         rows[-2]["Action"] = "fail"
         self.assertFalse(ci.validate(encoded(rows).splitlines(), 0, group))
 
-    def test_workflow_entrypoint_and_minimization(self):
-        for failed_index in (None, *range(21)):
-            with self.subTest(failed_index=failed_index), tempfile.TemporaryDirectory() as root:
-                calls = []
-                def fake(command):
+    def test_promotion_events_fail_closed(self):
+        group = PROMOTION_GROUP
+        good = events(group)
+        self.assertTrue(ci.validate(encoded(good).splitlines(), 0, group))
+        for name in group["tests"]:
+            missing = [row for row in good if row.get("Test") != name]
+            renamed = [dict(row, Test=name + "_renamed") if row.get("Test") == name else dict(row)
+                       for row in good]
+            variants = {"missing": missing, "renamed": renamed}
+            for action in ("skip", "fail"):
+                variants[action] = [dict(row, Action=action)
+                                    if row.get("Test") == name and row["Action"] == "pass" else dict(row)
+                                    for row in good]
+            for label, rows in variants.items():
+                with self.subTest(name=name, label=label):
+                    self.assertFalse(ci.validate(encoded(rows).splitlines(), 0, group))
+        for extra in ("TestUnexpectedPromotion", "TestInstalledProductionPromotionInert/extra",
+                      "TestInstalledProductionPromotionInert/owned_update_and_scoped_removal/extra"):
+            rows = good[:-1] + [dict(Package=group["package"], Test=extra, Action=action)
+                               for action in ("run", "pass")] + good[-1:]
+            with self.subTest(extra=extra):
+                self.assertFalse(ci.validate(encoded(rows).splitlines(), 0, group))
+        for status in (1, -9):
+            self.assertFalse(ci.validate(encoded(good).splitlines(), status, group))
+
+    def test_promotion_missing_leaf_zero_exit_failed_receipt(self):
+        missing = "TestInstalledProductionPromotionInert/consented_missing_route_removal"
+        for system, mode in (("Darwin", "normal"), ("Linux", "normal"), ("Linux", "race")):
+            with self.subTest(system=system, mode=mode), tempfile.TemporaryDirectory() as root:
+                groups, calls = ci.selection(system), []
+                def fake(args):
                     index = len(calls)
-                    group = ci.selection(platform.system())[index]
-                    self.assertEqual(command, ci.command(group, "normal"))
-                    calls.append(command)
+                    group = groups[index]
+                    self.assertEqual(args, ci.command(group, mode))
+                    calls.append(args)
                     rows = events(group)
-                    rows.insert(1, {"Package": group["package"], "Action": "output", "Output": " ".join((*CANARIES, root))})
-                    return encoded(rows), int(index == failed_index)
-                path = Path(root) / "evidence.json"
-                argv = ["--mode", "normal", "--os", platform.system(), "--sha", "a" * 40,
+                    if index == 21:
+                        self.assertEqual(group, PROMOTION_GROUP)
+                        rows = [row for row in rows if row.get("Test") != missing]
+                        rows.insert(1, dict(Package=group["package"], Action="output",
+                                            Output=" ".join((*CANARIES, root))))
+                    return encoded(rows), 0  # Even the incomplete promotion exits zero.
+                path = Path(root) / "receipt.json"
+                argv = ["--mode", mode, "--os", system, "--sha", "a" * 40,
                         "--run-id", "123", "--attempt", "2", "--evidence", str(path)]
-                self.assertEqual(ci.main(argv, fake), int(failed_index is not None))
+                metadata = {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}
+                # Synthetic receipt policy only, with an explicit inert executor.
+                with patch.object(ci.platform, "system", return_value=system), \
+                     patch.object(ci, "authorized", return_value=True), \
+                     patch.object(ci.os.environ, "get", side_effect=metadata.get):
+                    self.assertEqual(ci.main(argv, fake), 1)
+                self.assertEqual(len(calls), 22)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 receipt = json.loads(path.read_text(), object_pairs_hook=ci.unique_object)
-                assert_minimized(self, receipt,
-                                 expected_receipt(platform.system(), failed_index),
-                                 (*CANARIES, root))
-                self.assertEqual(len(calls), 21)
-                self.assertEqual(ci.main(argv, fake), 1)  # stale receipt
-                self.assertEqual(len(calls), 21)
+                assert_minimized(self, receipt, expected_receipt(system, 21, mode), (*CANARIES, root))
+
+    def test_promotion_receipt_refusals(self):
+        for system in ("Darwin", "Linux"):
+            expected = expected_receipt(system, None)
+            self.assertEqual(expected["invocations"][21],
+                             dict(package=PROMOTION_GROUP["package"], tagged=True,
+                                  required_tests=list(PROMOTION_GROUP["tests"]), result="pass"))
+            for mutate in (
+                    lambda r: r["invocations"].pop(),
+                    lambda r: r["invocations"][21]["required_tests"].pop(),
+                    lambda r: r["invocations"][21]["required_tests"].append("TestUnexpectedPromotion"),
+                    lambda r: r["invocations"][21]["required_tests"].__setitem__(1, "TestRenamedPromotion"),
+                    lambda r: r["invocations"][21].update(result="skip"),
+                    lambda r: r["invocations"][21].update(result="fail"),
+                    lambda r: r["invocations"][21].update(tagged=False)):
+                bad = copy.deepcopy(expected)
+                mutate(bad)
+                with self.assertRaisesRegex(AssertionError, "exact projection"):
+                    assert_minimized(self, bad, expected, CANARIES)
+            bad = copy.deepcopy(expected)
+            bad["invocations"][21]["Output"] = ""
+            with self.assertRaisesRegex(AssertionError, "raw Output field retained"):
+                assert_minimized(self, bad, expected, CANARIES)
+
+    def test_promotion_source_labels(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "cmd/herdr-mobile-relay/installed_promotion_integration_test.go").read_text()
+        self.assertTrue(source.startswith("//go:build herdr_installed_inert_test\n"))
+        self.assertIn("func TestInstalledProductionPromotionInert(t *testing.T)", source)
+        self.assertIn("app.DenyInstalledCommandHTTP(t)", source)
+        labels = re.findall(r'\bt\.Run\("([^"]+)"', source)
+        self.assertEqual(labels, ["owned update and scoped removal", "uncertain stop retains authority",
+                                  "consented missing route removal"])
+        # These labels have only ASCII spaces; Go testing rewrites each to '_'.
+        self.assertEqual(["TestInstalledProductionPromotionInert"] +
+                         ["TestInstalledProductionPromotionInert/" + label.replace(" ", "_") for label in labels],
+                         PROMOTION_GROUP["tests"])
+
+    def test_workflow_entrypoint_and_minimization(self):
+        metadata = {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}
+        # Synthetic receipt policy only: admission is stubbed, binding is real,
+        # and every main call explicitly supplies an inert executor.
+        for system, mode in (("Darwin", "normal"), ("Linux", "normal"), ("Linux", "race")):
+            for failed_index in (None, *range(22)):
+                with self.subTest(system=system, mode=mode, failed_index=failed_index), \
+                     tempfile.TemporaryDirectory() as root, \
+                     patch.object(ci.platform, "system", return_value=system), \
+                     patch.object(ci, "authorized", return_value=True), \
+                     patch.object(ci.os.environ, "get", side_effect=metadata.get):
+                    calls = []
+                    def fake(command):
+                        index = len(calls)
+                        group = ci.selection(system)[index]
+                        self.assertEqual(command, ci.command(group, mode))
+                        calls.append(command)
+                        rows = events(group)
+                        rows.insert(1, {"Package": group["package"], "Action": "output", "Output": " ".join((*CANARIES, root))})
+                        return encoded(rows), int(index == failed_index)
+                    path = Path(root) / "evidence.json"
+                    argv = ["--mode", mode, "--os", system, "--sha", "a" * 40,
+                            "--run-id", "123", "--attempt", "2", "--evidence", str(path)]
+                    self.assertEqual(ci.main(argv, fake), int(failed_index is not None))
+                    receipt = json.loads(path.read_text(), object_pairs_hook=ci.unique_object)
+                    assert_minimized(self, receipt,
+                                     expected_receipt(system, failed_index, mode),
+                                     (*CANARIES, root))
+                    self.assertEqual(len(calls), 22)
+                    self.assertEqual(ci.main(argv, fake), 1)  # stale receipt
+                    self.assertEqual(len(calls), 22)
 
     def test_minimization_fixed_identities_and_sensitive_injections(self):
         # Pure projection checks: no driver dispatch or executor defaults.
@@ -179,7 +413,8 @@ class EvidenceTests(unittest.TestCase):
         for path in [app / "installed_construction_test.go", app / "installed_integration_test.go",
                      app / "installed_hosted_test.go", app / "installed_setup_test.go",
                      app / "installed_setup_close_test.go",
-                     root / "cmd/herdr-mobile-relay/installed_cli_integration_test.go"]:
+                     root / "cmd/herdr-mobile-relay/installed_cli_integration_test.go",
+                     root / "cmd/herdr-mobile-relay/installed_promotion_integration_test.go"]:
             source = path.read_text()
             self.assertIn("IsolateInstalledFixture(t)", source)
             self.assertNotIn("t.Parallel()", source)
@@ -273,8 +508,21 @@ class EvidenceTests(unittest.TestCase):
                          "24d18df1af7ea4877c0e48568bbe00367e60ac102a169960a9fddafa35ed9fc4")
         for system, mode in (("Darwin", "normal"), ("Linux", "normal"), ("Linux", "race")):
             groups = ci.selection(system)
-            self.assertEqual(len(groups), 21)
-            self.assertEqual(sum(len(g["tests"]) for g in groups), 733 if system == "Darwin" else 735)
+            self.assertEqual(len(groups), 22)
+            self.assertEqual(sum(len(g["tests"]) for g in groups), 737 if system == "Darwin" else 739)
+            historical = copy.deepcopy(ci.INVENTORY + ci.SUPPLEMENTAL["groups"])
+            for group in historical:
+                group["tests"].extend(group.pop("os_tests", {}).get(system, []))
+            self.assertEqual(groups[:21], historical)
+            self.assertEqual(sum(len(g["tests"]) for g in groups[6:21]), 550 if system == "Darwin" else 552)
+            self.assertEqual(groups[21:], [PROMOTION_GROUP])
+            promotion_command = ["go", "test", "-json", "-count=1", "-timeout=5m"]
+            if mode == "race":
+                promotion_command.append("-race")
+            promotion_command += ["-tags=herdr_installed_inert_test",
+                                  "github.com/0cv/herdr-mobile-relay/cmd/herdr-mobile-relay",
+                                  "-run", "^(TestInstalledProductionPromotionInert)$"]
+            self.assertEqual(ci.command(groups[21], mode), promotion_command)
             calls = []
             def fake(args):
                 group = groups[len(calls)]
@@ -285,8 +533,9 @@ class EvidenceTests(unittest.TestCase):
                 return encoded(events(group)), 0
             with patch.object(ci.platform, "system", return_value=system):
                 self.assertTrue(all(r["result"] == "pass" for r in ci.run_suite(mode, fake)))
-            self.assertEqual(len(calls), 21)
-            for failed_index in range(21):
+            self.assertEqual(len(calls), 22)
+            self.assertEqual(calls[21], promotion_command)
+            for failed_index in range(22):
                 index = [0]
                 def failing(args):
                     current = index[0]
@@ -295,9 +544,9 @@ class EvidenceTests(unittest.TestCase):
                     return encoded(events(groups[current])), int(current == failed_index)
                 with patch.object(ci.platform, "system", return_value=system):
                     results = ci.run_suite(mode, failing)
-                self.assertEqual(index[0], 21)
+                self.assertEqual(index[0], 22)
                 self.assertEqual([r["result"] for r in results],
-                                 ["fail" if i == failed_index else "pass" for i in range(21)])
+                                 ["fail" if i == failed_index else "pass" for i in range(22)])
             for group in groups:
                 good = events(group)
                 for name in group["tests"]:
@@ -340,7 +589,10 @@ class EvidenceTests(unittest.TestCase):
                 path = Path(directory) / "receipt.json"
                 args = ["--mode", "normal", "--os", system, "--sha", "a" * 40,
                         "--run-id", "1", "--attempt", "1", "--evidence", str(path)]
-                with patch.object(ci.platform, "system", return_value=system):
+                metadata = {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+                with patch.object(ci.platform, "system", return_value=system), \
+                     patch.object(ci, "authorized", return_value=True), \
+                     patch.object(ci.os.environ, "get", side_effect=metadata.get):
                     with patch.object(ci, "SUPPLEMENTAL", data):
                         self.assertEqual(ci.main(args, fake), 1)
                     # Exclusive creation precedes schema validation: empty is not a receipt.
@@ -364,6 +616,27 @@ class EvidenceTests(unittest.TestCase):
                     data["groups"][0]["tests"][0] = name
                     with self.assertRaisesRegex(ValueError, "invalid test identity"):
                         ci.selection(system, supplemental=data)
+
+    def test_promotion_schema_and_duplicate_refusals(self):
+        for system in ("Darwin", "Linux"):
+            for mutate in (
+                    lambda g: g.update(extra=True),
+                    lambda g: g.update(tagged=1),
+                    lambda g: g.update(package="unknown"),
+                    lambda g: g.update(tests=[]),
+                    lambda g: g["tests"].append(g["tests"][0]),
+                    lambda g: g["tests"].append("TestInstalledProductionPromotionInert/bad|selector"),
+                    lambda g: g["tests"].pop(0),
+                    lambda g: g["tests"].pop(),
+                    lambda g: g["tests"].append("TestInstalledProductionPromotionInert/extra")):
+                group = copy.deepcopy(PROMOTION_GROUP)
+                mutate(group)
+                with patch.object(ci, "PROMOTION", group), self.assertRaises(ValueError):
+                    ci.selection(system)
+            data = copy.deepcopy(ci.SUPPLEMENTAL)
+            data["groups"][12]["tests"].extend(PROMOTION_GROUP["tests"])
+            with self.assertRaisesRegex(ValueError, "duplicate identity"):
+                ci.selection(system, supplemental=data)
 
     def test_inventory_schema_refusals(self):
         mutations = [
@@ -395,7 +668,10 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = ["--mode", "normal", "--os", "Linux", "--sha", "a" * 40,
                     "--run-id", "1", "--attempt", "1", "--evidence", str(Path(directory) / "receipt")]
-            with patch.object(ci.platform, "system", return_value="Darwin"):
+            metadata = {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+            with patch.object(ci.platform, "system", return_value="Darwin"), \
+                 patch.object(ci, "authorized", return_value=True), \
+                 patch.object(ci.os.environ, "get", side_effect=metadata.get):
                 self.assertEqual(ci.main(args, lambda _: self.fail("dispatched")), 1)
 
     def test_exact_selection(self):
