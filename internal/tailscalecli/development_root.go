@@ -39,6 +39,23 @@ func newDevelopmentManager(developmentRoot, stateRoot, coordinationRoot string, 
 	return manager, nil
 }
 
+// DiscoverDevelopmentOrigin is only a read-only first-build discovery. It
+// cannot construct a manager; the complete preflight is still required after
+// staging, before entering the foreground workflow.
+func DiscoverDevelopmentOrigin(ctx context.Context, developmentRoot, stateRoot, coordinationRoot, binary string) (PreflightReport, error) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		return PreflightReport{}, ErrUnsupported
+	}
+	layout, err := developmentIsolationLayout(developmentRoot, stateRoot, coordinationRoot)
+	if err != nil {
+		return PreflightReport{}, err
+	}
+	if err := layout.validateDiscovery(); err != nil {
+		return PreflightReport{}, err
+	}
+	return preflightDevelopmentBinary(ctx, binary)
+}
+
 // PreflightDevelopmentWorkflow is the read-only CLI entrypoint for the
 // development launcher. It validates the complete Go-owned isolated layout,
 // exact fixed tuple, and executable profile before contacting the CLI. It does
@@ -50,6 +67,10 @@ func PreflightDevelopmentWorkflow(ctx context.Context, developmentRoot, stateRoo
 	if _, err := developmentIsolationFromEnvironment(developmentRoot, stateRoot, coordinationRoot); err != nil {
 		return PreflightReport{}, err
 	}
+	return preflightDevelopmentBinary(ctx, binary)
+}
+
+func preflightDevelopmentBinary(ctx context.Context, binary string) (PreflightReport, error) {
 	client, err := newClient(binary)
 	if err != nil {
 		return PreflightReport{}, err

@@ -53,7 +53,7 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 		_, err := fmt.Fprintln(stdout, "This relay is foreground-only. Send Ctrl-C; the persistent route is retained.")
 		return status(err)
 	}
-	if action != "preflight" && action != "status" && action != "recover" && action != "assert-ready" &&
+	if action != "discover" && action != "preflight" && action != "status" && action != "recover" && action != "assert-ready" &&
 		action != "release-reservation" && action != "unpublish" && action != "abandon-missing" && action != "reconcile" &&
 		action != "setup" && action != "repair-missing" && action != "update" {
 		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|repair-missing|update|status|recover|reconcile|assert-ready|release-reservation|abandon-missing|unpublish|stop|foreground}")
@@ -61,8 +61,8 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 
 	ctx, cancel := developmentCLICommandContext()
 	defer cancel()
-	if action == "preflight" {
-		report, err := developmentCLIPreflightFromEnvironment(ctx)
+	if action == "discover" || action == "preflight" {
+		report, err := developmentCLIPreflightFromEnvironment(ctx, action == "discover")
 		if err != nil {
 			return tailscalePreflightExitCode(err), err
 		}
@@ -116,16 +116,35 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 	}
 }
 
-func developmentCLIPreflightFromEnvironment(ctx context.Context) (tailscalecli.PreflightReport, error) {
+func developmentCLIPreflightFromEnvironment(ctx context.Context, discovery bool) (tailscalecli.PreflightReport, error) {
 	root := os.Getenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT")
 	stateRoot := os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT")
 	coordinationRoot := os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT")
-	if err := tailscalecli.ValidateDevelopmentOperationEnvironment(root, stateRoot, coordinationRoot, false, false); err != nil {
-		return tailscalecli.PreflightReport{}, err
-	}
 	binary := os.Getenv("HERDR_TAILSCALE_CLI_BIN")
 	if binary == "" {
 		return tailscalecli.PreflightReport{}, tailscalecli.ErrProfileUnavailable
+	}
+	if discovery {
+		if appOrigin := os.Getenv("HERDR_PHONE_APP_URL"); appOrigin != "" {
+			normalized, err := setuphelper.NormalizeExternalHTTPSOrigin(appOrigin)
+			if err != nil || normalized != appOrigin {
+				return tailscalecli.PreflightReport{}, tailscalecli.ErrConflict
+			}
+		}
+		report, err := tailscalecli.DiscoverDevelopmentOrigin(ctx, root, stateRoot, coordinationRoot, binary)
+		if err != nil {
+			return report, err
+		}
+		if expected := os.Getenv("HERDR_TAILSCALE_CLI_ORIGIN"); expected != "" && expected != report.Origin {
+			return report, tailscalecli.ErrConflict
+		}
+		if expected := os.Getenv("HERDR_TAILSCALE_CLI_NODE_ID"); expected != "" && expected != report.NodeID {
+			return report, tailscalecli.ErrConflict
+		}
+		return report, nil
+	}
+	if err := tailscalecli.ValidateDevelopmentOperationEnvironment(root, stateRoot, coordinationRoot, false, false); err != nil {
+		return tailscalecli.PreflightReport{}, err
 	}
 	return tailscalecli.PreflightDevelopmentWorkflow(ctx, root, stateRoot, coordinationRoot, binary)
 }

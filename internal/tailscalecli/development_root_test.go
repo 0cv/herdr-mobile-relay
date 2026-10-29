@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -74,6 +75,19 @@ func TestDevelopmentManagerRequiresProcessLocalWorkflow(t *testing.T) {
 	alternate, err := newDevelopmentManager(root, state, otherCoordination, client)
 	if err != nil || alternate.coordinationRoot != otherCoordination {
 		t.Fatalf("workflow did not bind its selected private coordination root: manager=%+v err=%v", alternate, err)
+	}
+}
+
+func TestDiscoveryRefusesWithoutDevelopmentIsolationBeforeCLI(t *testing.T) {
+	root, state, coordination := developmentManagerFixturePaths(t)
+	t.Setenv("HERDR_DEV_TAILSCALE_CLI_ENABLE", "")
+	_, err := DiscoverDevelopmentOrigin(context.Background(), root, state, coordination, "/not-an-executable")
+	want := ErrWorkflowRequired
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		want = ErrUnsupported
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("discovery reached a CLI without opt-in or qualified host: %v (want %v)", err, want)
 	}
 }
 

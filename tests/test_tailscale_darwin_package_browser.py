@@ -471,6 +471,11 @@ ALLOWED = (
     "internal/conversation/claude_chain_test.go",
     # Reviewed developer-before-lifecycle Darwin driver published in 3d508a26.
     "tests/test_tailscale_process_groups_darwin.py",
+    # Shared Go origin discovery used by the isolated development launcher.
+    "cmd/herdr-mobile-relay/dev_tailscale_cli.go",
+    "internal/tailscalecli/development_isolation.go",
+    "internal/tailscalecli/development_root.go",
+    "internal/tailscalecli/development_root_test.go",
 )
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
 # SCOPE_BASE to 59eda0d83a785822696da03461601eca906231c6. A future new path
@@ -5586,6 +5591,15 @@ def offline_check(group):
             require(ALLOWED.count(driver) == 1
                     and candidate_scope_allowed([*minimal, driver]) and candidate_scope_allowed([driver, *minimal]),
                     "offline_candidate_scope_reviewed_driver")
+            discovery = ("cmd/herdr-mobile-relay/dev_tailscale_cli.go",
+                         "internal/tailscalecli/development_isolation.go",
+                         "internal/tailscalecli/development_root.go",
+                         "internal/tailscalecli/development_root_test.go")
+            require(all(ALLOWED.count(path) == 1 and candidate_scope_allowed([*minimal, path])
+                        and candidate_scope_allowed([path, *minimal]) for path in discovery)
+                    and candidate_scope_allowed([*minimal, *discovery])
+                    and candidate_scope_allowed([*reversed(discovery), *minimal]),
+                    "offline_candidate_scope_shared_discovery")
             # `outside` is a path that is NOT allowed. (README.md, for one, IS allowed:
             # it is an ordinary parked-WIP entry, so it is a valid optional extra.)
             outside = "outside-the-allowlist/unlisted.txt"
@@ -5607,6 +5621,11 @@ def offline_check(group):
                 [*minimal, driver + "/"],
                 tuple(full), set(full), frozenset(minimal), None, "".join(minimal), {"a": 1},
                 [*minimal, 1], [*minimal, None], [*minimal, b"x"], [*full, ("a",)], [*minimal, True]]
+            for path in discovery:
+                invalid.extend([*minimal, lookalike] for lookalike in (
+                    path + ".bak", path.upper(), "x/" + path, path + "/child",
+                    path[:-3] + "s.go", path.rsplit("/", 1)[0] + "/*.go"))
+                invalid.append([*minimal, path, path])
             # Each REQUIRED path missing, one at a time, from the otherwise complete set.
             invalid.extend([path for path in full if path != required] for required in REQUIRED)
             invalid.extend([path for path in minimal if path != required] for required in REQUIRED)

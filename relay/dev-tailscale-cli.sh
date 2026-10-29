@@ -49,10 +49,16 @@ cli_relay_call() {
         (cd "$REPO_DIR" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go run ./cmd/herdr-mobile-relay "$@")
     fi
 }
+# First build has no current binary. Decode only through the same strict Go
+# json-field command used by the normal relay helper, never shell JSON parsing.
+cli_discovery_string() {
+    printf '%s' "$1" | cli_relay_call json-field string "$2" 2>/dev/null
+}
 
 usage() {
     echo "CLI-backed development uses a separate development-scope registration and private state." >&2
-    echo "It requires a selected absolute Tailscale CLI, exact HTTPS origin, node ID, and explicit risk consent." >&2
+    echo "It requires an unambiguous absolute Tailscale CLI and explicit development opt-in." >&2
+    echo "Fresh setup discovers the node ID and canonical HTTPS origin; optional configured identities must match." >&2
     echo "Interactive: make dev-tailscale-cli (development opt-in; then route publication consent)." >&2
     echo "Scripted transport opt-in: HERDR_DEV_TAILSCALE_CLI_ENABLE=1 make dev-tailscale-cli"
     echo "Route publication still requires an exact node/origin/listener/backend confirmation on stdin; no environment variable can consent." >&2
@@ -214,8 +220,16 @@ fi
 
 ENV_FILE="$DEV_ROOT/relay.env"
 MARKER="$DEV_ROOT/.herdr-dev-tailscale-cli"
+MIGRATE_LEGACY_SOCKET=0
+PENDING="$DEV_ROOT/.setup-pending"
 BUILD_DIR=""
 NEXT_POINTER=""
+SETUP_STAGE=""
+COMPLETE_STAGE=""
+# Save process choices before loading the persisted literal environment.
+REQUESTED_PHONE_APP="${HERDR_DEV_PHONE_APP_URL:-${HERDR_PHONE_APP_URL:-}}"
+REQUESTED_ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-${HERDR_TAILSCALE_CLI_ORIGIN:-}}"
+REQUESTED_NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-${HERDR_TAILSCALE_CLI_NODE_ID:-}}"
 # shellcheck disable=SC2329 # Invoked through the setup EXIT-trap cleanup function.
 cleanup_dev_build_stage() {
     case "$BUILD_DIR" in "$DEV_ROOT"/.build.*) [ ! -d "$BUILD_DIR" ] || rm -rf "$BUILD_DIR" ;; esac
@@ -223,6 +237,11 @@ cleanup_dev_build_stage() {
 }
 # shellcheck disable=SC2329 # Registered indirectly as an EXIT trap.
 cleanup_dev_setup() {
+    if [ -d "$PENDING" ]; then
+        recover_dev_setup || echo "✗ Interrupted setup retained uncertain state; inspect .setup-pending before retrying." >&2
+    fi
+    case "$SETUP_STAGE" in "$DEV_ROOT"/.setup-stage.*) [ ! -d "$SETUP_STAGE" ] || rm -rf "$SETUP_STAGE" ;; esac
+    case "$COMPLETE_STAGE" in "$DEV_ROOT"/.setup-complete.*) cleanup_complete_setup || true ;; esac
     cleanup_dev_build_stage
 }
 dev_owned_private_directory() {
@@ -245,14 +264,131 @@ dev_owned_private_file() {
     esac
     [ "$mode" = 600 ] && [ "$owner" = "$(id -u)" ]
 }
+# All snapshots are private, regular, exact 0600 bytes. An absent snapshot
+# means the path was absent, not that arbitrary content may be repaired.
+cleanup_complete_setup() {
+    [ -d "$COMPLETE_STAGE" ] && [ ! -L "$COMPLETE_STAGE" ] || return 1
+    for name in candidate-pointer candidate-env candidate-marker old-pointer old-env old-marker old-existence; do
+        [ ! -e "$COMPLETE_STAGE/$name" ] ||
+            { dev_owned_private_file "$COMPLETE_STAGE/$name" && rm "$COMPLETE_STAGE/$name"; } || return 1
+    done
+    rmdir "$COMPLETE_STAGE"
+}
+setup_snapshot_matches() {
+    local path="$1" snapshot="$2"
+    if [ -f "$snapshot" ]; then
+        dev_owned_private_file "$path" && cmp -s "$snapshot" "$path"
+    else
+        [ ! -e "$path" ] && [ ! -L "$path" ]
+    fi
+}
+setup_old_or_candidate() {
+    setup_snapshot_matches "$1" "$PENDING/old-$2" ||
+        setup_snapshot_matches "$1" "$PENDING/candidate-$2"
+}
+setup_pointer_matches() {
+    local pointer="$1" expected="$2"
+    if [ -f "$expected" ]; then
+        [ -L "$pointer" ] && [ "$(readlink "$pointer")" = "$(<"$expected")" ]
+    else
+        [ ! -e "$pointer" ] && [ ! -L "$pointer" ]
+    fi
+}
+replace_dev_pointer() {
+    local target="$1" staged="$DEV_ROOT/.current.$$"
+    [ ! -e "$staged" ] && [ ! -L "$staged" ] || return 1
+    ln -s "$target" "$staged" || return 1
+    NEXT_POINTER="$staged"
+    case "$(uname -s)" in
+        Linux) mv -fT "$staged" "$DEV_ROOT/current" ;;
+        Darwin) mv -f -h "$staged" "$DEV_ROOT/current" ;;
+        *) return 1 ;;
+    esac || return 1
+    NEXT_POINTER=""
+}
+setup_pending_snapshots_valid() {
+    local old_pointer_present=0 old_env_present=0 old_marker_present=0
+    dev_owned_private_directory "$DEV_ROOT" && dev_owned_private_directory "$PENDING" || return 1
+    for name in candidate-pointer candidate-env candidate-marker old-existence; do
+        dev_owned_private_file "$PENDING/$name" || return 1
+    done
+    for name in old-pointer old-env old-marker restore-env; do
+        [ ! -e "$PENDING/$name" ] && [ ! -L "$PENDING/$name" ] ||
+            dev_owned_private_file "$PENDING/$name" || return 1
+    done
+    [ ! -f "$PENDING/old-pointer" ] || old_pointer_present=1
+    [ ! -f "$PENDING/old-env" ] || old_env_present=1
+    [ ! -f "$PENDING/old-marker" ] || old_marker_present=1
+    printf 'pointer=%s\nenv=%s\nmarker=%s\n' "$old_pointer_present" "$old_env_present" "$old_marker_present" |
+        cmp -s - "$PENDING/old-existence" || return 1
+    [ "$old_env_present" = "$old_marker_present" ] &&
+        { [ "$old_pointer_present" = 0 ] || [ "$old_env_present" = 1 ]; } || return 1
+    if [ -f "$PENDING/restore-env" ]; then
+        [ -f "$PENDING/old-env" ] && cmp -s "$PENDING/restore-env" "$PENDING/old-env" || return 1
+    fi
+    for name in env marker; do
+        if [ -e "$PENDING/publish-$name" ] || [ -L "$PENDING/publish-$name" ]; then
+            dev_owned_private_file "$PENDING/publish-$name" &&
+                cmp -s "$PENDING/publish-$name" "$PENDING/candidate-$name" || return 1
+        fi
+    done
+}
+recover_dev_setup() {
+    local old_target
+    [ -e "$PENDING" ] || [ -L "$PENDING" ] || return 0
+    setup_pending_snapshots_valid || return 1
+    setup_old_or_candidate "$ENV_FILE" env &&
+        setup_old_or_candidate "$MARKER" marker &&
+        { setup_pointer_matches "$DEV_ROOT/current" "$PENDING/old-pointer" ||
+          setup_pointer_matches "$DEV_ROOT/current" "$PENDING/candidate-pointer"; } || return 1
+    # A rollback to an old pointer is proved only if its release still has
+    # the required private, complete shape. Unknown prior bytes are retained.
+    if [ -f "$PENDING/old-pointer" ]; then
+        old_target="$(<"$PENDING/old-pointer")"
+        case "${old_target#releases/}" in ''|.|..|*/*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        case "$old_target" in releases/*) ;; *) return 1 ;; esac
+        dev_owned_private_directory "$DEV_ROOT/$old_target" &&
+            [ -d "$DEV_ROOT/$old_target/bin" ] && [ ! -L "$DEV_ROOT/$old_target/bin" ] &&
+            [ -d "$DEV_ROOT/$old_target/web" ] && [ ! -L "$DEV_ROOT/$old_target/web" ] &&
+            [ -f "$DEV_ROOT/$old_target/web/version.json" ] && [ ! -L "$DEV_ROOT/$old_target/web/version.json" ] &&
+            [ -f "$DEV_ROOT/$old_target/bin/herdr-mobile-relay" ] &&
+            [ ! -L "$DEV_ROOT/$old_target/bin/herdr-mobile-relay" ] &&
+            [ -x "$DEV_ROOT/$old_target/bin/herdr-mobile-relay" ] || return 1
+    fi
+    # No route operation has run while this journal exists. Roll back only
+    # exact candidate bytes; never overwrite a changed saved app or marker.
+    if setup_pointer_matches "$DEV_ROOT/current" "$PENDING/candidate-pointer"; then
+        if [ -f "$PENDING/old-pointer" ]; then
+            replace_dev_pointer "$old_target" || return 1
+        else
+            [ -L "$DEV_ROOT/current" ] &&
+                [ "$(readlink "$DEV_ROOT/current")" = "$(<"$PENDING/candidate-pointer")" ] || return 1
+            rm "$DEV_ROOT/current" || return 1
+        fi
+    fi
+    if [ -f "$PENDING/old-env" ] && ! setup_snapshot_matches "$ENV_FILE" "$PENDING/old-env"; then
+        [ -f "$PENDING/restore-env" ] || cp -p "$PENDING/old-env" "$PENDING/restore-env" || return 1
+        setup_snapshot_matches "$ENV_FILE" "$PENDING/candidate-env" &&
+            mv -f "$PENDING/restore-env" "$ENV_FILE" || return 1
+    elif [ ! -f "$PENDING/old-env" ] && setup_snapshot_matches "$ENV_FILE" "$PENDING/candidate-env"; then
+        rm "$ENV_FILE" || return 1
+    fi
+    if [ ! -f "$PENDING/old-marker" ] && setup_snapshot_matches "$MARKER" "$PENDING/candidate-marker"; then
+        rm "$MARKER" || return 1
+    fi
+    setup_snapshot_matches "$ENV_FILE" "$PENDING/old-env" &&
+        setup_snapshot_matches "$MARKER" "$PENDING/old-marker" &&
+        setup_pointer_matches "$DEV_ROOT/current" "$PENDING/old-pointer" || return 1
+    for name in candidate-pointer candidate-env candidate-marker old-pointer old-env old-marker old-existence publish-env publish-marker restore-env; do
+        [ ! -e "$PENDING/$name" ] || rm "$PENDING/$name" || return 1
+    done
+    rmdir "$PENDING"
+}
 dev_root_marker_matches() {
-    local expected_marker actual_marker
     dev_owned_private_file "$MARKER" || return 1
-    expected_marker="$(printf '%s\n' 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' \
+    printf '%s\n' 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' \
         "HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=$DEV_ROOT/registration" \
-        "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$COORDINATION_ROOT")"
-    actual_marker="$(<"$MARKER")" || return 1
-    [ "$actual_marker" = "$expected_marker" ]
+        "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$COORDINATION_ROOT" | cmp -s - "$MARKER"
 }
 dev_legacy_socket_parent_is_safe() {
     [ ! -e "$DEV_ROOT/config" ] && [ ! -L "$DEV_ROOT/config" ] ||
@@ -266,6 +402,18 @@ dev_socket_setting_matches() {
     expected="HERDR_RELAY_PAIRING_SOCKET=$(shell_quote_value "$value")"
     grep -Fqx "$expected" "$ENV_FILE"
 }
+if [ "$ACTION" = setup ] || [ "$ACTION" = update ]; then
+    # Cancellation can arrive during read-only discovery, before a build or
+    # pending journal exists. Keep its status distinct from a build failure.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # A previous interrupted cutover is reversible only while EVERY live
+    # input is still exactly its recorded old or candidate byte/mode state.
+    recover_dev_setup || exit 1
+elif [ -e "$PENDING" ] || [ -L "$PENDING" ]; then
+    echo "✗ Interrupted setup needs proved recovery before any route action." >&2
+    exit 1
+fi
 if { [ "$ACTION" = setup ] || [ "$ACTION" = update ]; } &&
     { [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; }; then
     # Validate the root, environment file and binding marker before inspecting
@@ -279,10 +427,9 @@ if { [ "$ACTION" = setup ] || [ "$ACTION" = update ]; } &&
     if dev_socket_setting_matches "$legacy_pairing_socket" &&
         dev_legacy_socket_parent_is_safe &&
         [ ! -e "$legacy_pairing_socket" ] && [ ! -L "$legacy_pairing_socket" ]; then
-        set_env_value_atomic "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET "$PAIRING_SOCKET"
-        echo "▸ Moved this root's stopped pairing-control socket to the short private socket directory."
+        MIGRATE_LEGACY_SOCKET=1
     fi
-    if ! dev_socket_setting_matches "$PAIRING_SOCKET"; then
+    if [ "$MIGRATE_LEGACY_SOCKET" != 1 ] && ! dev_socket_setting_matches "$PAIRING_SOCKET"; then
         echo "✗ Existing development state records a different pairing socket; it was retained without migration. Choose a separate private root or follow a reviewed migration before setup/update." >&2
         exit 2
     fi
@@ -386,58 +533,63 @@ HERDR_DEV_HERDR_SOCKET="${HERDR_DEV_HERDR_SOCKET:-${HERDR_SOCKET_PATH:-${XDG_CON
 case "$HERDR_DEV_HERDR_SOCKET" in /*) ;; *) echo "✗ Herdr socket path must be absolute." >&2; exit 2 ;; esac
 [ -S "$HERDR_DEV_HERDR_SOCKET" ] || { echo "✗ Herdr socket does not exist; it is not contacted during selection." >&2; exit 2; }
 
-CONFIGURED_ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-${HERDR_TAILSCALE_CLI_ORIGIN:-}}"
-PHONE_APP="${HERDR_DEV_PHONE_APP_URL:-${HERDR_PHONE_APP_URL:-}}"
-CONFIGURED_NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-${HERDR_TAILSCALE_CLI_NODE_ID:-}}"
-if [ -z "$PHONE_APP" ]; then
-    if [ "$ACTION" != setup ] || [ -e "$ENV_FILE" ] || [ ! -t 0 ]; then
-        echo "✗ Set HERDR_DEV_PHONE_APP_URL (or HERDR_PHONE_APP_URL) to the exact canonical HTTPS phone-app origin; fresh setup can ask only with terminal stdin." >&2
-        exit 2
-    fi
-    # Selection is not verification or route consent. Do not infer an app
-    # address from the configured relay or the preflight placeholder.
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    echo "Enter the exact canonical HTTPS origin intended to serve the phone app (no path or trailing slash)." >&2
-    echo "This selects an address only; trusted TLS, exact app bundle and route readiness must still pass before pairing." >&2
-    printf 'Phone-app HTTPS origin (q to cancel): ' >&2
-    IFS= read -r PHONE_APP || { echo "Cancelled; no phone-app origin was selected." >&2; exit 2; }
-    case "$PHONE_APP" in q|Q) echo "Cancelled; no phone-app origin was selected." >&2; exit 2 ;; esac
-    PHONE_APP="$(cli_relay_call normalize-external-origin "$PHONE_APP")" || {
-        echo "✗ A canonical HTTPS phone-app origin is required; nothing was started." >&2
-        exit 2
+DNS_NAME=""
+PROFILE=""
+CONFIGURED_ORIGIN="${REQUESTED_ORIGIN:-${HERDR_TAILSCALE_CLI_ORIGIN:-}}"
+PHONE_APP="${REQUESTED_PHONE_APP:-${HERDR_PHONE_APP_URL:-}}"
+CONFIGURED_NODE_ID="${REQUESTED_NODE_ID:-${HERDR_TAILSCALE_CLI_NODE_ID:-}}"
+if [ -n "$PHONE_APP" ]; then
+    NORMALIZED_APP="$(cli_relay_call normalize-external-origin "$PHONE_APP")" || {
+        echo "✗ The selected phone-app origin is not canonical HTTPS; nothing was started." >&2; exit 2;
     }
-    trap - INT TERM
+    [ "$NORMALIZED_APP" = "$PHONE_APP" ] || { echo "✗ Noncanonical phone-app origin was refused." >&2; exit 2; }
 fi
-NEEDS_PREFLIGHT=0
-BOOTSTRAP_ORIGIN="https://preflight.invalid:8443"
-BOOTSTRAP_NODE_ID="node-preflight-pending"
 if [ "$ACTION" = setup ]; then
     CLI_BIN="$(cli_relay_call tailscale-cli resolve-binary --binary "$CLI_BIN")" || {
-        echo "✗ No unambiguous absolute Tailscale CLI candidate was selected." >&2
-        exit 2
+        echo "✗ No unambiguous absolute Tailscale CLI candidate was selected." >&2; exit 2;
     }
-    if [ -f "$ENV_FILE" ] &&
-        [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_ORIGIN)" = "$BOOTSTRAP_ORIGIN" ] &&
-        [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_NODE_ID)" = "$BOOTSTRAP_NODE_ID" ]; then
-        NEEDS_PREFLIGHT=1
-        CONFIGURED_ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-}"
-        CONFIGURED_NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-}"
-    elif [ ! -f "$ENV_FILE" ]; then
-        NEEDS_PREFLIGHT=1
-    fi
-    if [ "$NEEDS_PREFLIGHT" = 1 ]; then
-        ORIGIN="${CONFIGURED_ORIGIN:-$BOOTSTRAP_ORIGIN}"
-        NODE_ID="${CONFIGURED_NODE_ID:-$BOOTSTRAP_NODE_ID}"
-    else
-        ORIGIN="$CONFIGURED_ORIGIN"
-        NODE_ID="$CONFIGURED_NODE_ID"
-        [ -n "$ORIGIN" ] && [ -n "$NODE_ID" ] || { echo "✗ Existing CLI development identity is incomplete." >&2; exit 2; }
-    fi
-else
+fi
+if [ -f "$ENV_FILE" ]; then
+    [ -n "$PHONE_APP" ] && [ -n "$CONFIGURED_ORIGIN" ] && [ -n "$CONFIGURED_NODE_ID" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_PHONE_APP_URL)" = "$PHONE_APP" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_ORIGIN)" = "$CONFIGURED_ORIGIN" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_NODE_ID)" = "$CONFIGURED_NODE_ID" ] || {
+        echo "✗ Existing CLI profile/origin changed; registration requires explicit recovery." >&2; exit 1;
+    }
     ORIGIN="$CONFIGURED_ORIGIN"
     NODE_ID="$CONFIGURED_NODE_ID"
-    [ -n "$ORIGIN" ] && [ -n "$NODE_ID" ] || { echo "✗ Existing CLI development identity is incomplete." >&2; exit 2; }
+else
+    [ "$ACTION" = setup ] || { echo "✗ Update requires existing isolated CLI development state." >&2; exit 1; }
+    # Read-only bootstrap uses the same Go CLI Preflight/Origin implementation
+    # as full preflight. No placeholder is ever written to relay.env or runtime.
+    export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$CONFIGURED_ORIGIN"
+    export HERDR_TAILSCALE_CLI_NODE_ID="$CONFIGURED_NODE_ID" HERDR_PHONE_APP_URL="$PHONE_APP"
+    export HERDR_TAILSCALE_CLI_SCOPE=development HERDR_RELAY_TRANSPORT=tailscale-cli
+    export HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT="$DEV_ROOT" HERDR_TAILSCALE_CLI_STATE_ROOT="$DEV_ROOT/registration"
+    export HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT" HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT"
+    export HERDR_RELAY_ENV="$ENV_FILE" HERDR_RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"
+    export HERDR_WEB_ROOT="$DEV_ROOT/current/web" HERDR_RELEASE_ROOT="$DEV_ROOT/data/herdr-mobile-relay"
+    export XDG_CONFIG_HOME="$DEV_ROOT/config" XDG_CACHE_HOME="$DEV_ROOT/cache" XDG_DATA_HOME="$DEV_ROOT/data"
+    export HERDR_RELAY_HOST=127.0.0.1 HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
+    export HERDR_RELAY_PAIRING_SOCKET="$PAIRING_SOCKET" HERDR_REACHABILITY_PORT_MAPPING=0 HERDR_RELAY_REARM_BOOTSTRAP=0
+    export HERDR_BIN="$HERDR_DEV_HERDR_BIN" HERDR_SOCKET_PATH="$HERDR_DEV_HERDR_SOCKET"
+    DISCOVERY="$(cli_relay_call dev-tailscale-cli discover)" || {
+        echo "✗ Read-only Go-owned development origin discovery failed; no route or state was created." >&2; exit 1;
+    }
+    ORIGIN="$(cli_discovery_string "$DISCOVERY" origin)" || exit 1
+    NODE_ID="$(cli_discovery_string "$DISCOVERY" node_id)" || exit 1
+    DNS_NAME="$(cli_discovery_string "$DISCOVERY" dns_name)" || exit 1
+    PROFILE="$(cli_discovery_string "$DISCOVERY" profile)" || exit 1
+    if [ -z "$NODE_ID" ] || [ -z "$DNS_NAME" ] || [ -z "$ORIGIN" ] ||
+        [ "$PROFILE" != macos-appstore-1.102.4-supplied-metadata ] ||
+        [ "$ORIGIN" = https://preflight.invalid:8443 ] || [ "$NODE_ID" = node-preflight-pending ] ||
+        { [ -n "$CONFIGURED_ORIGIN" ] && [ "$ORIGIN" != "$CONFIGURED_ORIGIN" ]; } ||
+        { [ -n "$CONFIGURED_NODE_ID" ] && [ "$NODE_ID" != "$CONFIGURED_NODE_ID" ]; }; then
+        echo "✗ Discovery did not match the exact configured node and HTTPS origin." >&2
+        exit 1
+    fi
+    PHONE_APP="${PHONE_APP:-$ORIGIN}"
+    echo "Go-owned read-only discovery selected node $NODE_ID ($DNS_NAME), profile $PROFILE, HTTPS origin $ORIGIN."
 fi
 
 if [ "$ACTION" = setup ]; then
@@ -480,6 +632,10 @@ if [ "$ACTION" = setup ] || [ "$ACTION" = update ]; then
     ensure_private_socket_directory
 fi
 if [ -e "$DEV_ROOT/current" ] || [ -L "$DEV_ROOT/current" ]; then
+    [ -f "$ENV_FILE" ] && [ -f "$MARKER" ] || {
+        echo "✗ A current release without its marked environment is not fresh development state." >&2
+        exit 1
+    }
     dev_current_release >/dev/null || {
         echo "✗ Current development release pointer is not a complete managed release." >&2
         exit 1
@@ -508,6 +664,41 @@ if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
         exit 1
     }
 fi
+trap cleanup_dev_setup EXIT
+version="$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.toml")"
+revision="$(git -C "$REPO_DIR" rev-parse HEAD)"
+[ -n "$version" ] && [ "${#revision}" -eq 40 ] || { echo "✗ Cannot determine coherent development build identity." >&2; exit 1; }
+BUILD_DIR="$(mktemp -d "$DEV_ROOT/.build.XXXXXX")"
+bun run --cwd "$REPO_DIR/frontend" build
+cp -R "$REPO_DIR/frontend/dist" "$BUILD_DIR/web"
+bun "$REPO_DIR/scripts/stamp-web-version.mjs" "$BUILD_DIR/web/version.json" "$version" "$revision"
+bun "$REPO_DIR/frontend/scripts/validate-build.mjs" "$BUILD_DIR/web"
+CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly go build -trimpath \
+    -ldflags "-s -w -X main.version=$version -X main.revision=$revision" \
+    -o "$BUILD_DIR/herdr-mobile-relay" "$REPO_DIR/cmd/herdr-mobile-relay"
+[ -x "$BUILD_DIR/herdr-mobile-relay" ] && [ -f "$BUILD_DIR/web/version.json" ] &&
+    [ -d "$BUILD_DIR/web" ] && [ ! -L "$BUILD_DIR/web" ] || {
+    echo "✗ Staged development release is incomplete; prior release remains active." >&2; exit 1;
+}
+mkdir -m 700 "$BUILD_DIR/bin"
+mv "$BUILD_DIR/herdr-mobile-relay" "$BUILD_DIR/bin/herdr-mobile-relay"
+release_id="$(generate_instance_id)"
+release_name="${version}-${revision}-${release_id}"
+RELEASE_DIR="$DEV_ROOT/releases/$release_name"
+[ ! -e "$RELEASE_DIR" ] && [ ! -L "$RELEASE_DIR" ] || { echo "✗ Staged release identifier already exists." >&2; exit 1; }
+mv "$BUILD_DIR" "$RELEASE_DIR"
+BUILD_DIR=""
+
+SETUP_STAGE="$(mktemp -d "$DEV_ROOT/.setup-stage.XXXXXX")"
+printf '%s\n' "releases/$release_name" > "$SETUP_STAGE/candidate-pointer"
+if [ -L "$DEV_ROOT/current" ]; then readlink "$DEV_ROOT/current" > "$SETUP_STAGE/old-pointer"; fi
+if [ -f "$ENV_FILE" ]; then cp -p "$ENV_FILE" "$SETUP_STAGE/old-env"; fi
+if [ -f "$MARKER" ]; then cp -p "$MARKER" "$SETUP_STAGE/old-marker"; fi
+old_pointer_present=0 old_env_present=0 old_marker_present=0
+[ ! -f "$SETUP_STAGE/old-pointer" ] || old_pointer_present=1
+[ ! -f "$SETUP_STAGE/old-env" ] || old_env_present=1
+[ ! -f "$SETUP_STAGE/old-marker" ] || old_marker_present=1
+printf 'pointer=%s\nenv=%s\nmarker=%s\n' "$old_pointer_present" "$old_env_present" "$old_marker_present" > "$SETUP_STAGE/old-existence"
 if [ ! -f "$ENV_FILE" ]; then
     token="$(generate_token)"
     instance="$(generate_instance_id)"
@@ -515,11 +706,9 @@ if [ ! -f "$ENV_FILE" ]; then
     [ "${#token}" -eq 32 ] && [ -n "$instance" ] && [ -n "$control_run" ] || { echo "✗ Could not prepare private development identity." >&2; exit 2; }
     printf '%s\n' 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' \
         "HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=$DEV_ROOT/registration" \
-        "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$COORDINATION_ROOT" > "$MARKER"
-    chmod 600 "$MARKER"
-    initializing_env="$DEV_ROOT/.relay-env.initializing.$$"
+        "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$COORDINATION_ROOT" > "$SETUP_STAGE/candidate-marker"
+    initializing_env="$SETUP_STAGE/candidate-env"
     : > "$initializing_env"
-    chmod 600 "$initializing_env"
     set_env_value_atomic "$initializing_env" HERDR_RELAY_TRANSPORT tailscale-cli
     set_env_value_atomic "$initializing_env" HERDR_RELAY_TOKEN "$token"
     set_env_value_atomic "$initializing_env" HERDR_RELAY_INSTANCE_ID "$instance"
@@ -542,8 +731,12 @@ if [ ! -f "$ENV_FILE" ]; then
     set_env_value_atomic "$initializing_env" HERDR_REACHABILITY_PORT_MAPPING 0
     set_env_value_atomic "$initializing_env" HERDR_RELAY_REARM_BOOTSTRAP 0
     set_env_value_atomic "$initializing_env" HERDR_RELAY_POLL_INTERVAL 2
-    mv "$initializing_env" "$ENV_FILE"
 else
+    cp -p "$ENV_FILE" "$SETUP_STAGE/candidate-env"
+    cp -p "$MARKER" "$SETUP_STAGE/candidate-marker"
+    if [ "$MIGRATE_LEGACY_SOCKET" = 1 ]; then
+        set_env_value_atomic "$SETUP_STAGE/candidate-env" HERDR_RELAY_PAIRING_SOCKET "$PAIRING_SOCKET"
+    fi
     [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_TRANSPORT)" = tailscale-cli ] &&
         [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_SCOPE)" = development ] &&
         [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)" = "$RELAY_PORT" ] &&
@@ -564,43 +757,34 @@ else
     }
 fi
 
-load_relay_env "$ENV_FILE"
-set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
-trap cleanup_dev_setup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-version="$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.toml")"
-revision="$(git -C "$REPO_DIR" rev-parse HEAD)"
-[ -n "$version" ] && [ "${#revision}" -eq 40 ] || { echo "✗ Cannot determine coherent development build identity." >&2; exit 1; }
-BUILD_DIR="$(mktemp -d "$DEV_ROOT/.build.XXXXXX")"
-bun run --cwd "$REPO_DIR/frontend" build
-cp -R "$REPO_DIR/frontend/dist" "$BUILD_DIR/web"
-bun "$REPO_DIR/scripts/stamp-web-version.mjs" "$BUILD_DIR/web/version.json" "$version" "$revision"
-bun "$REPO_DIR/frontend/scripts/validate-build.mjs" "$BUILD_DIR/web"
-CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly go build -trimpath \
-    -ldflags "-s -w -X main.version=$version -X main.revision=$revision" \
-    -o "$BUILD_DIR/herdr-mobile-relay" "$REPO_DIR/cmd/herdr-mobile-relay"
-[ -x "$BUILD_DIR/herdr-mobile-relay" ] && [ -d "$BUILD_DIR/web" ] && [ ! -L "$BUILD_DIR/web" ] || {
-    echo "✗ Staged development release is incomplete; prior release remains active." >&2
+if [ ! -f "$SETUP_STAGE/old-env" ] ||
+    ! cmp -s "$SETUP_STAGE/old-env" "$SETUP_STAGE/candidate-env"; then
+    cp -p "$SETUP_STAGE/candidate-env" "$SETUP_STAGE/publish-env"
+fi
+if [ ! -f "$SETUP_STAGE/old-marker" ]; then
+    cp -p "$SETUP_STAGE/candidate-marker" "$SETUP_STAGE/publish-marker"
+fi
+# The pending journal becomes visible atomically before any live env, marker
+# or pointer mutation. Interrupted attempts recover only exact snapshots.
+[ ! -e "$PENDING" ] && [ ! -L "$PENDING" ] || { echo "✗ Existing setup journal requires recovery." >&2; exit 1; }
+mv "$SETUP_STAGE" "$PENDING"
+SETUP_STAGE=""
+if ! { setup_snapshot_matches "$ENV_FILE" "$PENDING/old-env" &&
+    setup_snapshot_matches "$MARKER" "$PENDING/old-marker" &&
+    setup_pointer_matches "$DEV_ROOT/current" "$PENDING/old-pointer"; }; then
+    echo "✗ Saved development state changed before cutover; journal retained if recovery is uncertain." >&2
     exit 1
-}
-mkdir -m 700 "$BUILD_DIR/bin"
-mv "$BUILD_DIR/herdr-mobile-relay" "$BUILD_DIR/bin/herdr-mobile-relay"
-release_id="$(generate_instance_id)"
-release_name="${version}-${revision}-${release_id}"
-RELEASE_DIR="$DEV_ROOT/releases/$release_name"
-[ ! -e "$RELEASE_DIR" ] && [ ! -L "$RELEASE_DIR" ] || { echo "✗ Staged release identifier already exists." >&2; exit 1; }
-mv "$BUILD_DIR" "$RELEASE_DIR"
-BUILD_DIR=""
-NEXT_POINTER="$DEV_ROOT/.current.$$"
-[ ! -e "$NEXT_POINTER" ] && [ ! -L "$NEXT_POINTER" ] || { echo "✗ Staged release pointer already exists." >&2; exit 1; }
-ln -s "releases/$release_name" "$NEXT_POINTER"
-case "$(uname -s)" in
-    Linux) mv -fT "$NEXT_POINTER" "$DEV_ROOT/current" ;;
-    Darwin) mv -f -h "$NEXT_POINTER" "$DEV_ROOT/current" ;;
-    *) echo "✗ Only Linux and macOS development are supported." >&2; exit 2 ;;
-esac
-NEXT_POINTER=""
+fi
+if [ -f "$PENDING/publish-marker" ]; then mv "$PENDING/publish-marker" "$MARKER"; fi
+if [ -f "$PENDING/publish-env" ]; then mv "$PENDING/publish-env" "$ENV_FILE"; fi
+if ! { setup_snapshot_matches "$ENV_FILE" "$PENDING/candidate-env" &&
+    setup_snapshot_matches "$MARKER" "$PENDING/candidate-marker" &&
+    setup_pointer_matches "$DEV_ROOT/current" "$PENDING/old-pointer"; }; then
+    echo "✗ Candidate or saved pointer changed before cutover; no release was selected." >&2
+    exit 1
+fi
+replace_dev_pointer "releases/$release_name"
+load_relay_env "$ENV_FILE"
 current_release="$(dev_current_release)" || { echo "✗ Atomic cutover did not select a complete development release." >&2; exit 1; }
 [ "$current_release" = "$RELEASE_DIR" ] || { echo "✗ Current release pointer did not select the staged build." >&2; exit 1; }
 RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"
@@ -619,34 +803,34 @@ export HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT" HERDR_PHONE_APP_URL="$PHONE_
 export HERDR_RELAY_PAIRING_SOCKET="$PAIRING_SOCKET"
 export HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
 
-trap cleanup_dev_build_stage EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-if [ "$NEEDS_PREFLIGHT" = 1 ]; then
-    PREFLIGHT="$("$RELAY_BIN" dev-tailscale-cli preflight)" || {
-        echo "✗ Go-owned isolated development preflight failed; no Serve route was changed." >&2
-        exit 1
-    }
-    LIVE_NODE_ID="$(json_string_field "$PREFLIGHT" node_id "$RELAY_BIN")"
-    LIVE_ORIGIN="$(json_string_field "$PREFLIGHT" origin "$RELAY_BIN")"
-    LIVE_DNS_NAME="$(json_string_field "$PREFLIGHT" dns_name "$RELAY_BIN")"
-    [ -n "$LIVE_NODE_ID" ] && [ -n "$LIVE_ORIGIN" ] && [ -n "$LIVE_DNS_NAME" ] || {
-        echo "✗ Go-owned preflight did not establish a complete node identity and origin." >&2
-        exit 1
-    }
-    [ -z "$CONFIGURED_NODE_ID" ] || [ "$CONFIGURED_NODE_ID" = "$LIVE_NODE_ID" ] || {
-        echo "✗ Configured node ID does not match the Go-owned read-only preflight." >&2
-        exit 1
-    }
-    [ -z "$CONFIGURED_ORIGIN" ] || [ "$CONFIGURED_ORIGIN" = "$LIVE_ORIGIN" ] || {
-        echo "✗ Configured HTTPS origin does not match the Go-owned read-only preflight." >&2
-        exit 1
-    }
-    set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_ORIGIN "$LIVE_ORIGIN"
-    set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_NODE_ID "$LIVE_NODE_ID"
-    ORIGIN="$LIVE_ORIGIN"
-    NODE_ID="$LIVE_NODE_ID"
-    export HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN" HERDR_TAILSCALE_CLI_NODE_ID="$NODE_ID"
-    echo "Go-owned read-only preflight selected node $NODE_ID ($LIVE_DNS_NAME), profile $(json_string_field "$PREFLIGHT" profile "$RELAY_BIN"), HTTPS origin $ORIGIN."
+PREFLIGHT="$("$RELAY_BIN" dev-tailscale-cli preflight)" || {
+    echo "✗ Full Go-owned isolated development preflight failed; prior state is retained on proved rollback." >&2; exit 1;
+}
+LIVE_NODE_ID="$(json_string_field "$PREFLIGHT" node_id "$RELAY_BIN")"
+LIVE_ORIGIN="$(json_string_field "$PREFLIGHT" origin "$RELAY_BIN")"
+LIVE_DNS_NAME="$(json_string_field "$PREFLIGHT" dns_name "$RELAY_BIN")"
+LIVE_PROFILE="$(json_string_field "$PREFLIGHT" profile "$RELAY_BIN")"
+if [ -z "$LIVE_NODE_ID" ] || [ -z "$LIVE_ORIGIN" ] || [ -z "$LIVE_DNS_NAME" ] || [ -z "$LIVE_PROFILE" ] ||
+    [ "$LIVE_NODE_ID" != "$NODE_ID" ] || [ "$LIVE_ORIGIN" != "$ORIGIN" ] ||
+    { [ -n "$DNS_NAME" ] && [ "$LIVE_DNS_NAME" != "$DNS_NAME" ]; } ||
+    { [ -n "$PROFILE" ] && [ "$LIVE_PROFILE" != "$PROFILE" ]; } ||
+    ! setup_snapshot_matches "$ENV_FILE" "$PENDING/candidate-env" ||
+    ! setup_snapshot_matches "$MARKER" "$PENDING/candidate-marker" ||
+    ! setup_pointer_matches "$DEV_ROOT/current" "$PENDING/candidate-pointer" ||
+    ! setup_pending_snapshots_valid; then
+    echo "✗ Full preflight changed identity or candidate state; no route was started." >&2
+    exit 1
 fi
+# The full validator has accepted the actual current release and canonical
+# saved app. Rename the journal atomically BEFORE deleting snapshots: an
+# interruption during deletion cannot leave an unrecoverable pending record.
+COMPLETE_STAGE="$DEV_ROOT/.setup-complete.$$"
+[ ! -e "$COMPLETE_STAGE" ] && [ ! -L "$COMPLETE_STAGE" ] || exit 1
+mv "$PENDING" "$COMPLETE_STAGE"
+cleanup_complete_setup || { echo "✗ Complete private setup snapshots need inspection; route not started." >&2; exit 1; }
+COMPLETE_STAGE=""
+if [ "$MIGRATE_LEGACY_SOCKET" = 1 ]; then
+    echo "▸ Moved this root's stopped pairing-control socket to the short private socket directory."
+fi
+trap cleanup_dev_build_stage EXIT
 exec "$RELAY_BIN" dev-tailscale-cli foreground --action "$ACTION"

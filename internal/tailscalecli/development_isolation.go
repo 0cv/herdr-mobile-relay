@@ -99,6 +99,17 @@ func validateUnixSocketPathLengthForOS(path, override, goos string) error {
 }
 
 func developmentIsolationFromEnvironment(root, stateRoot, coordinationRoot string) (*developmentIsolation, error) {
+	layout, err := developmentIsolationLayout(root, stateRoot, coordinationRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := layout.validate(false, false); err != nil {
+		return nil, err
+	}
+	return layout, nil
+}
+
+func developmentIsolationLayout(root, stateRoot, coordinationRoot string) (*developmentIsolation, error) {
 	runtimeBase, runtimeDir, pairingSocket, err := developmentPairingSocketPaths(root)
 	if err != nil {
 		return nil, err
@@ -130,13 +141,17 @@ func developmentIsolationFromEnvironment(root, stateRoot, coordinationRoot strin
 		herdrBinary:        os.Getenv("HERDR_BIN"),
 		herdrSocket:        os.Getenv("HERDR_SOCKET_PATH"),
 	}
-	if err := layout.validate(false, false); err != nil {
-		return nil, err
-	}
 	return layout, nil
 }
 
 func (d *developmentIsolation) validate(requireStopped, requireHerdrSocket bool) error {
+	if err := d.validateCommon(); err != nil {
+		return err
+	}
+	return d.validateComplete(requireStopped, requireHerdrSocket)
+}
+
+func (d *developmentIsolation) validateCommon() error {
 	if d == nil || runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return ErrUnsupported
 	}
@@ -201,6 +216,43 @@ func (d *developmentIsolation) validate(requireStopped, requireHerdrSocket bool)
 		return fmt.Errorf("%w: development ports or side-effect settings differ from the fixed profile", ErrWorkflowRequired)
 	}
 
+	return nil
+}
+
+// Pre-layout discovery retains the fixed tuple and inherited-environment
+// checks, but cannot assert a release, env or marker exists before first build.
+// It never returns an operation capability.
+func (d *developmentIsolation) validateDiscovery() error {
+	if err := d.validateCommon(); err != nil {
+		return err
+	}
+	if pathsOverlap(d.root, d.coordination) || pathsOverlap(d.state, d.coordination) ||
+		pathsOverlap(d.pairingRuntimeBase, d.root) || pathsOverlap(d.pairingRuntimeDir, d.coordination) {
+		return ErrPermissionDenied
+	}
+	for _, path := range []string{d.root, d.state, d.configHome, d.cacheHome, d.dataHome, filepath.Join(d.root, "releases"), d.coordination, d.pairingRuntimeBase, d.pairingRuntimeDir} {
+		if err := validateOptionalPrivateDirectory(path); err != nil {
+			return err
+		}
+	}
+	for _, path := range []string{d.relayEnv, filepath.Join(d.root, ".herdr-dev-tailscale-cli"), filepath.Join(d.root, "current")} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return ErrPermissionDenied
+		}
+	}
+	if err := d.validateProductionSeparation(); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(d.herdrSocket) || pathsOverlap(d.root, d.herdrSocket) {
+		return ErrPermissionDenied
+	}
+	if err := requireOwnedSocket(d.herdrSocket); err != nil {
+		return err
+	}
+	return requireExecutable(d.herdrBinary)
+}
+
+func (d *developmentIsolation) validateComplete(requireStopped, requireHerdrSocket bool) error {
 	for _, path := range []string{d.root, d.state, d.coordination, d.configHome, d.cacheHome, d.dataHome} {
 		resolved, err := validatePrivateDirectory(path)
 		if err != nil || resolved != path {

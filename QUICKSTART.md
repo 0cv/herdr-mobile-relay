@@ -177,8 +177,13 @@ precedence; invalid overrides fail closed. Selection keeps the existing explicit
 consent and route-confirmation gates.
 
 A separate CLI-backed foreground development entrypoint is available as
-`make dev-tailscale-cli`; it is not part of setup or an installed service. Only
-the exact supplied macOS/arm64 App Store Tailscale 1.102.4 profile is enabled
+`make dev-tailscale-cli`; it is not part of setup or an installed service.
+Fresh setup automatically discovers this Mac's Tailscale HTTPS origin on port
+8443 through the shared Go preflight code and uses it for the bundled phone app;
+there is no domain-entry prompt or requirement for separate app hosting. Saved
+or explicit app-origin choices are retained. Discovery does not publish a route:
+the exact route confirmation and TLS/readiness/bundle checks still apply.
+Only the exact supplied macOS/arm64 App Store Tailscale 1.102.4 profile is enabled
 for isolated development, and real-runtime and physical-phone qualification
 remain pending. Production and installed-service activation are still refused.
 Do not publish a persistent route based on the source/fixture implementation

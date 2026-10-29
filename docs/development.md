@@ -60,25 +60,37 @@ and 8443; conflicts are refused rather than adopting a listener or changing
 an enrolled port. CLI-backed development uses the same separate port contract, with state under
 `relay/.dev-tailscale-cli/` and an independently consented persistent route. Its
 pairing-control socket is placed outside the deep checkout in a short private
-runtime directory (`/private/tmp/herdr-cli-<uid>/<sha256-of-checkout>/p.sock` on
+runtime directory (`/private/tmp/herdr-cli-<uid>/<sha256-of-development-root>/p.sock` on
 macOS, `/tmp/...` on Linux); Go validates directory ownership/modes and the
 platform AF_UNIX path-length limit before using the socket. The route journal,
 relay config, credentials, and release remain in the private checkout state.
-On setup/update, a marked root migrates the exact previous in-root socket value
-only when that old path is absent (neither a socket nor a symlink). The migration
-atomically rewrites only `HERDR_RELAY_PAIRING_SOCKET` and runs once; an existing
-old-path object, unmarked root, or any other mismatch is refused unchanged. Go
-then validates the new short socket path against the persisted relay environment.
+On setup/update, a marked stopped root can migrate the exact previous in-root
+socket value only when that old path is absent (neither a socket nor a symlink).
+The socket rewrite is staged with the candidate environment and applied after a
+successful build, inside the private cutover. An existing old-path object,
+unmarked root, or changed snapshot is refused; uncertain recovery retains its
+evidence. Go then validates the selected short socket and persisted environment.
 The supported candidate is only the exact App Store macOS/arm64 1.102.4
 profile; profile-specific development eligibility is separate from runtime
-qualification. The launcher uses filesystem-only executable selection, then
-calls `dev-tailscale-cli preflight`; the standalone `tailscale-cli preflight`
-path is refused. Before any real CLI read or mutation, the Go entrypoint checks
-explicit opt-in, private root ownership/modes, exact registration and
-coordination bindings, isolated XDG/release/web/runtime paths, the relay
-configuration, installed-service environment and production-root separation,
-and the fixed HTTPS/backend/plugin tuple. Operation-level checks bind the
-selected executable and local Herdr socket. This is not proof of launcher
+qualification. After opt-in and filesystem-only executable selection, fresh CLI
+setup calls `dev-tailscale-cli discover`. This read-only action reuses Go's
+Tailscale inspection and origin derivation to obtain this node's canonical
+HTTPS origin, including fixed port 8443, before the build. That address becomes
+the bundled phone app's default: no hostname entry or separate app hosting is
+required. `HERDR_DEV_PHONE_APP_URL` (preferred), `HERDR_PHONE_APP_URL`, and an
+existing saved app choice retain their canonical custom origin; conflicting
+saved identity refuses rather than rebinding it.
+
+Discovery validates the development opt-in, supported profile, fixed tuple,
+root safety and production separation, but cannot construct a route manager.
+After staging the selected build, `dev-tailscale-cli preflight` validates the
+complete private layout and persisted/process configuration and rechecks the
+live identity before foreground startup. Route operations still require the
+independent exact node/origin/ports confirmation; trusted TLS, readiness and the
+exact app bundle must pass before pairing. Full operational checks bind the
+selected executable, local Herdr socket, registration/coordination roots and
+isolated XDG/release/web/runtime paths. The standalone
+`tailscale-cli preflight` path remains refused. This is not proof of launcher
 provenance or a privilege boundary against a deliberately fabricating
 same-user process. The persistent route survives stop and Ctrl-C;
 scoped unpublish has its own exact typed confirmation. After opt-in, executable `tailscale` and `herdr` binaries
