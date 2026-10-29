@@ -458,7 +458,9 @@ rollback_plugin_migration() {
     echo "herdr-mobile-relay: replacement failed; restoring previous service..." >&2
 
     if [ -n "$PREVIOUS_RELEASE" ] && [ -d "$PREVIOUS_RELEASE" ]; then
-        "$INSTALL_ROOT/current/herdr-mobile-relay" \
+        # The previous release verifies its own manifest schema; the new
+        # binary may require files that did not exist in that older release.
+        "$PREVIOUS_RELEASE/herdr-mobile-relay" \
             activate-release "$INSTALL_ROOT" "$PREVIOUS_RELEASE" || return 1
     elif [ "$current_was_present" = false ]; then
         rm -f "$INSTALL_ROOT/current"

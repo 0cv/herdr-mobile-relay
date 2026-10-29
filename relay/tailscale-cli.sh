@@ -92,17 +92,22 @@ selected_installed_cli() {
 manager_call() {
     local operation="$1"
     shift
-    local development_root_args=()
     if [ "$SCOPE" = development ]; then
         case "$DEVELOPMENT_ROOT" in
-            /*) development_root_args=(--development-root "$DEVELOPMENT_ROOT") ;;
+            /*) ;;
             *) echo "✗ Development-scope CLI operations require the launcher-bound private root." >&2; return 1 ;;
         esac
+        "$RELAY_BIN" tailscale-cli "$operation" --development-root "$DEVELOPMENT_ROOT" \
+            --binary "$CLI_BIN" --state-root "$STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
+            --scope "$SCOPE" --installation-id "$INSTALLATION_ID" --origin "$ORIGIN" \
+            --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" "$@"
+    else
+        # Bash 3.2 (hosted macOS) treats an empty array as unbound under set -u.
+        "$RELAY_BIN" tailscale-cli "$operation" \
+            --binary "$CLI_BIN" --state-root "$STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
+            --scope "$SCOPE" --installation-id "$INSTALLATION_ID" --origin "$ORIGIN" \
+            --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" "$@"
     fi
-    "$RELAY_BIN" tailscale-cli "$operation" "${development_root_args[@]}" \
-        --binary "$CLI_BIN" --state-root "$STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
-        --scope "$SCOPE" --installation-id "$INSTALLATION_ID" --origin "$ORIGIN" \
-        --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" "$@"
 }
 
 CLI_RESERVATION_CLAIMED=false

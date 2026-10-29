@@ -116,7 +116,10 @@ if [ "$TRANSPORT" = tailscale-cli ]; then
     RELAY_BIN="$(relay_binary 2>/dev/null)" || service_refuse 78
     [ -f "$RELAY_BIN" ] && [ -x "$RELAY_BIN" ] || service_refuse 78
     "$RELAY_BIN" tailscale-cli activation-check >/dev/null 2>&1 || service_refuse 69
-    exec "$SCRIPT_DIR/tailscale-cli-service.sh"
+    # This legacy wrapper has no pinned selection. Even if the compiled gate
+    # opens, only a freshly promoted native definition may start CLI service;
+    # a launchd pre-child refusal must not restart-loop on an unpinned child.
+    service_refuse 69
 fi
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"

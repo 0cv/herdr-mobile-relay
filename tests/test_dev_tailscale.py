@@ -664,9 +664,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         )
     print("PASS CLI development fixture: coordination lock root matches installed service relay.env")
 
-    # Explicit shell unpublish is exercised only through a fake relay manager.
-    # Declining consent must not dispatch route removal; accepting it passes the
-    # exact scoped node/port and narrow route-removal consent to the manager.
+    # A development-scoped direct unpublish cannot claim an installed service.
+    # Both answers must refuse before any route-removal manager call.
     unpublish_root = base / "cli-unpublish-consent"
     unpublish_root.mkdir(mode=0o700)
     unpublish_coordination = base / "cli-unpublish-coordination"
@@ -737,26 +736,17 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         finally:
             os.close(master)
 
-    declined_status, declined_output = run_unpublish_consent(b"n\n")
-    if declined_status == 0 or b"Cancelled; registration and route were left unchanged." not in declined_output:
-        raise AssertionError(f"declined CLI unpublish was not cancelled: {declined_output!r}")
-    if unpublish_record.read_text(encoding="utf-8").splitlines() != ["tailscale-cli activation-check"]:
-        raise AssertionError("declining CLI unpublish dispatched the route-removal manager")
-    accepted_status, accepted_output = run_unpublish_consent(b"y\n")
-    accepted_events = unpublish_record.read_text(encoding="utf-8").splitlines()
-    if (accepted_status != 0 or not accepted_events[-1].startswith(
-            "tailscale-cli unpublish --development-root " + str(unpublish_root) +
-            " --binary " + str(cli) + " --state-root ") or
-        "--scope development --installation-id fixture-unpublish-instance" not in accepted_events[-1] or
-        "--https-port 9443 --backend-port 18577 --accepted --node-id node-unpublish-fixture" not in accepted_events[-1] or
-        "--accept-route-removal --accept-check-to-write-race --accept-no-remote-drain" not in accepted_events[-1] or
-        "--accept-persistent-route" in accepted_events[-1] or sentinel.exists()):
-        raise AssertionError(f"accepted CLI unpublish did not pass exact narrow consent: {accepted_output!r} {accepted_events!r}")
-    print("PASS CLI shell unpublish fixture: decline is non-mutating; acceptance authorizes only the journaled exact route")
+    for answer in (b"n\n", b"y\n"):
+        status, output = run_unpublish_consent(answer)
+        if status == 0 or b"installed CLI transport and service configuration must be selected explicitly" not in output:
+            raise AssertionError(f"development-scoped CLI unpublish was not refused: {output!r}")
+    if unpublish_record.read_text(encoding="utf-8").splitlines() != ["tailscale-cli activation-check"] * 2:
+        raise AssertionError("development-scoped CLI unpublish dispatched a route-removal manager")
+    print("PASS CLI shell unpublish fixture: development scope cannot remove an installed route")
 
-    # Installed-service CLI startup is unavailable/non-ready (exit 69, one fixed
-    # diagnostic) and runs nothing: no config, no CLI and no relay command, not even
-    # activation-check, so every relay call by this synthetic relay is an effect.
+    # Generic installed-service dispatch tries only activation-check and then
+    # refuses (69); direct CLI dispatch without a selected service definition
+    # refuses before activation (78). Neither contacts the CLI or starts a child.
     cli_service_home = base / "cli-service-home"
     cli_service_home.mkdir(mode=0o700)
     cli_service_env = base / "cli-service.env"
@@ -775,7 +765,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     cli_service_relay.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$HERDR_CLI_SERVICE_RECORD\"\n"
-        "echo unexpected service relay command >&2; exit 97\n",
+        "[ \"$*\" = 'tailscale-cli activation-check' ] || { echo unexpected service relay command >&2; exit 97; }\n"
+        "exit 69\n",
         encoding="utf-8",
     )
     cli_service_relay.chmod(0o700)
@@ -786,18 +777,21 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         "HERDR_CLI_SERVICE_RECORD": str(cli_service_record),
     })
     fixed_diagnostic = b"Installed-service CLI startup is disabled: unavailable/non-ready; no service was started.\n"
-    for entrypoint in ("herdr-mobile-relay-service.sh", "tailscale-cli-service.sh"):
+    for entrypoint, status, diagnostic in (
+            ("herdr-mobile-relay-service.sh", 69, fixed_diagnostic),
+            ("tailscale-cli-service.sh", 78, b"")):
         result = subprocess.run(
             [str(cli_service_scripts / entrypoint)], env=service_env, cwd=root,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
         )
-        if result.returncode != 69 or result.stdout != b"" or result.stderr != fixed_diagnostic:
+        if result.returncode != status or result.stdout != b"" or result.stderr != diagnostic:
             raise AssertionError(
-                f"{entrypoint} was not unavailable/non-ready (exit 69 and the one fixed diagnostic): "
+                f"{entrypoint} did not refuse before a CLI child: "
                 f"{result.returncode!r} {result.stdout + result.stderr!r}")
-    if cli_service_record.exists() or sentinel.exists():
-        raise AssertionError("unavailable installed-service entrypoint contacted CLI or ran a relay command")
-    print("PASS CLI service fixture: direct and generic installed-service entrypoints are unavailable/non-ready (69) with zero CLI or relay effects")
+    if (cli_service_record.read_text(encoding="utf-8").splitlines() != ["tailscale-cli activation-check"] or
+            sentinel.exists()):
+        raise AssertionError("installed-service entrypoint contacted CLI or ran unexpected relay commands")
+    print("PASS CLI service fixture: generic activation gate (69) and unselected direct dispatch (78) refuse without CLI effects")
 
     # A named user-service fixture admits only a fake exact-route verifier and
     # fake systemctl/curl. It never reaches the host service manager, Tailscale,

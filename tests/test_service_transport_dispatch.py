@@ -732,7 +732,7 @@ def unavailable_cases(parent):
     assert os.getuid() != 0, "unreadable fixture requires the hosted non-root user"
     cli = "HERDR_RELAY_TRANSPORT=tailscale-cli\n"
     cells = [("valid", cli, {}, 69),
-             ("absent", None, {"HERDR_RELAY_TRANSPORT": "tailscale-cli"}, 69),
+             ("absent", None, {"HERDR_RELAY_TRANSPORT": "tailscale-cli"}, 78),
              ("empty-mode", "HERDR_RELAY_TRANSPORT=''\n", {"HERDR_RELAY_TRANSPORT": " TAILSCALE-CLI "}, 69),
              ("missing-executable", cli + "HERDR_TAILSCALE_CLI_BIN='/missing-selected-cli'\n", {}, 69),
              ("missing-relay", cli, {"HERDR_RELAY_BIN": "/missing-selected-relay"}, 69),
@@ -760,8 +760,8 @@ def unavailable_cases(parent):
     for bypass in ("development", "production"):
         cells.append(("bypass-" + bypass, cli + "HERDR_TAILSCALE_CLI_SCOPE='" + bypass + "'\n"
                       "HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START=1\n", {}, 69))
-    # The marked activation adapter models both outcomes, but neither it nor a
-    # CLI adapter may be called, even with bypass flags or a missing binary.
+    # The marked compiled activation gate models both outcomes. A legacy
+    # wrapper must refuse even if that gate opens; no CLI child may start.
     for platform in ("systemd", "launchd"):
         for number, (name, text, ambient, direct_status) in enumerate(cells):
             f = Fixture(parent, f"unavailable-{platform}-{number}", "tailscale-cli", platform, initial=True)
@@ -788,19 +788,25 @@ def unavailable_cases(parent):
             before = unavailable_snapshot(f.root)
             for activation in (0, 69):
                 f.env["ACTIVATION_RESULT"] = str(activation)
-                variants = [("cli", [str(f.script.parent / "tailscale-cli-service.sh")], 69),
+                variants = [("cli", [str(f.script.parent / "tailscale-cli-service.sh")], 78),
                             ("direct", [str(f.script.parent / "herdr-mobile-relay-service.sh")], direct_status),
                             ("launchd", launchd_arguments(f.script.parent), 0)]
                 for variant, argv, expected in variants:
+                    before_events = len(f.events())
                     result = unavailable_run(argv, f.env)
                     output = result.stdout + result.stderr
                     assert result.returncode == expected, (name, variant, result.returncode, output)
-                    assert "unavailable/non-ready" in output and "Starting herdr" not in output
+                    assert ("unavailable/non-ready" in output) == (variant != "cli") and "Starting herdr" not in output
                     assert ("automatic retry suppressed" in output) == (variant == "launchd")
                     f.check_safe(output)
                     assert "private-push-canary" not in output
                     assert unavailable_snapshot(f.root) == before, (name, variant)
-                    assert all(e["kind"] == "filesystem" and e["tool"] == "head" for e in f.events()), "refusal invoked a child, activation, or mutating tool"
+                    events = f.events()[before_events:]
+                    assert all(e.get("kind") == "cli-gate" or
+                               e.get("kind") == "filesystem" and e.get("tool") == "head"
+                               for e in events), "refusal invoked a CLI child or mutating tool"
+                    if variant == "cli":
+                        assert not any(e["kind"] == "cli-gate" for e in events), "unselected CLI service checked activation"
         # Executable text is never evaluated, not even to recover policy data.
         f = Fixture(parent, "unavailable-eval-" + platform, "tailscale-cli", platform)
         marker = f.root / "evaluated"
@@ -811,7 +817,7 @@ def unavailable_cases(parent):
             before = unavailable_snapshot(f.root)
             for argv, expected in (([str(f.script.parent / "herdr-mobile-relay-service.sh")], 78),
                                    (launchd_arguments(f.script.parent), 0),
-                                   ([str(f.script.parent / "tailscale-cli-service.sh")], 69)):
+                                   ([str(f.script.parent / "tailscale-cli-service.sh")], 78)):
                 result = unavailable_run(argv, f.env)
                 assert result.returncode == expected and not marker.exists()
                 assert unavailable_snapshot(f.root) == before
