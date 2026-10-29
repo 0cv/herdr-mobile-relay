@@ -20,6 +20,7 @@ and attachment permissions are unchanged.
 | Oh My Pi JSONL (`omp`, `ohmypi`) | Existing recorded-history reader | Unverified | No provisional text | Recorded results only |
 | OpenCode 1.x `session/message/part`, 2.x `session_v2/session_message`, and upgraded mixed SQLite stores | Per-session native database reader; bounded recorded updates | Unverified | Persisted edits only | Recorded state changes |
 | Hermes (`hermes`, `hermesagent`) | Existing native database reader | Unverified | Persisted edits only | Recorded calls/results |
+| Antigravity CLI (`agy`, `antigravity`) SQLite `steps` per conversation | Native database reader; user messages, replies and tool calls | Unverified | No provisional text | Tool calls marked completed when their result step exists; result bodies are not read |
 | Oh My OpenCode (`omo`, `ohmyopencode`) | Existing session JSONL and validated `senpi.todo-state` reader | Unverified | No provisional text | Recorded results and plan snapshots |
 | Kimi Code native 1.5 / legacy-engine 1.4 journals (0.36.x), plus validated 2.2.0 undo branches | Explicit main-agent event fold | Validated journal branch | Completed recorded responses, not tokens | Bounded recorded calls/results |
 

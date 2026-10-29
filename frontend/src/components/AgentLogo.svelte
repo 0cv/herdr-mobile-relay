@@ -1,5 +1,5 @@
 <script module lang="ts">
-  export type AgentLogoKind = 'claude' | 'codex' | 'generic' | 'hermes' | 'kimi' | 'omp' | 'opencode' | 'pi' | 'qoder';
+  export type AgentLogoKind = 'agy' | 'claude' | 'codex' | 'generic' | 'hermes' | 'kimi' | 'omp' | 'opencode' | 'pi' | 'qoder';
 
   // Agents without a bundled logo keep the generic glyph but still show the
   // name their vendor uses instead of the raw executable reported by Herdr.
@@ -22,6 +22,7 @@
     if (['kimi', 'kimi cli', 'kimi code', 'kimi code cli'].includes(normalized)) return 'kimi';
     if (['qoder', 'qoder cli', 'qodercli'].includes(normalized)) return 'qoder';
     if (['hermes', 'hermes agent', 'hermesagent'].includes(normalized)) return 'hermes';
+    if (['agy', 'antigravity', 'antigravity cli', 'antigravitycli'].includes(normalized)) return 'agy';
     return 'generic';
   }
 
@@ -38,6 +39,7 @@
     if (value === 'kimi') return 'Kimi';
     if (value === 'qoder') return 'Qoder';
     if (value === 'hermes') return 'Hermes';
+    if (value === 'agy') return 'Antigravity';
     return GENERIC_AGENT_LABELS.get(normalizedAgentName(original)) || original.trim() || 'Agent';
   }
 
@@ -75,7 +77,14 @@
 </script>
 
 <span class={`agent-logo agent-logo-${kind}`} role="img" aria-label={label} title={label}>
-  {#if kind === 'hermes'}
+  {#if kind === 'agy'}
+    <svg viewBox="0 0 28 28" aria-hidden="true">
+      <rect width="28" height="28" rx="6" fill="#edf3ff" />
+      <!-- Antigravity: an arch lifting off a baseline -->
+      <path d="M6.5 21.5C9 16 11 9 14 6.5c3 2.5 5 9.5 7.5 15" fill="none" stroke="#3b6df0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M9.5 21.5h9" fill="none" stroke="#3b6df0" stroke-width="2" stroke-linecap="round" opacity=".55" />
+    </svg>
+  {:else if kind === 'hermes'}
     <svg viewBox="0 0 28 28" aria-hidden="true">
       <rect width="28" height="28" rx="6" fill="#fff3ec" />
       <g transform="translate(3.5 3.5) scale(.75)" fill="#ea580c">

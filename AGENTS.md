@@ -13,9 +13,9 @@ Read `README.md` and `QUICKSTART.md` before changing behavior. `docs/` holds the
 ## Commands
 
 - Everything: `make check`.
-- Go 1.27.1: `make go-check` (gofmt, vet, tests, race detector).
+- Go 1.27.3: `make go-check` (gofmt, vet, tests, race detector).
 - Shell scripts and the Pi bridge: `make shell-check`.
-- Frontend (Bun 1.4.2, Node 26.13.0): `make frontend-check` (lint, svelte-check, unit tests, build, size budget); browser tests with `make frontend-browser`.
+- Frontend (Bun 1.4.4, Node 26.13.0): `make frontend-check` (lint, svelte-check, unit tests, build, size budget); browser tests with `make frontend-browser`.
 - Mobile harness: `make mobile-ci-check`; unit groups with `MOBILE_UNIT_FILTER='<regex>' bun run --cwd tests/mobile test:unit`.
 - If you change a test file, run it and iterate until it passes.
 

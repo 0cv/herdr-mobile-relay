@@ -115,6 +115,12 @@ var (
 // Classify determines what, if anything, the live control region is asking
 // the user to do. A blocked agent status is deliberately not an input.
 func Classify(text, agent string) Classification {
+	if isAgyAgent(agent) {
+		// ANSI styling can precede or split the focus marker and menu number.
+		// Normalize only after removing it, before any dialog parser runs.
+		text = ansiPattern.ReplaceAllString(text, "")
+		text = agyMenuFocusPattern.ReplaceAllString(text, "${1}❯ ${2}")
+	}
 	structuredControls := Supports(agent)
 	inputReady := normalInputPrompt(text, agent)
 	if !structuredControls && !inputReady {
@@ -166,20 +172,24 @@ func Classify(text, agent string) Classification {
 
 func approvalSummaryLines(text, agent string) []string {
 	normalized := strings.ToLower(agent)
-	if !strings.Contains(normalized, "hermes") {
+	isHermes := strings.Contains(normalized, "hermes")
+	isAgy := isAgyAgent(normalized)
+	if !isHermes && !isAgy {
 		return paneSummaryLines(text)
 	}
-	// Remove volatile Hermes chrome before applying the summary tail limit. A
-	// repaint must not evict stable dialog content from the fingerprint inputs.
+	// Remove volatile chrome before applying the summary tail limit. A repaint
+	// must not evict stable dialog content from the fingerprint inputs.
 	filtered := make([]string, 0)
 	for _, line := range cleanLines(text) {
 		if line == "" || chromePattern.MatchString(line) ||
-			promptSkipPattern.MatchString(line) || hermesApprovalChromeLine(line) {
+			promptSkipPattern.MatchString(line) ||
+			isHermes && hermesApprovalChromeLine(line) ||
+			isAgy && agyStatusLinePattern.MatchString(line) {
 			continue
 		}
 		if match := menuPattern.FindStringSubmatch(line); match != nil {
 			label := compact(match[3], 500)
-			if hermesApprovalAuxiliaryOption(label) {
+			if isHermes && hermesApprovalAuxiliaryOption(label) {
 				continue
 			}
 			// Menu focus and the native number-column padding are presentation.
@@ -601,6 +611,10 @@ func approvalHeader(agent, header string) bool {
 					strings.Contains(lower, "bash") ||
 					strings.Contains(lower, "command") ||
 					strings.Contains(lower, "action"))
+	case isAgyAgent(agent):
+		return strings.Contains(lower, "requesting permission for") ||
+			strings.Contains(lower, "run this command?") ||
+			strings.Contains(lower, "do you want to proceed")
 	case strings.Contains(agent, "qoder"):
 		return strings.Contains(lower, "permission required") &&
 			(strings.Contains(lower, "apply this change") ||
@@ -657,6 +671,9 @@ func newerOutputAfterMenu(lines []string, lastMenuLine int, agent string) bool {
 			continue
 		}
 		if strings.Contains(agent, "hermes") && hermesApprovalChromeLine(line) {
+			continue
+		}
+		if isAgyAgent(agent) && agyStatusLinePattern.MatchString(line) {
 			continue
 		}
 		if strings.Contains(agent, "qoder") && qoderApprovalTailLine(line) {
@@ -787,3 +804,16 @@ func kimiInputFramePrompt(lines []string, agent string) bool {
 	}
 	return false
 }
+
+// agyMenuFocusPattern matches Antigravity's focused menu row ("> 1. Yes"). It
+// marks focus with a plain ">" where every other agent uses "❯" or "›".
+var agyMenuFocusPattern = regexp.MustCompile(`(?m)^(\s*)> (\d+\.\s)`)
+
+func isAgyAgent(agent string) bool {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	return agent == "agy" || strings.Contains(agent, "antigravity")
+}
+
+// agyStatusLinePattern matches the "Context [...]" usage bar Antigravity keeps
+// under its dialogs; it is chrome, not output newer than the menu.
+var agyStatusLinePattern = regexp.MustCompile(`^\s*Context \[`)

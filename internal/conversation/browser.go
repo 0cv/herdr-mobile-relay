@@ -702,6 +702,9 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	if isHermesAgent(provider) {
 		return b.readHermesPage(ctx, request)
 	}
+	if isAgyAgent(provider) {
+		return b.readNativePage(ctx, request, "agy")
+	}
 	return b.readFilePage(ctx, request, false)
 }
 
@@ -2506,14 +2509,14 @@ func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) 
 }
 
 func (b *Browser) readOpenCodePage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
-	return b.readNativePage(ctx, request, false)
+	return b.readNativePage(ctx, request, "opencode")
 }
 
 func (b *Browser) readHermesPage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
-	return b.readNativePage(ctx, request, true)
+	return b.readNativePage(ctx, request, "hermes")
 }
 
-func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, hermes bool) (BrowsePage, error) {
+func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, provider string) (BrowsePage, error) {
 	var cursor browseCursor
 	var err error
 	if request.Cursor != "" {
@@ -2530,10 +2533,36 @@ func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, her
 	if cursor.NativeBefore != "" {
 		before = cursor.NativeBefore
 	}
-	if hermes {
+	switch provider {
+	case "hermes":
 		return b.readHermesNative(ctx, request, cursor, before)
+	case "agy":
+		return b.readAgyNative(ctx, request, cursor, before)
 	}
 	return b.readOpenCodeNative(ctx, request, cursor, before)
+}
+
+func (b *Browser) readAgyNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
+	const unavailable = "Antigravity conversation history is unavailable."
+	if ctx.Err() != nil {
+		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+	}
+	location, locateCode := b.reader.agy.locateContext(request.Scope.SessionID)
+	if locateCode != "" {
+		return nativeFailure(locateCode, unavailable), nil
+	}
+	entries, hasMore, corrupt, metadata, code := b.reader.agy.readFromContext(ctx, location.Path, before, request.Limit)
+	if ctx.Err() != nil {
+		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+	}
+	if code != "" {
+		return nativeFailure(code, unavailable), nil
+	}
+	revision := nativeDatabaseRevision(location.Path, metadata.SchemaVersion, "agy")
+	if cursor.Revision != "" && cursor.Revision != revision {
+		return browseFailure(true, "source_changed", "The Antigravity database changed while history was being browsed.", browseErrorFor("source_changed", "The Antigravity database changed while history was being browsed.", false)), nil
+	}
+	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, fmt.Sprint(metadata.OldestIdx), revision, cursor), nil
 }
 
 func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
