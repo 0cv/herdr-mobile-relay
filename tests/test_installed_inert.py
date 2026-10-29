@@ -207,8 +207,8 @@ class EvidenceTests(unittest.TestCase):
         self.assertLess(source.index("manager.WithInstalledSetupSession("),
                         source.index("session.PrepareRuntime("))
         self.assertLess(source.index("session.PrepareRuntime("),
-                        source.index("s := newServerWithResources("))
-        self.assertIn("s := newServerWithResources(&cfg, version, revision, logger, nil, nil, installedServiceStartup, cliInstalledUploadResources)", source)
+                        source.index("s := newServerWithResourcesIn("))
+        self.assertIn("s := newServerWithResourcesIn(ctx, &cfg, version, revision, logger, nil, nil, installedServiceStartup, cliInstalledUploadResources)", source)
         self.assertIn("installedCLIRunner()(s, lifetime)", source)
         self.assertNotIn(".Run(", source)
         bind = source.index("join := s.installedUpload.bindControl(cancel, done)")
@@ -265,8 +265,10 @@ class EvidenceTests(unittest.TestCase):
 
     def test_frozen_supplement_and_matrix(self):
         root = Path(__file__).resolve().parents[1]
-        frozen = json.loads((root / "docs/plans/pr-66-installed-ci-supplemental-test-identities.json").read_text())
-        self.assertEqual(ci.SUPPLEMENTAL, frozen)
+        supplement = root / "scripts/ci/installed-inert-supplemental-inventory.json"
+        self.assertEqual(hashlib.sha256(supplement.read_bytes()).hexdigest(),
+                         "33ab5ef02ae68b55b7f280ccdae7e5e8b1a4980c4e9d50713caf64cbff4e9349")
+        self.assertEqual(ci.SUPPLEMENTAL, json.loads(supplement.read_text()))
         self.assertEqual(hashlib.sha256((root / "scripts/ci/installed-inert-inventory.json").read_bytes()).hexdigest(),
                          "24d18df1af7ea4877c0e48568bbe00367e60ac102a169960a9fddafa35ed9fc4")
         for system, mode in (("Darwin", "normal"), ("Linux", "normal"), ("Linux", "race")):

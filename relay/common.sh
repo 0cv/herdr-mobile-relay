@@ -1926,20 +1926,6 @@ service_removal_quiet() {
 }
 
 service_removal_one() {
-    local root="$HOME/.local/state/herdr-mobile-relay/recovery" claim
-    (umask 077; mkdir -p "$root") || return 1
-    claim="$root/.herdr-native-claim-v1"
-    mkdir -m 700 "$claim" || return 1
-    # Retain the claim if an effect or its observation fails; the caller must
-    # resolve recovery evidence, never assume a stopped/deleted resource.
-    if service_removal_one_claimed "$@"; then
-        rmdir "$claim" || return 1
-        return 0
-    fi
-    return 1
-}
-
-service_removal_one_claimed() {
     local manager="$1" label="$2" file original attempt uid quiet=false reset=false stopped=false
     file="$(service_removal_path "$manager" "$label")" || return 1
     service_removal_resource "$file" || return 1
