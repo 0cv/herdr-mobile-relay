@@ -5597,6 +5597,92 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
+  test('recorded GMS persistence boundary fits the owned writer lifecycle without increasing the shared time pool', async () => {
+    const recorded = JSON.parse(await readFile(repositoryPath('tests/mobile/unit/fixtures/android-gms-persistence-boundary.json'), 'utf8'));
+    assert.ok(recorded.writer.durationMs > recorded.writer.writerTimeoutMs - recorded.writer.cleanupReservationMs);
+    const fixture = await harness.createFixture();
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment);
+    const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
+    const writerTimeouts: number[] = [];
+    let clockMs = 0;
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
+      monotonicNow: () => clockMs,
+      boundedCommand: async (binary, args, timeout, options) => {
+        if (!args.includes('--gms-diagnostic-persist')) return boundedCommand(binary, args, timeout, options);
+        writerTimeouts.push(timeout);
+        const executionMs = timeout - Math.min(options.cleanupReservationMs ?? 200, Math.floor(timeout / 3));
+        clockMs += recorded.writer.durationMs;
+        if (executionMs <= recorded.writer.durationMs) {
+          throw new BoundedCommandError(binary, args, fakeCommandResult('', { ...recorded.writer, targetPID: 12345 }));
+        }
+        return boundedCommand(binary, args, timeout, options);
+      },
+    });
+    try {
+      measurement.requireGmsObservations();
+      for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('recorded-gms-writer', { timeoutMs: 30_000 }));
+      await measurement.begin();
+      for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('recorded-gms-writer', { timeoutMs: 30_000 }));
+      const outcome = await measurement.finish();
+      assert.deepEqual(outcome.errors, []);
+      assert.equal(outcome.assessment?.collection.status, 'PASS');
+      const observations = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
+      const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
+      assert.deepEqual(observations.stages.map(({ stage, outcome }: any) => [stage, outcome]), stages.map(stage => [stage, 'collected']));
+      assert.equal(writerTimeouts.length, stages.length + 1);
+      assert.ok(writerTimeouts.at(-1)! < writerTimeouts[0]!, 'later writes must be clipped by the remaining shared pool');
+      assert.equal(observations.limits.persistenceOperationTimeoutMs, 5_000);
+      assert.equal(observations.limits.totalPersistenceLimitMs, 6_000);
+      assert.ok(collector.gmsObservations.persistenceAttemptMsThroughFinalization <= 6_000);
+      assert.equal(collector.gmsObservations.terminalConfirmation, 'confirmed');
+      assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
+      assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, 'not-needed');
+    } finally {
+      await measurement.finish().catch(() => undefined);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
+  test('GMS retired-writer failure reserves an owned cleanup lifecycle without accepting the failed publication', async () => {
+    const fixture = await harness.createFixture();
+    let clockMs = 0;
+    let cleanupTimeout = 0;
+    let collector: any;
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
+      monotonicNow: () => clockMs,
+      boundedCommand: async (binary, args, timeout, options) => {
+        if (args.includes('--gms-diagnostic-persist')) {
+          clockMs += 633;
+          throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 0, timedOut: true }));
+        }
+        if (args.includes('--gms-diagnostic-cleanup')) {
+          cleanupTimeout = timeout;
+          const requiredMs = 300;
+          clockMs += requiredMs;
+          if (timeout - (options.cleanupReservationMs ?? 0) <= requiredMs) {
+            throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 0, timedOut: true }));
+          }
+          return fakeCommandResult('{"removed":true}\n');
+        }
+        if (args.includes('--android-measurement-persist-json')) {
+          const request = JSON.parse(String(options.input));
+          if (request.target.endsWith('android-environment-collector.json')) collector = JSON.parse(request.contents);
+          return fakeCommandResult(`${JSON.stringify({ byteLength: request.expectedBytes, sha256: request.expectedSha256 })}\n`);
+        }
+        throw new Error(`unexpected command ${args.join(' ')}`);
+      },
+    });
+    measurement.requireGmsObservations();
+    await measurement.finalizeGmsObservations();
+    const outcome = await measurement.finish();
+    assert.ok(cleanupTimeout > 300);
+    assert.ok(outcome.errors.some(error => String(error).includes('GMS writer boundary')));
+    assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, 'removed-after-failure');
+    assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
+    assert.equal(collector.gmsObservations.terminalConfirmation, 'unconfirmed');
+    assert.ok(collector.gmsObservations.persistenceAttemptMsThroughFinalization <= 6_000);
+  });
   test('timed-out GMS persistence retires its file worker before finalization returns', async () => {
     const fixture = await harness.createFixture();
     const saved = { ...process.env };
@@ -5616,7 +5702,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           return boundedCommand(binary, args, timeout, options);
         }
         entered();
-        const lateCode = `process.on('SIGTERM',()=>{});setTimeout(()=>{require('node:fs').writeFileSync(${JSON.stringify(latePath)},'late');process.exit(0)},1500);setInterval(()=>{},1000)`;
+        const lateCode = `process.on('SIGTERM',()=>{});setTimeout(()=>{require('node:fs').writeFileSync(${JSON.stringify(latePath)},'late');process.exit(0)},${timeout + 500});setInterval(()=>{},1000)`;
         try {
           return await boundedCommand('node', ['-e', lateCode], timeout, { ...options, input: undefined, observerSupervisor: observer.stream });
         } catch (error) {
@@ -5651,7 +5737,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const writerErrors = outcome.errors.map(error => String(error)).filter(message => message.includes('GMS writer boundary'));
       assert.equal(writerErrors.length, 1, JSON.stringify(outcome.errors.map(error => String(error))));
       const writerTimeoutMs = Number(writerErrors[0]!.match(/ writerTimeoutMs=(\d+) dispatchedAfterMs=\d+ /u)?.[1]);
-      assert.ok(writerTimeoutMs > 0 && writerTimeoutMs <= 775, writerErrors[0]);
+      assert.ok(writerTimeoutMs > 0 && writerTimeoutMs <= 3_975, writerErrors[0]);
       assert.ok(writerErrors[0]!.includes(` durationMs=${writeFailure.result.durationMs} targetStarted=true timedOut=true aborted=false`
         + ' childExited=true targetClosed=true ownedProcessesExited=true stdioClosed=true '), writerErrors[0]);
       assert.match(writerErrors[0]!, / exitCode=\S+ signal=\S+ progress=none: BOUNDED_COMMAND_FAILED: node -e /u);
@@ -5803,8 +5889,8 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     }
   });
   test('GMS temporary cleanup after a retired writer failure reports confirmed removal, or pending when removal is unconfirmed', async () => {
-    for (const [writerElapsedMs, cleanupMode] of [[700, 'removed'], [150, 'removed'], [700, 'timed-out'], [700, 'rejected'],
-      [700, 'unconfirmed'], [1_000, 'not-dispatched']] as const) {
+    for (const [writerElapsedMs, cleanupMode] of [[4_000, 'removed'], [150, 'removed'], [4_000, 'timed-out'], [4_000, 'rejected'],
+      [4_000, 'unconfirmed'], [4_700, 'removed'], [5_000, 'not-dispatched']] as const) {
       const fixture = await harness.createFixture();
       let clockMs = 0;
       const writerTimeouts: number[] = [];
@@ -5839,8 +5925,8 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const errors = outcome.errors.map(error => String(error));
       const details = JSON.stringify({ writerElapsedMs, cleanupMode, writerTimeouts, cleanupTimeouts, gms: collector?.gmsObservations, errors });
       const notDispatched = cleanupMode === 'not-dispatched';
-      assert.deepEqual(writerTimeouts, [775], details);
-      assert.deepEqual(cleanupTimeouts, notDispatched ? [] : [200], details);
+      assert.deepEqual(writerTimeouts, [3_975], details);
+      assert.deepEqual(cleanupTimeouts, notDispatched ? [] : [Math.min(1_000, 5_000 - writerElapsedMs)], details);
       assert.equal(collector.gmsObservations.persistenceRetirement, notDispatched ? 'pending-temporary-write' : 'retired', details);
       assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, cleanupMode === 'removed' ? 'removed-after-failure' : 'pending', details);
       assert.equal(collector.gmsObservations.persistenceAttemptMsThroughFinalization, writerElapsedMs + (notDispatched ? 0 : 100), details);
@@ -7039,7 +7125,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.ok(completedAll - persistedPrior >= finalWriteDelayMs);
       assert.equal(observations.persistenceAccounting,
         'priorPersistenceAttemptMs includes prior bounded publication attempts; the current attempt is excluded and bounded by persistenceOperationTimeoutMs');
-      assert.equal(observations.limits.persistenceOperationTimeoutMs, 1_000);
+      assert.equal(observations.limits.persistenceOperationTimeoutMs, 5_000);
       assert.equal(observations.temporaryEvidenceCleanup, 'not-needed');
       assert.equal(collector.gmsObservations.persistenceAttemptMsThroughFinalization, completedAll);
       assert.match(collector.gmsObservations.persistenceAccounting, /includes all bounded observation-publication attempts through finalization/u);
@@ -7854,10 +7940,11 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     }
   });
   test('diagnostic GMS timeout probe reserves ownership and parsing before testing the command deadline', async () => {
-    const limits = { persistenceOperationTimeoutMs: 1_000, ownershipTimeoutMs: 2_000, parseReserveMs: 1_000 };
+    const limits = { persistenceOperationTimeoutMs: 5_000, ownershipTimeoutMs: 2_000, parseReserveMs: 1_000 };
     const probeBudgetMs = gmsTimeoutProbeBudgetMs(limits);
-    assert.equal(probeBudgetMs, 4_000);
-    for (const parentTimeoutMs of [2_250, probeBudgetMs]) {
+    assert.equal(probeBudgetMs, 8_000);
+    const shortParentMs = limits.persistenceOperationTimeoutMs + 1_250;
+    for (const parentTimeoutMs of [shortParentMs, probeBudgetMs]) {
       const fixture = await harness.createFixture();
       let clockMs = 0;
       let ownershipTimeoutMs: number | undefined;
@@ -7888,7 +7975,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await measurement.finalizeGmsObservations();
       assert.deepEqual(snapshot.limits.ownershipTimeoutMs, limits.ownershipTimeoutMs);
       assert.equal(snapshot.stages[0].outcome, 'failed');
-      if (parentTimeoutMs === 2_250) {
+      if (parentTimeoutMs === shortParentMs) {
         assert.equal(ownershipTimeoutMs, 249);
         assert.equal(commandTimeoutMs, undefined);
         assert.match(snapshot.stages[0].error, /owned-device verification exceeded its monotonic time bound/u);
@@ -7947,13 +8034,13 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         JSON.stringify({ stage: attackResult.stages[0], commandResult: failureMetadata(attackCommandFailure) }));
       assert.ok(attackResult.stages[0].parseDurationMs > 0);
       assert.deepEqual([attackResult.limits.ownershipTimeoutMs, attackResult.limits.commandTimeoutMs, attackResult.limits.parseReserveMs,
-        attackResult.limits.persistenceOperationTimeoutMs, attackResult.limits.totalCollectionMs], [2_000, 5_000, 1_000, 1_000, 5 * 8_000]);
+        attackResult.limits.persistenceOperationTimeoutMs, attackResult.limits.totalCollectionMs], [2_000, 5_000, 1_000, 5_000, 5 * 8_000]);
       limits = attackResult.limits;
       const attackTiming = gmsAttackTimingRule(attackResult.limits, attackResult.stages[0], attackElapsedMs);
       assert.deepEqual(attackTiming.violations, [], JSON.stringify({ attackElapsedMs, stage: attackResult.stages[0],
         commandResult: failureMetadata(attackCommandFailure), parserResult: failureMetadata(attackParserFailure) }));
       assert.equal(attackTiming.stageAllowanceMs, 8_000);
-      assert.equal(attackTiming.compositeCeilingMs, 10_000);
+      assert.equal(attackTiming.compositeCeilingMs, 8_000 + 2 * attackResult.limits.persistenceOperationTimeoutMs);
       assert.equal(attackResult.totalCollectionMs, attackResult.stages[0].durationMs);
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in attackEnvironment)) delete process.env[key];
@@ -7966,7 +8053,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const saved = { ...process.env };
       Object.assign(process.env, current.environment);
       const measurement = new AndroidEnvironmentMeasurement('emulator-5554', current.root, repositoryPath('tests/mobile/toolchains.json'));
-      const budget = new PhaseBudget(`gms-${failure}`, { timeoutMs: failure === 'timeout' ? ownershipAndParseReservedBudgetMs : 5_000 });
+      const budget = new PhaseBudget(`gms-${failure}`, {
+        timeoutMs: failure === 'timeout' ? ownershipAndParseReservedBudgetMs : limits!.persistenceOperationTimeoutMs + 4_000,
+      });
       try {
         measurement.requireGmsObservations();
         if (failure === 'malformed') await writeFile(join(current.fixtureDirectory, 'valid-gms.dump'), originalDump.slice(0, -10));
