@@ -273,7 +273,8 @@ PY
 
 # Exercise the exact extracted CLI service dispatch with an inert relay fixture.
 # Copying the packaged wrappers under a manifest-free temporary root guarantees
-# relay_binary cannot prefer or execute the extracted production binary.
+# relay_binary cannot prefer or execute the extracted production binary. The
+# selected service must attempt only the compiled activation check, then refuse.
 CLI_FIXTURE_ROOT="$WORK_DIR/cli-service-fixture"
 CLI_FIXTURE_HOME="$WORK_DIR/cli-service-home"
 CLI_FIXTURE_ENV="$WORK_DIR/cli-service.env"
@@ -301,9 +302,8 @@ chmod 700 "$CLI_FIXTURE_CLI"
 cat > "$CLI_FIXTURE_RELAY" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$HERDR_CLI_SERVICE_RECORD"
-# Every attempted relay command, including activation-check, is forbidden.
-echo unexpected service relay command >&2
-exit 97
+[ "$*" = 'tailscale-cli activation-check' ] || { echo unexpected service relay command >&2; exit 97; }
+exit 69
 EOF
 chmod 700 "$CLI_FIXTURE_RELAY"
 # Admit the complete fixed diagnostic bytes, not just one matching line.
@@ -319,9 +319,10 @@ CLI_FIXTURE_STATUS=0
     /bin/bash "$CLI_FIXTURE_ROOT/relay/herdr-mobile-relay-service.sh") \
     >"$WORK_DIR/cli-service.log" 2>&1 || CLI_FIXTURE_STATUS=$?
 [ "$CLI_FIXTURE_STATUS" -eq 69 ] &&
-    [ ! -e "$CLI_FIXTURE_RECORD" ] && [ ! -e "$CLI_FIXTURE_SENTINEL" ] &&
+    [ "$(cat "$CLI_FIXTURE_RECORD")" = 'tailscale-cli activation-check' ] &&
+    [ ! -e "$CLI_FIXTURE_SENTINEL" ] &&
     cmp "$CLI_FIXTURE_EXPECTED" "$WORK_DIR/cli-service.log" >/dev/null 2>&1 || {
-    echo 'extracted CLI service must be unavailable/non-ready (69) with zero command effects' >&2
+    echo 'extracted CLI service must refuse after only activation-check (69) without CLI effects' >&2
     exit 1
 }
 
