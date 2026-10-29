@@ -669,6 +669,12 @@ version="$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.tom
 revision="$(git -C "$REPO_DIR" rev-parse HEAD)"
 [ -n "$version" ] && [ "${#revision}" -eq 40 ] || { echo "✗ Cannot determine coherent development build identity." >&2; exit 1; }
 BUILD_DIR="$(mktemp -d "$DEV_ROOT/.build.XXXXXX")"
+echo "Preparing frontend dependencies from frontend/bun.lock..."
+NODE_ENV=development bun install --cwd "$REPO_DIR/frontend" --frozen-lockfile || {
+    dependency_status=$?
+    echo "✗ Frontend dependency installation failed; no new development release was selected. Fix the install error above and retry." >&2
+    exit "$dependency_status"
+}
 bun run --cwd "$REPO_DIR/frontend" build
 cp -R "$REPO_DIR/frontend/dist" "$BUILD_DIR/web"
 bun "$REPO_DIR/scripts/stamp-web-version.mjs" "$BUILD_DIR/web/version.json" "$version" "$revision"

@@ -471,6 +471,8 @@ ALLOWED = (
     "internal/conversation/claude_chain_test.go",
     # Reviewed developer-before-lifecycle Darwin driver published in 3d508a26.
     "tests/test_tailscale_process_groups_darwin.py",
+    # Interactive developer-menu opt-in propagation; route consent stays separate.
+    "relay/dev-tunnel.sh",
     # Shared Go origin discovery used by the isolated development launcher.
     "cmd/herdr-mobile-relay/dev_tailscale_cli.go",
     "internal/tailscalecli/development_isolation.go",
@@ -5591,6 +5593,10 @@ def offline_check(group):
             require(ALLOWED.count(driver) == 1
                     and candidate_scope_allowed([*minimal, driver]) and candidate_scope_allowed([driver, *minimal]),
                     "offline_candidate_scope_reviewed_driver")
+            menu = "relay/dev-tunnel.sh"
+            require(ALLOWED.count(menu) == 1
+                    and candidate_scope_allowed([*minimal, menu]) and candidate_scope_allowed([menu, *minimal]),
+                    "offline_candidate_scope_developer_menu")
             discovery = ("cmd/herdr-mobile-relay/dev_tailscale_cli.go",
                          "internal/tailscalecli/development_isolation.go",
                          "internal/tailscalecli/development_root.go",
@@ -5621,6 +5627,10 @@ def offline_check(group):
                 [*minimal, driver + "/"],
                 tuple(full), set(full), frozenset(minimal), None, "".join(minimal), {"a": 1},
                 [*minimal, 1], [*minimal, None], [*minimal, b"x"], [*full, ("a",)], [*minimal, True]]
+            invalid.extend([*minimal, lookalike] for lookalike in (
+                menu + ".bak", menu.upper(), "x/" + menu, menu + "/child",
+                "relay/dev-tunnel-other.sh", "relay/dev-*.sh", "relay", "relay/"))
+            invalid.append([*minimal, menu, menu])
             for path in discovery:
                 invalid.extend([*minimal, lookalike] for lookalike in (
                     path + ".bak", path.upper(), "x/" + path, path + "/child",

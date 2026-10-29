@@ -260,7 +260,9 @@ if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
         ''|1) ;;
         2)
             case "$tailscale_mode" in
-                cli) exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@" ;;
+                # Choosing 2 is the development opt-in, not route consent.
+                # Preserve an explicit invalid override so the child refuses it.
+                cli) HERDR_DEV_TAILSCALE_CLI_ENABLE="${HERDR_DEV_TAILSCALE_CLI_ENABLE:-1}" exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@" ;;
                 legacy) HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
             esac
             echo "✗ Tailscale Serve unavailable: $tailscale_unavailable_reason" >&2

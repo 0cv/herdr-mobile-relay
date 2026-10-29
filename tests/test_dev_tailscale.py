@@ -226,6 +226,9 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                     "app_store_missing_maps_to_legacy_mode"} and
                     b"Set up isolated managed Tailscale" in stdout + stderr):
                 raise AssertionError("menu selection demanded redundant development consent")
+            if (entrypoint == tunnel_script and case != "explicit_cli_transport_requires_opt_in" and
+                    b"Set up isolated CLI-backed Serve development?" in stdout + stderr):
+                raise AssertionError("menu selection demanded redundant CLI development consent")
             if case == "menu_uses_all_safe_defaults":
                 output = stdout + stderr
                 for value in (
@@ -251,14 +254,14 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                 "development_override_precedes_legacy_and_path_candidates",
                 "legacy_override_is_used_when_development_override_is_empty",
                 "exact_app_store_install_wrapper_aliases_bundle_in_menu",
-                "app_store_supported_version_still_requires_explicit_opt_in",
+                "app_store_menu_selection_is_cli_development_opt_in",
             }:
                 output = stdout + stderr
                 option2_lines = [line for line in output.splitlines() if b"2. Tailscale Serve" in line]
                 if len(option2_lines) != 1 or b"[UNAVAILABLE:" in option2_lines[0]:
                     raise AssertionError(f"{case}: option 2 was incorrectly marked unavailable: {output!r}")
                 if (case in {"exact_app_store_install_wrapper_aliases_bundle_in_menu",
-                             "app_store_supported_version_still_requires_explicit_opt_in"} and
+                             "app_store_menu_selection_is_cli_development_opt_in"} and
                     b"Tailscale app's CLI" not in option2_lines[0]):
                     raise AssertionError(f"{case}: menu did not select CLI-backed mode: {output!r}")
             if case == "non_exact_app_store_wrapper_keeps_ambiguity_in_menu":
@@ -574,8 +577,14 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     if activation_after_candidate_menu != activation_before_candidate_menu:
         raise AssertionError("menu candidate detection dispatched CLI activation checks")
     interactive_refused(
-        "app_store_supported_version_still_requires_explicit_opt_in", tunnel_script, b"2\nn\n",
-        b"Cancelled; nothing was started.", **app_store_settings,
+        "app_store_menu_selection_is_cli_development_opt_in", tunnel_script, b"2\n\n",
+        b"Custom development roots must already exist with mode 0700.",
+        HERDR_DEV_TAILSCALE_CLI_DIR=str(base / "missing-cli-menu-root"), **app_store_settings,
+    )
+    interactive_refused(
+        "menu_preserves_invalid_cli_opt_in_override", tunnel_script, b"2\n",
+        b"HERDR_DEV_TAILSCALE_CLI_ENABLE must be 1 to opt in.",
+        HERDR_DEV_TAILSCALE_CLI_ENABLE="0", **app_store_settings,
     )
     interactive_refused(
         "app_store_supported_version_keeps_cli_option_available", tunnel_script, b"3\n",
@@ -611,12 +620,14 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     check_checkout_root_existence_unchanged()
     private_cli_dev = base / "cli-dev-private"
     private_cli_dev.mkdir(mode=0o700)
+    # Probe CLI selection with the automatic app default. Custom-origin
+    # normalization is independently covered with the strict compiled helper.
     cli_dev_gate = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh")],
         env=dict(without_consent, HERDR_DEV_TAILSCALE_CLI_ENABLE="1",
                  HERDR_DEV_TAILSCALE_CLI_DIR=str(private_cli_dev),
                  HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(cli_relay),
-                 HERDR_DEV_PHONE_APP_URL="https://app.fixture.invalid",
+                 HERDR_DEV_PHONE_APP_URL="", HERDR_PHONE_APP_URL="",
                  ACTIVATION_CHECK_RECORD=str(activation_record)),
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=5, check=False,
@@ -1446,6 +1457,14 @@ chmod 700 "$out"
     bun_fixture = fixture_bin / "bun"
     bun_fixture.write_text(
         '''#!/bin/sh
+if [ "$1" = install ]; then
+    printf 'build|bun-install\\n' >> "$DEV_FIXTURE_LOG"
+    [ "$#" = 4 ] && [ "$2" = --cwd ] && [ "$4" = --frozen-lockfile ] || exit 97
+    [ -f "$3/package.json" ] && [ -f "$3/bun.lock" ] || exit 97
+    [ "$NODE_ENV" = development ] || exit 97
+    [ "${DEV_FIXTURE_BUN_MODE:-}" != install-fail ] || exit 73
+    exit 0
+fi
 if [ "$1" = run ]; then
     printf 'build|bun\\n' >> "$DEV_FIXTURE_LOG"
     if [ "${DEV_FIXTURE_BUN_MODE:-}" = wait ]; then sleep 60; exit 71; fi
@@ -1872,6 +1891,8 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
         for name in ("dev-tailscale-cli.sh", "common.sh"):
             shutil.copy2(root / "relay" / name, checkout / "relay" / name)
         shutil.copy2(root / "herdr-plugin.toml", checkout / "herdr-plugin.toml")
+        for name in ("package.json", "bun.lock"):
+            shutil.copy2(root / "frontend" / name, checkout / "frontend" / name)
         return checkout
 
     def snapshot_tree(directory: Path) -> dict | None:
@@ -2227,7 +2248,14 @@ os.execv(sys.argv[1], sys.argv[1:])
 
     for case, terminal in (("terminal-default", True), ("unattended-default", False)):
         checkout = selection_checkout(case)
-        status, output, events = run_selection(checkout, route_confirmation, terminal=terminal)
+        if (checkout / "frontend" / "node_modules").exists():
+            raise AssertionError("fresh setup fixture unexpectedly has frontend dependencies")
+        status, output, events = run_selection(
+            checkout, route_confirmation, terminal=terminal, overrides={"NODE_ENV": "production"},
+        )
+        if ("build|bun-install" not in events or "build|bun" not in events or
+            events.index("build|bun-install") >= events.index("build|bun")):
+            raise AssertionError("fresh setup built without first installing locked development dependencies")
         selected_env = checkout / "relay" / ".dev-tailscale-cli" / "relay.env"
         selected = relay_env_values(selected_env)
         if (status != 0 or discovery_boundary not in output or
@@ -2344,6 +2372,28 @@ os.execv(sys.argv[1], sys.argv[1:])
             any(event.startswith(("manager|workflow reserve ", "manager|workflow publish ",
                                   "runtime|", "control|")) for event in events)):
             raise AssertionError(f"discovery replaced exact route consent: {output!r} {events!r}")
+
+    checkout = selection_checkout("dependency-install-failure-retry")
+    status, output, events = run_selection(
+        checkout, route_confirmation, terminal=False, overrides={"DEV_FIXTURE_BUN_MODE": "install-fail"},
+    )
+    if (status != 73 or "build|bun-install" not in events or "build|bun" in events or
+        b"Frontend dependency installation failed" not in output):
+        raise AssertionError("failed dependency installation did not stop before the frontend build")
+    assert_no_selection_effects(checkout, events)
+    status, output, events = run_selection(checkout, route_confirmation, terminal=False)
+    if status != 0 or not any(event.startswith("manager|workflow publish ") for event in events):
+        raise AssertionError("fresh retry after dependency installation failure did not succeed")
+    installed_root = checkout / "relay" / ".dev-tailscale-cli"
+    installed_before = snapshot_tree(installed_root)
+    status, output, events = run_selection(
+        checkout, action="update", terminal=False,
+        overrides={"DEV_FIXTURE_BUN_MODE": "install-fail",
+                   "HERDR_DEV_TAILSCALE_CLI_RELAY_BIN": str(installed_root / "current" / "bin" / "herdr-mobile-relay")},
+    )
+    if (status != 73 or "build|bun-install" not in events or "build|bun" in events or
+        snapshot_tree(installed_root) != installed_before):
+        raise AssertionError("failed update dependency installation changed the saved development release")
 
     # A failed first build cannot publish a marker or broken env; retry with
     # the same checkout and no supplied app origin must discover again.

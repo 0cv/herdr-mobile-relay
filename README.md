@@ -76,6 +76,9 @@ macOS/arm64 profile and an unambiguous CLI; without an App Store app it uses the
 legacy standalone-daemon mode instead. If an App Store app is detected but CLI
 checks fail, option 2 is unavailable rather than falling back. Its description
 says which mode is selected and whether the route survives stopping the relay.
+Choosing 2 is the development opt-in; it does not ask for that opt-in again.
+CLI-backed setup/update installs the locked frontend dependencies, including build
+tools, before building. The separate exact-route consent remains required.
 That development chooser's checks read local files and platform metadata only;
 they never run Tailscale. The App Store Install CLI's exact forwarding wrapper is treated as an
 alias of its bundle executable; all other distinct executables or wrappers stay
