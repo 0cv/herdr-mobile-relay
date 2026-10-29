@@ -310,6 +310,16 @@ the uploaded Appium log only: private ephemeral local Appium logging remains
 enabled, and the startup-only console dump remains unchanged. It does
 not claim removal of other existing restricted diagnostic artifacts.
 
+`ios-webkit-discovery.json` extracts only fixed server-stage enums, numeric
+application/message IDs, UTC timestamps and durations from that private log.
+It also records the resolved XCUITest and remote-debugger package versions.
+Collection reads at most the final 8 MiB, drops partial/oversized 4 KiB records,
+and retains at most 256 events with omission counters and explicit missing-log
+or unavailable-version observations. URLs, labels, page data and error bodies
+are never copied. These post-run observations are diagnostic only: they help
+locate a pending Web Inspector listing but do not establish its cause or alter
+the fatal timeout, ownership checks, product result or qualification.
+
 The XCTest owner retains at most 128 recognized activity enums with host receipt
 timestamps, plus unknown, oversized, incomplete and dropped-event counts.
 Raw output, element labels, application names and source timestamps stay withheld.
