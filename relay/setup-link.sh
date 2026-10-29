@@ -61,6 +61,25 @@ if [ "$MODE" = tailscale-cli ]; then
     HTTPS_PORT="${HERDR_TAILSCALE_CLI_HTTPS_PORT:-443}"
     BACKEND_PORT="${HERDR_RELAY_PORT:-8375}"
     PHONE_APP_BASE="${HERDR_PHONE_APP_URL:-}"
+    if [ "$SCOPE" = production ]; then
+        # Both installed reprint entrypoints use the same owned control decision:
+        # Admit and the pairing result boundary recheck selected registration,
+        # local readiness, trusted HTTPS and exact app bundle before a link leaves.
+        # Reprint cannot arm, rotate or fall back to foreground control.
+        "$RELAY_BIN" tailscale-cli activation-check >/dev/null || exit 1
+        CONTROL_STATUS="$("$RELAY_BIN" installed-control status)" || exit 1
+        [ "$(json_string_field "$CONTROL_STATUS" code)" = ok ] &&
+            [ "$(json_string_field "$CONTROL_STATUS" publication)" = disabled ] &&
+            [ "$(json_string_field "$CONTROL_STATUS" installation)" = "$INSTANCE" ] || exit 1
+        RUN_ID="$(json_string_field "$CONTROL_STATUS" run)"
+        case "$RUN_ID" in ????????????????????????????????) ;; *) exit 1 ;; esac
+        CONTROL_LINK="$("$RELAY_BIN" installed-control reprint --run "$RUN_ID")" || exit 1
+        [ "$(json_string_field "$CONTROL_LINK" code)" = ok ] || exit 1
+        LINK="$(json_string_field "$CONTROL_LINK" invitation)"
+        [ -n "$LINK" ] || exit 1
+        printf '%s\n' "$LINK"
+        exit 0
+    fi
     [ -x "$CLI_BIN" ] && [ -n "$STATE_ROOT" ] && [ -n "$COORDINATION_ROOT" ] &&
         [ -n "$INSTANCE" ] && [ -n "$RUN_ID" ] && [ -n "$ORIGIN" ] &&
         [ -n "$PHONE_APP_BASE" ] || {

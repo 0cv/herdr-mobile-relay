@@ -3,12 +3,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -310,6 +312,54 @@ func TestTailscaleCLIReadinessArmAndDrift(t *testing.T) {
 		!recoveredInvitation.ExpiresAt.Equal(outageInvitation.ExpiresAt) {
 		t.Fatalf("CLI recovery replaced the bootstrap invitation: before=%+v after=%+v", outageInvitation, recoveredInvitation)
 	}
+
+	// Hosted/tagged only: the installed scheduler drives the real local/TLS/
+	// exact-bundle admission path (not a fake-ready callback). The route verifier
+	// remains synthetic; this is not production qualification or Run coverage.
+	t.Run("installed-lifetime-readmission", func(t *testing.T) {
+		path := filepath.Join(cfg.RuntimeDir, "device-auth", "devices.json")
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ticks := make(chan time.Time, 5)
+		for i := 0; i < 5; i++ {
+			ticks <- time.Unix(1, 0).Add(time.Duration(i) * 3 * time.Minute)
+		}
+		close(ticks)
+		calls := 0
+		installedRecovery(context.Background(), ticks, func(ctx context.Context) error {
+			calls++
+			verifier.err = nil
+			verifier.status.Readiness = tailscalecli.ReadinessReady
+			if calls == 1 || calls == 3 {
+				verifier.err = tailscalecli.ErrTransientUnavailable
+				verifier.status.Readiness = tailscalecli.ReadinessWaiting
+			}
+			if calls == 5 {
+				verifier.err = tailscalecli.ErrConflict
+			}
+			status, err := restarted.admitTailscaleCLI(ctx)
+			if calls == 2 || calls == 4 {
+				if err != nil || !status.Ready {
+					t.Fatalf("readmission %d: %+v %v", calls, status, err)
+				}
+			} else if err == nil {
+				t.Fatal("outage/drift admitted")
+			}
+			return err
+		}, restarted.quarantineTailscaleCLI)
+		if calls != 5 || restarted.bootstrapGate.OpenStatus() {
+			t.Fatal("lifetime recovery/retirement")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("recovery mutated paired device state")
+		}
+	})
 
 	verifier.status.Readiness = tailscalecli.ReadinessDegraded
 	verifier.err = tailscalecli.ErrConflict

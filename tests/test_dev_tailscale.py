@@ -1376,6 +1376,7 @@ exit 0
         wrapper.chmod(0o700)
     fake_cli = cli
     fake_herdr = herdr
+    (fixture_bin / "herdr").symlink_to(fake_herdr)
     positive_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     positive_socket.bind(str(cli_dev_fixture / "herdr.sock"))
     positive_env = dict(env)
@@ -1387,14 +1388,14 @@ exit 0
         "HERDR_DEV_TAILSCALE_CLI_ORIGIN": "https://relay.fixture.invalid:8443",
         "HERDR_DEV_TAILSCALE_CLI_NODE_ID": "dev-node-fixture",
         "HERDR_DEV_PHONE_APP_URL": "https://app.fixture.invalid",
-        "HERDR_DEV_HERDR_BIN": str(fake_herdr),
         "HERDR_DEV_HERDR_SOCKET": str(cli_dev_fixture / "herdr.sock"),
         "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(home / ".local" / "state" / "herdr-mobile-relay" / "tailscale-cli-coordination"),
         "HERDR_DEV_TAILSCALE_CLI_FIXTURE_LOG": str(fixture_log),
         "DEV_FIXTURE_LOG": str(fixture_log), "GH_TOKEN": "fixture-only-secret",
         "PATH": f"{fixture_bin}:/usr/bin:/bin",
     })
-    for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG"):
+    for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG",
+                 "HERDR_DEV_HERDR_BIN", "HERDR_BIN"):
         positive_env.pop(name, None)
     bypass_env = dict(positive_env, HERDR_DEV_TAILSCALE_CLI_PUBLISH="PUBLISH")
     bypass_cli = subprocess.run(
@@ -1440,6 +1441,7 @@ exit 0
                               all_events.index(manager_events[2]) < all_events.index(arm_event) <
                               all_events.index(bootstrap_event)) or
         "HERDR_RELAY_TRANSPORT='tailscale-cli'" not in (cli_dev_root / "relay.env").read_text(encoding="utf-8") or
+        "HERDR_BIN='" + str(fixture_bin / "herdr") + "'" not in (cli_dev_root / "relay.env").read_text(encoding="utf-8") or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI setup escaped development boundaries: {all_events!r}")
     setup_target = os.readlink(cli_dev_root / "current")

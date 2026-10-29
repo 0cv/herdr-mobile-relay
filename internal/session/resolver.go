@@ -2,7 +2,9 @@ package session
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
+	"github.com/0cv/herdr-mobile-relay/internal/conversationlife"
 )
 
 const cacheTTL = 60 * time.Second
@@ -26,6 +29,7 @@ type Resolver struct {
 	cache  map[string]cacheEntry
 	home   string
 	reader *conversation.Reader
+	owner  *conversationlife.Owner
 }
 
 // NewResolver creates an independent title and transcript resolver.
@@ -36,6 +40,9 @@ func NewResolver(home string) *Resolver {
 // NewResolverWithReader shares transcript-location decisions with conversation
 // history consumers.
 func NewResolverWithReader(home string, reader *conversation.Reader) *Resolver {
+	if reader != nil && reader.InstalledOwner() != nil {
+		return nil
+	}
 	if reader == nil {
 		reader = conversation.NewReader(home)
 	}
@@ -58,6 +65,10 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 // the title cache identity, so a foreground-only change cannot reuse a title
 // from another project copy.
 func (r *Resolver) SessionNameWithProject(agent string, project conversation.ProjectContext, sessionID string) string {
+	if r != nil && r.owner != nil {
+		name, _ := r.SessionNameWithProjectContext(context.Background(), agent, project, sessionID)
+		return name
+	}
 	project = conversation.NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -134,13 +145,16 @@ func extractOMPSessionTitle(path string) string {
 		return ""
 	}
 	defer f.Close()
+	return extractOMPSessionTitleReader(f)
+}
 
+func extractOMPSessionTitleReader(reader io.Reader) string {
 	var sessionTitle string
 	var headerTitle string
 	hasHeaderTitle := false
 	var latestTitle string
 	hasTitleEvent := false
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 	for scanner.Scan() {
 		var record struct {
@@ -178,9 +192,12 @@ func extractPiSessionTitle(path string) string {
 		return ""
 	}
 	defer f.Close()
+	return extractPiSessionTitleReader(f)
+}
 
+func extractPiSessionTitleReader(reader io.Reader) string {
 	var name string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 	for scanner.Scan() {
 		var record struct {
@@ -203,8 +220,11 @@ func codexIndexThreadName(indexFile, sessionID string) string {
 		return ""
 	}
 	defer f.Close()
+	return codexIndexThreadNameReader(f, sessionID)
+}
 
-	scanner := bufio.NewScanner(f)
+func codexIndexThreadNameReader(reader io.Reader, sessionID string) string {
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		var record struct {
 			ID         string `json:"id"`
@@ -226,9 +246,12 @@ func extractTitle(path string) string {
 		return ""
 	}
 	defer f.Close()
+	return extractTitleReader(f)
+}
 
+func extractTitleReader(reader io.Reader) string {
 	found := make(map[string]string)
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 	for scanner.Scan() {
 		var record map[string]any

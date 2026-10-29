@@ -48,9 +48,17 @@ Cloudflare account, domain, `cloudflared`, or tunnel configuration. If prompted,
 choose the installed Herdr app that should host the phone UI. The relay starts
 and prints a QR code.
 
-For tailnet HTTPS in the setup menu, choose **3 Tailscale → 2 Your own HTTPS
-route (advanced BYO)**, which uses a canonical HTTPS origin you already route to
-this loopback relay. Managed foreground is no longer a menu choice; its explicit
+For tailnet HTTPS in the post-install setup menu, choose **3 Tailscale → 1
+Always on** for the installed, owned CLI Serve selector and consented setup/QR
+path. It first checks production enablement and an actually qualified local
+Tailscale CLI/profile; with the current shipped gates closed, it refuses without
+changing selection or touching Serve. Once separately qualified and enabled,
+it selects the exact node, origin, ports and phone app before the existing
+promotion/installed-control wizard can publish anything. **3 Tailscale → 3
+Remove Herdr's own route** delegates only to selected owned-route unpublish,
+with its separate consent and safeguards. **3 Tailscale → 2 Your own HTTPS
+route (advanced BYO)** instead uses a canonical HTTPS origin you already route
+to this loopback relay. Managed foreground is no longer a menu choice; its explicit
 `relay/plugin-choose-transport.sh tailscale` entrypoint remains unchanged for
 supported authenticated standalone nodes, with
 fresh consent and session guards. BYO can keep
@@ -140,12 +148,14 @@ packaged diagnostic wrapper; **q Exit** leaves from any menu.
   3 change hostname; 4 remove stable tunnel.
 - WebRTC Gateway: 1 community gateways; 2 deploy/upgrade your own gateway through
   the existing chooser.
-- Tailscale: 1 Always on **unavailable** pending runtime/phone qualification and
-  separate production enablement; 2 your own HTTPS route (advanced BYO);
-  3 Remove Herdr's own route **unavailable** because no qualified standalone
-  installed-route cleanup adapter exists. Selecting unavailable entries does
-  nothing; there is no automatic Tailscale cleanup, Serve reset or development
-  recovery shortcut.
+- Tailscale: 1 Always on dispatches to the installed CLI selector, which
+  currently refuses before changing selection because production activation,
+  runtime/phone qualification and the independent installed-manager gate remain
+  closed; 2 your own HTTPS route (advanced BYO); 3 Remove Herdr's own route
+  dispatches to the selected owned `unpublish` action with its consent and
+  coordinator safeguards. `relay/tailscale-cli.sh remove-missing` remains a
+  separate exact-operation, proved-absence recovery action. Neither option
+  adopts an observed route, resets Serve, or switches an installed service.
 
 **b Back** returns one level. Blank at the top opens Cloudflare, never a tunnel;
 blank/invalid input in submenus starts nothing. EOF/q exits; old t/b and 7/8/9
@@ -163,11 +173,9 @@ run; no external ingress, service-controller or Tailscale query originates here.
 The parent never sources configuration or imports file-backed routing after an
 action; the next header uses a fresh diagnostic read.
 
-This is source-only navigation/presentation work. Gateway inline app
-choose/publish when missing is still unfinished, and the existing QR/publishing
-children's storage/cancellation/onboarding behavior is unchanged, not qualified
-by this slice. Full
-item-5/A1, hosted/package and phone qualification remain outstanding.
+The installed CLI chooser is source-wired, not live verified or enabled in
+shipped builds. The development chooser remains isolated foreground; it does
+not qualify or enable installed publication. Gateway app setup remains separate.
 
 ## Choosing how your phone connects
 
@@ -349,7 +357,13 @@ Current diagnostic ladder:
    by doctor/status and their wrapper/menu header; ping cannot make a partial
    report exit 0. Other required failures still take exit 1, invalid config exit 2.
 5. Service lifecycle, full Herdr comparison, pairing aggregates, Cloudflare
-   supervision and phone activity remain unavailable in this slice. A consistent
+   supervision and phone activity remain unavailable in this slice. For a
+   selected installed CLI profile, `relay/tailscale-cli.sh status` first prints
+   the packaged concise diagnostic, then (only after production activation)
+   requests the selected owned route, installed control and native service
+   status. Its service-manager response is not proof of a running relay; route
+   readiness is not proof of handset/VPN connectivity. Disabled profiles do
+   not contact Tailscale, installed control or a service manager. A consistent
    package, matching local health and valid ping still leave required categories
    unknown; none proves phone/direct-path reachability. CLI admission/inspection
    stays disabled. BYO makes zero Tailscale/LocalAPI/CLI calls. `--probe-ingress`

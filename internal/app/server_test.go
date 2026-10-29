@@ -422,7 +422,7 @@ func TestBroadcastAgentIdentitySatisfiesExactTargetValidation(t *testing.T) {
 		Agent: "omp", Status: "working",
 		Session: "/home/user/.omp/agent/sessions/-work/2026-08-30T19-57-25-194Z_x.jsonl",
 	}
-	server.resolveAgentSessionName(agent)
+	server.resolveAgentSessionName(context.Background(), agent)
 	server.state.CommitInventory([]*coordinator.AgentState{agent}, server.state.RevisionCounter())
 
 	data, err := json.Marshal(server.state.Snapshot())
@@ -503,14 +503,14 @@ func TestResolveAgentSessionName(t *testing.T) {
 	// named carries a canonical session id with both an index record and the
 	// rollout the reader would serve, the shape Locate requires post round-3.
 	named := &coordinator.AgentState{Agent: "codex", Session: codexSessionID}
-	s.resolveAgentSessionName(named)
+	s.resolveAgentSessionName(context.Background(), named)
 	if named.SessionName != "current-session" || named.Session != "current-session" ||
 		named.SessionID != codexSessionID || !named.ConversationHistoryAvailable {
 		t.Fatalf("named session = %#v, want resolved display name and retained history identity", named)
 	}
 
 	unnamed := &coordinator.AgentState{Agent: "codex", Session: "missing-session"}
-	s.resolveAgentSessionName(unnamed)
+	s.resolveAgentSessionName(context.Background(), unnamed)
 	if unnamed.SessionName != "" || unnamed.Session != "missing-session" ||
 		unnamed.SessionID != "missing-session" || !unnamed.ConversationHistoryAvailable {
 		t.Fatalf("unnamed session = %#v, want preserved history identity", unnamed)
@@ -537,7 +537,7 @@ func TestResolveAgentSessionNameTrimsWhitespaceOnlySession(t *testing.T) {
 	s.sessions = session.NewResolver(home)
 
 	agent := &coordinator.AgentState{Agent: "claude", Cwd: cwd, Session: "   "}
-	s.resolveAgentSessionName(agent)
+	s.resolveAgentSessionName(context.Background(), agent)
 	if agent.SessionName != "" {
 		t.Fatalf("SessionName = %q, want empty for a whitespace-only session", agent.SessionName)
 	}
@@ -606,7 +606,7 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	want := rows[1]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", "", sessionID); got != want {
+	if got, err := s.captureFinishedPane(context.Background(), "pane-1", "omp", "", sessionID); err != nil || got != want {
 		t.Fatalf("captured response = %q, want full conversation response %q", got, want)
 	}
 
@@ -617,8 +617,8 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 		ID: "old-finished", Timestamp: activity.MilliTimestamp(time.Date(2026, time.August, 16, 14, 24, 46, 0, time.UTC).UnixMilli()),
 		Kind: "finished", Status: "completed", Agent: "omp", PaneID: "pane-1", Session: "Old title",
 	}}
-	backfilled := s.recentActivities(1)
-	if len(backfilled) != 1 || backfilled[0].Extract != want {
+	backfilled, err := s.recentActivities(context.Background(), 1)
+	if err != nil || len(backfilled) != 1 || backfilled[0].Extract != want {
 		t.Fatalf("backfilled activity = %#v, want full conversation response", backfilled)
 	}
 }
@@ -643,8 +643,8 @@ func TestCaptureFinishedPaneUsesOriginalConversationCwd(t *testing.T) {
 		PaneID: "pane-1", Agent: "claude", Cwd: newCWD, ForegroundCwd: newForeground, SessionID: sessionID,
 	}}, s.state.RevisionCounter())
 
-	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", oldCWD, sessionID,
-		conversation.ProjectContext{CWD: oldCWD, ForegroundCWD: oldForeground}); got != "answer from original cwd" {
+	if got, err := s.captureFinishedPane(context.Background(), "pane-1", "claude", oldCWD, sessionID,
+		conversation.ProjectContext{CWD: oldCWD, ForegroundCWD: oldForeground}); err != nil || got != "answer from original cwd" {
 		t.Fatalf("captured response = %q, want the transcript bound to the completion's original project", got)
 	}
 }
@@ -671,8 +671,8 @@ func TestActivityBackfillKeepsHistoricalSessionCwdEmpty(t *testing.T) {
 		Session:   sessionID,
 	}}
 
-	backfilled := s.recentActivities(1)
-	if len(backfilled) != 1 || backfilled[0].Extract != "historical answer" {
+	backfilled, err := s.recentActivities(context.Background(), 1)
+	if err != nil || len(backfilled) != 1 || backfilled[0].Extract != "historical answer" {
 		t.Fatalf("historical activity = %#v, want response located without current pane cwd", backfilled)
 	}
 }
@@ -696,8 +696,8 @@ func TestActivityBackfillUsesLiveForegroundProject(t *testing.T) {
 		ID: "live-finished", Kind: "finished", Status: "completed", Agent: "claude", PaneID: "pane-1", Session: sessionID,
 	}}
 
-	backfilled := s.recentActivities(1)
-	if len(backfilled) != 1 || backfilled[0].Extract != "foreground answer" {
+	backfilled, err := s.recentActivities(context.Background(), 1)
+	if err != nil || len(backfilled) != 1 || backfilled[0].Extract != "foreground answer" {
 		t.Fatalf("live foreground activity = %#v, want foreground response", backfilled)
 	}
 }
@@ -952,7 +952,7 @@ func TestLatestConversationResponseFollowsClaudeContinuation(t *testing.T) {
 	)
 	server := testServer()
 	server.conversationM = conversation.NewReader(home)
-	if got := server.latestConversationResponse("claude", "/work", anchor); got != "new child response" {
+	if got, err := server.latestConversationResponse(context.Background(), "claude", "/work", anchor); err != nil || got != "new child response" {
 		t.Fatalf("latest conversation response = %q, want child response", got)
 	}
 }
@@ -971,7 +971,7 @@ func TestCaptureFinishedPaneFollowsClaudeContinuation(t *testing.T) {
 	)
 	server := testServer()
 	server.conversationM = conversation.NewReader(home)
-	if got := server.captureFinishedPane(context.Background(), "pane-1", "claude", "/work", anchor); got != "finished child response" {
+	if got, err := server.captureFinishedPane(context.Background(), "pane-1", "claude", "/work", anchor); err != nil || got != "finished child response" {
 		t.Fatalf("finished-pane extraction = %q, want child response", got)
 	}
 }
@@ -1691,12 +1691,13 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	enteredEnrichment := make(chan struct{})
 	releaseEnrichment := make(chan struct{})
 	var firstEnrichment atomic.Bool
-	server.poller.SetEnrich(func(context.Context, []*coordinator.AgentState) {
+	server.poller.SetEnrich(func(context.Context, []*coordinator.AgentState) error {
 		if !firstEnrichment.CompareAndSwap(false, true) {
-			return
+			return nil
 		}
 		close(enteredEnrichment)
 		<-releaseEnrichment
+		return nil
 	})
 	var reconnectWaits atomic.Int32
 	server.poller.SetEventReconnectWait(func(context.Context) bool {
@@ -3787,12 +3788,12 @@ func TestCommittedActivityViewTracksLiveCommitAndClear(t *testing.T) {
 	})
 	entry := activity.NewEntry("prompt", "sent", "hello", "pane-1", "", "", "request-1")
 	s.broadcastCommitted(map[string]any{"type": "activity", "activity": entry})
-	recent := s.recentActivities(500)
-	if len(recent) != 1 || recent[0].ID != entry.ID {
+	recent, err := s.recentActivities(context.Background(), 500)
+	if err != nil || len(recent) != 1 || recent[0].ID != entry.ID {
 		t.Fatalf("committed view = %+v", recent)
 	}
 	s.broadcastCommitted(map[string]any{"type": "activity_history", "activities": []activity.Entry{}})
-	if recent := s.recentActivities(500); len(recent) != 0 {
+	if recent, err := s.recentActivities(context.Background(), 500); err != nil || len(recent) != 0 {
 		t.Fatalf("cleared view = %+v", recent)
 	}
 }

@@ -478,6 +478,7 @@ func writeWorkerTestRelease(t *testing.T, root, version, revision string) {
 		"relay/common.sh",
 		"relay/herdr-mobile-relay-service.sh",
 		"relay/plugin-on-event.sh",
+		"relay/plugin-tailscale-always-on.sh",
 		"relay/setup-link.sh",
 		"relay/stable-setup.sh",
 		"relay/stable-teardown.sh",

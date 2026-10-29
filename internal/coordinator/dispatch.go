@@ -38,6 +38,7 @@ type CommandResult struct {
 }
 
 type Dispatcher struct {
+	installed        *installedDispatcher
 	herdr            *herdr.Client
 	state            *State
 	journal          *activity.Journal
@@ -85,36 +86,63 @@ type paneRead struct {
 }
 
 func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
+	return newDispatcher(client, state, journal, logger, nil)
+}
+
+func newDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger, installed *installedDispatcher) *Dispatcher {
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	dispatcher := &Dispatcher{
 		herdr:         client,
 		state:         state,
 		journal:       journal,
 		logger:        logger,
-		scheduler:     NewScheduler(defaultHerdrCapacity, logger),
+		installed:     installed,
 		testGates:     make(map[string]chan struct{}),
 		reads:         make(map[string]*paneRead),
 		watcherCtx:    watcherCtx,
 		watcherCancel: watcherCancel,
 	}
+	if installed != nil {
+		dispatcher.scheduler = newInstalledScheduler(defaultHerdrCapacity, logger)
+	} else {
+		dispatcher.scheduler = NewScheduler(defaultHerdrCapacity, logger)
+	}
 	dispatcher.scheduler.SetGenerationCurrent(state.PaneSessionCurrent)
 	if journal != nil {
-		dispatcher.activityW = activity.NewWorker(journal)
+		if installed != nil {
+			dispatcher.activityW = activity.NewInstalledWorker(journal)
+		} else {
+			dispatcher.activityW = activity.NewWorker(journal)
+		}
 	}
 	return dispatcher
 }
 
+// SetProfiles, SetBroadcast and SetWakePoll are construction-only setters:
+// configure before concurrent use. Installed retirement turns them into no-ops;
+// it does not make concurrent reconfiguration supported.
 func (d *Dispatcher) SetProfiles(resolver *profiles.Resolver) {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return
+	}
+	defer release()
 	d.profiles = resolver
 	d.lifecycle = NewLifecycle(d.herdr, resolver)
 	d.lifecycle.state = d.state
 	d.state.mu.Lock()
 	d.state.onInventory = func(agents []*AgentState) {
+		_, release, err := d.enterInstalled(context.Background())
+		if err != nil {
+			return
+		}
+		defer release()
 		targets := make([]profiles.PaneIdentity, 0, len(agents))
 		for _, agent := range agents {
 			targets = append(targets, profiles.PaneIdentity{PaneID: agent.PaneID, TerminalID: agent.TerminalID, TabID: agent.TabID, WorkspaceID: agent.WorkspaceID})
 		}
 		if err := resolver.ReconcileOwnership(targets); err != nil {
+			d.retainInstalledCallbackError(err)
 			d.logger.Warn("profile ownership reconciliation failed", "error", err)
 		}
 	}
@@ -122,10 +150,18 @@ func (d *Dispatcher) SetProfiles(resolver *profiles.Resolver) {
 }
 
 func (d *Dispatcher) CancelInflight() {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return
+	}
+	defer release()
 	d.scheduler.CancelInflight()
 }
 
 func (d *Dispatcher) Close(ctx context.Context) error {
+	if d.installed != nil {
+		return d.closeInstalledDispatcher(ctx)
+	}
 	d.closeWatchers()
 	err := d.scheduler.Close(ctx)
 	if d.activityW != nil {
@@ -137,6 +173,11 @@ func (d *Dispatcher) Close(ctx context.Context) error {
 }
 
 func (d *Dispatcher) startWatcher(work func(context.Context)) bool {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return false
+	}
+	defer release()
 	d.watcherMu.Lock()
 	if d.watcherClosed {
 		d.watcherMu.Unlock()
@@ -163,6 +204,7 @@ func (d *Dispatcher) closeWatchers() {
 	d.watcherWG.Wait()
 }
 
+// Metrics and ActivityFailures are diagnostic observations, not work admission.
 func (d *Dispatcher) Metrics() SchedulerMetrics {
 	return d.scheduler.Metrics()
 }
@@ -202,14 +244,28 @@ func (d *Dispatcher) waitTestGate(ctx context.Context, paneID string, generation
 }
 
 func (d *Dispatcher) PruneSlots(active map[string]bool) {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return
+	}
+	defer release()
 	generations := make(map[string]uint64, len(active))
 	for paneID := range active {
 		generations[paneID] = uint64(d.state.Generation(paneID))
 	}
-	d.ApplyTopology(active, generations)
+	d.applyTopology(active, generations)
 }
 
 func (d *Dispatcher) ApplyTopology(active map[string]bool, generations map[string]uint64) {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return
+	}
+	defer release()
+	d.applyTopology(active, generations)
+}
+
+func (d *Dispatcher) applyTopology(active map[string]bool, generations map[string]uint64) {
 	d.scheduler.ApplyTopology(active, generations)
 	d.testGatesMu.Lock()
 	defer d.testGatesMu.Unlock()
@@ -236,14 +292,33 @@ func (d *Dispatcher) paneSessionError(token WorkerToken) error {
 }
 
 func (d *Dispatcher) SetBroadcast(fn func(any)) {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return
+	}
+	defer release()
 	d.broadcast = fn
 }
 
 func (d *Dispatcher) SetWakePoll(fn func()) {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return
+	}
+	defer release()
 	d.wakePoll = fn
 }
 
 func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *CommandResult {
+	ctx, release, entryErr := d.enterInstalled(ctx)
+	if entryErr != nil {
+		return installedMessageRefusal(message, entryErr)
+	}
+	defer release()
+	return d.handle(ctx, message)
+}
+
+func (d *Dispatcher) handle(ctx context.Context, message map[string]any) *CommandResult {
 	receivedAt := time.Now()
 	if raw, ok := message["_server_received_at"].(string); ok {
 		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
@@ -315,12 +390,32 @@ func (d *Dispatcher) HandleAdmitted(
 	message map[string]any,
 	admitted func(),
 ) *CommandResult {
+	defer d.enterInstalledCallback()()
+	originalAck := admitted
+	var ack sync.Once
+	safeAck := func() {
+		ack.Do(func() {
+			if originalAck != nil {
+				originalAck()
+			}
+		})
+	}
+	defer safeAck()
+	ctx, release, entryErr := d.enterInstalled(ctx)
+	if entryErr != nil {
+		return installedMessageRefusal(message, entryErr)
+	}
+	defer func() {
+		defer release()
+		safeAck()
+	}()
+	admitted = safeAck
 	var once sync.Once
 	signal := func() {
 		once.Do(admitted)
 	}
 	ctx = context.WithValue(ctx, admissionContextKey{}, signal)
-	result := d.Handle(ctx, message)
+	result := d.handle(ctx, message)
 	signal()
 	return result
 }
@@ -337,6 +432,26 @@ func (d *Dispatcher) HandleTopologyAdmitted(
 	admitted func(),
 	handle func(context.Context) *CommandResult,
 ) *CommandResult {
+	defer d.enterInstalledCallback()()
+	originalAck := admitted
+	var ack sync.Once
+	safeAck := func() {
+		ack.Do(func() {
+			if originalAck != nil {
+				originalAck()
+			}
+		})
+	}
+	defer safeAck()
+	ctx, release, entryErr := d.enterInstalled(ctx)
+	if entryErr != nil {
+		return installedDispatchRefusal(entryErr)
+	}
+	defer func() {
+		defer release()
+		safeAck()
+	}()
+	admitted = safeAck
 	var once sync.Once
 	signal := func() {
 		once.Do(admitted)
@@ -1019,6 +1134,11 @@ func (d *Dispatcher) recordActivityWithExtract(kind, status, summary, extract, p
 }
 
 func (d *Dispatcher) RecordActivity(kind, status, summary, paneID, requestID string) {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return
+	}
+	defer release()
 	d.recordActivity(kind, status, summary, paneID, requestID)
 }
 
@@ -1040,6 +1160,11 @@ func (d *Dispatcher) RecordTransitionActivity(
 	extract string,
 	blockedIdentity ...any,
 ) bool {
+	_, release, err := d.enterInstalled(context.Background())
+	if err != nil {
+		return false
+	}
+	defer release()
 	if d.activityW == nil {
 		return false
 	}
@@ -1174,6 +1299,11 @@ func (d *Dispatcher) readPaneForDisplay(
 }
 
 func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
+	ctx, release, entryErr := d.enterInstalled(ctx)
+	if entryErr != nil {
+		return map[string]any{"type": "pane_content", "pane_id": stringValue(message, "pane_id"), "error": entryErr.Error()}
+	}
+	defer release()
 	paneID := stringValue(message, "pane_id")
 	if paneID == "" {
 		return map[string]any{"type": "pane_content", "pane_id": "", "content": "", "format": "text"}
@@ -1220,6 +1350,9 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 			return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
 		}
 	}
+	if d.installed != nil && readCtx.Err() != nil {
+		return map[string]any{"type": "pane_content", "pane_id": paneID, "error": readCtx.Err().Error()}
+	}
 	read, err := call.read, call.err
 	if err != nil {
 		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
@@ -1243,6 +1376,11 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 }
 
 func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {
+	ctx, release, entryErr := d.enterInstalled(ctx)
+	if entryErr != nil {
+		return map[string]any{"type": "pane_probe", "pane_id": stringValue(message, "pane_id"), "error": entryErr.Error()}
+	}
+	defer release()
 	paneID := stringValue(message, "pane_id")
 	format := stringValue(message, "format")
 	if format != "ansi" {
@@ -1257,6 +1395,9 @@ func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any
 	generation := d.state.Generation(paneID)
 	contentRevision := d.state.ContentRevision(paneID)
 	content, err := d.herdr.ProbePaneVisible(readCtx, paneID, lines, format)
+	if err == nil && d.installed != nil {
+		err = readCtx.Err()
+	}
 	if err != nil {
 		return map[string]any{"type": "pane_probe", "pane_id": paneID, "format": format, "error": "Unable to read the agent pane"}
 	}
@@ -1266,6 +1407,7 @@ func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any
 	return map[string]any{"type": "pane_probe", "pane_id": paneID, "content": string(content), "format": format}
 }
 
+// HandleGetActivity reads in-memory journal data only, including after drain.
 func (d *Dispatcher) HandleGetActivity(message map[string]any) map[string]any {
 	limit := intValue(message["limit"], 500)
 	if limit < 1 || limit > 500 {
@@ -1282,6 +1424,17 @@ func (d *Dispatcher) HandleClearActivities(
 	requestID string,
 	deliver func(*CommandResult),
 ) *CommandResult {
+	defer d.enterInstalledCallback()()
+	_, release, entryErr := d.enterInstalled(context.Background())
+	if entryErr != nil {
+		result := installedDispatchRefusal(entryErr)
+		result.RequestID, result.Action = requestID, "clear_activities"
+		if deliver != nil {
+			deliver(result)
+		}
+		return result
+	}
+	defer release()
 	finish := func(result *CommandResult) *CommandResult {
 		if deliver != nil {
 			deliver(result)

@@ -74,31 +74,37 @@ func newRecentProjectionCache(options BrowserOptions) *recentProjectionCache {
 	}
 }
 
-// get only holds the mutex for the map lookup and bookkeeping. The returned
-// value is immutable and cloned by the caller after the lock is released.
+// Clone immutable backing after releasing the bookkeeping lock. Callers may
+// mutate their private projection without changing another waiter's view.
 func (cache *recentProjectionCache) get(key string, now time.Time) (recentProjection, bool) {
 	if cache == nil {
 		return recentProjection{}, false
 	}
 	cache.mu.Lock()
-	defer cache.mu.Unlock()
 	item, ok := cache.entries[key]
 	if !ok {
 		cache.misses++
+		cache.mu.Unlock()
 		return recentProjection{}, false
 	}
 	if cache.idleTTL > 0 && now.Sub(item.lastUsed) >= cache.idleTTL {
 		cache.deleteLocked(key)
 		cache.misses++
+		cache.mu.Unlock()
 		return recentProjection{}, false
 	}
 	cache.hits++
 	item.lastUsed = now
 	cache.entries[key] = item
+	cache.mu.Unlock()
 	return cloneRecentProjection(item.value), true
 }
 
 func (cache *recentProjectionCache) put(key string, value recentProjection, now time.Time) bool {
+	return cache.putIn(nil, key, value, now)
+}
+
+func (cache *recentProjectionCache) putIn(ctx context.Context, key string, value recentProjection, now time.Time) bool {
 	if cache == nil || key == "" {
 		return false
 	}
@@ -108,8 +114,20 @@ func (cache *recentProjectionCache) put(key string, value recentProjection, now 
 		return false
 	}
 	copyValue.accountedFor = bytes
+	var done <-chan struct{}
+	if ctx != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		done = ctx.Done()
+	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	select {
+	case <-done:
+		return false
+	default:
+	}
 	if previous, ok := cache.entries[key]; ok {
 		cache.totalBytes -= previous.bytes
 	}
@@ -217,9 +235,15 @@ func (b *Browser) projectRecentRange(
 	digest string,
 	omo bool,
 ) (recentProjection, error) {
+	if err := ctx.Err(); err != nil {
+		return recentProjection{}, err
+	}
 	key := b.recentProjectionKey(scope, source, start, end, digest, omo)
 	if cached, ok := b.recentCache.get(key, time.Now()); ok {
-		return cloneRecentProjection(cached), nil
+		if err := ctx.Err(); err != nil {
+			return recentProjection{}, err
+		}
+		return cached, nil
 	}
 	projection, actualDigest, err := b.projectRecentRangeUncached(ctx, scope, source, start, end, digest, omo)
 	if err != nil {
@@ -228,7 +252,15 @@ func (b *Browser) projectRecentRange(
 	if actualDigest != digest {
 		return recentProjection{}, errRecentProjectionChanged
 	}
-	b.recentCache.put(key, projection, time.Now())
+	if err := ctx.Err(); err != nil {
+		return recentProjection{}, err
+	}
+	if b.installed == nil {
+		b.recentCache.putIn(ctx, key, projection, time.Now())
+	}
+	if err := ctx.Err(); err != nil {
+		return recentProjection{}, err
+	}
 	return cloneRecentProjection(projection), nil
 }
 
@@ -250,10 +282,16 @@ func (b *Browser) projectRecentRangeSingleRead(
 	// pass below rechecks the expected digest. This is important for the shared
 	// request budget: a cache hit must not turn into a second physical read just
 	// to discover the same digest.
+	if err := ctx.Err(); err != nil {
+		return recentProjection{}, "", err
+	}
 	if expectedDigest != "" {
 		key := b.recentProjectionKey(scope, source, start, end, expectedDigest, omo)
 		if cached, ok := b.recentCache.get(key, time.Now()); ok {
-			return cloneRecentProjection(cached), expectedDigest, nil
+			if err := ctx.Err(); err != nil {
+				return recentProjection{}, "", err
+			}
+			return cached, expectedDigest, nil
 		}
 	}
 	projection, digest, err := b.projectRecentRangeUncached(ctx, scope, source, start, end, expectedDigest, omo)
@@ -261,7 +299,15 @@ func (b *Browser) projectRecentRangeSingleRead(
 		return recentProjection{}, "", err
 	}
 	key := b.recentProjectionKey(scope, source, start, end, digest, omo)
-	b.recentCache.put(key, projection, time.Now())
+	if err := ctx.Err(); err != nil {
+		return recentProjection{}, "", err
+	}
+	if b.installed == nil {
+		b.recentCache.put(key, projection, time.Now())
+	}
+	if err := ctx.Err(); err != nil {
+		return recentProjection{}, "", err
+	}
 	return cloneRecentProjection(projection), digest, nil
 }
 
@@ -285,7 +331,7 @@ func (b *Browser) projectRecentRangeUncached(
 	projection := recentProjection{}
 	for {
 		record, nextErr := reader.Next()
-		if errors.Is(nextErr, io.EOF) {
+		if nextErr == io.EOF {
 			break
 		}
 		if nextErr != nil {

@@ -1049,7 +1049,13 @@ if args[0] in ("-replace", "-insert", "-remove"):
     with open(os.environ["PLIST_LOG"], "a", encoding="utf-8") as log:
         log.write(" ".join(args) + "\n")
 elif args[0] == "-extract":
-    print(document["EnvironmentVariables"]["HERDR_RELAY_ENV"])
+    value = document
+    for part in args[1].split("."):
+        try:
+            value = value[int(part)] if isinstance(value, list) else value[part]
+        except (KeyError, IndexError, ValueError):
+            raise SystemExit(1)
+    print(value)
 elif args[0] == "-lint":
     pass
 else:
@@ -1059,6 +1065,43 @@ chmod 700 "$FAKE_PLUTIL"
 export PLIST_LOG
 HERDR_PLUTIL="$FAKE_PLUTIL"
 export HERDR_PLUTIL
+# The promoted LaunchAgent has no EnvironmentVariables. Both setup-link
+# wrappers use this shared prelude before Go's owned reprint gate.
+mkdir -p "$WORK_DIR/promoted-config"
+printf 'HERDR_RELAY_INSTANCE_ID=install-fixture\n' > "$WORK_DIR/promoted-config/relay.env"
+cat > "$WORK_DIR/promoted.plist" <<EOF
+<?xml version="1.0"?><plist version="1.0"><dict>
+<key>Label</key><string>com.herdr-mobile-relay.service</string>
+<key>ProgramArguments</key><array>
+<string>$WORK_DIR/release/herdr-mobile-relay</string><string>serve-installed</string>
+<string>--selection</string><string>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</string>
+<string>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</string>
+<string>$WORK_DIR/promoted-config</string><string>install-fixture</string>
+</array></dict></plist>
+EOF
+test "$(XDG_CONFIG_HOME="$WORK_DIR/promoted-config" installed_promoted_selection_env "$WORK_DIR/promoted.plist" "$WORK_DIR/promoted-config/relay.env" "$FAKE_PLUTIL")" = "$WORK_DIR/promoted-config/relay.env"
+mkdir -p "$WORK_DIR/Library/LaunchAgents"
+cp "$WORK_DIR/promoted.plist" "$WORK_DIR/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+(
+    uname() { printf 'Darwin\n'; }
+    export HOME="$WORK_DIR" XDG_CONFIG_HOME="$WORK_DIR/promoted-config" HERDR_RELAY_ENV="$WORK_DIR/promoted-config/relay.env"
+    SCRIPT_DIR="$WORK_DIR/relay"
+    test "$(installed_service_env_file)" = "$HERDR_RELAY_ENV"
+    assert_service_env_matches "$HERDR_RELAY_ENV"
+    HERDR_RELAY_ENV="$WORK_DIR/promoted-config/other.env"
+    if installed_service_env_file >/dev/null 2>&1; then
+        echo 'plugin reprint prelude accepted a mismatched env selection' >&2; exit 1
+    fi
+)
+# Wrong config selection or a stale installed identity cannot be projected as
+# a service env file; missing EnvironmentVariables alone is never authority.
+if XDG_CONFIG_HOME="$WORK_DIR/other" installed_promoted_selection_env "$WORK_DIR/promoted.plist" "$WORK_DIR/promoted-config/relay.env" "$FAKE_PLUTIL" >/dev/null; then
+    echo 'promoted service accepted mismatched config root' >&2; exit 1
+fi
+printf 'HERDR_RELAY_INSTANCE_ID=other\n' > "$WORK_DIR/promoted-config/other.env"
+if XDG_CONFIG_HOME="$WORK_DIR/promoted-config" installed_promoted_selection_env "$WORK_DIR/promoted.plist" "$WORK_DIR/promoted-config/other.env" "$FAKE_PLUTIL" >/dev/null; then
+    echo 'promoted service accepted mismatched installation' >&2; exit 1
+fi
 cat > "$WORK_DIR/service.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

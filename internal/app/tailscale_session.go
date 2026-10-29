@@ -305,6 +305,19 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 // not use LocalAPI SessionAuthority; the registration verifier is read-only and
 // must report a live-qualified exact route before admission can open.
 func (s *Server) armTailscaleCLI(ctx context.Context) (localcontrol.Status, error) {
+	unlock, err := s.externalArmMu.Lock(ctx)
+	if err != nil {
+		status := s.tailscaleCLIControlStatus(ctx)
+		status.ArmOutcome = "not-committed"
+		status.ArmFailureCode = externalArmFailureCode(err)
+		return status, err
+	}
+	defer unlock()
+	return s.armTailscaleCLILocked(ctx)
+}
+
+// armTailscaleCLILocked requires externalArmMu.
+func (s *Server) armTailscaleCLILocked(ctx context.Context) (localcontrol.Status, error) {
 	refused := func(err error) (localcontrol.Status, error) {
 		status := s.tailscaleCLIControlStatus(ctx)
 		status.ArmOutcome = "not-committed"
@@ -317,11 +330,6 @@ func (s *Server) armTailscaleCLI(ctx context.Context) (localcontrol.Status, erro
 		}
 		return status, err
 	}
-	unlock, err := s.externalArmMu.Lock(ctx)
-	if err != nil {
-		return refused(err)
-	}
-	defer unlock()
 	if err := s.checkTailscaleCLIReadiness(ctx); err != nil {
 		return refused(err)
 	}
@@ -382,17 +390,25 @@ func (s *Server) armTailscaleCLI(ctx context.Context) (localcontrol.Status, erro
 // invitation; service restarts can resume existing devices without minting a
 // new bootstrap credential.
 func (s *Server) admitTailscaleCLI(ctx context.Context) (localcontrol.Status, error) {
+	unlock, err := s.externalArmMu.Lock(ctx)
+	if err != nil {
+		status := s.tailscaleCLIControlStatus(ctx)
+		status.ArmOutcome = "not-committed"
+		status.ArmFailureCode = externalArmFailureCode(err)
+		return status, err
+	}
+	defer unlock()
+	return s.admitTailscaleCLILocked(ctx)
+}
+
+// admitTailscaleCLILocked requires externalArmMu.
+func (s *Server) admitTailscaleCLILocked(ctx context.Context) (localcontrol.Status, error) {
 	refused := func(err error) (localcontrol.Status, error) {
 		status := s.tailscaleCLIControlStatus(ctx)
 		status.ArmOutcome = "not-committed"
 		status.ArmFailureCode = externalArmFailureCode(err)
 		return status, err
 	}
-	unlock, err := s.externalArmMu.Lock(ctx)
-	if err != nil {
-		return refused(err)
-	}
-	defer unlock()
 	if err := s.checkTailscaleCLIReadiness(ctx); err != nil {
 		return refused(err)
 	}
@@ -420,8 +436,11 @@ func (s *Server) admitTailscaleCLI(ctx context.Context) (localcontrol.Status, er
 }
 
 func (s *Server) checkTailscaleCLIReadiness(ctx context.Context) error {
+	if s.installedAdmissionRevoked() {
+		return tailscalecli.ErrWorkflowRequired
+	}
 	if !s.managedLocalReady() {
-		return errors.New("local relay inventory or backend readiness is incomplete")
+		return fmt.Errorf("%w: local relay inventory or backend readiness is incomplete", tailscalecli.ErrTransientUnavailable)
 	}
 	if s.webH == nil || s.webH.BundleVersion() != s.version || s.webH.BundleRevision() != s.revision {
 		return errors.New("local web bundle identity does not match the relay binary")
@@ -434,8 +453,11 @@ func (s *Server) checkTailscaleCLIReadiness(ctx context.Context) error {
 		return err
 	}
 	route, err := s.tailscaleCLIRegistration.VerifyRegisteredRoute(ctx, s.cfg.TailscaleCLIScope, s.cfg.InstanceID, s.cfg.TailscaleCLIOrigin, port, s.cfg.Port)
-	if err != nil || route.Readiness != tailscalecli.ReadinessReady || !tailscaleCLIRouteEnabledForScope(s.cfg.TailscaleCLIScope, route) {
-		return errors.New("persistent CLI-backed Serve route is not enabled for this scope and ready")
+	if err != nil {
+		return err
+	}
+	if route.Readiness != tailscalecli.ReadinessReady || !tailscaleCLIRouteEnabledForScope(s.cfg.TailscaleCLIScope, route) {
+		return tailscalecli.ErrUnsupported
 	}
 	if err := s.checkLocalHealth(ctx); err != nil {
 		return err
@@ -448,9 +470,12 @@ func (s *Server) checkTailscaleCLIReadiness(ctx context.Context) error {
 	}
 	response, err := managedHealthClientForServer(s, managedHealthTimeout).Do(request)
 	if err != nil {
-		return fmt.Errorf("trusted CLI-backed HTTPS health check failed: %w", err)
+		return redactInstalledEvidence(errors.Join(err, checkCtx.Err()))
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusBadGateway || response.StatusCode == http.StatusServiceUnavailable || response.StatusCode == http.StatusGatewayTimeout {
+		return fmt.Errorf("%w: CLI-backed HTTPS health is unavailable", tailscalecli.ErrTransientUnavailable)
+	}
 	if response.StatusCode != http.StatusOK || response.Header.Get("X-Herdr-Relay-Instance") != s.cfg.InstanceID {
 		return errors.New("CLI-backed HTTPS health endpoint identity did not match this relay")
 	}
@@ -467,11 +492,11 @@ func (s *Server) checkTailscaleCLIReadiness(ctx context.Context) error {
 		BundleVersion  string `json:"bundle_version"`
 		BundleRevision string `json:"bundle_revision"`
 	}
-	if err := decodeManagedHealth(response.Body, &health); err != nil {
-		return errors.New("CLI-backed HTTPS health response was invalid")
+	if err := decodeInstalledHealth(checkCtx, response.Body, &health); err != nil {
+		return err
 	}
 	if health.Status != "ok" || health.Readiness != "ready" || health.Transport != config.TransportTailscaleCLI ||
-		health.Instance != s.cfg.InstanceID || health.ControlRunID != s.cfg.ControlRunID ||
+		health.Instance != s.cfg.InstanceID || health.ControlRunID != s.controlRunID() ||
 		health.Version != s.version || health.Revision != s.revision || health.Origin != s.cfg.TailscaleCLIOrigin ||
 		s.webH == nil || health.BundleHash != s.webH.BundleHash() ||
 		health.BundleVersion != s.version || health.BundleRevision != s.revision {
@@ -511,6 +536,14 @@ func (s *Server) tailscaleCLIControlStatus(ctx context.Context) localcontrol.Sta
 	status.Transport = config.TransportTailscaleCLI
 	status.HTTPSOrigin = s.cfg.TailscaleCLIOrigin
 	status.PersistentRouteReady = false
+	// Publication probes this same HTTP service while holding the setup
+	// operation lock. Waiting health must never reenter that lock.
+	if s.installedSetup != nil && !s.installedSetup.registered() {
+		status.PersistentRouteState = s.installedSetup.phase()
+		status.Ready = false
+		status.Quarantined = true
+		return status
+	}
 	if s.tailscaleCLIRegistration == nil {
 		status.PersistentRouteState = "unavailable"
 		status.Quarantined = true
@@ -888,6 +921,9 @@ func (s *Server) checkManagedTailscaleReadinessWithoutOwner(ctx context.Context,
 }
 
 func (s *Server) checkLocalHealth(ctx context.Context) error {
+	if s.installedCLI != nil || s.installedSetup != nil {
+		return s.checkInstalledLocalHealth(ctx)
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, managedHealthTimeout)
 	defer cancel()
 	client := managedHealthClientForServer(s, managedHealthTimeout)
@@ -1165,6 +1201,11 @@ func (s *Server) armForControl(ctx context.Context) (localcontrol.Status, error)
 }
 
 func (s *Server) controlRunID() string {
+	if s.cfg.Transport == config.TransportTailscaleCLI && (s.installedCLI != nil || s.installedSetup != nil) {
+		s.installedRunMu.RLock()
+		defer s.installedRunMu.RUnlock()
+		return s.installedRun
+	}
 	if s.cfg.Transport == config.TransportTailscaleExternal || s.cfg.Transport == config.TransportTailscaleCLI {
 		return s.cfg.ControlRunID
 	}

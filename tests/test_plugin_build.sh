@@ -531,6 +531,52 @@ sleep 1
 grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||
     { echo "a configured relay did not open the setup menu" >&2; exit 1; }
 
+# Fresh PUBLIC install: no release-download credential and no relay.env. The
+# same existing generator must provide a literal private identity for setup.
+FRESH_HOME="$WORK_DIR/public-home"
+FRESH_ROOT="$FRESH_HOME/releases"
+FRESH_CONFIG="$FRESH_HOME/config"
+FRESH_RELEASE="$FRESH_ROOT/releases/$TEST_VERSION-new"
+mkdir -p "$FRESH_RELEASE/relay" "$FRESH_CONFIG"
+cp "$NEW_RELEASE/release-manifest.json" "$NEW_RELEASE/herdr-mobile-relay" "$FRESH_RELEASE/"
+cp "$NEW_RELEASE/relay/herdr-mobile-relay-service.sh" "$FRESH_RELEASE/relay/"
+cat > "$FRESH_INSTALLER" <<EOF
+#!/bin/sh
+set -eu
+printf '%s' "\${GH_TOKEN:-}" > "$FRESH_TOKEN_RECORD"
+temp="\$INSTALL_ROOT/.current-install"
+ln -s "$FRESH_RELEASE" "\$temp"
+mv -f "\$temp" "\$INSTALL_ROOT/current"
+EOF
+rm -f "$SETUP_RECORD"
+if ! run_fresh_build env GH_API_PUBLIC=1 HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay; then
+    echo 'fresh public install did not prepare relay identity' >&2
+    exit 1
+fi
+[ ! -s "$FRESH_TOKEN_RECORD" ] && [ ! -e "$FRESH_CONFIG/github-token" ] &&
+    [ -f "$FRESH_CONFIG/relay.env" ] && [ "$(stat -c %a "$FRESH_CONFIG/relay.env")" = 600 ] || {
+    echo 'public install required download authentication or left an unsafe identity' >&2; exit 1;
+}
+literal_env_lookup "$FRESH_CONFIG/relay.env" HERDR_RELAY_TOKEN
+[ "${#LITERAL_VALUE}" -eq 32 ] || { echo 'fresh public relay token missing' >&2; exit 1; }
+literal_env_lookup "$FRESH_CONFIG/relay.env" HERDR_RELAY_INSTANCE_ID
+[ -n "$LITERAL_VALUE" ] || { echo 'fresh public instance missing' >&2; exit 1; }
+sleep 1
+[ "$(cat "$SETUP_RECORD")" = 'plugin action invoke setup --plugin herdr-mobile-relay.events' ] || {
+    echo 'fresh public install did not schedule exactly one Setup action' >&2; exit 1;
+}
+cp -p "$FRESH_CONFIG/relay.env" "$WORK_DIR/public-first-identity"
+rm -f "$SETUP_RECORD"
+if ! run_fresh_build env GH_API_PUBLIC=1 HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay; then
+    echo 'public reinstall failed' >&2; exit 1
+fi
+sleep 1
+cmp -s "$WORK_DIR/public-first-identity" "$FRESH_CONFIG/relay.env" &&
+    [ "$(cat "$SETUP_RECORD")" = 'plugin action invoke setup --plugin herdr-mobile-relay.events' ] &&
+    [ ! -s "$FRESH_TOKEN_RECORD" ] && [ ! -e "$FRESH_CONFIG/github-token" ] || {
+    echo 'public reinstall changed private identity/credential state or scheduled Setup more than once' >&2; exit 1;
+}
+
 # --- Explicit operator-managed CLI package update ---------------------------
 # Exercise the complete update entrypoint with only a fake relay manager,
 # release installer, health endpoint and systemctl. The selected CLI is a

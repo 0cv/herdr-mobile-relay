@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,13 +12,14 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
-// tailscale-cli retains filesystem-only binary selection and the local-only
-// transport-switch check. All real CLI Serve operations use the process-local
-// dev-tailscale-cli workflow after Go-owned profile/isolation validation; this
-// does not claim same-user anti-fabrication or shell-launcher provenance.
+// tailscale-cli provides filesystem-only binary selection, a local transport
+// switch check and an independently gated read-only installed preflight.
+// Route mutation remains confined to the existing installed coordinator or
+// isolated development workflow; no shell-launcher provenance is implied.
 func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	return runTailscaleCLIWithInput(args, os.Stdin, stdout, stderr)
 }
@@ -43,12 +45,52 @@ func runTailscaleCLIWithInput(args []string, stdin io.Reader, stdout, stderr io.
 			_, err := fmt.Fprintln(stdout, "development CLI access is limited to the profile-checked isolated dev-tailscale-cli workflow; runtime qualification remains pending")
 			return status(err)
 		}
+		if config.TailscaleCLIProfilesEnabled() {
+			return 0, nil
+		}
 		return 2, errors.New("production activation remains disabled pending physical-phone qualification and separate production enablement; no CLI or service was contacted")
+	}
+	if len(args) > 0 && args[0] == "installed-preflight" {
+		if !config.TailscaleCLIProfilesEnabled() {
+			return 2, errors.New("installed Tailscale CLI needs runtime/phone qualification and separate production enablement")
+		}
+		flags := flag.NewFlagSet("tailscale-cli installed-preflight", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		binary := flags.String("binary", "", "selected absolute CLI")
+		port := flags.Int("https-port", 443, "selected HTTPS listener")
+		backend := flags.Int("backend-port", 8375, "selected loopback relay listener")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return 2, tailscaleCLIUsageError()
+		}
+		ctx, stop := installedCommandContext()
+		defer stop()
+		report, err := tailscalecli.PreflightInstalledBinary(ctx, *binary, *port, *backend)
+		if err != nil {
+			return 1, fmt.Errorf("installed CLI identity/profile unavailable: %w", err)
+		}
+		return status(json.NewEncoder(stdout).Encode(report))
+	}
+	if len(args) > 0 && args[0] == "installed-selection-check" {
+		if !config.TailscaleCLIProfilesEnabled() || len(args) != 1 {
+			return 2, tailscaleCLIUsageError()
+		}
+		cfg, err := config.LoadInstalled()
+		if err != nil {
+			return 1, errors.New("installed CLI selection is invalid")
+		}
+		if _, err := config.BindInstalledCLI(cfg); err != nil {
+			return 1, errors.New("installed CLI selection is invalid")
+		}
+		return 0, nil
 	}
 	if len(args) == 0 {
 		return 2, tailscaleCLIUsageError()
 	}
 	operation, operationArgs := args[0], args[1:]
+	switch operation {
+	case "status", "recover", "assert-ready", "unpublish", "release-backend-port", "reconcile":
+		return runInstalledRouteCommand(operation, operationArgs, stdout, stderr)
+	}
 	if operation == "resolve-binary" {
 		flags := flag.NewFlagSet("tailscale-cli resolve-binary", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -126,7 +168,10 @@ func readRouteConfirmation(stdin io.Reader, expected string) (string, error) {
 	if stdin == nil {
 		return "", errors.New("route-bound confirmation must be supplied on stdin")
 	}
-	reader := bufio.NewReaderSize(stdin, 512)
+	reader, ok := stdin.(*bufio.Reader)
+	if !ok {
+		reader = bufio.NewReaderSize(stdin, 512)
+	}
 	line, err := reader.ReadSlice('\n')
 	if err != nil || len(line) > 512 {
 		return "", errors.New("route-bound confirmation line is missing or oversized")
@@ -139,5 +184,5 @@ func readRouteConfirmation(stdin io.Reader, expected string) (string, error) {
 }
 
 func tailscaleCLIUsageError() error {
-	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check|resolve-binary|check-transport-switch|with-transport-switch-lock}; real CLI operations require dev-tailscale-cli")
+	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check|resolve-binary|installed-preflight|installed-selection-check|check-transport-switch|with-transport-switch-lock}; real CLI operations require an installed selection or dev-tailscale-cli")
 }

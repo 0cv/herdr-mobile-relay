@@ -29,6 +29,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
+	"github.com/0cv/herdr-mobile-relay/internal/conversationlife"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
@@ -100,6 +101,8 @@ type Server struct {
 	sessions                        *session.Resolver
 	historyM                        *history.Manager
 	conversationM                   *conversation.Reader
+	conversationOwner               *conversationlife.Owner
+	conversationCollect             sync.Once
 	conversationB                   *conversation.Browser
 	profiles                        *profiles.Resolver
 	webH                            *web.Handler
@@ -108,6 +111,9 @@ type Server struct {
 	clipboardWrite                  func(context.Context, []byte) error
 	copyRunner                      copyResponseRunner
 	speechSynth                     func(context.Context, string, string) ([]byte, error)
+	installedBeforeServe            func() // test scheduling only; nil in production
+	installedServeDraining          func() // test observation only; nil in production
+	installedOperatorWaiting        func() // observes real pairing queue only; nil in production
 	speechStatus                    func() speech.Catalog
 	speechInstall                   func(context.Context, string) error
 	speechRemove                    func(string) error
@@ -121,6 +127,7 @@ type Server struct {
 	appDeployM                      *appdeploy.Manager
 	hybrid                          *hybridTransport
 	uploadM                         *upload.Manager
+	installedUpload                 *installedUploadOwner
 	deviceAuth                      *deviceauth.Store
 	deviceAuthMu                    sync.RWMutex
 	bootstrapGate                   *deviceauth.BootstrapGate
@@ -128,6 +135,12 @@ type Server struct {
 	tailscaleSession                managedTailscaleAuthority
 	tailscaleCLIRegistration        tailscaleCLIRegistrationVerifier
 	developmentCLIWorkflow          *tailscalecli.DevelopmentWorkflow
+	installedCLI                    *tailscalecli.InstalledSession
+	installedSetup                  *installedSetupState
+	installedBackend                *installedBackend
+	installedRunMu                  sync.RWMutex
+	installedRun                    string // public generation only; never the capability
+	installedTerminal               bool   // guarded by mu; never reset in this generation
 	listenerBound                   chan struct{}
 	listenerBoundOnce               sync.Once
 	developmentBackendBound         chan struct{}
@@ -479,15 +492,46 @@ func newServerWithStartup(
 	authority managedTailscaleAuthority,
 	policy startupPolicy,
 ) *Server {
+	return newServerWithResources(cfg, version, revision, logger, owner, authority, policy, ordinaryUploadResources)
+}
+
+func newServerWithResources(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner, authority managedTailscaleAuthority, policy startupPolicy, resources uploadResourcePolicy) *Server {
+	return newServerWithResourcesIn(context.Background(), cfg, version, revision, logger, owner, authority, policy, resources)
+}
+
+func newServerWithResourcesIn(ctx context.Context, cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner, authority managedTailscaleAuthority, policy startupPolicy, resources uploadResourcePolicy) *Server {
+	// Installed selection binds all conversation consumers before the remaining
+	// server factories, store access or request publication. No ordinary Reader
+	// fallback is constructed on an installed acquisition failure.
+	home, _ := os.UserHomeDir()
+	var conversationReader *conversation.Reader
+	var conversationBrowser *conversation.Browser
+	var sessResolver *session.Resolver
+	var conversationOwner *conversationlife.Owner
+	if resources == cliInstalledUploadResources {
+		if cfg == nil || cfg.Transport != config.TransportTailscaleCLI || ctx == nil || !filepath.IsAbs(home) {
+			return &Server{cfg: cfg, initErr: conversationlife.ErrRefused}
+		}
+		conversationOwner = conversationlife.New()
+		var err error
+		conversationReader, conversationBrowser, sessResolver, err = acquireInstalledConversation(ctx, home, cfg.CacheDir, conversationOwner)
+		if err != nil {
+			conversationOwner.Join()
+			return &Server{cfg: cfg, initErr: err}
+		}
+	}
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
 	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
 	_, clipboardRead, _ := clipboard.Reader()
 	pollInterval := time.Duration(cfg.PollInterval * float64(time.Second))
-	poller := coordinator.NewPoller(herdrClient, state, pollInterval, logger)
-
-	home, _ := os.UserHomeDir()
-	hostname, _ := os.Hostname()
+	var hostname string
+	if resources == cliInstalledUploadResources {
+		hostname, _ = installedConstructorHostname()
+	} else {
+		hostname, _ = os.Hostname()
+	}
+	poller := coordinator.NewPollerWithHostname(herdrClient, state, pollInterval, logger, hostname)
 	if hostname == "" {
 		hostname = "relay"
 	} else if idx := strings.Index(hostname, "."); idx > 0 {
@@ -499,29 +543,27 @@ func newServerWithStartup(
 			logger.Warn("profile ownership requires recovery; relaunch is disabled", "error", err)
 		}
 	}
-	conversationReader := conversation.NewReader(home)
-	var conversationBrowser *conversation.Browser
-	cacheRoot := ""
-	if strings.TrimSpace(cfg.CacheDir) != "" {
-		cacheRoot = filepath.Join(cfg.CacheDir, "conversation-history")
+	if conversationOwner == nil {
+		conversationReader = conversation.NewReader(home)
+		cacheRoot := ""
+		if strings.TrimSpace(cfg.CacheDir) != "" {
+			cacheRoot = filepath.Join(cfg.CacheDir, "conversation-history")
+		}
+		var browserErr error
+		conversationBrowser, browserErr = conversation.NewBrowser(conversationReader, cacheRoot, conversation.DefaultBrowserOptions())
+		if browserErr != nil {
+			logger.Warn("interactive conversation browsing unavailable", "error", browserErr)
+		}
+		sessResolver = session.NewResolverWithReader(home, conversationReader)
 	}
-	conversationBrowser, browserErr := conversation.NewBrowser(conversationReader, cacheRoot, conversation.DefaultBrowserOptions())
-	if browserErr != nil {
-		logger.Warn("interactive conversation browsing unavailable", "error", browserErr)
-	}
-	sessResolver := session.NewResolverWithReader(home, conversationReader)
 	histManager := history.NewManager(cfg.CacheDir)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
 
-	var uploadManager *upload.Manager
-	var uploadErr error
-	if strings.TrimSpace(cfg.CacheDir) == "" {
-		uploadErr = errors.New("cache directory is required")
-	} else {
-		uploadManager, uploadErr = upload.NewManager(upload.Config{
-			Root: filepath.Join(cfg.CacheDir, "uploads"), Logger: logger,
-		})
+	uploadRoot := ""
+	if strings.TrimSpace(cfg.CacheDir) != "" {
+		uploadRoot = filepath.Join(cfg.CacheDir, "uploads")
 	}
+	uploadManager, uploadOwner, uploadErr := acquireAppUpload(resources, upload.Config{Root: uploadRoot, Logger: logger})
 	if uploadErr != nil {
 		logger.Warn("attachment uploads unavailable", "error", uploadErr)
 	}
@@ -579,9 +621,12 @@ func newServerWithStartup(
 		}
 	}
 
-	speechLanguages := speech.Languages()
+	speechLanguages := serverSpeechLanguages()
 	logger.Info("speech synthesis available", "languages", strings.Join(speechLanguages, ","))
 	initialInventory := state.InventorySnapshot()
+	if fatal := fatalUploadConstruction(uploadErr); fatal != nil {
+		deviceStoreErr = errors.Join(deviceStoreErr, fatal)
+	}
 
 	return &Server{
 		cfg:                 cfg,
@@ -598,7 +643,7 @@ func newServerWithStartup(
 		clipboardWrite:      clipboard.Write,
 		copyRunner:          copyresponse.Run,
 		speechSynth:         speech.Synthesize,
-		speechStatus:        speech.Status,
+		speechStatus:        serverSpeechStatus,
 		speechInstall:       speech.Install,
 		speechRemove:        speech.Remove,
 		speechLanguages:     speechLanguages,
@@ -608,10 +653,12 @@ func newServerWithStartup(
 		sessions:            sessResolver,
 		historyM:            histManager,
 		conversationM:       conversationReader,
+		conversationOwner:   conversationOwner,
 		conversationB:       conversationBrowser,
 		updateM:             newUpdateManager(cfg, version, revision, healthURL),
 		appDeployM:          newAppDeployManager(cfg, version, revision),
 		uploadM:             uploadManager,
+		installedUpload:     uploadOwner,
 		deviceAuth:          deviceStore,
 		bootstrapGate:       bootstrapGate,
 		managedOwner:        owner,
@@ -913,9 +960,9 @@ func projectContextForAgent(agent *coordinator.AgentState) conversation.ProjectC
 	})
 }
 
-func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
+func (s *Server) resolveAgentSessionName(ctx context.Context, agent *coordinator.AgentState) error {
 	if agent == nil {
-		return
+		return nil
 	}
 	agent.SessionName = ""
 	// Every other consumer of a pane's reported session (Reader.Read,
@@ -935,18 +982,33 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	agent.AgentSessionID = sessionID
 	agent.ConversationHistoryAvailable = sessionID != "" && conversation.Supported(agent.Agent)
 	if sessionID == "" {
-		return
+		return nil
 	}
-	title := s.sessions.SessionNameWithProject(agent.Agent, projectContextForAgent(agent), sessionID)
-	if title == "" {
-		return
+	var title string
+	if s.conversationOwner != nil {
+		var err error
+		title, err = s.sessions.SessionNameWithProjectContext(ctx, agent.Agent, projectContextForAgent(agent), sessionID)
+		if conversation.IsTerminalProviderError(err) || ctx.Err() != nil {
+			return errors.Join(err, ctx.Err())
+		}
+	} else {
+		title = s.sessions.SessionNameWithProject(agent.Agent, projectContextForAgent(agent), sessionID)
 	}
-	agent.SessionName = title
-	agent.Session = title
+	if title != "" && ctx.Err() == nil {
+		agent.SessionName = title
+		agent.Session = title
+	}
+	return nil
 }
 
-func (s *Server) Run(ctx context.Context) error {
-	if s.cfg != nil && s.cfg.Transport == config.TransportTailscaleCLI && s.developmentCLIWorkflow == nil {
+func (s *Server) Run(ctx context.Context) (runErr error) {
+	if s.installedUpload != nil {
+		defer func() { runErr = s.installedUpload.result(runErr) }()
+	}
+	if s.conversationOwner != nil {
+		defer func() { runErr = errors.Join(runErr, s.collectInstalledConversation()) }()
+	}
+	if s.cfg != nil && s.cfg.Transport == config.TransportTailscaleCLI && s.developmentCLIWorkflow == nil && s.installedCLI == nil && s.installedSetup == nil {
 		return tailscalecli.ErrWorkflowRequired
 	}
 	if s.initErr != nil {
@@ -973,8 +1035,18 @@ func (s *Server) Run(ctx context.Context) error {
 	s.transitionTasks = newLifecycleTasks(ctx)
 	s.historyTasks = newLifecycleTasks(ctx)
 	defer s.drainLifecycleWork()
-	if s.uploadM != nil {
+	if s.uploadM != nil && s.installedUpload == nil {
 		defer s.uploadM.Close()
+	}
+	// Fence promptly on producer cancellation; join the cancellation observer
+	// before terminal release, including every early return below.
+	if s.installedUpload != nil {
+		observer := observeInstalledUpload(ctx, s.installedUpload)
+		defer func() {
+			s.installedUpload.begin()
+			cancelRun()
+			observer.stopOrJoin()
+		}()
 	}
 	if err := s.state.EnableTriagePersistence(s.cfg.CacheDir); err != nil {
 		s.recordSafeError("durable agent triage unavailable", err)
@@ -1018,7 +1090,14 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	})
 
-	s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, s.journal, s.logger)
+	var installedDrain *installedDispatcherCleanup
+	if s.installedCLI != nil || s.installedSetup != nil {
+		s.dispatcher = coordinator.NewInstalledDispatcher(s.herdrC, s.state, s.journal, s.logger)
+		installedDrain = newInstalledDispatcherCleanup(cancelRun, s.dispatcher)
+		defer func() { runErr = errors.Join(runErr, installedDrain.drain()) }()
+	} else {
+		s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, s.journal, s.logger)
+	}
 	s.dispatcher.SetProfiles(s.profiles)
 	s.dispatcher.SetBroadcast(s.broadcastCommitted)
 	s.dispatcher.SetWakePoll(func() { s.poller.Wake() })
@@ -1297,9 +1376,13 @@ func (s *Server) Run(ctx context.Context) error {
 			if limit < 1 || limit > 500 {
 				limit = 500
 			}
+			activities, activityErr := s.recentActivities(client.Context(), limit)
+			if activityErr != nil || client.Context().Err() != nil {
+				break
+			}
 			s.hub.Send(client, map[string]any{
 				"type":       "activity_history",
-				"activities": s.recentActivities(limit),
+				"activities": activities,
 			})
 		case "clear_activities":
 			requestID, _ := msg["request_id"].(string)
@@ -1401,7 +1484,10 @@ func (s *Server) Run(ctx context.Context) error {
 			profileID := s.profiles.ResolvePane(paneID, agent)
 			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
 			agentVersion := s.profiles.AgentVersion(profileID)
-			location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
+			location, locationErr := s.slashLocation(client.Context(), agent, project, activeAgent.SessionID)
+			if locationErr != nil || client.Context().Err() != nil {
+				break
+			}
 			agentDir := locatedAgentDir(home, agent, location)
 			catalog := slashcmd.CatalogForProfileWithSuppression(
 				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
@@ -1415,6 +1501,9 @@ func (s *Server) Run(ctx context.Context) error {
 						catalog.Status = runtime.Status
 					}
 				}
+			}
+			if client.Context().Err() != nil {
+				break
 			}
 			currentAgent, currentExists := s.state.Agent(paneID)
 			if !currentExists || !sameSlashTarget(activeAgent, currentAgent) {
@@ -1431,6 +1520,9 @@ func (s *Server) Run(ctx context.Context) error {
 				break
 			}
 			catalog = fitSlashCommandCatalog(slashcmd.Revise(catalog), requestID, "list_slash_commands", paneID)
+			if client.Context().Err() != nil {
+				break
+			}
 			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
 		case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
 			requestID := inbound.RequestID
@@ -1660,9 +1752,14 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.setInventoryPublisher(ctx)
 
-	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
+	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) error {
 		for _, a := range agents {
-			s.resolveAgentSessionName(a)
+			if err := s.resolveAgentSessionName(ctx, a); err != nil {
+				return err
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if a.Status != "blocked" {
 				continue
 			}
@@ -1680,6 +1777,7 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			setAgentAttention(s.state, a, question.Classify(string(read.Content), a.Agent))
 		}
+		return ctx.Err()
 	})
 
 	handler := s.httpHandler()
@@ -1700,6 +1798,12 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return s.unwindManagedStartup(fmt.Errorf("listen %s: %w", s.cfg.Addr(), err))
 	}
+	if s.installedCLI != nil || s.installedSetup != nil {
+		// All paths, including net/http's own Close, share the lease fence.
+		s.installedBackend = newInstalledBackend(ctx, ln)
+		ln = s.installedBackend
+		defer ln.Close()
+	}
 	if s.listenerBound != nil {
 		s.listenerBoundOnce.Do(func() { close(s.listenerBound) })
 	}
@@ -1718,6 +1822,11 @@ func (s *Server) Run(ctx context.Context) error {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	if s.installedCLI != nil || s.installedSetup != nil {
+		// Even a graceful-shutdown timeout must not leave a backend listening
+		// after installed ownership is released.
+		defer srv.Close()
+	}
 	s.mu.Lock()
 	s.ready = true
 	s.backendBound = true
@@ -1841,7 +1950,7 @@ func (s *Server) Run(ctx context.Context) error {
 	signal.Notify(profileSignals, syscall.SIGHUP)
 	defer signal.Stop(profileSignals)
 	startBackground(func() { s.reloadProfilesLoop(ctx, profileSignals) })
-	if s.pairingControl == nil {
+	if s.pairingControl == nil && s.installedCLI == nil && s.installedSetup == nil {
 		bootstrapSignals := make(chan os.Signal, 1)
 		signal.Notify(bootstrapSignals, syscall.SIGUSR1)
 		defer signal.Stop(bootstrapSignals)
@@ -1873,7 +1982,11 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 	if s.cfg.Transport == config.TransportTailscaleCLI {
-		startBackground(func() { s.watchTailscaleCLIRegistration(ctx) })
+		if s.installedCLI != nil || s.installedSetup != nil {
+			startBackground(func() { s.watchInstalledCLI(ctx) })
+		} else {
+			startBackground(func() { s.watchTailscaleCLIRegistration(ctx) })
+		}
 	}
 	startBackground(func() { s.watchJobStates(ctx) })
 	startBackground(func() { s.updateCheckLoop(ctx) })
@@ -1882,10 +1995,28 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if errCh == nil {
 		errCh = make(chan error, 1)
-		go func() { errCh <- srv.Serve(serveListener) }()
+		if s.installedCLI != nil || s.installedSetup != nil {
+			installedServeDone := make(chan struct{})
+			defer func() {
+				_ = ln.Close()
+				_ = srv.Close() // preserve forced close after Shutdown timeout
+				if s.installedServeDraining != nil {
+					s.installedServeDraining()
+				}
+				<-installedServeDone
+			}()
+			go func() {
+				defer close(installedServeDone)
+				if s.installedBeforeServe != nil {
+					s.installedBeforeServe()
+				}
+				errCh <- srv.Serve(serveListener)
+			}()
+		} else {
+			go func() { errCh <- srv.Serve(serveListener) }()
+		}
 	}
 
-	var runErr error
 	var inertServer *http.Server
 	var inertDone <-chan struct{}
 	if s.tailscaleSession != nil {
@@ -1955,8 +2086,14 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		<-serveDone
 	}
+	if s.conversationOwner != nil {
+		s.conversationOwner.Begin()
+	}
+	s.installedUpload.begin()
 	cancelRun()
-	if s.dispatcher != nil {
+	if installedDrain != nil {
+		installedDrain.begin()
+	} else if s.dispatcher != nil {
 		s.dispatcher.CancelInflight()
 	}
 	paneSizeShutdownCtx, cancelPaneSizes := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1989,7 +2126,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	bg.Wait()
 	s.drainLifecycleWork()
-	if s.dispatcher != nil {
+	if installedDrain != nil {
+		// Collect only in the deferred return join, after all other tail errors.
+		_ = installedDrain.drain()
+	} else if s.dispatcher != nil {
 		dispatcherCloseCtx, cancelDispatcher := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.dispatcher.Close(dispatcherCloseCtx); runErr == nil && err != nil {
 			runErr = err
@@ -2720,7 +2860,10 @@ func (s *Server) handleTransition(
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
-	extract := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID, conversationProject)
+	extract, extractErr := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID, conversationProject)
+	if extractErr != nil || ctx.Err() != nil {
+		return
+	}
 	currentAgent, currentExists := s.state.Agent(paneID)
 	if !transitionCurrent() || agentExists != currentExists ||
 		(agentExists && !sameConversationTuple(agentState, currentAgent)) {
@@ -2737,7 +2880,7 @@ func (s *Server) handleTransition(
 	) {
 		return
 	}
-	if !transitionCurrent() {
+	if ctx.Err() != nil || !transitionCurrent() {
 		return
 	}
 	if s.pushM != nil {
@@ -3126,35 +3269,51 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 // only a bounded fallback for agents without a readable transcript. The
 // optional context keeps pane-only callers source compatible while live
 // completion paths pass the captured foreground hint.
-func (s *Server) latestConversationResponse(agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
+func (s *Server) latestConversationResponse(ctx context.Context, agent, cwd, sessionID string, contexts ...conversation.ProjectContext) (string, error) {
 	if s.conversationM == nil || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
-		return ""
+		return "", ctx.Err()
 	}
 	project := conversation.ProjectContext{CWD: cwd}
 	if len(contexts) > 0 {
 		project = contexts[0]
 	}
-	page, err := s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
+	var page conversation.Page
+	var err error
+	if s.conversationOwner != nil {
+		page, err = s.conversationM.ReadWithProjectContext(ctx, agent, project, sessionID, "", 1)
+	} else {
+		page, err = s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
+	}
+	if (s.conversationOwner != nil && conversation.IsTerminalProviderError(err)) || ctx.Err() != nil {
+		return "", errors.Join(err, ctx.Err())
+	}
 	if err != nil || !page.Available || len(page.Entries) == 0 {
-		return ""
+		return "", nil
 	}
 	entry := page.Entries[len(page.Entries)-1]
 	if entry.Role != "assistant" || strings.TrimSpace(entry.Text) == "" {
-		return ""
+		return "", nil
 	}
-	return entry.Text
+	return entry.Text, nil
 }
 
-func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
-	if response := s.latestConversationResponse(agent, cwd, sessionID, contexts...); response != "" {
-		return response
+func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string, contexts ...conversation.ProjectContext) (string, error) {
+	response, readErr := s.latestConversationResponse(ctx, agent, cwd, sessionID, contexts...)
+	if readErr != nil {
+		return "", readErr
+	}
+	if response != "" {
+		return response, nil
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
 	content := read.Content
-	if err != nil || len(content) == 0 {
-		return ""
+	if err != nil || ctx.Err() != nil || len(content) == 0 {
+		return "", ctx.Err()
 	}
 	raw := string(content)
 	completionContent := raw
@@ -3162,9 +3321,24 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 		completionContent = s.historyM.Merge(paneID, raw)
 	}
 	if response := question.LatestCompletedResponse(completionContent); response != "" {
-		return response
+		return response, nil
 	}
-	return question.PaneSummary(completionContent)
+	return question.PaneSummary(completionContent), nil
+}
+
+// slashLocation permits the static catalog only for nonterminal lookup misses.
+func (s *Server) slashLocation(ctx context.Context, agent string, project conversation.ProjectContext, sessionID string) (conversation.Location, error) {
+	if s.conversationOwner == nil {
+		return s.conversationM.LocateWithProject(agent, project, sessionID), ctx.Err()
+	}
+	location, err := s.conversationM.LocateWithProjectContext(ctx, agent, project, sessionID)
+	if conversation.IsTerminalProviderError(err) || ctx.Err() != nil {
+		return conversation.Location{}, errors.Join(err, ctx.Err())
+	}
+	if err != nil {
+		return conversation.Location{}, nil
+	}
+	return location, nil
 }
 
 func locatedAgentDir(home, agent string, location conversation.Location) string {
@@ -3243,7 +3417,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp["external_https_origin"] = s.cfg.ExternalHTTPSOrigin
 	}
 	if s.cfg.Transport == config.TransportTailscaleCLI {
-		resp["tailscale_cli_control_run_id"] = s.cfg.ControlRunID
+		resp["tailscale_cli_control_run_id"] = s.controlRunID()
 		resp["tailscale_cli_origin"] = s.cfg.TailscaleCLIOrigin
 	}
 	if s.cfg.TailscaleOrigin != "" {
@@ -3639,9 +3813,13 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		"type":       "workspaces",
 		"workspaces": committed.workspaces,
 	})
+	activities, activityErr := s.recentActivities(client.Context(), 500)
+	if activityErr != nil || client.Context().Err() != nil {
+		return
+	}
 	s.hub.Send(client, map[string]any{
 		"type":       "activity_history",
-		"activities": s.recentActivities(500),
+		"activities": activities,
 	})
 	s.hub.Send(client, inventoryStatusMessage(inventory))
 }
@@ -4932,7 +5110,7 @@ func parseTimestamp(s string) int64 {
 	return time.Now().UnixMilli()
 }
 
-func (s *Server) recentActivities(limit int) []activity.Entry {
+func (s *Server) recentActivities(ctx context.Context, limit int) ([]activity.Entry, error) {
 	s.activityMu.RLock()
 	if limit <= 0 || limit > len(s.activityView) {
 		limit = len(s.activityView)
@@ -4940,12 +5118,12 @@ func (s *Server) recentActivities(limit int) []activity.Entry {
 	start := len(s.activityView) - limit
 	entries := append([]activity.Entry(nil), s.activityView[start:]...)
 	s.activityMu.RUnlock()
-	return s.enrichActivityResponses(entries)
+	return s.enrichActivityResponses(ctx, entries)
 }
 
-func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.Entry {
+func (s *Server) enrichActivityResponses(ctx context.Context, entries []activity.Entry) ([]activity.Entry, error) {
 	if s.conversationM == nil || len(entries) == 0 {
-		return entries
+		return entries, ctx.Err()
 	}
 	agents := make(map[string]*coordinator.AgentState)
 	for _, agent := range s.state.Snapshot() {
@@ -4953,6 +5131,9 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 	}
 	pages := make(map[string]conversation.Page)
 	for index := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entry := entries[index]
 		if strings.ToLower(strings.TrimSpace(entry.Kind)) != "finished" {
 			continue
@@ -4975,14 +5156,34 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		cacheKey := agentName + "\x00" + project.CWD + "\x00" + project.ForegroundCWD + "\x00" + sessionID
 		page, loaded := pages[cacheKey]
 		if !loaded {
-			page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
+			if s.conversationOwner != nil {
+				var err error
+				page, err = s.conversationM.ReadWithProjectContext(ctx, agentName, project, sessionID, "", 200)
+				if conversation.IsTerminalProviderError(err) || ctx.Err() != nil {
+					return nil, errors.Join(err, ctx.Err())
+				}
+				if err != nil {
+					continue
+				}
+			} else {
+				page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			pages[cacheKey] = page
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {
 			entries[index].Extract = response
 		}
 	}
-	return entries
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func conversationResponseAt(entries []conversation.Entry, activityTimestamp int64) string {

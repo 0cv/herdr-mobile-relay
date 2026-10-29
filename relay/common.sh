@@ -1260,6 +1260,35 @@ cloudflare_routed_hostname() {
         head -1
 }
 
+# A promoted service carries a pinned selection, not HERDR_RELAY_ENV. This
+# shape check is only a prelude; the owned Go reprint repeats exact admission.
+installed_promoted_selection_env() {
+    local plist="$1" env_file="$2" tool="$3" key value generation digest config_home instance
+    [ -f "$env_file" ] && [ ! -L "$env_file" ] || return 1
+    for key in Label ProgramArguments.0 ProgramArguments.1 ProgramArguments.2 ProgramArguments.3 ProgramArguments.4 ProgramArguments.5 ProgramArguments.6; do
+        value="$("$tool" -extract "$key" raw -o - "$plist" 2>/dev/null)" || return 1
+        case "$key" in
+            Label) [ "$value" = com.herdr-mobile-relay.service ] || return 1 ;;
+            ProgramArguments.0) case "$value" in /*/herdr-mobile-relay) ;; *) return 1 ;; esac ;;
+            ProgramArguments.1) [ "$value" = serve-installed ] || return 1 ;;
+            ProgramArguments.2) [ "$value" = --selection ] || return 1 ;;
+            ProgramArguments.3) generation="$value" ;;
+            ProgramArguments.4) digest="$value" ;;
+            ProgramArguments.5) config_home="$value" ;;
+            ProgramArguments.6) instance="$value" ;;
+        esac
+    done
+    [ "${#generation}" -eq 32 ] && [ "${#digest}" -eq 64 ] || return 1
+    case "$generation$digest" in *[!0-9a-f]*) return 1 ;; esac
+    [ "$config_home" = "${XDG_CONFIG_HOME:-$HOME/.config}" ] &&
+        [ -n "$instance" ] && [ "$instance" = "$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)" ] || return 1
+    if "$tool" -extract ProgramArguments.7 raw -o - "$plist" >/dev/null 2>&1 ||
+        "$tool" -extract EnvironmentVariables.HERDR_RELAY_ENV raw -o - "$plist" >/dev/null 2>&1; then
+        return 1
+    fi
+    printf '%s\n' "$env_file"
+}
+
 installed_service_env_file() {
     local service_file
 
@@ -1275,7 +1304,11 @@ installed_service_env_file() {
             if [ -r "$service_file" ]; then
                 local plist_tool="${HERDR_PLUTIL:-/usr/bin/plutil}"
                 [ -x "$plist_tool" ] || return 1
-                "$plist_tool" -extract EnvironmentVariables.HERDR_RELAY_ENV raw -o - "$service_file"
+                if [ "$("$plist_tool" -extract ProgramArguments.2 raw -o - "$service_file" 2>/dev/null)" = --selection ]; then
+                    installed_promoted_selection_env "$service_file" "$(relay_env_file_read_only "$SCRIPT_DIR")" "$plist_tool"
+                else
+                    "$plist_tool" -extract EnvironmentVariables.HERDR_RELAY_ENV raw -o - "$service_file"
+                fi
             fi
             ;;
     esac
@@ -1893,6 +1926,20 @@ service_removal_quiet() {
 }
 
 service_removal_one() {
+    local root="$HOME/.local/state/herdr-mobile-relay/recovery" claim
+    (umask 077; mkdir -p "$root") || return 1
+    claim="$root/.herdr-native-claim-v1"
+    mkdir -m 700 "$claim" || return 1
+    # Retain the claim if an effect or its observation fails; the caller must
+    # resolve recovery evidence, never assume a stopped/deleted resource.
+    if service_removal_one_claimed "$@"; then
+        rmdir "$claim" || return 1
+        return 0
+    fi
+    return 1
+}
+
+service_removal_one_claimed() {
     local manager="$1" label="$2" file original attempt uid quiet=false reset=false stopped=false
     file="$(service_removal_path "$manager" "$label")" || return 1
     service_removal_resource "$file" || return 1

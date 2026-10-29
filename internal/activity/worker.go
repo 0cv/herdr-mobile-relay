@@ -61,9 +61,10 @@ type workerReply struct {
 }
 
 type Worker struct {
-	journal  *Journal
-	requests chan workerRequest
-	done     chan struct{}
+	installed *installedWorker
+	journal   *Journal
+	requests  chan workerRequest
+	done      chan struct{}
 }
 
 func NewWorker(journal *Journal) *Worker {
@@ -77,9 +78,19 @@ func NewWorker(journal *Journal) *Worker {
 }
 
 func (w *Worker) Commit(ctx context.Context, request ActivityCommitRequested) (ActivityCommitted, error) {
+	if err := w.admitInstalled(ctx); err != nil {
+		return ActivityCommitted{}, err
+	}
+	defer w.releaseInstalled()
+	if w.installed != nil {
+		if err := ctx.Err(); err != nil {
+			return ActivityCommitted{}, err
+		}
+	}
 	reply := make(chan workerReply, 1)
 	select {
 	case w.requests <- workerRequest{commit: &request, reply: reply}:
+		w.ackInstalled(request.Sequence)
 	case <-ctx.Done():
 		return ActivityCommitted{}, ctx.Err()
 	case <-w.done:
@@ -100,9 +111,19 @@ func (w *Worker) Commit(ctx context.Context, request ActivityCommitRequested) (A
 }
 
 func (w *Worker) Clear(ctx context.Context, request ActivityClearRequested) (ActivityCleared, error) {
+	if err := w.admitInstalled(ctx); err != nil {
+		return ActivityCleared{}, err
+	}
+	defer w.releaseInstalled()
+	if w.installed != nil {
+		if err := ctx.Err(); err != nil {
+			return ActivityCleared{}, err
+		}
+	}
 	reply := make(chan workerReply, 1)
 	select {
 	case w.requests <- workerRequest{clear: &request, reply: reply}:
+		w.ackInstalled(request.Sequence)
 	case <-ctx.Done():
 		return ActivityCleared{}, ctx.Err()
 	case <-w.done:
@@ -123,9 +144,19 @@ func (w *Worker) Clear(ctx context.Context, request ActivityClearRequested) (Act
 }
 
 func (w *Worker) Discard(ctx context.Context, request ActivityDiscardRequested) (ActivityDiscarded, error) {
+	if err := w.admitInstalled(ctx); err != nil {
+		return ActivityDiscarded{}, err
+	}
+	defer w.releaseInstalled()
+	if w.installed != nil {
+		if err := ctx.Err(); err != nil {
+			return ActivityDiscarded{}, err
+		}
+	}
 	reply := make(chan workerReply, 1)
 	select {
 	case w.requests <- workerRequest{discard: &request, reply: reply}:
+		w.ackInstalled(request.Sequence)
 	case <-ctx.Done():
 		return ActivityDiscarded{}, ctx.Err()
 	case <-w.done:
@@ -146,6 +177,23 @@ func (w *Worker) Discard(ctx context.Context, request ActivityDiscardRequested) 
 }
 
 func (w *Worker) Close(ctx context.Context) error {
+	if w.installed != nil {
+		if ctx == nil {
+			return ErrInstalledContext
+		}
+		w.beginInstalledDrain()
+		select {
+		case <-w.installed.done:
+			return w.installed.result
+		case <-ctx.Done():
+			select {
+			case <-w.installed.done:
+				return w.installed.result
+			default:
+				return ctx.Err()
+			}
+		}
+	}
 	select {
 	case w.requests <- workerRequest{}:
 	case <-ctx.Done():
@@ -168,6 +216,7 @@ func (w *Worker) run() {
 		if request.commit != nil {
 			entry := NormalizeEntry(request.commit.Entry)
 			err := w.journal.Append(entry)
+			w.retainInstalledError(err)
 			if err != nil {
 				request.reply <- workerReply{event: ActivityCommitFailed{Sequence: request.commit.Sequence, Err: err}}
 			} else {
@@ -177,6 +226,7 @@ func (w *Worker) run() {
 		}
 		if request.discard != nil {
 			err := w.journal.Discard(request.discard.ID)
+			w.retainInstalledError(err)
 			if err != nil {
 				request.reply <- workerReply{event: ActivityDiscardFailed{
 					Sequence: request.discard.Sequence,
@@ -192,6 +242,7 @@ func (w *Worker) run() {
 			continue
 		}
 		err := w.journal.Clear()
+		w.retainInstalledError(err)
 		if err != nil {
 			request.reply <- workerReply{event: ActivityClearFailed{Sequence: request.clear.Sequence, Err: err}}
 		} else {

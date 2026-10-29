@@ -100,7 +100,17 @@ func LoadDevelopmentCLI(workflow *tailscalecli.DevelopmentWorkflow) (*Config, er
 	return load(workflow)
 }
 
+// LoadInstalled selects installed CLI policy without enabling any profile.
+// Other transports retain ordinary loading semantics.
+func LoadInstalled() (*Config, error) {
+	return loadMode(nil, true)
+}
+
 func load(workflow *tailscalecli.DevelopmentWorkflow) (*Config, error) {
+	return loadMode(workflow, false)
+}
+
+func loadMode(workflow *tailscalecli.DevelopmentWorkflow, installed bool) (*Config, error) {
 	transport, err := resolveTransport(os.Getenv("HERDR_RELAY_TRANSPORT"), os.Getenv("HERDR_GATEWAY_URL"))
 	if err != nil {
 		return nil, err
@@ -187,7 +197,14 @@ func load(workflow *tailscalecli.DevelopmentWorkflow) (*Config, error) {
 		cfg.HerdrBin = findHerdrBin()
 	}
 
-	if err := cfg.validate(workflow); err != nil {
+	if installed && cfg.Transport == TransportTailscaleCLI {
+		if err := validateInstalledEnvironment(cfg); err != nil {
+			return nil, err
+		}
+		if _, err := BindInstalledCLI(cfg); err != nil {
+			return nil, err
+		}
+	} else if err := cfg.validate(workflow); err != nil {
 		return nil, err
 	}
 

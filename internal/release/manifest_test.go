@@ -21,6 +21,7 @@ func testRelease(t *testing.T) string {
 		"relay/common.sh":                     "#!/bin/sh\n",
 		"relay/herdr-mobile-relay-service.sh": "#!/bin/sh\n",
 		"relay/plugin-on-event.sh":            "#!/bin/sh\n",
+		"relay/plugin-tailscale-always-on.sh": "#!/bin/sh\n",
 		"relay/setup-link.sh":                 "#!/bin/sh\n",
 		"relay/stable-setup.sh":               "#!/bin/sh\n",
 		"relay/stable-teardown.sh":            "#!/bin/sh\n",
@@ -64,6 +65,19 @@ func TestBuildAndVerifyManifest(t *testing.T) {
 	}
 	if verified.Version != "1.2.3" {
 		t.Fatalf("version = %q", verified.Version)
+	}
+}
+
+func TestVerifyRequiresInstalledSelector(t *testing.T) {
+	root := testRelease(t)
+	if _, err := Build(root, "1.2.3", "abc123", "linux/amd64"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "relay", "plugin-tailscale-always-on.sh")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(root, "linux/amd64"); err == nil {
+		t.Fatal("verified package accepted a missing installed selector")
 	}
 }
 

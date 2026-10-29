@@ -12,9 +12,9 @@ cd "$SCRIPT_DIR"
 
 MODE="${1:-}"
 case "$MODE" in
-    temporary | stable | community | own | tailscale | tailscale-external) ;;
+    temporary | stable | community | own | tailscale | tailscale-external | tailscale-cli) ;;
     *)
-        echo "Usage: $0 {temporary|stable|community|own|tailscale|tailscale-external}" >&2
+        echo "Usage: $0 {temporary|stable|community|own|tailscale|tailscale-external|tailscale-cli}" >&2
         exit 2
         ;;
 esac
@@ -22,7 +22,9 @@ esac
 # Selection is not exposure consent. The installed plugin has already prepared
 # credentials; the foreground launcher checks prerequisites without setup/install
 # or config migration. Forward only arguments supplied by this caller.
-if [ "$MODE" = tailscale ]; then
+if [ "$MODE" = tailscale-cli ]; then
+    exec /bin/bash "$SCRIPT_DIR/plugin-tailscale-always-on.sh"
+elif [ "$MODE" = tailscale ]; then
     ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
     tailscale_cli_transport_switch_safe "$ENV_FILE" || exit 1
     shift

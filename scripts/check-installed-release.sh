@@ -109,7 +109,7 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     echo "release does not contain an executable relay" >&2
     exit 1
 }
-for WRAPPER in tailscale.sh tailscale-external.sh tailscale-cli.sh tailscale-cli-service.sh; do
+for WRAPPER in tailscale.sh tailscale-external.sh tailscale-cli.sh tailscale-cli-service.sh native-cli-fresh.sh plugin-tailscale-always-on.sh; do
     [ -x "$RELEASE_DIR/relay/$WRAPPER" ] || {
         echo "release does not contain executable $WRAPPER" >&2
         exit 1
@@ -126,6 +126,150 @@ done
     exit 1
 }
 bash -n "$RELEASE_DIR/relay/native-install-transaction.sh"
+
+# The selector must be in the verified archive, not copied from the checkout.
+# Exercise its actual extracted bytes under an inert, manifest-free root: the
+# fixture relay refuses at activation, before configuration or native queries.
+SELECTOR_FIXTURE="$WORK_DIR/selector-fixture"
+mkdir -p "$SELECTOR_FIXTURE/relay" "$WORK_DIR/selector-home"
+for WRAPPER in common.sh plugin-tailscale-always-on.sh; do
+    cp "$RELEASE_DIR/relay/$WRAPPER" "$SELECTOR_FIXTURE/relay/$WRAPPER"
+    cmp "$RELEASE_DIR/relay/$WRAPPER" "$SELECTOR_FIXTURE/relay/$WRAPPER" >/dev/null
+done
+cat > "$SELECTOR_FIXTURE/refusing-relay" <<'EOF'
+#!/bin/sh
+[ "$1" = tailscale-cli ] && [ "$2" = activation-check ] || exit 97
+printf 'activation-check\n' >> "$SELECTOR_CALLS"
+exit 69
+EOF
+chmod 700 "$SELECTOR_FIXTURE/refusing-relay"
+SELECTOR_STATUS=0
+(umask 077; env -i HOME="$WORK_DIR/selector-home" PATH=/usr/bin:/bin \
+    HERDR_RELAY_BIN="$SELECTOR_FIXTURE/refusing-relay" SELECTOR_CALLS="$WORK_DIR/selector-calls" \
+    /bin/bash "$SELECTOR_FIXTURE/relay/plugin-tailscale-always-on.sh") \
+    >"$WORK_DIR/selector-output" 2>&1 || SELECTOR_STATUS=$?
+[ "$SELECTOR_STATUS" -eq 1 ] && [ "$(cat "$WORK_DIR/selector-calls")" = activation-check ] || {
+    echo 'extracted installed selector did not refuse before touching native state' >&2; exit 1;
+}
+
+# The same verified archive bytes must also traverse the selected setup path.
+# Only the manifest-free fixture runs: never the shipped binary or a host CLI,
+# service manager, endpoint or phone. Promotion/wizard replies are inert seams,
+# not evidence of an installed profile or of the seven real wizard consents.
+for WRAPPER in tailscale-cli.sh; do
+    cp "$RELEASE_DIR/relay/$WRAPPER" "$SELECTOR_FIXTURE/relay/$WRAPPER"
+    cmp "$RELEASE_DIR/relay/$WRAPPER" "$SELECTOR_FIXTURE/relay/$WRAPPER" >/dev/null || {
+        echo 'extracted installed setup wrapper copy mismatch' >&2; exit 1;
+    }
+done
+python3 - "$SELECTOR_FIXTURE" <<'PY'
+import json, os, pathlib, pty, select, signal, subprocess, sys, time
+root = pathlib.Path(sys.argv[1]).resolve()
+os.umask(0o077)
+home = root / 'success-home'; home.mkdir(mode=0o700)
+config = root / 'success.env'
+config.write_text('HERDR_RELAY_TRANSPORT=cloudflare\nHERDR_RELAY_INSTANCE_ID=archive-fixture\n'
+                  'HERDR_RELAY_TOKEN=' + 't'*32 + '\nHERDR_RELAY_PORT=18375\nHERDR_RELAY_PLUGIN_PORT=18376\n')
+config.chmod(0o600)
+record = root / 'success-events'
+forbidden = root / 'forbidden-actions'
+cli = root / 'selected-cli'
+cli.write_text('#!/bin/sh\nprintf "unexpected CLI\\n" >> "$FORBIDDEN_ACTIONS"\nexit 97\n')
+cli.chmod(0o700)
+bin_dir = root / 'bin'; bin_dir.mkdir(mode=0o700)
+for name in ('tailscale', 'systemctl', 'launchctl', 'curl'):
+    stub = bin_dir / name
+    stub.write_text('#!/bin/sh\nprintf "unexpected native/CLI action\\n" >> "$FORBIDDEN_ACTIONS"\nexit 97\n')
+    stub.chmod(0o700)
+service = root / 'relay' / 'service.sh'
+service.write_text('#!/bin/sh\nprintf "unexpected service action\\n" >> "$FORBIDDEN_ACTIONS"\nexit 97\n')
+service.chmod(0o700)
+fake = root / 'inert-relay'
+fake.write_text('#!' + sys.executable + '\n' + '''import json, os, pathlib, sys
+args = sys.argv[1:]
+if args[:1] == ['json-field'] and len(args) == 3 and args[1] == 'string':
+    value = json.load(sys.stdin).get(args[2])
+    if not isinstance(value, str): raise SystemExit(1)
+    print(value); raise SystemExit(0)
+record = pathlib.Path(os.environ['SELECTED_EVENTS'])
+def event(value):
+    with record.open('a') as out: out.write(value + '\\n')
+if args == ['tailscale-cli', 'activation-check']:
+    event('activation-check'); raise SystemExit(0)
+if args == ['tailscale-cli', 'resolve-binary', '--binary', '']:
+    event('resolve-binary'); print(os.environ['SELECTED_CLI']); raise SystemExit(0)
+if args == ['tailscale-cli', 'installed-preflight', '--binary', os.environ['SELECTED_CLI'],
+            '--https-port', '443', '--backend-port', '18375']:
+    event('installed-preflight'); print(json.dumps(dict(node_id='archive-node', origin='https://relay.example.test')))
+    raise SystemExit(0)
+if args == ['tailscale-cli', 'installed-selection-check']:
+    if any(os.environ.get(key) != value for key, value in (
+            ('HERDR_RELAY_TRANSPORT', 'tailscale-cli'), ('HERDR_TAILSCALE_CLI_NODE_ID', 'archive-node'),
+            ('HERDR_TAILSCALE_CLI_ORIGIN', 'https://relay.example.test'),
+            ('HERDR_TAILSCALE_CLI_SCOPE', 'production'), ('HERDR_TAILSCALE_CLI_BIN', os.environ['SELECTED_CLI']))):
+        raise SystemExit(97)
+    event('installed-selection-check'); raise SystemExit(0)
+if args == ['promote-installed']:
+    event('promote-installed'); raise SystemExit(0)
+if args == ['installed-control-wizard']:
+    event('installed-control-wizard'); raise SystemExit(0)
+if args[:2] == ['tailscale-cli', 'assert-ready'] and all(item in args for item in (
+        '--binary', os.environ['SELECTED_CLI'], '--scope', 'production', '--installation-id', 'archive-fixture',
+        '--origin', 'https://relay.example.test', '--https-port', '443', '--backend-port', '18375')):
+    event('assert-ready'); raise SystemExit(0)
+if args == ['installed-control', 'status']:
+    event('status-ready')
+    print(json.dumps(dict(code='ok', publication='disabled', installation='archive-fixture', run='a'*32)))
+    raise SystemExit(0)
+if args == ['installed-control', 'arm', '--run', 'a'*32, '--operation-id', 'archive-one']:
+    event('arm:archive-one')
+    print(json.dumps(dict(code='ok', arm_receipt='acknowledged', invitation='https://app.example.test/#setup=archive')))
+    raise SystemExit(0)
+if args == ['normalize-origin', '--allow-loopback-http', 'https://app.example.test']:
+    event('normalize-origin'); print('https://app.example.test'); raise SystemExit(0)
+if args[:2] == ['qr', '--columns'] and args[-1] == 'https://app.example.test/#setup=archive':
+    event('qr'); print('ARCHIVE-SYNTHETIC-QR'); raise SystemExit(0)
+event('unexpected-command'); raise SystemExit(97)
+''')
+fake.chmod(0o700)
+environment = {'HOME': str(home), 'PATH': str(bin_dir) + ':/usr/bin:/bin', 'LC_ALL': 'C', 'TERM': 'dumb',
+               'HERDR_RELAY_ENV': str(config), 'HERDR_RELAY_BIN': str(fake), 'SELECTED_CLI': str(cli),
+               'SELECTED_EVENTS': str(record), 'FORBIDDEN_ACTIONS': str(forbidden)}
+master, slave = pty.openpty()
+process = subprocess.Popen(['/bin/bash', str(root / 'relay' / 'plugin-tailscale-always-on.sh')],
+                           cwd=root, env=environment, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+os.close(slave)
+try:
+    os.write(master, b'y\ny\narchive-one\n')
+    chunks = []; deadline = time.monotonic() + 20
+    while process.poll() is None or select.select([master], [], [], 0)[0]:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, b''.join(chunks)
+        if select.select([master], [], [], min(remaining, 0.2))[0]:
+            try: chunks.append(os.read(master, 65536))
+            except OSError: break
+    process.wait(timeout=2)
+    output = b''.join(chunks); calls = record.read_text().splitlines() if record.exists() else []
+    assert process.returncode == 0 and not forbidden.exists() and 'unexpected-command' not in calls, (calls, output)
+    assert calls[:3] == ['activation-check', 'resolve-binary', 'installed-preflight'], (calls, output)
+    assert calls.count('installed-selection-check') == 1
+    assert calls.count('promote-installed') == calls.count('installed-control-wizard') == 1
+    assert calls.count('assert-ready') == calls.count('status-ready') == calls.count('arm:archive-one') == 1
+    assert calls.count('normalize-origin') == calls.count('qr') == 1
+    assert calls.index('installed-selection-check') < min(calls.index('promote-installed'), calls.index('installed-control-wizard'))
+    assert max(calls.index('promote-installed'), calls.index('installed-control-wizard')) < calls.index('assert-ready')
+    assert calls.index('assert-ready') < calls.index('status-ready') < calls.index('arm:archive-one') < calls.index('qr')
+    assert b'node archive-node, HTTPS https://relay.example.test -> 127.0.0.1:18375 (plugin 18376)' in output
+    assert output.count(b'ARCHIVE-SYNTHETIC-QR') == output.count(b'https://app.example.test/#setup=archive') == 1
+    selected = config.read_text()
+    assert "HERDR_TAILSCALE_CLI_NODE_ID='archive-node'" in selected
+    assert "HERDR_TAILSCALE_CLI_ORIGIN='https://relay.example.test'" in selected
+finally:
+    try: os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+    process.wait(timeout=2)
+    os.close(master)
+PY
 
 # Exercise the exact extracted CLI service dispatch with an inert relay fixture.
 # Copying the packaged wrappers under a manifest-free temporary root guarantees

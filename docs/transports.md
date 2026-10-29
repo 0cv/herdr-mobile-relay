@@ -21,10 +21,14 @@ and Tailscale traffic use their respective trusted HTTPS paths.
 Pick **Temporary Cloudflare Tunnel**, **Community WebRTC Gateway**, **Deploy or
 Upgrade Your Own WebRTC Gateway**, or **Stable Tunnel** from the setup menu, or
 **3 Tailscale → 2 Your own HTTPS route (advanced BYO)** for operator-owned
-Tailscale HTTPS Serve; the other two Tailscale entries, Always on and Remove
-Herdr's own route, are unavailable. Managed Tailscale Serve (foreground) is no
-longer a menu choice: start it with `relay/plugin-choose-transport.sh tailscale`.
-A completed choice starts or restarts the relay and verifies the phone app before printing a QR.
+Tailscale HTTPS Serve. **3 Tailscale → 1 Always on** now dispatches the
+installed CLI selector and existing consented promotion/QR workflow; shipped
+production and installed-manager gates, plus runtime/phone qualification, still
+prevent selection or publication. **3 Tailscale → 3 Remove Herdr's own route**
+dispatches only to the selected owned-route consented unpublish action. Managed
+Tailscale Serve (foreground) is separate: start it with
+`relay/plugin-choose-transport.sh tailscale`. A completed choice verifies its
+phone app before printing a QR.
 
 ## Managed Tailscale Serve
 

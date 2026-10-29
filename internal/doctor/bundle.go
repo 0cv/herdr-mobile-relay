@@ -149,8 +149,8 @@ func (q *PackageQueries) event(stage, name string, file *os.File) {
 // This list is the explicit package-release.sh wrapper topology, not a general
 // .sh allowlist. Adding shipped content requires a separately reviewed policy.
 var bundleWrappers = []string{
-	"common.sh", "native-install-transaction.sh", "herdr-mobile-relay-service.sh",
-	"install-service.sh", "install-systemd-user-service.sh", "plugin-on-event.sh", "plugin-status.sh",
+	"common.sh", "native-install-transaction.sh", "native-cli-fresh.sh", "herdr-mobile-relay-service.sh",
+	"install-service.sh", "install-systemd-user-service.sh", "plugin-on-event.sh", "plugin-status.sh", "plugin-tailscale-always-on.sh",
 	"pi-commands.sh", "service.sh", "setup-link.sh", "setup.sh", "speech-voices.sh", "stable-setup.sh",
 	"stable-teardown.sh", "start.sh", "tailscale.sh", "tailscale-external.sh", "tailscale-cli.sh",
 	"tailscale-cli-service.sh", "transport-switch-locked.sh", "uninstall.sh", "uninstall-service.sh", "uninstall-systemd-user-service.sh",

@@ -30,6 +30,8 @@
 package agentroots
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,18 +67,21 @@ const (
 // Claude reports the transcript roots for Claude Code, honouring
 // CLAUDE_CONFIG_DIR exactly as it did when a single root was resolved.
 func Claude(home string) []string {
-	return resolve(home, ClaudeListEnv, "CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"), "projects")
+	roots, _ := ClaudeContext(context.Background(), home)
+	return roots
 }
 
 // Qoder reports the transcript roots for Qoder CLI, which has no config
 // directory variable of its own.
 func Qoder(home string) []string {
-	return resolve(home, QoderListEnv, "", filepath.Join(home, ".qoder"), "projects")
+	roots, _ := QoderContext(context.Background(), home)
+	return roots
 }
 
 // Codex reports the rollout roots for OpenAI Codex.
 func Codex(home string) []string {
-	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "sessions")
+	roots, _ := CodexContext(context.Background(), home)
+	return roots
 }
 
 // CodexHomes reports the Codex config directories themselves, for consumers
@@ -89,48 +94,39 @@ func CodexHomes(home string) []string {
 // <root>/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl. List entries are the
 // projects directories themselves (the same shape as ~/.cursor/projects).
 func Cursor(home string) []string {
-	return resolve(home, CursorListEnv, "", filepath.Join(home, ".cursor", "projects"), "")
+	roots, _ := CursorContext(context.Background(), home)
+	return roots
 }
 
 // OpenCodeData reports the only directories in which the relay will accept an
 // OpenCode database. Entries name data directories, not database files.
 func OpenCodeData(home string) []string {
-	xdgData := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-	if xdgData == "" {
-		xdgData = filepath.Join(home, ".local", "share")
-	}
-	return resolve(home, OpenCodeListEnv, "", filepath.Join(xdgData, "opencode"), "")
+	roots, _ := OpenCodeDataContext(context.Background(), home)
+	return roots
 }
 
 // OpenCodeDBs reports fixed database filenames under the configured OpenCode
 // data directories. A caller must still re-check containment and regular-file
 // status immediately before opening one.
 func OpenCodeDBs(home string) []string {
-	roots := OpenCodeData(home)
-	paths := make([]string, 0, len(roots))
-	for _, root := range roots {
-		paths = append(paths, filepath.Join(root, "opencode.db"))
-	}
-	return paths
+	roots, _ := OpenCodeDBsContext(context.Background(), home)
+	return roots
 }
 
 // HermesData reports the directories containing Hermes Agent state databases.
 // Hermes stores its canonical session history in state.db under HERMES_HOME,
 // defaulting to ~/.hermes.
 func HermesData(home string) []string {
-	return resolve(home, HermesListEnv, "HERMES_HOME", filepath.Join(home, ".hermes"), "")
+	roots, _ := HermesDataContext(context.Background(), home)
+	return roots
 }
 
 // HermesDBs reports the fixed state database filename under each Hermes data
 // directory. Callers must still re-check containment and regular-file status
 // immediately before opening one.
 func HermesDBs(home string) []string {
-	roots := HermesData(home)
-	paths := make([]string, 0, len(roots))
-	for _, root := range roots {
-		paths = append(paths, filepath.Join(root, "state.db"))
-	}
-	return paths
+	roots, _ := HermesDBsContext(context.Background(), home)
+	return roots
 }
 
 // OMO reports every supported Pi-compatible transcript root for Oh My
@@ -138,32 +134,15 @@ func HermesDBs(home string) []string {
 // branded, standalone Senpi, and pre-unification layouts in addition to any
 // relay-side or process environment override.
 func OMO(home string) []string {
-	branded := filepath.Join(home, ".omo", "agent")
-	legacy := filepath.Join(home, ".omo")
-	discovered := []string{
-		os.Getenv("SENPI_CODING_AGENT_DIR"),
-		os.Getenv("PI_CODING_AGENT_DIR"),
-		branded,
-	}
-	if info, err := os.Stat(filepath.Join(legacy, "settings.json")); err == nil && info.Mode().IsRegular() {
-		discovered = append(discovered, legacy)
-	}
-	return resolve(
-		home,
-		OMOListEnv,
-		"OMO_CODING_AGENT_DIR",
-		filepath.Join(home, ".senpi", "agent"),
-		"sessions",
-		discovered...,
-	)
+	roots, _ := OMOContext(context.Background(), home)
+	return roots
 }
 
 // Pi reports the session roots for the Pi coding agent, including the agent
 // directory of every named profile found under its config root.
 func Pi(home string) []string {
-	configRoot := filepath.Join(home, ".pi")
-	return resolve(home, PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "sessions",
-		profileAgentDirs(configRoot)...)
+	roots, _ := PiContext(context.Background(), home)
+	return roots
 }
 
 // OMP reports the session roots for Oh My Pi, including the agent directory of
@@ -183,9 +162,8 @@ func Pi(home string) []string {
 // relay cannot read a pane's environment, which is the whole reason this package
 // exists - but it is why discovery, not the variable, is what finds profiles.
 func OMP(home string) []string {
-	configRoot := filepath.Join(home, ".omp")
-	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "sessions",
-		profileAgentDirs(configRoot)...)
+	roots, _ := OMPContext(context.Background(), home)
+	return roots
 }
 
 // OMPSkillDirs reports the directories holding Oh My Pi's own (native) skills,
@@ -278,10 +256,59 @@ type profileCacheEntry struct {
 	expires   time.Time
 }
 
-var profileCache = struct {
+type profileCacheState struct {
 	sync.Mutex
 	entries map[string]profileCacheEntry
-}{entries: make(map[string]profileCacheEntry)}
+}
+
+var profileCache = profileCacheState{entries: make(map[string]profileCacheEntry)}
+
+// Dependencies are complete per operation; fixtures never borrow production
+// callbacks or cache state. Cached slices are immutable after publication.
+type rootDependencies struct {
+	getenv  func(string) string
+	stat    func(string) (os.FileInfo, error)
+	readDir func(string) ([]os.DirEntry, error)
+	now     func() time.Time
+	cache   *profileCacheState
+}
+
+func productionRoots() rootDependencies {
+	return rootDependencies{os.Getenv, os.Stat, os.ReadDir, time.Now, &profileCache}
+}
+
+func rootContextError(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("agentroots: nil context")
+	}
+	return ctx.Err()
+}
+
+func (d rootDependencies) validate(ctx context.Context) error {
+	if err := rootContextError(ctx); err != nil {
+		return err
+	}
+	if d.getenv == nil || d.stat == nil || d.readDir == nil || d.now == nil || d.cache == nil {
+		return errors.New("agentroots: incomplete dependencies")
+	}
+	d.cache.Lock()
+	complete := d.cache.entries != nil
+	d.cache.Unlock()
+	if !complete {
+		return errors.New("agentroots: missing cache state")
+	}
+	return nil
+}
+
+// Only an already obtained channel is inspected under the cache mutex.
+func rootCancelled(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
 
 // profileAgentDirs reports the agent directory of every named profile under a
 // config root. Pi and Oh My Pi place one at <config root>/profiles/<name>/agent
@@ -307,36 +334,89 @@ var profileCache = struct {
 // relay has to as well; symlinked profile directories are a normal way to keep
 // agent configuration on another volume or in a dotfiles repo.
 func profileAgentDirs(configRoot string) []string {
+	dirs, _ := productionRoots().profiles(context.Background(), configRoot)
+	return dirs
+}
+
+func (d rootDependencies) profiles(ctx context.Context, configRoot string) ([]string, error) {
+	if err := d.validate(ctx); err != nil {
+		return nil, err
+	}
 	if !filepath.IsAbs(configRoot) {
-		return nil
+		return nil, rootContextError(ctx)
 	}
 	profiles := filepath.Join(configRoot, "profiles")
-	info, err := os.Stat(profiles)
-	if err != nil || !info.IsDir() {
-		profileCache.Lock()
-		delete(profileCache.entries, profiles)
-		profileCache.Unlock()
-		return nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	info, statErr := d.stat(profiles)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	done := ctx.Done()
+	if statErr != nil || !info.IsDir() {
+		d.cache.Lock()
+		cancelled := rootCancelled(done)
+		if !cancelled {
+			delete(d.cache.entries, profiles)
+		}
+		d.cache.Unlock()
+		return nil, ctx.Err()
 	}
 	signature := strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10)
-
-	profileCache.Lock()
-	cached, ok := profileCache.entries[profiles]
-	profileCache.Unlock()
-	if ok && cached.signature == signature && time.Now().Before(cached.expires) {
-		return append([]string(nil), cached.dirs...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
-	entries, err := os.ReadDir(profiles)
-	if err != nil {
-		return nil
+	d.cache.Lock()
+	cached, ok := d.cache.entries[profiles]
+	d.cache.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ok && cached.signature == signature {
+		now := d.now()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if now.Before(cached.expires) {
+			var dirs []string
+			for _, dir := range cached.dirs {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				dirs = append(dirs, dir)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return dirs, nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, readErr := d.readDir(profiles)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if readErr != nil {
+		return nil, nil
 	}
 	dirs := make([]string, 0, len(entries))
 	dangling := false
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		candidate := filepath.Join(profiles, entry.Name())
-		entryInfo, err := os.Stat(candidate)
-		if err != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entryInfo, statErr := d.stat(candidate)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if statErr != nil {
 			if entry.Type()&os.ModeSymlink != 0 {
 				dangling = true
 			}
@@ -347,18 +427,34 @@ func profileAgentDirs(configRoot string) []string {
 		}
 		dirs = append(dirs, filepath.Join(candidate, "agent"))
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ttl := profileCacheTTL
 	if dangling {
 		ttl = profileDanglingCacheTTL
 	}
-	profileCache.Lock()
-	profileCache.entries[profiles] = profileCacheEntry{
-		signature: signature,
-		dirs:      append([]string(nil), dirs...),
-		expires:   time.Now().Add(ttl),
+	var owned []string
+	for _, dir := range dirs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		owned = append(owned, dir)
 	}
-	profileCache.Unlock()
-	return dirs
+	publication := profileCacheEntry{signature: signature, dirs: owned, expires: d.now().Add(ttl)}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d.cache.Lock()
+	cancelled := rootCancelled(done)
+	if !cancelled {
+		d.cache.entries[profiles] = publication
+	}
+	d.cache.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return dirs, nil
 }
 
 // resolve builds the ordered, de-duplicated root list for one agent. home is
@@ -376,6 +472,14 @@ func profileAgentDirs(configRoot string) []string {
 // expanded by a shell, so a "~" or "." entry would otherwise silently become a
 // scan root under the service's working directory.
 func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...string) []string {
+	roots, _ := productionRoots().resolveContext(context.Background(), home, listEnv, singleEnv, homeBase, leaf, discovered...)
+	return roots
+}
+
+func (d rootDependencies) resolveContext(ctx context.Context, home, listEnv, singleEnv, homeBase, leaf string, discovered ...string) ([]string, error) {
+	if err := d.validate(ctx); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]bool, 4+len(discovered))
 	roots := make([]string, 0, 4+len(discovered))
 	add := func(base string) {
@@ -409,14 +513,30 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 		seen[root] = true
 		roots = append(roots, root)
 	}
-	for _, base := range filepath.SplitList(os.Getenv(listEnv)) {
+	for _, base := range filepath.SplitList(d.getenv(listEnv)) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		add(base)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if singleEnv != "" {
-		add(os.Getenv(singleEnv))
+		base := d.getenv(singleEnv)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		add(base)
 	}
 	for _, base := range discovered {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		add(base)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	add(homeBase)
 
@@ -426,13 +546,149 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 	if filepath.IsAbs(homeRoot) {
 		filtered := roots[:0]
 		for _, root := range roots {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if root != homeRoot {
 				filtered = append(filtered, root)
 			}
 		}
 		roots = append(filtered, homeRoot)
 	}
-	return roots
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return roots, nil
+}
+
+// Context counterparts use cancellation only, not Reader lifetime authority.
+func ClaudeContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "Claude")
+}
+
+func QoderContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "Qoder")
+}
+
+func CodexContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "Codex")
+}
+
+func CursorContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "Cursor")
+}
+
+func OpenCodeDataContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "OpenCodeData")
+}
+
+func OpenCodeDBsContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "OpenCodeDBs")
+}
+
+func HermesDataContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "HermesData")
+}
+
+func HermesDBsContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "HermesDBs")
+}
+
+func PiContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "Pi")
+}
+
+func OMPContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "OMP")
+}
+
+func OMOContext(ctx context.Context, home string) ([]string, error) {
+	return productionRoots().roots(ctx, home, "OMO")
+}
+
+func (d rootDependencies) roots(ctx context.Context, home, family string) ([]string, error) {
+	if err := d.validate(ctx); err != nil {
+		return nil, err
+	}
+	var list, single, base, leaf, database string
+	var discovered []string
+	switch family {
+	case "Claude":
+		list, single, base, leaf = ClaudeListEnv, "CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"), "projects"
+	case "Qoder":
+		list, base, leaf = QoderListEnv, filepath.Join(home, ".qoder"), "projects"
+	case "Codex":
+		list, single, base, leaf = CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "sessions"
+	case "Cursor":
+		list, base = CursorListEnv, filepath.Join(home, ".cursor", "projects")
+	case "OpenCodeData", "OpenCodeDBs":
+		xdg := strings.TrimSpace(d.getenv("XDG_DATA_HOME"))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if xdg == "" {
+			xdg = filepath.Join(home, ".local", "share")
+		}
+		list, base = OpenCodeListEnv, filepath.Join(xdg, "opencode")
+		if family == "OpenCodeDBs" {
+			database = "opencode.db"
+		}
+	case "HermesData", "HermesDBs":
+		list, single, base = HermesListEnv, "HERMES_HOME", filepath.Join(home, ".hermes")
+		if family == "HermesDBs" {
+			database = "state.db"
+		}
+	case "Pi", "OMP":
+		config := filepath.Join(home, ".pi")
+		list = PiListEnv
+		if family == "OMP" {
+			config, list = filepath.Join(home, ".omp"), OMPListEnv
+		}
+		var err error
+		discovered, err = d.profiles(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		single, base, leaf = "PI_CODING_AGENT_DIR", filepath.Join(config, "agent"), "sessions"
+	case "OMO":
+		for _, key := range []string{"SENPI_CODING_AGENT_DIR", "PI_CODING_AGENT_DIR"} {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			discovered = append(discovered, d.getenv(key))
+		}
+		discovered = append(discovered, filepath.Join(home, ".omo", "agent"))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		legacy := filepath.Join(home, ".omo")
+		info, statErr := d.stat(filepath.Join(legacy, "settings.json"))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if statErr == nil && info.Mode().IsRegular() {
+			discovered = append(discovered, legacy)
+		}
+		list, single, base, leaf = OMOListEnv, "OMO_CODING_AGENT_DIR", filepath.Join(home, ".senpi", "agent"), "sessions"
+	default:
+		return nil, errors.New("agentroots: unknown family")
+	}
+	roots, err := d.resolveContext(ctx, home, list, single, base, leaf, discovered...)
+	if err != nil {
+		return nil, err
+	}
+	if database != "" {
+		for i, root := range roots {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			roots[i] = filepath.Join(root, database)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return roots, nil
 }
 
 // expandTilde expands a leading "~" or "~/" against home, the same shorthand a

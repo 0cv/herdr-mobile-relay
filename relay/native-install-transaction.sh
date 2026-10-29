@@ -30,7 +30,7 @@ native_install_observe() {
     local LC_ALL=C
     # native_observed_origin is launchd-only evidence taken from this same observation; it is
     # empty (origin unknown) unless exactly one job-level path line is found below.
-    NATIVE_STATE=unknown NATIVE_ENABLED=unknown native_observed_origin=""
+    NATIVE_STATE=unknown NATIVE_ENABLED=unknown NATIVE_FLAG_PRESENT=unknown native_observed_origin=""
     if [ "$native_manager" = systemd ]; then
         output="$(
             LC_ALL=C systemctl --user show "$label" --property=LoadState --property=ActiveState --property=UnitFileState 2>/dev/null | native_install_read_bounded 4096
@@ -141,6 +141,7 @@ native_install_observe() {
         esac
     done <<< "$disabled"
     [ "$state" -eq 2 ] && [ "$count" -le 1 ] || return 1
+    NATIVE_FLAG_PRESENT="$count"
     NATIVE_STATE="$active" NATIVE_ENABLED="$enabled"
     return 0
 }
@@ -213,7 +214,7 @@ native_install_begin() {
     native_origin_refused=false
     native_activation_attempted=false native_committed=false native_previous_ready=false
     native_active=false native_enabled=false native_legacy_active=false native_legacy_enabled=false
-    local root="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/recovery" file index=0 previous binary instance identifier
+    local root="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/recovery" claim_root="$HOME/.local/state/herdr-mobile-relay/recovery" file index=0 previous binary instance identifier
     local identities=() identity_count=0 identity_index
     native_selected_pointer_disjoint "${NATIVE_SELECTED_POINTER:-}" "${native_resources[@]}" || return 1
     for file in "${native_resources[@]}"; do
@@ -228,9 +229,14 @@ native_install_begin() {
     done
     # No selected-file mutation until every snapshot and both state queries
     # succeed. Existing directories/executables are not chmodded as a shortcut.
-    (umask 077; mkdir -p "$root") || return 1
-    native_recovery="$(mktemp -d "$root/herdr-native-recovery.XXXXXX")" || return 1
-    chmod 700 "$native_recovery" || { rm -rf "$native_recovery"; return 1; }
+    (umask 077; mkdir -p "$root" "$claim_root") || return 1
+    # Shared native resource claim: a fresh CLI promotion retains this directory
+    # for its entire installed lifetime. Replacement/rollback must never run
+    # concurrently with that setup, its route, or an uncertain attempt.
+    native_claim="$claim_root/.herdr-native-claim-v1"
+    mkdir -m 700 "$native_claim" || return 1
+    native_recovery="$(mktemp -d "$root/herdr-native-recovery.XXXXXX")" || { rmdir "$native_claim"; return 1; }
+    chmod 700 "$native_recovery" || { rm -rf "$native_recovery"; rmdir "$native_claim"; return 1; }
     trap native_install_exit EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -426,7 +432,10 @@ native_install_exit() {
     trap ':' INT TERM
     set +e
     [ -z "$native_stage" ] || rm -f "$native_stage"
-    if [ "$native_committed" = true ]; then rm -rf "$native_recovery"; exit "$result"; fi
+    if [ "$native_committed" = true ]; then
+        rm -rf "$native_recovery" && rmdir "$native_claim" || result=1
+        exit "$result"
+    fi
     if [ "$native_snapshot_complete" = true ] && [ "$native_quiesced" = true ]; then
         # NO restore/remove/reactivate after active/unknown quiescence. A
         # failed file restoration likewise forbids all prior reactivation.
@@ -437,7 +446,7 @@ native_install_exit() {
     if [ "$failed" = true ]; then
         echo 'Native installation rollback is incomplete; current resources and private recovery evidence are retained.' >&2
     else
-        rm -rf "$native_recovery" || failed=true
+        rm -rf "$native_recovery" && rmdir "$native_claim" || failed=true
         # An origin refusal (before any mutation) has already printed its one fixed line; only
         # that case, with recovery removed, omits this generic line. Every other failure keeps it.
         if [ "$native_origin_refused" != true ] || [ "$failed" = true ]; then

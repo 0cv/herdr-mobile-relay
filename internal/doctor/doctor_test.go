@@ -59,6 +59,25 @@ func TestHerdrPingEvidenceRemainsRequiredUnknownAndFinite(t *testing.T) {
 	}
 }
 
+func TestUnknownOperatorChecksOfferRecoveryWithoutHealth(t *testing.T) {
+	cfg := fixtureConfig(ModeCLI)
+	r := finalize(cfg, testBuild(), testNow(), false, policy(cfg, Options{ProbeIngress: true}))
+	if r.ExitCode() == 0 {
+		t.Fatal("missing observations became healthy")
+	}
+	for id, remedy := range map[CheckID]string{
+		CheckService: "inspect_service", CheckCLI: "inspect_route", CheckHerdr: "inspect_herdr",
+		CheckRelay: "inspect_local", CheckIngress: "inspect_https_bundle",
+		CheckIngressBundle: "inspect_https_bundle", CheckPhone: "check_handset",
+	} {
+		c := findCheck(t, r, id)
+		if c.Applicable && (c.State == OK || c.RemedyID != remedy || c.Remedy == "") {
+			t.Fatalf("%s: incomplete observation lacks recovery or was promoted: %+v", id, c)
+		}
+	}
+	assertRenderPrivacy(t, r)
+}
+
 func TestFinalModelExitPriorityAndRequiredness(t *testing.T) {
 	for _, test := range []struct {
 		name              string

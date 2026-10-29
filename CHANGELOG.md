@@ -43,10 +43,13 @@ entry below states its limits.
   (guided foreground Serve with a private state root and nonproduction ports),
   `make dev-tailscale-cli` (CLI-backed persistent Serve for the exact
   macOS/arm64 App Store Tailscale 1.102.4 profile) and a connection chooser in
-  `make dev-tunnel`. The CLI-backed mode is not offered in setup and is not
-  runtime-qualified, and shipped builds refuse production and installed-service
-  activation. Its route survives stopping the relay and is removed only by a
-  separate, explicitly confirmed operation.
+  `make dev-tunnel`. The isolated CLI-backed development mode is not
+  runtime-qualified. Post-install setup visibly dispatches **Tailscale > Always
+  on** to the installed CLI selector, but production, installed-manager and
+  RuntimeQualified gates remain closed; installed activation is refused pending
+  actual qualification and separate enablement. The development route survives
+  stopping the relay and is removed only by a separate, explicitly confirmed
+  operation.
 - Add read-only `herdr-mobile-relay doctor` and `status` commands, with
   `--json`, `--config ABSOLUTE_FILE` and `--probe-ingress`. The plugin's Status
   pane and the setup menu header now render them. They check the selected
@@ -94,8 +97,9 @@ entry below states its limits.
   **5 Publish the phone app to your Cloudflare Pages (advanced)** and
   **6 Doctor** at the top level. `b` goes back and `q` exits; a blank answer at
   the top opens Cloudflare and never starts a tunnel. In the Tailscale submenu
-  **Always on** and **Remove Herdr's own route** are listed as unavailable and
-  do nothing.
+  **Always on** dispatches the installed CLI selector, and **Remove Herdr's own
+  route** dispatches its selected, consented removal action. Both remain refused
+  while installed activation is disabled pending qualification and separate enablement.
 - Require fresh, authenticated inventory before the phone app acts on a relay.
   After each connection, path change or wake the app sends one snapshot request
   with a random nonce, which the relay answers from an inventory poll that

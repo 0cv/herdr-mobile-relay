@@ -19,9 +19,10 @@ REPO_DIR=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 OPERATOR_CLI_UPDATE=false
 case "$#" in
     0) ;;
-    1)
+    1|2)
         if [ "$1" = --operator-managed-tailscale-cli ]; then
             OPERATOR_CLI_UPDATE=true
+            OWNED_CANDIDATE=${2:-}
         else
             echo "Usage: relay/plugin-build.sh [--operator-managed-tailscale-cli]" >&2
             exit 2
@@ -84,6 +85,19 @@ SOURCE_SESSION=""
 SOURCE_EXTERNAL_SESSION=""
 [ -z "$SOURCE_ENV" ] || SOURCE_SESSION="$(dirname "$SOURCE_ENV")/tailscale-session.env"
 [ -z "$SOURCE_ENV" ] || SOURCE_EXTERNAL_SESSION="$(dirname "$SOURCE_ENV")/tailscale-external-session.env"
+# Promoted definitions execute a physical pin and have no wrapper environment.
+# Dispatch before the old wrapper transport/migration check, never through it.
+if [ "$OPERATOR_CLI_UPDATE" = true ] &&
+   [ -d "$HOME/.local/state/herdr-mobile-relay/recovery/.herdr-native-claim-v1" ]; then
+    [ "$TARGET_TRANSPORT" = tailscale-cli ] && [ -n "${OWNED_CANDIDATE:-}" ] && [ -t 0 ] || {
+        echo "herdr-mobile-relay: explicit CLI selection, pinned candidate and interactive operator required" >&2; exit 1;
+    }
+    read -r -p "Update the owned pinned service to this verified release, with possible interruption? [y/N] " answer || exit 1
+    case "$answer" in y|Y|yes|YES) ;; *) exit 1 ;; esac
+    SOURCE_BIN=${HERDR_RELAY_BIN:-"$INSTALL_ROOT/current/herdr-mobile-relay"}
+    exec "$SOURCE_BIN" update-installed "$OWNED_CANDIDATE"
+fi
+[ -z "${OWNED_CANDIDATE:-}" ] || { echo "herdr-mobile-relay: candidate is only valid for an owned promotion" >&2; exit 1; }
 if [ "$TARGET_TRANSPORT" = tailscale-cli ] || [ "$SOURCE_TRANSPORT" = tailscale-cli ]; then
     if [ "$OPERATOR_CLI_UPDATE" != true ] ||
        [ "$TARGET_TRANSPORT" != tailscale-cli ] || [ "$SOURCE_TRANSPORT" != tailscale-cli ]; then
@@ -658,9 +672,9 @@ WEB_HASH=$(sed -n 's/^[[:space:]]*"web_hash":[[:space:]]*"\([^"]*\)".*/\1/p' "$M
 
 # Store the repository credential separately; the service receives only its
 # path, so the relay, cloudflared, and agent subprocesses never inherit it.
-if [ -n "$INSTALL_TOKEN" ]; then
-    ensure_relay_env "$TARGET_ENV" "" "$INSTALL_TOKEN"
-fi
+# Release download authentication is independent of the private relay identity.
+# Prepare it for public installs too, preserving any existing token/instance.
+ensure_relay_env "$TARGET_ENV" "" "$INSTALL_TOKEN"
 unset INSTALL_TOKEN
 
 # Cut over an existing service to the new release root.

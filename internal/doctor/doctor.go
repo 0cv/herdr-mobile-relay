@@ -260,6 +260,22 @@ func decorate(c Check) Check {
 	if c.State == Unknown || c.State == Error || c.State == Warn {
 		c.RemedyID, c.Remedy = "review_observation", "Review the configured host and obtain a fresh read-only observation; do not delete recovery evidence."
 	}
+	if c.State != OK && c.Applicable {
+		switch c.ID {
+		case CheckService:
+			c.RemedyID, c.Remedy = "inspect_service", "Inspect the selected user service with its native manager; start or recover only the owned definition. Service state was not observed here."
+		case CheckHerdr:
+			c.RemedyID, c.Remedy = "inspect_herdr", "Check the running Herdr server and selected private socket separately; a ping does not compare installed client or features."
+		case CheckCLI, CheckManaged:
+			c.RemedyID, c.Remedy = "inspect_route", "Use the selected transport's read-only status and retained journal before recovery; do not adopt, republish or reset a route."
+		case CheckGateway:
+			c.RemedyID, c.Remedy = "inspect_registration", "Verify local gateway registration and the selected app origin separately; registration is not phone access."
+		case CheckRelay:
+			c.RemedyID, c.Remedy = "inspect_local", "Check the selected relay's loopback readiness and instance identity; do not infer remote HTTPS or phone access."
+		case CheckIngress, CheckIngressBundle:
+			c.RemedyID, c.Remedy = "inspect_https_bundle", "Verify trusted HTTPS and the exact installed phone-app bundle before reprinting an invitation. No external probe was sent."
+		}
+	}
 	if c.ID == CheckPhone {
 		c.RemedyID, c.Remedy = "check_handset", "Check the handset connection and VPN separately; no phone probe was sent."
 	}

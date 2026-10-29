@@ -866,7 +866,7 @@ func diagnosticBundleFixture(t *testing.T, text string) (diagnosticRuntime, stri
 			t.Fatal(err)
 		}
 	}
-	wrappers := []string{"common.sh", "native-install-transaction.sh", "herdr-mobile-relay-service.sh", "install-service.sh", "install-systemd-user-service.sh", "plugin-on-event.sh", "plugin-status.sh", "pi-commands.sh", "service.sh", "setup-link.sh", "setup.sh", "speech-voices.sh", "stable-setup.sh", "stable-teardown.sh", "start.sh", "tailscale.sh", "tailscale-external.sh", "tailscale-cli.sh", "tailscale-cli-service.sh", "transport-switch-locked.sh", "uninstall.sh", "uninstall-service.sh", "uninstall-systemd-user-service.sh"}
+	wrappers := []string{"common.sh", "native-install-transaction.sh", "native-cli-fresh.sh", "herdr-mobile-relay-service.sh", "install-service.sh", "install-systemd-user-service.sh", "plugin-on-event.sh", "plugin-status.sh", "plugin-tailscale-always-on.sh", "pi-commands.sh", "service.sh", "setup-link.sh", "setup.sh", "speech-voices.sh", "stable-setup.sh", "stable-teardown.sh", "start.sh", "tailscale.sh", "tailscale-external.sh", "tailscale-cli.sh", "tailscale-cli-service.sh", "transport-switch-locked.sh", "uninstall.sh", "uninstall-service.sh", "uninstall-systemd-user-service.sh"}
 	for _, name := range wrappers {
 		write("relay/"+name, []byte("inert wrapper bytes, never executed\n"), 0o755)
 	}

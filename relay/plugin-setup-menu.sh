@@ -74,9 +74,9 @@ render_submenu() {
             ;;
         tailscale)
             printf '\n%s\n' 'Tailscale' \
-                '  1. Always on — unavailable: runtime/phone qualification and separate production enablement pending.' \
+                '  1. Always on — installed CLI Serve setup + pairing (requires a qualified profile and production enablement)' \
                 '  2. Your own HTTPS route (advanced BYO)' \
-                "  3. Remove Herdr's own route — unavailable: no qualified standalone installed-route cleanup adapter."
+                "  3. Remove Herdr's own route — selected owned route only, with explicit consent"
             ;;
     esac
     printf '%s\n\n' '  b. Back' '  q. Exit, change nothing'
@@ -128,9 +128,9 @@ while true; do
             cloudflare:4) run_action plugin-stable-teardown.sh; break ;;
             gateway:1) run_action plugin-choose-transport.sh community; break ;;
             gateway:2) run_action plugin-choose-transport.sh own; break ;;
+            tailscale:1) run_action plugin-choose-transport.sh tailscale-cli; break ;;
             tailscale:2) run_action plugin-choose-transport.sh tailscale-external; break ;;
-            tailscale:1) printf '%s\n' 'Always on unavailable: runtime/phone qualification and separate production enablement pending.' ;;
-            tailscale:3) printf '%s\n' "Route removal unavailable: no qualified standalone installed-route cleanup adapter." ;;
+            tailscale:3) run_action tailscale-cli.sh unpublish; break ;;
             *) printf '%s\n' 'Invalid choice; select a listed option, Back in a submenu, or q.' ;;
         esac
     done

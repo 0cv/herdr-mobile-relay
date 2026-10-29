@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/conversationlife"
 )
 
 var multiDash = regexp.MustCompile(`-+`)
@@ -41,152 +44,28 @@ func cursorTranscriptRels(sessionID string) []string {
 }
 
 func findCursorSession(roots []string, project ProjectContext, sessionID string) Location {
-	if !canonicalSessionID.MatchString(sessionID) {
-		return Location{}
-	}
-	rels := cursorTranscriptRels(sessionID)
-	candidates := projectDirectoriesForContext(project)
-
-	for _, root := range roots {
-		seenSlug := make(map[string]bool)
-		for _, cwd := range candidates {
-			slug := cursorProjectSlug(cwd)
-			if slug == "" || seenSlug[slug] {
-				continue
-			}
-			seenSlug[slug] = true
-			if location := cursorTranscriptInProject(root, slug, rels); location.Path != "" {
-				return location
-			}
-		}
-
-		for _, cwd := range candidates {
-			if location := findCursorByWorkspaceTrusted(root, cwd, rels); location.Path != "" {
-				return location
-			}
-		}
-
-		for _, rel := range rels {
-			if location := scanCursorSession(root, rel); location.Path != "" {
-				return location
-			}
-		}
-	}
-	return Location{}
+	location, _ := findCursorSessionContext(context.Background(), ordinaryReaderDiscoveryDeps(), roots, project, sessionID)
+	return location
 }
 
 func findCursorByWorkspaceTrusted(root, cwd string, rels []string) Location {
-	cwd = strings.TrimSpace(cwd)
-	if cwd == "" {
-		return Location{}
-	}
-
-	// Resolve symlinks once for the target path.
-	resolvedCWD, errCWD := filepath.EvalSymlinks(cwd)
-
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return Location{}
-	}
-	for _, entry := range entries {
-		projectDir := filepath.Join(root, entry.Name())
-		if !isDir(projectDir) {
-			continue
-		}
-		trustedPath := containedRegularFile(filepath.Join(projectDir, ".workspace-trusted"), root)
-		if trustedPath == "" {
-			continue
-		}
-		data, err := os.ReadFile(trustedPath)
-		if err != nil {
-			continue
-		}
-		var payload struct {
-			WorkspacePath string `json:"workspacePath"`
-		}
-		if json.Unmarshal(data, &payload) != nil {
-			continue
-		}
-		recorded := strings.TrimSpace(payload.WorkspacePath)
-		if recorded == "" {
-			continue
-		}
-
-		// Compare paths: direct match or resolved match.
-		match := (cwd == recorded)
-		if !match && errCWD == nil {
-			resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
-			match = (errRecorded == nil && resolvedCWD == resolvedRecorded)
-		}
-
-		if !match {
-			continue
-		}
-		if location := cursorTranscriptInProject(root, entry.Name(), rels); location.Path != "" {
-			return location
-		}
-	}
-	return Location{}
+	location, _ := findCursorByWorkspaceTrustedContext(context.Background(), ordinaryReaderDiscoveryDeps(), root, cwd, rels)
+	return location
 }
 
 func cursorTranscriptInProject(root, projectName string, rels []string) Location {
-	for _, rel := range rels {
-		path := filepath.Join(root, projectName, rel)
-		if found := containedRegularFile(path, root); found != "" {
-			return Location{Path: found, Root: root}
-		}
-	}
-	return Location{}
+	location, _ := cursorTranscriptInProjectContext(context.Background(), ordinaryReaderDiscoveryDeps(), root, projectName, rels)
+	return location
 }
 
 func scanCursorSession(root, rel string) Location {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return Location{}
-	}
-	for _, entry := range entries {
-		projectDir := filepath.Join(root, entry.Name())
-		if !isDir(projectDir) {
-			continue
-		}
-		path := filepath.Join(projectDir, rel)
-		if found := containedRegularFile(path, root); found != "" {
-			return Location{Path: found, Root: root}
-		}
-	}
-	return Location{}
+	location, _ := scanCursorSessionContext(context.Background(), ordinaryReaderDiscoveryDeps(), root, rel)
+	return location
 }
 
 func parseCursorRecord(record map[string]any) (string, string) {
-	role := strings.ToLower(strings.TrimSpace(stringValue(record["role"])))
-	if role != "user" && role != "assistant" {
-		return "", ""
-	}
-	message, ok := record["message"].(map[string]any)
-	if !ok {
-		return "", ""
-	}
-	content := message["content"]
-	if raw, ok := content.(string); ok {
-		if role == "user" {
-			return role, humanCursorText(raw)
-		}
-		return role, raw
-	}
-	if role == "user" {
-		blocks := textBlockList(content)
-		kept := make([]string, 0, len(blocks))
-		for _, block := range blocks {
-			if text := humanCursorText(block); strings.TrimSpace(text) != "" {
-				kept = append(kept, text)
-			}
-		}
-		if len(kept) == 0 {
-			return "", ""
-		}
-		return role, strings.Join(kept, "\n")
-	}
-	return role, textBlocks(content)
+	role, text, _ := parseCursorRecordContext(context.Background(), record)
+	return role, text
 }
 
 // humanCursorText keeps only explicit <user_query> bodies. User records without
@@ -201,30 +80,8 @@ func humanCursorText(raw string) string {
 }
 
 func cursorTimestampFromRecord(record map[string]any) string {
-	role := strings.ToLower(strings.TrimSpace(stringValue(record["role"])))
-	if role != "user" {
-		return ""
-	}
-	message, ok := record["message"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	content := message["content"]
-	var raw string
-	if s, ok := content.(string); ok {
-		raw = innerTag(s, "timestamp")
-	} else {
-		for _, block := range textBlockList(content) {
-			if stamp := innerTag(block, "timestamp"); stamp != "" {
-				raw = stamp
-				break
-			}
-		}
-	}
-	if raw == "" {
-		return ""
-	}
-	return normalizeCursorTimestamp(raw)
+	stamp, _ := cursorTimestampFromRecordContext(context.Background(), record)
+	return stamp
 }
 
 // normalizeCursorTimestamp parses Cursor's <timestamp> format and returns RFC 3339 UTC,
@@ -283,4 +140,437 @@ func normalizeCursorTimestamp(raw string) string {
 
 	t = t.Add(-time.Duration(offsetMinutes) * time.Minute)
 	return t.UTC().Format(time.RFC3339)
+}
+
+func parseCursorRecordContext(ctx context.Context, record map[string]any) (role string, text string, err error) {
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", "", err
+	}
+	defer func() {
+		if finalErr := readerParseContextErr(ctx); finalErr != nil {
+			err = finalErr
+		}
+		if err != nil {
+			role, text = "", ""
+		}
+	}()
+	role = stringValue(record["role"])
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", "", err
+	}
+	role = strings.TrimSpace(role)
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", "", err
+	}
+	role = strings.ToLower(role)
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", "", err
+	}
+	if role != "user" && role != "assistant" {
+		return "", "", nil
+	}
+	message, ok := record["message"].(map[string]any)
+	if !ok {
+		return "", "", nil
+	}
+	content := message["content"]
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", "", err
+	}
+	if raw, ok := content.(string); ok {
+		if role == "user" {
+			return role, humanCursorText(raw), nil
+		}
+		return role, raw, nil
+	}
+	if role == "user" {
+		blocks, blockErr := textBlockListContext(ctx, content)
+		if blockErr != nil {
+			return "", "", blockErr
+		}
+		if err = readerParseContextErr(ctx); err != nil {
+			return "", "", err
+		}
+		kept := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if err = readerParseContextErr(ctx); err != nil {
+				return "", "", err
+			}
+			filtered := humanCursorText(block)
+			if err = readerParseContextErr(ctx); err != nil {
+				return "", "", err
+			}
+			nonempty := strings.TrimSpace(filtered) != ""
+			if err = readerParseContextErr(ctx); err != nil {
+				return "", "", err
+			}
+			if nonempty {
+				kept = append(kept, filtered)
+			}
+		}
+		if err = readerParseContextErr(ctx); err != nil {
+			return "", "", err
+		}
+		if len(kept) == 0 {
+			return "", "", nil
+		}
+		return role, strings.Join(kept, "\n"), nil
+	}
+	text, err = textBlocksContext(ctx, content)
+	return role, text, err
+}
+
+func cursorTimestampFromRecordContext(ctx context.Context, record map[string]any) (stamp string, err error) {
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", err
+	}
+	defer func() {
+		if finalErr := readerParseContextErr(ctx); finalErr != nil {
+			err = finalErr
+		}
+		if err != nil {
+			stamp = ""
+		}
+	}()
+	role := stringValue(record["role"])
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", err
+	}
+	role = strings.TrimSpace(role)
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", err
+	}
+	role = strings.ToLower(role)
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", err
+	}
+	if role != "user" {
+		return "", nil
+	}
+	message, ok := record["message"].(map[string]any)
+	if !ok {
+		return "", nil
+	}
+	content := message["content"]
+	var raw string
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", err
+	}
+	if s, ok := content.(string); ok {
+		raw = innerTag(s, "timestamp")
+		if err = readerParseContextErr(ctx); err != nil {
+			return "", err
+		}
+	} else {
+		blocks, blockErr := textBlockListContext(ctx, content)
+		if blockErr != nil {
+			return "", blockErr
+		}
+		if err = readerParseContextErr(ctx); err != nil {
+			return "", err
+		}
+		for _, block := range blocks {
+			if err = readerParseContextErr(ctx); err != nil {
+				return "", err
+			}
+			candidate := innerTag(block, "timestamp")
+			if err = readerParseContextErr(ctx); err != nil {
+				return "", err
+			}
+			if candidate != "" {
+				raw = candidate
+				break
+			}
+		}
+	}
+	if err = readerParseContextErr(ctx); err != nil {
+		return "", err
+	}
+	if raw == "" {
+		return "", nil
+	}
+	return normalizeCursorTimestamp(raw), nil
+}
+
+func findCursorSessionContext(ctx context.Context, d readerDiscoveryDeps, roots []string, project ProjectContext, sessionID string) (location Location, err error) {
+	defer func() {
+		err = readerDiscoveryResult(ctx, err)
+		if err != nil {
+			location = Location{}
+		}
+	}()
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	if !d.complete() {
+		return Location{}, conversationlife.ErrRefused
+	}
+	canonical := canonicalSessionID.MatchString(sessionID)
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	if !canonical {
+		return Location{}, nil
+	}
+	rels := cursorTranscriptRels(sessionID)
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	candidates := projectDirectoriesForContext(project)
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	for _, root := range roots {
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		seenSlug := make(map[string]bool)
+		for _, cwd := range candidates {
+			if err = readerParseContextErr(ctx); err != nil {
+				return Location{}, err
+			}
+			slug := cursorProjectSlug(cwd)
+			if err = readerParseContextErr(ctx); err != nil {
+				return Location{}, err
+			}
+			if slug == "" || seenSlug[slug] {
+				continue
+			}
+			seenSlug[slug] = true
+			location, err = cursorTranscriptInProjectContext(ctx, d, root, slug, rels)
+			if err = readerDiscoveryResult(ctx, err); err != nil {
+				return Location{}, err
+			}
+			if location.Path != "" {
+				return location, nil
+			}
+		}
+		for _, cwd := range candidates {
+			if err = readerParseContextErr(ctx); err != nil {
+				return Location{}, err
+			}
+			location, err = findCursorByWorkspaceTrustedContext(ctx, d, root, cwd, rels)
+			if err = readerDiscoveryResult(ctx, err); err != nil {
+				return Location{}, err
+			}
+			if location.Path != "" {
+				return location, nil
+			}
+		}
+		for _, rel := range rels {
+			if err = readerParseContextErr(ctx); err != nil {
+				return Location{}, err
+			}
+			location, err = scanCursorSessionContext(ctx, d, root, rel)
+			if err = readerDiscoveryResult(ctx, err); err != nil {
+				return Location{}, err
+			}
+			if location.Path != "" {
+				return location, nil
+			}
+		}
+	}
+	return Location{}, nil
+}
+
+func findCursorByWorkspaceTrustedContext(ctx context.Context, d readerDiscoveryDeps, root, cwd string, rels []string) (location Location, err error) {
+	defer func() {
+		err = readerDiscoveryResult(ctx, err)
+		if err != nil {
+			location = Location{}
+		}
+	}()
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	if !d.complete() {
+		return Location{}, conversationlife.ErrRefused
+	}
+	cwd = strings.TrimSpace(cwd)
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	if cwd == "" {
+		return Location{}, nil
+	}
+
+	// Resolve symlinks once for the target path.
+	var resolvedCWD string
+	errCWD := sourceEffect(ctx, func() (effectErr error) { resolvedCWD, effectErr = d.eval(cwd); return })
+	if terminalProviderError(errCWD) {
+		return Location{}, errCWD
+	}
+	var entries []os.DirEntry
+	err = sourceEffect(ctx, func() (effectErr error) { entries, effectErr = d.readDir(root); return })
+	if terminalProviderError(err) {
+		return Location{}, err
+	}
+	if err != nil {
+		return Location{}, nil
+	}
+	for _, entry := range entries {
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		projectDir := filepath.Join(root, entry.Name())
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		directory, directoryErr := isDirContext(ctx, d, projectDir)
+		if err = readerDiscoveryResult(ctx, directoryErr); err != nil {
+			return Location{}, err
+		}
+		if !directory {
+			continue
+		}
+		trustedPath, trustedErr := containedRegularFileContext(ctx, d, filepath.Join(projectDir, ".workspace-trusted"), root)
+		if err = readerDiscoveryResult(ctx, trustedErr); err != nil {
+			return Location{}, err
+		}
+		if trustedPath == "" {
+			continue
+		}
+		var data []byte
+		err = sourceEffect(ctx, func() (effectErr error) {
+			data, effectErr = d.readContent(ctx, Location{Path: trustedPath, Root: root})
+			return
+		})
+		if terminalProviderError(err) {
+			return Location{}, err
+		}
+		if err != nil {
+			continue
+		}
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		var payload struct {
+			WorkspacePath string `json:"workspacePath"`
+		}
+		decodeErr := json.Unmarshal(data, &payload)
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		if decodeErr != nil {
+			continue
+		}
+		recorded := strings.TrimSpace(payload.WorkspacePath)
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		if recorded == "" {
+			continue
+		}
+
+		// Compare paths: direct match or resolved match.
+		match := (cwd == recorded)
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		if !match && errCWD == nil {
+			var resolvedRecorded string
+			errRecorded := sourceEffect(ctx, func() (effectErr error) { resolvedRecorded, effectErr = d.eval(recorded); return })
+			if terminalProviderError(errRecorded) {
+				return Location{}, errRecorded
+			}
+			match = (errRecorded == nil && resolvedCWD == resolvedRecorded)
+		}
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		if !match {
+			continue
+		}
+		location, err = cursorTranscriptInProjectContext(ctx, d, root, entry.Name(), rels)
+		if err = readerDiscoveryResult(ctx, err); err != nil {
+			return Location{}, err
+		}
+		if location.Path != "" {
+			return location, nil
+		}
+	}
+	return Location{}, nil
+}
+
+func cursorTranscriptInProjectContext(ctx context.Context, d readerDiscoveryDeps, root, projectName string, rels []string) (location Location, err error) {
+	defer func() {
+		err = readerDiscoveryResult(ctx, err)
+		if err != nil {
+			location = Location{}
+		}
+	}()
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	if !d.complete() {
+		return Location{}, conversationlife.ErrRefused
+	}
+	for _, rel := range rels {
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		path := filepath.Join(root, projectName, rel)
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		found, foundErr := containedRegularFileContext(ctx, d, path, root)
+		if err = readerDiscoveryResult(ctx, foundErr); err != nil {
+			return Location{}, err
+		}
+		if found != "" {
+			return Location{Path: found, Root: root}, nil
+		}
+	}
+	return Location{}, nil
+}
+
+func scanCursorSessionContext(ctx context.Context, d readerDiscoveryDeps, root, rel string) (location Location, err error) {
+	defer func() {
+		err = readerDiscoveryResult(ctx, err)
+		if err != nil {
+			location = Location{}
+		}
+	}()
+	if err = readerParseContextErr(ctx); err != nil {
+		return Location{}, err
+	}
+	if !d.complete() {
+		return Location{}, conversationlife.ErrRefused
+	}
+	var entries []os.DirEntry
+	err = sourceEffect(ctx, func() (effectErr error) { entries, effectErr = d.readDir(root); return })
+	if terminalProviderError(err) {
+		return Location{}, err
+	}
+	if err != nil {
+		return Location{}, nil
+	}
+	for _, entry := range entries {
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		projectDir := filepath.Join(root, entry.Name())
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		directory, directoryErr := isDirContext(ctx, d, projectDir)
+		if err = readerDiscoveryResult(ctx, directoryErr); err != nil {
+			return Location{}, err
+		}
+		if !directory {
+			continue
+		}
+		path := filepath.Join(projectDir, rel)
+		if err = readerParseContextErr(ctx); err != nil {
+			return Location{}, err
+		}
+		found, foundErr := containedRegularFileContext(ctx, d, path, root)
+		if err = readerDiscoveryResult(ctx, foundErr); err != nil {
+			return Location{}, err
+		}
+		if found != "" {
+			return Location{Path: found, Root: root}, nil
+		}
+	}
+	return Location{}, nil
 }

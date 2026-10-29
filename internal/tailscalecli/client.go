@@ -647,7 +647,7 @@ func sanitizeCommandError(operation string, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return context.DeadlineExceeded
 	}
-	if errors.Is(err, ErrUncertain) {
+	if onlyError(err, ErrUncertain) {
 		// These calls are read-only, so an incomplete observation is retryable;
 		// it cannot represent an ambiguous Serve mutation.
 		return fmt.Errorf("%w: Tailscale CLI %s observation was incomplete", ErrTransientUnavailable, operation)

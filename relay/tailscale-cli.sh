@@ -26,12 +26,14 @@ ORIGIN="${HERDR_TAILSCALE_CLI_ORIGIN:-}"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: relay/tailscale-cli.sh {setup|status|recover|release-reservation|reconcile|arm-bootstrap|stop|unpublish|update|uninstall}
+Usage: relay/tailscale-cli.sh {setup|status|arm-status|reprint|recover|release-reservation|reconcile|arm-bootstrap|stop|unpublish|remove-missing|update|uninstall}
 
 setup requires an explicit tailscale-cli relay.env selection, absolute selected
 CLI path, canonical HTTPS origin, private registration roots, and operator-bound
 node/port consent. Stop retains the persistent Serve route. Unpublish is a
-separate consented operation. Unresolved records are never erased automatically.
+separate consented operation. Remove-missing is the explicit, operation-bound
+exit for a proven absent route; it never unpublishes a present route.
+Unresolved records are never erased automatically.
 EOF
 }
 
@@ -76,6 +78,15 @@ ensure_private_root() {
 
 activation_check() {
     "$RELAY_BIN" tailscale-cli activation-check
+}
+
+selected_installed_cli() {
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-cli ] &&
+        [ "$SCOPE" = production ] &&
+        assert_service_env_matches "$ENV_FILE" || {
+        echo '✗ The installed CLI transport and service configuration must be selected explicitly.' >&2
+        return 1
+    }
 }
 
 manager_call() {
@@ -124,13 +135,46 @@ cleanup_cli_backend_reservation() {
     fi
 }
 
+installed_control_run() {
+    local status
+    status="$("$RELAY_BIN" installed-control status)" || return 1
+    [ "$(json_string_field "$status" code)" = ok ] &&
+        [ "$(json_string_field "$status" publication)" = disabled ] &&
+        [ "$(json_string_field "$status" installation)" = "$INSTALLATION_ID" ] || return 1
+    CONTROL_RUN="$(json_string_field "$status" run)"
+    case "$CONTROL_RUN" in
+        ????????????????????????????????) ;; *) return 1 ;;
+    esac
+}
+
+wait_installed_control() {
+    local deadline=$((SECONDS + 30))
+    # Discovery and status are read-only; the selected installation, run and
+    # disabled-publication status must be observed before the single arm send.
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if installed_control_run; then return 0; fi
+        sleep 1
+    done
+    echo '✗ Installed control did not become ready for this selected service. The service and route were retained; inspect tailscale-cli.sh status and recover, then use reprint when ready. Do not select Always on again or guess a new operation ID.' >&2
+    return 1
+}
+
 arm_cli_bootstrap() {
-    "$RELAY_BIN" pairing-control --socket "${HERDR_RELAY_PAIRING_SOCKET:-}" \
-        --operation arm_bootstrap --run-id "${HERDR_RELAY_CONTROL_RUN_ID:-}" \
-        --instance "$INSTALLATION_ID" >/dev/null || {
-        echo "✗ Operator-requested bootstrap invitation could not be armed." >&2
+    local operation_id reply invitation
+    wait_installed_control || return 1
+    read -r -p 'Stable operation ID for this one-use invitation (save it for status recovery): ' operation_id || return 1
+    [ -n "$operation_id" ] || return 1
+    # This authenticated operation performs its own fresh local/route/HTTPS and
+    # exact packaged-app admission; assert-ready alone cannot create a link.
+    reply="$("$RELAY_BIN" installed-control arm --run "$CONTROL_RUN" --operation-id "$operation_id")" || {
+        echo '✗ Invitation unavailable or outcome uncertain. Inspect status with the SAME operation ID; never retry with a new ID.' >&2
         return 1
     }
+    [ "$(json_string_field "$reply" code)" = ok ] &&
+        [ "$(json_string_field "$reply" arm_receipt)" = acknowledged ] || return 1
+    invitation="$(json_string_field "$reply" invitation)"
+    [ -n "$invitation" ] || return 1
+    printf '%s\n' "$invitation"
 }
 
 prompt_yes() {
@@ -151,6 +195,7 @@ release_pending_reservation() {
     activation_check
     check_action
     [ -t 0 ] || { echo "✗ Backend reservation recovery requires an interactive terminal." >&2; return 2; }
+    request_node_id || return 1
     local report reservation_id reservation_state releasable answer
     if report="$(manager_call recover)"; then
         :
@@ -182,13 +227,15 @@ reconcile_pending() {
     activation_check
     check_action
     [ -t 0 ] || { echo "✗ Journal reconciliation requires an interactive terminal." >&2; return 2; }
-    local report operation_id observation answer
+    local report operation_id observation reservation_id answer
+    request_node_id || return 1
     if report="$(manager_call recover)"; then
         :
     else
         [ -n "$report" ] || { echo "✗ Recovery report is unavailable; journal was not changed." >&2; return 1; }
     fi
     operation_id="$(json_string_field "$report" recovery_operation_id)"
+    reservation_id="$(json_string_field "$report" reservation_attempt_id)"
     observation="$(json_string_field "$report" observation)"
     [ -n "$operation_id" ] || { echo "✗ No exact pending operation is available for reconciliation." >&2; return 1; }
     case "$observation" in
@@ -203,8 +250,33 @@ reconcile_pending() {
         echo "Cancelled; journal and route are unchanged."
         return 1
     }
+    "$SCRIPT_DIR/service.sh" assert-stopped || {
+        echo '✗ Service quiescence is required before journal reconciliation.' >&2
+        return 1
+    }
     manager_call reconcile --operation-id "$operation_id" --confirm-observed-route "$observation" \
-        --accepted --accept-journal-reconciliation --node-id "$NODE_ID"
+        --reservation-id "$reservation_id" --accepted --accept-journal-reconciliation --node-id "$NODE_ID"
+}
+
+explicit_remove_missing() {
+    [ -t 0 ] || { echo '✗ Absence removal requires an interactive terminal.' >&2; return 2; }
+    request_node_id || return 1
+    local report operation_id reservation_id observation state answer
+    report="$(manager_call recover)" || [ -n "$report" ] || return 1
+    operation_id="$(json_string_field "$report" recovery_operation_id)"
+    reservation_id="$(json_string_field "$report" reservation_attempt_id)"
+    observation="$(json_string_field "$report" observation)"
+    state="$(json_string_field "$report" journal_state)"
+    [ -n "$operation_id" ] && { [ "$state" = registered ] || [ "$state" = reconciled-absent ]; } &&
+        [ "$observation" = selected-listener-absent ] || {
+        echo '✗ No exact acknowledged missing route is available for owned removal.' >&2
+        return 1
+    }
+    printf '%s\n' "$report"
+    echo 'This operation stops only the pinned service, proves exact route absence, releases its reservation and retires its owned definition/claim.'
+    read -r -p "Type REMOVE MISSING $NODE_ID $ORIGIN $HTTPS_PORT $BACKEND_PORT $operation_id $reservation_id to authorize: " answer || return 1
+    [ "$answer" = "REMOVE MISSING $NODE_ID $ORIGIN $HTTPS_PORT $BACKEND_PORT $operation_id $reservation_id" ] || return 1
+    "$RELAY_BIN" remove-missing-installed "$NODE_ID" "$operation_id" "$reservation_id" I-ACCEPT-ABSENCE-REMOVAL
 }
 
 explicit_unpublish() {
@@ -216,15 +288,48 @@ explicit_unpublish() {
         echo "Cancelled; registration and route were left unchanged."
         return 1
     }
-    manager_call unpublish --accepted --node-id "$NODE_ID" \
-        --accept-route-removal --accept-check-to-write-race --accept-no-remote-drain
+    # Only the pinned coordinator may quiesce the owned definition and remove
+    # the journaled route. A missing/foreign claim is not fallback authority to
+    # stop or disable a service by its name.
+    [ -d "$HOME/.local/state/herdr-mobile-relay/recovery/.herdr-native-claim-v1" ] || {
+        echo '✗ No owned promoted service claim; route and service were left unchanged.' >&2
+        return 1
+    }
+    "$RELAY_BIN" remove-installed "$NODE_ID"
 }
 
 setup_cli() {
     activation_check
-    echo "✗ Installed-service CLI setup is disabled; real CLI access is limited to the isolated foreground development workflow." >&2
-    echo "  No Tailscale CLI, service manager, or relay server was contacted." >&2
-    return 1
+    check_action
+    selected_installed_cli || return 1
+    [ -t 0 ] && [ -t 1 ] || {
+        echo '✗ Installed CLI setup requires an interactive operator.' >&2
+        return 1
+    }
+    # This child is the sole temporary setup owner. The separate wizard is an
+    # authenticated installed-control client, not an ambient pairing-control
+    # run. Always cancel and join the child on refusal/EOF/interrupt.
+    "$RELAY_BIN" promote-installed </dev/null &
+    local promotion_pid=$! joined=false
+    cleanup_setup_child() {
+        if [ "$joined" != true ]; then
+            kill -TERM "$promotion_pid" 2>/dev/null || true
+            wait "$promotion_pid" 2>/dev/null || true
+        fi
+    }
+    trap cleanup_setup_child EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    "$RELAY_BIN" installed-control-wizard || return 1
+    local result=0
+    wait "$promotion_pid" || result=$?
+    joined=true
+    trap - EXIT INT TERM
+    [ "$result" -eq 0 ] || {
+        echo '✗ Setup publication or fresh service activation was not verified; retain recovery evidence.' >&2
+        return 1
+    }
+    echo 'Fresh installed service activation attempted. Installed control must become ready before arming an invitation.'
 }
 
 case "$ACTION" in
@@ -234,71 +339,133 @@ case "$ACTION" in
         ;;
     status)
         [ "$#" -eq 0 ] || { usage; exit 2; }
-        "$SCRIPT_DIR/service.sh" status || true
-        if activation_check; then
-            check_action
-            manager_call status
-        else
-            echo "CLI route status is unavailable while candidate profiles are disabled; no CLI was contacted." >&2
-            exit 2
+        selected_installed_cli || exit 1
+        check_action
+        # The existing diagnostic reports selection, packaged/local evidence and
+        # unknown Herdr/phone checks; it does not grant CLI query authority.
+        HERDR_SETUP_MENU=1 "$SCRIPT_DIR/plugin-status.sh" --concise --config "$ENV_FILE" || :
+        activation_check || {
+            echo 'Installed CLI profile/route/service readiness unavailable; no CLI or service manager was contacted.' >&2
+            exit 3
+        }
+        route_status=0
+        route="$(manager_call status)" || route_status=$?
+        control_status=unavailable
+        service_status=unavailable
+        # A failed route/profile selection is not authority for a second
+        # control or native-manager query. Recover can inspect retained state.
+        if [ "$route_status" -eq 0 ]; then
+            if installed_control_run; then control_status=observed; fi
+            if [ "$control_status" = observed ] && "$SCRIPT_DIR/service.sh" status >/dev/null 2>&1; then
+                service_status=manager_responded
+            fi
         fi
+        journal="$(json_string_field "$route" journal_state)"
+        readiness="$(json_string_field "$route" readiness)"
+        profile="$(json_string_field "$route" profile)"
+        qualified="$(json_bool_field "$route" runtime_qualified 2>/dev/null || true)"
+        case "$journal" in unconfigured|publish-pending|registered|publish-uncertain|remove-pending|remove-uncertain|removed|reconciled-present|reconciled-absent) ;; *) journal=unknown ;; esac
+        case "$readiness" in ready|waiting|degraded|conflicted|uncertain|unqualified) ;; *) readiness=unknown ;; esac
+        case "$profile" in macos-appstore-1.102.4-supplied-metadata|linux-amd64-1.102.4-source-candidate) ;; *) profile=unknown ;; esac
+        case "$qualified" in true|false) ;; *) qualified=unknown ;; esac
+        printf 'installed_service=%s installed_control=%s cli_profile=%s runtime_qualified=%s registration=%s route_readiness=%s phone=unknown\n' \
+            "$service_status" "$control_status" "$profile" "$qualified" "$journal" "$readiness"
+        # Manager response is not verified service liveness or Herdr/phone
+        # reachability. Keep the composite decision incomplete even when the
+        # selected registered route itself is ready.
+        exit 3
+        ;;
+    arm-status)
+        [ "$#" -eq 1 ] || { usage; exit 2; }
+        selected_installed_cli || exit 1
+        activation_check
+        check_action
+        installed_control_run || exit 1
+        "$RELAY_BIN" installed-control status --run "$CONTROL_RUN" --operation-id "$1"
+        ;;
+    reprint)
+        [ "$#" -eq 0 ] || { usage; exit 2; }
+        selected_installed_cli || exit 1
+        activation_check
+        check_action
+        installed_control_run || exit 1
+        # The owned reprint itself repeats registered-route, trusted HTTPS,
+        # exact app-bundle and selected-identity admission before releasing a link.
+        reply="$("$RELAY_BIN" installed-control reprint --run "$CONTROL_RUN")" || exit 1
+        [ "$(json_string_field "$reply" code)" = ok ] || exit 1
+        link="$(json_string_field "$reply" invitation)"
+        [ -n "$link" ] || exit 1
+        printf '%s\n' "$link"
         ;;
     recover)
         [ "$#" -eq 0 ] || { usage; exit 2; }
+        selected_installed_cli || exit 1
         activation_check
         check_action
         manager_call recover
         ;;
     release-reservation)
         [ "$#" -eq 0 ] || { usage; exit 2; }
+        selected_installed_cli || exit 1
         release_pending_reservation
         ;;
     reconcile)
         [ "$#" -eq 0 ] || { usage; exit 2; }
+        selected_installed_cli || exit 1
         reconcile_pending
         ;;
     stop)
         [ "$#" -eq 0 ] || { usage; exit 2; }
-        "$SCRIPT_DIR/service.sh" stop
-        echo "Relay service stopped; persistent Serve route and registration were retained."
+        selected_installed_cli || exit 1
+        activation_check || exit 1
+        "$RELAY_BIN" stop-installed
+        echo "Owned relay service stopped; persistent Serve route and registration were retained."
         ;;
     unpublish)
         [ "$#" -eq 0 ] || { usage; exit 2; }
         activation_check
         check_action
+        selected_installed_cli || exit 1
         explicit_unpublish
+        ;;
+    remove-missing)
+        [ "$#" -eq 0 ] || { usage; exit 2; }
+        activation_check
+        check_action
+        selected_installed_cli || exit 1
+        explicit_remove_missing
         ;;
     arm-bootstrap)
         [ "$#" -eq 0 ] || { usage; exit 2; }
+        selected_installed_cli || exit 1
         activation_check
         check_action
         prompt_yes "Create a new one-use bootstrap invitation for this exact registered route?" || exit 1
         manager_call assert-ready >/dev/null
-        "$RELAY_BIN" pairing-control --socket "${HERDR_RELAY_PAIRING_SOCKET:-}" \
-            --operation admit --run-id "${HERDR_RELAY_CONTROL_RUN_ID:-}" --instance "$INSTALLATION_ID" >/dev/null || {
-            echo "✗ The exact route is not ready for admission." >&2
-            exit 1
-        }
         arm_cli_bootstrap
-        wait_for_cli_admission "$RELAY_BIN" "${HERDR_RELAY_PAIRING_SOCKET:-}" \
-            "${HERDR_RELAY_CONTROL_RUN_ID:-}" "$INSTALLATION_ID" || exit 1
-        exec "$SCRIPT_DIR/setup-link.sh"
         ;;
     update)
-        [ "$#" -eq 0 ] || { usage; exit 2; }
+        [ "$#" -le 1 ] || { usage; exit 2; }
         activation_check
         check_action
-        [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-cli ] || {
-            echo "✗ Operator-managed CLI update requires an explicitly selected tailscale-cli transport." >&2
-            exit 1
-        }
+        selected_installed_cli || exit 1
         manager_call assert-ready >/dev/null
-        exec "$SCRIPT_DIR/plugin-build.sh" --operator-managed-tailscale-cli
+        if [ -d "$HOME/.local/state/herdr-mobile-relay/recovery/.herdr-native-claim-v1" ] && [ "$#" -eq 0 ]; then
+            [ -t 0 ] || { echo '✗ Owned update requires an explicit pinned candidate.' >&2; exit 1; }
+            read -r -p 'Physical executable in the already installed verified candidate release: ' candidate || exit 1
+            [ -n "$candidate" ] || exit 1
+            set -- "$candidate"
+        fi
+        exec "$SCRIPT_DIR/plugin-build.sh" --operator-managed-tailscale-cli "$@"
         ;;
     uninstall)
         [ "$#" -eq 0 ] || { usage; exit 2; }
+        selected_installed_cli || exit 1
         activation_check
         check_action
+        # Full-plugin erase has separate native confinement obligations. The
+        # shipped uninstaller retains its fail-closed guard; do not use this
+        # action as a substitute for the owned route/service removal above.
         exec "$SCRIPT_DIR/uninstall.sh"
         ;;
     *) usage; exit 2 ;;

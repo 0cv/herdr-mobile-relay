@@ -96,10 +96,16 @@ own gateway.
 
 ## Use managed Tailscale Serve
 
-If a supported Tailscale Unix daemon is already installed, running, and
-authenticated on the computer, use the explicit managed entrypoint
-`relay/plugin-choose-transport.sh tailscale`;
-managed foreground is no longer a setup-menu choice. The relay stays on `127.0.0.1`, and after read-only
+For the installed CLI Serve path, choose **3 Tailscale → 1 Always on** in the
+post-install Setup menu (`herdr plugin action invoke setup --plugin
+herdr-mobile-relay.events`). The selector is source-wired to read-only CLI
+identity/profile checks and the consented promotion/QR path, but shipped builds
+still refuse before selection changes: production activation, runtime/phone
+qualification and independent installed-manager enablement are pending.
+
+For the separate foreground route on a supported authenticated Unix daemon,
+use `relay/plugin-choose-transport.sh tailscale`; managed foreground is no longer
+a setup-menu choice. The relay stays on `127.0.0.1`, and after read-only
 preflight and per-run consent the relay process owns its temporary HTTPS Serve
 route through LocalAPI. It does not run `tailscale login`, invoke `tailscale serve`,
 enable Funnel, adopt a route, or overwrite existing Serve configuration.
@@ -128,9 +134,20 @@ installation or qualifies an untested daemon.
 
 If you already configured Tailscale Serve to route a canonical HTTPS origin to
 the relay's loopback listener (`127.0.0.1:8375` by default, or your configured port), choose
-**3 Tailscale → 2 Your own HTTPS route (advanced BYO)** in the setup menu; the
-other two Tailscale entries, Always on and Remove Herdr's own route, are
-unavailable. Enter that `https://` origin. Herdr checks its trusted
+**3 Tailscale → 2 Your own HTTPS route (advanced BYO)** in the setup menu.
+**3 Tailscale → 3 Remove Herdr's own route** dispatches only to the selected,
+owned, consented installed `unpublish` action, and also refuses while production
+activation is disabled. After separate installed-profile qualification and enablement,
+the selected installed CLI operator can use `relay/tailscale-cli.sh status`,
+`recover`, `reprint`, `stop`, consented `unpublish`, and `remove-missing` outside
+the setup menu. `remove-missing` is only for an acknowledged missing route: it
+requires an interactive exact-node/origin/ports/operation/reservation confirmation,
+proves service quiescence and absence again, and retires only the owned service
+and claim; use `recover` first and retain evidence if any check is uncertain.
+It never repairs or republishes an installed route. Reprint
+checks owned route, local readiness, trusted HTTPS and the exact app bundle;
+status cannot prove phone connectivity. Unpublish refuses a missing/foreign
+promoted-service claim. Enter that `https://` origin. Herdr checks its trusted
 TLS certificate, instance identity, and readiness. Choose this origin or keep an
 independently hosted Herdr phone app; the selected app must pass TLS checks and
 serve the exact packaged frontend before Herdr arms an invitation. For an
@@ -143,7 +160,7 @@ availability is not guaranteed by Herdr. This path does not support background
 service installation or phone-managed updates. See
 [Operator-owned Serve](docs/transports.md#operator-owned-https-serve-byo).
 
-Checkout developers can also run `make dev-tunnel`: 1 is a temporary public
+Checkout developers can run `make dev-tunnel` locally: 1 is a temporary public
 Cloudflare URL (or saved gateway), with a QR and no Tailscale required; 2 is the
 single Tailscale Serve choice. It selects CLI-backed persistent Serve only when
 the supported macOS/arm64 App Store 1.102.4 profile and an unambiguous CLI are

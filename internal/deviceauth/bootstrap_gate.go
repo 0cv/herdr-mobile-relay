@@ -3,7 +3,6 @@ package deviceauth
 import (
 	"context"
 	"errors"
-	"sync"
 	"sync/atomic"
 
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
@@ -27,7 +26,7 @@ var ErrBootstrapGateCommittedSuspended = errors.New("bootstrap invitation commit
 // those channels directly so watch EOF is effective before its monitor can
 // acquire the authority operation lock.
 type BootstrapGate struct {
-	mu sync.RWMutex
+	mu snapshotMutex
 
 	store                     *Store
 	invitationOpen            bool
@@ -108,6 +107,12 @@ func (g *BootstrapGate) SuspendAdmission() {
 	if g != nil {
 		g.suspended.Store(true)
 	}
+}
+
+// AdmissionQuarantined observes reversible suspension or terminal revocation,
+// independently of whether an invitation has ever been opened. It changes nothing.
+func (g *BootstrapGate) AdmissionQuarantined() bool {
+	return g != nil && (g.suspended.Load() || g.revoked.Load())
 }
 
 // ResumeAdmission clears a transient suspension after the caller has performed

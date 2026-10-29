@@ -193,6 +193,132 @@ unchanged, never calls the guard, and stays an open obligation.
 The full-uninstall suite gains about ten invocations and one binary copy per Linux-model invocation; its 900 s bound is unchanged. The
 mount controls are a separate workflow, so the service gates, shard counts and their matrix are unchanged.
 
+## Required installed inert source regression tier (PR66)
+
+C3 now selects **21 invocations: 733 Darwin / 735 Linux identities**.
+The original six183 bytes remain unchanged; the separate
+`scripts/ci/installed-inert-supplemental-inventory.json` freezes 15 groups,
+550/552 names. Handoff has121 common plus Darwin6/Linux8. Strict schema,
+OS coverage, package/tag uniqueness and root checks precede execution; no
+source discovery occurs. Exact event membership/equality rejects undeclared
+passing children (ICI-001). The six-group descriptions below are historical.
+
+The separate hosted driver now selects two invocations / six identities:
+original app actual-Run3 and localcontrol
+`TestInstalledEndpointHostedRestart`, `TestInstalledEndpointHostedDisconnect`,
+`TestInstalledEndpointHostedReplacement`. Endpoint admission is synthetic,
+not concrete app/HTTPS qualification. Both tags, first-action guards and3m
+Go timeout remain. Hosted schema2 uses grouped `invocations` with package,
+exact tags, required tests and result. Inert retains grouped schema1.
+Receipts retain SHA/run/attempt/OS/mode, exclusive creation and no raw output.
+Matrices, provenance, clean checkout, read-only permissions and exact artifact
+paths are unchanged. Worker C3 checks were syntax/static only. Final parent review
+clears SOURCE/OFFLINE/EXACT-INERT:733 selected Darwin Go identities and18 offline
+methods passed, with static checks clean after recorded repairs. See
+retained, uncommitted review notes.
+This is not hosted CI evidence: Linux735 and guarded hosted6 remain unexecuted
+locally. Production CLOSED; S3, full C0–C7, native/actualRun/HTTPS/phone remain REQUIRED.
+
+
+S1b additive inventory: six groups now require **183 identities** (26 config,
+104 manager, 6 ordinary app, 12 ordinary command, 5 tagged app, 30 tagged command).
+All original 153 identities remain in their original groups, frozen by per-group
+identity-list digests in the offline validator. All 25 reviewed S1a identities
+are added to the manager group. Five S1b cases cover joined-error precedence,
+setup monitor transition, concrete empty-start app/publication/resume, the actual
+backend close fence, and publication cancellation versus physical close. New
+app construction is inert-tagged, isolated first, and never calls Server.Run.
+These are authored inventory requirements, not claims of executed Go tests or
+hosted qualification. S1b worker verification is compile/static/offline only.
+
+`check.yml` adds `installed-inert`, dependent on `provenance`, for Linux normal,
+Linux race (ubuntu-24.04), and macOS normal (macos-15). All three cells are
+unconditional within the existing push/PR triggers, with no continue-on-error.
+Each verifies the exact clean event checkout, uses a read-only token and no Go
+cache, and validates its own evidence; no artifact collector is needed. Existing
+jobs, inventories, triggers and release admission policy are unchanged. This YAML
+does **not** configure hosting branch protections or establish successful hosted
+runs. The always-on feature remains incomplete and production remains refused.
+
+The frozen package/test/leaf inventory is
+[`scripts/ci/installed-inert-inventory.json`](../scripts/ci/installed-inert-inventory.json).
+It is reviewed source, not regenerated at CI runtime. The runner
+[`scripts/ci/installed_inert.py`](../scripts/ci/installed_inert.py) makes six separate
+invocations. Each command is `go test -json -count=1 -timeout=5m PACKAGE -run
+'^(ROOT1|ROOT2|...)$'`, with the exact top-level roots from that inventory (never a
+prefix selection). Linux race adds `-race` to every invocation:
+
+| Package | Build | Frozen selection family (exact identities in inventory) |
+| --- | --- | --- |
+| internal/config | ordinary | TestInstalledBinding: Snapshot, Policy, Filesystem |
+| internal/tailscalecli | ordinary | TestInstalledResume: all frozen resume/startup tests |
+| internal/app | ordinary | TestInstalledRecovery roots and TestInstalledCLIRefusesBeforeConstruction |
+| cmd/herdr-mobile-relay | ordinary | TestInstalledCLICommandUnavailable, TestInstalledCLICommandInvalidPolicy |
+| internal/app | herdr_installed_inert_test | TestInstalledConcreteAppLifecycle, TestInstalledCLIConstructionPreservesStore |
+| cmd/herdr-mobile-relay | herdr_installed_inert_test | TestInstalledCLICommandConcreteLifecycle plus the two ordinary command roots |
+
+IH-001 deliberately moves the positive store-construction case to the tagged
+app group: six invocations and 153 identities remain (ordinary app 4, tagged app 2).
+Both inert-only and dual-tag library builds use inert speech languages/status;
+selected positive constructors clear inherited overrides and use private HOME/XDG,
+empty PATH and explicit absent Herdr tool/socket paths. Earlier strict inert-only
+execution claims were corrected in the parent CI review; historical passes are
+not new isolation evidence. No Go test execution is authorized until parent re-audit.
+
+The normal invocations independently require production refusal without fixture
+tags. No `herdr_tailscale_test` or real runtime profile is enabled. Frozen leaves
+include IC-001 `AliasDrift/{runtime,cache,runtime-wait,cache-wait}`, command
+`StartupWait`/`StartupCancel`, every startup wait mode, IR-001 coexistence,
+IR-002 reservation states both before and during ownership, and all eight IS-001
+`PostObservationReservation/{initial,callback-check}/{missing,pending,tuple,malformed}`
+cases. Concrete app/store preservation assertions reside in the mandatory
+`TestInstalledConcreteAppLifecycle` body (it has no named subcases).
+
+Every invocation must exit zero and produce well-formed Go JSON with exactly one
+package start/completion and exactly one run/pass for every required identity in
+its own package. Missing/renamed leaves, empty/truncated/malformed streams,
+duplicate terminals, impostor packages, and skipped/failed descendants fail.
+A later success cannot erase an earlier failed invocation. Raw Output and stderr
+are captured privately and never printed or uploaded. Receipts contain only
+fixed inventory identities/results, SHA, current run ID/attempt and OS/mode;
+exclusive creation prevents stale reuse. Each cell uploads only its one exact
+sanitized receipt, with one-day retention and missing-file failure.
+
+Offline validator tests: `python3 -I -B tests/test_installed_inert.py`. These call
+the workflow entrypoint with in-memory Go events and private temporary receipts,
+without Git/process/service fixtures. Local focused Go runs and parser tests
+are **not** hosted execution or RuntimeQualified evidence. This suite proves
+inert command/config/manager/app/store composition only. Actual Server.Run
+listener/shutdown, native lifecycle, TLS recovery, physical phone/login,
+publication/wizard/removal/installer, main reconciliation and separately approved
+production enablement remain mandatory subsequent work, subject to parent review.
+
+## Separate installed hosted real-Run source tier (PR66)
+
+`installed-hosted` adds Linux normal/race and macOS normal cells to `check.yml`,
+with provenance and clean-checkout checks. The explicit
+[`installed_hosted.py`](../scripts/ci/installed_hosted.py) driver requires
+`TestInstalledHostedRealRunBindFailure`,
+`TestInstalledHostedRealRunShutdownRestart` and
+`TestInstalledHostedRealRunCancelBeforeServe` exactly once, with both
+`herdr_installed_inert_test` and `herdr_installed_hosted_test` tags. It requires an
+explicit hosted opt-in and GitHub-hosted OS/run identity before execution.
+Missing/skipped/failed cases fail evidence; only finite test IDs and
+SHA/run/attempt/OS/mode/result metadata are uploaded, not logs or private state.
+The hosted cases are excluded from the inert inventory and default runner.
+At the IH repair boundary the inert tier retained six selections and 153
+identities; its positive constructor case moved to the isolated tagged app
+selection. S1b adds the reviewed setup identities as described below.
+
+These source tests call actual `Server.Run` using concrete in-memory Tailscale
+observations and private loopback listeners, never a real Tailscale/Herdr daemon
+or native service. Isolation audit and acceptance limits remain in uncommitted review notes.
+They have **not run**: local evidence is compile/static only. Do not execute this
+driver or test binary locally, including via a broad tagged test selection.
+`python3 -I -B tests/test_installed_hosted.py` tests evidence with in-memory events
+only. Hosted execution, parent review and all product/runtime/phone obligations
+remain pending; the job is not a production qualification or branch-rule claim.
+
 ## Local use
 
 Only the pure helper runs locally: `python3 -I -B tests/service_qualification_matrix.py list --tier fast`

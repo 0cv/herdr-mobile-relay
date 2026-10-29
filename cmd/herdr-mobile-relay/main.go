@@ -106,9 +106,37 @@ func runCommand(
 			return 2, errors.New("serve does not accept arguments")
 		}
 		return runServeWithRunner(false, runner, sweep)
-	case "serve-installed":
+	case "installed-control":
+		return runInstalledControl(args, os.Stdin, os.Stdout)
+	case "installed-control-wizard":
 		if len(args) != 0 {
-			return 2, errors.New("serve-installed does not accept arguments")
+			return 2, errors.New("installed-control-wizard does not accept arguments")
+		}
+		return runInstalledControlWizard(os.Stdin, os.Stdout)
+	case "update-installed":
+		return runInstalledLifecycleCommand("update", args)
+	case "remove-installed":
+		return runInstalledLifecycleCommand("remove", args)
+	case "remove-missing-installed":
+		return runInstalledLifecycleCommand("remove-missing", args)
+	case "stop-installed":
+		return runInstalledLifecycleCommand("stop", args)
+	case "promote-installed":
+		if len(args) != 0 {
+			return 2, errors.New("promote-installed does not accept arguments")
+		}
+		return runInstalledPromotionCommand()
+	case "setup-installed":
+		if len(args) != 0 {
+			return 2, errors.New("setup-installed does not accept arguments")
+		}
+		return runInstalledSetupCommand()
+	case "serve-installed":
+		if len(args) == 5 && args[0] == "--selection" {
+			return runInstalledPinnedService(args[1:])
+		}
+		if len(args) != 0 {
+			return 2, errors.New("serve-installed accepts only a pinned selection")
 		}
 		return runServeWithRunner(true, runner, sweep)
 	case "doctor":
@@ -561,7 +589,13 @@ func runServeWithRunner(
 			return 1, errors.New("installed service refuses bootstrap re-enrollment policy")
 		}
 	}
-	cfg, err := loadCommandConfig()
+	var cfg *config.Config
+	var err error
+	if installed {
+		cfg, err = config.LoadInstalled()
+	} else {
+		cfg, err = loadCommandConfig()
+	}
 	if err != nil {
 		if installed {
 			// Config errors can contain raw gateway URLs or other environment
@@ -569,6 +603,13 @@ func runServeWithRunner(
 			return 1, errors.New("invalid installed service configuration")
 		}
 		return 1, err
+	}
+
+	if installed && cfg.Transport == config.TransportTailscaleCLI {
+		if !installedUnpinnedServiceAllowed() {
+			return 1, errInstalledCLIUnavailable
+		}
+		return runInstalledCLICommand(cfg)
 	}
 
 	logger := newRelayLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr))
@@ -586,8 +627,8 @@ func runServeWithRunner(
 
 	if installed {
 		// Constructor policy validation occurs before managed-owner acquisition
-		// and before any app/store/listener side effects. No CLI authority is
-		// acquired by this dispatch; ordinary config loading stays unchanged.
+		// and before any app/store/listener side effects. CLI selections have
+		// their separate concrete session path above.
 		srv, err := app.NewInstalledService(cfg, version, revision, logger)
 		if err != nil {
 			return 1, err

@@ -97,14 +97,6 @@ for SERVICE_SESSION in "$(tailscale_session_file "$ENV_FILE")" "$(tailscale_exte
     [ ! -e "$SERVICE_SESSION" ] && [ ! -L "$SERVICE_SESSION" ] || service_refuse 78
 done
 case "$TRANSPORT" in tailscale|tailscale-external) service_refuse 78 ;; esac
-if [ "$TRANSPORT" = tailscale-cli ]; then
-    [ "$SERVICE_LAUNCHD" = true ] || exec "$SCRIPT_DIR/tailscale-cli-service.sh"
-    # This actual entrypoint is unconditionally disabled, with no essential
-    # children. Preserve any unexpected result; only its known 69 is adapted.
-    if "$SCRIPT_DIR/tailscale-cli-service.sh"; then exit 1; else SERVICE_STATUS=$?; fi
-    [ "$SERVICE_STATUS" = 69 ] || exit "$SERVICE_STATUS"
-    service_refuse 69
-fi
 # Assign admitted literal values as DATA, preserving native-generated fields.
 # Raw updater credentials are never exported to helpers or essential children.
 for ((SERVICE_INDEX=0; SERVICE_INDEX<${#LITERAL_KEYS[@]}; SERVICE_INDEX++)); do
@@ -117,6 +109,15 @@ RELAY_UPDATER_TOKEN_FILE="${LITERAL_VALUE:-$RELAY_UPDATER_TOKEN_FILE}"
 export -n RELAY_UPDATER_TOKEN_FILE
 export HERDR_RELAY_ENV="$ENV_FILE" HERDR_RELAY_TRANSPORT="$TRANSPORT" HERDR_GATEWAY_URL="$SERVICE_GATEWAYS"
 unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE HERDR_RELAY_REARM_BOOTSTRAP
+
+# Admission is a compiled, profile-specific production decision, before any
+# backend or CLI work. A launchd pre-child refusal must not spin on KeepAlive.
+if [ "$TRANSPORT" = tailscale-cli ]; then
+    RELAY_BIN="$(relay_binary 2>/dev/null)" || service_refuse 78
+    [ -f "$RELAY_BIN" ] && [ -x "$RELAY_BIN" ] || service_refuse 78
+    "$RELAY_BIN" tailscale-cli activation-check >/dev/null 2>&1 || service_refuse 69
+    exec "$SCRIPT_DIR/tailscale-cli-service.sh"
+fi
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 # Agents often install their CLI into a per-tool bin directory that the service

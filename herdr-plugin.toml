@@ -60,10 +60,13 @@ id = "install-service"
 title = "Herdr Mobile Relay: Stable Cloudflare Tunnel Setup"
 command = ["bash", "relay/open-plugin-pane.sh", "install-service"]
 
-# setup-link — reprints the private phone link and QR for the installed relay,
-# on either the gateway or the stable tunnel path. The wrapper follows the
-# service's recorded relay environment so it also works when a Marketplace
-# action manages a checkout-installed service.
+# setup-link — reprints the private phone link and QR for the installed relay
+# on gateway or stable tunnel paths, and for selected installed Tailscale CLI
+# Serve only after qualification and separate enablement. Shipped production,
+# installed-manager and RuntimeQualified gates remain closed, so installed
+# Tailscale reprint is refused. The wrapper follows the service's recorded relay
+# environment so it also works when a Marketplace action manages a
+# checkout-installed service.
 [[actions]]
 id = "setup-link"
 title = "Herdr Mobile Relay: Show Phone Setup QR"

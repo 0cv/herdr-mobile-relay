@@ -139,6 +139,7 @@ type FinishResult struct {
 }
 
 type Manager struct {
+	installed           *installedOwnership
 	mu                  sync.Mutex
 	attachmentMu        sync.Mutex
 	randomMu            sync.Mutex
@@ -160,6 +161,7 @@ type Manager struct {
 }
 
 type session struct {
+	cleaned   bool
 	mu        sync.Mutex
 	id        string
 	target    protocol.TargetRef
@@ -171,16 +173,19 @@ type session struct {
 }
 
 type sessionFile struct {
-	spec       FileSpec
-	path       string
-	file       *os.File
-	received   int64
-	hash       hash.Hash
-	prefix     []byte
-	suffix     []byte
-	utf8Tail   []byte
-	invalidUTF bool
-	hasNUL     bool
+	closeErr       error
+	cleanupWitness func(error)
+	closeResource  func(io.Closer) error
+	spec           FileSpec
+	path           string
+	file           *os.File
+	received       int64
+	hash           hash.Hash
+	prefix         []byte
+	suffix         []byte
+	utf8Tail       []byte
+	invalidUTF     bool
+	hasNUL         bool
 }
 
 type attachmentRecord struct {
@@ -212,6 +217,10 @@ type tombstone struct {
 }
 
 func NewManager(config Config) (*Manager, error) {
+	return newManager(config, nil)
+}
+
+func newManager(config Config, ownership *installedOwnership) (*Manager, error) {
 	if strings.TrimSpace(config.Root) == "" {
 		return nil, failure("upload_root_unavailable", nil)
 	}
@@ -271,7 +280,8 @@ func NewManager(config Config) (*Manager, error) {
 		return nil, failure("upload_root_unavailable", nil)
 	}
 	manager := &Manager{
-		rootPath: cleanRoot, root: root, chunkBytes: config.ChunkBytes,
+		installed: ownership,
+		rootPath:  cleanRoot, root: root, chunkBytes: config.ChunkBytes,
 		maxFiles: config.MaxFiles, maxFile: config.MaxFileBytes, maxBatch: config.MaxBatchBytes,
 		maxSessions: config.MaxSessions, maxSessionsPerOwner: config.MaxSessionsPerOwner,
 		sessionTTL: config.SessionTTL, attachTTL: config.AttachmentTTL,
@@ -279,23 +289,22 @@ func NewManager(config Config) (*Manager, error) {
 		attachments: make(map[string]*attachmentRecord), tombstones: make(map[string]tombstone),
 	}
 	if err := manager.ensurePrivateDirectory("sessions"); err != nil {
-		root.Close()
-		return nil, err
+		return manager.constructionFailure(err)
 	}
 	if err := manager.ensurePrivateDirectory("objects"); err != nil {
-		root.Close()
-		return nil, err
+		return manager.constructionFailure(err)
 	}
 	if err := manager.clearSessionDiskLocked(); err != nil {
-		root.Close()
-		return nil, err
+		return manager.constructionFailure(err)
 	}
 	dropped, loadErr := manager.loadAttachmentsLocked()
 	if loadErr != nil {
 		manager.attachments = make(map[string]*attachmentRecord)
 		if quarantineErr := manager.quarantineAttachmentIndexLocked(); quarantineErr != nil {
-			root.Close()
-			return nil, quarantineErr
+			if ownership != nil {
+				quarantineErr = errors.Join(loadErr, quarantineErr)
+			}
+			return manager.constructionFailure(quarantineErr)
 		}
 		config.Logger.Warn("quarantined unreadable attachment index",
 			"root", cleanRoot, "error", loadErr)
@@ -303,15 +312,20 @@ func NewManager(config Config) (*Manager, error) {
 		config.Logger.Warn("dropped unusable attachment records",
 			"root", cleanRoot, "dropped", dropped, "kept", len(manager.attachments))
 	}
-	manager.Cleanup()
+	manager.cleanup()
 	if err := manager.persistAttachments(); err != nil {
-		root.Close()
-		return nil, err
+		return manager.constructionFailure(err)
+	}
+	if err := manager.cleanupResult(); err != nil {
+		return manager.constructionFailure(nil)
 	}
 	return manager, nil
 }
 
 func (m *Manager) Close() error {
+	if m.installed != nil {
+		return m.DrainInstalled()
+	}
 	m.mu.Lock()
 	sessions := make([]*session, 0, len(m.sessions))
 	for _, current := range m.sessions {
@@ -330,7 +344,12 @@ func (m *Manager) Close() error {
 }
 
 func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
-	m.Cleanup()
+	done, admissionErr := m.admit()
+	if admissionErr != nil {
+		return BeginResult{}, admissionErr
+	}
+	defer done()
+	m.cleanup()
 	owner := strings.TrimSpace(request.Owner)
 	if owner == "" {
 		owner = "unattributed"
@@ -352,7 +371,7 @@ func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
 			return BeginResult{}, failure("upload_batch_too_large", map[string]any{"max_bytes": m.maxBatch})
 		}
 		total += normalized.Bytes
-		files[index] = &sessionFile{spec: normalized, hash: sha256.New()}
+		files[index] = &sessionFile{spec: normalized, hash: sha256.New(), cleanupWitness: m.witness, closeResource: m.physicalClose}
 	}
 	id, err := m.opaqueID(24)
 	if err != nil {
@@ -387,13 +406,13 @@ func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
 	m.mu.Unlock()
 
 	directory := "sessions/" + id
-	if err := m.root.Mkdir(directory, 0o700); err != nil {
+	if err := m.beginDirectory(directory); err != nil {
 		m.discardSession(current, false)
 		return BeginResult{}, failure("upload_staging_failed", nil)
 	}
 	for index, item := range files {
 		item.path = fmt.Sprintf("%s/%04d.part", directory, index)
-		file, openErr := m.root.OpenFile(item.path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		file, openErr := m.beginFile(item.path)
 		if openErr != nil {
 			m.discardSession(current, false)
 			return BeginResult{}, failure("upload_staging_failed", nil)
@@ -407,6 +426,11 @@ func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
 }
 
 func (m *Manager) Chunk(request ChunkRequest) (ChunkResult, error) {
+	done, admissionErr := m.admit()
+	if admissionErr != nil {
+		return ChunkResult{}, admissionErr
+	}
+	defer done()
 	current, err := m.lockSession(request.UploadID, request.Target)
 	if err != nil {
 		return ChunkResult{}, err
@@ -431,7 +455,7 @@ func (m *Manager) Chunk(request ChunkRequest) (ChunkResult, error) {
 	if item.received > item.spec.Bytes-int64(len(request.Data)) {
 		return fail(failure("upload_file_too_large", map[string]any{"expected_bytes": item.spec.Bytes}))
 	}
-	if _, err := item.file.Write(request.Data); err != nil {
+	if _, err := m.finishWrite(item, request.Data); err != nil {
 		return fail(failure("upload_staging_failed", nil))
 	}
 	_, _ = item.hash.Write(request.Data)
@@ -446,6 +470,11 @@ func (m *Manager) Chunk(request ChunkRequest) (ChunkResult, error) {
 }
 
 func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
+	done, admissionErr := m.admit()
+	if admissionErr != nil {
+		return FinishResult{}, admissionErr
+	}
+	defer done()
 	current, err := m.lockSession(request.UploadID, request.Target)
 	if err != nil {
 		return FinishResult{}, err
@@ -471,7 +500,7 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 		if err := validateContent(item); err != nil {
 			return fail(err)
 		}
-		if err := item.file.Sync(); err != nil {
+		if err := m.finishSync(item); err != nil {
 			return fail(failure("upload_staging_failed", nil))
 		}
 		pathInfo, statErr := m.root.Lstat(item.path)
@@ -492,23 +521,29 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 		ref, idErr := m.opaqueID(24)
 		if idErr != nil {
 			for _, path := range created {
-				_ = m.root.Remove(path)
+				m.removed(m.finishRemove(path))
 			}
 			return fail(idErr)
 		}
 		extension := canonicalExtension(item.spec.MediaType)
 		relPath := "objects/" + ref + extension
-		if closeErr := item.file.Close(); closeErr != nil {
+		if !m.finishRefAvailable(ref, relPath, pending) {
+			for _, path := range created {
+				m.removed(m.finishRemove(path))
+			}
+			return fail(failure("upload_staging_failed", nil))
+		}
+		if closeErr := m.closeFile(item); closeErr != nil {
 			item.file = nil
 			for _, path := range created {
-				_ = m.root.Remove(path)
+				m.removed(m.finishRemove(path))
 			}
 			return fail(failure("upload_staging_failed", nil))
 		}
 		item.file = nil
-		if renameErr := m.root.Rename(item.path, relPath); renameErr != nil {
+		if renameErr := m.finishRename(item.path, relPath); renameErr != nil {
 			for _, path := range created {
-				_ = m.root.Remove(path)
+				m.removed(m.finishRemove(path))
 			}
 			return fail(failure("upload_staging_failed", nil))
 		}
@@ -523,7 +558,7 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 	}
 	if syncErr := m.syncObjectsDirectory(); syncErr != nil {
 		for _, path := range created {
-			_ = m.root.Remove(path)
+			m.removed(m.finishRemove(path))
 		}
 		return fail(syncErr)
 	}
@@ -543,7 +578,7 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 	m.mu.Unlock()
 	if collision {
 		for _, path := range created {
-			_ = m.root.Remove(path)
+			m.removed(m.finishRemove(path))
 		}
 		return fail(failure("upload_staging_failed", nil))
 	}
@@ -558,7 +593,7 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 		}
 		m.mu.Unlock()
 		for _, path := range created {
-			_ = m.root.Remove(path)
+			m.removed(m.finishRemove(path))
 		}
 		return fail(persistErr)
 	}
@@ -567,6 +602,11 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 }
 
 func (m *Manager) Cancel(target protocol.TargetRef, uploadID string) error {
+	done, admissionErr := m.admit()
+	if admissionErr != nil {
+		return admissionErr
+	}
+	defer done()
 	m.mu.Lock()
 	current := m.sessions[uploadID]
 	if current == nil {
@@ -598,7 +638,12 @@ func (m *Manager) Cancel(target protocol.TargetRef, uploadID string) error {
 }
 
 func (m *Manager) Resolve(target protocol.TargetRef, ref string) (Attachment, error) {
-	m.Cleanup()
+	done, admissionErr := m.admit()
+	if admissionErr != nil {
+		return Attachment{}, admissionErr
+	}
+	defer done()
+	m.cleanup()
 	m.attachmentMu.Lock()
 	defer m.attachmentMu.Unlock()
 	m.mu.Lock()
@@ -618,7 +663,7 @@ func (m *Manager) Resolve(target protocol.TargetRef, ref string) (Attachment, er
 		}
 		return Attachment{}, err
 	}
-	_ = file.Close()
+	m.cleanupClose(file)
 	if info.Size() != record.attachment.Bytes {
 		m.removeAttachment(record)
 		if persistErr := m.persistAttachments(); persistErr != nil {
@@ -630,6 +675,15 @@ func (m *Manager) Resolve(target protocol.TargetRef, ref string) (Attachment, er
 }
 
 func (m *Manager) Cleanup() int {
+	done, err := m.admit()
+	if err != nil {
+		return 0
+	}
+	defer done()
+	return m.cleanup()
+}
+
+func (m *Manager) cleanup() int {
 	now := m.now()
 	m.mu.Lock()
 	expiredSessions := make([]*session, 0)
@@ -647,8 +701,7 @@ func (m *Manager) Cleanup() int {
 	m.mu.Unlock()
 	for _, current := range expiredSessions {
 		current.mu.Lock()
-		m.closeSessionFiles(current)
-		_ = m.root.RemoveAll("sessions/" + current.id)
+		m.cleanSession(current)
 		current.mu.Unlock()
 	}
 
@@ -663,11 +716,11 @@ func (m *Manager) Cleanup() int {
 	}
 	m.mu.Unlock()
 	for _, record := range expiredAttachments {
-		_ = m.root.Remove(record.relPath)
+		m.removed(m.root.Remove(record.relPath))
 	}
 	diskRemoved := m.cleanupDiskLocked()
 	if len(expiredAttachments) > 0 {
-		_ = m.persistAttachments()
+		_ = m.persistAttachments() // installed persistence records its physical failures
 	}
 	m.attachmentMu.Unlock()
 	return len(expiredSessions) + len(expiredAttachments) + diskRemoved
@@ -689,8 +742,7 @@ func (m *Manager) lockSession(id string, target protocol.TargetRef) (*session, e
 	}
 	m.mu.Unlock()
 	if !active {
-		m.closeSessionFiles(current)
-		_ = m.root.RemoveAll("sessions/" + current.id)
+		m.cleanSession(current)
 		current.mu.Unlock()
 		return nil, failure("upload_session_not_found", nil)
 	}
@@ -712,8 +764,7 @@ func (m *Manager) discardSession(current *session, tombstoneSession bool) {
 		}
 	}
 	m.mu.Unlock()
-	m.closeSessionFiles(current)
-	_ = m.root.RemoveAll("sessions/" + current.id)
+	m.cleanSession(current)
 }
 
 func (m *Manager) removeAttachment(record *attachmentRecord) {
@@ -722,14 +773,13 @@ func (m *Manager) removeAttachment(record *attachmentRecord) {
 		delete(m.attachments, record.attachment.Ref)
 	}
 	m.mu.Unlock()
-	_ = m.root.Remove(record.relPath)
+	m.removed(m.recoveryRemove("resolve-remove", record.relPath))
 }
 
 func (m *Manager) closeSessionFiles(current *session) {
 	for _, item := range current.files {
 		if item.file != nil {
-			_ = item.file.Close()
-			item.file = nil
+			_ = m.closeFile(item)
 		}
 	}
 }
@@ -745,18 +795,20 @@ func (m *Manager) cleanupDiskLocked() int {
 		name string
 		ttl  time.Duration
 	}{{"sessions", m.sessionTTL}, {"objects", m.attachTTL}} {
-		entries, err := fs.ReadDir(m.root.FS(), directory.name)
+		entries, err := m.readDirectory(directory.name)
 		if err != nil {
+			m.witness(err)
 			continue
 		}
 		for _, entry := range entries {
 			path := directory.name + "/" + entry.Name()
-			info, infoErr := entry.Info()
+			info, infoErr := m.sweepInfo(path, entry)
 			if infoErr != nil {
+				m.witness(infoErr)
 				continue
 			}
 			if entry.Type()&os.ModeSymlink != 0 {
-				_ = m.root.Remove(path)
+				m.removed(m.recoveryRemove("sweep-link-remove", path))
 				removed++
 				continue
 			}
@@ -769,23 +821,25 @@ func (m *Manager) cleanupDiskLocked() int {
 				continue
 			}
 			if directory.name == "sessions" && entry.IsDir() {
-				_ = m.root.RemoveAll(path)
+				m.removed(m.sweepRemoveDirectory(path))
 				removed++
 			} else if directory.name == "objects" && info.Mode().IsRegular() {
-				_ = m.root.Remove(path)
+				m.removed(m.recoveryRemove("sweep-object-remove", path))
 				removed++
 			}
 		}
 	}
-	entries, err := fs.ReadDir(m.root.FS(), ".")
+	entries, err := m.readDirectory(".")
+	m.witness(err)
 	if err == nil {
 		for _, entry := range entries {
 			if !entry.Type().IsRegular() || !legacyUploadFilename.MatchString(entry.Name()) {
 				continue
 			}
-			info, infoErr := entry.Info()
+			info, infoErr := m.sweepInfo(entry.Name(), entry)
+			m.witness(infoErr)
 			if infoErr == nil && now.Sub(info.ModTime()) >= m.attachTTL {
-				_ = m.root.Remove(entry.Name())
+				m.removed(m.recoveryRemove("sweep-legacy-remove", entry.Name()))
 				removed++
 			}
 		}
@@ -813,7 +867,7 @@ func (m *Manager) loadAttachmentsLocked() (int, error) {
 	if err != nil {
 		return 0, failure("upload_metadata_invalid", nil)
 	}
-	defer file.Close()
+	defer m.cleanupClose(file)
 	decoder := json.NewDecoder(io.LimitReader(file, 16<<20))
 	decoder.DisallowUnknownFields()
 	var index attachmentIndex
@@ -837,7 +891,7 @@ func (m *Manager) loadAttachmentsLocked() (int, error) {
 			continue
 		}
 		if !now.Before(attachment.ExpiresAt) {
-			_ = m.root.Remove(stored.RelPath)
+			m.removed(m.recoveryRemove("load-expired-remove", stored.RelPath))
 			continue
 		}
 		if _, exists := m.attachments[attachment.Ref]; exists {
@@ -856,18 +910,22 @@ func (m *Manager) loadAttachmentsLocked() (int, error) {
 		opened, openedInfo, openErr := m.openAttachmentLocked(record)
 		if openErr != nil || openedInfo.Size() != attachment.Bytes {
 			if opened != nil {
-				_ = opened.Close()
+				m.cleanupClose(opened)
 			}
 			dropped++
 			continue
 		}
-		_ = opened.Close()
+		m.cleanupClose(opened)
 		m.attachments[attachment.Ref] = record
 	}
 	return dropped, nil
 }
 
 func (m *Manager) quarantineAttachmentIndexLocked() error {
+	if err := m.deny("quarantine", attachmentIndexFilename); err != nil {
+		m.witness(err)
+		return failure("upload_metadata_invalid", nil)
+	}
 	stamp := m.now().UTC().UnixNano()
 	for attempt := range 1000 {
 		name := fmt.Sprintf("attachments.invalid-%d.json", stamp)
@@ -877,9 +935,11 @@ func (m *Manager) quarantineAttachmentIndexLocked() error {
 		if _, err := m.root.Lstat(name); err == nil {
 			continue
 		} else if !errors.Is(err, fs.ErrNotExist) {
+			m.witness(err)
 			return failure("upload_metadata_invalid", nil)
 		}
 		if err := m.root.Rename(attachmentIndexFilename, name); err != nil {
+			m.witness(err)
 			return failure("upload_metadata_invalid", nil)
 		}
 		return nil
@@ -888,6 +948,9 @@ func (m *Manager) quarantineAttachmentIndexLocked() error {
 }
 
 func (m *Manager) persistAttachments() error {
+	if m.installed != nil {
+		return m.persistInstalledAttachments()
+	}
 	m.mu.Lock()
 	records := make([]diskAttachmentRecord, 0, len(m.attachments))
 	for _, record := range m.attachments {
@@ -942,32 +1005,43 @@ func (m *Manager) persistAttachments() error {
 	return nil
 }
 
-func (m *Manager) syncObjectsDirectory() error {
-	directory, err := m.root.Open("objects")
+func (m *Manager) syncObjectsDirectory() (result error) {
+	directory, err := m.finishObjectsOpen()
 	if err != nil {
+		m.witness(err)
 		return failure("upload_metadata_unavailable", nil)
 	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
+	defer func() {
+		err := m.physicalClose(directory)
+		m.witness(err)
+		if m.installed != nil && err != nil {
+			result = failure("upload_metadata_unavailable", nil)
+		}
+	}()
+	if err := m.finishObjectsSync(directory); err != nil {
+		m.witness(err)
 		return failure("upload_metadata_unavailable", nil)
 	}
 	return nil
 }
 
 func (m *Manager) clearSessionDiskLocked() error {
-	entries, err := fs.ReadDir(m.root.FS(), "sessions")
+	entries, err := m.readDirectory("sessions")
 	if err != nil {
+		m.witness(err)
 		return failure("upload_root_unavailable", nil)
 	}
 	for _, entry := range entries {
 		path := "sessions/" + entry.Name()
 		if entry.IsDir() {
-			if err := m.root.RemoveAll(path); err != nil {
+			if err := m.removeSessionDirectory(path); err != nil {
+				m.witness(err)
 				return failure("upload_root_unavailable", nil)
 			}
 			continue
 		}
 		if err := m.root.Remove(path); err != nil {
+			m.witness(err)
 			return failure("upload_root_unavailable", nil)
 		}
 	}
@@ -975,6 +1049,9 @@ func (m *Manager) clearSessionDiskLocked() error {
 }
 
 func (m *Manager) ensurePrivateDirectory(path string) error {
+	if err := m.deny("ensure-directory", path); err != nil {
+		return err
+	}
 	if err := m.root.Mkdir(path, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return failure("upload_root_unavailable", nil)
 	}
@@ -993,13 +1070,17 @@ func (m *Manager) openAttachmentLocked(record *attachmentRecord) (*os.File, fs.F
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, nil, failure("attachment_changed", nil)
 	}
+	// Receipt is after the named snapshot, before acquiring the actual probe.
+	if err := m.deny("probe-open", record.relPath); err != nil {
+		return nil, nil, failure("attachment_changed", nil)
+	}
 	file, err := m.root.Open(record.relPath)
 	if err != nil {
 		return nil, nil, failure("attachment_changed", nil)
 	}
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		_ = file.Close()
+		m.cleanupClose(file)
 		return nil, nil, failure("attachment_changed", nil)
 	}
 	return file, opened, nil
@@ -1214,17 +1295,17 @@ func validateContent(item *sessionFile) error {
 	case "text/plain", "text/markdown", "text/csv":
 		valid = validTextContent(item)
 	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "word/document.xml", "")
+		valid = validDocumentContainerOwned(item.cleanupWitness, item.closeResource, item.file, item.spec.Bytes, "word/document.xml", "")
 	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "xl/workbook.xml", "")
+		valid = validDocumentContainerOwned(item.cleanupWitness, item.closeResource, item.file, item.spec.Bytes, "xl/workbook.xml", "")
 	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "ppt/presentation.xml", "")
+		valid = validDocumentContainerOwned(item.cleanupWitness, item.closeResource, item.file, item.spec.Bytes, "ppt/presentation.xml", "")
 	case "application/vnd.oasis.opendocument.text":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.text")
+		valid = validDocumentContainerOwned(item.cleanupWitness, item.closeResource, item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.text")
 	case "application/vnd.oasis.opendocument.spreadsheet":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.spreadsheet")
+		valid = validDocumentContainerOwned(item.cleanupWitness, item.closeResource, item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.spreadsheet")
 	case "application/vnd.oasis.opendocument.presentation":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.presentation")
+		valid = validDocumentContainerOwned(item.cleanupWitness, item.closeResource, item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.presentation")
 	}
 	if !valid {
 		return failure("upload_content_type_mismatch", map[string]any{"file_index": -1})
@@ -1253,6 +1334,10 @@ func validJSONContent(file *os.File) bool {
 }
 
 func validDocumentContainer(file *os.File, size int64, requiredPath, requiredMIME string) bool {
+	return validDocumentContainerOwned(nil, nil, file, size, requiredPath, requiredMIME)
+}
+
+func validDocumentContainerOwned(witness func(error), closeResource func(io.Closer) error, file *os.File, size int64, requiredPath, requiredMIME string) bool {
 	if file == nil || size < 1 {
 		return false
 	}
@@ -1285,7 +1370,15 @@ func validDocumentContainer(file *os.File, size int64, requiredPath, requiredMIM
 				return false
 			}
 			content, readErr := io.ReadAll(io.LimitReader(reader, 129))
-			closeErr := reader.Close()
+			var closeErr error
+			if closeResource != nil {
+				closeErr = closeResource(reader)
+			} else {
+				closeErr = reader.Close()
+			}
+			if witness != nil {
+				witness(closeErr)
+			}
 			if readErr != nil || closeErr != nil || string(content) != requiredMIME {
 				return false
 			}

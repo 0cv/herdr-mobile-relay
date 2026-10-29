@@ -28,7 +28,7 @@ if not HELPER or not Path(HELPER).is_file() or not os.access(HELPER, os.X_OK):
     raise SystemExit("setup menu fixtures require the native fixture's compiled helper")
 
 ACTIONS = ["plugin-choose-transport.sh", "plugin-install-service.sh", "plugin-change-hostname.sh",
-           "plugin-stable-teardown.sh", "plugin-setup-link.sh", "plugin-configure-app-deploy.sh"]
+           "plugin-stable-teardown.sh", "plugin-setup-link.sh", "plugin-configure-app-deploy.sh", "tailscale-cli.sh"]
 CANARIES = ["secret-menu-canary", "private-menu-node", "private-menu-path", "$(", "\x1b"]
 
 
@@ -130,13 +130,13 @@ class Fixture:
     def calls(self):
         return [json.loads(line) for line in self.trace.read_text().splitlines()] if self.trace.exists() else []
 
-    def navigation(self, data, extra=None, preserve=True):
+    def navigation(self, data, extra=None, preserve=True, allow_stderr=False):
         before = self.snapshot()
         result = subprocess.run(["/bin/bash", str(self.scripts / "plugin-setup-menu.sh")],
                                 input=data, capture_output=True, text=True, env=dict(self.env, **(extra or {})), timeout=25)
         require(result.returncode == 0, "diagnostic/child refusal terminated navigation")
         self.safe_output(result.stdout+result.stderr)
-        require(not result.stderr, "navigation emitted unexpected stderr")
+        require(allow_stderr or not result.stderr, "navigation emitted unexpected stderr")
         require("Press Enter" not in result.stdout, "piped navigation consumed a return pause")
         if preserve:
             require(self.snapshot() == before, "navigation sourced/migrated/rewrote/chmodded state")
@@ -332,10 +332,10 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
     # Invalid/blank/default/Back/EOF/removed aliases cannot select a child.
     for data, headers in [("", 1), ("q\n", 1), ("t\nT\nb\nB\n7\n8\n9\ninvalid\nq\n", 1),
                           ("\n\ninvalid\nb\nq\n", 2), ("1\n", 1), ("2\nq\n", 1),
-                          ("2\n\ninvalid\nb\nq\n", 2), ("3\n1\n3\n\ninvalid\nb\nq\n", 2)]:
+                          ("2\n\ninvalid\nb\nq\n", 2), ("3\n\ninvalid\nb\nq\n", 2)]:
         f = fresh()
         text = f.navigation(data)
-        require(not f.actions() and len(f.headers()) == headers, "navigation/unavailable/default unexpectedly dispatched or reprobed")
+        require(not f.actions() and len(f.headers()) == headers, "navigation/default unexpectedly dispatched or reprobed")
         require(all(call["argv"] == ["status", "--config", str(f.env_file)] and call["menu"] == "1" for call in f.headers()),
                 "header used ingress/arbitrary command or permitted wrapper pause")
         require("Managed Tailscale Serve (foreground)" not in text, "removed managed mode still advertised")
@@ -350,7 +350,9 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
             ("1\n4\nb\nq\n", "plugin-stable-teardown.sh", []),
             ("2\n1\nb\nq\n", "plugin-choose-transport.sh", ["community"]),
             ("2\n2\nb\nq\n", "plugin-choose-transport.sh", ["own"]),
+            ("3\n1\nb\nq\n", "plugin-choose-transport.sh", ["tailscale-cli"]),
             ("3\n2\nb\nq\n", "plugin-choose-transport.sh", ["tailscale-external"]),
+            ("3\n3\nb\nq\n", "tailscale-cli.sh", ["unpublish"]),
             ("4\nq\n", "plugin-setup-link.sh", []),
             ("5\nq\n", "plugin-configure-app-deploy.sh", [])]
     for data, entry, args in maps:
@@ -366,6 +368,22 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
     text = f.navigation("6\nq\n")
     require([call["argv"][0] for call in f.calls()] == ["status", "doctor", "status"], "Doctor bypassed wrapper or started another action")
     require("Action did not complete (exit 3)" in text, "incomplete doctor decision hidden")
+
+    f = fresh()
+    text = f.navigation("3\n1\nq\n", dict(ACTION_EXIT="73"))
+    require(len(f.actions()) == 1 and "no follow-up action was requested" in text,
+            "installed CLI refusal triggered another action")
+    for answer in ["q\n", ""]:
+        f = fresh()
+        executable(f.scripts / "plugin-choose-transport.sh",
+                   '#!/bin/bash\nprintf \'{"kind":"action","entry":"plugin-choose-transport.sh","argv":["tailscale-cli"]}\\n\' >> "$MENU_TRACE"\n'
+                   'IFS= read -r response || exit 1\n[ "$response" = y ]\n')
+        text = f.navigation("3\n1\n"+answer)
+        require(len(f.actions()) == 1 and "no follow-up action was requested" in text,
+                "cancel/EOF in installed selector dispatched a second action")
+
+    # Extracted selector bytes and their activation refusal are exercised by
+    # check-installed-release.sh; do not substitute the source selector here.
 
     for code in [0, 1, 2, 3]:
         f = fresh()
@@ -395,7 +413,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
         if mode == "tailscale-external":
             config += "HERDR_EXTERNAL_HTTPS_ORIGIN=https://private-menu-node.invalid\n"
         f.env_file.write_text(config)
-        text = f.navigation("t\n3\n1\n3\nb\n6\nq\n")
+        text = f.navigation("t\n3\n\ninvalid\nb\n6\nq\n")
         require("selected_transport="+mode in text and "status=unknown exit=3" in text, "actual partial model selection missing/claimed ready")
         require(not f.actions(), "actual read-only navigation started a lifecycle")
     f = fresh(real=True)

@@ -78,8 +78,10 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         install-service.sh \
         install-systemd-user-service.sh \
         native-install-transaction.sh \
+        native-cli-fresh.sh \
         plugin-on-event.sh \
         plugin-status.sh \
+        plugin-tailscale-always-on.sh \
         pi-commands.sh \
         service.sh \
         setup-link.sh \

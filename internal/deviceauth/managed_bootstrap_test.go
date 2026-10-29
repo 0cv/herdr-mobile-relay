@@ -136,6 +136,10 @@ func TestManagedArmDetectsReplacementAtBeforeRenameBoundary(t *testing.T) {
 		if err := os.WriteFile(foreign, []byte("foreign replacement"), 0o640); err != nil {
 			return err
 		}
+		// Establish the synthetic foreign mode independently of inherited umask.
+		if err := os.Chmod(foreign, 0o640); err != nil {
+			return err
+		}
 		return os.Rename(foreign, filepath.Join(dir, storeFilename))
 	}
 	err := store.ArmBootstrapInvitationTransactional(bytes.Repeat([]byte("k"), secretBytes), "relay", "en")

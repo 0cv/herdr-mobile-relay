@@ -378,7 +378,10 @@ case "$CLI_BIN" in
     *) echo "✗ An explicit Tailscale CLI override must be absolute." >&2; exit 2 ;;
 esac
 HERDR_DEV_HERDR_BIN="${HERDR_DEV_HERDR_BIN:-${HERDR_BIN:-}}"
-case "$HERDR_DEV_HERDR_BIN" in /*) [ -x "$HERDR_DEV_HERDR_BIN" ] && [ ! -d "$HERDR_DEV_HERDR_BIN" ] || { echo "✗ Select an absolute executable Herdr path." >&2; exit 2; } ;; *) echo "✗ Set HERDR_DEV_HERDR_BIN to the absolute Herdr executable." >&2; exit 2 ;; esac
+if [ -z "$HERDR_DEV_HERDR_BIN" ]; then
+    HERDR_DEV_HERDR_BIN="$(type -P herdr 2>/dev/null || true)"
+fi
+case "$HERDR_DEV_HERDR_BIN" in /*) [ -x "$HERDR_DEV_HERDR_BIN" ] && [ ! -d "$HERDR_DEV_HERDR_BIN" ] || { echo "✗ Select an absolute executable Herdr path." >&2; exit 2; } ;; *) echo "✗ Install Herdr on PATH or set HERDR_DEV_HERDR_BIN to its absolute executable." >&2; exit 2 ;; esac
 HERDR_DEV_HERDR_SOCKET="${HERDR_DEV_HERDR_SOCKET:-${HERDR_SOCKET_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock}}"
 case "$HERDR_DEV_HERDR_SOCKET" in /*) ;; *) echo "✗ Herdr socket path must be absolute." >&2; exit 2 ;; esac
 [ -S "$HERDR_DEV_HERDR_SOCKET" ] || { echo "✗ Herdr socket does not exist; it is not contacted during selection." >&2; exit 2; }

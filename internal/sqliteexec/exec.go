@@ -4,12 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"os/exec"
 	"strings"
-
-	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 // Backend selects how conversation readers execute SQL against agent SQLite files.
@@ -53,82 +48,12 @@ func ParseBackend(value string) Backend {
 	}
 }
 
-// FromEnv builds an executor using HERDR_SQLITE_BACKEND (default auto).
-func FromEnv() (Executor, error) {
-	return Resolve(ParseBackend(os.Getenv(EnvBackend)), "sqlite3")
-}
-
-// Resolve builds an executor for the requested backend.
-// cliBinary is the sqlite3 executable name or path used by the CLI backend.
-func Resolve(backend Backend, cliBinary string) (Executor, error) {
-	if cliBinary == "" {
-		cliBinary = "sqlite3"
-	}
-	switch ParseBackend(string(backend)) {
-	case BackendNative:
-		return newNative(), nil
-	case BackendCLI:
-		cli := newCLI(cliBinary)
-		if !cli.Ready() {
-			return nil, fmt.Errorf("%w: %s not found", ErrUnavailable, cliBinary)
-		}
-		return cli, nil
-	default: // auto
-		native := newNative()
-		if native.Ready() {
-			return native, nil
-		}
-		cli := newCLI(cliBinary)
-		if cli.Ready() {
-			return cli, nil
-		}
-		return nil, ErrUnavailable
-	}
-}
-
-// MustFromEnv returns FromEnv or a CLI fallback that reports not Ready when
-// nothing works. Callers still check Ready/databases().
-func MustFromEnv() Executor {
-	executor, err := FromEnv()
-	if err == nil {
-		return executor
-	}
-	return newCLI("sqlite3")
-}
-
 type cliExecutor struct {
 	binary string
 }
 
 func newCLI(binary string) *cliExecutor {
 	return &cliExecutor{binary: binary}
-}
-
-func (c *cliExecutor) Ready() bool {
-	_, err := exec.LookPath(c.binary)
-	return err == nil
-}
-
-func (c *cliExecutor) QueryJSON(ctx context.Context, database, query string, maxBytes int) ([]byte, error) {
-	if maxBytes < 1 {
-		maxBytes = 1
-	}
-	command := childenv.CommandContext(ctx, c.binary, "-readonly", "-batch", "-json", database, query)
-	stdout := &limitedBuffer{remaining: maxBytes}
-	var stderr limitedBuffer
-	stderr.remaining = 4096
-	command.Stdout = stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		if stdout.overflow {
-			return nil, ErrOutputLimit
-		}
-		return nil, fmt.Errorf("sqlite3 query failed: %w", err)
-	}
-	if stdout.overflow {
-		return nil, ErrOutputLimit
-	}
-	return stdout.Bytes(), nil
 }
 
 type limitedBuffer struct {

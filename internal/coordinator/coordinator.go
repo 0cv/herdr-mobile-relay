@@ -142,8 +142,9 @@ func (h *deadlineHeap) Pop() any {
 }
 
 type Scheduler struct {
-	logger   *slog.Logger
-	capacity int
+	installed *installedScheduler
+	logger    *slog.Logger
+	capacity  int
 
 	ingress        chan scheduleRequest
 	completions    chan completionEvent
@@ -165,10 +166,15 @@ type Scheduler struct {
 }
 
 func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
+	return newScheduler(capacity, logger, nil)
+}
+
+func newScheduler(capacity int, logger *slog.Logger, owned *installedScheduler) *Scheduler {
 	if capacity <= 0 {
 		capacity = defaultHerdrCapacity
 	}
 	s := &Scheduler{
+		installed:      owned,
 		logger:         logger,
 		capacity:       capacity,
 		ingress:        make(chan scheduleRequest, coordinatorIngressCapacity),
@@ -180,8 +186,14 @@ func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
 		stop:           make(chan chan struct{}),
 		done:           make(chan struct{}),
 	}
+	if owned != nil {
+		owned.lifetime, owned.cancel = context.WithCancel(context.Background())
+	}
 	s.metrics.HerdrCapacity = capacity
 	go s.run()
+	if owned != nil {
+		go s.finishInstalled()
+	}
 	return s
 }
 
@@ -190,6 +202,10 @@ func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
 // returns, so queued work from the old pane session cannot reach a replacement
 // that later reuses the same pane ID.
 func (s *Scheduler) ApplyTopology(active map[string]bool, paneGenerations ...map[string]uint64) bool {
+	if !s.admitInstalled() {
+		return false
+	}
+	defer s.releaseInstalled()
 	if s.closed.Load() {
 		return false
 	}
@@ -237,6 +253,29 @@ func (s *Scheduler) ExecuteAdmitted(
 	runner EffectRunner,
 	admitted func(),
 ) (*CommandResult, error) {
+	if s.installed != nil {
+		if err := installedContextError(ctx); err != nil {
+			if admitted != nil {
+				admitted()
+			}
+			return nil, err
+		}
+	}
+	if !s.admitInstalled() {
+		if admitted != nil {
+			admitted()
+		}
+		return nil, ErrClosed
+	}
+	defer s.releaseInstalled()
+	if s.installed != nil {
+		if err := installedContextError(ctx); err != nil {
+			if admitted != nil {
+				admitted()
+			}
+			return nil, err
+		}
+	}
 	if s.closed.Load() {
 		if admitted != nil {
 			admitted()
@@ -300,6 +339,10 @@ func (s *Scheduler) UpdateLedgerPhase(key string, generation uint64, phase strin
 // terminal confirmation result. Replays must preserve data and errors, not only
 // the terminal phase.
 func (s *Scheduler) UpdateLedgerResult(key string, generation uint64, result *CommandResult) bool {
+	if !s.admitInstalled() {
+		return false
+	}
+	defer s.releaseInstalled()
 	if key == "" || s.closed.Load() {
 		return false
 	}
@@ -327,6 +370,10 @@ func (s *Scheduler) UpdateLedgerResult(key string, generation uint64, result *Co
 // found with a nil result means the matching operation is still in flight and
 // the caller should submit normally so the scheduler can attach as a waiter.
 func (s *Scheduler) ReplayLedger(key, payloadHash string) (*CommandResult, bool, error) {
+	if !s.admitInstalled() {
+		return nil, false, ErrClosed
+	}
+	defer s.releaseInstalled()
 	if key == "" || s.closed.Load() {
 		return nil, false, ErrClosed
 	}
@@ -359,6 +406,9 @@ func (s *Scheduler) CancelInflight() {
 }
 
 func (s *Scheduler) Close(ctx context.Context) error {
+	if s.installed != nil {
+		return s.closeInstalled(ctx)
+	}
 	if !s.closed.CompareAndSwap(false, true) {
 		select {
 		case <-s.done:
@@ -400,6 +450,10 @@ func (s *Scheduler) run() {
 	inUse := 0
 	stopping := false
 	var stopAck chan struct{}
+	var installedStop <-chan struct{}
+	if s.installed != nil {
+		installedStop = s.installed.stop
+	}
 
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
@@ -429,6 +483,9 @@ func (s *Scheduler) run() {
 
 	var dispatch func()
 	dispatch = func() {
+		if s.installed != nil && s.closed.Load() {
+			return
+		}
 		now := time.Now()
 
 		for len(relayQueue) > 0 && inUse < s.capacity && !stopping {
@@ -439,6 +496,10 @@ func (s *Scheduler) run() {
 					heap.Remove(&deadlines, op.index)
 				}
 				s.expire(op, ledger)
+				continue
+			}
+			if !s.admitInstalledEffect() {
+				s.finish(op, nil, ErrClosed, ledger)
 				continue
 			}
 			inUse++
@@ -478,6 +539,10 @@ func (s *Scheduler) run() {
 					}
 					s.expire(op, ledger)
 					progress = true
+					continue
+				}
+				if !s.admitInstalledEffect() {
+					s.finish(op, nil, ErrClosed, ledger)
 					continue
 				}
 				inUse++
@@ -833,6 +898,15 @@ func (s *Scheduler) run() {
 			}
 			dispatch()
 
+		case <-installedStop:
+			installedStop = nil // consume once; never starve completions
+			stopAck = make(chan struct{})
+			// Reuse the owner cancellation path on its next turn.
+			select {
+			case s.cancelInflight <- struct{}{}:
+			default:
+			}
+
 		case <-s.cancelInflight:
 			if !stopping {
 				stopping = true
@@ -896,12 +970,22 @@ func (s *Scheduler) start(op *scheduledOperation, generation uint64) context.Can
 	s.metricsMu.Lock()
 	s.metrics.Dispatched++
 	s.metricsMu.Unlock()
-	ctx, cancel := context.WithDeadline(context.Background(), token.Deadline)
+	parent := context.Background()
+	if s.installed != nil {
+		parent = s.installed.lifetime
+	}
+	ctx, cancel := context.WithDeadline(parent, token.Deadline)
 	op.dispatched = true
 	go func() {
+		if s.installed != nil {
+			defer s.installed.effects.Done()
+		}
 		defer cancel()
 		result := op.runner.Run(ctx, token)
 		s.completions <- completionEvent{operation: op, result: result}
+		if s.installed != nil && s.installed.afterCompletion != nil {
+			s.installed.afterCompletion()
+		}
 	}()
 	return cancel
 }

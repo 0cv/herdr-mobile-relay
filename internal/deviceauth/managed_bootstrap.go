@@ -69,7 +69,7 @@ func OpenDeferred(dir string, options ...Option) (*Store, error) {
 // resets credentials. Callers serialize this operation with the pairing gate
 // and may supply a final admission check that runs after durable installation;
 // a refusal there restores the exact prior snapshot before returning.
-func (s *Store) ArmBootstrapInvitationTransactional(secret []byte, name, locale string, beforeCommit ...func() error) error {
+func (s *Store) ArmBootstrapInvitationTransactional(secret []byte, name, locale string, beforeCommit ...func() error) (resultErr error) {
 	if len(beforeCommit) > 1 {
 		return errors.New("managed invitation arm accepts at most one final admission check")
 	}
@@ -86,6 +86,14 @@ func (s *Store) ArmBootstrapInvitationTransactional(secret []byte, name, locale 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if errors.Is(resultErr, ErrManagedArmRecovery) {
+			s.managedUncertain = true
+		}
+	}()
+	if s.managedUncertain {
+		return ErrManagedArmRecovery
+	}
 	writer, err := acquireStoreWriterLock(s.dir)
 	if err != nil {
 		return err

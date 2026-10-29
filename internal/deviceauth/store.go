@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -127,7 +126,7 @@ func WithBootstrapReenrollment() Option {
 }
 
 type Store struct {
-	mu                 sync.Mutex
+	mu                 snapshotMutex
 	dir                string
 	path               string
 	now                func() time.Time
@@ -135,6 +134,7 @@ type Store struct {
 	rearmBootstrap     bool
 	state              diskState
 	managedArmBaseline *managedStoreSnapshot
+	managedUncertain   bool
 	managedArmFault    func(stage string) error
 	persistFault       func(stage string) error
 }
@@ -493,7 +493,15 @@ func (s *Store) persistLocked() error {
 // The snapshot check rejects stale cooperating Store instances; pathname
 // replacement by a same-UID writer that bypasses this lock remains a documented
 // non-atomic filesystem race.
-func (s *Store) persistLockedWithWriterLock() error {
+func (s *Store) persistLockedWithWriterLock() (resultErr error) {
+	defer func() {
+		if errors.Is(resultErr, ErrManagedArmRecovery) {
+			s.managedUncertain = true
+		}
+	}()
+	if s.managedUncertain {
+		return ErrManagedArmRecovery
+	}
 	if s.managedArmBaseline == nil {
 		return errors.New("device store has no authoritative disk baseline")
 	}

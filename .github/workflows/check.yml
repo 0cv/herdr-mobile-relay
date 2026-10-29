@@ -198,6 +198,104 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  installed-inert:
+    needs: provenance
+    name: Installed inert (${{ matrix.os }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: Linux
+            mode: normal
+          - runner: ubuntu-24.04
+            os: Linux
+            mode: race
+          - runner: macos-15
+            os: Darwin
+            mode: normal
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify exact clean checkout
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: false
+      - name: Test evidence refusals offline
+        run: python3 -I -B tests/test_installed_inert.py
+      - name: Require exact installed inert invocations and sanitized evidence
+        run: >-
+          python3 -I -B scripts/ci/installed_inert.py
+          --mode '${{ matrix.mode }}' --os '${{ matrix.os }}'
+          --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --evidence '${{ runner.temp }}/installed-inert-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.mode }}.json'
+      - name: Upload only sanitized installed evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installed-inert-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/installed-inert-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.mode }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  installed-hosted:
+    needs: provenance
+    name: Installed hosted real Run and endpoint (${{ matrix.os }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: Linux
+            mode: normal
+          - runner: ubuntu-24.04
+            os: Linux
+            mode: race
+          - runner: macos-15
+            os: Darwin
+            mode: normal
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify exact clean checkout
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: false
+      - name: Test evidence refusals offline
+        run: python3 -I -B tests/test_installed_hosted.py
+      - name: Require exact installed hosted cases and sanitized evidence
+        env:
+          HERDR_INSTALLED_HOSTED_TEST: "1"
+        run: >-
+          python3 -I -B scripts/ci/installed_hosted.py
+          --mode '${{ matrix.mode }}' --os '${{ matrix.os }}'
+          --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --evidence '${{ runner.temp }}/installed-hosted-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.mode }}.json'
+      - name: Upload only sanitized installed evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installed-hosted-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/installed-hosted-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.mode }}.json
+          if-no-files-found: error
+          retention-days: 1
+
   journal:
     needs: provenance
     name: Linux journald logging acceptance

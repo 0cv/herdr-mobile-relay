@@ -9,6 +9,9 @@ if (os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRON
     raise SystemExit("CLI setup fixtures require genuine disposable non-root hosted CI and launcher admission")
 if sys.version_info < (3, 11): raise SystemExit("CLI setup fixtures require Python >=3.11")
 import hashlib
+import select
+import time
+import pty
 import shutil
 import signal
 import stat
@@ -59,6 +62,7 @@ def run_setup(platform: str, prior: str, guard_status: int = 0) -> None:
     with tempfile.TemporaryDirectory(prefix="herdr-cli-setup-refusal-") as temporary:
         present = {"absent": (), "current": (0,), "legacy": (1,)}[prior]
         fixture = Fixture(Path(temporary).resolve(), platform, present=present, mode="tailscale-cli")
+        fixture.env_file.write_text(fixture.env_file.read_text() + 'HERDR_RELAY_INSTANCE_ID=fixture-instance\n')
         copy_source("tailscale-cli.sh", fixture.relay)
         events = fixture.root / 'setup-events'
         adapter = '#!' + sys.executable + '\n' + '''import os, pathlib, sys
@@ -85,8 +89,8 @@ raise SystemExit(97)
         assert calls == ['guard-relay:tailscale-cli activation-check'], calls
         assert result.returncode == (guard_status or 1)
         if guard_status == 0:
-            assert b'Installed-service CLI setup is disabled' in result.stdout
-            assert b'No Tailscale CLI, service manager, or relay server was contacted.' in result.stdout
+            assert b'Installed CLI setup requires an interactive operator.' in result.stdout
+            assert b'Installed-service CLI setup is disabled' not in result.stdout
         assert b'has been installed' not in result.stdout and b'Installed and verified' not in result.stdout
         assert all(value not in result.stdout for value in
                    (b'fixture-saved-canary', b'fixture-ambient-canary', b'fixture-ambient-github-canary'))
@@ -166,6 +170,127 @@ def installer_refusal(platform: str, definition_kind: str) -> None:
         assert b'Installed and verified' not in result.stdout
 
 
+def delayed_installed_control(answer: bytes, expected: str) -> None:
+    # Real selector/common/CLI wrapper bytes, with only CLI, promotion, wizard,
+    # control, QR and origin verification replaced by finite inert endpoints.
+    # This is not a service/profile/phone qualification or a wizard simulation.
+    with tempfile.TemporaryDirectory(prefix='herdr-cli-delayed-control-') as temporary:
+        root = Path(temporary).resolve()
+        relay = root / 'relay'; home = root / 'home'; fakebin = root / 'bin'
+        for directory in (relay, home, fakebin): directory.mkdir(mode=0o700)
+        for name in ('common.sh', 'tailscale-cli.sh', 'plugin-tailscale-always-on.sh'):
+            copy_source(name, relay)
+        env_file = root / 'relay.env'
+        original = 'HERDR_RELAY_TRANSPORT=cloudflare\nHERDR_RELAY_INSTANCE_ID=delayed-fixture\n' + \
+                   'HERDR_RELAY_TOKEN=' + 't'*32 + '\nHERDR_RELAY_PORT=18375\nHERDR_RELAY_PLUGIN_PORT=18376\n'
+        env_file.write_text(original, encoding='utf-8'); env_file.chmod(0o600)
+        record = root / 'control-record'; sentinel = root / 'forbidden-actions'
+        cli = root / 'selected-cli'; write_executable(cli, '#!/bin/sh\nprintf "unexpected CLI\\n" >> "$FORBIDDEN_ACTIONS"\nexit 97\n')
+        for name in ('systemctl', 'launchctl', 'tailscale', 'curl'):
+            write_executable(fakebin / name, '#!/bin/sh\nprintf "unexpected native/CLI action\\n" >> "$FORBIDDEN_ACTIONS"\nexit 97\n')
+        write_executable(relay / 'service.sh', '#!/bin/sh\nprintf "unexpected service action\\n" >> "$FORBIDDEN_ACTIONS"\nexit 97\n')
+        fake = root / 'inert-relay'
+        write_executable(fake, '#!' + sys.executable + '\n' + '''import json, os, pathlib, sys
+args = sys.argv[1:]
+if args[:1] == ['json-field'] and len(args) == 3 and args[1] == 'string':
+    value = json.load(sys.stdin).get(args[2])
+    if not isinstance(value, str): raise SystemExit(1)
+    print(value); raise SystemExit(0)
+record = pathlib.Path(os.environ['CONTROL_RECORD'])
+def event(text):
+    with record.open('a') as stream: stream.write(text + '\\n')
+if args == ['tailscale-cli', 'activation-check']:
+    event('activation-check'); raise SystemExit(0)
+if args == ['tailscale-cli', 'resolve-binary', '--binary', '']:
+    event('resolve-binary'); print(os.environ['SELECTED_CLI']); raise SystemExit(0)
+if args == ['tailscale-cli', 'installed-preflight', '--binary', os.environ['SELECTED_CLI'],
+            '--https-port', '443', '--backend-port', '18375']:
+    event('installed-preflight')
+    print(json.dumps(dict(node_id='node-delayed', origin='https://relay.example.test')))
+    raise SystemExit(0)
+if args == ['tailscale-cli', 'installed-selection-check']:
+    if any(os.environ.get(key) != value for key, value in (
+            ('HERDR_RELAY_TRANSPORT', 'tailscale-cli'), ('HERDR_TAILSCALE_CLI_NODE_ID', 'node-delayed'),
+            ('HERDR_TAILSCALE_CLI_ORIGIN', 'https://relay.example.test'),
+            ('HERDR_TAILSCALE_CLI_SCOPE', 'production'), ('HERDR_TAILSCALE_CLI_BIN', os.environ['SELECTED_CLI']))):
+        raise SystemExit(97)
+    event('installed-selection-check'); raise SystemExit(0)
+if args == ['promote-installed']:
+    event('promote-installed'); raise SystemExit(0)
+if args == ['installed-control-wizard']:
+    event('installed-control-wizard'); raise SystemExit(0)
+if args[:2] == ['tailscale-cli', 'assert-ready'] and all(
+        item in args for item in ('--binary', os.environ['SELECTED_CLI'], '--scope', 'production',
+                                  '--installation-id', 'delayed-fixture', '--origin', 'https://relay.example.test',
+                                  '--https-port', '443', '--backend-port', '18375')):
+    event('assert-ready'); raise SystemExit(0)
+if args == ['installed-control', 'status']:
+    probes = sum(line.startswith('status:') for line in record.read_text().splitlines())
+    event('status:' + str(probes + 1))
+    if probes < 2: raise SystemExit(1)
+    print(json.dumps(dict(code='ok', publication='disabled', installation='delayed-fixture', run='a'*32)))
+    raise SystemExit(0)
+if args == ['installed-control', 'arm', '--run', 'a'*32, '--operation-id', 'fixture-one']:
+    event('arm:fixture-one')
+    print(json.dumps(dict(code='ok', arm_receipt='acknowledged',
+                          invitation='https://app.example.test/#setup=fixture')))
+    raise SystemExit(0)
+if args == ['normalize-origin', '--allow-loopback-http', 'https://app.example.test']:
+    event('normalize-origin'); print('https://app.example.test'); raise SystemExit(0)
+if args[:2] == ['qr', '--columns'] and args[-1] == 'https://app.example.test/#setup=fixture':
+    event('qr'); print('SYNTHETIC-QR'); raise SystemExit(0)
+event('unexpected-command'); raise SystemExit(97)
+''')
+        master, slave = pty.openpty()
+        environment = {'PATH': str(fakebin) + ':/usr/bin:/bin', 'HOME': str(home), 'LC_ALL': 'C', 'TERM': 'dumb',
+                       'HERDR_RELAY_ENV': str(env_file), 'HERDR_RELAY_BIN': str(fake),
+                       'SELECTED_CLI': str(cli), 'CONTROL_RECORD': str(record), 'FORBIDDEN_ACTIONS': str(sentinel)}
+        process = subprocess.Popen(['/bin/bash', str(relay / 'plugin-tailscale-always-on.sh')],
+                                   cwd=root, env=environment, stdin=slave, stdout=slave,
+                                   stderr=slave, start_new_session=True)
+        os.close(slave)
+        try:
+            os.write(master, answer)
+            chunks = []; deadline = time.monotonic() + 20
+            while process.poll() is None or select.select([master], [], [], 0)[0]:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, b''.join(chunks)
+                if select.select([master], [], [], min(remaining, 0.2))[0]:
+                    try: chunks.append(os.read(master, 65536))
+                    except OSError: break  # PTY EOF on Linux
+            process.wait(timeout=2)
+            output = b''.join(chunks)
+            calls = record.read_text().splitlines() if record.exists() else []
+            assert not sentinel.exists() and 'unexpected-command' not in calls, (calls, output)
+            assert calls[:3] == ['activation-check', 'resolve-binary', 'installed-preflight'], (calls, output)
+            if expected == 'selected':
+                assert process.returncode == 0, (calls, output)
+                assert "HERDR_TAILSCALE_CLI_NODE_ID='node-delayed'" in env_file.read_text()
+                assert "HERDR_TAILSCALE_CLI_ORIGIN='https://relay.example.test'" in env_file.read_text()
+                assert calls.count('installed-selection-check') == 1
+                assert calls.count('promote-installed') == calls.count('installed-control-wizard') == 1
+                assert calls.count('status:1') == calls.count('status:2') == calls.count('status:3') == 1
+                assert calls.count('assert-ready') == calls.count('arm:fixture-one') == 1
+                assert calls.count('normalize-origin') == calls.count('qr') == 1
+                assert calls.index('installed-selection-check') < min(calls.index('promote-installed'), calls.index('installed-control-wizard'))
+                assert max(calls.index('promote-installed'), calls.index('installed-control-wizard')) < calls.index('assert-ready')
+                assert calls.index('assert-ready') < calls.index('status:1') < calls.index('status:3')
+                assert calls.index('status:3') < calls.index('arm:fixture-one') < calls.index('qr')
+                assert b'node node-delayed, HTTPS https://relay.example.test -> 127.0.0.1:18375 (plugin 18376)' in output
+                assert output.count(b'SYNTHETIC-QR') == output.count(b'https://app.example.test/#setup=fixture') == 1
+            else:
+                assert process.returncode != 0 and 'arm:fixture-one' not in calls and 'qr' not in calls, (calls, output)
+                if expected == 'declined':
+                    assert env_file.read_text() == original and calls == calls[:3], (calls, output)
+                else:
+                    assert 'installed-control-wizard' in calls and 'assert-ready' not in calls, (calls, output)
+        finally:
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait(timeout=2)
+            os.close(master)
+
+
 def main() -> None:
     for platform in ("Linux", "Darwin"):
         for prior in ('absent', 'current', 'legacy'):
@@ -180,7 +305,11 @@ def main() -> None:
                   'unknown' if platform == 'Linux' else 'disabled-fail')
         for fault in faults: rollback_action(platform, fault)
         rollback_action(platform, 'stop-noop', cached=True)
-    print("PASS CLI setup refusal and actual dynamic internal cleanup fixtures")
+    delayed_installed_control(b'y\ny\nfixture-one\n', 'selected')
+    delayed_installed_control(b'n\n', 'declined')
+    delayed_installed_control(b'\x04', 'declined')
+    delayed_installed_control(b'y\nn\n', 'arm-cancelled')
+    print("PASS CLI setup refusal, selected synthetic QR, delayed control readiness and actual dynamic internal cleanup fixtures")
 
 
 if __name__ == "__main__":

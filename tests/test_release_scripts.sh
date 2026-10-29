@@ -106,9 +106,11 @@ for WRAPPER in \
     tailscale-external.sh \
     tailscale-cli.sh \
     tailscale-cli-service.sh \
+    native-cli-fresh.sh \
+    plugin-tailscale-always-on.sh \
     transport-switch-locked.sh; do
     case "$WRAPPER" in
-        common.sh|herdr-mobile-relay-service.sh|tailscale-cli.sh|tailscale-cli-service.sh|transport-switch-locked.sh)
+        common.sh|herdr-mobile-relay-service.sh|tailscale-cli.sh|tailscale-cli-service.sh|native-cli-fresh.sh|plugin-tailscale-always-on.sh|transport-switch-locked.sh)
             cp "$REPO_DIR/relay/$WRAPPER" "$RELEASE_DIR/relay/$WRAPPER"
             ;;
         *) printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER" ;;

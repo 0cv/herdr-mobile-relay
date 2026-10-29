@@ -33,11 +33,12 @@ func TestTopologyCacheCannotRevertPolledNativeSession(t *testing.T) {
 			state := testState()
 			state.CommitInventory([]*AgentState{{PaneID: pane.ID, TerminalID: pane.TerminalID, Agent: pane.Agent, Status: "idle"}}, 0)
 			poller := NewPoller(client, state, time.Second, testLogger())
-			poller.SetEnrich(func(_ context.Context, agents []*AgentState) {
+			poller.SetEnrich(func(_ context.Context, agents []*AgentState) error {
 				for _, agent := range agents {
 					agent.SessionID = agent.Session
 					agent.AgentSessionID = agent.Session
 				}
+				return nil
 			})
 			poller.poll(context.Background())
 			before, _ := state.Agent("pane")

@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/conversationlife"
 )
 
 const (
@@ -109,6 +111,10 @@ func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error)
 // ReadOMOTodoState returns the latest valid native senpi.todo-state row for one
 // exact OMO session. Invalid later rows cannot erase an earlier valid v2 state.
 func (r *Reader) ReadOMOTodoState(cwd, sessionID string) OMOTodoState {
+	if r != nil && r.installed != nil {
+		state, _ := r.ReadOMOTodoStateContext(context.Background(), cwd, sessionID)
+		return state
+	}
 	location, identity, code := r.locateOMO(cwd, strings.TrimSpace(sessionID))
 	if code != "" {
 		return OMOTodoState{ReasonCode: code, Phases: []OMOTodoPhase{}}
@@ -126,7 +132,8 @@ func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([
 		return nil, OMOTodoState{}, false, "source_unavailable"
 	}
 	defer source.close()
-	if !verifyOMOIdentityFile(source.file, identity, cwd) {
+	file, ok := source.file.(*os.File)
+	if !ok || !verifyOMOIdentityFile(file, identity, cwd) {
 		return nil, OMOTodoState{}, false, "invalid_session"
 	}
 	key := source.path + "\x00" + identity.ID + "\x00" + cwd
@@ -137,7 +144,7 @@ func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([
 	if ok && cached.size == source.info.Size() && cached.modTime == source.info.ModTime().UnixNano() && cached.identity == sourceIdentity {
 		return append([]Entry(nil), cached.entries...), cached.plan, cached.clipped, ""
 	}
-	text, clipped, err := loadTailFile(source.file, maxConversationBytes)
+	text, clipped, err := loadTailFile(file, maxConversationBytes)
 	if err != nil {
 		return nil, OMOTodoState{}, false, "source_unavailable"
 	}
@@ -290,104 +297,18 @@ func verifyOMOIdentityFile(file *os.File, expected omoIdentity, requestedCWD str
 	if file == nil {
 		return false
 	}
-	scanner := bufio.NewScanner(io.LimitReader(file, maxOMOIdentityBytes))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxEntryBytes)
-	for scanner.Scan() {
-		var record struct {
-			Type string `json:"type"`
-			ID   string `json:"id"`
-			CWD  string `json:"cwd"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &record) != nil || record.Type != "session" {
-			continue
-		}
-		if record.ID != expected.ID {
-			return false
-		}
-		if strings.TrimSpace(requestedCWD) != "" && record.CWD != requestedCWD {
-			return false
-		}
-		return true
-	}
-	return false
+	matched, _ := verifyOMOIdentityReaderContext(context.Background(), file, expected, requestedCWD)
+	return matched
 }
 
 func latestValidOMOTodo(text, sessionID string) (OMOTodoState, bool, bool) {
-	var latest OMOTodoState
-	found := false
-	sawTodo := false
-	for len(text) > 0 {
-		line := text
-		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
-			line = text[:newline]
-			text = text[newline+1:]
-		} else {
-			text = ""
-		}
-		if len(line) > maxOMOTodoBytes {
-			continue
-		}
-		var record struct {
-			Type       string          `json:"type"`
-			CustomType string          `json:"customType"`
-			Timestamp  string          `json:"timestamp"`
-			Data       json.RawMessage `json:"data"`
-		}
-		if json.Unmarshal([]byte(line), &record) != nil || record.Type != "custom" || record.CustomType != "senpi.todo-state" {
-			continue
-		}
-		sawTodo = true
-		state, ok := decodeOMOTodo(record.Data, sessionID, record.Timestamp)
-		if ok {
-			latest = state
-			found = true
-		}
-	}
-	return latest, found, sawTodo && !found
+	latest, found, invalidOnly, _ := latestValidOMOTodoContext(context.Background(), text, sessionID)
+	return latest, found, invalidOnly
 }
 
 func decodeOMOTodo(data json.RawMessage, sessionID, timestamp string) (OMOTodoState, bool) {
-	var native struct {
-		Schema string `json:"schema"`
-		Phases []struct {
-			Name  string `json:"name"`
-			Tasks []struct {
-				ID      string `json:"id"`
-				Content string `json:"content"`
-				Status  string `json:"status"`
-			} `json:"tasks"`
-		} `json:"phases"`
-	}
-	if json.Unmarshal(data, &native) != nil || native.Schema != "v2" || native.Phases == nil {
-		return OMOTodoState{}, false
-	}
-	state := OMOTodoState{SessionID: sessionID, Version: 2, UpdatedAt: timestamp, Phases: []OMOTodoPhase{}}
-	taskCount := 0
-	for phaseIndex, phase := range native.Phases {
-		name := strings.TrimSpace(phase.Name)
-		if name == "" || len(name) > maxOMOTodoString || phase.Tasks == nil {
-			return OMOTodoState{}, false
-		}
-		if phaseIndex >= maxOMOPhases {
-			state.Truncated = true
-			continue
-		}
-		outputPhase := OMOTodoPhase{Name: name, Tasks: []OMOTodoTask{}}
-		for _, task := range phase.Tasks {
-			content := strings.TrimSpace(task.Content)
-			if content == "" || len(content) > maxOMOTodoString || !validOMOTodoStatus(task.Status) || len(task.ID) > 128 {
-				return OMOTodoState{}, false
-			}
-			if taskCount >= maxOMOTasks {
-				state.Truncated = true
-				continue
-			}
-			outputPhase.Tasks = append(outputPhase.Tasks, OMOTodoTask{ID: task.ID, Content: content, Status: task.Status})
-			taskCount++
-		}
-		state.Phases = append(state.Phases, outputPhase)
-	}
-	return state, true
+	state, valid, _ := decodeOMOTodoContext(context.Background(), data, sessionID, timestamp)
+	return state, valid
 }
 
 func validOMOTodoStatus(status string) bool {
@@ -407,4 +328,197 @@ func parseOMOTimestamp(name string) (time.Time, bool) {
 	value := strings.SplitN(strings.TrimSuffix(name, ".jsonl"), "_", 2)[0]
 	parsed, err := time.Parse("2006-01-02T15-04-05-000Z", value)
 	return parsed, err == nil
+}
+
+func verifyOMOIdentityReaderContext(ctx context.Context, reader io.Reader, expected omoIdentity, requestedCWD string) (matched bool, err error) {
+	var readErr error
+	defer func() {
+		// Ordinary scanner errors remain nonsemantic unless cancellation or a
+		// terminal identity accompanies them, including at final publication.
+		if readErr != nil && (terminalProviderError(readErr) || readerParseContextErr(ctx) != nil) {
+			err = readerDiscoveryResult(ctx, readErr)
+		}
+		err = readerDiscoveryResult(ctx, err)
+		if err != nil {
+			matched = false
+		}
+	}()
+	if err = readerParseContextErr(ctx); err != nil {
+		return false, err
+	}
+	if reader == nil {
+		return false, conversationlife.ErrRefused
+	}
+	scanner := bufio.NewScanner(io.LimitReader(reader, maxOMOIdentityBytes))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxEntryBytes)
+	for {
+		if err = readerParseContextErr(ctx); err != nil {
+			return false, err
+		}
+		scanned := scanner.Scan()
+		// Scanner can return a buffered record alongside a terminal read error.
+		// Retain that primary error together with actual cancellation before
+		// applying the ordinary scanner-failure/first-session policy.
+		readErr = scanner.Err()
+		cancelled := readerParseContextErr(ctx)
+		if terminalProviderError(readErr) || cancelled != nil {
+			err = readerDiscoveryResult(ctx, readErr)
+			if err == nil {
+				err = cancelled
+			}
+			return false, err
+		}
+		if !scanned {
+			return false, nil
+		}
+		var record struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			CWD  string `json:"cwd"`
+		}
+		decodeErr := json.Unmarshal(scanner.Bytes(), &record)
+		if err = readerParseContextErr(ctx); err != nil {
+			return false, readerDiscoveryResult(ctx, readErr)
+		}
+		if decodeErr != nil || record.Type != "session" {
+			continue
+		}
+		if record.ID != expected.ID {
+			return false, nil
+		}
+		cwdRequired := strings.TrimSpace(requestedCWD) != ""
+		if err = readerParseContextErr(ctx); err != nil {
+			return false, readerDiscoveryResult(ctx, readErr)
+		}
+		if cwdRequired && record.CWD != requestedCWD {
+			return false, nil
+		}
+		return true, nil
+	}
+}
+
+func latestValidOMOTodoContext(ctx context.Context, text, sessionID string) (latest OMOTodoState, found bool, invalidOnly bool, err error) {
+	defer func() {
+		err = readerDiscoveryResult(ctx, err)
+		if err != nil {
+			latest, found, invalidOnly = OMOTodoState{}, false, false
+		}
+	}()
+	if err = readerParseContextErr(ctx); err != nil {
+		return OMOTodoState{}, false, false, err
+	}
+	sawTodo := false
+	for len(text) > 0 {
+		if err = readerParseContextErr(ctx); err != nil {
+			return OMOTodoState{}, false, false, err
+		}
+		line := text
+		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
+			line = text[:newline]
+			text = text[newline+1:]
+		} else {
+			text = ""
+		}
+		if err = readerParseContextErr(ctx); err != nil {
+			return OMOTodoState{}, false, false, err
+		}
+		if len(line) > maxOMOTodoBytes {
+			continue
+		}
+		var record struct {
+			Type       string          `json:"type"`
+			CustomType string          `json:"customType"`
+			Timestamp  string          `json:"timestamp"`
+			Data       json.RawMessage `json:"data"`
+		}
+		decodeErr := json.Unmarshal([]byte(line), &record)
+		if err = readerParseContextErr(ctx); err != nil {
+			return OMOTodoState{}, false, false, err
+		}
+		if decodeErr != nil || record.Type != "custom" || record.CustomType != "senpi.todo-state" {
+			continue
+		}
+		sawTodo = true
+		state, ok, decodeErr := decodeOMOTodoContext(ctx, record.Data, sessionID, record.Timestamp)
+		if err = readerDiscoveryResult(ctx, decodeErr); err != nil {
+			return OMOTodoState{}, false, false, err
+		}
+		if ok {
+			latest = state
+			found = true
+		}
+	}
+	return latest, found, sawTodo && !found, nil
+}
+
+func decodeOMOTodoContext(ctx context.Context, data json.RawMessage, sessionID, timestamp string) (state OMOTodoState, valid bool, err error) {
+	defer func() {
+		err = readerDiscoveryResult(ctx, err)
+		if err != nil {
+			state, valid = OMOTodoState{}, false
+		}
+	}()
+	if err = readerParseContextErr(ctx); err != nil {
+		return OMOTodoState{}, false, err
+	}
+	var native struct {
+		Schema string `json:"schema"`
+		Phases []struct {
+			Name  string `json:"name"`
+			Tasks []struct {
+				ID      string `json:"id"`
+				Content string `json:"content"`
+				Status  string `json:"status"`
+			} `json:"tasks"`
+		} `json:"phases"`
+	}
+	decodeErr := json.Unmarshal(data, &native)
+	if err = readerParseContextErr(ctx); err != nil {
+		return OMOTodoState{}, false, err
+	}
+	if decodeErr != nil || native.Schema != "v2" || native.Phases == nil {
+		return OMOTodoState{}, false, nil
+	}
+	state = OMOTodoState{SessionID: sessionID, Version: 2, UpdatedAt: timestamp, Phases: []OMOTodoPhase{}}
+	taskCount := 0
+	for phaseIndex, phase := range native.Phases {
+		if err = readerParseContextErr(ctx); err != nil {
+			return OMOTodoState{}, false, err
+		}
+		name := strings.TrimSpace(phase.Name)
+		if err = readerParseContextErr(ctx); err != nil {
+			return OMOTodoState{}, false, err
+		}
+		if name == "" || len(name) > maxOMOTodoString || phase.Tasks == nil {
+			return OMOTodoState{}, false, nil
+		}
+		if phaseIndex >= maxOMOPhases {
+			state.Truncated = true
+			continue
+		}
+		outputPhase := OMOTodoPhase{Name: name, Tasks: []OMOTodoTask{}}
+		for _, task := range phase.Tasks {
+			if err = readerParseContextErr(ctx); err != nil {
+				return OMOTodoState{}, false, err
+			}
+			content := strings.TrimSpace(task.Content)
+			if err = readerParseContextErr(ctx); err != nil {
+				return OMOTodoState{}, false, err
+			}
+			if content == "" || len(content) > maxOMOTodoString || !validOMOTodoStatus(task.Status) || len(task.ID) > 128 {
+				return OMOTodoState{}, false, nil
+			}
+			if taskCount >= maxOMOTasks {
+				state.Truncated = true
+				continue
+			}
+			outputPhase.Tasks = append(outputPhase.Tasks, OMOTodoTask{ID: task.ID, Content: content, Status: task.Status})
+			taskCount++
+		}
+		if err = readerParseContextErr(ctx); err != nil {
+			return OMOTodoState{}, false, err
+		}
+		state.Phases = append(state.Phases, outputPhase)
+	}
+	return state, true, nil
 }
