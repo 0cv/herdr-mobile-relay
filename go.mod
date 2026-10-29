@@ -1,6 +1,6 @@
 module github.com/0cv/herdr-mobile-relay
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
