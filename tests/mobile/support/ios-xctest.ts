@@ -16,6 +16,7 @@ const startupOutputMarker = '[startup output suppressed]\n';
 const maxStatusBytes = 65_536;
 const maxProcessCommandMs = 2_000;
 const maxRunnerCleanupMs = 10_000;
+const maxCleanupMs = 30_000;
 const maxPreFreezeDiagnosticMs = 8_000;
 const maxOwnerBytes = 1_048_576;
 const maxDiagnosticCommands = 128;
@@ -1610,7 +1611,7 @@ async function supervise(): Promise<void> {
     };
     save();
   };
-  const listenerPids = (phase = 'cleanup'): string[] => {
+  const listenerPids = (inspectionDeadline: number, phase = 'cleanup'): string[] => {
     const query = (endpoint: 'wda' | 'mjpeg', listenerPort: number): {
       snapshot: ListenerEndpointSnapshot;
       commandId?: number;
@@ -1618,7 +1619,7 @@ async function supervise(): Promise<void> {
     } => {
       const commandStart = diagnostics.checkpoint();
       try {
-        const pids = listeners(listenerPort, maxProcessCommandMs, undefined, commandContext(phase, 'inspect-listener', {
+        const pids = listeners(listenerPort, deadlineTimeout(inspectionDeadline), undefined, commandContext(phase, 'inspect-listener', {
           endpoint, port: listenerPort, frozenOwner: Boolean(frozenRunner),
         }));
         return {snapshot: {status: 'evaluated', pids}, commandId: diagnostics.commandIdsFrom(commandStart).at(-1)};
@@ -1645,10 +1646,10 @@ async function supervise(): Promise<void> {
     retainCleanupListenerObservation(wda.snapshot, wda.commandId, mjpegResult.snapshot, mjpegResult.commandId, commandIds);
     return [...new Set([...(wda.snapshot.pids || []), ...(mjpegResult.snapshot.pids || [])])];
   };
-  const ownedListeners = (pids: string[], phase = 'cleanup'): boolean => {
+  const ownedListeners = (pids: string[], phaseDeadline: number, phase = 'cleanup'): boolean => {
     if (!owner.runnerPid || !owner.runnerBirth || !owner.runnerExecutable || pids.length === 0 || pids.some(pid => pid !== owner.runnerPid)) return false;
     try {
-      const inspectionDeadline = Date.now() + maxProcessCommandMs * 3;
+      const inspectionDeadline = Math.min(phaseDeadline, Date.now() + maxProcessCommandMs * 3);
       const evidence = processEvidence(owner.runnerPid, inspectionDeadline, commandContext(phase, 'inspect-managed-listener-process', {
         endpoint: 'managed-listener', port, pid: owner.runnerPid, frozenOwner: true,
       }));
@@ -1823,7 +1824,7 @@ async function supervise(): Promise<void> {
     persist('pending', 'none');
     return {pid: observed!.pid, executable: observed!.executable, birth: observed!.birth!};
   };
-  const recordInitialCandidateDiagnostic = (snapshot: ListenerSnapshot, cleanupSnapshot?: CleanupListenerSnapshot): void => {
+  const recordInitialCandidateDiagnostic = (snapshot: ListenerSnapshot, phaseDeadline: number, cleanupSnapshot?: CleanupListenerSnapshot): void => {
     if (owner.initialCandidateDiagnostic || frozenRunner || snapshot.wda.status !== 'evaluated' || snapshot.mjpeg.status !== 'evaluated') return;
     const wdaPids = snapshot.wda.pids || [];
     const mjpegPids = snapshot.mjpeg.pids || [];
@@ -1847,7 +1848,7 @@ async function supervise(): Promise<void> {
       mjpeg: cleanupMjpeg,
     };
     const startedAtMonotonicMs = Number(diagnostics.now().toFixed(3));
-    const budgetMs = Math.max(0, Math.min(maxPreFreezeDiagnosticMs, deadline - Date.now()));
+    const budgetMs = Math.max(0, Math.min(maxPreFreezeDiagnosticMs, deadline - Date.now(), phaseDeadline - Date.now()));
     const diagnosticDeadline = Date.now() + budgetMs;
     const budgetExhausted = (): boolean => Date.now() >= diagnosticDeadline || Date.now() >= deadline;
     const exhausted = (error: unknown): boolean => budgetExhausted()
@@ -2039,13 +2040,13 @@ async function supervise(): Promise<void> {
     if (!childEnded) rememberFailure({message: 'XCTEST: child cleanup did not settle', phase: 'cleanup', stage: 'child-cleanup', category: 'child-cleanup-timeout', frozenOwner: Boolean(frozenRunner)});
     diagnostics.lifecycle('child-stop-finished', {phase: 'cleanup', pid: child.pid, childEnded});
   };
-  const waitForOwnedListenersToExit = async (): Promise<void> => {
-    const limit = Date.now() + maxRunnerCleanupMs;
+  const waitForOwnedListenersToExit = async (cleanupDeadline: number): Promise<void> => {
+    const limit = Math.min(cleanupDeadline, Date.now() + maxRunnerCleanupMs);
     while (Date.now() < limit) {
-      const pids = listenerPids('cleanup-wait');
+      const pids = listenerPids(limit, 'cleanup-wait');
       if (!pids.length) return;
-      if (!ownedListeners(pids, 'cleanup-wait')) throw new Error('XCTEST: unknown WDA listener remained during cleanup');
-      await sleep(100);
+      if (!ownedListeners(pids, limit, 'cleanup-wait')) throw new Error('XCTEST: unknown WDA listener remained during cleanup');
+      await sleep(Math.max(0, Math.min(100, limit - Date.now())));
     }
     throw new Error('XCTEST: owned WDA listener cleanup deadline');
   };
@@ -2066,9 +2067,9 @@ async function supervise(): Promise<void> {
     owner.cachedProductExecutableHashAt = new Date().toISOString();
     save();
     ownership(udid);
-    if (listeners(port, Math.min(maxProcessCommandMs, remaining()), undefined, commandContext('preflight', 'inspect-listener', {
+    if (listeners(port, remaining(), undefined, commandContext('preflight', 'inspect-listener', {
       endpoint: 'wda', port, frozenOwner: false,
-    })).length || listeners(mjpeg, Math.min(maxProcessCommandMs, remaining()), undefined, commandContext('preflight', 'inspect-listener', {
+    })).length || listeners(mjpeg, remaining(), undefined, commandContext('preflight', 'inspect-listener', {
       endpoint: 'mjpeg', port: mjpeg, frozenOwner: false,
     })).length) {
       throw new Error('XCTEST: occupied endpoint');
@@ -2346,6 +2347,9 @@ async function supervise(): Promise<void> {
     const message = errorMessage(error);
     rememberFailure({error, message, phase: 'supervisor', stage: message === 'XCTEST: startup deadline' ? 'startup-deadline' : 'supervisor-error', category: message === 'XCTEST: startup deadline' ? 'startup-deadline' : 'supervisor-error', frozenOwner: Boolean(frozenRunner)});
   } finally {
+    const cleanupDeadline = Date.now() + maxCleanupMs;
+    // Reserve the existing 10s TERM + 2s KILL tail even if inspection hangs.
+    const listenerDeadline = cleanupDeadline - 12_000;
     diagnostics.lifecycle('cleanup-enter', {phase: 'cleanup', frozenOwner: Boolean(frozenRunner), firstFailure: owner.firstFailure?.stage});
     owner.ready = false;
     diagnostics.lifecycle('owner-ready-cleared', {phase: 'cleanup', frozenOwner: Boolean(frozenRunner)});
@@ -2354,10 +2358,10 @@ async function supervise(): Promise<void> {
     let cleanupDiagnosticAttempted = false;
     try {
       ownership(udid);
-      const pids = listenerPids('cleanup');
+      const pids = listenerPids(listenerDeadline, 'cleanup');
       if (initialCandidateSnapshot && cleanupListenerSnapshot) {
         cleanupDiagnosticAttempted = true;
-        recordInitialCandidateDiagnostic(initialCandidateSnapshot, cleanupListenerSnapshot);
+        recordInitialCandidateDiagnostic(initialCandidateSnapshot, listenerDeadline, cleanupListenerSnapshot);
       }
       diagnostics.lifecycle('cleanup-listeners-observed', {
         phase: 'cleanup',
@@ -2368,12 +2372,12 @@ async function supervise(): Promise<void> {
         frozenOwner: Boolean(frozenRunner),
       });
       if (pids.length) {
-        if (!ownedListeners(pids, 'cleanup-owner-check')) {
+        if (!ownedListeners(pids, listenerDeadline, 'cleanup-owner-check')) {
           rememberFailure({message: 'XCTEST: refusing unknown WDA listener cleanup', phase: 'cleanup', stage: 'cleanup-listener-ownership', category: 'cleanup-unknown-listener', frozenOwner: Boolean(frozenRunner)});
         } else {
           ownedListenerObserved = true;
           diagnostics.lifecycle('owned-listener-termination-requested', {phase: 'cleanup', pid: owner.runnerPid, frozenOwner: true});
-          run('xcrun', ['simctl', 'terminate', udid, runnerId], 10_000, commandContext('cleanup', 'terminate-owned-runner', {
+          run('xcrun', ['simctl', 'terminate', udid, runnerId], Math.min(10_000, deadlineTimeout(listenerDeadline)), commandContext('cleanup', 'terminate-owned-runner', {
             endpoint: 'simulator', pid: owner.runnerPid, frozenOwner: true,
           }));
           diagnostics.lifecycle('owned-listener-termination-finished', {phase: 'cleanup', pid: owner.runnerPid, frozenOwner: true});
@@ -2381,7 +2385,7 @@ async function supervise(): Promise<void> {
       }
     } catch (error) {
       if (!cleanupDiagnosticAttempted && initialCandidateSnapshot && cleanupListenerSnapshot) {
-        recordInitialCandidateDiagnostic(initialCandidateSnapshot, cleanupListenerSnapshot);
+        recordInitialCandidateDiagnostic(initialCandidateSnapshot, listenerDeadline, cleanupListenerSnapshot);
       }
       rememberFailure({error, phase: 'cleanup', stage: 'cleanup-listener', category: 'cleanup-listener-error', frozenOwner: Boolean(frozenRunner)});
     }
@@ -2390,7 +2394,7 @@ async function supervise(): Promise<void> {
       rememberFailure({error, phase: 'cleanup', stage: 'child-cleanup', category: 'child-cleanup-error', frozenOwner: Boolean(frozenRunner)});
     }
     if (ownedListenerObserved) {
-      try { await waitForOwnedListenersToExit(); }
+      try { await waitForOwnedListenersToExit(cleanupDeadline); }
       catch (error) {
         rememberFailure({error, phase: 'cleanup', stage: 'owned-listener-cleanup', category: 'owned-listener-cleanup-error', frozenOwner: true});
       }
@@ -2521,7 +2525,7 @@ async function main(): Promise<void> {
     if (!existsSync(ownerPath)) throw new Error('XCTEST: missing owner state');
     const readOwner = (): Owner => JSON.parse(readFileSync(ownerPath, 'utf8'));
     if (!readOwner().endedAt) writeFileSync(join(root, 'stop'), 'owner cleanup', { mode: 0o600 });
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + maxCleanupMs;
     while (Date.now() < deadline) {
       if (existsSync(ownerPath)) {
         const current = readOwner();
