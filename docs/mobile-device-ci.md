@@ -208,6 +208,15 @@ Hosted iOS runs on the `xcode-27` label with Xcode 27.0 (27A266a) at `/Applicati
 
 The runner keeps fixture info, TLS keys, and relay stores under `--private-output`, separate from the evidence directory. It attempts every acquired-resource cleanup in `finally`, retaining individual failures; workflow cleanup also attempts removal after failures. Persistence or cleanup failures produce nonzero execution, not a guarantee that an artifact can be recovered. Only screenshots, `mobile-result.json`, and bounded redacted diagnostics belong in uploaded evidence. Do not copy `fixture-info.json` or relay state outside the private run directory.
 
+The owned-process supervisor releases only its one-way manager-input endpoint
+(fd6) with normal stream destruction after successful writable `finish`, including
+all write and final callbacks. Source EOF or an empty queue is not sufficient.
+Control and output endpoints and the other input edges keep their existing owners.
+`owned input finish` unit cases exercise real TCP sockets, byte digests, natural
+peer EOF, gated callbacks and failure cleanup under Bun and Node. This addresses
+a reproduced finished-but-open endpoint; the initiating Bun/physical-FD cause
+remains unproved. Deadlines and retirement evidence are unchanged.
+
 ## CI inputs and evidence
 
 A manual dispatch requires `artifact_run_id`, a completed successful same-repository `check` push on `main` containing `release-bundles`; provide `source_commit` for a specific revision. Every dispatch runs both platforms with the release suite. External provenance verifies repository, workflow, push event, main branch, conclusion, source SHA, artifact name, archive checksums, manifest revision and expiration before devices are provisioned. Check and release calls bind to the caller's exact artifact without confusing a PR merge build with its head SHA; evidence records both identities.
