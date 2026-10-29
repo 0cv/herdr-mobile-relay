@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -68,9 +69,20 @@ func testInstalledProductionPromotionInert(t *testing.T, uncertain, missing bool
 	if err := os.WriteFile(physical, []byte("inert executable; never launched"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(root, "Library", "LaunchAgents") // absent on a fresh host
-	definition := filepath.Join(dir, "com.herdr-mobile-relay.service.plist")
-	legacy := filepath.Join(dir, "com.herdr-remote.service.plist")
+	definition, err := promotionDefinitionPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(definition) // absent on a fresh host
+	var legacy string
+	switch runtime.GOOS {
+	case "darwin":
+		legacy = filepath.Join(dir, "com.herdr-remote.service.plist")
+	case "linux":
+		legacy = filepath.Join(dir, "herdr-remote.service")
+	default:
+		t.Fatal(errPromotion)
+	}
 	// Seed the same real store/roles used by the app lifecycle fixture before
 	// setup, then compare its credential bytes and E2EE authentication on resume.
 	storeRoot := filepath.Join(cfg.RuntimeDir, "device-auth")
@@ -401,6 +413,7 @@ func testInstalledProductionPromotionInert(t *testing.T, uncertain, missing bool
 		t.Fatal("update changed device/role store")
 	}
 	updatedReady := make(chan struct{})
+	updatedEndpointReady := make(chan struct{})
 	app.SetInstalledInertRunner(t, func(s *app.Server, call context.Context) error {
 		return app.RunInstalledCommandLogicalBackend(s, call, func(store *deviceauth.Store, _ string) error {
 			if e := assertDevices(store, call); e != nil {
@@ -411,9 +424,14 @@ func testInstalledProductionPromotionInert(t *testing.T, uncertain, missing bool
 		})
 	})
 	installedFixtureEndpoint = func(call context.Context, original config.InstalledConfig, core localcontrol.InstalledControl, c localcontrol.InstalledCredentials) error {
-		if original.Validate(cfg) != nil || commandOperatorRequest(call, core, c, "proposal").Code != "publication_disabled" {
-			return errors.New("updated service republished")
+		if original.Validate(cfg) != nil {
+			return errors.New("updated service selection changed")
 		}
+		proposal := commandOperatorRequest(call, core, c, "proposal")
+		if proposal.Code != "publication_disabled" {
+			return errors.New("updated service proposal was not publication-disabled")
+		}
+		close(updatedEndpointReady)
 		<-call.Done()
 		return call.Err()
 	}
@@ -427,12 +445,23 @@ func testInstalledProductionPromotionInert(t *testing.T, uncertain, missing bool
 		updatedCode, updatedErr = runCommand([]string{"serve-installed", "--selection", ref.Generation, ref.Digest, cfg.ConfigHome, cfg.InstanceID}, nil, nil)
 	}()
 	t.Cleanup(func() { stopUpdated(); <-updatedDone })
+	// Backend observation precedes listener readiness and operator dispatch.
+	// Witness the real resume proposal too, before cancellation can retire it.
+	updatedStartup := time.NewTimer(5 * time.Second)
+	defer updatedStartup.Stop()
+	for _, witnessed := range []<-chan struct{}{updatedReady, updatedEndpointReady} {
+		select {
+		case <-witnessed:
+		case <-updatedDone:
+			t.Fatalf("updated STRICT service exited before backend/proposal witnesses: code=%d err_present=%t canceled=%t", updatedCode, updatedErr != nil, errors.Is(updatedErr, context.Canceled))
+		case <-updatedStartup.C:
+			t.Fatal("updated STRICT service backend/proposal witness timed out")
+		}
+	}
 	select {
-	case <-updatedReady:
 	case <-updatedDone:
-		t.Fatalf("updated STRICT service exited: %d %v", updatedCode, updatedErr)
-	case <-time.After(5 * time.Second):
-		t.Fatal("updated STRICT service did not acquire backend")
+		t.Fatalf("updated STRICT service exited before stop: code=%d err_present=%t canceled=%t", updatedCode, updatedErr != nil, errors.Is(updatedErr, context.Canceled))
+	default:
 	}
 	stopUpdated()
 	select {
@@ -441,7 +470,7 @@ func testInstalledProductionPromotionInert(t *testing.T, uncertain, missing bool
 		t.Fatal("updated STRICT service did not join")
 	}
 	if updatedCode != 0 || updatedErr != nil || mutations() != before {
-		t.Fatal("updated STRICT service changed the route")
+		t.Fatalf("updated STRICT service result: code=%d err_present=%t canceled=%t mutations_unchanged=%t", updatedCode, updatedErr != nil, errors.Is(updatedErr, context.Canceled), mutations() == before)
 	}
 	installedFixtureContext = context.Background()
 	// An older but verified current release can dispatch a consented lifecycle

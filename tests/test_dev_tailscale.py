@@ -20,12 +20,14 @@ if (os.name != "posix" or os.getuid() == 0 or os.geteuid() == 0 or
     )
 
 from pathlib import Path
+import json
 import pty
 import select
 import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1828,6 +1830,12 @@ os.execv(sys.argv[1], sys.argv[1:])
         master, slave = pty.openpty() if terminal else (None, None)
         process = None
         failure = None
+        cleanup_deadline = None
+        timeout_receipt = None
+        write_actual = write_expected = "unavailable"
+        cleanup_outcomes = {stage: {"outcome": "not_needed", "errno": None} for stage in (
+            "group_signal", "child_signal", "pipe_drain", "child_reap",
+        )}
         prefix = b""
         deadline = time.monotonic() + 30
         command = [str(checkout / "relay" / "dev-tailscale-cli.sh"), action]
@@ -1858,7 +1866,8 @@ os.execv(sys.argv[1], sys.argv[1:])
                 # shim exec preserves its PID. Never use a discovered PGID.
                 os.killpg(process.pid, cancel_signal)
             elif terminal:
-                os.write(master, answers if answers is not None else b"\x04")
+                write_expected = len(answers if answers is not None else b"\x04")
+                write_actual = os.write(master, answers if answers is not None else b"\x04")
             stdout, stderr = process.communicate(
                 input=None if terminal else answers, timeout=max(0, deadline - time.monotonic()),
             )
@@ -1869,34 +1878,189 @@ os.execv(sys.argv[1], sys.argv[1:])
         except BaseException as error:
             failure = error
             if isinstance(error, subprocess.TimeoutExpired):
-                reached_prompt = origin_prompt in prefix + (error.stderr or b"")
-                print(f"origin selection timeout: prompt-reached={reached_prompt}", file=sys.stderr)
+                # All observation consumes the existing cleanup budget. Keep
+                # most of it for the original signal/drain/reap operations.
+                cleanup_deadline = time.monotonic() + 5
+                observation_deadline = min(cleanup_deadline, time.monotonic() + 1)
+                # A wait-only timeout may omit stderr even after draining it.
+                # Missing evidence cannot prove that the prompt was absent.
+                prompt_reached = "inconclusive"
+                if origin_prompt in prefix:
+                    prompt_reached = True
+                elif error.stderr is not None:
+                    prompt_reached = origin_prompt in prefix + error.stderr
+                timeout_receipt = {
+                    "schema": 1, "observation_outcome": "ok",
+                    "prompt_reached": prompt_reached,
+                    "normalizer_marker": "inconclusive", "events_outcome": "unavailable",
+                    "pty_write_actual": write_actual, "pty_write_expected": write_expected,
+                    "streams_closed_before_cleanup": {
+                        name: stream.closed if stream is not None else "unavailable"
+                        for name, stream in (("stdin", process.stdin), ("stdout", process.stdout),
+                                             ("stderr", process.stderr))
+                    },
+                    "ps_outcome": "unavailable", "ps_errno": None,
+                    "state": "unavailable", "parent_matches": "unavailable",
+                    "real_uid_matches": "unavailable", "effective_uid_matches": "unavailable",
+                    "pgid": {"outcome": "unavailable", "errno": None, "matches_birth_pid": "unavailable"},
+                    "sid": {"outcome": "unavailable", "errno": None, "matches_birth_pid": "unavailable"},
+                    "observer_signal": {"outcome": "not_needed", "errno": None},
+                    "observer_pipe_close": {"outcome": "not_needed", "errno": None},
+                    "observer_reap": {"outcome": "not_started", "errno": None},
+                    "cleanup": cleanup_outcomes,
+                }
+                observer = None
+                try:
+                    try:
+                        # No poll/wait of the fixture child before this snapshot:
+                        # its unreaped birth PID pins every query's exact target.
+                        if process.returncode is None:
+                            for name, query in (("pgid", os.getpgid), ("sid", os.getsid)):
+                                try:
+                                    timeout_receipt[name].update(
+                                        outcome="ok", matches_birth_pid=query(process.pid) == process.pid,
+                                    )
+                                except OSError as probe_error:
+                                    timeout_receipt[name].update(outcome="os_error", errno=probe_error.errno)
+                            if time.monotonic() < observation_deadline - 0.25:
+                                # Fixed numeric fields only; never read commands,
+                                # args or environment, and never discover tools.
+                                observer = subprocess.Popen(
+                                    ["/bin/ps", "-p", str(process.pid), "-o", "stat=",
+                                     "-o", "ppid=", "-o", "ruid=", "-o", "uid="],
+                                    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+                                    cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, start_new_session=True,
+                                )
+                                timeout_receipt["observer_reap"]["outcome"] = "unavailable"
+                                metadata, _ = observer.communicate(
+                                    timeout=max(0, observation_deadline - time.monotonic() - 0.25),
+                                )
+                                timeout_receipt["ps_outcome"] = "unavailable"
+                                if observer.returncode == 0 and len(metadata) <= 256:
+                                    fields = metadata.decode("ascii").split()
+                                    if len(fields) == 4 and all(value.isdecimal() for value in fields[1:]):
+                                        timeout_receipt.update(
+                                            ps_outcome="ok",
+                                            state={"R": "running", "S": "sleeping", "I": "idle",
+                                                   "D": "uninterruptible", "U": "uninterruptible",
+                                                   "T": "stopped", "Z": "zombie", "X": "dead",
+                                                   "W": "paging"}.get(fields[0][:1], "unavailable"),
+                                            parent_matches=int(fields[1]) == os.getpid(),
+                                            real_uid_matches=int(fields[2]) == os.getuid(),
+                                            effective_uid_matches=int(fields[3]) == os.geteuid(),
+                                        )
+                            else:
+                                timeout_receipt["ps_outcome"] = "budget_exhausted"
+                        else:
+                            timeout_receipt["ps_outcome"] = "already_reaped"
+                    except subprocess.TimeoutExpired:
+                        timeout_receipt["ps_outcome"] = "timeout"
+                    except OSError as probe_error:
+                        timeout_receipt.update(ps_outcome="os_error", ps_errno=probe_error.errno)
+                    finally:
+                        # ps is a separately owned, fixed system executable, not
+                        # project runtime. Bound its retirement to the SAME
+                        # one-second observation slice, with no unbounded run().
+                        if observer is not None:
+                            if observer.returncode is None:
+                                try:
+                                    observer.kill()
+                                    timeout_receipt["observer_signal"]["outcome"] = "ok"
+                                except ProcessLookupError as probe_error:
+                                    timeout_receipt["observer_signal"].update(
+                                        outcome="no_process", errno=probe_error.errno,
+                                    )
+                                except OSError as probe_error:
+                                    timeout_receipt["observer_signal"].update(
+                                        outcome="os_error", errno=probe_error.errno,
+                                    )
+                            if observer.stdout is not None:
+                                try:
+                                    observer.stdout.close()
+                                    timeout_receipt["observer_pipe_close"]["outcome"] = "ok"
+                                except OSError as probe_error:
+                                    timeout_receipt["observer_pipe_close"].update(
+                                        outcome="os_error", errno=probe_error.errno,
+                                    )
+                            try:
+                                observer.wait(timeout=max(0, observation_deadline - time.monotonic()))
+                                timeout_receipt["observer_reap"]["outcome"] = "ok"
+                            except subprocess.TimeoutExpired:
+                                timeout_receipt["observer_reap"]["outcome"] = "timeout"
+                            except OSError as probe_error:
+                                timeout_receipt["observer_reap"].update(
+                                    outcome="os_error", errno=probe_error.errno,
+                                )
+                    if time.monotonic() < observation_deadline:
+                        # Only this checkout's known private event file. A
+                        # bounded complete append delta can prove absence; a
+                        # missing/partial/oversized/changed read cannot.
+                        descriptor = os.open(record, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                        try:
+                            initial = os.fstat(descriptor)
+                            event_data = (os.read(descriptor, 16 * 1024 + 1)
+                                          if stat.S_ISREG(initial.st_mode) else None)
+                            final = os.fstat(descriptor)
+                        finally:
+                            os.close(descriptor)
+                        if (event_data is not None and len(event_data) <= 16 * 1024 and
+                                len(event_data) == initial.st_size == final.st_size and
+                                initial.st_mtime_ns == final.st_mtime_ns and
+                                (not event_data or event_data.endswith(b"\n"))):
+                            event_lines = event_data.decode("utf-8").split("\n", 129)[:-1]
+                            if len(event_lines) <= 128 and event_lines[:len(before)] == before:
+                                timeout_receipt.update(
+                                    events_outcome="complete",
+                                    normalizer_marker=(
+                                        "selection|normalize-external-origin" in event_lines[len(before):]
+                                    ),
+                                )
+                        if timeout_receipt["events_outcome"] != "complete":
+                            timeout_receipt["events_outcome"] = "inconclusive"
+                    else:
+                        timeout_receipt["events_outcome"] = "budget_exhausted"
+                except BaseException:
+                    # Diagnostics must never replace the primary timeout or
+                    # prevent the original fixture cleanup below.
+                    timeout_receipt["observation_outcome"] = "unavailable"
             raise
         finally:
             cleanup_problems = []
             if process is not None:
-                cleanup_deadline = time.monotonic() + 5
+                if cleanup_deadline is None:
+                    cleanup_deadline = time.monotonic() + 5
                 # Do not poll/reap first: the unreaped child pins its PID even
                 # if it exited while a descendant still holds a captured pipe.
                 if process.returncode is None:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass  # No group remains; still drain and reap below.
-                    except OSError:
+                        cleanup_outcomes["group_signal"]["outcome"] = "ok"
+                    except ProcessLookupError as cleanup_error:
+                        # No group remains; still drain and reap below.
+                        cleanup_outcomes["group_signal"].update(outcome="no_process", errno=cleanup_error.errno)
+                    except OSError as cleanup_error:
+                        cleanup_outcomes["group_signal"].update(outcome="os_error", errno=cleanup_error.errno)
                         cleanup_problems.append("group-signal")
                         # Popen still owns this unreaped direct child. This
                         # fallback cannot prove group retirement and never
                         # turns a refused group signal into a passing cleanup.
                         try:
                             process.kill()
-                        except ProcessLookupError:
-                            pass
-                        except OSError:
+                            cleanup_outcomes["child_signal"]["outcome"] = "ok"
+                        except ProcessLookupError as cleanup_error:
+                            cleanup_outcomes["child_signal"].update(outcome="no_process", errno=cleanup_error.errno)
+                        except OSError as cleanup_error:
+                            cleanup_outcomes["child_signal"].update(outcome="os_error", errno=cleanup_error.errno)
                             cleanup_problems.append("child-signal")
                     try:
                         process.communicate(timeout=max(0, cleanup_deadline - time.monotonic()))
-                    except (OSError, subprocess.TimeoutExpired):
+                        cleanup_outcomes["pipe_drain"]["outcome"] = "ok"
+                    except subprocess.TimeoutExpired:
+                        cleanup_outcomes["pipe_drain"]["outcome"] = "timeout"
+                        cleanup_problems.append("pipe-drain")
+                    except OSError as cleanup_error:
+                        cleanup_outcomes["pipe_drain"].update(outcome="os_error", errno=cleanup_error.errno)
                         cleanup_problems.append("pipe-drain")
                 # POSIX communicate uses no reader threads. Close every owned
                 # pipe even if draining failed, then separately reap the child
@@ -1910,8 +2074,22 @@ os.execv(sys.argv[1], sys.argv[1:])
                 if process.returncode is None:
                     try:
                         process.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
-                    except (OSError, subprocess.TimeoutExpired):
+                        cleanup_outcomes["child_reap"]["outcome"] = "ok"
+                    except subprocess.TimeoutExpired:
+                        cleanup_outcomes["child_reap"]["outcome"] = "timeout"
                         cleanup_problems.append("child-reap")
+                    except OSError as cleanup_error:
+                        cleanup_outcomes["child_reap"].update(outcome="os_error", errno=cleanup_error.errno)
+                        cleanup_problems.append("child-reap")
+                else:
+                    cleanup_outcomes["child_reap"]["outcome"] = "already_reaped"
+            if timeout_receipt is not None:
+                if timeout_receipt["observer_signal"]["outcome"] == "os_error":
+                    cleanup_problems.append("observer-signal")
+                if timeout_receipt["observer_pipe_close"]["outcome"] == "os_error":
+                    cleanup_problems.append("observer-pipe-close")
+                if timeout_receipt["observer_reap"]["outcome"] not in ("not_started", "ok"):
+                    cleanup_problems.append("observer-reap")
             for descriptor in (slave, master):
                 if descriptor is not None:
                     try:
@@ -1924,7 +2102,19 @@ os.execv(sys.argv[1], sys.argv[1:])
                     raise AssertionError(message)
                 # Preserve the initial timeout/prompt/signal failure; print only
                 # fixed stages, never environment or arbitrary captured output.
-                print(message + "; original failure retained", file=sys.stderr)
+                try:
+                    print(message + "; original failure retained", file=sys.stderr)
+                except BaseException:
+                    pass  # Reporting must also preserve the original failure.
+            if timeout_receipt is not None:
+                timeout_receipt["cleanup_problems"] = cleanup_problems
+                try:
+                    # Only allowlisted labels, booleans, counts and numeric
+                    # errno; no event lines, IDs, output, paths or exceptions.
+                    print("origin selection timeout receipt: " +
+                          json.dumps(timeout_receipt, separators=(",", ":")), file=sys.stderr)
+                except BaseException:
+                    pass  # A reporting failure cannot replace the timeout.
 
     def assert_no_selection_effects(checkout: Path, events: list[str]) -> None:
         if ((checkout / "relay" / ".dev-tailscale-cli").exists() or
