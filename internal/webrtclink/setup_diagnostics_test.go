@@ -29,12 +29,30 @@ type setupEvent struct {
 	err         error
 }
 
+type setupGenerations struct {
+	local  string
+	remote string
+}
+
 type setupDiagnostics struct {
-	mu       sync.Mutex
-	start    time.Time
-	events   []setupEvent
-	dropped  int
-	rejected int
+	mu          sync.Mutex
+	start       time.Time
+	events      []setupEvent
+	dropped     int
+	rejected    int
+	generations map[*webrtc.PeerConnection]setupGenerations
+}
+
+func (d *setupDiagnostics) rememberDescriptions(pc *webrtc.PeerConnection, local, remote string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.generations == nil {
+		d.generations = make(map[*webrtc.PeerConnection]setupGenerations)
+	}
+	d.generations[pc] = setupGenerations{
+		local:  descriptionGeneration(&webrtc.SessionDescription{SDP: local}),
+		remote: descriptionGeneration(&webrtc.SessionDescription{SDP: remote}),
+	}
 }
 
 func generationHash(value string) string {
@@ -70,15 +88,13 @@ func (d *setupDiagnostics) record(stage string, pc *webrtc.PeerConnection, candi
 	if field != nil {
 		event.FieldUfrag = generationHash(*field)
 	}
-	if pc != nil {
-		event.LocalUfrag = descriptionGeneration(pc.LocalDescription())
-		event.RemoteUfrag = descriptionGeneration(pc.RemoteDescription())
-	}
 	if err != nil {
 		event.ErrorType = fmt.Sprintf("%T", err)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	generations := d.generations[pc]
+	event.LocalUfrag, event.RemoteUfrag = generations.local, generations.remote
 	if d.start.IsZero() {
 		d.start = time.Now()
 	}
@@ -94,13 +110,16 @@ func (d *setupDiagnostics) record(stage string, pc *webrtc.PeerConnection, candi
 	d.events = append(d.events, event)
 }
 
-func peerSetupState(pc *webrtc.PeerConnection) map[string]any {
+func (d *setupDiagnostics) peerSetupState(pc *webrtc.PeerConnection) map[string]any {
 	state := map[string]any{"present": pc != nil}
 	if pc == nil {
 		return state
 	}
-	state["local_ufrag"] = descriptionGeneration(pc.LocalDescription())
-	state["remote_ufrag"] = descriptionGeneration(pc.RemoteDescription())
+	d.mu.Lock()
+	generations := d.generations[pc]
+	d.mu.Unlock()
+	state["local_ufrag"] = generations.local
+	state["remote_ufrag"] = generations.remote
 	state["ice"] = pc.ICEConnectionState().String()
 	state["connection"] = pc.ConnectionState().String()
 	state["signaling"] = pc.SignalingState().String()
@@ -160,7 +179,7 @@ func (h *harness) setupSnapshot() string {
 		peer.diagnostics.mu.Lock()
 		state := map[string]any{"events": append([]setupEvent(nil), peer.diagnostics.events...), "dropped": peer.diagnostics.dropped, "rejected": peer.diagnostics.rejected}
 		peer.diagnostics.mu.Unlock()
-		state["browser"] = peerSetupState(peer.pc)
+		state["browser"] = peer.diagnostics.peerSetupState(peer.pc)
 		state["browser_channel"] = peer.dc.ReadyState().String()
 		state["to_browser"] = gateSetupState(&peer.toBrowser)
 		state["to_relay"] = gateSetupState(&peer.toRelay)
@@ -172,7 +191,7 @@ func (h *harness) setupSnapshot() string {
 			state["relay_pending"] = len(session.pending)
 			state["relay_pair_selected"] = session.selectedRemote != ""
 			session.mu.Unlock()
-			state["relay"] = peerSetupState(pc)
+			state["relay"] = peer.diagnostics.peerSetupState(pc)
 			state["relay_datachannel_callback_reached"] = conn != nil
 			if conn != nil {
 				state["relay_channel"] = conn.dc.ReadyState().String()
@@ -212,6 +231,27 @@ func TestSetupDiagnosticsRetainAsyncCandidateError(t *testing.T) {
 	snapshot := h.setupSnapshot()
 	if !strings.Contains(snapshot, `"rejected":1`) || strings.Contains(snapshot, "192.0.2.1") || strings.Contains(snapshot, "private-generation") {
 		t.Fatal("timeout snapshot lost or exposed candidate evidence")
+	}
+}
+
+func TestSetupDiagnosticsRememberSignaledGenerations(t *testing.T) {
+	peer := newBrowserPeer(t, dataChannelLabel)
+	var diagnostics setupDiagnostics
+	local := "a=ice-ufrag:local-generation\r\n"
+	remote := "a=ice-ufrag:remote-generation\r\n"
+	diagnostics.rememberDescriptions(peer.pc, local, remote)
+	diagnostics.record("candidate.generated", peer.pc, "", nil, nil)
+	event := diagnostics.events[0]
+	if event.LocalUfrag != generationHash("local-generation") || event.RemoteUfrag != generationHash("remote-generation") {
+		t.Fatal("signaled generations were not retained")
+	}
+	diagnostics.rememberDescriptions(peer.pc, "a=ice-ufrag:restart-generation\r\n", remote)
+	state := diagnostics.peerSetupState(peer.pc)
+	if state["local_ufrag"] != generationHash("restart-generation") || state["remote_ufrag"] != event.RemoteUfrag {
+		t.Fatal("snapshot did not advance to the signaled restart generation")
+	}
+	if diagnostics.events[0] != event {
+		t.Fatal("restart changed an earlier event's generations")
 	}
 }
 

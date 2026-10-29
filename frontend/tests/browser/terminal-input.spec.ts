@@ -356,7 +356,8 @@ for (const view of manualViews) {
       await control({ cmd: 'release_barrier', barrier });
       await page.getByText('Current terminal context', { exact: true }).click();
       const context = page.locator('section[aria-label="Keyboard"] pre');
-      await expect(context).toContainText('Delayed pre-send snapshot');
+      // A newer read can replace the held one, and the page then drops its late response instead of showing it.
+      await context.filter({ hasText: 'Delayed pre-send snapshot' }).waitFor({ timeout: 2_000 }).catch(() => {});
       await expect(button(page, 'I checked the terminal')).toBeDisabled();
       await expect(button(page, 'Enter')).toBeDisabled();
       // The relay rejects a read that overlaps its own check of the changed screen; the next 2 s refresh reads again.

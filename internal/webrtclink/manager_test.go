@@ -262,6 +262,7 @@ func (h *harness) negotiateWithCandidates(t *testing.T, key SessionKey, label st
 	if err != nil {
 		t.Fatalf("create offer: %v", err)
 	}
+	peer.diagnostics.rememberDescriptions(peer.pc, offer.SDP, "")
 	if err := peer.pc.SetLocalDescription(offer); err != nil {
 		t.Fatalf("set browser local description: %v", err)
 	}
@@ -271,6 +272,7 @@ func (h *harness) negotiateWithCandidates(t *testing.T, key SessionKey, label st
 	if err != nil {
 		t.Fatalf("handle offer: %v", err)
 	}
+	peer.diagnostics.rememberDescriptions(h.relayPeer(key), answerSDP, offer.SDP)
 	peer.diagnostics.record("relay.answer.returned", h.relayPeer(key), "", nil, nil)
 	if !trickle && (strings.Contains(offer.SDP, "a=candidate:") || strings.Contains(answerSDP, "a=candidate:")) {
 		t.Fatal("candidate-free negotiation carried an embedded candidate")
@@ -279,6 +281,7 @@ func (h *harness) negotiateWithCandidates(t *testing.T, key SessionKey, label st
 		peer.toRelay.release()
 	}
 
+	peer.diagnostics.rememberDescriptions(peer.pc, offer.SDP, answerSDP)
 	if err := peer.pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  answerSDP,
@@ -431,6 +434,7 @@ func TestManagerRenegotiatesKnownSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create restart offer: %v", err)
 	}
+	peer.diagnostics.rememberDescriptions(peer.pc, offer.SDP, "")
 	if err := peer.pc.SetLocalDescription(offer); err != nil {
 		t.Fatalf("set restart local description: %v", err)
 	}
@@ -439,6 +443,7 @@ func TestManagerRenegotiatesKnownSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renegotiate: %v", err)
 	}
+	peer.diagnostics.rememberDescriptions(h.relayPeer(key), answerSDP, offer.SDP)
 	if answerSDP == "" {
 		t.Fatal("renegotiation returned an empty answer")
 	}

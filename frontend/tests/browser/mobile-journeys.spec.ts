@@ -1551,6 +1551,49 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
   )).toBe(true);
 });
 
+const STALE_ENTRY = '/builds/0.0.1-1-0123456789abcdef/index.html';
+const STALE_DOCUMENT = '<!doctype html><html><head><script src="/manifest-loader.js"></script></head>'
+  + '<body><div id="app"></div><p id="stale-build">stale build</p></body></html>';
+
+for (const search of ['', '?herdr_reload=update-1'] as const) {
+  test(`a Home Screen copy started on an outdated build${search ? ' after a reload' : ''} opens the deployed build`, async ({ page }) => {
+    const deployed = JSON.parse(readFileSync(resolve(webRoot, 'version.json'), 'utf8')) as { entry: string; script: string };
+    const documentRequests: string[] = [];
+    page.on('request', (request) => {
+      if (request.resourceType() === 'document') documentRequests.push(new URL(request.url()).pathname);
+    });
+    await page.route(`**${STALE_ENTRY}*`, (route) => route.fulfill({ contentType: 'text/html', body: STALE_DOCUMENT }));
+    await boot(page, [], `${STALE_ENTRY}${search}#settings`);
+    await expect(page.locator('#stale-build')).toHaveCount(0);
+    await expect(page.locator('script[type="module"][src*="/assets/app-"]')).toHaveAttribute('src', deployed.script);
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+    expect(new URL(page.url()).searchParams.has('herdr_reload')).toBe(false);
+    expect(new URL(page.url()).hash).toBe('#settings');
+    expect(documentRequests).toEqual([STALE_ENTRY, '/index.html', deployed.entry]);
+  });
+}
+
+test('an outdated build is not redirected again when the redirect lands on an outdated build', async ({ page }) => {
+  const documentRequests: string[] = [];
+  let versionRequests = 0;
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (request.resourceType() === 'document') documentRequests.push(path);
+    if (path === '/version.json') versionRequests += 1;
+  });
+  await page.route(`**${STALE_ENTRY}*`, (route) => route.fulfill({ contentType: 'text/html', body: STALE_DOCUMENT }));
+  await page.route((url) => url.pathname === '/index.html', (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `<!doctype html><script>location.replace(${JSON.stringify(STALE_ENTRY)} + location.search)</script>`,
+  }));
+  await boot(page, [], STALE_ENTRY);
+  await expect.poll(() => versionRequests).toBe(2);
+  await page.waitForTimeout(500);
+  await expect(page.locator('#stale-build')).toHaveCount(1);
+  expect(new URL(page.url()).searchParams.get('herdr_reload')).toMatch(/^stale-/u);
+  expect(documentRequests).toEqual([STALE_ENTRY, '/index.html', STALE_ENTRY]);
+});
+
 test('finalizes the loaded phone with a cached legacy manifest bootstrap', async ({ page }) => {
   const mac = { id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' };
   // The 0.20.8 bootstrap installs the manifest but emits no asset-ready flags.

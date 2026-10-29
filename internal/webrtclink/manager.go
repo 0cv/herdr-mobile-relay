@@ -170,16 +170,7 @@ func New(opts Options) (*Manager, error) {
 		return nil, fmt.Errorf("webrtclink: listen udp: %w", err)
 	}
 
-	// pion starts the mux read worker before it finishes assigning the mux's
-	// own fields (ice v4.4.1, udp_mux_universal.go:87 writes UDPMuxDefault
-	// after NewUDPMuxDefault has already launched connWorker), so a datagram
-	// that lands during construction is handled against a half-written struct.
-	// The race detector catches it whenever a stray STUN packet arrives on a
-	// freshly bound port. Holding reads until the constructor returns closes
-	// the window without reaching into pion's internals.
-	gated := &gatedConn{UDPConn: udp, open: make(chan struct{})}
-	mux := ice.NewUniversalUDPMuxDefault(ice.UniversalUDPMuxParams{UDPConn: gated})
-	close(gated.open)
+	mux := ice.NewUniversalUDPMuxDefault(ice.UniversalUDPMuxParams{UDPConn: udp})
 
 	m := &Manager{
 		logger:      logger,
@@ -304,7 +295,7 @@ func (m *Manager) DiscoverMappedAddresses(ctx context.Context) ([]netip.AddrPort
 	// reachable host candidate and pion gathers it directly (the socket is
 	// dual-stack and UDP6 is in the network types). Asking for it anyway costs
 	// real time — pion's universal mux cannot answer an IPv6 XOR-mapped request
-	// through the shared socket, verified against v4.4.1, so every attempt would
+	// through the shared socket, verified against v4.4.2, so every attempt would
 	// burn the full discovery timeout on a keepalive that runs every 10 s.
 	mapped, err := m.discoverOn(ctx, "udp", hostPort)
 	if err != nil {

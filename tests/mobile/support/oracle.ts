@@ -283,6 +283,13 @@ export function assertPhoneUpdateAcknowledged(evidence: UpdateCompletionEvidence
   }
 }
 
+// Closing the update progress dialog deletes its record, so a resumed app must not show it again.
+export function assertUpdateProgressClosed(evidence: UpdateCompletionEvidence): void {
+  if (evidence.rawPlanPresent || evidence.phoneRequired || evidence.phoneAcknowledged || evidence.phoneState !== '' || evidence.visibleCompletion) {
+    throw oracleError('UPDATE_PROGRESS_REOPENED', 'the update progress was still present after it was closed and the app resumed');
+  }
+}
+
 export function assertUpgradeDidNotComplete(
   acknowledged: boolean,
   runtime: RuntimeIdentity,

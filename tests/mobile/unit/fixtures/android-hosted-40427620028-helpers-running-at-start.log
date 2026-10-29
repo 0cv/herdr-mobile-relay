@@ -1,0 +1,54 @@
+         1793067758.736  5439  5439 D Zygote  : Forked child process 5947
+         1793067758.743  5947  5947 I ocessService0:7: Using CollectorTypeCMC GC.
+         1793067758.743  5947  5947 W ocessService0:7: Unexpected CPU variant for x86: x86_64.
+         1793067758.743  5947  5947 W ocessService0:7: Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default
+         1793067758.746  5947  5947 E ocessService0:7: Not starting debugger since process cannot load the jdwp agent.
+         1793067758.752  5920  5920 W SystemServiceRegistry: No service published for: uimode
+         1793067758.755   556   590 I ActivityManager: Start proc 5947:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:7/u0ai7 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:7}
+         1793067758.756  5947  5947 D nativeloader: Load libframework-connectivity-tiramisu-jni.so using APEX ns com_android_tethering for caller /apex/com.android.tethering/javalib/framework-connectivity-t.jar: ok
+         1793067758.764  5439  5439 D Zygote  : Forked child process 5956
+         1793067758.767  5956  5956 I ocessService0:8: Using CollectorTypeCMC GC.
+         1793067758.768  5956  5956 W ocessService0:8: Unexpected CPU variant for x86: x86_64.
+         1793067758.768  5956  5956 W ocessService0:8: Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default
+         1793067758.779  5956  5956 E ocessService0:8: Not starting debugger since process cannot load the jdwp agent.
+         1793067758.785  5956  5956 D nativeloader: Load libframework-connectivity-tiramisu-jni.so using APEX ns com_android_tethering for caller /apex/com.android.tethering/javalib/framework-connectivity-t.jar: ok
+         1793067758.790   556   590 I ActivityManager: Start proc 5956:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:8/u0ai8 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:8}
+         1793067758.792  5920  5920 I cr_ChildProcessService: Creating new ChildProcessService pid=5920
+         1793067758.810  5947  5947 D CompatChangeReporter: Compat change id reported: 242716250; UID 90007; state: ENABLED
+         1793067758.822  5956  5956 D CompatChangeReporter: Compat change id reported: 242716250; UID 90008; state: ENABLED
+         1793067758.824  5970  5970 I HerdrMeasure: 40427620028 START
+         1793067758.836  5956  5956 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar
+         1793067758.837  5956  5956 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.sidecar.jar
+         1793067758.852  5909  5934 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+         1793067758.855   556  1759 I ActivityManager: Killing 5909:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:5/u0a145i-8995 (adj 0): isolated not needed
+         1793067758.867  5920  5971 I cr_LibraryLoader: Successfully loaded native library
+         1793067758.870  5399  5399 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=5909)
+         1793067758.870  5947  5947 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar
+         1793067758.870  5947  5947 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.sidecar.jar
+         1793067758.876  5956  5956 I LoadedApk: No resource references to update in package com.google.android.trichromelibrary
+         1793067758.877  5956  5956 I cr_SplitCompatApp: version=131.0.6778.200 (677820038) minSdkVersion=29 isBundle=true processName=com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:8 isIsolatedProcess=true
+         1793067758.883  5956  5956 W SystemServiceRegistry: No service published for: uimode
+         1793067758.888  5439  5439 I Zygote  : Process 5909 exited cleanly (0)
+         1793067758.890  5947  5947 I LoadedApk: No resource references to update in package com.google.android.trichromelibrary
+         1793067758.893  5947  5947 I cr_SplitCompatApp: version=131.0.6778.200 (677820038) minSdkVersion=29 isBundle=true processName=com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:7 isIsolatedProcess=true
+         1793067758.894  5920  5971 I cr_CachingUmaRecorder: Flushed 3 samples from 3 histograms, 0 samples were dropped.
+         1793067758.897  5956  5956 I cr_ChildProcessService: Creating new ChildProcessService pid=5956
+         1793067758.911  5947  5947 W SystemServiceRegistry: No service published for: uimode
+         1793067758.927  5956  5988 I cr_LibraryLoader: Successfully loaded native library
+         1793067758.937  5947  5947 I cr_ChildProcessService: Creating new ChildProcessService pid=5947
+         1793067758.937  5956  5988 I cr_CachingUmaRecorder: Flushed 3 samples from 3 histograms, 0 samples were dropped.
+         1793067758.976  5947  5998 I cr_LibraryLoader: Successfully loaded native library
+         1793067758.978  5947  5998 I cr_CachingUmaRecorder: Flushed 3 samples from 3 histograms, 0 samples were dropped.
+         1793067758.998  5956  5988 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+         1793067759.001   556  1757 I ActivityManager: Killing 5956:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:8/u0a145i-8992 (adj 0): isolated not needed
+         1793067759.042  5399  5399 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=5956)
+         1793067759.043  5439  5439 I Zygote  : Process 5956 exited cleanly (0)
+         1793067759.043  5947  5998 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+         1793067759.060  5920  5971 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+         1793067759.069   556  1757 I ActivityManager: Killing 5947:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:7/u0a145i-8993 (adj 0): isolated not needed
+         1793067759.082  5399  5399 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=5920)
+         1793067759.084   556  1759 I ActivityManager: Process com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:6 (pid 5920) has died: vis BTOP
+         1793067759.093  5439  5439 I Zygote  : Process 5920 exited cleanly (0)
+         1793067759.107  5399  5399 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=5947)
+         1793067759.118  5439  5439 I Zygote  : Process 5947 exited cleanly (0)
+         1793067834.219 10896 10896 I HerdrMeasure: 40427620028 END

@@ -1,5 +1,5 @@
 import { redactText } from './diagnostics';
-import { PhaseBudget, PhaseBudgetError } from './budget';
+import { PhaseBudget, PhaseBudgetError, timingScale } from './budget';
 
 export interface WebDriverElement {
   [key: string]: string;
@@ -56,7 +56,63 @@ export interface WebDriverLookupEvidence {
   error?: string;
 }
 
+export type RequestTimingScope = 'unscoped' | 'ios-attachment-discovery' | 'ios-attachment-discovery-native'
+  | 'ios-attachment-pre-attachment-native' | 'ios-attachment-validation' | 'ios-install-confirmation';
+
+// Client-local correlation only: ordinals are not server request IDs. All offsets
+// use one monotonic client origin, never the deadline/timeout clock. Null means
+// no phase observation was available, not that a deadline was satisfied.
+export interface WebDriverRequestTiming {
+  attemptId: number;
+  dispatchedOrdinal?: number;
+  sessionGeneration: number;
+  operation: 'create' | 'close' | 'context' | 'contexts' | 'alert' | 'app-state' | 'active-app'
+    | 'native-elements' | 'url' | 'execute' | 'other';
+  scope: RequestTimingScope;
+  entryMs: number;
+  dispatchMs?: number;
+  responseAvailableMs?: number;
+  bodyReadStartMs?: number;
+  bodyReadCompleteMs?: number;
+  parseStartMs?: number;
+  parseCompleteMs?: number;
+  historyStartMs?: number;
+  redactionCompleteMs?: number;
+  historyCompleteMs?: number;
+  settlementMs?: number;
+  priorSettlementToEntryMs?: number;
+  priorSettlementToDispatchMs?: number;
+  phaseRemainingAtEntryMs: number | null;
+  phaseRemainingAtDispatchMs: number | null;
+  phaseRemainingAtSettlementMs: number | null;
+  admitted: boolean;
+  sent: boolean;
+  completed: boolean; // Full response body observed, including non-2xx/invalid JSON.
+  status?: number;
+  outcome: 'unavailable' | 'success' | 'not-admitted' | 'timeout' | 'interrupted'
+    | 'transport-error' | 'invalid-json' | 'command-error';
+}
+
+function requestOperation(path: string, method: string, body: unknown): WebDriverRequestTiming['operation'] {
+  if (path === '/session' && method === 'POST') return 'create';
+  if (/^\/session\/[^/]+$/u.test(path) && method === 'DELETE') return 'close';
+  if (path === '/context') return 'context';
+  if (path === '/contexts') return 'contexts';
+  if (path === '/alert/text') return 'alert';
+  if (path === '/url') return 'url';
+  if (path === '/elements' || /^\/element\/[^/]+\/elements$/u.test(path)) return 'native-elements';
+  if (path !== '/execute/sync') return 'other';
+  const script = body && typeof body === 'object' && 'script' in body ? body.script : undefined;
+  switch (script) {
+    case 'mobile: getContexts': return 'contexts';
+    case 'mobile: queryAppState': return 'app-state';
+    case 'mobile: activeAppInfo': return 'active-app';
+    default: return 'execute';
+  }
+}
+
 export interface WebDriverCommandEvidence {
+  timing?: Readonly<WebDriverRequestTiming>;
   command: string;
   path: string;
   method: string;
@@ -136,6 +192,18 @@ export function isRetryableElementLookupError(error: unknown): boolean {
 
 export type FetchTransport = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+export interface WebDriverRequestPolicy {
+  readonly budget: PhaseBudget;
+  readonly beforeDispatch: () => void;
+  readonly finalAction?: boolean;
+}
+
+export interface RequestEnforcementClock {
+  now: () => number;
+  timer: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clear: (timer: ReturnType<typeof setTimeout>) => void;
+}
+
 function isTimeoutError(error: unknown): boolean {
   if (error instanceof Error && error.name === 'TimeoutError') return true;
   if (error && typeof error === 'object' && 'name' in error && (error as { name?: unknown }).name === 'TimeoutError') return true;
@@ -179,6 +247,7 @@ export function isCommandAdmissionError(error: unknown): boolean {
 
 export class AppiumClient {
   private sessionId = '';
+  private sessionOwner = {};
   private readonly baseUrl: string;
   private readonly requestTimeoutMs: number;
   private readonly transport: FetchTransport;
@@ -186,11 +255,33 @@ export class AppiumClient {
   private selectedContext = 'NATIVE_APP';
   private selectedWindow = '';
   private unusable = false;
+  private scopedRequestFailed = false;
   private readonly history: WebDriverCommandEvidence[] = [];
   private readonly lookupHistory: WebDriverLookupEvidence[] = [];
   private firstFatal?: WebDriverFatalEvidence;
+  private commandGuard?: { before: () => void; failure: (error: unknown, path: string) => void };
+  private guardedCommandActive = false;
+  private timingScope?: { label: RequestTimingScope; budget: PhaseBudget };
+  private attemptOrdinal = 0;
+  private dispatchedOrdinal = 0;
+  private sessionGeneration = 0;
+  private previousSettlementMs?: number;
+  private readonly timingOrigin: number;
+  private readonly enforcementClock: Readonly<RequestEnforcementClock>;
+  private scopedCommand?: { overlapped: boolean };
 
-  constructor(baseUrl = 'http://127.0.0.1:4723', requestTimeoutMs = 30_000, transport: FetchTransport = fetch) {
+  constructor(baseUrl = 'http://127.0.0.1:4723', requestTimeoutMs = 30_000, transport: FetchTransport = fetch,
+    private readonly timingNow: () => number = () => performance.now(),
+    enforcementClock: RequestEnforcementClock = {
+      now: () => performance.now(), timer: (callback, ms) => setTimeout(callback, ms), clear: timer => clearTimeout(timer),
+    }) {
+    // Fourth argument is a diagnostic-only test clock; never used for admission.
+    this.enforcementClock = Object.freeze({
+      now: enforcementClock.now.bind(enforcementClock),
+      timer: enforcementClock.timer.bind(enforcementClock),
+      clear: enforcementClock.clear.bind(enforcementClock),
+    });
+    this.timingOrigin = timingNow();
     this.baseUrl = baseUrl.replace(/\/$/u, '');
     this.requestTimeoutMs = requestTimeoutMs;
     this.transport = transport;
@@ -198,6 +289,16 @@ export class AppiumClient {
 
   setBudget(budget: PhaseBudget | undefined): void {
     this.budget = budget;
+  }
+
+  setRequestTimingScope(label: RequestTimingScope, budget: PhaseBudget): () => void {
+    const previous = this.timingScope;
+    this.timingScope = { label, budget };
+    return () => { this.timingScope = previous; };
+  }
+
+  private timingOffset(): number {
+    return this.timingNow() - this.timingOrigin;
   }
 
   snapshot(): WebDriverSnapshot {
@@ -213,11 +314,45 @@ export class AppiumClient {
     };
   }
 
+  assertSessionIdentity(sessionId: string): void {
+    this.retainSessionOwner()();
+    if (sessionId !== this.sessionId) throw new Error('APPIUM_SESSION: retained response session mismatch');
+  }
+
+  retainSessionOwner(): () => void {
+    const owner = this.sessionOwner;
+    const session = this.sessionId;
+    const assertOwner = (): void => {
+      if (!session || this.sessionId !== session || this.sessionOwner !== owner || this.unusable || this.firstFatal) {
+        throw new Error('APPIUM_SESSION: original usable session owner is unavailable');
+      }
+    };
+    assertOwner();
+    return assertOwner;
+  }
+
+  nativeRequestPolicy(budget: PhaseBudget): WebDriverRequestPolicy {
+    const assertOwner = this.retainSessionOwner();
+    const generation = this.sessionGeneration;
+    return Object.freeze({
+      budget,
+      beforeDispatch: () => {
+        assertOwner();
+        if (this.sessionGeneration !== generation || this.selectedContext !== 'NATIVE_APP') {
+          throw new Error('APPIUM_SESSION: original native request context is unavailable');
+        }
+      },
+    });
+  }
+
   async create(options: SessionOptions): Promise<Record<string, unknown>> {
-    if (this.unusable) {
+    this.assertNoScopedOverlap('/session');
+    this.commandGuard?.before();
+    if (this.unusable || this.scopedRequestFailed) {
       throw new WebDriverError({
         code: 'APPIUM_SESSION_UNUSABLE',
-        message: 'the previous session operation did not complete; bounded teardown is required before replacement',
+        message: this.scopedRequestFailed ? 'the scoped native operation failed; only bounded owned teardown is permitted'
+          : 'the previous session operation did not complete; bounded teardown is required before replacement',
         path: '/session',
         method: 'POST',
         durationMs: 0,
@@ -240,6 +375,7 @@ export class AppiumClient {
       throw error;
     }
     const value = response.value as unknown as WebDriverResponse<Record<string, unknown>>;
+    this.sessionOwner = {};
     this.sessionId = String(response.sessionId || (value as any)?.sessionId || '');
     const capabilities = (value as any)?.value || value;
     if (!this.sessionId) throw new Error('APPIUM_SESSION: server did not return a session id');
@@ -250,18 +386,19 @@ export class AppiumClient {
   }
 
   async close(): Promise<void> {
+    if (!this.unusable) this.assertNoScopedOverlap('/session');
     if (!this.sessionId) return;
     const session = this.sessionId;
     try {
       await this.request(`/session/${encodeURIComponent(session)}`, 'DELETE', undefined, this.requestTimeoutMs, false, false, true);
       this.sessionId = '';
-      this.unusable = false;
+      this.unusable = this.scopedRequestFailed;
     } catch (error) {
       if (isFatalDriverError(error)) this.recordFatal(error);
       if (error instanceof WebDriverError && ((error.code === 'APPIUM_COMMAND' && error.status === 404)
         || (error.code === 'APPIUM_HTTP' && error.status !== undefined && error.status >= 200 && error.status < 300))) {
         this.sessionId = '';
-        this.unusable = false;
+        this.unusable = this.scopedRequestFailed;
         return;
       }
       this.unusable = true;
@@ -331,17 +468,17 @@ export class AppiumClient {
     this.selectedWindow = handle;
   }
 
-  async activeAppInfo(timeoutMs?: number): Promise<Record<string, unknown> | null> {
-    const value = await this.mobile('activeAppInfo', {}, timeoutMs);
+  async activeAppInfo(timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<Record<string, unknown> | null> {
+    const value = await this.mobile('activeAppInfo', {}, timeoutMs, policy);
     return value && typeof value === 'object' ? value as Record<string, unknown> : null;
   }
 
-  async settings(timeoutMs?: number): Promise<Record<string, unknown>> {
-    return this.command<Record<string, unknown>>('/appium/settings', 'GET', undefined, timeoutMs);
+  async settings(timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<Record<string, unknown>> {
+    return this.command<Record<string, unknown>>('/appium/settings', 'GET', undefined, timeoutMs, policy);
   }
 
-  async updateSettings(settings: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>> {
-    return this.command<Record<string, unknown>>('/appium/settings', 'POST', { settings }, timeoutMs);
+  async updateSettings(settings: Record<string, unknown>, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<Record<string, unknown>> {
+    return this.command<Record<string, unknown>>('/appium/settings', 'POST', { settings }, timeoutMs, policy);
   }
 
   async find(locator: Locator, timeoutMs = 30_000): Promise<string> {
@@ -386,13 +523,21 @@ export class AppiumClient {
     throw new ElementLookupError(`APPIUM_ELEMENT: ${locator.using}=${redactText(locator.value)}: element response did not contain an id`);
   }
 
-  async findAll(locator: Locator, timeoutMs = this.requestTimeoutMs): Promise<string[]> {
-    const values = await this.command<Record<string, string>[]>('/elements', 'POST', locator, timeoutMs);
-    return values.map((value) => value['element-6066-11e4-a52e-4f735466cecf'] || value.ELEMENT).filter(Boolean);
+  async findAll(locator: Locator, timeoutMs = this.requestTimeoutMs, policy?: WebDriverRequestPolicy): Promise<string[]> {
+    const values = await this.command<unknown>('/elements', 'POST', locator, timeoutMs, policy);
+    const malformed = () => new ElementLookupError('APPIUM_ELEMENT: malformed element list response');
+    if (!Array.isArray(values)) throw malformed();
+    return values.map((value: unknown) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw malformed();
+      const reference = value as Record<string, unknown>;
+      const id = reference['element-6066-11e4-a52e-4f735466cecf'] ?? reference.ELEMENT;
+      if (typeof id !== 'string' || !id.trim()) throw malformed();
+      return id;
+    });
   }
 
-  async click(element: string, timeoutMs?: number): Promise<void> {
-    await this.command(`/element/${encodeURIComponent(element)}/click`, 'POST', undefined, timeoutMs);
+  async click(element: string, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<void> {
+    await this.command(`/element/${encodeURIComponent(element)}/click`, 'POST', undefined, timeoutMs, policy);
   }
 
   async sendKeys(element: string, text: string, timeoutMs?: number): Promise<void> {
@@ -406,8 +551,8 @@ export class AppiumClient {
     return this.command<string>(`/element/${encodeURIComponent(element)}/text`, 'GET', undefined, timeoutMs);
   }
 
-  async attribute(element: string, name: string, timeoutMs?: number): Promise<string | null> {
-    return this.command<string | null>(`/element/${encodeURIComponent(element)}/attribute/${encodeURIComponent(name)}`, 'GET', undefined, timeoutMs);
+  async attribute(element: string, name: string, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<string | null> {
+    return this.command<string | null>(`/element/${encodeURIComponent(element)}/attribute/${encodeURIComponent(name)}`, 'GET', undefined, timeoutMs, policy);
   }
 
   async elementRect(element: string, timeoutMs?: number): Promise<{ x: number; y: number; width: number; height: number }> {
@@ -435,19 +580,65 @@ export class AppiumClient {
     await this.command('/actions', 'POST', { actions }, timeoutMs);
   }
 
-  async mobile(command: string, args: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
-    return this.command('/execute/sync', 'POST', { script: `mobile: ${command}`, args }, timeoutMs);
+  async mobile(command: string, args: Record<string, unknown> = {}, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<unknown> {
+    return this.command('/execute/sync', 'POST', { script: `mobile: ${command}`, args }, timeoutMs, policy);
   }
 
-  async command<T = unknown>(path: string, method: string, body?: unknown, timeoutMs?: number): Promise<T> {
-    this.assertUsable(path);
+  setCommandGuard(guard: { before: () => void; failure: (error: unknown, path: string) => void }): void {
+    this.commandGuard = guard;
+  }
+
+  async command<T = unknown>(path: string, method: string, body?: unknown, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<T> {
+    this.assertNoScopedOverlap(path);
+    if (policy && this.guardedCommandActive) throw new Error('APPIUM_SESSION: overlapping native request');
+    const scoped = policy ? { overlapped: false } : undefined;
+    if (scoped) this.scopedCommand = scoped;
     try {
-      const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs);
+      return await this.commandResponse<T>(path, method, body, timeoutMs, policy);
+    } finally {
+      if (scoped) this.scopedCommand = undefined;
+    }
+  }
+
+  private assertNoScopedOverlap(path: string): void {
+    if (!this.scopedCommand) return;
+    this.scopedCommand.overlapped = true;
+    this.assertUsable(path, true);
+    throw new WebDriverError({
+      code: 'APPIUM_COMMAND_NOT_ADMITTED', message: 'overlapping native request', path, method: 'COMMAND',
+      durationMs: 0, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow,
+    });
+  }
+
+  private async commandResponse<T>(path: string, method: string, body?: unknown, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<T> {
+    this.commandGuard?.before();
+    if (this.commandGuard && this.guardedCommandActive) {
+      this.commandGuard.failure(new Error('APPIUM_SESSION: overlapping retained command'), path);
+      throw new Error('APPIUM_SESSION: overlapping retained command');
+    }
+    this.guardedCommandActive = true;
+    try {
+      this.assertUsable(path);
+      const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs, true, true, false, policy);
+      if (this.commandGuard) {
+        if (!response || typeof response !== 'object' || !Object.hasOwn(response, 'value')) throw new Error('APPIUM_RESPONSE: missing command value');
+        const value = response.value;
+        if (path === '/contexts' || path === '/window/handles') {
+          if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item)) throw new Error('APPIUM_RESPONSE: invalid owner inventory');
+        }
+        if (method === 'GET' && (path === '/window' || path === '/url') && (typeof value !== 'string' || !value)) {
+          throw new Error('APPIUM_RESPONSE: missing current owner document');
+        }
+      }
+      this.commandGuard?.before();
       return response.value as T;
     } catch (error) {
       if (isFatalDriverError(error)) this.recordFatal(error);
       if (error instanceof WebDriverError && error.timedOut && path !== '/status') this.unusable = true;
+      this.commandGuard?.failure(error, path);
       throw error;
+    } finally {
+      this.guardedCommandActive = false;
     }
   }
 
@@ -455,11 +646,12 @@ export class AppiumClient {
     return this.budget?.phaseView(operation, timeoutMs) || new PhaseBudget(operation, { timeoutMs, recoveryLimit: 0 });
   }
 
-  private assertUsable(path: string): void {
-    if (this.unusable && path !== '/session' && !path.endsWith('/status')) {
+  private assertUsable(path: string, requireNoFatal = false): void {
+    if (this.scopedRequestFailed || (requireNoFatal && this.firstFatal) || (this.unusable && path !== '/session' && !path.endsWith('/status'))) {
       const error = new WebDriverError({
         code: 'APPIUM_SESSION_UNUSABLE',
-        message: 'the previous command did not complete; session replacement is required',
+        message: this.scopedRequestFailed ? 'the scoped native operation failed; only bounded owned teardown is permitted'
+          : 'the previous command did not complete; session replacement is required',
         path,
         method: 'COMMAND',
         durationMs: 0,
@@ -484,118 +676,304 @@ export class AppiumClient {
     checkSession = true,
     enforceBudget = true,
     allowEmptyResponse = false,
+    requestPolicy?: WebDriverRequestPolicy,
   ): Promise<WebDriverResponse<T>> {
-    if (checkSession) this.assertUsable(path);
-    const operation = `${method} ${path}`;
-    if (enforceBudget) this.budget?.assertAvailable(operation);
-    const operationTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
-    const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
-    const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
-    const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');
-    const allowance = driverCommandAllowance(commandPath, method, body);
-    const startedAt = Date.now();
-    if (enforceBudget && this.budget && requestTimeoutMs < allowance) {
-      const error = new WebDriverError({
-        code: 'APPIUM_COMMAND_NOT_ADMITTED',
-        message: `${operation} has ${requestTimeoutMs}ms available; ${allowance}ms is required to complete the command`,
-        path,
-        method,
-        durationMs: 0,
-        selectedContext: this.selectedContext,
-        selectedWindow: this.selectedWindow,
-      });
-      this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, error.message);
-      throw error;
-    }
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
+    const identity = requestPolicy ? Object.freeze({
+      session: this.sessionId, owner: this.sessionOwner, generation: this.sessionGeneration,
+      context: this.selectedContext, scope: this.scopedCommand,
+    }) : undefined;
+    const policy = requestPolicy ? Object.freeze({ ...requestPolicy }) : undefined;
+    let deadlineFailure: WebDriverError | undefined;
+    let recordDeadlineFailure: (() => void) | undefined;
+    const rootBudget = enforceBudget ? this.budget : undefined;
+    const entryMs = this.timingOffset();
+    const priorSettlement = this.previousSettlementMs;
+    const timingScope = this.timingScope;
+    const observedBudget = timingScope?.budget || (enforceBudget ? this.budget : undefined);
+    const timing: WebDriverRequestTiming = {
+      attemptId: ++this.attemptOrdinal,
+      sessionGeneration: this.sessionGeneration,
+      operation: requestOperation(path.replace(/^\/session\/[^/]+(?=\/)/u, ''), method, body),
+      scope: timingScope?.label || 'unscoped',
+      entryMs,
+      ...(priorSettlement === undefined ? {} : { priorSettlementToEntryMs: entryMs - priorSettlement }),
+      phaseRemainingAtEntryMs: observedBudget?.remainingMs ?? null,
+      phaseRemainingAtDispatchMs: null,
+      phaseRemainingAtSettlementMs: null,
+      admitted: false, sent: false, completed: false, outcome: 'unavailable',
+    };
+    try {
+      if (checkSession) this.assertUsable(path);
+      const operation = `${method} ${path}`;
+      if (enforceBudget) this.budget?.assertAvailable(operation);
+      const admissionTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
+      const operationTimeoutMs = admissionTimeoutMs * timingScale;
+      const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
+      const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
+      const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');
+      const confirmationCapture = commandPath === '/source' && timingScope?.label === 'ios-install-confirmation';
+      const retainedInspection = commandPath === '/execute/sync' && body !== null && typeof body === 'object'
+        && 'script' in body && body.script === 'mobile: inspectRetainedChromeTargets';
+      const allowance = driverCommandAllowance(commandPath, method, body);
+      const startedAt = Date.now();
+      if (enforceBudget && this.budget && requestTimeoutMs < allowance) {
+        const error = new WebDriverError({
+          code: 'APPIUM_COMMAND_NOT_ADMITTED',
+          message: `${operation} has ${requestTimeoutMs}ms available; ${allowance}ms is required to complete the command`,
+          path,
+          method,
+          durationMs: 0,
+          selectedContext: this.selectedContext,
+          selectedWindow: this.selectedWindow,
+        });
+        timing.outcome = 'not-admitted';
+        this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, error.message, timing);
+        throw error;
+      }
+      timing.admitted = true;
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let rejectTimeout!: (error: unknown) => void;
+      const timeoutPromise = new Promise<never>((_, reject) => { rejectTimeout = reject; });
+      void timeoutPromise.catch(() => {});
+      const selectDeadlineFailure = (): WebDriverError => {
+        if (deadlineFailure) return deadlineFailure;
+        const cause = new DOMException(`${operation} timed out`, 'TimeoutError');
+        deadlineFailure = new WebDriverError({
+          code: 'APPIUM_TIMEOUT', message: cause.message, path, method, durationMs: Date.now() - startedAt,
+          timedOut: true, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow, cause,
+        });
+        this.scopedRequestFailed = true;
+        this.unusable = true;
+        this.recordFatal(deadlineFailure);
+        timing.outcome = 'timeout';
+        recordDeadlineFailure = () => {
+          this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, true, cause.message, timing);
+        };
+        return deadlineFailure;
+      };
+      const startTimer = (duration = requestTimeoutMs) => this.enforcementClock.timer(() => {
+        if (policy) {
+          const error = selectDeadlineFailure();
+          rejectTimeout(error);
+          controller.abort(error.cause);
+          return;
+        }
         const error = new DOMException(`${operation} timed out`, 'TimeoutError');
         controller.abort(error);
-        reject(error);
-      }, requestTimeoutMs);
-    });
-    let response: Response | undefined;
-    let text: string;
-    try {
-      response = await Promise.race([
-        this.transport(`${this.baseUrl}${path}`, {
+        rejectTimeout(error);
+      }, duration);
+      let requestDeadline: number | undefined;
+      const checkDeadline = () => {
+        if (deadlineFailure) throw deadlineFailure;
+        if (!policy || requestDeadline === undefined || !timing.sent) return;
+        const expired = this.enforcementClock.now() >= requestDeadline || policy.budget.exhausted || rootBudget?.exhausted;
+        if (deadlineFailure) throw deadlineFailure;
+        if (!expired) return;
+        const error = selectDeadlineFailure();
+        controller.abort(error.cause);
+        throw error;
+      };
+      let response: Response | undefined;
+      let text: string;
+      try {
+        if (!policy) timer = startTimer();
+        const init = {
           method,
           headers: body === undefined ? undefined : { 'content-type': 'application/json' },
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: controller.signal,
-        }),
-        timeoutPromise,
-      ]);
-      text = await Promise.race([response.text(), timeoutPromise]);
-    } catch (error) {
-      const timedOut = isTimeoutError(error) || controller.signal.aborted || (enforceBudget && this.budget?.exhausted === true);
-      if (timer !== undefined) clearTimeout(timer);
-      const interrupted = response !== undefined;
-      if (timedOut || interrupted) {
-        this.unusable = true;
-        controller.abort(error);
+        };
+        timing.phaseRemainingAtDispatchMs = observedBudget?.remainingMs ?? null;
+        timing.dispatchMs = this.timingOffset();
+        if (priorSettlement !== undefined) timing.priorSettlementToDispatchMs = timing.dispatchMs - priorSettlement;
+        if (policy) {
+          policy.beforeDispatch();
+          const dispatchTime = this.enforcementClock.now();
+          const remaining = Math.min(policy.budget.remainingMs, rootBudget?.remainingMs ?? Infinity);
+          if (remaining < admissionTimeoutMs) {
+            timing.admitted = false;
+            timing.dispatchMs = undefined;
+            timing.priorSettlementToDispatchMs = undefined;
+            timing.phaseRemainingAtDispatchMs = null;
+            timing.outcome = 'not-admitted';
+            const error = new WebDriverError({
+              code: 'APPIUM_COMMAND_NOT_ADMITTED', message: `${operation} requires its full ${admissionTimeoutMs}ms at dispatch`,
+              path, method, durationMs: 0, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow,
+            });
+            this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, error.message, timing);
+            throw error;
+          }
+          requestDeadline = dispatchTime + Math.min(operationTimeoutMs, remaining);
+        }
+        if (identity && (!identity.session || this.sessionId !== identity.session || this.sessionOwner !== identity.owner
+          || this.sessionGeneration !== identity.generation || identity.context !== 'NATIVE_APP' || this.selectedContext !== identity.context
+          || this.unusable || this.firstFatal || this.scopedRequestFailed || !identity.scope || identity.scope.overlapped
+          || this.scopedCommand !== identity.scope)) {
+          const error = new WebDriverError({
+            code: 'APPIUM_COMMAND_NOT_ADMITTED', message: 'original native request ownership changed or overlapped',
+            path, method, durationMs: 0, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow,
+          });
+          timing.admitted = false;
+          timing.dispatchMs = undefined;
+          timing.priorSettlementToDispatchMs = undefined;
+          timing.phaseRemainingAtDispatchMs = null;
+          timing.outcome = 'not-admitted';
+          this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, error.message, timing);
+          throw error;
+        }
+        timing.dispatchedOrdinal = ++this.dispatchedOrdinal;
+        if (timing.operation === 'create') this.sessionGeneration += 1;
+        timing.sessionGeneration = this.sessionGeneration;
+        timing.sent = true;
+        const pendingResponse = this.transport(`${this.baseUrl}${path}`, init);
+        void pendingResponse.catch(() => {});
+        if (requestDeadline !== undefined) timer = startTimer(Math.max(0, requestDeadline - this.enforcementClock.now()));
+        response = await Promise.race([pendingResponse, timeoutPromise]);
+        // Only the winning await observes a stage. Late transport/body promises
+        // cannot mutate this request's receipt, history, or previous settlement.
+        checkDeadline();
+        timing.responseAvailableMs = this.timingOffset();
+        if (Number.isInteger(response.status) && response.status >= 100 && response.status <= 599) timing.status = response.status;
+        timing.bodyReadStartMs = this.timingOffset();
+        text = await Promise.race([response.text(), timeoutPromise]);
+        checkDeadline();
+        timing.bodyReadCompleteMs = this.timingOffset();
+        timing.completed = true;
+      } catch (error) {
+        if (deadlineFailure) throw deadlineFailure;
+        if (policy && !timing.sent) {
+          timing.admitted = false;
+          timing.dispatchMs = undefined;
+          timing.priorSettlementToDispatchMs = undefined;
+          timing.phaseRemainingAtDispatchMs = null;
+          timing.outcome = 'not-admitted';
+          if (confirmationCapture) {
+            if (this.history.at(-1)?.timing !== timing) this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, 'Confirmation source not admitted', timing);
+            throw error;
+          }
+        }
+        if (policy && error instanceof WebDriverError) {
+          checkDeadline();
+          throw error;
+        }
+        checkDeadline();
+        const timedOut = isTimeoutError(error) || controller.signal.aborted || (enforceBudget && this.budget?.exhausted === true);
+        const interrupted = response !== undefined;
+        const detail = confirmationCapture ? 'Confirmation source transport unavailable'
+          : retainedInspection ? 'Retained inspection transport failed' : error instanceof Error ? error.message : String(error);
+        const failure = new WebDriverError({
+          code: timedOut ? 'APPIUM_TIMEOUT' : interrupted ? 'APPIUM_INTERRUPTED' : 'APPIUM_HTTP',
+          message: detail,
+          path,
+          method,
+          durationMs: Date.now() - startedAt,
+          timedOut,
+          selectedContext: this.selectedContext,
+          selectedWindow: this.selectedWindow,
+          status: response?.status,
+          cause: error,
+        });
+        if (policy && (isFatalDriverError(failure) || (policy.finalAction && timing.sent))) {
+          this.scopedRequestFailed = true;
+          this.unusable = true;
+          this.recordFatal(failure, policy.finalAction && timing.sent);
+        }
+        if (timedOut || interrupted || (policy?.finalAction && timing.sent)) {
+          this.unusable = true;
+          controller.abort(error);
+        }
+        timing.outcome = timedOut ? 'timeout' : interrupted ? 'interrupted' : 'transport-error';
+        this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, timedOut, detail, timing);
+        throw failure;
+      } finally {
+        if (timer !== undefined) this.enforcementClock.clear(timer);
       }
-      const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, timedOut, error instanceof Error ? error.message : String(error));
-      throw new WebDriverError({
-        code: timedOut ? 'APPIUM_TIMEOUT' : interrupted ? 'APPIUM_INTERRUPTED' : 'APPIUM_HTTP',
-        message: error instanceof Error ? error.message : String(error),
-        path,
-        method,
-        durationMs: command.durationMs,
-        timedOut,
-        selectedContext: this.selectedContext,
-        selectedWindow: this.selectedWindow,
-        status: response?.status,
-        cause: error,
-      });
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
-    if (allowEmptyResponse && response.ok && text.trim() === '') {
-      this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false);
-      return { value: undefined as T };
-    }
-    let parsed: WebDriverResponse<T>;
-    try {
-      parsed = JSON.parse(text) as WebDriverResponse<T>;
+      if (allowEmptyResponse && response.ok && text.trim() === '') {
+        timing.outcome = 'success';
+        this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, undefined, timing);
+        return { value: undefined as T };
+      }
+      let parsed: WebDriverResponse<T>;
+      timing.parseStartMs = this.timingOffset();
+      try {
+        parsed = JSON.parse(text) as WebDriverResponse<T>;
+        timing.parseCompleteMs = this.timingOffset();
+      } catch (error) {
+        checkDeadline();
+        timing.parseCompleteMs = this.timingOffset();
+        timing.outcome = 'invalid-json';
+        const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, `HTTP ${response.status}`, timing);
+        throw new WebDriverError({
+          code: 'APPIUM_HTTP',
+          message: `HTTP ${response.status}`,
+          path,
+          method,
+          durationMs: command.durationMs,
+          selectedContext: this.selectedContext,
+          selectedWindow: this.selectedWindow,
+          status: response.status,
+          cause: error,
+        });
+      }
+      checkDeadline();
+      const commandValue = policy?.finalAction ? parsed?.value : parsed.value;
+      if (!response.ok || (commandValue as any)?.error) {
+        const detail = confirmationCapture ? 'Confirmation source refused' : retainedInspection ? 'Retained inspection refused'
+          : typeof commandValue === 'object' ? JSON.stringify(commandValue) : String(commandValue || text);
+        checkDeadline();
+        timing.outcome = 'command-error';
+        const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, detail, timing);
+        throw new WebDriverError({
+          code: 'APPIUM_COMMAND',
+          message: `HTTP ${response.status}: ${redactText(detail).slice(0, 500)}`,
+          path,
+          method,
+          durationMs: command.durationMs,
+          selectedContext: this.selectedContext,
+          selectedWindow: this.selectedWindow,
+          status: response.status,
+        });
+      }
+      const validAcknowledgement = !policy?.finalAction || (parsed !== null && typeof parsed === 'object'
+        && Object.hasOwn(parsed, 'value') && parsed.value === null);
+      checkDeadline();
+      if (!validAcknowledgement) {
+        timing.outcome = 'command-error';
+        const cause = new Error('final action acknowledgement must contain a null value');
+        const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, cause.message, timing);
+        throw new WebDriverError({
+          code: 'APPIUM_HTTP', message: cause.message, path, method, durationMs: command.durationMs,
+          selectedContext: this.selectedContext, selectedWindow: this.selectedWindow, status: response.status, cause,
+        });
+      }
+      if (policy) this.assertUsable(path, true);
+      timing.outcome = 'success';
+      this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, undefined, timing);
+      return parsed;
     } catch (error) {
-      const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, `HTTP ${response.status}`);
-      throw new WebDriverError({
-        code: 'APPIUM_HTTP',
-        message: `HTTP ${response.status}`,
-        path,
-        method,
-        durationMs: command.durationMs,
-        selectedContext: this.selectedContext,
-        selectedWindow: this.selectedWindow,
-        status: response.status,
-        cause: error,
-      });
+      if (deadlineFailure) {
+        recordDeadlineFailure?.();
+        throw deadlineFailure;
+      }
+      if (policy && (isFatalDriverError(error) || (policy.finalAction && timing.sent))) {
+        this.scopedRequestFailed = true;
+        this.unusable = true;
+        this.recordFatal(error, policy.finalAction && timing.sent);
+      }
+      throw error;
+    } finally {
+      timing.phaseRemainingAtSettlementMs = observedBudget?.remainingMs ?? null;
+      timing.settlementMs = this.timingOffset();
+      this.previousSettlementMs = timing.settlementMs;
+      Object.freeze(timing);
     }
-    if (!response.ok || (parsed as any).value?.error) {
-      const detail = typeof (parsed as any).value === 'object'
-        ? JSON.stringify((parsed as any).value)
-        : String((parsed as any).value || text);
-      const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, detail);
-      throw new WebDriverError({
-        code: 'APPIUM_COMMAND',
-        message: `HTTP ${response.status}: ${redactText(detail).slice(0, 500)}`,
-        path,
-        method,
-        durationMs: command.durationMs,
-        selectedContext: this.selectedContext,
-        selectedWindow: this.selectedWindow,
-        status: response.status,
-      });
-    }
-    this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false);
-    return parsed;
   }
 
-  private recordCommand(command: string, path: string, method: string, startedAt: number, timeoutMs: number, timedOut: boolean, error?: string): WebDriverCommandEvidence {
+  private recordCommand(command: string, path: string, method: string, startedAt: number, timeoutMs: number, timedOut: boolean, error?: string, timing?: WebDriverRequestTiming): WebDriverCommandEvidence {
+    if (timing) timing.historyStartMs = this.timingOffset();
     const evidence: WebDriverCommandEvidence = {
+      ...(timing ? { timing } : {}),
       command,
       path,
       method,
@@ -606,8 +984,10 @@ export class AppiumClient {
       selectedWindow: this.selectedWindow,
       ...(error ? { error: redactText(error).slice(0, 500) } : {}),
     };
+    if (timing) timing.redactionCompleteMs = this.timingOffset();
     this.history.push(evidence);
     if (this.history.length > 100) this.history.shift();
+    if (timing) timing.historyCompleteMs = this.timingOffset();
     return evidence;
   }
 
@@ -683,8 +1063,8 @@ export class AppiumClient {
     throw new ElementLookupError(`APPIUM_ELEMENT_ANY: ${lastError}`);
   }
 
-  private recordFatal(error: unknown): void {
-    if (this.firstFatal || !isFatalDriverError(error)) return;
+  private recordFatal(error: unknown, finalAction = false): void {
+    if (this.firstFatal || (!finalAction && !isFatalDriverError(error))) return;
     if (error instanceof WebDriverError) {
       this.firstFatal = {
         code: error.code,

@@ -16,6 +16,17 @@ project follows [Semantic Versioning](https://semver.org/).
 - Use the rightmost non-empty `X-Forwarded-For` entry behind a trusted reverse
   proxy, preventing forged leftmost entries from bypassing per-IP rate limits.
 
+## [0.23.4] - 2026-10-27
+
+### Fixed
+
+- `/reload` in Pi now picks up an updated relay command integration. Pi kept
+  running the previous version until it was restarted, so after a relay update
+  the phone could miss new slash-command or activity behaviour.
+- A Home Screen app that restarts on an outdated build address after an update
+  now opens the deployed build instead of reopening the old one from the
+  browser cache.
+
 ## [0.23.3] - 2026-10-26
 
 ### Fixed
@@ -1909,7 +1920,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...HEAD
+[0.23.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...v0.23.4
 [0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...v0.23.1
