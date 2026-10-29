@@ -1026,3 +1026,90 @@ func TestCountersSurviveRestart(t *testing.T) {
 		t.Fatalf("restarted gateway refused with %q, want %q", refusal.Code, gatewaywire.CodeQuotaExceeded)
 	}
 }
+
+func TestRegistrationAuthorization(t *testing.T) {
+	relayID, _ := testIdentity(t)
+	otherID, _ := identityFor(t, testSecondRelayKey)
+	for _, tc := range []struct {
+		name, token, proofToken, proofID, rawProof string
+		allowed                                    map[string]bool
+		wantCode                                   string
+	}{
+		{name: "open gateway"},
+		{name: "valid proof", token: "secret", proofToken: "secret"},
+		{name: "missing proof", token: "secret", wantCode: "unauthorized"},
+		{name: "wrong token", token: "secret", proofToken: "wrong", wantCode: "unauthorized"},
+		{name: "wrong relay binding", token: "secret", proofToken: "secret", proofID: otherID, wantCode: "unauthorized"},
+		{name: "malformed proof", token: "secret", rawProof: "!", wantCode: "unauthorized"},
+		{name: "allow listed", allowed: map[string]bool{relayID: true}},
+		{name: "not allow listed", allowed: map[string]bool{otherID: true}, wantCode: "unauthorized"},
+		{name: "both pass", token: "secret", proofToken: "secret", allowed: map[string]bool{relayID: true}},
+		{name: "token cannot bypass list", token: "secret", proofToken: "secret", allowed: map[string]bool{otherID: true}, wantCode: "unauthorized"},
+		{name: "list cannot bypass token", token: "secret", allowed: map[string]bool{relayID: true}, wantCode: "unauthorized"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, Options{RegistrationToken: tc.token, AllowedRelayIDs: tc.allowed})
+			ctx, cancel := context.WithTimeout(context.Background(), testDeadline)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, h.wsURL+"/relay", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.CloseNow()
+			hello := readControl(t, conn)
+			nonce, err := base64.RawURLEncoding.DecodeString(hello.Nonce)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof := tc.rawProof
+			if tc.proofToken != "" {
+				id := tc.proofID
+				if id == "" {
+					id = relayID
+				}
+				proof = base64.RawURLEncoding.EncodeToString(gatewaywire.RegistrationProof(tc.proofToken, id, nonce))
+			}
+			writeControl(t, conn, gatewaywire.RegisterHello{Type: gatewaywire.TypeRegister, Proto: gatewaywire.Proto, RelayID: relayID, RegistrationProof: proof})
+			reply := readControl(t, conn)
+			if tc.wantCode == "" {
+				if reply.Type != gatewaywire.TypeReady {
+					t.Fatalf("reply = %+v, want ready", reply)
+				}
+			} else if reply.Type != gatewaywire.TypeError || reply.Code != tc.wantCode {
+				t.Fatalf("reply = %+v, want error %s", reply, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestClientIPTrustedProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		forwarded  []string
+		trust      bool
+	}{
+		{"forged left entries", "198.51.100.9", []string{"192.0.2.1, 192.0.2.2, 198.51.100.9"}, true},
+		{"single entry", "198.51.100.9", []string{" 198.51.100.9 "}, true},
+		{"trailing empty entries", "198.51.100.9", []string{"192.0.2.1, 198.51.100.9, , "}, true},
+		{"empty entries", "203.0.113.1", []string{", ,"}, true},
+		{"no header", "203.0.113.1", nil, true},
+		{"untrusted", "203.0.113.1", []string{"198.51.100.9"}, false},
+		{"proxy appends separate field", "198.51.100.9", []string{"6.6.6.6", "198.51.100.9"}, true},
+		{"multiple fields and comma lists", "198.51.100.9", []string{"6.6.6.6, 192.0.2.1", "192.0.2.2, 198.51.100.9"}, true},
+		{"empty trailing fields", "198.51.100.9", []string{"6.6.6.6", "198.51.100.9, ", " , "}, true},
+		{"all fields empty", "203.0.113.1", []string{" , ", ""}, true},
+		{"untrusted repeated fields", "203.0.113.1", []string{"6.6.6.6", "198.51.100.9"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{opts: Options{TrustProxyHeaders: tc.trust}}
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.RemoteAddr = "203.0.113.1:1234"
+			for _, value := range tc.forwarded {
+				r.Header.Add("X-Forwarded-For", value)
+			}
+			if got := s.clientIP(r); got != tc.want {
+				t.Fatalf("clientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -1,0 +1,20 @@
+{
+  "source": {
+    "runId": "40841336873",
+    "attempt": 3,
+    "artifact": "android-environment-completion.json"
+  },
+  "writer": {
+    "writerTimeoutMs": 769,
+    "cleanupReservationMs": 150,
+    "durationMs": 633,
+    "code": 0,
+    "timedOut": true,
+    "childExited": true,
+    "targetCloseObserved": true,
+    "ownedProcessesExited": true,
+    "stdioClosed": true,
+    "stderr": "GMS_WRITER_PROGRESS ready 105\nGMS_WRITER_PROGRESS input 143 97885\nGMS_WRITER_PROGRESS directory 157\nGMS_WRITER_PROGRESS staged 158\n"
+  },
+  "temporaryCleanupConfirmed": false
+}
