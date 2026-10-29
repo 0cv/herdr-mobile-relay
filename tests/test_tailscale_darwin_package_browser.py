@@ -469,6 +469,8 @@ ALLOWED = (
     "tests/test_plugin_build.sh",
     # Installed conversation chain race fixture repair in CI recovery.
     "internal/conversation/claude_chain_test.go",
+    # Reviewed developer-before-lifecycle Darwin driver published in 3d508a26.
+    "tests/test_tailscale_process_groups_darwin.py",
 )
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
 # SCOPE_BASE to 59eda0d83a785822696da03461601eca906231c6. A future new path
@@ -5580,6 +5582,10 @@ def offline_check(group):
             require(re.fullmatch(r"[0-9a-f]{40}", SCOPE_BASE) is not None and SCOPE_BASE != BASE
                     and LAUNCHCTL_PINNED_PARENT == SCOPE_BASE, "offline_scope_base_constant")
             minimal, full = list(REQUIRED), list(ALLOWED)
+            driver = "tests/test_tailscale_process_groups_darwin.py"
+            require(ALLOWED.count(driver) == 1
+                    and candidate_scope_allowed([*minimal, driver]) and candidate_scope_allowed([driver, *minimal]),
+                    "offline_candidate_scope_reviewed_driver")
             # `outside` is a path that is NOT allowed. (README.md, for one, IS allowed:
             # it is an ordinary parked-WIP entry, so it is a valid optional extra.)
             outside = "outside-the-allowlist/unlisted.txt"
@@ -5595,6 +5601,10 @@ def offline_check(group):
                 full + ["extra.txt"], full + ["../" + full[0]], full + ["/" + full[0]], full + [full[0] + "/"],
                 full + [full[0].upper()], full + ["relay\\common.sh"], full + ["relay"], full + ["relay/"],
                 full + ["tests/*.py"],
+                [*minimal, driver + ".bak"], [*minimal, "tests/test_tailscale_process_groups_Darwin.py"],
+                [*minimal, "tests/test_tailscale_process_groups_linux.py"], [*minimal, driver, driver], full + [driver],
+                [*minimal, "tests"], [*minimal, "tests/"], [*minimal, "tests/test_tailscale_process_groups_*.py"],
+                [*minimal, driver + "/"],
                 tuple(full), set(full), frozenset(minimal), None, "".join(minimal), {"a": 1},
                 [*minimal, 1], [*minimal, None], [*minimal, b"x"], [*full, ("a",)], [*minimal, True]]
             # Each REQUIRED path missing, one at a time, from the otherwise complete set.
