@@ -1654,17 +1654,24 @@ exit 0
         raise AssertionError("changed saved env was overwritten or reached route effects")
     # Restore only this fixture's original bytes to allow exact pending recovery.
     (cli_dev_root / "relay.env").write_bytes(env_snapshot)
-    prior_target = os.readlink(current_pointer)
+    # The next invocation recovers the pending candidate to the last committed
+    # release before attempting the deliberately incomplete frontend build.
+    prior_target = active_target
     prior_release = cli_dev_root / prior_target
     prior_binary = (prior_release / "bin" / "herdr-mobile-relay").read_bytes()
     prior_bundle = (prior_release / "web" / "version.json").read_bytes()
+    before_missing_bundle = fixture_log.read_text(encoding="utf-8").splitlines()
     missing_bundle = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh"), "update"],
         env=dict(update_env, DEV_FIXTURE_BUN_MODE="missing-version"), cwd=root,
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=30, check=False,
     )
-    if (missing_bundle.returncode == 0 or os.readlink(current_pointer) != prior_target or
+    missing_bundle_events = fixture_log.read_text(encoding="utf-8").splitlines()[len(before_missing_bundle):]
+    if (missing_bundle.returncode == 0 or "build|bun" not in missing_bundle_events or
+        pending_saved.exists() or os.readlink(current_pointer) != prior_target or
+        (cli_dev_root / "relay.env").read_bytes() != env_snapshot or
+        (cli_dev_root / ".herdr-dev-tailscale-cli").read_bytes() != marker_snapshot or
         (prior_release / "bin" / "herdr-mobile-relay").read_bytes() != prior_binary or
         (prior_release / "web" / "version.json").read_bytes() != prior_bundle):
         raise AssertionError(
