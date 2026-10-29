@@ -1,13 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { cp, mkdtemp, mkdir, readFile, writeFile, rm, realpath, symlink } from 'node:fs/promises';
 import { existsSync, readFileSync, writeFileSync, renameSync, statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, isAbsolute } from 'node:path';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
-import type { Readable, Writable } from 'node:stream';
+import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { managedWdaCapabilities } from '../support/ios-xctest';
 import { monotonicNowNs, spawnOwnedProcess, type OwnedProcess, type SpawnBinding } from '../support/owned-process';
 import { IOSPlatform } from '../platforms/ios';
@@ -5530,11 +5530,12 @@ xctestOwnerTests.push(['Native startup XCTest HOST no-env terminal factory', asy
   if (primaryFailed) throw primary;
   if (cleanupFailure) throw cleanupFailure;
 }]);
-xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated environment and cwd', async () => {
+const terminalTargetEnvironment = async (deferStdoutUntilTargetClose = false): Promise<void> => {
   const deadline = Date.now() + 40_000;
   const root = await terminalBound(mkdtemp(join(tmpdir(), 'sm63-terminal-target-')), deadline);
   let positive: ReturnType<typeof spawnOwnedProcess> | undefined;
   let negative: ReturnType<typeof spawnOwnedProcess> | undefined;
+  let stdout: Readable | undefined;
   let primary: unknown;
   try {
     for (const name of ['home', 'tmp', 'cache']) await terminalBound(mkdir(join(root, name)), deadline);
@@ -5578,7 +5579,12 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
       terminalTarget: {cwd: root, env},
     });
     let output = '';
-    positive.stdout.on('data', bytes => { output += String(bytes); });
+    // Buffer delayed delivery in memory without pausing the process socket.
+    stdout = deferStdoutUntilTargetClose ? positive.stdout.pipe(new PassThrough()) : positive.stdout;
+    stdout.on('data', bytes => { output += String(bytes); });
+    const stdoutEnded = once(stdout, 'end');
+    void stdoutEnded.catch(() => undefined);
+    if (deferStdoutUntilTargetClose) stdout.pause();
     positive.stderr.resume();
     await terminalBound(positive.ready, deadline);
     positive.start();
@@ -5587,6 +5593,12 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
     assert.deepEqual(await terminalBound(positive.terminalTransport!.targetCallback, deadline), {...binding, callback: 'spawn'});
     assert.deepEqual(await terminalBound(positive.targetExit, deadline), {code: 0, signal: null});
     assert.deepEqual(await terminalBound(positive.targetClose, deadline), {code: 0, signal: null});
+    if (deferStdoutUntilTargetClose) {
+      assert.equal(output, '', 'target close must precede stdout consumption in the regression');
+      queueMicrotask(() => stdout?.resume());
+    }
+    // Target close uses a separate control pipe; caller stdout can still be in flight.
+    await terminalBound(stdoutEnded, deadline);
     const observed = JSON.parse(output);
     assert.equal(observed.cwd, canonicalRoot);
     assert.equal(observed.bun, true);
@@ -5631,8 +5643,10 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
   } catch (error) {
     primary = error;
   } finally {
+    stdout?.resume();
     for (const owned of [positive, negative]) {
       if (!owned) continue;
+      owned.stdout.resume();
       owned.stop('terminal-target-test-cleanup');
       try { await terminalBound(owned.retire('terminal-target-test-cleanup'), deadline); }
       catch (error) { primary ??= error; }
@@ -5643,7 +5657,9 @@ xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated envi
     }
   }
   if (primary) throw primary;
-}]);
+};
+xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated environment and cwd', async () => { await terminalTargetEnvironment(); }]);
+xctestOwnerTests.push(['Native startup XCTest terminal target drains stdout after target close', async () => { await terminalTargetEnvironment(true); }]);
 xctestOwnerTests.push(['Native startup XCTest terminal witness registration failure', async () => { await terminalControl(true); }]);
 const terminalPositiveFromUnitRunner = async (): Promise<void> => {
   const localStartNs = process.hrtime.bigint();
