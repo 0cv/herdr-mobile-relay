@@ -10,6 +10,22 @@ import (
 	"testing"
 )
 
+// net.Pipe rejects deadline updates after its peer closes, unlike the Unix
+// stream used in production. Split the first reply read so the server's write
+// stays blocked until the client has installed its short frame deadline.
+type installedFirstReadConn struct {
+	net.Conn
+	read bool
+}
+
+func (c *installedFirstReadConn) Read(b []byte) (int, error) {
+	if !c.read && len(b) > 0 {
+		c.read = true
+		b = b[:1]
+	}
+	return c.Conn.Read(b)
+}
+
 func installedMemoryExchange(t *testing.T, core InstalledControl, c InstalledCredentials, i InstalledIntent) InstalledClientResult {
 	t.Helper()
 	data, e := installedIntentFrame(c, i)
@@ -21,7 +37,7 @@ func installedMemoryExchange(t *testing.T, core InstalledControl, c InstalledCre
 	done := make(chan struct{})
 	go func() { defer close(done); installedServeConnection(ctx, a, core) }()
 	defer func() { cancel(); a.Close(); b.Close(); <-done }()
-	result, e := installedClientExchange(ctx, b, c, i, data)
+	result, e := installedClientExchange(ctx, &installedFirstReadConn{Conn: b}, c, i, data)
 	if e != nil {
 		t.Fatal("in-memory exchange refused")
 	}

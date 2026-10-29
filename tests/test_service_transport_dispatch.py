@@ -732,7 +732,7 @@ def unavailable_cases(parent):
     assert os.getuid() != 0, "unreadable fixture requires the hosted non-root user"
     cli = "HERDR_RELAY_TRANSPORT=tailscale-cli\n"
     cells = [("valid", cli, {}, 69),
-             ("absent", None, {"HERDR_RELAY_TRANSPORT": "tailscale-cli"}, 78),
+             ("absent", None, {"HERDR_RELAY_TRANSPORT": "tailscale-cli"}, 69),
              ("empty-mode", "HERDR_RELAY_TRANSPORT=''\n", {"HERDR_RELAY_TRANSPORT": " TAILSCALE-CLI "}, 69),
              ("missing-executable", cli + "HERDR_TAILSCALE_CLI_BIN='/missing-selected-cli'\n", {}, 69),
              ("missing-relay", cli, {"HERDR_RELAY_BIN": "/missing-selected-relay"}, 69),

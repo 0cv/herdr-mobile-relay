@@ -246,8 +246,11 @@ try:
         remaining = deadline - time.monotonic()
         assert remaining > 0, b''.join(chunks)
         if select.select([master], [], [], min(remaining, 0.2))[0]:
-            try: chunks.append(os.read(master, 65536))
+            try: chunk = os.read(master, 65536)
             except OSError: break
+            # Darwin signals PTY EOF with an empty read, not Linux's EIO.
+            if not chunk: break
+            chunks.append(chunk)
     process.wait(timeout=2)
     output = b''.join(chunks); calls = record.read_text().splitlines() if record.exists() else []
     assert process.returncode == 0 and not forbidden.exists() and 'unexpected-command' not in calls, (calls, output)
