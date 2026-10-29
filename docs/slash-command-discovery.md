@@ -28,6 +28,7 @@ unbounded catalog.
 | Oh My Pi | Builtins plus selected profile/project resources |
 | OpenCode | 17 builtin suggestions plus bounded native Markdown commands; skills use native `@` mentions |
 | Hermes, Kimi | Builtins plus native/configured skills |
+| Antigravity CLI | 1.4.7 builtins and aliases plus `~/.gemini/skills` and configured skill dirs |
 
 ## Cursor
 

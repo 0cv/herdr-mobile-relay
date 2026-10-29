@@ -77,7 +77,7 @@ paths.
   by enabling **Settings → Pi Integration** for that computer, then reloading Pi
   ([CLI alternative](docs/slash-command-discovery.md#pi-runtime-commands)).
 - Read and search native conversations for agents with a native history reader,
-  including Hermes, OpenCode, Oh My OpenCode plans and native Kimi Code journals.
+  including Hermes, OpenCode, Antigravity CLI, Oh My OpenCode plans and native Kimi Code journals.
   Kimi imports and human-engine-only histories use the Terminal fallback. Inspect workspace files, images, and Git diffs read-only.
 - Manage workspaces and Git worktrees; start, rename, clear, and stop agents.
 - Have the relay read responses aloud, even with the screen off.

@@ -998,6 +998,21 @@ describe('accessible Svelte interactions', () => {
     expect(meta).toEqual(['Devin', 'Devin']);
   });
 
+  it('names Antigravity panes under every alias Herdr reports', () => {
+    const agents: Agent[] = ['agy', 'antigravity', 'Antigravity-CLI'].map((agent, index) => ({
+      relay_id: 'mac',
+      relay_label: 'Mac',
+      raw_pane_id: `w5:p${index}`,
+      pane_id: `mac::w5:p${index}`,
+      project: `agy-${index}`,
+      agent,
+      status: 'idle',
+    }));
+    const { container } = render(AgentList, { agents, relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    expect(screen.getAllByRole('img', { name: 'Antigravity' })).toHaveLength(3);
+    expect(container.querySelectorAll('.agent-logo-agy')).toHaveLength(3);
+  });
+
   it('keeps a structured answer local until Submit', async () => {
     const interaction: QuestionInteraction = {
       id: 'question-1', kind: 'single_select', question: 'Where should the adapter live?',

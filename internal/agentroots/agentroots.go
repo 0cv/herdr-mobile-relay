@@ -59,6 +59,7 @@ const (
 	OpenCodeListEnv = "HERDR_OPENCODE_DATA_DIRS"
 	OMOListEnv      = "HERDR_OMO_CONFIG_DIRS"
 	HermesListEnv   = "HERDR_HERMES_DATA_DIRS"
+	AgyListEnv      = "HERDR_AGY_DATA_DIRS"
 	CursorListEnv   = "HERDR_CURSOR_PROJECTS_DIRS"
 	KimiCodeListEnv = "HERDR_KIMI_CODE_HOME_DIRS"
 )
@@ -95,6 +96,12 @@ func KimiCodeHomes(home string) []string {
 
 func Cursor(home string) []string {
 	return resolve(home, CursorListEnv, "", filepath.Join(home, ".cursor", "projects"), "")
+}
+
+// Agy reports the directories containing Antigravity CLI conversation
+// databases, one `<conversation-id>.db` per conversation.
+func Agy(home string) []string {
+	return resolve(home, AgyListEnv, "", filepath.Join(home, ".gemini", "antigravity-cli"), "conversations")
 }
 
 // OpenCodeData reports the only directories in which the relay will accept an
