@@ -227,11 +227,12 @@ server {
 
 Set `HERDR_GATEWAY_TRUSTED_PROXY=true` only behind a single trusted reverse
 proxy, and prevent clients from reaching the gateway listener directly. The
-rightmost non-empty `X-Forwarded-For` entry is the address that proxy saw; forged
-entries to its left are ignored. The proxy must append the client address or
-replace the header. Leave this `false` when exposed directly, or clients can
-forge the header and bypass per-IP limits. Do not compress these routes: the
-payloads are ciphertext, so compression buys nothing and leaks length information.
+rightmost non-empty entry across all `X-Forwarded-For` header fields is the
+address that proxy saw; forged entries to its left are ignored. The proxy must
+append the client address or replace the header. Leave this `false` when exposed
+directly, or clients can forge the header and bypass per-IP limits. Do not compress
+these routes: the payloads are ciphertext, so compression buys nothing and leaks
+length information.
 
 ## Configuration
 
@@ -251,7 +252,7 @@ Everything is read from the environment at startup; there are no flags.
 | `HERDR_GATEWAY_QUOTA_WARN_PERCENT` | `80` | Percentage of the quota at which the relay receives one advisory warning. Negative disables it. |
 | `HERDR_GATEWAY_IDLE_TIMEOUT` | `300` | Seconds a phone connection may carry no traffic before it is closed. Negative disables idle reaping. Relay links use ping/pong instead. |
 | `HERDR_GATEWAY_STATE` | unset | JSON file holding the byte counters. Unset keeps them in memory only. |
-| `HERDR_GATEWAY_TRUSTED_PROXY` | `false` | Believe the rightmost non-empty `X-Forwarded-For` entry. Enable only behind a single trusted proxy you control, with no direct access to the listener. |
+| `HERDR_GATEWAY_TRUSTED_PROXY` | `false` | Believe the rightmost non-empty entry across all `X-Forwarded-For` header fields. Enable only behind a single trusted proxy you control, with no direct access to the listener. |
 | `HERDR_GATEWAY_LOG_FORMAT` | `text` | `text` or `json` structured logs on stderr. |
 
 Fixed: protocol version 1, a 10-second hello deadline, the wire protocol's
@@ -280,6 +281,18 @@ registration must pass both checks. An id alone is public, so use the token when
 you need proof that the registrant is authorized. An `unauthorized` rejection
 means the relay's token is missing/wrong or its id is not allowed. Correct the
 environment and restart; failed registrations retry with exponential backoff.
+
+For the generated Compose bundle, edit `HERDR_GATEWAY_REGISTRATION_TOKEN` and
+`HERDR_GATEWAY_ALLOWED_RELAY_IDS` in the server's `.env` beside
+`docker-compose.yml`, then run `docker compose up -d gateway` from that directory
+to recreate the gateway with those settings. Both default to empty (registration
+open); a token-only or allow-list-only configuration is supported. Quote an
+allow-list containing whitespace, for example
+`HERDR_GATEWAY_ALLOWED_RELAY_IDS="AAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBB"`.
+Compose explicitly passes these settings to the gateway container; the relay's
+matching token still belongs in its own service environment. The deployment
+wizard replaces `.env` on redeploy, so reapply these private settings after a
+wizard redeploy before reopening registration traffic.
 
 
 ### Opening the gateway to other people

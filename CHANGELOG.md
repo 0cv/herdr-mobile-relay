@@ -13,8 +13,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Use the rightmost non-empty `X-Forwarded-For` entry behind a trusted reverse
-  proxy, preventing forged leftmost entries from bypassing per-IP rate limits.
+- Use the rightmost non-empty `X-Forwarded-For` entry across all header fields
+  behind a trusted reverse proxy, preventing forged earlier fields or entries
+  from bypassing per-IP rate limits.
+- Forward the optional registration token and relay-id allow-list from generated
+  deployment bundles into the gateway container.
 
 ## [0.23.4] - 2026-10-27
 

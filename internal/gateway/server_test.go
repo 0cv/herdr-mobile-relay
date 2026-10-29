@@ -1084,21 +1084,29 @@ func TestRegistrationAuthorization(t *testing.T) {
 
 func TestClientIPTrustedProxy(t *testing.T) {
 	for _, tc := range []struct {
-		name, forwarded, want string
-		trust                 bool
+		name, want string
+		forwarded  []string
+		trust      bool
 	}{
-		{"forged left entries", "192.0.2.1, 192.0.2.2, 198.51.100.9", "198.51.100.9", true},
-		{"single entry", " 198.51.100.9 ", "198.51.100.9", true},
-		{"trailing empty entries", "192.0.2.1, 198.51.100.9, , ", "198.51.100.9", true},
-		{"empty entries", ", ,", "203.0.113.1", true},
-		{"no header", "", "203.0.113.1", true},
-		{"untrusted", "198.51.100.9", "203.0.113.1", false},
+		{"forged left entries", "198.51.100.9", []string{"192.0.2.1, 192.0.2.2, 198.51.100.9"}, true},
+		{"single entry", "198.51.100.9", []string{" 198.51.100.9 "}, true},
+		{"trailing empty entries", "198.51.100.9", []string{"192.0.2.1, 198.51.100.9, , "}, true},
+		{"empty entries", "203.0.113.1", []string{", ,"}, true},
+		{"no header", "203.0.113.1", nil, true},
+		{"untrusted", "203.0.113.1", []string{"198.51.100.9"}, false},
+		{"proxy appends separate field", "198.51.100.9", []string{"6.6.6.6", "198.51.100.9"}, true},
+		{"multiple fields and comma lists", "198.51.100.9", []string{"6.6.6.6, 192.0.2.1", "192.0.2.2, 198.51.100.9"}, true},
+		{"empty trailing fields", "198.51.100.9", []string{"6.6.6.6", "198.51.100.9, ", " , "}, true},
+		{"all fields empty", "203.0.113.1", []string{" , ", ""}, true},
+		{"untrusted repeated fields", "203.0.113.1", []string{"6.6.6.6", "198.51.100.9"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Server{opts: Options{TrustProxyHeaders: tc.trust}}
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.RemoteAddr = "203.0.113.1:1234"
-			r.Header.Set("X-Forwarded-For", tc.forwarded)
+			for _, value := range tc.forwarded {
+				r.Header.Add("X-Forwarded-For", value)
+			}
 			if got := s.clientIP(r); got != tc.want {
 				t.Fatalf("clientIP = %q, want %q", got, tc.want)
 			}

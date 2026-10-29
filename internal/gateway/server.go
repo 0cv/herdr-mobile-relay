@@ -417,19 +417,22 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 
 // clientIP is the address the gateway attributes this request to. A single
 // trusted reverse proxy appends (or replaces the header with) the address it
-// saw, so the rightmost non-empty entry wins, ignoring forged entries to its left.
+// saw, so the rightmost non-empty entry across all header fields wins.
 func (s *Server) clientIP(r *http.Request) string {
 	if s.opts.TrustProxyHeaders {
-		forwarded := r.Header.Get("X-Forwarded-For")
-		for forwarded != "" {
-			comma := strings.LastIndexByte(forwarded, ',')
-			if last := strings.TrimSpace(forwarded[comma+1:]); last != "" {
-				return last
+		values := r.Header.Values("X-Forwarded-For")
+		for index := len(values) - 1; index >= 0; index-- {
+			forwarded := values[index]
+			for forwarded != "" {
+				comma := strings.LastIndexByte(forwarded, ',')
+				if last := strings.TrimSpace(forwarded[comma+1:]); last != "" {
+					return last
+				}
+				if comma < 0 {
+					break
+				}
+				forwarded = forwarded[:comma]
 			}
-			if comma < 0 {
-				break
-			}
-			forwarded = forwarded[:comma]
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

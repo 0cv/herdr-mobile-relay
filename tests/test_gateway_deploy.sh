@@ -202,6 +202,58 @@ grep -Fq 'HERDR_GATEWAY_STUN_ADDR: ${HERDR_GATEWAY_STUN_ADDR-:3478}' \
 ! grep -Fq '${HERDR_GATEWAY_STUN_ADDR:-' "$BUNDLE_DIR/docker-compose.yml" ||
     fail "compose file turns an empty address discovery value back into :3478"
 
+# Registration controls must reach the container, not merely Compose's .env
+# interpolation scope. Empty/unset values keep community registration open.
+for KNOB in HERDR_GATEWAY_REGISTRATION_TOKEN HERDR_GATEWAY_ALLOWED_RELAY_IDS; do
+    grep -Fxq "$KNOB=" "$BUNDLE_DIR/.env" ||
+        fail ".env lost the optional $KNOB setting"
+    grep -Fq "$KNOB: \${$KNOB:-}" "$BUNDLE_DIR/docker-compose.yml" ||
+        fail "compose file does not pass $KNOB with an empty default"
+done
+
+# Config rendering needs no daemon, images, builds, or network. When available,
+# use real Compose interpolation rather than only inspecting template strings.
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 &&
+    command -v python3 >/dev/null 2>&1; then
+    for CASE in unset empty token-only allow-list-only configured; do
+        CONFIG_ENV="$WORK_DIR/registration-$CASE.env"
+        TOKEN=""
+        RELAY_IDS=""
+        : > "$CONFIG_ENV"
+        if [ "$CASE" = token-only ] || [ "$CASE" = configured ]; then
+            TOKEN="deployment-test-token"
+        fi
+        if [ "$CASE" = allow-list-only ] || [ "$CASE" = configured ]; then
+            RELAY_IDS="AAAAAAAAAAAAAAAAAAAAAA,BBBBBBBBBBBBBBBBBBBBBB CCCCCCCCCCCCCCCCCCCCCC"
+        fi
+        if [ "$CASE" != unset ]; then
+            printf 'HERDR_GATEWAY_REGISTRATION_TOKEN=%s\nHERDR_GATEWAY_ALLOWED_RELAY_IDS="%s"\n' \
+                "$TOKEN" "$RELAY_IDS" > "$CONFIG_ENV"
+        fi
+        env -u HERDR_GATEWAY_REGISTRATION_TOKEN -u HERDR_GATEWAY_ALLOWED_RELAY_IDS \
+            docker compose --project-directory "$BUNDLE_DIR" \
+            --env-file "$CONFIG_ENV" -f "$BUNDLE_DIR/docker-compose.yml" \
+            config --format json > "$WORK_DIR/compose-config.json" ||
+            fail "Compose could not render $CASE registration settings"
+        python3 - "$WORK_DIR/compose-config.json" "$TOKEN" "$RELAY_IDS" <<'PY' ||
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as config_file:
+    environment = json.load(config_file)["services"]["gateway"]["environment"]
+for key, expected in zip(
+    ("HERDR_GATEWAY_REGISTRATION_TOKEN", "HERDR_GATEWAY_ALLOWED_RELAY_IDS"),
+    sys.argv[2:],
+):
+    if environment.get(key) != expected:
+        sys.exit(f"{key} did not reach the gateway environment unchanged")
+PY
+            fail "Compose lost $CASE registration settings"
+    done
+else
+    echo "SKIP: Compose registration rendering requires docker compose and python3"
+fi
+
 # A shared instance needs whole-gateway ceilings; every other limit is per-relay
 # or per-IP and cannot bound total memory.
 for KNOB in HERDR_GATEWAY_MAX_RELAYS HERDR_GATEWAY_MAX_CLIENTS; do

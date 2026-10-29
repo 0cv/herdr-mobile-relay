@@ -353,9 +353,11 @@ services:
     environment:
       HERDR_GATEWAY_ADDR: ":8443"
       HERDR_GATEWAY_STUN_ADDR: ${HERDR_GATEWAY_STUN_ADDR-:3478}
-      # Caddy is in front, so the leftmost X-Forwarded-For entry is the real
-      # client: the per-IP connect limit and /probe need it. Safe only because
-      # port 8443 is unreachable from outside the host.
+      HERDR_GATEWAY_REGISTRATION_TOKEN: ${HERDR_GATEWAY_REGISTRATION_TOKEN:-}
+      HERDR_GATEWAY_ALLOWED_RELAY_IDS: ${HERDR_GATEWAY_ALLOWED_RELAY_IDS:-}
+      # Caddy is in front, so the rightmost non-empty X-Forwarded-For entry
+      # across all header fields is the client: per-IP limits and /probe need it.
+      # Safe only because port 8443 is unreachable from outside the host.
       HERDR_GATEWAY_TRUSTED_PROXY: "true"
       HERDR_GATEWAY_STATE: /state/counters.json
       HERDR_GATEWAY_LOG_FORMAT: ${HERDR_GATEWAY_LOG_FORMAT:-json}
@@ -483,6 +485,14 @@ HERDR_GATEWAY_VERSION=@GATEWAY_VERSION@
 HERDR_GATEWAY_REVISION=@GATEWAY_REVISION@
 
 # --- Gateway tunables ---
+
+# Optional registration controls. Empty keeps registration open. For a private
+# gateway, set a strong shared token here and in every relay's service environment.
+# Never use the relay key as this token. The allow-list takes full 22-character
+# relay ids separated by commas or whitespace; quote values containing spaces.
+# With both controls set, registrations must satisfy both.
+HERDR_GATEWAY_REGISTRATION_TOKEN=
+HERDR_GATEWAY_ALLOWED_RELAY_IDS=
 
 # Bytes copied in both directions, per relay, per UTC calendar month. 0 is
 # unlimited, which is the right answer on a box you pay for yourself; the
