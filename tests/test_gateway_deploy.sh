@@ -336,22 +336,31 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 &
             printf 'HERDR_GATEWAY_REGISTRATION_TOKEN=%s\nHERDR_GATEWAY_ALLOWED_RELAY_IDS="%s"\nHERDR_GATEWAY_MONTHLY_BYTES=123456\n' \
                 "$TOKEN" "$RELAY_IDS" > "$REMOTE_FIXTURE_DIR/.env"
             cp "$REMOTE_FIXTURE_DIR/.env" "$WORK_DIR/expected-$CASE.env"
+            printf 'HERDR_GATEWAY_VERSION=0.0.1\nHERDR_GATEWAY_REVISION=obsolete\nHERDR_GATEWAY_IMAGE=herdr-gateway:old\nHERDR_CADDY_IMAGE=caddy:old\n' >> "$REMOTE_FIXTURE_DIR/.env"
         fi
-        # Stale source must be replaced even though .env must not be.
+        # Stale source and generated identity update; operator policy survives.
         printf 'old source\n' > "$REMOTE_FIXTURE_DIR/docker-compose.yml"
         run_deploy
         [ "$STATUS" -eq 0 ] || fail "$CASE upgrade failed: $STATUS"
         if [ "$CASE" != fresh ]; then
-            cmp "$WORK_DIR/expected-$CASE.env" "$REMOTE_FIXTURE_DIR/.env" ||
-                fail "$CASE upgrade replaced the existing server environment"
+            grep -vE '^HERDR_(GATEWAY_(VERSION|REVISION|IMAGE)|CADDY_IMAGE)=' "$REMOTE_FIXTURE_DIR/.env" > "$WORK_DIR/preserved.env"
+            cmp "$WORK_DIR/expected-$CASE.env" "$WORK_DIR/preserved.env" ||
+                fail "$CASE upgrade replaced operator configuration"
         fi
-        python3 - "$STUB_STATE/recreated-environment.json" "$TOKEN" "$RELAY_IDS" <<'PY' ||
+        docker compose --project-directory "$BUNDLE_DIR" -f "$BUNDLE_DIR/docker-compose.yml" config --format json > "$WORK_DIR/expected-release.json"
+        python3 - "$STUB_STATE/recreated-environment.json" "$TOKEN" "$RELAY_IDS" "$WORK_DIR/expected-release.json" <<'PY' ||
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as source:
-    environment = json.load(source)["services"]["gateway"]["environment"]
+    deployed = json.load(source)["services"]
+environment = deployed["gateway"]["environment"]
 assert environment["HERDR_GATEWAY_REGISTRATION_TOKEN"] == sys.argv[2]
 assert environment["HERDR_GATEWAY_ALLOWED_RELAY_IDS"] == sys.argv[3]
+with open(sys.argv[4], encoding="utf-8") as source:
+    expected = json.load(source)["services"]
+assert deployed["gateway"]["build"]["args"] == expected["gateway"]["build"]["args"]
+assert deployed["gateway"]["image"] == expected["gateway"]["image"]
+assert deployed["caddy"]["image"] == expected["caddy"]["image"]
 PY
             fail "$CASE upgrade cleared registration restrictions before recreation"
     done
@@ -377,7 +386,8 @@ printf 'HERDR_GATEWAY_REGISTRATION_TOKEN=local-private-token\nHERDR_GATEWAY_ALLO
 cp "$BUNDLE_DIR/.env" "$WORK_DIR/expected-local.env"
 run_deploy
 [ "$STATUS" -eq 0 ] || fail "local configuration preservation run failed"
-cmp "$WORK_DIR/expected-local.env" "$BUNDLE_DIR/.env" ||
+grep -vE '^HERDR_(GATEWAY_(VERSION|REVISION|IMAGE)|CADDY_IMAGE)=' "$BUNDLE_DIR/.env" > "$WORK_DIR/preserved-local.env"
+cmp "$WORK_DIR/expected-local.env" "$WORK_DIR/preserved-local.env" ||
     fail "regenerating the bundle erased local registration settings"
 
 # --- Public endpoint never answers: keep the transport unchanged --------------
