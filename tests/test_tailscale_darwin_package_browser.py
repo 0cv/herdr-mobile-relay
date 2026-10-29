@@ -467,6 +467,8 @@ ALLOWED = (
     # PG3: fallback service restart rollback unit paths (docs/updates.md is already listed).
     "relay/plugin-build.sh",
     "tests/test_plugin_build.sh",
+    # Installed conversation chain race fixture repair in CI recovery.
+    "internal/conversation/claude_chain_test.go",
 )
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
 # SCOPE_BASE to 59eda0d83a785822696da03461601eca906231c6. A future new path
