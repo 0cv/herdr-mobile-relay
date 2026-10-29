@@ -82,9 +82,12 @@ CANDIDATE_PATHS = (*FILES, QUALIFY_GATE)
 # a frozen literal of explicit repo-relative paths (no globs, no directory
 # prefixes), exact at the reviewed snapshot: it equals the diff from SCOPE_BASE to
 # the candidate that introduced it, so it carries no speculative entries. A later
-# commit that touches a path outside ALLOWED must extend ALLOWED in the same
-# commit; that friction is intended. The workflow's producer step calls
-# candidate_scope_allowed from this module, so there is exactly one allowlist.
+# commit that touches a path outside ALLOWED must extend the scope deliberately.
+# The installed Tailscale source at 59eda0d adds 275 paths outside the earlier
+# BYO list. Pin that *exact sorted path set* separately: this is path provenance,
+# not a review or qualification of installed runtime behavior. No glob, prefix,
+# ancestry shortcut, or arbitrary subset of the new set is admitted. The
+# workflow's producer and the runtime use the same predicate.
 REQUIRED = (FILES[0], FILES[1], QUALIFY_GATE)
 ALLOWED = (
     # M5 reconciliation, release pipeline and runtime ports from main (8b44cd8f #57, 3901f13f 0.22.6,
@@ -465,6 +468,10 @@ ALLOWED = (
     "relay/plugin-build.sh",
     "tests/test_plugin_build.sh",
 )
+# SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
+# SCOPE_BASE to 59eda0d83a785822696da03461601eca906231c6. A future new path
+# must update this pin explicitly; the BYO receipt still asserts BYO only.
+INSTALLED_PATH_SET_SHA256 = "471649e5c4c937ca9e9e5f3f6f8634d347d1f72d3020cb40b12465474ef13164"
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")
 LIMITS = MappingProxyType({
@@ -597,11 +604,15 @@ def require(condition, code):
 
 
 def candidate_scope_allowed(changed):
-    # REQUIRED <= changed <= ALLOWED, no duplicates: a missing gate file, a path
-    # outside the frozen allowlist, a repeat or a non-list container all refuse.
-    return (type(changed) is list and all(type(path) is str for path in changed)
-            and len(changed) == len(set(changed))
-            and set(REQUIRED) <= set(changed) <= set(ALLOWED))
+    # Retain the old BYO scope or accept exactly the pinned installed addition.
+    # Both require every gate file, unique repo-relative paths and no new paths.
+    if type(changed) is not list or not all(type(path) is str for path in changed):
+        return False
+    paths = set(changed)
+    if len(paths) != len(changed) or not set(REQUIRED) <= paths:
+        return False
+    extra = sorted(paths - set(ALLOWED))
+    return not extra or sha(("\n".join(extra) + "\n").encode()) == INSTALLED_PATH_SET_SHA256
 
 
 def cap(kind, value):

@@ -64,7 +64,10 @@ jobs:
           .github/workflows/tailscale-native-preflight.yml
           .github/workflows/native-manager-lifecycle.yml
       - run: go vet ./...
+      # Handoff fixtures require a caller-supplied canonical short temp parent.
       - run: go test ./...
+        env:
+          TMPDIR: /tmp
 
   tailscale-app-integration:
     needs: provenance
@@ -232,6 +235,8 @@ jobs:
       - name: Test evidence refusals offline
         run: python3 -I -B tests/test_installed_inert.py
       - name: Require exact installed inert invocations and sanitized evidence
+        env:
+          TMPDIR: ${{ matrix.os == 'Darwin' && '/private/tmp' || '/tmp' }}
         run: >-
           python3 -I -B scripts/ci/installed_inert.py
           --mode '${{ matrix.mode }}' --os '${{ matrix.os }}'
@@ -282,6 +287,7 @@ jobs:
       - name: Require exact installed hosted cases and sanitized evidence
         env:
           HERDR_INSTALLED_HOSTED_TEST: "1"
+          TMPDIR: ${{ matrix.os == 'Darwin' && '/private/tmp' || '/tmp' }}
         run: >-
           python3 -I -B scripts/ci/installed_hosted.py
           --mode '${{ matrix.mode }}' --os '${{ matrix.os }}'
@@ -333,6 +339,8 @@ jobs:
           go-version: 1.27.1
           cache: true
       - run: go test -race ./...
+        env:
+          TMPDIR: /tmp
 
   go-darwin:
     needs: provenance

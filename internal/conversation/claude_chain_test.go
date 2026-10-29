@@ -2565,6 +2565,11 @@ func TestClaudeChainPreparationDeduplicatesConcurrentHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer browser.releaseClaudeChainContext(context)
+	// Keep the worker alive until all callers have observed the same queued job.
+	// Otherwise a fast worker can complete before the last caller arrives.
+	release := make(chan struct{})
+	defer close(release)
+	browser.chainWorkerBeforeCaptureObserver = func() { <-release }
 	const callers = 24
 	jobs := make(chan *browseJob, callers)
 	pages := make(chan *BrowsePage, callers)

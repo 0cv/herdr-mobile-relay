@@ -1421,7 +1421,7 @@ func TestInstalledBundleBuilderShapeAndCanonicalDescriptorBoundary(t *testing.T)
 			t.Fatal("public wrapper policy diverged from package builder")
 		}
 	}
-	if len(bundleWrappers) != 23 {
+	if len(bundleWrappers) != 25 {
 		t.Fatal("explicit wrapper inventory changed without a fixture update")
 	}
 	for _, required := range []string{"common.sh", "herdr-mobile-relay-service.sh", "plugin-on-event.sh", "setup-link.sh", "stable-setup.sh", "stable-teardown.sh", "start.sh", "transport-switch-locked.sh"} {

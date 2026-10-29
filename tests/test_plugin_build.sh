@@ -577,10 +577,11 @@ cmp -s "$WORK_DIR/public-first-identity" "$FRESH_CONFIG/relay.env" &&
     echo 'public reinstall changed private identity/credential state or scheduled Setup more than once' >&2; exit 1;
 }
 
-# --- Explicit operator-managed CLI package update ---------------------------
-# Exercise the complete update entrypoint with only a fake relay manager,
-# release installer, health endpoint and systemctl. The selected CLI is a
-# sentinel and the persistent route journal is checked byte-for-byte.
+# --- Explicit installed CLI package update ----------------------------------
+# Exercise the selected production-scope wrapper with only a fake relay manager,
+# release installer, health endpoint and systemctl. This does not qualify or
+# enable production Serve. The selected CLI is a sentinel and the persistent
+# route journal is checked byte-for-byte.
 CLI_UPDATE_DEVELOPMENT_ROOT="$TEST_HOME/.local/state/herdr-mobile-relay/tailscale-cli-development"
 CLI_UPDATE_STATE="$CLI_UPDATE_DEVELOPMENT_ROOT/registration"
 CLI_UPDATE_COORDINATION="$TEST_HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination"
@@ -624,7 +625,7 @@ write_cli_update_config() {
     local env_file="$1"
     cat >> "$env_file" <<EOF
 HERDR_RELAY_TRANSPORT=tailscale-cli
-HERDR_TAILSCALE_CLI_SCOPE=development
+HERDR_TAILSCALE_CLI_SCOPE=production
 HERDR_TAILSCALE_CLI_BIN=$CLI_TAILSCALE
 HERDR_TAILSCALE_CLI_STATE_ROOT=$CLI_UPDATE_STATE
 HERDR_TAILSCALE_CLI_COORDINATION_ROOT=$CLI_UPDATE_COORDINATION
@@ -723,7 +724,7 @@ test "$(cat "$RESTART_LOG")" = restart
 grep -F "persistent Serve route and registration journal are retained" \
     "$WORK_DIR/cli-update-success" >/dev/null
 [ "$(wc -l < "$CLI_ROUTE_RECORD")" -eq 1 ]
-grep -F "tailscale-cli assert-ready --development-root $CLI_UPDATE_DEVELOPMENT_ROOT --binary $CLI_TAILSCALE" "$CLI_ROUTE_RECORD" >/dev/null
+grep -F "tailscale-cli assert-ready --binary $CLI_TAILSCALE" "$CLI_ROUTE_RECORD" >/dev/null
 if grep -E 'tailscale-cli (publish|unpublish)' "$CLI_UPDATE_MANAGER_RECORD" "$CLI_ROUTE_RECORD" >/dev/null; then
     echo "operator-managed package update mutated the persistent Serve route" >&2
     exit 1

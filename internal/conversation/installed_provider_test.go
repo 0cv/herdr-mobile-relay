@@ -6948,7 +6948,7 @@ func hermesSemanticRun(t *testing.T, p hermesSemanticCase) {
 		if p.typedField == "tool_calls" {
 			wantType, wantValue = reflect.TypeOf(""), "bool"
 		}
-		if !errors.As(err, &typed) || typed.Field != p.typedField || typed.Struct != "hermesRow" || typed.Value != wantValue || typed.Type != wantType {
+		if !errors.As(err, &typed) || typed.Field != "0."+p.typedField || typed.Struct != "" || typed.Value != wantValue || typed.Type != wantType {
 			t.Fatalf("actual decoder type identity: %v", err)
 		}
 		for _, forbidden := range []error{context.Canceled, context.DeadlineExceeded, conversationlife.ErrRefused, sqliteexec.ErrCleanupUncertain, ErrSourceCleanupUncertain, sqliteexec.ErrOutputLimit} {

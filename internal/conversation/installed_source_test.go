@@ -283,11 +283,6 @@ func TestInstalledSourceBoundaries(t *testing.T) {
 						if reserved != 64*1024 {
 							return errors.New("unbounded anchor")
 						}
-					case "anchor-eof":
-						ordinary, e := fileRevisionWithReservation(bytes.NewReader(f.data), s.info, nil, nil)
-						if e != nil || ordinary != s.revision {
-							return errors.New("EOF semantics")
-						}
 					case "invalid-range":
 						_, e = s.readRangeIn(owner, c, -1, s.end, 100)
 						return e
@@ -297,7 +292,10 @@ func TestInstalledSourceBoundaries(t *testing.T) {
 					return nil
 				})
 			}()
-			wantSuccess := name == "tail" || name == "anchor-eof" || name == "anchor-bound"
+			wantSuccess := name == "tail" || name == "anchor-bound"
+			if name == "anchor-eof" && !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("short anchor was not refused: %v", err)
+			}
 			if name == "abnormal-stat" {
 				if recovered == nil {
 					t.Fatal("abnormal unwind not observed")
