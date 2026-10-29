@@ -884,13 +884,16 @@ if name == "stat" and len(args) == 3 and args[:2] in (["-c", "%u:%a:%h"], ["-f",
     inside(args[2]); event("read")
     if fault == "stat": raise SystemExit(2)
     real()
-if name == "plutil" and len(args) == 6 and args[:5] == ["-extract", "EnvironmentVariables.HERDR_RELAY_ENV", "raw", "-o", "-"]:
+if name == "plutil" and len(args) == 6 and args[0] == "-extract" and args[1] in (
+        "ProgramArguments.2", "EnvironmentVariables.HERDR_RELAY_ENV") and args[2:5] == ["raw", "-o", "-"]:
     path = inside(args[5]); event("decode")
     if fault == "decode": raise SystemExit(2)
     try:
-        value = plistlib.loads(path.read_bytes())["EnvironmentVariables"]["HERDR_RELAY_ENV"]
+        plist = plistlib.loads(path.read_bytes())
+        value = (plist["ProgramArguments"][2] if args[1] == "ProgramArguments.2"
+                 else plist["EnvironmentVariables"]["HERDR_RELAY_ENV"])
         assert isinstance(value, str) and value
-    except Exception:
+    except (KeyError, IndexError, ValueError, TypeError, AssertionError):
         raise SystemExit(2)
     print(value)
     raise SystemExit(0)

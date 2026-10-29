@@ -435,7 +435,7 @@ for CLI_FAULT in zero wrong-status missing-diagnostic activation cli server othe
         zero) CLI_STATUS=0 ;;
         wrong-status) CLI_STATUS=23 ;;
         missing-diagnostic) CLI_DIAGNOSTIC='Unavailable.' ;;
-        activation) printf '%s\n' '"$HERDR_RELAY_BIN" tailscale-cli activation-check || :' >> "$CLI_WRAPPER" ;;
+        activation) printf '%s\n' '"$HERDR_RELAY_BIN" tailscale-cli activation-check || :' '"$HERDR_RELAY_BIN" tailscale-cli activation-check || :' >> "$CLI_WRAPPER" ;;
         cli) printf '%s\n' '"$HERDR_TAILSCALE_CLI_BIN" status || :' >> "$CLI_WRAPPER" ;;
         server) printf '%s\n' '"$HERDR_RELAY_BIN" serve-installed || :' >> "$CLI_WRAPPER" ;;
         other) printf '%s\n' '"$HERDR_RELAY_BIN" version || :' >> "$CLI_WRAPPER" ;;
@@ -458,7 +458,7 @@ for CLI_FAULT in zero wrong-status missing-diagnostic activation cli server othe
     if OUTPUT=$(check_release "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" 2>&1); then
         echo "installed-release check accepted CLI contract fault: $CLI_FAULT" >&2; exit 1
     fi
-    printf '%s\n' "$OUTPUT" | grep -Fq 'extracted CLI service must be unavailable/non-ready (69) with zero command effects'
+    printf '%s\n' "$OUTPUT" | grep -Fq 'extracted CLI service must refuse after only activation-check (69) without CLI effects'
 done
 cp "$REPO_DIR/relay/herdr-mobile-relay-service.sh" "$CLI_WRAPPER"
 cmp "$REPO_DIR/relay/herdr-mobile-relay-service.sh" "$CLI_WRAPPER" >/dev/null
