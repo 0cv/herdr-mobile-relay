@@ -143,12 +143,10 @@ ALLOWED = (
     "tests/mobile/unit/android-environment.ts",
     "tests/mobile/unit/run.ts",
     "tests/pi-command-bridge.test.mjs",
-    # Parked always-on/doctor/menu WIP (commit 88a6714) and its tests and docs.
+    # Parked always-on/menu WIP (commit 88a6714) and its tests and docs.
     # These paths are in the candidate only because the WIP is parked on this branch;
     # they are NOT reviewed until M3 and listing them here is not a review.
     "README.md",
-    "cmd/herdr-mobile-relay/doctor.go",
-    "cmd/herdr-mobile-relay/doctor_test.go",
     "cmd/herdr-mobile-relay/main.go",
     "cmd/herdr-mobile-relay/main_test.go",
     "docs/collie-tailscale-comparison.md",
@@ -160,26 +158,6 @@ ALLOWED = (
     "internal/darwinacl/darwinacl_darwin.go",
     "internal/darwinacl/darwinacl_other.go",
     "internal/darwinacl/darwinacl_test.go",
-    "internal/doctor/bundle.go",
-    "internal/doctor/bundle_test.go",
-    "internal/doctor/config.go",
-    "internal/doctor/config_acl_darwin.go",
-    "internal/doctor/config_acl_other.go",
-    "internal/doctor/config_test.go",
-    "internal/doctor/doctor.go",
-    "internal/doctor/doctor_test.go",
-    "internal/doctor/herdr.go",
-    "internal/doctor/herdr_peer_darwin.go",
-    "internal/doctor/herdr_peer_linux.go",
-    "internal/doctor/herdr_test.go",
-    "internal/doctor/local.go",
-    "internal/doctor/local_test.go",
-    "internal/doctor/package_acl.go",
-    "internal/doctor/package_acl_test.go",
-    "internal/doctor/package_identity.go",
-    "internal/doctor/package_identity_test.go",
-    "internal/doctor/probes.go",
-    "internal/doctor/probes_test.go",
     "internal/readiness/readiness.go",
     "internal/readiness/readiness_test.go",
     "internal/support/support.go",
@@ -188,7 +166,6 @@ ALLOWED = (
     "relay/plugin-setup-menu.sh",
     "relay/plugin-status.sh",
     "scripts/package-release.sh",
-    "tests/test_plugin_doctor.py",
     "tests/test_setup_menu.py",
     "tests/test_tailscale_consent.py",
     # The 21 reviewed service/installer repairs (A1-F001..A1-F009, revision 23 plus the
@@ -410,7 +387,7 @@ ALLOWED = (
     # Listing a path here is not a review.
     "internal/profiles/ownership.go",
     "internal/profiles/ownership_test.go",
-    # Unit DOC: align the setup-menu and macOS doctor text with the code.
+    # Unit DOC: align the setup-menu text with the code.
     "QUICKSTART.md",
     "docs/transports.md",
     # M5 U-H: port of main 0e070b26..278b8c26 (terminal scroll fixes #71, workspace.move_block capability evidence

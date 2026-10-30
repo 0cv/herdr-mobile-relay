@@ -1,127 +1,66 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Status is a rendering of the packaged doctor, never shell-evaluated config or
-# an independent service/network health implementation. No common.sh startup.
-refuse() {
-    if printf '%s\n' "$1" >&2; then :; fi
-    exit "$2"
-}
-JSON_MODE=0
-CONFIG_SET=0
-SEEN_JSON=0
-SEEN_INGRESS=0
-SEEN_CONCISE=0
-COMMAND=doctor
-# Function positional arguments preserve the caller's argv without empty-array
-# nounset behavior on the packaged macOS Bash 3.2.
-validate_args() {
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --concise)
-            [ "$SEEN_CONCISE" -eq 0 ] || refuse 'invalid diagnostic invocation' 2
-            SEEN_CONCISE=1
-            COMMAND=status
-            ;;
-        --json)
-            [ "$SEEN_JSON" -eq 0 ] || refuse 'invalid diagnostic invocation' 2
-            SEEN_JSON=1
-            JSON_MODE=1
-            ;;
-        --probe-ingress)
-            [ "$SEEN_INGRESS" -eq 0 ] || refuse 'invalid diagnostic invocation' 2
-            SEEN_INGRESS=1
-            ;;
-        --config)
-            [ "$CONFIG_SET" -eq 0 ] || refuse 'invalid diagnostic invocation' 2
-            CONFIG_SET=1
-            [ "$#" -ge 2 ] || refuse 'invalid diagnostic invocation' 2
-            shift
-            [ -n "$1" ] || refuse 'invalid diagnostic invocation' 2
-            ;;
-        *) refuse 'invalid diagnostic invocation' 2 ;;
-    esac
-    shift
-done
-}
-validate_args "$@"
-SCRIPT_PARENT=${BASH_SOURCE[0]%/*}
-[ "$SCRIPT_PARENT" != "${BASH_SOURCE[0]}" ] || SCRIPT_PARENT=.
-if ! SCRIPT_DIR="$(CDPATH= cd -- "$SCRIPT_PARENT" 2>/dev/null && pwd -P)"; then
-    refuse 'diagnostic executable unavailable' 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -n "${HERDR_BIN_PATH:-}" ]; then
+    export HERDR_BIN="$HERDR_BIN_PATH"
 fi
-PACKAGE_ROOT=${SCRIPT_DIR%/*}
-if [ -f "$PACKAGE_ROOT/release-manifest.json" ] && [ -f "$PACKAGE_ROOT/herdr-mobile-relay" ] && [ -x "$PACKAGE_ROOT/herdr-mobile-relay" ]; then
-    BINARY="$PACKAGE_ROOT/herdr-mobile-relay"
-elif [ -n "${HERDR_RELAY_BIN:-}" ]; then
-    BINARY="$HERDR_RELAY_BIN"
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+# shellcheck source=common.sh
+. "$SCRIPT_DIR/common.sh"
+
+ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+load_relay_env "$ENV_FILE"
+
+echo "🐑 Herdr Mobile Relay status"
+echo ""
+echo "  Config file:  $ENV_FILE"
+if [ -f "$ENV_FILE" ] && grep -q '^HERDR_RELAY_TOKEN=..*' "$ENV_FILE"; then
+    echo "  Relay token:  present"
 else
-    [ -n "${HERDR_RELEASE_ROOT:-}${XDG_DATA_HOME:-}${HOME:-}" ] || refuse 'diagnostic executable unavailable' 1
-    RELEASE_ROOT=${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-${HOME:-}/.local/share}/herdr-mobile-relay}
-    BINARY="$RELEASE_ROOT/current/herdr-mobile-relay"
+    echo "  Relay token:  missing — run the Quick Start action once"
 fi
-case "$BINARY" in /*) ;; *) refuse 'diagnostic executable unavailable' 1 ;; esac
-[ -f "$BINARY" ] && [ -x "$BINARY" ] || refuse 'diagnostic executable unavailable' 1
-if [ "$CONFIG_SET" -eq 0 ]; then
-    if [ -n "${HERDR_RELAY_ENV:-}" ]; then
-        ENV_FILE="$HERDR_RELAY_ENV"
-    elif [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
-        ENV_FILE="$HERDR_PLUGIN_CONFIG_DIR/relay.env"
-    else
-        ENV_FILE="$SCRIPT_DIR/.env"
-    fi
-    set -- --config "$ENV_FILE" "$@"
-fi
-# Consume only the wrapper's rendering flag. Rotate remaining positional argv
-# rather than using empty arrays (macOS Bash 3.2); config values remain data even
-# if they resemble flags. Preserve the original ordering of forwarded arguments.
-invoke_diagnostic() {
-    local remaining="$#"
-    local value
-    while [ "$remaining" -gt 0 ]; do
-        case "$1" in
-            --concise) shift ;;
-            --config)
-                value="$2"
-                shift 2
-                set -- "$@" --config "$value"
-                remaining=$((remaining - 1))
-                ;;
-            *)
-                value="$1"
-                shift
-                set -- "$@" "$value"
-                ;;
-        esac
-        remaining=$((remaining - 1))
-    done
-    "$BINARY" "$COMMAND" "$@"
-}
-# Suppress path-bearing shell/loader errors, including a raced-away executable.
-# The trusted doctor's finalized output is a finite-catalog report. Retain it
-# in memory (no temporary file) to distinguish a report decision of 2 from an
-# invocation refusal, which emits NO stdout. Do not parse or re-decide health.
-# Command substitution removes trailing newlines; restore the report terminator.
-if REPORT="$(invoke_diagnostic "$@" 2>/dev/null)"; then
-    STATUS=0
-else
-    STATUS=$?
-fi
-if [ -n "$REPORT" ]; then
-    if ! printf '%s\n' "$REPORT" 2>/dev/null; then
-        refuse 'diagnostic output unavailable' 1
-    fi
-elif [ "$STATUS" -eq 2 ]; then
-    if printf '%s\n' 'diagnostic input refused' >&2; then :; fi
-fi
-case "$STATUS" in
-    126|127) if printf '%s\n' 'diagnostic executable unavailable' >&2; then :; fi ;;
+
+case "$(uname -s)" in
+    Darwin)
+        SERVICE_FILE="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+        if [ ! -f "$SERVICE_FILE" ]; then
+            echo "  Service:      not installed"
+        elif launchctl print "gui/$(id -u)/com.herdr-mobile-relay.service" >/dev/null 2>&1; then
+            echo "  Service:      installed (active)"
+        else
+            echo "  Service:      installed (inactive)"
+        fi
+        ;;
+    Linux)
+        SERVICE_FILE="$HOME/.config/systemd/user/herdr-mobile-relay.service"
+        if [ ! -f "$SERVICE_FILE" ]; then
+            echo "  Service:      not installed"
+        else
+            SERVICE_STATE="$(systemctl --user is-active herdr-mobile-relay.service 2>/dev/null || true)"
+            if [ -n "$SERVICE_STATE" ]; then
+                echo "  Service:      installed ($SERVICE_STATE)"
+            else
+                echo "  Service:      installed (status unavailable)"
+            fi
+        fi
+        ;;
 esac
-# The setup menu pauses once itself. Never prompt or add text to JSON/pipelines;
-# EOF at an interactive pause cannot change the diagnostic command's exit.
-if [ "$JSON_MODE" -eq 0 ] && [ "${HERDR_SETUP_MENU:-}" != 1 ] && [ -t 0 ] && [ -t 1 ]; then
-    if printf '\nPress Enter to close this pane.'; then
-        if read -r _answer; then :; fi
-    fi
+SERVICE_ENV="$(installed_service_env_file)"
+if [ -n "$SERVICE_ENV" ]; then
+    echo "  Service env:  $SERVICE_ENV"
 fi
-exit "$STATUS"
+
+PORT="${HERDR_RELAY_PORT:-8375}"
+if HEALTH="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/healthz" 2>/dev/null)"; then
+    echo "  Relay health: $HEALTH"
+    echo ""
+    echo "  Sanitized support snapshot:"
+    "$(relay_binary)" support || true
+else
+    echo "  Relay health: not reachable on 127.0.0.1:$PORT — is the relay running?"
+fi
+
+pause_before_close

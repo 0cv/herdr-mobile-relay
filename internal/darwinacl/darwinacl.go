@@ -1,5 +1,5 @@
 // Package darwinacl is the one bounded, descriptor-bound ACL inspector for macOS,
-// shared by the doctor's configuration reader and the support-snapshot reader.
+// shared by the installed package and support-snapshot readers.
 // Mode bits cannot rule out ACL grants, so a reader proves privacy from the
 // opened descriptor. Nothing here returns a GUID, a right, an identity or a
 // path: results are counts, and every unknown, truncated, malformed or

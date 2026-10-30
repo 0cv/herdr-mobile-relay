@@ -2,11 +2,10 @@
 # Service qualification driver for GitHub-hosted CI.
 #
 # Modes (anything else refuses with exit 2):
-#   suites               the ten unsharded suites, each invoked the way the Makefile's
-#                        shell-check invokes it. The dispatch, doctor and setup-menu suites that
+#   suites               the nine unsharded suites, each invoked the way the Makefile's
+#                        shell-check invokes it. The dispatch and setup-menu suites that
 #                        tests/test_native_install.sh nests are each their own required run here
-#                        (own exit status, timing and bound), so one doctor failure can no
-#                        longer hide the native cells
+#                        (own exit status, timing and bound)
 #   native TIER I/N      one shard of tests/test_native_install.sh (TIER fast|full; N is the
 #                        tier's fixed shard count in tests/service_qualification_matrix.py:
 #                        5 fast, 29 full, from modeled hosted-macOS shard times) and
@@ -48,7 +47,7 @@ set -eu
 # SUITE_TIMEOUT_SECONDS. The dispatch suite's helper build is bounded separately
 # by HELPER_BUILD_TIMEOUT_SECONDS, and its tests then get their own full
 # SUITE_TIMEOUT_SECONDS. There is no aggregate budget, no reservation and no
-# job-clock arithmetic. Residual, stated plainly: ten suites at their bounds can
+# job-clock arithmetic. Residual, stated plainly: nine suites at their bounds can
 # need more than the workflow's 60-minute job cap (timeout-minutes). A
 # pathologically slow or hung run is then cancelled by GitHub at that cap, which
 # is a red job with a missing summary artifact, never a pass. Tune
@@ -349,18 +348,18 @@ run_service_suites() {
     run_suite tests/test_install.sh '' /bin/sh tests/test_install.sh
     run_suite tests/test_service_supervision.py '' "$PYTHON3" tests/test_service_supervision.py
 
-    # The dispatch, doctor and setup-menu suites require NATIVE_HELPER at import time: the compiled
+    # The dispatch and setup-menu suites require NATIVE_HELPER at import time: the compiled
     # relay used for strict JSON/origin commands (the native suite builds its own the same way:
     # go build -o <helper> ./cmd/herdr-mobile-relay). The build only compiles; it does not run the
     # relay. It has its own bound (HELPER_BUILD_TIMEOUT_SECONDS) and each suite then gets its own
     # bound, the dispatch suite's time including the build; nothing is subtracted between them. A
-    # failed or timed-out build fails all three without running them.
+    # failed or timed-out build fails both without running them.
     dispatch_name=tests/test_service_transport_dispatch.py
     helper="$work_dir/native-helper"
     helper_status=0
     banner "$dispatch_name"
     dispatch_started=$SECONDS
-    printf 'building the NATIVE_HELPER relay binary for the dispatch, doctor and setup-menu suites\n'
+    printf 'building the NATIVE_HELPER relay binary for the dispatch and setup-menu suites\n'
     run_closed "$HELPER_BUILD_TIMEOUT_SECONDS" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
         helper_status=$?
     dispatch_status=$helper_status
@@ -373,8 +372,7 @@ run_service_suites() {
     record_suite "$dispatch_name" "$dispatch_status" "$((SECONDS - dispatch_started))"
     check_checkout "$dispatch_name"
 
-    # The doctor and setup-menu suites keep the bounds they had nested in the native suite (120s, 180s).
-    run_helper_suite tests/test_plugin_doctor.py 120
+    # The setup-menu suite keeps its bound from the native suite (180s).
     run_helper_suite tests/test_setup_menu.py 180
 
     # On a Linux host the full-uninstall fixtures run the real mount guard: the compiled relay is their binary.
@@ -445,10 +443,10 @@ run_uninstall_cli_suite() {
 
 EXPECTED_SUITE_COUNT=0
 case "$mode" in
-    suites) EXPECTED_SUITE_COUNT=10; run_service_suites ;;
+    suites) EXPECTED_SUITE_COUNT=9; run_service_suites ;;
     native) EXPECTED_SUITE_COUNT=1; run_native_suite ;;
     uninstall-cli) EXPECTED_SUITE_COUNT=1; run_uninstall_cli_suite ;;
-    *) EXPECTED_SUITE_COUNT=12; run_service_suites; run_native_suite; run_uninstall_cli_suite ;;
+    *) EXPECTED_SUITE_COUNT=11; run_service_suites; run_native_suite; run_uninstall_cli_suite ;;
 esac
 
 # --------------------------------------------------------------- results ----

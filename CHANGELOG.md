@@ -13,7 +13,7 @@ project follows [Semantic Versioning](https://semver.org/).
   cannot be confirmed. BYO leaves the operator's route unchanged. The installed
   CLI selector remains disabled pending runtime and physical-phone qualification;
   isolated checkout tools support only the documented development profiles.
-- Add read-only relay doctor/status diagnostics and an opt-in encrypted last-known
+- Add an opt-in encrypted last-known
   phone summary. Resume timing remains local to the phone with redacted export.
 
 ### Changed

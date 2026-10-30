@@ -344,7 +344,7 @@ jobs:
 
   go-darwin:
     needs: provenance
-    name: Go Darwin ACL, doctor and support (macos-15)
+    name: Go Darwin ACL and support (macos-15)
     runs-on: macos-15
     timeout-minutes: 30
     permissions:
@@ -365,9 +365,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(uname -s)" = Darwin
           log="$RUNNER_TEMP/go-darwin-test.jsonl" err="$RUNNER_TEMP/go-darwin-test.stderr"
-          go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support >"$log" 2>"$err" && go_exit=0 || go_exit=$?
+          go test -json -count=1 ./internal/darwinacl ./internal/support >"$log" 2>"$err" && go_exit=0 || go_exit=$?
           go test -json -count=1 ./cmd/herdr-mobile-relay -run '^TestSupportCommandProjectsLoadedPrivateState$' >>"$log" 2>>"$err" || go_exit=$?
-          go test -json -count=1 ./cmd/herdr-mobile-relay -run '^(TestDarwinSelectedConfigAndRequiredBundleUnknown|TestDiagnosticActualLocalCompositionStillIncomplete|TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate|TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure|TestDiagnosticBundleFailureUnknownPriorityAndLateResult)$' >>"$log" 2>>"$err" || go_exit=$?
           [ "$go_exit" = 0 ] || tail -n 5 "$err" | cut -c1-200 >&2
           python3 - "$log" "$go_exit" <<'PY'
           import json
@@ -379,10 +378,8 @@ jobs:
           log, go_exit = sys.argv[1:]
           required = {
               "internal/darwinacl": ["TestRealPlainObjectsHaveNoACLOnAnAllowedVolume"],
-              "internal/doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads",
-                                  "TestDarwinHostedPackageIdentityACLFreeAndGrantRefusal", "TestDarwinHostedBundleACLFreePositive", "TestDarwinHostedBundleACLGrantRefusals"],
               "internal/support": ["TestLoadDarwinHostedRealACL"],
-              "cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState", "TestDarwinSelectedConfigAndRequiredBundleUnknown", "TestDiagnosticActualLocalCompositionStillIncomplete", "TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate", "TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure", "TestDiagnosticBundleFailureUnknownPriorityAndLateResult"],
+              "cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState"],
           }
           module = [line.split()[1] for line in open("go.mod") if line.startswith("module ")][0]
           ends, unparsed = {}, 0
@@ -402,7 +399,7 @@ jobs:
               problems.append("%d log lines were not JSON events with an Action" % unparsed)
           for package, names in required.items():
               path = module + "/" + package
-              expected_package_ends = ["pass"] * (2 if package == "cmd/herdr-mobile-relay" else 1)
+              expected_package_ends = ["pass"]
               if ends.get((path, None)) != expected_package_ends:
                   problems.append("%s: package ended %s" % (package, ends.get((path, None)) or "missing"))
               for name in names:
@@ -432,7 +429,7 @@ jobs:
           cache: true
       # Makefile's PATH assignment is an ordinary makefile variable and can
       # otherwise reintroduce host tools/adapters after a clean step env.
-      # shell-check-ci-complement is `make shell-check` minus the native-install (with its nested dispatch, doctor
+      # shell-check-ci-complement is `make shell-check` minus the native-install (with its nested dispatch
       # and setup-menu suites), full-uninstall and uninstall-CLI suites. Those are required runs of the Service
       # qualification workflows on every event this workflow runs on (fast on pushes, full on pull requests; see
       # docs/ci-test-tiers.md), so they are not repeated here. The complete default stays `make shell-check`.

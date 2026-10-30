@@ -5,7 +5,7 @@ set -euo pipefail
 # loader, process/service probes, network tools or parent-side config parser.
 SCRIPT_PARENT=${BASH_SOURCE[0]%/*}
 [ "$SCRIPT_PARENT" != "${BASH_SOURCE[0]}" ] || SCRIPT_PARENT=.
-if ! SCRIPT_DIR="$(CDPATH= cd -- "$SCRIPT_PARENT" 2>/dev/null && pwd -P)"; then
+if ! SCRIPT_DIR="$(CDPATH='' cd -- "$SCRIPT_PARENT" 2>/dev/null && pwd -P)"; then
     printf '%s\n' 'Setup menu unavailable.' >&2
     exit 1
 fi
@@ -14,33 +14,8 @@ if ! cd -- "$SCRIPT_DIR" 2>/dev/null; then
     exit 1
 fi
 
-print_header() {
-    local report=''
-    local status
-    # Re-enter the named directory after an in-place plugin update. The trusted
-    # status renderer has one finite line, not raw JSON/status/config data.
-    if report="$(
-        cd -- "$SCRIPT_DIR" 2>/dev/null || exit 1
-        HERDR_SETUP_MENU=1 "$SCRIPT_DIR/plugin-status.sh" --concise 2>/dev/null
-    )"; then status=0; else status=$?; fi
-    case "$status" in
-        0|1|2|3)
-            # Presentation framing only; do not parse/re-decide health. Reject
-            # multiline/control/oversize output rather than show it as a header.
-            if [ -n "$report" ] && [ "${#report}" -le 2048 ]; then
-                case "$report" in
-                    *[$'\001'-$'\037'$'\177']*) ;;
-                    *) printf 'Current setup (selection, not readiness): %s\n' "$report"; return ;;
-                esac
-            fi
-            ;;
-    esac
-    printf '%s\n' 'Current setup: selected_transport=unknown status=unknown (diagnostic unavailable).'
-}
-
 render_main() {
     printf '\n%s\n\n' 'Herdr Mobile Relay Setup'
-    print_header
     printf '\n%s\n' \
         'Connection' \
         '  1. Cloudflare' \
@@ -54,7 +29,7 @@ render_main() {
         '     needed for gateway unless an app address already exists.' \
         '' \
         'Diagnostics' \
-        '  6. Doctor' \
+        '  6. Show Full Status' \
         '  q. Exit, change nothing' \
         ''
 }
@@ -135,6 +110,5 @@ while true; do
         esac
     done
     [ "$MENU_EOF" -eq 0 ] || exit 0
-    # Action returns stay in their submenu; only Back enters the main menu and
-    # refreshes its read-only header. Main-menu actions refresh on return.
+    # Action returns stay in their submenu; only Back enters the main menu.
 done

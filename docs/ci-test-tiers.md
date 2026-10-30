@@ -16,11 +16,10 @@ way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is nev
 | `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes, and a push run is never accepted); none found fails closed; the existing 1800 s window | - |
 | `resume-benchmark.yml` | `workflow_dispatch` only (was a per-push `check.yml` job) | - | - |
 
-Both service workflows also run the ten unsharded suites on both runners: common, credentials, **install** (the
+Both service workflows also run the nine unsharded suites on both runners: common, credentials, **install** (the
 hosted macOS run of `install.sh`'s Darwin-specific `stat -f` branch), supervision, dispatch,
-**doctor**, **setup-menu**, full uninstall, Tailscale CLI setup failure and release scripts. Dispatch,
-doctor and setup-menu used to be nested inside the native suite, so one doctor failure hid every native cell; they are now
-required runs with their own exit status and bounds (900 s, 120 s, 180 s). The uninstall CLI used to be the slowest of the
+**setup-menu**, full uninstall, Tailscale CLI setup failure and release scripts. Dispatch and setup-menu used to be nested inside the native suite; they are now
+required runs with their own exit status and bounds (900 s, 180 s). The uninstall CLI used to be the slowest of the
 sequential suites job (its macOS run hit the 900 s bound); it is now its own `uninstall_cli` shard job in both workflows.
 `make shell-check` is unchanged and complete (no environment variable selects everything: it still nests them and runs the
 whole uninstall CLI suite, unsharded); `make shell-check-ci-complement` is it minus the native, full-uninstall and
@@ -157,22 +156,7 @@ for a still-running Full run, so dispatch it and let it finish before tagging.
 
 ## Hosted macOS Go job: real descriptor ACL evidence
 
-`check.yml` job `go-darwin` (**Go Darwin ACL, doctor and support (macos-15)**: after `provenance`, read-only token, no secrets, `setup-go` caching off so that no cache is saved to or restored from the repository's Actions cache, no artifact; only the job log outlives the runner) runs
-`go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support` on a GitHub-hosted macos-15 runner, then **two separate filtered** cmd invocations appending to the same JSON log:
-`go test -json -count=1 ./cmd/herdr-mobile-relay -run '^TestSupportCommandProjectsLoadedPrivateState$'` and
-`go test -json -count=1 ./cmd/herdr-mobile-relay -run '^(TestDarwinSelectedConfigAndRequiredBundleUnknown|TestDiagnosticActualLocalCompositionStillIncomplete|TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate|TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure|TestDiagnosticBundleFailureUnknownPriorityAndLateResult)$'`.
-These are three commands over four packages, **not** a full cmd-suite execution. The Ubuntu `go` and `race` jobs never execute the real macOS ACL cells (they skip or return early off Darwin or off a hosted runner). The job
-passes only if **all three commands exit 0**, all five package terminal events are `pass` (one per internal package, two for cmd), and each of fourteen required tests ends `pass` **in its own package**
-with no skipped or failed subtest: `internal/darwinacl` `TestRealPlainObjectsHaveNoACLOnAnAllowedVolume`; `internal/doctor`
-`TestDarwinHostedRealACLGrant`, `TestDarwinHostedRealDirectoryACL`, `TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads`,
-`TestDarwinHostedPackageIdentityACLFreeAndGrantRefusal`, `TestDarwinHostedBundleACLFreePositive` and `TestDarwinHostedBundleACLGrantRefusals`;
-`internal/support` `TestLoadDarwinHostedRealACL`; `cmd/herdr-mobile-relay` `TestSupportCommandProjectsLoadedPrivateState`,
-`TestDarwinSelectedConfigAndRequiredBundleUnknown`, `TestDiagnosticActualLocalCompositionStillIncomplete`,
-`TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate`, `TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure`,
-`TestDiagnosticBundleFailureUnknownPriorityAndLateResult`. A later successful command cannot clear an earlier nonzero exit.
-For any of the fourteen, **a skip, a missing test or a pass under another package is a failure**, never a pass (a skip of any other test in the three full internal packages is not examined: their `go test` still exits 0).
-A failure prints package and test names (and the last five stderr lines of `go` itself when it fails), never the log. Only a passing
-hosted run of this job qualifies the real-ACL cells and filtered CLI cells on a real macOS host: until one has passed, they are unqualified.
+`check.yml` job `go-darwin` (**Go Darwin ACL and support (macos-15)**) runs `go test -json -count=1 ./internal/darwinacl ./internal/support` and the filtered `TestSupportCommandProjectsLoadedPrivateState` cmd test on a GitHub-hosted macos-15 runner. It requires `internal/darwinacl` `TestRealPlainObjectsHaveNoACLOnAnAllowedVolume`, `internal/support` `TestLoadDarwinHostedRealACL`, and `cmd/herdr-mobile-relay` `TestSupportCommandProjectsLoadedPrivateState` to pass in their own packages with no skips, and every package terminal event to pass. A failure prints only package and test names, not the log.
 
 ## Uninstall mount confinement
 

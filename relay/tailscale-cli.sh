@@ -346,9 +346,6 @@ case "$ACTION" in
         [ "$#" -eq 0 ] || { usage; exit 2; }
         selected_installed_cli || exit 1
         check_action
-        # The existing diagnostic reports selection, packaged/local evidence and
-        # unknown Herdr/phone checks; it does not grant CLI query authority.
-        HERDR_SETUP_MENU=1 "$SCRIPT_DIR/plugin-status.sh" --concise --config "$ENV_FILE" || :
         activation_check || {
             echo 'Installed CLI profile/route/service readiness unavailable; no CLI or service manager was contacted.' >&2
             exit 3

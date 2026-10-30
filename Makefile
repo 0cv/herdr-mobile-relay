@@ -115,7 +115,7 @@ backend-check: go-check shell-check production-path-audit
 
 # `shell-check` is the complete default and still runs everything below. check.yml's Shell job runs only
 # `shell-check-ci-complement`, because the three suites in `shell-check-service-suites` (native install with its
-# nested dispatch, doctor and setup-menu children, full uninstall, uninstall CLI) are required runs of the Service
+# nested dispatch and setup-menu children, full uninstall, uninstall CLI) are required runs of the Service
 # qualification workflows on every event check.yml runs on (docs/ci-test-tiers.md).
 shell-check: shell-check-ci-complement shell-check-service-suites
 

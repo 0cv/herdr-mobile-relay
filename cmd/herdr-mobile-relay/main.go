@@ -139,10 +139,6 @@ func runCommand(
 			return 2, errors.New("serve-installed accepts only a pinned selection")
 		}
 		return runServeWithRunner(true, runner, sweep)
-	case "doctor":
-		return runDoctorCommand(args, false)
-	case "status":
-		return runDoctorCommand(args, true)
 	case "version":
 		if len(args) == 1 && args[0] == "--json" {
 			data, _ := json.Marshal(map[string]string{"version": version, "revision": revision, "target": release.CurrentTarget()})

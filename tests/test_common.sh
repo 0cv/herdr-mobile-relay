@@ -2315,49 +2315,41 @@ for STABLE_SWITCH_CODE in 23 130 143; do
         { echo "stable tunnel action lost the child failure/cancellation status" >&2; exit 1; }
 done
 
-# Navigation/header correspondence only; inert diagnostics cannot qualify Go
-# health. The guarded native menu fixture additionally uses NATIVE_HELPER.
+# Navigation correspondence only; the guarded native menu fixture uses NATIVE_HELPER.
 MENU_BIN_DIR="$WORK_DIR/menu-bin"
 MENU_ENV="$WORK_DIR/config/menu.env"
 MENU_SCRIPT_DIR="$WORK_DIR/menu-scripts"
 MENU_TOOL_MARKER="$WORK_DIR/menu-tool-called"
 MENU_SOURCE_MARKER="$WORK_DIR/menu-config-sourced"
 mkdir -p "$MENU_BIN_DIR" "$MENU_SCRIPT_DIR"
-cp "$REPO_DIR/relay/plugin-setup-menu.sh" "$REPO_DIR/relay/plugin-status.sh" "$MENU_SCRIPT_DIR/"
-printf 'K=$(touch "%s")\nHERDR_GATEWAY_URL=wss://private-menu-canary\n' "$MENU_SOURCE_MARKER" > "$MENU_ENV"
-cat > "$MENU_BIN_DIR/diagnostic" <<'EOF'
+cp "$REPO_DIR/relay/plugin-setup-menu.sh" "$MENU_SCRIPT_DIR/"
+cat > "$MENU_SCRIPT_DIR/plugin-status.sh" <<'EOF'
 #!/bin/sh
-case "$1" in
-    status) printf 'selected_transport=unknown status=unknown exit=3 local_relay=unknown\n' ;;
-    doctor) printf 'Doctor fixture: incomplete (exit 3)\n' ;;
-    *) exit 91 ;;
-esac
-exit 3
+printf 'status fixture\n'
 EOF
+chmod 700 "$MENU_SCRIPT_DIR/plugin-status.sh"
+printf 'K=$(touch "%s")\nHERDR_GATEWAY_URL=wss://private-menu-canary\n' "$MENU_SOURCE_MARKER" > "$MENU_ENV"
 cat > "$MENU_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 printf called > "$MENU_TOOL_MARKER"
 exit 91
 EOF
-chmod 700 "$MENU_BIN_DIR/diagnostic" "$MENU_BIN_DIR/curl"
+chmod 700 "$MENU_BIN_DIR/curl"
 export MENU_TOOL_MARKER
 MENU_OUTPUT="$(
     printf 't\nb\n9\n6\nq\n' |
-        PATH="$MENU_BIN_DIR:$PATH" HERDR_RELAY_BIN="$MENU_BIN_DIR/diagnostic" \
+        PATH="$MENU_BIN_DIR:$PATH" \
         HERDR_RELAY_ENV="$MENU_ENV" bash "$MENU_SCRIPT_DIR/plugin-setup-menu.sh"
 )"
-case "$MENU_OUTPUT" in
-    *"Current setup (selection, not readiness): selected_transport=unknown status=unknown exit=3"*"Doctor fixture: incomplete (exit 3)"*) ;;
-    *) echo "setup menu did not use packaged diagnostics/header" >&2; exit 1 ;;
-esac
+case "$MENU_OUTPUT" in *"status fixture"*) ;; *) echo "status action did not return" >&2; exit 1 ;; esac
 test "$(printf '%s\n' "$MENU_OUTPUT" | grep -c 'Herdr Mobile Relay Setup')" -eq 2 ||
-    { echo "invalid aliases rerendered/probed or doctor did not return" >&2; exit 1; }
+    { echo "invalid aliases rerendered or status did not return" >&2; exit 1; }
 case "$MENU_OUTPUT" in
-    *"1. Cloudflare"*"2. WebRTC Gateway"*"3. Tailscale"*"4. Show setup QR"*"5. Publish the phone app"*"6. Doctor"*"Exit, change nothing"*) ;;
+    *"1. Cloudflare"*"2. WebRTC Gateway"*"3. Tailscale"*"4. Show setup QR"*"5. Publish the phone app"*"6. Show Full Status"*"Exit, change nothing"*) ;;
     *) echo "setup menu navigation labels are obsolete" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
-    *private-menu-canary*|*"Managed Tailscale Serve (foreground)"*|*"Show Full Status"*) echo "menu retained raw/removed presentation" >&2; exit 1 ;;
+    *private-menu-canary*|*"Managed Tailscale Serve (foreground)"*) echo "menu retained raw/removed presentation" >&2; exit 1 ;;
 esac
 test ! -e "$MENU_TOOL_MARKER"
 test ! -e "$MENU_SOURCE_MARKER"
@@ -2383,8 +2375,6 @@ if [ "${HERDR_GATEWAY_URL+x}" = x ]; then
     exit 92
 fi
 printf 'unset\n' > "$REFRESH_MENU_MARKER"
-printf 'selected_transport=unknown status=unknown exit=3\n'
-exit 3
 EOF
 chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" "$REFRESH_MENU_DIR/plugin-status.sh"
 export REFRESH_MENU_MARKER
@@ -2395,8 +2385,7 @@ export REFRESH_MENU_MARKER
 test "$(cat "$REFRESH_MENU_MARKER")" = unset
 test ! -s "$REFRESH_MENU_ENV"
 
-# Preserve the deleted-cwd regression, using new Doctor numbering. A header is
-# NOT the selected action: the marker must be written only by the doctor call.
+# Preserve the deleted-cwd regression: the marker is written by the selected status action.
 STALE_MENU_DIR="$WORK_DIR/stale-menu-scripts"
 STALE_MENU_OLD="$WORK_DIR/stale-menu-old"
 STALE_MENU_FIFO="$WORK_DIR/stale-menu-input"
@@ -2427,9 +2416,7 @@ rm -rf "$STALE_MENU_OLD"
 mkdir -p "$STALE_MENU_DIR"
 cat > "$STALE_MENU_DIR/plugin-status.sh" <<'EOF'
 #!/bin/sh
-if [ "$#" -eq 0 ]; then printf 'action ran\n' > "$STALE_MENU_MARKER"; fi
-printf 'selected_transport=unknown status=unknown exit=3\n'
-exit 3
+printf 'action ran\n' > "$STALE_MENU_MARKER"
 EOF
 chmod 700 "$STALE_MENU_DIR/plugin-status.sh"
 printf '6\nq\n' >&7

@@ -20,10 +20,9 @@ python3 - "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay" <<'PY'
 import subprocess, sys
 subprocess.run(["go", "build", "-o", sys.argv[1], sys.argv[2]], check=True, timeout=180)
 PY
-# Existing production-dispatch, diagnostic and navigation suites remain wired;
-# they retain their separate acceptance boundaries and their own hosted guards.
-# The service qualification harness sets HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN=1 because it runs all three as their
-# own required suites (own exit status, timing and bound; nested, one doctor failure hid the native cells and the nested
+# Existing production-dispatch and navigation suites retain their separate acceptance boundaries and hosted guards.
+# The service qualification harness sets HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN=1 because it runs both as their
+# own required suites (own exit status, timing and bound; nested, a helper failure hid the native cells and the nested
 # dispatch copy used most of this suite's wall-clock bound). Without the variable (`make shell-check`, a developer run)
 # the nested execution is unchanged.
 python3 - "$REPO_DIR" <<'PY'
@@ -31,7 +30,7 @@ import os, pathlib, subprocess, sys
 repo = pathlib.Path(sys.argv[1])
 assert os.environ.get("HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN") in (None, "1"), "SKIP_NESTED_CHILDREN must be unset or 1"
 for name, timeout in (("test_service_transport_dispatch.py", 900),
-                      ("test_plugin_doctor.py", 120), ("test_setup_menu.py", 180)):
+                      ("test_setup_menu.py", 180)):
     if os.environ.get("HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN") == "1":
         print(name + " runs as its own qualification suite; not nested here", flush=True)
         continue

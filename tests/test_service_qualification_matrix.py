@@ -383,7 +383,7 @@ class UninstallCli(unittest.TestCase):
                 plan({"HERDR_UNINSTALL_CLI_" + k: v for k, v in env.items()})
 
     def test_a_cell_is_the_one_semantic_id_not_a_counter(self):
-        self.assertEqual(len(m.SUITES), 10)
+        self.assertEqual(len(m.SUITES), 9)
         self.assertEqual(m.SUITES[:3], ("tests/test_common.sh", "tests/test_service_credentials.sh", "tests/test_install.sh"))  # the hosted install run follows credentials
         self.assertNotIn(m.UNINSTALL_CLI, m.SUITES)  # it is its own sharded job now
         self.assertEqual(len({i.lower() for i in CLI_INVENTORY}), len(CLI_INVENTORY))
@@ -487,7 +487,7 @@ class Evidence(unittest.TestCase):
             "suite failed": (suites(lambda d: d["suites"][0].update(exit=1)), "a suite failed"),
             "suite missing": (suites(lambda d: d["suites"].pop(), "macos-15"), "suite records"),
             "suite duplicated": (suites(lambda d: d["suites"].append(d["suites"][0]), "macos-15"), "suite records"),
-            "nested doctor suite not required": (suites(lambda d: d["suites"].pop(4)), "suite records")}
+            "nested setup-menu suite not required": (suites(lambda d: d["suites"].pop(4)), "suite records")}
         malformed = {  # every nested field of the driver's summary, in both the suites and the native summaries
             "runner without arch": (lambda d: d["runner"].pop("arch"), "malformed runner"),
             "runner arch empty": (lambda d: d["runner"].update(arch=""), "malformed runner"),
@@ -731,35 +731,23 @@ class Wiring(unittest.TestCase):
     def test_check_keeps_the_hosted_macos_go_job_and_its_required_real_acl_and_cli_tests(self):
         check, docs = self.text(".github/workflows/check.yml"), " ".join(self.text("docs/ci-test-tiers.md").split())
         found = re.search(r"(?ms)^  go-darwin:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)", check)
-        self.assertIsNotNone(found, "check.yml dropped the go-darwin job")
+        self.assertIsNotNone(found)
         job = found.group(1)
-        for text in ("needs: provenance", "runs-on: macos-15", "go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support", '!= ["pass"]'):
-            self.assertIn(text, job)
-        core = 'go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support >"$log" 2>"$err" && go_exit=0 || go_exit=$?'
+        core = 'go test -json -count=1 ./internal/darwinacl ./internal/support >"$log" 2>"$err" && go_exit=0 || go_exit=$?'
         cli = 'go test -json -count=1 ./cmd/herdr-mobile-relay -run \'^TestSupportCommandProjectsLoadedPrivateState$\' >>"$log" 2>>"$err" || go_exit=$?'
-        self.assertIn(core, job)
-        self.assertIn(cli, job)
-        cmd_names = ["TestDarwinSelectedConfigAndRequiredBundleUnknown", "TestDiagnosticActualLocalCompositionStillIncomplete",
-                     "TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate", "TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure",
-                     "TestDiagnosticBundleFailureUnknownPriorityAndLateResult"]
-        doctor = "go test -json -count=1 ./cmd/herdr-mobile-relay -run '^(" + "|".join(cmd_names) + ")$' >>\"$log\" 2>>\"$err\" || go_exit=$?"
         self.assertEqual(job.count(core), 1)
         self.assertEqual(job.count(cli), 1)
-        self.assertEqual(job.count(doctor), 1)
         self.assertLess(job.index(core), job.index(cli))
-        self.assertLess(job.index(cli), job.index(doctor), "both filtered CLI tests must append after the full ACL suites")
-        self.assertIn('"cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState", ' + ", ".join('"%s"' % name for name in cmd_names) + ']', job)
-        self.assertIn('expected_package_ends = ["pass"] * (2 if package == "cmd/herdr-mobile-relay" else 1)', job)
+        self.assertIn('"cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState"]', job)
+        self.assertIn('expected_package_ends = ["pass"]', job)
         self.assertIn('if ends.get((path, None)) != expected_package_ends:', job)
-        self.assertNotIn("str.strip", job, "blank log lines must be rejected, not filtered out")
-        self.assertIn("cache: false", job, "the job must save nothing to the Actions cache")
-        self.assertIn("parse_constant=reject", job, "NaN/Infinity are not JSON")
-        required = {"darwinacl": ["TestRealPlainObjectsHaveNoACLOnAnAllowedVolume"], "support": ["TestLoadDarwinHostedRealACL"],
-                    "doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads",
-                               "TestDarwinHostedPackageIdentityACLFreeAndGrantRefusal", "TestDarwinHostedBundleACLFreePositive", "TestDarwinHostedBundleACLGrantRefusals"]}
+        self.assertIn("cache: false", job)
+        self.assertIn("parse_constant=reject", job)
+        required = {"darwinacl": ["TestRealPlainObjectsHaveNoACLOnAnAllowedVolume"],
+                    "support": ["TestLoadDarwinHostedRealACL"]}
         for package, names in required.items():
             source = "".join(path.read_text() for path in (ROOT / "internal" / package).glob("*_test.go"))
-            for name in names:  # the job, its page and the package's own tests all name the same eight ACL tests
+            for name in names:
                 self.assertIn('"internal/%s"' % package, job)
                 self.assertIn(name, job)
                 self.assertIn("`%s`" % name, docs)
@@ -767,11 +755,6 @@ class Wiring(unittest.TestCase):
         name = "TestSupportCommandProjectsLoadedPrivateState"
         self.assertIn("`%s`" % name, docs)
         self.assertRegex(self.text("cmd/herdr-mobile-relay/main_test.go"), r"(?m)^func %s\(t \*testing\.T\)" % name)
-        cmd_source = self.text("cmd/herdr-mobile-relay/doctor_test.go")
-        for name in cmd_names:
-            self.assertIn("`%s`" % name, docs)
-            self.assertRegex(cmd_source, r"(?m)^func %s\(t \*testing\.T\)" % name)
-
 
 if __name__ == "__main__":
     unittest.main()

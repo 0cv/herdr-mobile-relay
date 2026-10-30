@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted disposable menu/wrapper fixtures; inert actions prove wiring only.
-NATIVE_HELPER cases exercise actual partial status, not package/phone health.
-"""
+"""Hosted disposable menu fixtures; inert actions prove wiring only."""
 import os
 import sys
 
@@ -62,31 +60,8 @@ if os.environ.get("WAIT_INT") == "1":
 print("Disposable action returned", flush=True)
 raise SystemExit(int(os.environ.get("ACTION_EXIT", "0")))
 '''
-DIAGNOSTIC = '''import json, os, sys
-with open(os.environ["MENU_TRACE"], "a") as f:
-    f.write(json.dumps(dict(kind="diagnostic", argv=sys.argv[1:], menu=os.environ.get("HERDR_SETUP_MENU")))+"\\n")
-if os.environ.get("NOISY_DIAGNOSTIC"):
-    print("private-menu-path secret-menu-canary", file=sys.stderr)
-code = int(os.environ.get("DIAGNOSTIC_EXIT", "3"))
-if os.environ.get("EMPTY_DIAGNOSTIC"):
-    raise SystemExit(code)
-frame = os.environ.get("BAD_FRAME")
-if frame == "multiline":
-    print("first\\nsecond")
-elif frame == "control":
-    print("first\\x1bsecond")
-elif frame == "oversize":
-    print("x"*2049)
-elif sys.argv[1] == "status":
-    print("selected_transport=unknown status=unknown exit="+str(code)+" local_relay=unknown")
-else:
-    print("Doctor fixture (inert), exit "+str(code))
-raise SystemExit(code)
-'''
-
-
 class Fixture:
-    def __init__(self, root, real=False):
+    def __init__(self, root):
         self.root = root
         self.scripts = root / "package with spaces/relay"
         self.home = root / "isolated home"
@@ -108,16 +83,13 @@ class Fixture:
         executable(self.scripts / "common.sh", '#!/bin/sh\nprintf called > "$MENU_SOURCE"\nexit 91\n')
         for name in ACTIONS:
             executable(self.scripts / name, "#!"+sys.executable+"\n"+ACTOR)
-        self.binary = root / "diagnostic"
-        executable(self.binary, "#!"+sys.executable+"\n"+DIAGNOSTIC)
+        executable(self.scripts / "plugin-status.sh", "#!"+sys.executable+"\n"+ACTOR)
         for name in ["curl", "tailscale", "tailscaled", "systemctl", "launchctl", "cloudflared", "herdr", "ssh", "scp",
                      "sudo", "go", "bun", "npm", "npx", "uname", "id", "security", "touch", "brew"]:
             executable(self.traps / name, '#!/bin/sh\nprintf called > "$MENU_TOOL"\nexit 91\n')
         self.env = dict(PATH=str(self.traps)+":/usr/bin:/bin", HOME=str(self.home),
-                        HERDR_RELAY_ENV=str(self.env_file), HERDR_RELAY_BIN=HELPER if real else str(self.binary),
+                        HERDR_RELAY_ENV=str(self.env_file),
                         MENU_TRACE=str(self.trace), MENU_SOURCE=str(self.source_marker), MENU_TOOL=str(self.tool_marker))
-        if real:
-            self.env_file.write_text("HERDR_RELAY_TRANSPORT=cloudflare\n")
 
     def snapshot(self):
         result = {}
@@ -134,7 +106,7 @@ class Fixture:
         before = self.snapshot()
         result = subprocess.run(["/bin/bash", str(self.scripts / "plugin-setup-menu.sh")],
                                 input=data, capture_output=True, text=True, env=dict(self.env, **(extra or {})), timeout=25)
-        require(result.returncode == 0, "diagnostic/child refusal terminated navigation")
+        require(result.returncode == 0, "child refusal terminated navigation")
         self.safe_output(result.stdout+result.stderr)
         require(allow_stderr or not result.stderr, "navigation emitted unexpected stderr")
         require("Press Enter" not in result.stdout, "piped navigation consumed a return pause")
@@ -148,10 +120,6 @@ class Fixture:
 
     def actions(self):
         return [call for call in self.calls() if call["kind"] == "action"]
-
-    def headers(self):
-        return [call for call in self.calls() if call["kind"] == "diagnostic" and call["argv"][0] == "status"]
-
 
 def read_until(process, master, output, marker, deadline):
     while marker not in output:
@@ -239,7 +207,7 @@ def contain(process, master):
               file=sys.stderr, flush=True)
 
 
-def terminal_case(fixture, doctor=False, eof=False, interrupt=False):
+def terminal_case(fixture, eof=False, interrupt=False):
     before = fixture.snapshot()
     master, slave = pty.openpty()
     env = dict(fixture.env, WAIT_INT="1") if interrupt else fixture.env
@@ -256,7 +224,7 @@ def terminal_case(fixture, doctor=False, eof=False, interrupt=False):
         if eof:
             os.write(master, b"\x04")
         else:
-            os.write(master, b"6\n" if doctor else b"4\n")
+            os.write(master, b"4\n")
             if interrupt:
                 phase = "awaiting the interruptible child"
                 read_until(process, master, output, b"FIXTURE_CHILD_WAIT_INT", deadline)
@@ -279,7 +247,7 @@ def terminal_case(fixture, doctor=False, eof=False, interrupt=False):
         fixture.safe_output(text)
         require(before == fixture.snapshot(), "PTY navigation mutated state")
     except Exception:
-        report_failure("terminal_case(doctor=%s, eof=%s, interrupt=%s)" % (doctor, eof, interrupt), phase, process, output, fixture, started)
+        report_failure("terminal_case(eof=%s, interrupt=%s)" % (eof, interrupt), phase, process, output, fixture, started)
         raise
     finally:
         contain(process, master)
@@ -324,25 +292,23 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
     base = Path(directory).resolve()
     number = 0
 
-    def fresh(real=False):
+    def fresh():
         global number
         number += 1
-        return Fixture(base / str(number), real)
+        return Fixture(base / str(number))
 
     # Invalid/blank/default/Back/EOF/removed aliases cannot select a child.
-    for data, headers in [("", 1), ("q\n", 1), ("t\nT\nb\nB\n7\n8\n9\ninvalid\nq\n", 1),
-                          ("\n\ninvalid\nb\nq\n", 2), ("1\n", 1), ("2\nq\n", 1),
-                          ("2\n\ninvalid\nb\nq\n", 2), ("3\n\ninvalid\nb\nq\n", 2)]:
+    for data in ("", "q\n", "t\nT\nb\nB\n7\n8\n9\ninvalid\nq\n",
+                 "\n\ninvalid\nb\nq\n", "1\n", "2\nq\n",
+                 "2\n\ninvalid\nb\nq\n", "3\n\ninvalid\nb\nq\n"):
         f = fresh()
         text = f.navigation(data)
-        require(not f.actions() and len(f.headers()) == headers, "navigation/default unexpectedly dispatched or reprobed")
-        require(all(call["argv"] == ["status", "--config", str(f.env_file)] and call["menu"] == "1" for call in f.headers()),
-                "header used ingress/arbitrary command or permitted wrapper pause")
+        require(not f.actions(), "navigation/default unexpectedly dispatched")
         require("Managed Tailscale Serve (foreground)" not in text, "removed managed mode still advertised")
     for submenu in ["1", "2", "3"]:
         f = fresh()
         f.navigation(submenu+"\n")  # EOF at every submenu
-        require(not f.actions() and len(f.headers()) == 1, "submenu EOF ran an action")
+        require(not f.actions(), "submenu EOF ran an action")
 
     maps = [("1\n1\nb\nq\n", "plugin-choose-transport.sh", ["temporary"]),
             ("1\n2\nb\nq\n", "plugin-install-service.sh", []),
@@ -363,11 +329,10 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
         require(calls[0]["menu"] == "1" and calls[0]["cwd"] == str(f.scripts), "action did not enter current directory/stand down child pause")
         require(all(value is None for value in calls[0]["consent"].values()) and calls[0]["routing"] is None,
                 "menu loaded file-backed routing/automatic consent")
-        require(len(f.headers()) == 2, "main return did not refresh header exactly once")
     f = fresh()
-    text = f.navigation("6\nq\n")
-    require([call["argv"][0] for call in f.calls()] == ["status", "doctor", "status"], "Doctor bypassed wrapper or started another action")
-    require("Action did not complete (exit 3)" in text, "incomplete doctor decision hidden")
+    f.navigation("6\nq\n")
+    require(len(f.actions()) == 1 and f.actions()[0]["entry"] == "plugin-status.sh",
+            "full status action did not dispatch")
 
     f = fresh()
     text = f.navigation("3\n1\nq\n", dict(ACTION_EXIT="73"))
@@ -385,54 +350,14 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
     # Extracted selector bytes and their activation refusal are exercised by
     # check-installed-release.sh; do not substitute the source selector here.
 
-    for code in [0, 1, 2, 3]:
-        f = fresh()
-        text = f.navigation("q\n", dict(DIAGNOSTIC_EXIT=str(code), NOISY_DIAGNOSTIC="1"))
-        require("exit="+str(code) in text and len(f.headers()) == 1, "header decision changed navigation or was reparsed")
-    for extra in [dict(DIAGNOSTIC_EXIT="127", EMPTY_DIAGNOSTIC="1"), dict(DIAGNOSTIC_EXIT="127"),
-                  dict(BAD_FRAME="multiline"), dict(BAD_FRAME="control"), dict(BAD_FRAME="oversize")]:
-        f = fresh()
-        require("diagnostic unavailable" in f.navigation("q\n", extra), "invalid/unavailable header not fixed unknown")
-    f = fresh()
-    f.env["HERDR_RELAY_BIN"] = str(f.root / "private-menu-path-missing")
-    require("diagnostic unavailable" in f.navigation("q\n"), "missing binary triggered guessing/build/download")
-    f = fresh()
-    (f.scripts / "plugin-status.sh").unlink()  # disposable missing wrapper case
-    require("diagnostic unavailable" in f.navigation("q\n"), "missing wrapper terminated navigation")
     f = fresh()
     text = f.navigation("4\nq\n", dict(ACTION_EXIT="73"))
     require(len(f.actions()) == 1 and "Action did not complete (exit 73)" in text, "failed action dispatched a follow-up or lost exit")
 
-    # Real compiled partial diagnostic: private selected transport is finite,
-    # metadata remains unavailable; no startup/config.Load/Tailscale or external capability.
-    for mode in ["cloudflare", "gateway", "tailscale", "tailscale-external", "tailscale-cli"]:
-        f = fresh(real=True)
-        config = "HERDR_RELAY_TRANSPORT="+mode+"\n"
-        if mode == "gateway":
-            config += "HERDR_GATEWAY_URL=wss://private-menu-node.invalid\n"
-        if mode == "tailscale-external":
-            config += "HERDR_EXTERNAL_HTTPS_ORIGIN=https://private-menu-node.invalid\n"
-        f.env_file.write_text(config)
-        text = f.navigation("t\n3\n\ninvalid\nb\n6\nq\n")
-        require("selected_transport="+mode in text and "status=unknown exit=3" in text, "actual partial model selection missing/claimed ready")
-        require(not f.actions(), "actual read-only navigation started a lifecycle")
-    f = fresh(real=True)
-    f.env_file.write_text('K=$(touch "'+str(f.source_marker)+'")\n')
-    require("selected_transport=unknown status=failed exit=2" in f.navigation("q\n"), "actual refused config guessed Cloudflare/terminated navigation")
-    f = fresh(real=True)
-    f.env_file.unlink()
-    require("selected_transport=unknown status=unknown exit=3" in f.navigation("q\n"), "actual missing config invented selection")
-    f = fresh(real=True)
-    text = f.navigation("4\nq\n", dict(MUTATE_CONFIG="1"), preserve=False)
-    require("selected_transport=cloudflare" in text and "selected_transport=tailscale-external" in text,
-            "return header reused cached parent config instead of genuine doctor refresh")
-    require(len(f.actions()) == 1 and f.actions()[0]["routing"] is None, "file-backed config exported to explicit child")
-
     terminal_case(fresh())
-    terminal_case(fresh(), doctor=True)
     terminal_case(fresh(), eof=True)
     terminal_case(fresh(), interrupt=True)
 
     inplace_update_case(fresh())
 
-print("hosted navigation/header fixtures passed (not downstream lifecycle/package/phone qualification)")
+print("hosted navigation fixtures passed (not downstream lifecycle/package/phone qualification)")
