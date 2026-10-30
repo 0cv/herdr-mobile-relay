@@ -418,12 +418,12 @@ webdriverInterruptionTests.push(['Appium request timing SM57 remote work survivi
   }
   assert.equal(a.sent(), 1);
   assert.deepEqual(a.client.snapshot(), snapshot);
-  await a.client.close();
-  assert.equal(a.sent(), 2);
-  assert.equal(a.client.snapshot().unusable, true);
-  assert.deepEqual(a.client.snapshot().firstFatal, snapshot.firstFatal);
+  await assert.rejects(() => a.client.close(), /APPIUM_SESSION_UNUSABLE/u);
+  await assert.rejects(() => a.client.close(), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.sent(), 1);
+  assert.deepEqual(a.client.snapshot(), snapshot);
   await assert.rejects(() => a.client.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/u);
-  assert.equal(a.sent(), 2);
+  assert.equal(a.sent(), 1);
 }]);
 
 webdriverInterruptionTests.push(['Appium request timing SM57 unscoped defaults and diagnostic annotations stay observational', async () => {
@@ -522,9 +522,9 @@ webdriverInterruptionTests.push(['Appium request timing refusal is unsent and hi
   let ticks = 0;
   let sends = 0;
   let phaseNow = 0;
-  const client = new AppiumClient('http://protocol.invalid', 5_000, async () => {
+  const client = new AppiumClient('http://protocol.invalid', 5_000, async (_input, init) => {
     sends++;
-    return Response.json({ value: {}, sessionId: 'secret-session' });
+    return Response.json({ value: init?.method === 'DELETE' ? null : {}, sessionId: 'secret-session' });
   }, () => ++ticks);
   await client.create({ capabilities: {} });
   const phase = new PhaseBudget('original-phase', { timeoutMs: 30_000, now: () => phaseNow });

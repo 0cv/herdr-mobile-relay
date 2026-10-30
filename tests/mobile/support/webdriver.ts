@@ -18,6 +18,8 @@ export interface SessionOptions {
   budget?: PhaseBudget;
 }
 
+export type InstalledContextTarget = Readonly<{ bundleId: 'com.apple.webapp'; nativePid: number }>;
+
 export interface ContextMetadata {
   id: string;
   url?: string;
@@ -57,6 +59,7 @@ export interface WebDriverLookupEvidence {
 }
 
 export type RequestTimingScope = 'unscoped' | 'ios-attachment-discovery' | 'ios-attachment-discovery-native'
+  | 'ios-attachment-pre-discovery-native' | 'ios-attachment-contract'
   | 'ios-attachment-pre-attachment-native' | 'ios-attachment-validation' | 'ios-install-confirmation';
 
 // Client-local correlation only: ordinals are not server request IDs. All offsets
@@ -104,7 +107,8 @@ function requestOperation(path: string, method: string, body: unknown): WebDrive
   if (path !== '/execute/sync') return 'other';
   const script = body && typeof body === 'object' && 'script' in body ? body.script : undefined;
   switch (script) {
-    case 'mobile: getContexts': return 'contexts';
+    case 'mobile: getContexts':
+    case 'mobile: getInstalledContexts': return 'contexts';
     case 'mobile: queryAppState': return 'app-state';
     case 'mobile: activeAppInfo': return 'active-app';
     default: return 'execute';
@@ -346,34 +350,25 @@ export class AppiumClient {
   }
 
   async create(options: SessionOptions): Promise<Record<string, unknown>> {
-    this.assertNoScopedOverlap('/session');
-    this.commandGuard?.before();
-    if (this.unusable || this.scopedRequestFailed) {
-      throw new WebDriverError({
-        code: 'APPIUM_SESSION_UNUSABLE',
-        message: this.scopedRequestFailed ? 'the scoped native operation failed; only bounded owned teardown is permitted'
-          : 'the previous session operation did not complete; bounded teardown is required before replacement',
-        path: '/session',
-        method: 'POST',
-        durationMs: 0,
-        selectedContext: this.selectedContext,
-        selectedWindow: this.selectedWindow,
-      });
-    }
-    options.budget?.assertAvailable('create session');
-    if (options.budget) this.setBudget(options.budget);
+    this.assertUsable('/session');
     let response: WebDriverResponse<{ value: Record<string, unknown>; sessionId?: string }>;
     try {
+      this.assertNoScopedOverlap('/session');
+      this.commandGuard?.before();
+      this.assertUsable('/session');
+      this.assertBudgetAvailable(options.budget, 'create session');
+      if (options.budget) this.setBudget(options.budget);
       response = await this.request<{ value: Record<string, unknown>; sessionId?: string }>('/session', 'POST', {
         capabilities: {
           alwaysMatch: options.capabilities,
           firstMatch: [{}],
         },
-      }, options.requestTimeoutMs || this.requestTimeoutMs, false);
+      }, options.requestTimeoutMs || this.requestTimeoutMs);
     } catch (error) {
       if (isFatalDriverError(error)) this.recordFatal(error);
       throw error;
     }
+    this.assertUsable('/session');
     const value = response.value as unknown as WebDriverResponse<Record<string, unknown>>;
     this.sessionOwner = {};
     this.sessionId = String(response.sessionId || (value as any)?.sessionId || '');
@@ -386,22 +381,16 @@ export class AppiumClient {
   }
 
   async close(): Promise<void> {
-    if (!this.unusable) this.assertNoScopedOverlap('/session');
+    this.assertUsable('/session');
+    this.assertNoScopedOverlap('/session');
     if (!this.sessionId) return;
     const session = this.sessionId;
     try {
-      await this.request(`/session/${encodeURIComponent(session)}`, 'DELETE', undefined, this.requestTimeoutMs, false, false, true);
+      await this.request(`/session/${encodeURIComponent(session)}`, 'DELETE', undefined, this.requestTimeoutMs, false, true);
+      this.assertUsable('/session');
       this.sessionId = '';
-      this.unusable = this.scopedRequestFailed;
     } catch (error) {
-      if (isFatalDriverError(error)) this.recordFatal(error);
-      if (error instanceof WebDriverError && ((error.code === 'APPIUM_COMMAND' && error.status === 404)
-        || (error.code === 'APPIUM_HTTP' && error.status !== undefined && error.status >= 200 && error.status < 300))) {
-        this.sessionId = '';
-        this.unusable = this.scopedRequestFailed;
-        return;
-      }
-      this.unusable = true;
+      this.recordFatal(error, true);
       throw error;
     }
   }
@@ -414,8 +403,24 @@ export class AppiumClient {
     return this.mobile('getContexts', {}, timeoutMs);
   }
 
+  async installedContextContract(timeoutMs?: number): Promise<void> {
+    const value = await this.mobile('installedContextContract', {}, timeoutMs);
+    if (!value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'contract,selector'
+      || (value as Record<string, unknown>).contract !== 'herdr-installed-contexts-v1'
+      || (value as Record<string, unknown>).selector !== 'herdr-installed-contexts-v1') {
+      throw new Error('IOS_INSTALLED_CONTEXT_UNSUPPORTED: loaded producer contract unavailable');
+    }
+  }
+
+  async installedContextMetadata(targetApp: InstalledContextTarget, timeoutMs?: number): Promise<ContextMetadata[]> {
+    return this.parseContextMetadata(await this.mobile('getInstalledContexts', { targetApp }, timeoutMs));
+  }
+
   async contextMetadata(timeoutMs?: number): Promise<ContextMetadata[]> {
-    const value = await this.contextMetadataRaw(timeoutMs);
+    return this.parseContextMetadata(await this.contextMetadataRaw(timeoutMs));
+  }
+
+  private parseContextMetadata(value: unknown): ContextMetadata[] {
     const entries = Array.isArray(value)
       ? value
       : value && typeof value === 'object' && Array.isArray((value as any).contexts)
@@ -482,12 +487,13 @@ export class AppiumClient {
   }
 
   async find(locator: Locator, timeoutMs = 30_000): Promise<string> {
+    this.assertUsable('/element');
     const budget = this.phaseBudget(timeoutMs, `find ${locator.using}`);
     const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
     const allowance = driverCommandAllowance('/element', 'POST', locator);
     let lastError = 'element not found';
     while (!budget.exhausted && Date.now() < deadline) {
-      budget.assertAvailable(`find ${locator.using}`);
+      this.assertBudgetAvailable(budget, `find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
       if (remaining <= 1) break;
       if (this.budget && remaining < Math.max(minimumDriverRequestMs, allowance)) {
@@ -510,9 +516,9 @@ export class AppiumClient {
       const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);
       if (waitMs <= 0) break;
       await delay(waitMs);
-      if (this.budget?.exhausted) this.budget.assertAvailable(`find ${locator.using}`);
+      if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, `find ${locator.using}`);
     }
-    if (this.budget?.exhausted) this.budget.assertAvailable(`find ${locator.using}`);
+    if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, `find ${locator.using}`);
     throw new ElementLookupError(`APPIUM_ELEMENT: ${locator.using}=${redactText(locator.value)}: ${lastError}`);
   }
 
@@ -589,6 +595,7 @@ export class AppiumClient {
   }
 
   async command<T = unknown>(path: string, method: string, body?: unknown, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<T> {
+    this.assertUsable(path);
     this.assertNoScopedOverlap(path);
     if (policy && this.guardedCommandActive) throw new Error('APPIUM_SESSION: overlapping native request');
     const scoped = policy ? { overlapped: false } : undefined;
@@ -603,7 +610,7 @@ export class AppiumClient {
   private assertNoScopedOverlap(path: string): void {
     if (!this.scopedCommand) return;
     this.scopedCommand.overlapped = true;
-    this.assertUsable(path, true);
+    this.assertUsable(path);
     throw new WebDriverError({
       code: 'APPIUM_COMMAND_NOT_ADMITTED', message: 'overlapping native request', path, method: 'COMMAND',
       durationMs: 0, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow,
@@ -611,15 +618,15 @@ export class AppiumClient {
   }
 
   private async commandResponse<T>(path: string, method: string, body?: unknown, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<T> {
-    this.commandGuard?.before();
-    if (this.commandGuard && this.guardedCommandActive) {
-      this.commandGuard.failure(new Error('APPIUM_SESSION: overlapping retained command'), path);
-      throw new Error('APPIUM_SESSION: overlapping retained command');
-    }
-    this.guardedCommandActive = true;
     try {
+      this.commandGuard?.before();
+      if (this.commandGuard && this.guardedCommandActive) {
+        this.commandGuard.failure(new Error('APPIUM_SESSION: overlapping retained command'), path);
+        throw new Error('APPIUM_SESSION: overlapping retained command');
+      }
+      this.guardedCommandActive = true;
       this.assertUsable(path);
-      const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs, true, true, false, policy);
+      const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs, true, false, policy);
       if (this.commandGuard) {
         if (!response || typeof response !== 'object' || !Object.hasOwn(response, 'value')) throw new Error('APPIUM_RESPONSE: missing command value');
         const value = response.value;
@@ -631,10 +638,10 @@ export class AppiumClient {
         }
       }
       this.commandGuard?.before();
+      this.assertUsable(path);
       return response.value as T;
     } catch (error) {
       if (isFatalDriverError(error)) this.recordFatal(error);
-      if (error instanceof WebDriverError && error.timedOut && path !== '/status') this.unusable = true;
       this.commandGuard?.failure(error, path);
       throw error;
     } finally {
@@ -646,12 +653,20 @@ export class AppiumClient {
     return this.budget?.phaseView(operation, timeoutMs) || new PhaseBudget(operation, { timeoutMs, recoveryLimit: 0 });
   }
 
-  private assertUsable(path: string, requireNoFatal = false): void {
-    if (this.scopedRequestFailed || (requireNoFatal && this.firstFatal) || (this.unusable && path !== '/session' && !path.endsWith('/status'))) {
+  private assertBudgetAvailable(budget: PhaseBudget | undefined, operation: string): void {
+    try {
+      budget?.assertAvailable(operation);
+    } catch (error) {
+      this.recordFatal(error);
+      throw error;
+    }
+  }
+
+  private assertUsable(path: string): void {
+    if (this.scopedRequestFailed || this.firstFatal || this.unusable) {
       const error = new WebDriverError({
         code: 'APPIUM_SESSION_UNUSABLE',
-        message: this.scopedRequestFailed ? 'the scoped native operation failed; only bounded owned teardown is permitted'
-          : 'the previous command did not complete; session replacement is required',
+        message: 'the client is quarantined; no further WebDriver requests are permitted',
         path,
         method: 'COMMAND',
         durationMs: 0,
@@ -673,11 +688,11 @@ export class AppiumClient {
     method: string,
     body?: unknown,
     timeoutMs = this.requestTimeoutMs,
-    checkSession = true,
     enforceBudget = true,
     allowEmptyResponse = false,
     requestPolicy?: WebDriverRequestPolicy,
   ): Promise<WebDriverResponse<T>> {
+    this.assertUsable(path);
     const identity = requestPolicy ? Object.freeze({
       session: this.sessionId, owner: this.sessionOwner, generation: this.sessionGeneration,
       context: this.selectedContext, scope: this.scopedCommand,
@@ -703,9 +718,9 @@ export class AppiumClient {
       admitted: false, sent: false, completed: false, outcome: 'unavailable',
     };
     try {
-      if (checkSession) this.assertUsable(path);
+      this.assertUsable(path);
       const operation = `${method} ${path}`;
-      if (enforceBudget) this.budget?.assertAvailable(operation);
+      if (enforceBudget) this.assertBudgetAvailable(this.budget, operation);
       const admissionTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
       const operationTimeoutMs = admissionTimeoutMs * timingScale;
       const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
@@ -753,15 +768,9 @@ export class AppiumClient {
         return deadlineFailure;
       };
       const startTimer = (duration = requestTimeoutMs) => this.enforcementClock.timer(() => {
-        if (policy) {
-          const error = selectDeadlineFailure();
-          rejectTimeout(error);
-          controller.abort(error.cause);
-          return;
-        }
-        const error = new DOMException(`${operation} timed out`, 'TimeoutError');
-        controller.abort(error);
+        const error = selectDeadlineFailure();
         rejectTimeout(error);
+        controller.abort(error.cause);
       }, duration);
       let requestDeadline: number | undefined;
       const checkDeadline = () => {
@@ -806,6 +815,7 @@ export class AppiumClient {
           }
           requestDeadline = dispatchTime + Math.min(operationTimeoutMs, remaining);
         }
+        this.assertUsable(path);
         if (identity && (!identity.session || this.sessionId !== identity.session || this.sessionOwner !== identity.owner
           || this.sessionGeneration !== identity.generation || identity.context !== 'NATIVE_APP' || this.selectedContext !== identity.context
           || this.unusable || this.firstFatal || this.scopedRequestFailed || !identity.scope || identity.scope.overlapped
@@ -822,6 +832,7 @@ export class AppiumClient {
           this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, error.message, timing);
           throw error;
         }
+        this.assertUsable(path);
         timing.dispatchedOrdinal = ++this.dispatchedOrdinal;
         if (timing.operation === 'create') this.sessionGeneration += 1;
         timing.sessionGeneration = this.sessionGeneration;
@@ -833,15 +844,21 @@ export class AppiumClient {
         // Only the winning await observes a stage. Late transport/body promises
         // cannot mutate this request's receipt, history, or previous settlement.
         checkDeadline();
+        this.assertUsable(path);
         timing.responseAvailableMs = this.timingOffset();
         if (Number.isInteger(response.status) && response.status >= 100 && response.status <= 599) timing.status = response.status;
         timing.bodyReadStartMs = this.timingOffset();
         text = await Promise.race([response.text(), timeoutPromise]);
         checkDeadline();
+        this.assertUsable(path);
         timing.bodyReadCompleteMs = this.timingOffset();
         timing.completed = true;
       } catch (error) {
         if (deadlineFailure) throw deadlineFailure;
+        if (isFatalDriverError(error)) {
+          this.recordFatal(error);
+          throw error;
+        }
         if (policy && !timing.sent) {
           timing.admitted = false;
           timing.dispatchMs = undefined;
@@ -853,7 +870,7 @@ export class AppiumClient {
             throw error;
           }
         }
-        if (policy && error instanceof WebDriverError) {
+        if (error instanceof WebDriverError) {
           checkDeadline();
           throw error;
         }
@@ -874,10 +891,9 @@ export class AppiumClient {
           status: response?.status,
           cause: error,
         });
-        if (policy && (isFatalDriverError(failure) || (policy.finalAction && timing.sent))) {
-          this.scopedRequestFailed = true;
-          this.unusable = true;
-          this.recordFatal(failure, policy.finalAction && timing.sent);
+        if (isFatalDriverError(failure) || (policy?.finalAction && timing.sent)) {
+          if (policy) this.scopedRequestFailed = true;
+          this.recordFatal(failure, policy?.finalAction && timing.sent);
         }
         if (timedOut || interrupted || (policy?.finalAction && timing.sent)) {
           this.unusable = true;
@@ -889,6 +905,7 @@ export class AppiumClient {
       } finally {
         if (timer !== undefined) this.enforcementClock.clear(timer);
       }
+      this.assertUsable(path);
       if (allowEmptyResponse && response.ok && text.trim() === '') {
         timing.outcome = 'success';
         this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, undefined, timing);
@@ -917,7 +934,15 @@ export class AppiumClient {
         });
       }
       checkDeadline();
-      const commandValue = policy?.finalAction ? parsed?.value : parsed.value;
+      this.assertUsable(path);
+      const commandValue = policy?.finalAction || allowEmptyResponse ? parsed?.value : parsed.value;
+      // Only a complete W3C invalid-session response confirms DELETE absence.
+      if (allowEmptyResponse && method === 'DELETE' && response.status === 404
+        && (commandValue as any)?.error === 'invalid session id') {
+        timing.outcome = 'success';
+        this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, undefined, timing);
+        return { value: undefined as T };
+      }
       if (!response.ok || (commandValue as any)?.error) {
         const detail = confirmationCapture ? 'Confirmation source refused' : retainedInspection ? 'Retained inspection refused'
           : typeof commandValue === 'object' ? JSON.stringify(commandValue) : String(commandValue || text);
@@ -935,19 +960,19 @@ export class AppiumClient {
           status: response.status,
         });
       }
-      const validAcknowledgement = !policy?.finalAction || (parsed !== null && typeof parsed === 'object'
+      const validAcknowledgement = !(policy?.finalAction || allowEmptyResponse) || (parsed !== null && typeof parsed === 'object'
         && Object.hasOwn(parsed, 'value') && parsed.value === null);
       checkDeadline();
       if (!validAcknowledgement) {
         timing.outcome = 'command-error';
-        const cause = new Error('final action acknowledgement must contain a null value');
+        const cause = new Error('command acknowledgement must contain a null value');
         const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, cause.message, timing);
         throw new WebDriverError({
           code: 'APPIUM_HTTP', message: cause.message, path, method, durationMs: command.durationMs,
           selectedContext: this.selectedContext, selectedWindow: this.selectedWindow, status: response.status, cause,
         });
       }
-      if (policy) this.assertUsable(path, true);
+      this.assertUsable(path);
       timing.outcome = 'success';
       this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, undefined, timing);
       return parsed;
@@ -961,6 +986,7 @@ export class AppiumClient {
         this.unusable = true;
         this.recordFatal(error, policy.finalAction && timing.sent);
       }
+      this.recordFatal(error, method === 'DELETE' && /^\/session\/[^/]+$/u.test(path));
       throw error;
     } finally {
       timing.phaseRemainingAtSettlementMs = observedBudget?.remainingMs ?? null;
@@ -992,12 +1018,13 @@ export class AppiumClient {
   }
 
   async findAnyOnce(locators: Locator[], timeoutMs = 30_000): Promise<string> {
+    this.assertUsable('/element');
     const budget = this.phaseBudget(timeoutMs, 'find any once');
     const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
     let lastError = 'no locator matched';
     for (const locator of locators) {
       if (budget.exhausted || Date.now() >= deadline) break;
-      budget.assertAvailable(`find ${locator.using}`);
+      this.assertBudgetAvailable(budget, `find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
       const allowance = driverCommandAllowance('/element', 'POST', locator);
       if (remaining <= 1) break;
@@ -1019,11 +1046,12 @@ export class AppiumClient {
         if (isCommandAdmissionError(error)) break;
       }
     }
-    if (this.budget?.exhausted) this.budget.assertAvailable('find any once');
+    if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, 'find any once');
     throw new ElementLookupError(`APPIUM_ELEMENT_ANY: ${lastError}`);
   }
 
   async findAny(locators: Locator[], timeoutMs = 30_000): Promise<string> {
+    this.assertUsable('/element');
     const budget = this.phaseBudget(timeoutMs, 'find any');
     const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
     let lastError = 'no locator matched';
@@ -1031,7 +1059,7 @@ export class AppiumClient {
     while (locators.length > 0 && !budget.exhausted && Date.now() < deadline) {
       const locator = locators[nextLocator % locators.length];
       nextLocator += 1;
-      budget.assertAvailable(`find ${locator.using}`);
+      this.assertBudgetAvailable(budget, `find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
       const allowance = driverCommandAllowance('/element', 'POST', locator);
       if (remaining <= 1) break;
@@ -1056,32 +1084,34 @@ export class AppiumClient {
         const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);
         if (waitMs <= 0) break;
         await delay(waitMs);
-        if (this.budget?.exhausted) this.budget.assertAvailable('find any');
+        if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, 'find any');
       }
     }
-    if (this.budget?.exhausted) this.budget.assertAvailable('find any');
+    if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, 'find any');
     throw new ElementLookupError(`APPIUM_ELEMENT_ANY: ${lastError}`);
   }
 
   private recordFatal(error: unknown, finalAction = false): void {
-    if (this.firstFatal || (!finalAction && !isFatalDriverError(error))) return;
+    if (!finalAction && !isFatalDriverError(error)) return;
+    this.unusable = true;
+    if (this.firstFatal) return;
     if (error instanceof WebDriverError) {
-      this.firstFatal = {
+      this.firstFatal = Object.freeze({
         code: error.code,
         path: error.path,
         method: error.method,
         at: Date.now(),
         detail: redactText(error.message).slice(0, 500),
-      };
+      });
       return;
     }
-    this.firstFatal = {
+    this.firstFatal = Object.freeze({
       code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code) : 'APPIUM_FATAL',
       path: '',
       method: '',
       at: Date.now(),
       detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 500),
-    };
+    });
   }
 
   private recordLookup(locator: Locator, sliceMs: number, startedAt: number, operationDeadline: number, outcome: WebDriverLookupEvidence['outcome'], error?: unknown): void {

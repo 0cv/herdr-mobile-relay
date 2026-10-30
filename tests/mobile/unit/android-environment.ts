@@ -3844,7 +3844,11 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const { before, after } = await snapshots(fixture);
       let deletes = 0;
       const driver = new AppiumClient('http://fixture.test', 1_000, async (input, init) => {
-        if (init?.method === 'DELETE') deletes++;
+        if (init?.method === 'DELETE') {
+          assert.equal(new URL(String(input)).pathname, '/session/scenario');
+          deletes++;
+          return Response.json({ value: null });
+        }
         return Response.json({ value: new URL(String(input)).pathname === '/session' ? { sessionId: 'scenario' } : true });
       });
       await driver.create({ capabilities: {} });

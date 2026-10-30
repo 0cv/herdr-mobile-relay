@@ -278,11 +278,7 @@ runs:
         if [ "$MOBILE_PLATFORM" = android ]; then
           bash tests/mobile/android-appium/ci.sh install
         else
-          npm install --global appium@3.7.0
-          appium driver install xcuitest@12.12.4
-          npm install --prefix "$APPIUM_HOME/node_modules/appium-xcuitest-driver" --no-save --package-lock=false appium-webdriveragent@16.12.8
-          npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.11
-          appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
+          bash tests/mobile/ios-appium/ci.sh install
         fi
       shell: bash
     - name: Prebuild WebDriverAgent
@@ -320,16 +316,17 @@ runs:
           bash tests/mobile/android-appium/ci.sh verify
           bash tests/mobile/android-appium/ci.sh start "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
         else
-          appium "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
+          bash tests/mobile/ios-appium/ci.sh verify
+          bash tests/mobile/ios-appium/ci.sh start "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
         fi
         appium_pid="$!"
         printf 'APPIUM_PID=%s\n' "$appium_pid" >> "$GITHUB_ENV"
         for attempt in $(seq 1 60); do
-          if [ "$MOBILE_PLATFORM" = android ]; then kill -0 "$appium_pid"; fi
+          kill -0 "$appium_pid"
           if curl --fail --silent http://127.0.0.1:4723/status >/dev/null; then exit 0; fi
           sleep 1
         done
-        sed -n '1,160p' "$RUNNER_TEMP/appium.log" >&2
+        printf '%s\n' 'Appium startup failed; payload-bearing log withheld' >&2
         exit 1
       shell: bash
     - name: Wait for Google Play services components to settle
@@ -368,6 +365,13 @@ runs:
       run: |
         set -euo pipefail
         bun tests/mobile/support/ios-xctest.ts stop
+      shell: bash
+    - name: Retain captured iOS producer integrity
+      if: always() && inputs.platform == 'ios'
+      run: |
+        set -euo pipefail
+        mkdir -p "$MOBILE_OUTPUT"
+        bun tests/mobile/ios-appium/evidence.ts "$APPIUM_HOME" "$MOBILE_OUTPUT"
       shell: bash
     - name: Sanitize bounded diagnostics
       if: always()
