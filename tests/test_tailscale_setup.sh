@@ -182,7 +182,7 @@ if command -v script >/dev/null 2>&1; then
         cmp "$HERDR_RELAY_ENV" "$WORK/prior" || { echo 'turn-off did not restore service form' >&2; exit 1; }
     done
     : > "$FAKE_LOG"
-    if (export FAIL_CONFLICT=1 FAIL_OFF=1; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1; then
+    if ({ printf 'y\n'; /bin/sleep 1; } | FAIL_CONFLICT=1 FAIL_OFF=1 tty_setup) > "$WORK/out" 2>&1; then
         echo 'failed publish cleanup accepted' >&2; exit 1
     fi
     grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
@@ -193,7 +193,7 @@ if command -v script >/dev/null 2>&1; then
     run tailscale-off.sh
     for failure in MISSING_CLI HERDR_TAILSCALE_BIN; do
         : > "$FAKE_LOG"
-        if (export FAIL_CONFLICT=1; export "$failure=1"; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1; then
+        if (export "$failure=1"; { printf 'y\n'; /bin/sleep 1; } | FAIL_CONFLICT=1 tty_setup) > "$WORK/out" 2>&1; then
             echo "failed publish cleanup accepted: $failure" >&2; exit 1
         fi
         grep -q 'mapping may remain.*selection kept' "$WORK/out"
