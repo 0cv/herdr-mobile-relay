@@ -94,7 +94,7 @@ find_missing_tools() {
     local required=(herdr)
     # A gateway-configured relay dials the gateway itself, so cloudflared is
     # neither installed nor required on that path.
-    if [ -z "$GATEWAY_URL" ]; then
+    if [ -z "$GATEWAY_URL" ] && [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ]; then
         required+=(cloudflared)
     fi
     for command in "${required[@]}"; do
@@ -158,7 +158,7 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
     fi
     echo "  Herdr:       https://herdr.dev"
     echo "  Relay:       rerun the exact version installer from this plugin"
-    if [ -z "$GATEWAY_URL" ]; then
+    if [ -z "$GATEWAY_URL" ] && [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ]; then
         echo "  cloudflared: https://developers.cloudflare.com/tunnel/downloads/"
     fi
     exit 1

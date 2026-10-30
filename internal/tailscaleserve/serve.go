@@ -280,7 +280,7 @@ func Run(args []string, stdout, stderr io.Writer) (int, error) {
 		return result(err)
 	}
 	if used {
-		if owned {
+		if owned && *bg {
 			return 0, nil
 		}
 		return result(fail(Conflict, "Tailscale HTTPS port %d is already in use; refusing to replace its mapping", *port))

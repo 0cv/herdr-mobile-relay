@@ -199,6 +199,9 @@ func TestPublishAndOff(t *testing.T) {
 		t.Fatal(logLines(t))
 	}
 	t.Setenv("TS_SERVE_STATUS", own)
+	if code, message, _ := invoke("serve"); code != Conflict || !strings.Contains(message, "already in use") {
+		t.Fatalf("foreground serve reused a mapping without a child: %d %s", code, message)
+	}
 	before := logLines(t)
 	if code, _, _ := invoke("serve", "--bg"); code != 0 || logLines(t) != before+"1|version\n1|status --json\n1|serve status --json\n" {
 		t.Fatal("idempotent serve changed the mapping")
