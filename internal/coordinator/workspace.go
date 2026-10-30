@@ -497,6 +497,11 @@ func (d *Dispatcher) failTopologyErr(requestID, action, paneID string, err error
 	var data any
 	var cliErr *herdr.CLIError
 	switch {
+	// An earlier applied step outranks any refusal from the failing step alone.
+	case errors.Is(err, herdr.ErrPartiallyApplied):
+		phase = "dispatched_unknown"
+		public = "Part of the command already reached the agent; review it before retrying"
+		data = map[string]any{"dispatched_unknown": true}
 	case errors.As(err, &cliErr) && cliErr.Code == "dirty_worktree_requires_force":
 		phase = "not_started"
 		public = "Worktree has uncommitted changes; force removal is required"
@@ -544,7 +549,7 @@ func topologyRefusalCode(code string) bool {
 		"linked_worktree_source", "worktree_operation_in_progress", "protocol_mismatch",
 		"workspace_group_close_required", "workspace_group_changed",
 		"workspace_group_primary_required", "workspace_group_consent_invalid",
-		"workspace_group_validation_unavailable":
+		"workspace_group_validation_unavailable", "workspace_move_block_failed":
 		return true
 	default:
 		return false

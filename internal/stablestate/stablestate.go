@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 )
 
 const Owner = "herdr-mobile-relay-stable-setup-v1"
@@ -207,6 +209,10 @@ func ReadState(filename string) (map[string]any, error) {
 }
 
 func Write(filename string, state map[string]any) error {
+	return write(filename, state, atomicfile.Replace)
+}
+
+func write(filename string, state map[string]any, replace func(string, string, string, []byte, os.FileMode) (atomicfile.Outcome, error)) error {
 	if state["owner"] != Owner {
 		return errors.New("refusing to write unowned stable state")
 	}
@@ -222,35 +228,7 @@ func Write(filename string, state map[string]any) error {
 		return err
 	}
 	data = append(data, '\n')
-	temp, err := os.CreateTemp(directory, "."+filepath.Base(filename)+".")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempName, filename); err != nil {
-		return err
-	}
-	dir, err := os.Open(directory)
-	if err == nil {
-		err = dir.Sync()
-		_ = dir.Close()
-	}
+	_, err = replace(directory, filename, "."+filepath.Base(filename)+".", data, 0o600)
 	return err
 }
 

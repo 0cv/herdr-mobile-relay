@@ -6,11 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -69,28 +66,11 @@ func promptExchange(ctx context.Context, directory string, lease PromptLease, re
 	}
 	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
 	defer cancel()
-	if _, err := owned(directory, false); err != nil {
-		return result, false, err
-	}
-	path := filepath.Join(directory, fmt.Sprintf("%d.sock", lease.PID))
-	before, err := owned(path, true)
-	if err != nil {
-		return result, false, err
-	}
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	conn, err := openBridgeConnection(ctx, directory, lease.PID)
 	if err != nil {
 		return result, false, err
 	}
 	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	deadline, _ := ctx.Deadline()
-	if err := conn.SetDeadline(deadline); err != nil {
-		return result, false, err
-	}
-	if err := checkPeer(conn.(*net.UnixConn), lease.PID); err != nil {
-		return result, false, err
-	}
 	challengeBytes := make([]byte, 16)
 	if _, err := rand.Read(challengeBytes); err != nil {
 		return result, false, err
@@ -120,8 +100,8 @@ func promptExchange(ctx context.Context, directory string, lease PromptLease, re
 	if err := decodeBridge(data, &result); err != nil {
 		return result, attempted, err
 	}
-	after, err := owned(path, true)
-	if err != nil || !os.SameFile(before, after) {
+	after, err := owned(conn.path, true)
+	if err != nil || !os.SameFile(conn.before, after) {
 		return result, attempted, errors.New("bridge replaced")
 	}
 	if result.Identity != lease.Identity || result.Challenge != challenge || len(result.Incarnation) != 36 {

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -171,28 +170,11 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
 	defer cancel()
-	if _, err := owned(directory, false); err != nil {
-		return result, err
-	}
-	path := filepath.Join(directory, fmt.Sprintf("%d.sock", identity.PID))
-	before, err := owned(path, true)
-	if err != nil {
-		return result, err
-	}
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	conn, err := openBridgeConnection(ctx, directory, identity.PID)
 	if err != nil {
 		return result, err
 	}
 	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	deadline, _ := ctx.Deadline()
-	if err := conn.SetDeadline(deadline); err != nil {
-		return result, err
-	}
-	if err := checkPeer(conn.(*net.UnixConn), identity.PID); err != nil {
-		return result, err
-	}
 	challengeBytes := make([]byte, 16)
 	if _, err := rand.Read(challengeBytes); err != nil {
 		return result, err
@@ -222,8 +204,8 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 	if err := decodeBridge(data, &result); err != nil {
 		return result, err
 	}
-	after, err := owned(path, true)
-	if err != nil || !os.SameFile(before, after) {
+	after, err := owned(conn.path, true)
+	if err != nil || !os.SameFile(conn.before, after) {
 		return result, errors.New("bridge replaced")
 	}
 	if result.Identity != identity || result.Challenge != challenge || len(result.Incarnation) != 36 || len(result.Revision) != 64 {

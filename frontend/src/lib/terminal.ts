@@ -1,4 +1,5 @@
 import type { TerminalScheme } from './config';
+import { escapeHtml as escapeHtmlString, safeExternalUrl, trimUrlPunctuation } from './rich-output';
 
 // Everything that depends on whether the phone's terminal pane is dark or
 // light. The desktop pane may run the opposite scheme, so each entry also says
@@ -305,34 +306,10 @@ function terminalCellsHtml(text: string, startingColumn: number): { html: string
 
 
 export function escapeHtml(text: unknown): string {
-  return String(text ?? '').replace(/[&<>"']/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[character] || character);
+  return escapeHtmlString(String(text ?? ''));
 }
 
 const TERMINAL_URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
-
-function splitTerminalUrl(value: string): [string, string] {
-  let candidate = value;
-  let suffix = '';
-  while (candidate && /[.,;:!?\])]/u.test(candidate.at(-1) || '')) {
-    const character = candidate.at(-1) || '';
-    if (character === ')' && (candidate.match(/\(/g)?.length || 0) >= (candidate.match(/\)/g)?.length || 0)) break;
-    if (character === ']' && (candidate.match(/\[/g)?.length || 0) >= (candidate.match(/\]/g)?.length || 0)) break;
-    suffix = character + suffix;
-    candidate = candidate.slice(0, -1);
-  }
-  return [candidate, suffix];
-}
-
-function safeTerminalUrl(value: string): string {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : '';
-  } catch {
-    return '';
-  }
-}
 
 export function linkifyTerminalText(value: string): string {
   let html = '';
@@ -340,8 +317,8 @@ export function linkifyTerminalText(value: string): string {
   for (const match of value.matchAll(TERMINAL_URL_PATTERN)) {
     const index = match.index || 0;
     html += escapeHtml(value.slice(cursor, index));
-    const [candidate, suffix] = splitTerminalUrl(match[0]);
-    const href = safeTerminalUrl(candidate);
+    const [candidate, suffix] = trimUrlPunctuation(match[0]);
+    const href = safeExternalUrl(candidate);
     html += href
       ? `<a class="terminal-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(candidate)}</a>${escapeHtml(suffix)}`
       : escapeHtml(match[0]);
@@ -649,10 +626,10 @@ export function ansiToHtml(
       open = false;
     }
     const codes = parts[index] ? parts[index].split(';').map(Number) : [0];
-    if (codes.includes(0)) styles = {};
     for (let position = 0; position < codes.length; position += 1) {
       const code = codes[position];
-      if (code === 1) styles.fontWeight = '700';
+      if (code === 0) styles = {};
+      else if (code === 1) styles.fontWeight = '700';
       else if (code === 2) styles.opacity = '0.7';
       else if (code === 3) styles.fontStyle = 'italic';
       else if (code === 4) styles.textDecoration = 'underline';
@@ -699,12 +676,11 @@ export function ansiLineBackground(line: string): string {
       continue;
     }
     const codes = parts[index] ? parts[index].split(';').map(Number) : [0];
-    if (codes.includes(0)) background = '';
     for (let position = 0; position < codes.length; position += 1) {
       const code = codes[position];
       if (code === 38) {
         position += ansiExtendedColor(codes, position).consumed;
-      } else if (code === 49) background = '';
+      } else if (code === 0 || code === 49) background = '';
       else if (code === 48) {
         const extended = ansiExtendedColor(codes, position);
         if (extended.color) background = extended.color;

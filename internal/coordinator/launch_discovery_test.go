@@ -26,11 +26,10 @@ func TestLaunchDiscoveryRejectsReplacementAndRevocation(t *testing.T) {
 
 func runLaunchDiscovery(t *testing.T, mode string) {
 	dir := t.TempDir()
-	entered, release, record := filepath.Join(dir, "entered"), filepath.Join(dir, "release"), filepath.Join(dir, "calls")
-	bin := writeScript(t, dir, "herdr", fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\ncase \"$1 $2\" in\n 'agent start') touch %q; while [ ! -f %q ]; do sleep 0.01; done; printf '%%s\\n' '{\"result\":{\"pane_id\":\"pane-new\"}}' ;;\n 'agent prompt') printf '%%s\\n' '{\"result\":{}}' ;;\nesac\n", record, entered, release))
-	state := NewState(testLogger())
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600); _ = d.Close(context.Background()) })
+	entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
+	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{start: fmt.Sprintf(": > %q; while [ ! -f %q ]; do /bin/sleep 0.01; done", entered, release)})
+	d, state, record := f.dispatcher, f.dispatcher.state, f.calls
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
 	resultCh := make(chan *CommandResult, 1)
 	var revoked atomic.Bool
 	waitCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -41,7 +40,7 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 		}
 		return nil
 	})
-	message := map[string]any{"action": "agent_start", "request_id": "normal-discovery", "profile_id": "claude", "name": "proj", "cwd": "/tmp", "prompt": "hello"}
+	message := map[string]any{"action": "agent_start", "request_id": "normal-discovery", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 	go func() { resultCh <- d.Handle(ctx, message) }()
 	for {
 		if _, err := os.Stat(entered); err == nil {
@@ -81,9 +80,13 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 		if mode == "replacement" || mode == "disappearance" || mode == "revocation" {
 			wantPhase, wantPrompts = "completed_with_warning", 0
 		}
-		if result.Phase != wantPhase || strings.Count(string(data), "agent prompt") != wantPrompts {
+		if !result.OK || result.PaneID != f.target.PaneID || result.Phase != wantPhase || strings.Count(string(data), "agent prompt") != wantPrompts {
 			t.Fatalf("launch identity result=%+v generation=%d calls=%s", result, state.Generation("pane-new"), data)
 		}
+		if wantPhase == "completed" {
+			f.assertLaunch(t, result)
+		}
+		f.assertCalls(t, wantPrompts)
 		replay := d.Handle(ctx, message)
 		if replay.Phase != result.Phase {
 			t.Fatalf("duplicate outcome differs: %+v", replay)
