@@ -5,6 +5,32 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Read Oh My Pi settings with a standard YAML parser. A settings file that is
+  not valid YAML is now ignored as a whole instead of being partly salvaged, so
+  skill commands follow the defaults until the file is fixed.
+
+### Fixed
+
+- Keep terminal styling correct after extended-color codes with a zero channel
+  and after trailing resets such as `31;0`.
+- Focus Cancel when a destructive workspace confirmation opens and when it
+  escalates to force removal, so a stray Enter cannot confirm it.
+- Expand `~` in Pi profile skill paths exactly once, so a bare `~` or
+  `~/skills` resolves to the home directory instead of a `~` folder inside it.
+- Carry the conversation error reason code to the app so it can show the right
+  message.
+- Keep the phase, code and retry safety of workspace move refusals.
+- Stop delayed terminal reads from running after their relay connection was
+  replaced, closed or disconnected.
+- Stop UPnP port mapping from following redirects away from the router that
+  answered discovery.
+- Reject operation requests whose type and action disagree, consistently for
+  authorization, audit and dispatch.
+- Cancel tab and workspace reordering cleanly and release its pointer when the
+  gesture is interrupted.
+
 ## [0.23.5] - 2026-10-29
 
 ### Added
