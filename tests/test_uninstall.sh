@@ -6,12 +6,13 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-uninstall-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 SCRIPT_DIR="$WORK_DIR/relay"
 mkdir -p "$SCRIPT_DIR"
-cp "$REPO_DIR/relay/uninstall.sh" "$REPO_DIR/relay/common.sh" "$SCRIPT_DIR/"
+cp "$REPO_DIR/relay/uninstall.sh" "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/uninstall-systemd-user-service.sh" "$SCRIPT_DIR/"
 FAKE_BIN="$WORK_DIR/bin"
 mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/systemctl" <<'EOF'
 #!/bin/sh
-exit 1
+case "$*" in *is-active*) exit 1 ;; esac
+exit 0
 EOF
 cat > "$FAKE_BIN/herdr" <<'EOF'
 #!/bin/sh
@@ -21,7 +22,12 @@ cat > "$FAKE_BIN/uname" <<'EOF'
 #!/bin/sh
 printf 'Linux\n'
 EOF
-chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/herdr" "$FAKE_BIN/uname"
+cat > "$FAKE_BIN/relay" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_LOG"
+[ "${FAIL_OFF:-}" != 1 ]
+EOF
+chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/herdr" "$FAKE_BIN/uname" "$FAKE_BIN/relay"
 export PATH="$FAKE_BIN:$PATH"
 
 TEST_HOME="$WORK_DIR/home"
@@ -82,16 +88,39 @@ mkdir -p "$SOURCE_CHECKOUT/relay"
 printf "HERDR_RELAY_TOKEN='source-token'\n" > "$SOURCE_CHECKOUT/relay/.env"
 printf 'source file\n' > "$SOURCE_CHECKOUT/relay/keep.txt"
 
-printf 'y\n' |
-    HOME="$TEST_HOME" \
+printf "HERDR_TAILSCALE_PORT='8443'\n" > "$CONFIG_HOME/herdr-mobile-relay/relay.env"
+export FAKE_LOG="$WORK_DIR/off.log"
+if ! output="$(printf 'y\n' |
+    HOME="$TEST_HOME" HERDR_RELAY_BIN="$FAKE_BIN/relay" FAIL_OFF=1 \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
     HERDR_PLUGIN_CONFIG_DIR="$CONFIG_HOME/herdr-mobile-relay" \
     XDG_CACHE_HOME="$CACHE_HOME" \
-    bash "$SCRIPT_DIR/uninstall.sh" >/dev/null
+    bash "$SCRIPT_DIR/uninstall.sh" 2>&1)"; then
+    echo "full uninstall stopped on failed off: $output" >&2; exit 1
+fi
+grep -q 'tailscale serve --https=8443 off' <<< "$output"
+test "$(grep -c 'tailscale off --port 8443' "$FAKE_LOG")" -eq 1
 test ! -e "$RELEASE_ROOT"
 test ! -e "$CONFIG_HOME/herdr-mobile-relay"
 test ! -e "$CACHE_HOME/herdr-mobile-relay"
 test -f "$SOURCE_CHECKOUT/relay/.env"
 test -f "$SOURCE_CHECKOUT/relay/keep.txt"
+
+mkdir -p "$RELEASE_ROOT" "$CONFIG_HOME/herdr-mobile-relay" "$CACHE_HOME/herdr-mobile-relay"
+for target in "$RELEASE_ROOT" "$CONFIG_HOME/herdr-mobile-relay" "$CACHE_HOME/herdr-mobile-relay"; do
+    canonical="$(cd "$target" && pwd -P)"
+    printf 'product=herdr-mobile-relay\nroot=%s\n' "$canonical" > "$target/.herdr-mobile-relay-installation"
+    chmod 600 "$target/.herdr-mobile-relay-installation"
+done
+printf "HERDR_TAILSCALE_PORT='8443'\n" > "$CONFIG_HOME/herdr-mobile-relay/relay.env"
+: > "$FAKE_LOG"
+printf 'y\n' |
+    HOME="$TEST_HOME" HERDR_RELAY_BIN="$FAKE_BIN/relay" \
+    HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
+    HERDR_PLUGIN_CONFIG_DIR="$CONFIG_HOME/herdr-mobile-relay" \
+    XDG_CACHE_HOME="$CACHE_HOME" \
+    bash "$SCRIPT_DIR/uninstall.sh" > /dev/null
+test "$(grep -c 'tailscale off --port 8443' "$FAKE_LOG")" -eq 1
+test ! -e "$CONFIG_HOME/herdr-mobile-relay"
 
 echo "uninstall shell tests passed"

@@ -15,6 +15,10 @@ fi
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"
+if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
+    echo "Always on Tailscale is already set up. Use 'Show setup QR', or 'Turn off Tailscale' first." >&2
+    exit 1
+fi
 if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
     echo "A gateway is selected. Switch to a Cloudflare tunnel first, then choose Always on Tailscale." >&2
     exit 1
@@ -46,15 +50,21 @@ if [ -f "$ENV_FILE" ]; then
 fi
 OLD_SERVICE_INSTALLED=false
 SERVICE_CHANGED=false
-PUBLISHED=false
+SERVE_ATTEMPTED=false
 [ -z "$(installed_service_env_file)" ] || OLD_SERVICE_INSTALLED=true
 rollback() {
     local status=$?
     trap - EXIT
     if [ "$status" -ne 0 ]; then
-        if [ "$PUBLISHED" = true ]; then
-            "$RELAY_BIN" tailscale off --port 8443 --relay-port "$PORT" ||
-                echo "✗ Remove the published mapping manually: tailscale serve --https=8443 off" >&2
+        if [ "$SERVE_ATTEMPTED" = true ]; then
+            local off_status=0
+            "$RELAY_BIN" tailscale off --port 8443 --relay-port "$PORT" || off_status=$?
+            if [ "$off_status" -ne 0 ] && [ "$off_status" -ne 3 ]; then
+                echo "✗ Tailscale Serve may still be published; selection kept. Run: tailscale serve --https=8443 off" >&2
+                echo "  Then use 'Turn off Tailscale', or set HERDR_TAILSCALE_ABANDON=1 to clear the selection without removing Serve." >&2
+                rm -f "$ENV_BACKUP"
+                return
+            fi
         fi
         if [ "$ENV_WAS_PRESENT" = true ]; then
             cp -p "$ENV_BACKUP" "$ENV_FILE"
@@ -70,7 +80,7 @@ rollback() {
                     echo "✗ New service could not be removed; run relay/service.sh uninstall." >&2
             fi
         fi
-        echo "✗ Always on Tailscale was not published; the previous selection was restored." >&2
+        echo "✗ Always on Tailscale was not published; the previous service form was restored." >&2
     fi
     rm -f "$ENV_BACKUP"
 }
@@ -90,9 +100,14 @@ if ! wait_for_relay_health "$PORT" 15 1 "$(env_file_value "$ENV_FILE" HERDR_RELA
     echo "✗ The background relay did not become healthy. Check service logs." >&2
     exit 1
 fi
+SERVE_ATTEMPTED=true
 if ! "$RELAY_BIN" tailscale serve --bg --port 8443 --relay-port "$PORT"; then
     echo "✗ Could not publish Tailscale Serve." >&2
     exit 1
 fi
-PUBLISHED=true
-"$SCRIPT_DIR/setup-link.sh"
+trap - EXIT
+rm -f "$ENV_BACKUP"
+if ! HERDR_REQUIRE_SETUP_QR=1 "$SCRIPT_DIR/setup-link.sh"; then
+    echo "Always on Tailscale is set up, but the QR could not be shown: run 'Show setup QR'" >&2
+    exit 1
+fi

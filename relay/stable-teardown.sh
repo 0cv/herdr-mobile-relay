@@ -99,7 +99,7 @@ recover_state_from_config() {
 }
 
 require_supported_platform
-assert_service_env_matches "$ENV_FILE"
+
 
 if [ ! -f "$STATE_FILE" ]; then
     if ! recover_state_from_config; then
@@ -117,6 +117,8 @@ case "$TUNNEL_NAME" in
         exit 1
         ;;
 esac
+
+assert_service_env_matches "$ENV_FILE"
 
 TUNNEL_UUID="$(state_get tunnel_uuid)"
 HOSTNAME="$(state_get hostname)"

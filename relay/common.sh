@@ -1715,7 +1715,8 @@ render_setup_qr() {
     local url="$1"
     local cols
     cols="$(tput cols 2>/dev/null || true)"
-    "$(relay_binary)" qr --columns "${cols:-80}" "$url" 2>/dev/null || true
+    "$(relay_binary)" qr --columns "${cols:-80}" "$url" 2>/dev/null ||
+        [ "${HERDR_REQUIRE_SETUP_QR:-}" != 1 ]
 }
 
 # The URL has already been validated before this internal emitter is called.
@@ -1741,7 +1742,7 @@ print_phone_setup() {
     local qr_code
 
     phone_setup_url_is_safe "$phone_url" || return 1
-    qr_code="$(render_setup_qr "$phone_url")"
+    qr_code="$(render_setup_qr "$phone_url")" || return 1
     if [ -n "$qr_code" ]; then
         echo "  Scan this QR code with your phone camera:"
         echo ""

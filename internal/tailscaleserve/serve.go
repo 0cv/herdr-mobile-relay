@@ -295,10 +295,10 @@ func Run(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		if _, owned, statusErr := c.mapping(*port, target); statusErr == nil && owned {
 			if _, offErr := c.output("serve", "--https="+strconv.Itoa(*port), "off"); offErr != nil {
-				err = fmt.Errorf("%w; could not remove published mapping: %v", err, offErr)
+				err = fmt.Errorf("%w; cleanup failed, mapping may remain: %v", err, offErr)
 			}
 		} else if statusErr != nil {
-			err = fmt.Errorf("%w; could not check published mapping: %v", err, statusErr)
+			err = fmt.Errorf("%w; could not check published mapping; mapping may remain: %v", err, statusErr)
 		}
 	}
 	return result(err)

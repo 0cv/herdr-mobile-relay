@@ -64,7 +64,7 @@ mkdir -p "$UNIT_DIR"
 STAGED_UNIT="$native_recovery/new.service"
 cat > "$STAGED_UNIT" <<EOF
 [Unit]
-Description=Herdr Mobile Relay
+Description=Herdr Mobile Relay and Cloudflare tunnel
 After=network-online.target
 Wants=network-online.target
 

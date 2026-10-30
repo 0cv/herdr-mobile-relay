@@ -29,10 +29,11 @@ case "$*" in
       printf '%s\n' "$TS_SERVE_STATUS"
     fi ;;
   serve*off)
+    if [ "$TS_FAIL" = cleanup ]; then echo 'off failed' >&2; exit 1; fi
     if [ "$TS_FAIL" = https ]; then echo 'error enabling https feature' >&2; exit 1; fi
     if [ -n "$TS_APPLIED" ]; then /bin/rm -f "$TS_APPLIED"; fi ;;
   serve*)
-    if [ "$TS_FAIL" = applied ]; then : > "$TS_APPLIED"; echo 'serve failed after applying mapping' >&2; exit 1; fi
+    if [ "$TS_FAIL" = applied ] || [ "$TS_FAIL" = cleanup ]; then : > "$TS_APPLIED"; echo 'serve failed after applying mapping' >&2; exit 1; fi
     if [ "$TS_FAIL" = https ]; then echo 'error enabling https feature' >&2; exit 1; fi
     if [ "$TS_FAIL" = permission ]; then echo 'Access denied' >&2; exit 1; fi
     if [ "$TS_FAIL" = foreground ]; then echo 'HTTPS cert support is not enabled/configured for your tailnet.' >&2; exit 1; fi
@@ -252,6 +253,21 @@ func TestFailedPublishRemovesOnlyOwnedMapping(t *testing.T) {
 	}
 	if got := logLines(t); !strings.Contains(got, "1|serve status --json\n1|serve --https=8443 off\n") || strings.Contains(got, "--https=9443 off") {
 		t.Fatalf("cleanup touched another port or missed ours: %s", got)
+	}
+}
+
+func TestFailedPublishReportsCleanupFailure(t *testing.T) {
+	root, _ := setup(t)
+	applied := filepath.Join(root, "applied")
+	t.Setenv("TS_APPLIED", applied)
+	t.Setenv("TS_APPLIED_STATUS", own)
+	t.Setenv("TS_FAIL", "cleanup")
+	code, message, _ := invoke("serve", "--bg")
+	if code != 1 || !strings.Contains(message, "mapping may remain") || !strings.Contains(message, "off failed") {
+		t.Fatalf("cleanup failure: %d %s", code, message)
+	}
+	if _, err := os.Stat(applied); err != nil {
+		t.Fatalf("mapping was unexpectedly cleared: %v", err)
 	}
 }
 

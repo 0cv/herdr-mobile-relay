@@ -113,6 +113,21 @@ if run tailscale-setup.sh; then echo 'gateway selected setup accepted' >&2; exit
 grep -q 'Switch to a Cloudflare tunnel first' "$WORK/out"
 assert_absent . "$FAKE_LOG"
 grep -q '^HERDR_GATEWAY_URL=' "$HERDR_RELAY_ENV"
+mkdir -p "$WORK/stable-wrapper"
+cp "$REPO_DIR/relay/plugin-install-service.sh" "$REPO_DIR/relay/common.sh" "$WORK/stable-wrapper/"
+printf '#!/bin/sh\nexit 1\n' > "$WORK/stable-wrapper/stable-setup.sh"
+chmod +x "$WORK/stable-wrapper/stable-setup.sh"
+if "$WORK/stable-wrapper/plugin-install-service.sh" > "$WORK/out" 2>&1; then
+    echo 'fake stable setup unexpectedly succeeded' >&2; exit 1
+fi
+grep -q 'Switching this relay from the WebRTC gateway to Cloudflare' "$WORK/out"
+assert_absent '^HERDR_GATEWAY_URL=' "$HERDR_RELAY_ENV"
+printf "CLOUDFLARED_CONFIG='%s'\n" "$HOME/cloudflare.yml" >> "$HERDR_RELAY_ENV"
+printf 'hostname: relay.cloudflare.test\n' > "$HOME/cloudflare.yml"
+run service.sh install
+grep -q "CLOUDFLARED_CONFIG='" "$HERDR_RELAY_ENV"
+assert_absent '^HERDR_GATEWAY_URL=' "$HERDR_RELAY_ENV"
+run service.sh uninstall
 rm -f "$HERDR_RELAY_ENV"
 
 if command -v script >/dev/null 2>&1; then
@@ -125,7 +140,11 @@ if command -v script >/dev/null 2>&1; then
         (export "$failure=1"; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1 || :
         test ! -e "$HERDR_RELAY_ENV"
         test ! -e "$HOME/.config/systemd/user/herdr-mobile-relay.service"
-        assert_absent 'tailscale off' "$FAKE_LOG"
+        if [ "$failure" = FAIL_CONFLICT ]; then
+            grep -q 'tailscale off --port 8443' "$FAKE_LOG"
+        else
+            assert_absent 'tailscale off' "$FAKE_LOG"
+        fi
         if [ "$failure" = FAIL_PREREQ ]; then
             assert_absent 'systemctl .* (stop|disable)' "$FAKE_LOG"
         else
@@ -144,10 +163,32 @@ if command -v script >/dev/null 2>&1; then
     cmp "$HERDR_RELAY_ENV" "$WORK/prior"
     [ "$(grep -c 'systemctl --user restart' "$FAKE_LOG")" -ge 2 ]
     test -f "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    for failure in FAIL_LINK FAIL_QR; do
+        : > "$FAKE_LOG"
+        if (export "$failure=1"; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1; then
+            echo 'failed QR accepted' >&2; exit 1
+        fi
+        grep -q 'Always on Tailscale is set up, but the QR could not be shown' "$WORK/out"
+        grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
+        test -f "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+        assert_absent 'tailscale off' "$FAKE_LOG"
+        : > "$FAKE_LOG"
+        if run tailscale-setup.sh; then echo 'selected setup accepted' >&2; exit 1; fi
+        grep -q "Always on Tailscale is already set up. Use 'Show setup QR', or 'Turn off Tailscale' first." "$WORK/out"
+        assert_absent . "$FAKE_LOG"
+        run tailscale-off.sh
+        cmp "$HERDR_RELAY_ENV" "$WORK/prior" || { echo 'turn-off did not restore service form' >&2; exit 1; }
+    done
     : > "$FAKE_LOG"
-    (export FAIL_LINK=1; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1 || :
-    cmp "$HERDR_RELAY_ENV" "$WORK/prior"
-    grep -q 'tailscale off --port 8443' "$FAKE_LOG"
+    if (export FAIL_CONFLICT=1 FAIL_OFF=1; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1; then
+        echo 'failed publish cleanup accepted' >&2; exit 1
+    fi
+    grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
+    grep -q 'tailscale serve --https=8443 off' "$WORK/out"
+    grep -q 'HERDR_TAILSCALE_ABANDON=1' "$WORK/out"
+    test -f "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    assert_absent 'systemctl --user disable --now' "$FAKE_LOG"
+    run tailscale-off.sh
     : > "$FAKE_LOG"
     ({ printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1
     grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
@@ -161,7 +202,7 @@ if command -v script >/dev/null 2>&1; then
 fi
 
 refusal="Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first."
-for entry in 'stable-setup.sh' 'gateway-deploy.sh' 'plugin-choose-transport.sh temporary' 'plugin-choose-transport.sh community' 'plugin-choose-transport.sh own' 'plugin-choose-transport.sh stable' 'plugin-install-service.sh' 'plugin-quick-start.sh' 'setup.sh' 'setup.sh --install-missing' 'start.sh' 'stable-teardown.sh' 'change-hostname.sh'; do
+for entry in 'stable-setup.sh' 'gateway-deploy.sh' 'plugin-choose-transport.sh temporary' 'plugin-choose-transport.sh community' 'plugin-choose-transport.sh own' 'plugin-choose-transport.sh stable' 'plugin-install-service.sh' 'plugin-quick-start.sh' 'setup.sh' 'setup.sh --install-missing' 'start.sh' 'stable-teardown.sh' 'change-hostname.sh' 'service.sh uninstall' 'uninstall-systemd-user-service.sh' 'uninstall-service.sh'; do
     : > "$FAKE_LOG"
     cp "$HERDR_RELAY_ENV" "$WORK/before"
     read -r -a args <<< "$entry"
@@ -177,9 +218,16 @@ grep -q 'tailscale serve --https=8443 off' "$WORK/out"
 grep -q 'exit 5' "$WORK/out"
 grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 assert_absent 'systemctl' "$FAKE_LOG"
-(MISSING_CLI=1 run tailscale-off.sh) || { echo 'missing CLI off failed:' >&2; tail -50 "$WORK/out" >&2; exit 1; }
+run tailscale-off.sh
+assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
+printf "HERDR_TAILSCALE_PORT='8443'\n" >> "$HERDR_RELAY_ENV"
+(MISSING_CLI=1 run tailscale-off.sh) || { echo 'missing CLI off failed:' >&2; exit 1; }
 assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 grep -q 'systemctl .* restart' "$FAKE_LOG" || grep -q 'systemctl .* start' "$FAKE_LOG"
+: > "$FAKE_LOG"
+run service.sh uninstall
+grep -q 'systemctl --user disable --now' "$FAKE_LOG"
+run service.sh install
 (CLOUDFLARED_BIN="$WORK/bin/cloudflared" run herdr-mobile-relay-service.sh) || :
 grep -q 'Starting cloudflared' "$WORK/out"
 printf "HERDR_TAILSCALE_PORT='8443'\n" >> "$HERDR_RELAY_ENV"
