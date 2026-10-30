@@ -15,6 +15,7 @@ const fakeCLI = `#!/bin/sh
 printf '%s|%s\n' "$TAILSCALE_BE_CLI" "$*" >> "$TS_LOG"
 case "$*" in
   version)
+    if [ "$TS_FAIL" = hang ]; then while :; do /bin/sleep 0.1; done; fi
     if [ "$TS_FAIL" = version ]; then echo 'version unavailable' >&2; exit 1; fi
     printf '%s\n' "$TS_VERSION" ;;
   'status --json')
@@ -38,7 +39,11 @@ case "$*" in
     if [ "$TS_FAIL" = permission ]; then echo 'Access denied' >&2; exit 1; fi
     if [ "$TS_FAIL" = foreground ]; then echo 'HTTPS cert support is not enabled/configured for your tailnet.' >&2; exit 1; fi
     if [ "$TS_FOREGROUND" = 1 ]; then
-      trap 'echo signal >> "$TS_LOG"; exit 0' INT TERM
+      if [ "${TS_STUBBORN:-}" = 1 ]; then
+        trap 'echo signal >> "$TS_LOG"' INT TERM
+      else
+        trap 'echo signal >> "$TS_LOG"; exit 0' INT TERM
+      fi
       : > "$TS_READY"
       while :; do /bin/sleep 0.1; done
     fi ;;
@@ -217,12 +222,12 @@ func TestPublishAndOff(t *testing.T) {
 		t.Fatal("off did not disable only 8443")
 	}
 	before = logLines(t)
-	if code, _, _ := invoke("off", "--port", "9443"); code != 0 || strings.Contains(strings.TrimPrefix(logLines(t), before), " off\n") {
-		t.Fatal("off removed unrelated mapping")
+	if code, message, _ := invoke("off", "--port", "9443"); code != Conflict || !strings.Contains(message, "another mapping") || strings.Contains(strings.TrimPrefix(logLines(t), before), " off\n") {
+		t.Fatal("off did not reject unrelated mapping")
 	}
 	before = logLines(t)
-	if code, _, _ := invoke("off", "--relay-port", "9999"); code != 0 || strings.Contains(strings.TrimPrefix(logLines(t), before), " off\n") {
-		t.Fatal("off removed another target on the same port")
+	if code, message, _ := invoke("off", "--relay-port", "9999"); code != Conflict || !strings.Contains(message, "another mapping") || strings.Contains(strings.TrimPrefix(logLines(t), before), " off\n") {
+		t.Fatal("off did not reject another target on the same port")
 	}
 	t.Setenv("TS_STATUS", `{"BackendState":"Running","Self":{"DNSName":"node.tail.ts.net."}}`)
 	before = logLines(t)
@@ -285,9 +290,21 @@ func TestConflicts(t *testing.T) {
 			t.Fatalf("%s: %d %s", config, code, message)
 		}
 		before := logLines(t)
-		if code, _, _ := invoke("off"); code != 0 || strings.Contains(strings.TrimPrefix(logLines(t), before), " off\n") {
-			t.Fatalf("off removed conflicting mapping: %s", config)
+		if code, message, _ := invoke("off"); code != Conflict || !strings.Contains(message, "another mapping") || strings.Contains(strings.TrimPrefix(logLines(t), before), " off\n") {
+			t.Fatalf("off did not reject conflicting mapping: %s: %d %s", config, code, message)
 		}
+	}
+}
+
+func TestOneShotTimeout(t *testing.T) {
+	setup(t)
+	t.Setenv("TS_FAIL", "hang")
+	previous := outputTimeout
+	outputTimeout = 150 * time.Millisecond
+	defer func() { outputTimeout = previous }()
+	start := time.Now()
+	if code, message, _ := invoke("check"); code != 1 || !strings.Contains(message, "version timed out") || time.Since(start) > 2*time.Second {
+		t.Fatalf("one-shot CLI did not time out: %d %s", code, message)
 	}
 }
 
@@ -295,9 +312,52 @@ func TestHelperProcess(t *testing.T) {
 	if os.Getenv("TS_HELPER") != "1" {
 		return
 	}
+	if os.Getenv("TS_STUBBORN") == "1" {
+		foregroundGrace = 150 * time.Millisecond
+	}
 	var out, diagnostics bytes.Buffer
 	code, _ := Run([]string{"serve"}, &out, &diagnostics)
 	os.Exit(code)
+}
+
+func TestForegroundKillsStubbornChild(t *testing.T) {
+	root, _ := setup(t)
+	ready := filepath.Join(root, "ready")
+	t.Setenv("TS_READY", ready)
+	t.Setenv("TS_FOREGROUND", "1")
+	t.Setenv("TS_STUBBORN", "1")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
+	cmd.Env = append(os.Environ(), "TS_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("foreground CLI never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stubborn foreground child blocked shutdown")
+	}
+	if !strings.Contains(logLines(t), "signal\n") {
+		t.Fatal("signal was not forwarded")
+	}
 }
 
 func TestForegroundForwardsSignal(t *testing.T) {

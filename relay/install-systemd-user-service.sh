@@ -22,7 +22,6 @@ unset HERDR_TAILSCALE_PORT
 load_relay_env "$ENV_FILE"
 unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
-GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 
 if ! command -v systemctl >/dev/null 2>&1; then
     echo "systemctl not found"
@@ -31,20 +30,20 @@ fi
 
 relay_binary >/dev/null
 
-if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "$GATEWAY_URL" ] && ! command -v cloudflared >/dev/null 2>&1; then
+if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && ! command -v cloudflared >/dev/null 2>&1; then
     echo "cloudflared not found in PATH"
     echo "Install cloudflared before installing the service."
     exit 1
 fi
 
-if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "$GATEWAY_URL" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
+if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
     echo "Missing Cloudflare tunnel config: $CLOUDFLARED_CONFIG"
     echo "Create it first, or set CLOUDFLARED_CONFIG in $ENV_FILE."
     exit 1
 fi
 
 native_install_begin systemd "$UNIT_FILE" "$LEGACY_UNIT_FILE" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
-if [ -n "${HERDR_TAILSCALE_PORT:-}" ] || [ -n "$GATEWAY_URL" ]; then
+if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
     ensure_relay_env "$ENV_FILE" ""
 else
     ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"

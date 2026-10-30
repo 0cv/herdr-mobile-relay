@@ -59,11 +59,14 @@ rollback() {
         if [ "$SERVE_ATTEMPTED" = true ]; then
             local off_status=0
             "$RELAY_BIN" tailscale off --port 8443 --relay-port "$PORT" || off_status=$?
-            if [ "$off_status" -ne 0 ] && [ "$off_status" -ne 3 ]; then
-                echo "✗ Tailscale Serve may still be published; selection kept. Run: tailscale serve --https=8443 off" >&2
-                echo "  Then use 'Turn off Tailscale', or set HERDR_TAILSCALE_ABANDON=1 to clear the selection without removing Serve." >&2
-                rm -f "$ENV_BACKUP"
-                return
+            if [ "$off_status" -ne 0 ]; then
+                if [ "${HERDR_TAILSCALE_ABANDON:-}" != 1 ]; then
+                    echo "✗ Tailscale Serve mapping may remain; selection kept. Run: tailscale serve --https=8443 off" >&2
+                    echo "  Then use 'Turn off Tailscale', or set HERDR_TAILSCALE_ABANDON=1 to clear the selection without removing Serve." >&2
+                    rm -f "$ENV_BACKUP"
+                    return
+                fi
+                echo "⚠ Tailscale Serve mapping may remain; abandoning the selection. Run: tailscale serve --https=8443 off" >&2
             fi
         fi
         if [ "$ENV_WAS_PRESENT" = true ]; then

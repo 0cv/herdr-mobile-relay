@@ -2,6 +2,7 @@ package tailscaleserve
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const usage = "usage: herdr-mobile-relay tailscale {check|address|serve|off} [--port N] [--relay-port N] [--bg]"
@@ -33,6 +35,8 @@ const (
 
 var versionNumber = regexp.MustCompile(`^(\d+)\.(\d+)(?:\.|\s|$)`)
 var systemBundle = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+var outputTimeout = 30 * time.Second
+var foregroundGrace = 2 * time.Second
 
 type failure struct {
 	code int
@@ -85,8 +89,15 @@ func (c client) command(args ...string) *exec.Cmd {
 }
 
 func (c client) output(args ...string) ([]byte, error) {
-	cmd := c.command(args...)
+	ctx, cancel := context.WithTimeout(context.Background(), outputTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.binary, args...)
+	cmd.Env = c.env
+	cmd.WaitDelay = time.Second
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("tailscale %s timed out: %w", strings.Join(args, " "), ctx.Err())
+	}
 	if err != nil {
 		return nil, cliError(strings.Join(args, " "), output, err)
 	}
@@ -204,6 +215,7 @@ func (config serveConfig) portMapping(port int, target string) (bool, bool) {
 
 func (c client) foreground(args []string, stderr io.Writer) error {
 	cmd := c.command(args...)
+	cmd.WaitDelay = time.Second
 	var output bytes.Buffer
 	diagnostics := io.MultiWriter(stderr, &output)
 	cmd.Stdout = diagnostics
@@ -224,7 +236,12 @@ func (c client) foreground(args []string, stderr io.Writer) error {
 		return nil
 	case sig := <-interrupt:
 		_ = cmd.Process.Signal(sig)
-		<-done
+		select {
+		case <-done:
+		case <-time.After(foregroundGrace):
+			_ = cmd.Process.Kill()
+			<-done
+		}
 		return nil
 	}
 }
@@ -273,8 +290,11 @@ func Run(args []string, stdout, stderr io.Writer) (int, error) {
 		return result(err)
 	}
 	if op == "off" {
-		if !owned {
+		if !used {
 			return 0, nil
+		}
+		if !owned {
+			return result(fail(Conflict, "Tailscale HTTPS port %d is in use by another mapping; refusing to remove it", *port))
 		}
 		_, err = c.output("serve", "--https="+strconv.Itoa(*port), "off")
 		return result(err)
