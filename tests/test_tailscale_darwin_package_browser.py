@@ -847,7 +847,7 @@ ALLOWED = (
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
 # SCOPE_BASE to the candidate. Adding or removing a path must update this pin
 # explicitly; the BYO receipt still asserts BYO only.
-INSTALLED_PATH_SET_SHA256 = "21b29e8efc32a4cefecf396853300546834a5631fd50b912b0536a07c6ef44ed"
+INSTALLED_PATH_SET_SHA256 = "aca842fae54947997f502157aae6e4d5d587e051140d1de5af884dd5ac588776"
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")
 LIMITS = MappingProxyType({

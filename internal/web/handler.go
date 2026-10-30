@@ -185,10 +185,6 @@ func (h *Handler) isAllowedAsset(asset string) bool {
 		strings.HasPrefix(asset, "fonts/")
 }
 
-func (h *Handler) immutableAsset(asset string) bool {
-	return h.webFiles[asset] || h.isVersionedLazyAsset(asset)
-}
-
 // Lazy chunks are not entry assets, so they are not repeated in the small
 // release descriptor file map. Only chunks referenced by the verified
 // application module, with the exact release asset version, are executable.
