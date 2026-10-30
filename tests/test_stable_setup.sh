@@ -277,7 +277,7 @@ new_case() {
     unset STUB_APP_ORIGIN STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE
     unset STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL STUB_ROUTE_NAME
-    unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME
+    unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME HERDR_TAILSCALE_BIN
 }
 
 run_setup() {
@@ -340,6 +340,31 @@ test_success_and_alternate_port() {
     assert_contains "$STUB_LOG" 'cloudflared tunnel create --output json --credentials-file'
     assert_not_contains "$STUB_LOG" '--overwrite-dns'
     pass "successful creation uses the alternate relay port and prints QR only after verification"
+}
+
+test_switch_from_tailscale() {
+    new_case
+    cat > "$BIN/tailscale" <<'EOF'
+#!/bin/sh
+printf 'tailscale %s\n' "$*" >> "$STUB_LOG"
+case "$*" in
+    version) echo '1.80.0' ;;
+    'status --json') echo '{"BackendState":"Running","Self":{"DNSName":"sheep.ts.net."}}' ;;
+    'serve status --json') echo '{"TCP":{"8443":{"HTTPS":true}},"Web":{"sheep.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8375"}}}}}' ;;
+    'serve --https=8443 off') ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod 700 "$BIN/tailscale"
+    export HERDR_TAILSCALE_BIN="$BIN/tailscale"
+    printf "HERDR_RELAY_TOKEN='fake-token'\nHERDR_TAILSCALE_PORT='8443'\n" > "$HERDR_RELAY_ENV"
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "direct stable setup after Tailscale"; }
+    assert_contains "$STUB_LOG" 'tailscale serve --https=8443 off'
+    assert_not_contains "$HERDR_RELAY_ENV" 'HERDR_TAILSCALE_PORT='
+    assert_contains "$OUTPUT" 'relay=wss%3A%2F%2Frelay-workstation.example.test'
+    assert_contains "$STUB_LOG" 'cloudflared tunnel create'
+    pass "direct stable setup removes only the owned Tailscale mapping and serves Cloudflare"
 }
 
 test_existing_phone_app_origin() {
@@ -748,8 +773,9 @@ test_teardown_recovers_uuid_config_by_tunnel_name() {
 }
 
 
-echo "1..17"
+echo "1..18"
 test_success_and_alternate_port
+test_switch_from_tailscale
 test_existing_phone_app_origin
 test_deployed_phone_app_origin
 test_discovered_phone_app_origin

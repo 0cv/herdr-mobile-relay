@@ -16,6 +16,7 @@ require_user_service_context
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
+unset HERDR_TAILSCALE_PORT
 load_relay_env "$ENV_FILE"
 unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"

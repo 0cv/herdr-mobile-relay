@@ -577,6 +577,11 @@ fi
 
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"
+switch_off_tailscale "$ENV_FILE"
+if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
+    set_gateway_url "$ENV_FILE" ""
+    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
+fi
 export HERDR_RELAY_ENV="$ENV_FILE"
 
 if ! "$SCRIPT_DIR/setup.sh" --install-missing; then

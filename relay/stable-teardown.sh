@@ -98,7 +98,12 @@ recover_state_from_config() {
 }
 
 require_supported_platform
-
+assert_service_env_matches "$ENV_FILE"
+if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
+    echo "✗ Cloudflare teardown is unavailable while Always on Tailscale uses the shared relay service and environment." >&2
+    echo "  Turn off Tailscale first, then rerun Cloudflare teardown." >&2
+    exit 1
+fi
 
 if [ ! -f "$STATE_FILE" ]; then
     if ! recover_state_from_config; then
@@ -116,8 +121,6 @@ case "$TUNNEL_NAME" in
         exit 1
         ;;
 esac
-
-assert_service_env_matches "$ENV_FILE"
 
 TUNNEL_UUID="$(state_get tunnel_uuid)"
 HOSTNAME="$(state_get hostname)"

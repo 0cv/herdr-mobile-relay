@@ -1319,6 +1319,7 @@ set_gateway_url() {
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
         return 0
     fi
+    switch_off_tailscale "$env_file"
     set_env_value_atomic "$env_file" HERDR_GATEWAY_URL "$url"
 }
 

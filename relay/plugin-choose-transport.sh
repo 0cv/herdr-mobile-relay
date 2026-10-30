@@ -76,7 +76,6 @@ use_gateways() {
     if [ "$count" -gt 1 ]; then
         selection="$(prompt_gateway_selection "$selection")"
     fi
-    switch_off_tailscale "$ENV_FILE"
     set_gateway_url "$ENV_FILE" "$urls"
     set_gateway_selection "$ENV_FILE" "$selection"
     echo ""
@@ -187,7 +186,6 @@ case "$MODE" in
         ;;
     own)
         if choose_own_gateway; then
-            switch_off_tailscale "$ENV_FILE"
             exec "$SCRIPT_DIR/plugin-quick-start.sh"
         fi
         exit 1

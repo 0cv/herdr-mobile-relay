@@ -4,7 +4,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-dev-tailscale.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
-mkdir -p "$WORK_DIR/bin" "$WORK_DIR/state"
+export HOME="$WORK_DIR/home"
+mkdir -p "$WORK_DIR/bin" "$WORK_DIR/state" "$HOME/.local/bin"
 export FAKE_LOG="$WORK_DIR/actions" FAKE_ENV="$WORK_DIR/state/relay.env"
 export HERDR_RELAY_BIN="$WORK_DIR/bin/herdr-mobile-relay"
 export FAKE_TAILSCALE_BIN="$WORK_DIR/bin/tailscale"
@@ -53,6 +54,15 @@ case "$1 ${2:-}" in
 esac
 EOF
 chmod +x "$HERDR_RELAY_BIN" "$HERDR_BIN" "$FAKE_TAILSCALE_BIN"
+
+for tool in launchctl systemctl cloudflared; do
+    cat > "$HOME/.local/bin/$tool" <<'EOF'
+#!/bin/sh
+printf 'unexpected %s %s\n' "${0##*/}" "$*" >> "$FAKE_LOG"
+exit 1
+EOF
+    chmod +x "$HOME/.local/bin/$tool"
+done
 
 cat > "$WORK_DIR/bin/bun" <<'EOF'
 #!/bin/sh
@@ -154,5 +164,9 @@ if (FAKE_SERVE_FAIL=1 run_start; wait "$START_PID"); then
 fi
 grep -q 'Tailscale HTTPS port 9443 is already in use' "$WORK_DIR/start-output"
 ! grep -q 'tailscale off' "$FAKE_LOG"
+if grep -q '^unexpected ' "$FAKE_LOG"; then
+    echo 'A host service tool was invoked' >&2
+    exit 1
+fi
 
 echo 'dev Tailscale tests passed'
