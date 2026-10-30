@@ -57,7 +57,7 @@ wait_for_exit() {
     for ((attempt = 0; attempt < attempts; attempt++)); do
         if ! kill -0 "$pid" 2>/dev/null; then
             wait "$pid" 2>/dev/null || true
-            return
+            return 0
         fi
         sleep 1
     done

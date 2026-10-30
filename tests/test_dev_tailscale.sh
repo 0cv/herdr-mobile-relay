@@ -173,7 +173,16 @@ if (FAKE_ORIGIN_FAIL=1 run_start; wait "$START_PID"); then
     echo 'failed phone origin unexpectedly succeeded' >&2
     exit 1
 fi
-grep -q 'tailscale off --port 9443' "$FAKE_LOG"
+grep -q 'Enter a domain or HTTPS URL without a path' "$WORK_DIR/start-output"
+grep -q "tailscale off --port 9443 --relay-port $HERDR_RELAY_PORT" "$FAKE_LOG"
+if kill -0 "$(<"$WORK_DIR/state/tailscale.pid")" 2>/dev/null; then
+    echo 'Fake Tailscale Serve survived failed phone origin' >&2
+    exit 1
+fi
+if kill -0 "$(<"$WORK_DIR/state/relay.pid")" 2>/dev/null; then
+    echo 'Fake relay survived failed phone origin' >&2
+    exit 1
+fi
 
 : > "$FAKE_LOG"
 if (FAKE_SERVE_FAIL=1 run_start; wait "$START_PID"); then
