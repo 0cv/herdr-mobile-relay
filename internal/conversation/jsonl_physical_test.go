@@ -10,32 +10,6 @@ import (
 	"testing"
 )
 
-type joinedEOFFile struct{ *os.File }
-
-func (f joinedEOFFile) ReadAt([]byte, int64) (int, error) {
-	return 0, errors.Join(io.EOF, context.Canceled)
-}
-
-func TestJSONLJoinedEOFDoesNotHideCancellation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "source.jsonl")
-	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	reader, err := NewJSONLRecordReader(context.Background(), joinedEOFFile{file}, 0, 3, 1024, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = reader.Next()
-	if !errors.Is(err, context.Canceled) || !errors.Is(err, io.EOF) || err == io.EOF {
-		t.Fatalf("joined EOF/cancellation was downgraded: %v", err)
-	}
-}
-
 func TestJSONLPhysicalReadsIncludeBoundaryReadAheadAndCancellation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "source.jsonl")
 	text := "clipped\n" + strings.Repeat("{}\n", 50000)

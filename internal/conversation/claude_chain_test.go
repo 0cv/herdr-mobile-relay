@@ -2567,17 +2567,6 @@ func TestClaudeChainPreparationDeduplicatesConcurrentHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer browser.releaseClaudeChainContext(context)
-	// Keep the worker alive until all callers have observed the same queued job.
-	// Otherwise a fast worker can complete before the last caller arrives.
-	release := make(chan struct{})
-	defer close(release)
-	browser.chainWorkerBeforeCaptureObserver = func() { <-release }
-	// Publish the first job before flooding the bounded admission queue. Concurrent
-	// creators before publication are allowed to get index_busy, not a handle.
-	first, page := browser.startClaudeChainJob(scope, context, 0)
-	if first == nil || page != nil {
-		t.Fatalf("first preparation refused: %#v", page)
-	}
 	const callers = 24
 	jobs := make(chan *browseJob, callers)
 	pages := make(chan *BrowsePage, callers)
@@ -2594,9 +2583,15 @@ func TestClaudeChainPreparationDeduplicatesConcurrentHandles(t *testing.T) {
 	group.Wait()
 	close(jobs)
 	close(pages)
+	var first *browseJob
 	for job := range jobs {
-		if job != first {
-			t.Fatalf("concurrent preparation did not reuse queued handle %p: %p", first, job)
+		if job == nil {
+			t.Fatal("concurrent preparation returned no job")
+		}
+		if first == nil {
+			first = job
+		} else if first != job {
+			t.Fatalf("concurrent preparation returned duplicate handles %p and %p", first, job)
 		}
 	}
 	for page := range pages {

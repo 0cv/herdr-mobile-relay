@@ -564,7 +564,7 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 	// The pane cwd differs from session_v2.directory (#61).
 	scope := BrowseScope{Provider: "opencode", CWD: cwd, SessionID: "ses_browser2"}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
-	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {
+	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" || latest.Total != nil {
 		t.Fatalf("latest page = %#v, err = %v", latest, err)
 	}
 	appendSQL := openCodeV2Message("m4", "ses_browser2", "assistant", 4, 4, `{"content":[{"type":"text","text":"appended"}]}`)
@@ -573,11 +573,11 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 		t.Fatalf("append OpenCode database: %v: %s", err, output)
 	}
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
-	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" {
+	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" || older.Total != nil {
 		t.Fatalf("older page after append = %#v, err = %v", older, err)
 	}
 	page, err := reader.ReadWithProject("opencode", ProjectContext{CWD: cwd}, "ses_browser2", "", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 3 || page.Entries[2].Text != "appended" {
+	if err != nil || !page.Available || len(page.Entries) != 3 || page.Entries[2].Text != "appended" || page.Total != UnknownTotal {
 		t.Fatalf("pane read = %#v, err = %v", page, err)
 	}
 }

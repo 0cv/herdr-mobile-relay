@@ -81,7 +81,7 @@ func (s *Server) runInstalledOperator(ctx context.Context, selected config.Insta
 	lifetime, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	var operatorErr error
-	join := s.installedUpload.bindControl(cancel, done)
+	join := func() { cancel(); <-done }
 	defer join()
 	go func() {
 		defer close(done)
@@ -94,7 +94,6 @@ func (s *Server) runInstalledOperator(ctx context.Context, selected config.Insta
 		operatorErr = invokeInstalledOperator(lifetime, control, credentials, operator)
 	}()
 	err = installedCLIRunner()(s, lifetime)
-	s.installedUpload.begin()
 	join()
 	return errors.Join(err, operatorErr)
 }

@@ -1691,13 +1691,12 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	enteredEnrichment := make(chan struct{})
 	releaseEnrichment := make(chan struct{})
 	var firstEnrichment atomic.Bool
-	server.poller.SetEnrich(func(context.Context, []*coordinator.AgentState) error {
+	server.poller.SetEnrich(func(context.Context, []*coordinator.AgentState) {
 		if !firstEnrichment.CompareAndSwap(false, true) {
-			return nil
+			return
 		}
 		close(enteredEnrichment)
 		<-releaseEnrichment
-		return nil
 	})
 	var reconnectWaits atomic.Int32
 	server.poller.SetEventReconnectWait(func(context.Context) bool {

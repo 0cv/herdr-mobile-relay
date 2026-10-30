@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
-	"github.com/0cv/herdr-mobile-relay/internal/conversationlife"
 	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
 
@@ -23,17 +21,12 @@ const (
 )
 
 type openCodeReader struct {
-	home      string
-	binary    string
-	executor  sqliteexec.Executor
-	mu        sync.Mutex
-	cache     map[string]openCodeCacheEntry
-	layouts   map[string]openCodeLayoutEntry
-	installed *installedProviderSQL
-	metadata  installedProviderMetadata
-	// Optional returning observations, configured before use; never under mu.
-	observe       func(string)
-	parserObserve func(context.Context)
+	home     string
+	binary   string
+	executor sqliteexec.Executor
+	mu       sync.Mutex
+	cache    map[string]openCodeCacheEntry
+	layouts  map[string]openCodeLayoutEntry
 }
 
 type openCodeFileStamp struct {
@@ -72,7 +65,8 @@ type openCodeRow struct {
 	HasMessages   int    `json:"has_messages"`
 	Database      string `json:"-"`
 	V2            bool   `json:"-"`
-	pendingIDs    []string
+
+	pendingIDs []string
 }
 
 func newOpenCodeReader(home string) *openCodeReader {
@@ -80,22 +74,10 @@ func newOpenCodeReader(home string) *openCodeReader {
 }
 
 func (r *openCodeReader) queryExec() sqliteexec.Executor {
-	if r.installed != nil {
-		return nil
-	}
 	return resolveQueryExecutor(r.executor, r.binary)
 }
 
 func (r *openCodeReader) databases() ([]string, string) {
-	if r.installed != nil {
-		var paths []string
-		var code string
-		err := r.root(context.Background(), func(c *conversationlife.Call) error { var err error; paths, code, err = r.databasesIn(c); return err })
-		if err != nil {
-			return nil, "source_unavailable"
-		}
-		return paths, code
-	}
 	if exec := r.queryExec(); exec == nil || !exec.Ready() {
 		return nil, "source_unavailable"
 	}
@@ -120,24 +102,6 @@ func (r *openCodeReader) read(sessionID, before string, limit int) ([]Entry, boo
 }
 
 func (r *openCodeReader) readContext(ctx context.Context, sessionID, before string, limit int) ([]Entry, bool, bool, openCodeRow, string) {
-	if r.installed != nil {
-		var entries []Entry
-		var more, corrupt bool
-		var metadata openCodeRow
-		var code string
-		err := r.root(ctx, func(c *conversationlife.Call) error {
-			var err error
-			entries, more, corrupt, metadata, code, err = r.readIn(c, sessionID, before, limit)
-			return err
-		})
-		if err != nil {
-			if code == "" || terminalProviderError(err) {
-				code = "query_failed"
-			}
-			return nil, false, false, openCodeRow{}, code
-		}
-		return entries, more, corrupt, metadata, code
-	}
 	if !validOpenCodeSessionID(sessionID) {
 		return nil, false, false, openCodeRow{}, "invalid_session"
 	}
@@ -192,19 +156,6 @@ func openCodeStamp(database string) (openCodeFileStamp, bool) {
 }
 
 func (r *openCodeReader) cachedQuery(key string, stamp openCodeFileStamp) ([]openCodeRow, bool, bool) {
-	if r.installed != nil {
-		var rows []openCodeRow
-		var more, hit bool
-		err := r.root(context.Background(), func(c *conversationlife.Call) error {
-			var err error
-			rows, more, hit, err = r.cachedQueryIn(c, key, stamp)
-			return err
-		})
-		if err != nil {
-			return nil, false, false
-		}
-		return rows, more, hit
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry, ok := r.cache[key]
@@ -215,10 +166,6 @@ func (r *openCodeReader) cachedQuery(key string, stamp openCodeFileStamp) ([]ope
 }
 
 func (r *openCodeReader) storeQuery(key string, stamp openCodeFileStamp, rows []openCodeRow, hasMore bool) {
-	if r.installed != nil {
-		_ = r.root(context.Background(), func(c *conversationlife.Call) error { return r.storeQueryIn(c, key, stamp, rows, hasMore) })
-		return
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.cache) >= maxOpenCodeCache {
@@ -234,11 +181,6 @@ func (r *openCodeReader) query(database, sessionID, before string, limit int) ([
 }
 
 func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
-	if r.installed != nil {
-		return r.rowsRoot(ctx, func(c *conversationlife.Call) ([]openCodeRow, bool, string, error) {
-			return r.queryIn(c, database, sessionID, before, limit)
-		})
-	}
 	stamp, stampOK := openCodeStamp(database)
 	cacheKey := fmt.Sprintf("%s\x00%s\x00%s\x00%d", database, sessionID, before, limit)
 	if stampOK {
@@ -299,19 +241,6 @@ type openCodeLayoutEntry struct {
 }
 
 func (r *openCodeReader) layoutContext(ctx context.Context, database string, stamp openCodeFileStamp, stampOK bool) (openCodeLayout, string) {
-	if r.installed != nil {
-		var layout openCodeLayout
-		var code string
-		err := r.root(ctx, func(c *conversationlife.Call) error {
-			var err error
-			layout, code, err = r.layoutIn(c, database, stamp, stampOK)
-			return err
-		})
-		if err != nil {
-			return openCodeLayout{}, "query_failed"
-		}
-		return layout, code
-	}
 	if stampOK {
 		r.mu.Lock()
 		entry, ok := r.layouts[database]
@@ -328,9 +257,22 @@ func (r *openCodeReader) layoutContext(ctx context.Context, database string, sta
 	if code != "" {
 		return openCodeLayout{}, code
 	}
-	layout, code, _ := decodeOpenCodeLayout(context.Background(), raw, nil)
-	if code != "" {
-		return openCodeLayout{}, code
+	var tables []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &tables); err != nil {
+		return openCodeLayout{}, "source_corrupt"
+	}
+	present := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		present[table.Name] = true
+	}
+	layout := openCodeLayout{
+		v1: present["session"] && present["message"] && present["part"],
+		v2: present["session_v2"] && present["session_message"],
+	}
+	if !layout.v1 && !layout.v2 {
+		return openCodeLayout{}, "query_failed"
 	}
 	if current, ok := openCodeStamp(database); stampOK && ok && current == stamp {
 		r.mu.Lock()
@@ -344,10 +286,6 @@ func (r *openCodeReader) layoutContext(ctx context.Context, database string, sta
 }
 
 func (r *openCodeReader) queryV1(ctx context.Context, database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
-	return r.runRows(ctx, database, openCodeV1SQL(sessionID, before, limit), limit, false)
-}
-
-func openCodeV1SQL(sessionID, before string, limit int) string {
 	sessionHex := hex.EncodeToString([]byte(sessionID))
 	cursorCTE := `cursor AS (SELECT NULL AS time_created,NULL AS id WHERE 0)`
 	cursorFilter := ""
@@ -379,17 +317,13 @@ func openCodeV1SQL(sessionID, before string, limit int) string {
 		cursorFound,
 		sessionHex,
 	)
-	return query
+	return r.runRows(ctx, database, query, limit, false)
 }
 
 // queryV2 reads the OpenCode 2.x tables. Only user and assistant turns are
-// selected, in SQL before LIMIT, so hidden turn types neither use page slots
-// nor count toward the total. Turn order is session_message.seq.
+// selected in SQL before LIMIT, so hidden turn types do not use page slots.
+// Turn order is session_message.seq.
 func (r *openCodeReader) queryV2(ctx context.Context, database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
-	return r.runRows(ctx, database, openCodeV2SQL(sessionID, before, limit), limit, true)
-}
-
-func openCodeV2SQL(sessionID, before string, limit int) string {
 	const visible = `type IN ('user','assistant')`
 	sessionHex := hex.EncodeToString([]byte(sessionID))
 	cursorCTE := `cursor AS (SELECT NULL AS seq WHERE 0)`
@@ -425,56 +359,24 @@ func openCodeV2SQL(sessionID, before string, limit int) string {
 		cursorFound,
 		sessionHex,
 	)
-	return query
+	return r.runRows(ctx, database, query, limit, true)
 }
 
 func (r *openCodeReader) runRows(ctx context.Context, database, query string, limit int, v2 bool) ([]openCodeRow, bool, string) {
-	if r.installed != nil {
-		return r.rowsRoot(ctx, func(c *conversationlife.Call) ([]openCodeRow, bool, string, error) {
-			return r.runRowsIn(c, database, query, limit, v2)
-		})
-	}
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
 	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxOpenCodeOutput)
 	if code != "" {
 		return nil, false, code
 	}
-	rows, more, code, _ := decodeOpenCodeRows(context.Background(), raw, limit, v2, nil)
-	return rows, more, code
-}
-
-// Shared row algorithm; ordinary callers retain their historical contextless
-// decoding, while installed callers retain the admitted operation throughout.
-func decodeOpenCodeRows(ctx context.Context, raw []byte, limit int, v2 bool, observe func(string)) ([]openCodeRow, bool, string, error) {
-	check := func(stage string) error {
-		if observe != nil {
-			observe(stage)
-		}
-		return ctx.Err()
-	}
-	if err := check("decode"); err != nil {
-		return nil, false, "query_failed", err
-	}
 	var rows []openCodeRow
-	decodeErr := json.Unmarshal(raw, &rows)
-	if err := ctx.Err(); err != nil {
-		return nil, false, "query_failed", err
-	}
-	if decodeErr != nil {
-		return nil, false, "source_corrupt", nil
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, false, "source_corrupt"
 	}
 	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
-		if err := check("reverse"); err != nil {
-			return nil, false, "query_failed", err
-		}
 		rows[left], rows[right] = rows[right], rows[left]
 	}
 	for index := range rows {
-		if err := check("version"); err != nil {
-			return nil, false, "query_failed", err
-		}
-		rows[index].V2 = v2
 		rows[index].V2 = v2
 		if v2 {
 			rows[index].Total = UnknownTotal
@@ -483,9 +385,6 @@ func decodeOpenCodeRows(ctx context.Context, raw []byte, limit int, v2 bool, obs
 	messageIDs := make([]string, 0, limit+1)
 	seen := make(map[string]struct{}, limit+1)
 	for _, row := range rows {
-		if err := check("distinct"); err != nil {
-			return nil, false, "query_failed", err
-		}
 		if row.MessageID == "" {
 			continue
 		}
@@ -500,499 +399,13 @@ func decodeOpenCodeRows(ctx context.Context, raw []byte, limit int, v2 bool, obs
 		extraID := messageIDs[0]
 		kept := rows[:0]
 		for _, row := range rows {
-			if err := check("filter"); err != nil {
-				return nil, false, "query_failed", err
-			}
 			if row.MessageID != extraID {
 				kept = append(kept, row)
 			}
 		}
 		rows = kept
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, false, "query_failed", err
-	}
-	return rows, hasMore, "", nil
-}
-
-func decodeOpenCodeLayout(ctx context.Context, raw []byte, observe func(string)) (openCodeLayout, string, error) {
-	if err := ctx.Err(); err != nil {
-		return openCodeLayout{}, "query_failed", err
-	}
-	var tables []struct {
-		Name string `json:"name"`
-	}
-	decodeErr := json.Unmarshal(raw, &tables)
-	if err := ctx.Err(); err != nil {
-		return openCodeLayout{}, "query_failed", err
-	}
-	if decodeErr != nil {
-		return openCodeLayout{}, "source_corrupt", nil
-	}
-	present := make(map[string]bool, len(tables))
-	for _, table := range tables {
-		if observe != nil {
-			observe("layout-row")
-		}
-		if err := ctx.Err(); err != nil {
-			return openCodeLayout{}, "query_failed", err
-		}
-		present[table.Name] = true
-	}
-	layout := openCodeLayout{v1: present["session"] && present["message"] && present["part"], v2: present["session_v2"] && present["session_message"]}
-	if !layout.v1 && !layout.v2 {
-		return openCodeLayout{}, "query_failed", nil
-	}
-	if err := ctx.Err(); err != nil {
-		return openCodeLayout{}, "query_failed", err
-	}
-	return layout, "", nil
-}
-
-// Production association is concrete and precedes admission/effects. This is
-// intended for the future Reader constructor's live construction Call.
-func newInstalledOpenCodeReaderIn(owner *conversationlife.Owner, parent *conversationlife.Call, home string, executor *sqliteexec.InstalledExecutor) (*openCodeReader, error) {
-	binding, err := bindInstalledProviderSQL(owner, executor, "sqlite3")
-	if err != nil {
-		return nil, err
-	}
-	return constructInstalledOpenCodeIn(parent, home, binding, productionOpenCodeMetadata())
-}
-
-func constructInstalledOpenCodeIn(parent *conversationlife.Call, home string, binding *installedProviderSQL, metadata installedProviderMetadata) (*openCodeReader, error) {
-	if !binding.valid("sqlite3") || !metadata.complete() {
-		return nil, conversationlife.ErrRefused
-	}
-	var result *openCodeReader
-	err := binding.owner.DoIn(parent, func(c *conversationlife.Call) error {
-		if err := c.Context().Err(); err != nil {
-			return err
-		}
-		result = &openCodeReader{home: home, binary: "sqlite3", installed: binding, metadata: metadata,
-			cache: make(map[string]openCodeCacheEntry), layouts: make(map[string]openCodeLayoutEntry)}
-		return c.Context().Err()
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-func (r *openCodeReader) installedValid() bool {
-	return r != nil && r.installed.valid(r.binary) && r.metadata.complete() && r.cache != nil && r.layouts != nil
-}
-
-func (r *openCodeReader) root(ctx context.Context, fn func(*conversationlife.Call) error) error {
-	if !r.installedValid() {
-		return conversationlife.ErrRefused
-	}
-	return r.installed.owner.Do(ctx, func(c *conversationlife.Call) error {
-		if err := c.Context().Err(); err != nil {
-			return err
-		}
-		return errors.Join(fn(c), c.Context().Err())
-	})
-}
-
-func (r *openCodeReader) in(parent *conversationlife.Call, fn func(*conversationlife.Call) error) error {
-	if !r.installedValid() {
-		return conversationlife.ErrRefused
-	}
-	return r.installed.owner.DoIn(parent, func(c *conversationlife.Call) error {
-		if err := c.Context().Err(); err != nil {
-			return err
-		}
-		return errors.Join(fn(c), c.Context().Err())
-	})
-}
-
-func (r *openCodeReader) rowsRoot(ctx context.Context, fn func(*conversationlife.Call) ([]openCodeRow, bool, string, error)) ([]openCodeRow, bool, string) {
-	var rows []openCodeRow
-	var more bool
-	var code string
-	err := r.root(ctx, func(c *conversationlife.Call) error { var err error; rows, more, code, err = fn(c); return err })
-	if err != nil {
-		if code == "" || terminalProviderError(err) {
-			code = "query_failed"
-		}
-		return nil, false, code
-	}
-	return rows, more, code
-}
-
-func (r *openCodeReader) checkpoint(ctx context.Context, stage string) error {
-	if r.observe != nil {
-		r.observe(stage)
-	}
-	return ctx.Err()
-}
-
-func (r *openCodeReader) databasesIn(parent *conversationlife.Call) (paths []string, code string, err error) {
-	err = r.in(parent, func(c *conversationlife.Call) error {
-		ctx := c.Context()
-		ready, err := r.installed.readyIn(c, r.binary)
-		if err != nil {
-			return err
-		}
-		if !ready {
-			code = "source_unavailable"
-			return nil
-		}
-		var roots, candidates []string
-		if err := sourceEffect(ctx, func() (err error) { roots, err = r.metadata.roots(ctx, r.home); return err }); err != nil {
-			return err
-		}
-		if err := sourceEffect(ctx, func() (err error) { candidates, err = r.metadata.databases(ctx, r.home); return err }); err != nil {
-			return err
-		}
-		for index, candidate := range candidates {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if index >= len(roots) {
-				break
-			}
-			path, err := r.metadata.contained(ctx, candidate, roots[index])
-			if terminalProviderError(err) {
-				return err
-			}
-			if err == nil && path != "" {
-				paths = append(paths, path)
-			}
-		}
-		if len(paths) == 0 {
-			code = "source_unavailable"
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, "source_unavailable", err
-	}
-	return
-}
-
-func (r *openCodeReader) readIn(parent *conversationlife.Call, sessionID, before string, limit int) (entries []Entry, more, corrupt bool, metadata openCodeRow, code string, err error) {
-	err = r.in(parent, func(c *conversationlife.Call) error {
-		if !validOpenCodeSessionID(sessionID) {
-			code = "invalid_session"
-			return nil
-		}
-		if before != "" && (len(before) > 256 || strings.ContainsAny(before, "\x00\r\n")) {
-			code = "invalid_cursor"
-			return nil
-		}
-		paths, discoveryCode, err := r.databasesIn(c)
-		if err != nil {
-			return err
-		}
-		if discoveryCode != "" {
-			code = discoveryCode
-			return nil
-		}
-		firstFailure := ""
-		var firstError error
-		for _, database := range paths {
-			if err := c.Context().Err(); err != nil {
-				return err
-			}
-			rows, hasMore, queryCode, queryErr := r.queryIn(c, database, sessionID, before, limit)
-			if terminalProviderError(queryErr) {
-				return queryErr
-			}
-			if err := c.Context().Err(); err != nil {
-				return errors.Join(queryErr, err)
-			}
-			if queryCode != "" {
-				if firstFailure == "" {
-					firstFailure, firstError = queryCode, queryErr
-				}
-				continue
-			}
-			if queryErr != nil {
-				return queryErr
-			}
-			if len(rows) == 0 || rows[0].SessionID != sessionID {
-				continue
-			}
-			if before != "" && rows[0].CursorFound == 0 {
-				code = "invalid_cursor"
-				return nil
-			}
-			parserContext := c.Context()
-			if r.observe != nil || r.parserObserve != nil {
-				parserContext = openCodeParserObservationContext{Context: parserContext, observe: r.observe, contextObserved: r.parserObserve}
-			}
-			parsed, damaged, err := parseOpenCodeRowsContext(parserContext, rows)
-			if err != nil {
-				return err
-			}
-			entries, more, corrupt, metadata = parsed, hasMore, damaged, rows[0]
-			metadata.Database = database
-			return nil
-		}
-		code = firstFailure
-		if code == "" {
-			code = "invalid_session"
-		}
-		return firstError
-	})
-	if err != nil {
-		if code == "" || terminalProviderError(err) {
-			code = "query_failed"
-		}
-		return nil, false, false, openCodeRow{}, code, err
-	}
-	return
-}
-
-// Observation only: admission remains with the original Call. Embedded context
-// delegates Deadline, Done and Value unchanged; production nil uses no wrapper.
-type openCodeParserObservationContext struct {
-	context.Context
-	observe         func(string)
-	contextObserved func(context.Context)
-}
-
-func (c openCodeParserObservationContext) Err() error {
-	if c.contextObserved != nil {
-		c.contextObserved(c.Context)
-	}
-	if c.observe != nil {
-		c.observe("parser-check")
-	}
-	return c.Context.Err()
-}
-
-func copyOpenCodeRows(ctx context.Context, rows []openCodeRow, observe func(string)) ([]openCodeRow, error) {
-	var copied []openCodeRow
-	if rows != nil {
-		copied = make([]openCodeRow, len(rows))
-	}
-	for i := range rows {
-		if observe != nil {
-			observe("cache-copy")
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		copied[i] = rows[i]
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return copied, nil
-}
-
-func (r *openCodeReader) cachedQueryIn(parent *conversationlife.Call, key string, stamp openCodeFileStamp) (rows []openCodeRow, more, hit bool, err error) {
-	err = r.in(parent, func(c *conversationlife.Call) error {
-		r.mu.Lock()
-		entry, ok := r.cache[key]
-		r.mu.Unlock()
-		if err := r.checkpoint(c.Context(), "cache-hit"); err != nil {
-			return err
-		}
-		if !ok || entry.stamp != stamp {
-			return nil
-		}
-		var err error
-		rows, err = copyOpenCodeRows(c.Context(), entry.rows, r.observe)
-		if err != nil {
-			return err
-		}
-		more, hit = entry.hasMore, true
-		return nil
-	})
-	if err != nil {
-		return nil, false, false, err
-	}
-	return
-}
-
-func (r *openCodeReader) storeQueryIn(parent *conversationlife.Call, key string, stamp openCodeFileStamp, rows []openCodeRow, more bool) error {
-	return r.in(parent, func(c *conversationlife.Call) error {
-		ctx := c.Context()
-		copied, err := copyOpenCodeRows(ctx, rows, r.observe)
-		if err != nil {
-			return err
-		}
-		// Keys retain the existing database-first NUL-separated format.
-		database, _, _ := strings.Cut(key, "\x00")
-		current, ok, err := r.metadata.stamp(ctx, database)
-		if err != nil {
-			return err
-		}
-		if !ok || current != stamp {
-			return nil
-		}
-		if err := r.checkpoint(ctx, "cache-publish"); err != nil {
-			return err
-		}
-		done := ctx.Done()
-		r.mu.Lock()
-		select {
-		case <-done:
-		default:
-			if len(r.cache) >= maxOpenCodeCache {
-				clear(r.cache)
-			}
-			r.cache[key] = openCodeCacheEntry{stamp: stamp, rows: copied, hasMore: more}
-		}
-		r.mu.Unlock()
-		return ctx.Err()
-	})
-}
-
-func (r *openCodeReader) queryIn(parent *conversationlife.Call, database, sessionID, before string, limit int) (rows []openCodeRow, more bool, code string, err error) {
-	err = r.in(parent, func(c *conversationlife.Call) error {
-		if limit < 0 {
-			return conversationlife.ErrRefused
-		}
-		ctx := c.Context()
-		stamp, stampOK, err := r.metadata.stamp(ctx, database)
-		if err != nil {
-			return err
-		}
-		key := fmt.Sprintf("%s\x00%s\x00%s\x00%d", database, sessionID, before, limit)
-		if stampOK {
-			var hit bool
-			rows, more, hit, err = r.cachedQueryIn(c, key, stamp)
-			if err != nil {
-				return err
-			}
-			if hit {
-				return nil
-			}
-		}
-		layout, layoutCode, err := r.layoutIn(c, database, stamp, stampOK)
-		if err != nil || layoutCode != "" {
-			code = layoutCode
-			return err
-		}
-		if layout.v2 {
-			rows, more, code, err = r.queryV2In(c, database, sessionID, before, limit)
-			if err != nil || code != "" {
-				return err
-			}
-			if layout.v1 && (len(rows) == 0 || rows[0].HasMessages == 0) {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				v1Rows, v1More, v1Code, v1Err := r.queryV1In(c, database, sessionID, before, limit)
-				if v1Err != nil || v1Code != "" {
-					code = v1Code
-					return v1Err
-				}
-				if len(v1Rows) > 0 || len(rows) == 0 {
-					rows, more = v1Rows, v1More
-				}
-			}
-		} else {
-			rows, more, code, err = r.queryV1In(c, database, sessionID, before, limit)
-			if err != nil || code != "" {
-				return err
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if stampOK {
-			return r.storeQueryIn(c, key, stamp, rows, more)
-		}
-		return nil
-	})
-	if err != nil {
-		if code == "" {
-			code = "query_failed"
-		}
-		return nil, false, code, err
-	}
-	return
-}
-
-func (r *openCodeReader) layoutIn(parent *conversationlife.Call, database string, stamp openCodeFileStamp, stampOK bool) (layout openCodeLayout, code string, err error) {
-	err = r.in(parent, func(c *conversationlife.Call) error {
-		ctx := c.Context()
-		if stampOK {
-			r.mu.Lock()
-			entry, ok := r.layouts[database]
-			r.mu.Unlock()
-			if err := r.checkpoint(ctx, "layout-hit"); err != nil {
-				return err
-			}
-			if ok && entry.stamp == stamp {
-				layout = entry.layout
-				return nil
-			}
-		}
-		raw, queryCode, err := r.installed.queryIn(c, r.binary, database,
-			`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session','message','part','session_v2','session_message');`, maxOpenCodeOutput, openCodeQueryTimeout)
-		code = queryCode
-		if err != nil || code != "" {
-			return err
-		}
-		layout, code, err = decodeOpenCodeLayout(ctx, raw, r.observe)
-		if err != nil || code != "" {
-			return err
-		}
-		current, ok, err := r.metadata.stamp(ctx, database)
-		if err != nil {
-			return err
-		}
-		if stampOK && ok && current == stamp {
-			if err := r.checkpoint(ctx, "layout-publish"); err != nil {
-				return err
-			}
-			done := ctx.Done()
-			r.mu.Lock()
-			select {
-			case <-done:
-			default:
-				if len(r.layouts) >= maxOpenCodeCache {
-					clear(r.layouts)
-				}
-				r.layouts[database] = openCodeLayoutEntry{stamp: stamp, layout: layout}
-			}
-			r.mu.Unlock()
-		}
-		return ctx.Err()
-	})
-	if err != nil {
-		if code == "" {
-			code = "query_failed"
-		}
-		return openCodeLayout{}, code, err
-	}
-	return
-}
-
-func (r *openCodeReader) queryV1In(parent *conversationlife.Call, database, sessionID, before string, limit int) ([]openCodeRow, bool, string, error) {
-	return r.runRowsIn(parent, database, openCodeV1SQL(sessionID, before, limit), limit, false)
-}
-
-func (r *openCodeReader) queryV2In(parent *conversationlife.Call, database, sessionID, before string, limit int) ([]openCodeRow, bool, string, error) {
-	return r.runRowsIn(parent, database, openCodeV2SQL(sessionID, before, limit), limit, true)
-}
-
-func (r *openCodeReader) runRowsIn(parent *conversationlife.Call, database, query string, limit int, v2 bool) (rows []openCodeRow, more bool, code string, err error) {
-	err = r.in(parent, func(c *conversationlife.Call) error {
-		if limit < 0 {
-			return conversationlife.ErrRefused
-		}
-		raw, queryCode, err := r.installed.queryIn(c, r.binary, database, query, maxOpenCodeOutput, openCodeQueryTimeout)
-		code = queryCode
-		if err != nil || code != "" {
-			return err
-		}
-		rows, more, code, err = decodeOpenCodeRows(c.Context(), raw, limit, v2, r.observe)
-		return err
-	})
-	if err != nil {
-		if code == "" {
-			code = "query_failed"
-		}
-		return nil, false, code, err
-	}
-	return
+	return rows, hasMore, ""
 }
 
 // readOpenCode reads a session by the ID Herdr reported for the pane. It does
@@ -1063,29 +476,13 @@ func openCodePendingIDs(rows []openCodeRow, entries []Entry) []string {
 }
 
 func parseOpenCodeRows(rows []openCodeRow) ([]Entry, bool) {
-	entries, corrupt, _ := parseOpenCodeRowsContext(context.Background(), rows)
-	return entries, corrupt
-}
-
-func parseOpenCodeRowsContext(ctx context.Context, rows []openCodeRow) (result []Entry, damaged bool, err error) {
-	defer func() {
-		if cancelled := ctx.Err(); cancelled != nil {
-			result, damaged, err = nil, false, cancelled
-		}
-	}()
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
 	if len(rows) > 0 && rows[0].V2 {
-		return parseOpenCodeV2RowsContext(ctx, rows)
+		return parseOpenCodeV2Rows(rows)
 	}
 	entries := make([]Entry, 0)
 	byMessage := make(map[string]int)
 	corrupt := false
 	for _, row := range rows {
-		if err := ctx.Err(); err != nil {
-			return nil, false, err
-		}
 		if row.MessageID == "" {
 			continue
 		}
@@ -1159,39 +556,20 @@ func parseOpenCodeRowsContext(ctx context.Context, rows []openCodeRow) (result [
 	}
 	kept := entries[:0]
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, false, err
-		}
 		entry.Text, entry.Truncated = clampText(entry.Text, maxEntryBytes)
 		if entry.Text != "" || len(entry.Tools) > 0 {
 			kept = append(kept, entry)
 		}
 	}
-	return kept, corrupt, nil
+	return kept, corrupt
 }
 
 // parseOpenCodeV2Rows maps OpenCode 2.x session_message rows (one per turn) to
 // entries. The role is the row type; assistant parts live in data.content.
 func parseOpenCodeV2Rows(rows []openCodeRow) ([]Entry, bool) {
-	entries, corrupt, _ := parseOpenCodeV2RowsContext(context.Background(), rows)
-	return entries, corrupt
-}
-
-func parseOpenCodeV2RowsContext(ctx context.Context, rows []openCodeRow) (result []Entry, damaged bool, err error) {
-	defer func() {
-		if cancelled := ctx.Err(); cancelled != nil {
-			result, damaged, err = nil, false, cancelled
-		}
-	}()
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
 	entries := make([]Entry, 0, len(rows))
 	corrupt := false
 	for _, row := range rows {
-		if err := ctx.Err(); err != nil {
-			return nil, false, err
-		}
 		if row.MessageID == "" {
 			continue
 		}
@@ -1217,50 +595,20 @@ func parseOpenCodeV2RowsContext(ctx context.Context, rows []openCodeRow) (result
 		}
 		if row.MessageType == "user" {
 			entry.Text = sanitizeText(data.Text)
-		} else {
-			itemCorrupt, err := parseOpenCodeV2ContentContext(ctx, &entry, data.Content)
-			if err != nil {
-				return nil, false, err
-			}
-			corrupt = corrupt || itemCorrupt
+		} else if itemCorrupt := parseOpenCodeV2Content(&entry, data.Content); itemCorrupt {
+			corrupt = true
 		}
 		entry.Text, entry.Truncated = clampText(entry.Text, maxEntryBytes)
 		if entry.Text != "" || len(entry.Tools) > 0 {
 			entries = append(entries, entry)
 		}
 	}
-	return entries, corrupt, nil
+	return entries, corrupt
 }
 
 func parseOpenCodeV2Content(entry *Entry, items []json.RawMessage) bool {
-	corrupt, _ := parseOpenCodeV2ContentContext(context.Background(), entry, items)
-	return corrupt
-}
-
-// A cancelled helper must not expose partially attached content or tools.
-func parseOpenCodeV2ContentContext(ctx context.Context, entry *Entry, items []json.RawMessage) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	candidate := *entry
-	candidate.Tools = append([]ToolActivity(nil), entry.Tools...)
-	corrupt, err := parseOpenCodeV2ContentInto(ctx, &candidate, items)
-	if err != nil {
-		return false, err
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	*entry = candidate
-	return corrupt, nil
-}
-
-func parseOpenCodeV2ContentInto(ctx context.Context, entry *Entry, items []json.RawMessage) (bool, error) {
 	corrupt := false
 	for _, raw := range items {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
 		var item struct {
 			Type  string `json:"type"`
 			Text  string `json:"text"`
@@ -1295,17 +643,17 @@ func parseOpenCodeV2ContentInto(ctx context.Context, entry *Entry, items []json.
 				input = string(item.State.Input)
 			}
 			activity := newToolActivity(item.ID, item.Name, input)
-			output, err := openCodeV2ToolOutputContext(ctx, item.State.Content, item.State.Output)
-			if err != nil {
-				return false, err
-			}
-			activity.Output, activity.Truncated = clampText(sanitizeText(output), maxEntryBytes)
+			activity.State = openCodeToolState(item.State.Status)
+			activity.Output, activity.Truncated = clampText(sanitizeText(openCodeV2ToolOutput(item.State.Content, item.State.Output)), maxEntryBytes)
 			activity.Error = item.State.Status == "error" || openCodeV2ErrorSet(item.State.Error) ||
 				openCodeExitFailed(item.State.Metadata)
+			if activity.Error {
+				activity.State = "failed"
+			}
 			entry.Tools = append(entry.Tools, activity)
 		}
 	}
-	return corrupt, ctx.Err()
+	return corrupt
 }
 
 // openCodeExitFailed reports whether a tool's state.metadata records a
@@ -1328,19 +676,6 @@ func openCodeExitFailed(metadata json.RawMessage) bool {
 // code 3" after the command output, so blocks are separated by a newline when
 // the previous one does not already end with one.
 func openCodeV2ToolOutput(content, output json.RawMessage) string {
-	text, _ := openCodeV2ToolOutputContext(context.Background(), content, output)
-	return text
-}
-
-func openCodeV2ToolOutputContext(ctx context.Context, content, output json.RawMessage) (textResult string, err error) {
-	defer func() {
-		if cancelled := ctx.Err(); cancelled != nil {
-			textResult, err = "", cancelled
-		}
-	}()
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -1348,9 +683,6 @@ func openCodeV2ToolOutputContext(ctx context.Context, content, output json.RawMe
 	if json.Unmarshal(content, &blocks) == nil {
 		var text strings.Builder
 		for _, block := range blocks {
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
 			if (block.Type != "text" && block.Type != "") || block.Text == "" {
 				continue
 			}
@@ -1360,14 +692,14 @@ func openCodeV2ToolOutputContext(ctx context.Context, content, output json.RawMe
 			text.WriteString(block.Text)
 		}
 		if text.Len() > 0 {
-			return text.String(), nil
+			return text.String()
 		}
 	}
 	var fallback string
 	if json.Unmarshal(output, &fallback) == nil {
-		return fallback, nil
+		return fallback
 	}
-	return "", nil
+	return ""
 }
 
 // openCodeV2ErrorSet reports whether state.error holds a value of any JSON type.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 )
 
@@ -34,7 +35,7 @@ type JSONLRecordProgress struct {
 
 type JSONLRecordReader struct {
 	ctx          context.Context
-	file         browserFile
+	file         *os.File
 	reader       *bufio.Reader
 	start        int64
 	end          int64
@@ -50,7 +51,7 @@ type JSONLRecordReader struct {
 
 func NewJSONLRecordReader(
 	ctx context.Context,
-	file browserFile,
+	file *os.File,
 	start, end, maxBytes int64,
 	progress func(JSONLRecordProgress),
 ) (*JSONLRecordReader, error) {
@@ -152,11 +153,7 @@ func (r *JSONLRecordReader) Next() (JSONLRecord, error) {
 			return JSONLRecord{}, err
 		}
 		if r.position >= r.end {
-			info, err := r.file.Stat()
-			if err != nil {
-				return JSONLRecord{}, err
-			}
-			if info.Size() < r.end {
+			if info, err := r.file.Stat(); err == nil && info.Size() < r.end {
 				return JSONLRecord{}, errJSONLSourceTruncated
 			}
 			return JSONLRecord{}, io.EOF
@@ -205,7 +202,7 @@ func (r *JSONLRecordReader) Next() (JSONLRecord, error) {
 				break
 			case errors.Is(err, bufio.ErrBufferFull):
 				continue
-			case err == io.EOF:
+			case errors.Is(err, io.EOF):
 				if r.position < r.end {
 					return JSONLRecord{}, errJSONLSourceTruncated
 				}
@@ -344,7 +341,7 @@ func collectJSONLRecordsBytes(ctx context.Context, data []byte, start int64, sta
 
 func collectJSONLRecords(
 	ctx context.Context,
-	file browserFile,
+	file *os.File,
 	start, end, maxBytes int64,
 	progress func(JSONLRecordProgress),
 ) ([]JSONLRecord, int, error) {
@@ -356,7 +353,7 @@ func collectJSONLRecords(
 	overSized := 0
 	for {
 		record, err := reader.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return records, overSized, nil
 		}
 		if err != nil {

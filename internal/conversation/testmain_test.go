@@ -1,5 +1,3 @@
-//go:build !herdr_sqlite_logical_test || herdr_installed_hosted_test || herdr_tailscale_test || herdr_tailscale_cli_fixture_binary
-
 package conversation
 
 import (

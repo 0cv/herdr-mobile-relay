@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"time"
 )
@@ -24,9 +25,8 @@ var (
 )
 
 type claudeChainLineage struct {
-	segments    []claudeSegment
-	lastAccess  time.Time
-	terminalErr error
+	segments   []claudeSegment
+	lastAccess time.Time
 }
 
 func cloneClaudeSegments(segments []claudeSegment) []claudeSegment {
@@ -64,15 +64,14 @@ type claudeChainContext struct {
 }
 
 func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
-	anchor, err := b.locateBrowserClaude(ctx, request.Scope)
-	if err != nil {
-		return BrowsePage{}, err
-	}
+	anchor := b.reader.LocateWithProject(request.Scope.Provider, ProjectContext{
+		CWD: request.Scope.CWD, ForegroundCWD: request.Scope.ForegroundCWD,
+	}, request.Scope.SessionID)
 	if anchor.Path == "" {
 		return browseUnavailable("invalid_session", "No conversation log is available for this session."), nil
 	}
 	requestBudget := newClaudeChainRequestBudget(b.options.RecentBytes)
-	chain, err := b.resolveBrowserClaude(ctx, anchor, request.Scope.SessionID,
+	chain, err := resolveClaudeChainWithReadHooks(ctx, anchor, request.Scope.SessionID,
 		func(bytes int64) error {
 			if err := requestBudget.takeDiscovery(bytes); err != nil {
 				return err
@@ -85,9 +84,6 @@ func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest
 		},
 	)
 	if err != nil {
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
-		}
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			message := "History request was cancelled."
 			return browseFailure(true, "request_cancelled", message, browseErrorFor("request_cancelled", message, true)), nil
@@ -110,9 +106,6 @@ func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest
 			message := "Conversation history is being validated; try again shortly."
 			return browseFailure(true, "validation_pending", message, browseErrorFor("validation_pending", message, true)), nil
 		}
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
-		}
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			message := "History request was cancelled."
 			return browseFailure(true, "request_cancelled", message, browseErrorFor("request_cancelled", message, true)), nil
@@ -134,21 +127,12 @@ func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest
 	// prefix or retiring an otherwise healthy public lineage.
 	for _, segment := range chain.Segments {
 		if err := b.revalidateClaudeChainCandidate(ctx, segment); err != nil {
-			if b.installed != nil && terminalProviderError(err) {
-				return BrowsePage{}, err
-			}
 			return b.claudeChainLatestValidationFailure(ctx, err), nil
 		}
 	}
-	page, pageErr := b.claudeChainLatestPage(ctx, request.Scope, request.Limit, chainContext, requestBudget)
-	if pageErr != nil {
-		return BrowsePage{}, pageErr
-	}
+	page := b.claudeChainLatestPage(ctx, request.Scope, request.Limit, chainContext, requestBudget)
 	for _, segment := range chain.Segments {
 		if err := b.revalidateClaudeChainCandidate(ctx, segment); err != nil {
-			if b.installed != nil && terminalProviderError(err) {
-				return BrowsePage{}, err
-			}
 			return b.claudeChainLatestValidationFailure(ctx, err), nil
 		}
 	}
@@ -177,13 +161,9 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 	segment := view.chain.Segments[segmentIndex]
 	b.mu.Lock()
 	lineage, hasLineage := b.chainLineage[chainContext.scopeID]
-	terminal := lineage.terminalErr
 	lineagePending := hasLineage && segmentIndex < len(lineage.segments) && lineage.segments[segmentIndex].EvidenceCompactionPending
 	lineageFailed := hasLineage && segmentIndex < len(lineage.segments) && lineage.segments[segmentIndex].EvidenceCompactionError != ""
 	b.mu.Unlock()
-	if b.installed != nil && terminal != nil {
-		return BrowsePage{}, terminal
-	}
 	if lineagePending {
 		return b.claudeChainValidationPendingPage(request.Scope, chainContext, request.Cursor), nil
 	}
@@ -193,9 +173,6 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 	preparedSegment := segmentIndex < len(view.prepared) && view.prepared[segmentIndex]
 	if !preparedSegment {
 		if err := b.validateClaudeChainSegment(ctx, segment, requestBudget.validation); err != nil {
-			if b.installed != nil && terminalProviderError(err) {
-				return BrowsePage{}, err
-			}
 			if ctx.Err() != nil {
 				return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 			}
@@ -221,16 +198,10 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 		view = b.claudeChainView(chainContext)
 		recentTailExhausted = segmentIndex < len(view.recentComplete) && !view.recentComplete[segmentIndex]
 		recent, err = b.loadClaudeChainRecentWithBudget(ctx, request.Scope, chainContext, segmentIndex, requestBudget)
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
-		}
 		if errors.Is(err, errClaudeChainRecentBudget) {
 			return b.claudeChainBudgetPage(request.Scope, chainContext, segmentIndex), nil
 		}
 		if err != nil {
-			if b.installed != nil && terminalProviderError(err) {
-				return BrowsePage{}, err
-			}
 			return b.claudeChainSourceFailure(ctx, err), nil
 		}
 		if boundary > int64(len(recent.Entries)) {
@@ -246,7 +217,7 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 		// the tail a second time and jumping over its prefix.
 		byteBoundary := claudeChainRecentBoundary(recent.Entries, boundary, segment.CapturedEnd,
 			recentTailExhausted, segment.RecentStart)
-		return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chainContext, segmentIndex, byteBoundary, request.Retry, requestBudget)
+		return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chainContext, segmentIndex, byteBoundary, request.Retry, requestBudget), nil
 	}
 	if !b.claudeChainSegmentPrepared(chainContext, segmentIndex) && cursor.ChainOffset {
 		b.mu.Lock()
@@ -274,11 +245,7 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 				b.mu.Unlock()
 				if job == nil {
 					var page *BrowsePage
-					var startErr error
-					job, page, startErr = b.startClaudeChainJobIn(ctx, request.Scope, chainContext, segmentIndex, budgetForeground(requestBudget))
-					if startErr != nil {
-						return BrowsePage{}, startErr
-					}
+					job, page = b.startClaudeChainJob(request.Scope, chainContext, segmentIndex, budgetForeground(requestBudget))
 					if page != nil {
 						return b.claudeChainAdmissionFailure(request.Scope, chainContext, segmentIndex, boundary, true, *page), nil
 					}
@@ -287,25 +254,19 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 						return b.claudeChainAdmissionFailure(request.Scope, chainContext, segmentIndex, boundary, true, page), nil
 					}
 				}
-				return b.continueClaudeChainJob(ctx, request, chainContext, segmentIndex, boundary, true, job, requestBudget)
+				return b.continueClaudeChainJob(ctx, request, chainContext, segmentIndex, boundary, true, job, requestBudget), nil
 			}
 		}
 	}
 	if cursor.ChainOffset {
 		if b.claudeChainSegmentPrepared(chainContext, segmentIndex) {
-			return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chainContext, segmentIndex, boundary, request.Retry, requestBudget)
+			return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chainContext, segmentIndex, boundary, request.Retry, requestBudget), nil
 		}
 		recent, recentErr := b.loadClaudeChainRecentWithBudget(ctx, request.Scope, chainContext, segmentIndex, requestBudget)
-		if b.installed != nil && terminalProviderError(recentErr) {
-			return BrowsePage{}, recentErr
-		}
 		if errors.Is(recentErr, errClaudeChainRecentBudget) {
 			return b.claudeChainBudgetPage(request.Scope, chainContext, segmentIndex), nil
 		}
 		if recentErr != nil {
-			if b.installed != nil && terminalProviderError(recentErr) {
-				return BrowsePage{}, recentErr
-			}
 			return b.claudeChainSourceFailure(ctx, recentErr), nil
 		}
 		byteBoundary := 0
@@ -314,9 +275,9 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 				byteBoundary++
 			}
 		}
-		return b.claudeChainPageAt(ctx, request.Scope, request.Limit, chainContext, false, segmentIndex, byteBoundary, recent.Entries, requestBudget, recentTailExhausted)
+		return b.claudeChainPageAt(ctx, request.Scope, request.Limit, chainContext, false, segmentIndex, byteBoundary, recent.Entries, requestBudget, recentTailExhausted), nil
 	}
-	return b.claudeChainPageAt(ctx, request.Scope, request.Limit, chainContext, false, segmentIndex, int(boundary), recent.Entries, requestBudget, recentTailExhausted)
+	return b.claudeChainPageAt(ctx, request.Scope, request.Limit, chainContext, false, segmentIndex, int(boundary), recent.Entries, requestBudget, recentTailExhausted), nil
 }
 
 var (
@@ -420,18 +381,11 @@ func (b *Browser) acquireClaudeChainContext(ctx context.Context, scope BrowseSco
 	}
 	scopeID := browseScopeID(scope)
 	b.mu.Lock()
-	if b.closing || ctx.Err() != nil || b.ctx.Err() != nil {
+	if b.closing {
 		b.mu.Unlock()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
 		return nil, errors.New("conversation browser is closed")
 	}
 	lineage, hasLineage := b.chainLineage[scopeID]
-	if b.installed != nil && lineage.terminalErr != nil {
-		b.mu.Unlock()
-		return nil, lineage.terminalErr
-	}
 	lineageIdentity := b.chainLineageIdentity[scopeID].id
 	if hasLineage {
 		b.schedulePendingClaudeChainCompactionsLocked(scopeID, &lineage)
@@ -452,11 +406,8 @@ func (b *Browser) acquireClaudeChainContext(ctx context.Context, scope BrowseSco
 	}
 
 	b.mu.Lock()
-	if b.closing || ctx.Err() != nil || b.ctx.Err() != nil {
+	if b.closing {
 		b.mu.Unlock()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
 		return nil, errors.New("conversation browser is closed")
 	}
 	if !b.claudeChainLineageUnchangedLocked(scopeID, lineage, hasLineage, lineageIdentity) {
@@ -486,15 +437,9 @@ func (b *Browser) acquireClaudeChainContext(ctx context.Context, scope BrowseSco
 	if b.chainReservations > 0 {
 		b.chainReservations--
 	}
-	if err != nil || ctx.Err() != nil || b.ctx.Err() != nil || b.closing {
+	if err != nil {
 		b.mu.Unlock()
-		if err != nil {
-			return nil, err
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, errors.New("conversation browser is closed")
+		return nil, err
 	}
 	// Building the manifest released the mutex again. Authenticate publication
 	// against the SAME complete lineage generation checked above, before even
@@ -706,7 +651,7 @@ func claudeChainValidationKey(candidate claudeSegment, evidence []claudeRangeEvi
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candidate claudeSegment, foreground ...*claudeChainForegroundBudget) (result error) {
+func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candidate claudeSegment, foreground ...*claudeChainForegroundBudget) error {
 	if old.CapturedEnd < 0 || candidate.CapturedEnd < old.CapturedEnd {
 		return errClaudeChainLineageChanged
 	}
@@ -737,23 +682,14 @@ func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candi
 	if !foregroundBudget.takeValidation(total) {
 		return b.deferClaudeChainValidation(ctx, candidate, old.FileIdentity, evidence, foregroundBudget)
 	}
-	source, err := b.captureBrowserSource(ctx, candidate.Location, reserveClaudeChainPhysical(foregroundBudget), b.observeValidationRead)
+	source, err := captureFileSourceWithReserve(candidate.Location, reserveClaudeChainPhysical(foregroundBudget), b.observeValidationRead)
 	if err != nil {
-		if b.installed != nil && terminalProviderError(err) {
-			return err
-		}
 		if errors.Is(err, errClaudeChainForegroundBudget) {
 			return b.deferClaudeChainValidation(ctx, candidate, old.FileIdentity, evidence, foregroundBudget)
 		}
 		return errClaudeChainLineageChanged
 	}
-	defer func() {
-		if b.installed != nil {
-			result = sourceResult(result, source.close())
-		} else {
-			_ = source.close()
-		}
-	}()
+	defer source.close()
 	if source.end < old.CapturedEnd || source.end < candidate.CapturedEnd ||
 		old.FileIdentity != "" && fileIdentity(source.info) != old.FileIdentity ||
 		candidate.FileIdentity != "" && fileIdentity(source.info) != candidate.FileIdentity ||
@@ -774,15 +710,7 @@ func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candi
 			return err
 		}
 		digest, digestErr := b.digestClaudeChainValidationRangeObserved(ctx, source.file, item.Start, item.End, foregroundBudget)
-		if b.installed != nil && terminalProviderError(digestErr) {
-			return digestErr
-		}
 		if errors.Is(digestErr, errClaudeChainForegroundBudget) {
-			if b.installed != nil {
-				if closeErr := source.close(); closeErr != nil {
-					return closeErr
-				}
-			}
 			return b.deferClaudeChainValidation(ctx, candidate, old.FileIdentity, evidence, foregroundBudget)
 		}
 		if digestErr != nil {
@@ -867,32 +795,10 @@ func (b *Browser) deferClaudeChainValidation(ctx context.Context, candidate clau
 
 	go func() {
 		defer b.validationWG.Done()
-		published := false
-		publish := func(ctx context.Context) error {
-			validationErr := b.runClaudeChainValidation(ctx, candidate, identity, evidence)
-			b.mu.Lock()
-			if b.ctx.Err() != nil || ctx.Err() != nil {
-				validationErr = errors.Join(validationErr, ctx.Err(), b.ctx.Err())
-			}
-			task.running = false
-			task.err = validationErr
-			task.lastAccess = time.Now()
-			if b.chainValidationActive > 0 {
-				b.chainValidationActive--
-			}
-			close(task.done)
-			published = true
-			b.mu.Unlock()
-			return validationErr
-		}
-		err := b.doBrowserBackgroundContext(publish)
-		if published {
-			return
-		}
-		// Refused admission cannot leave a running singleflight placeholder.
+		validationErr := b.runClaudeChainValidation(candidate, identity, evidence)
 		b.mu.Lock()
 		task.running = false
-		task.err = err
+		task.err = validationErr
 		task.lastAccess = time.Now()
 		if b.chainValidationActive > 0 {
 			b.chainValidationActive--
@@ -903,33 +809,24 @@ func (b *Browser) deferClaudeChainValidation(ctx context.Context, candidate clau
 	return errClaudeChainValidationPending
 }
 
-func (b *Browser) runClaudeChainValidation(ctx context.Context, candidate claudeSegment, identity string, evidence []claudeRangeEvidence) (result error) {
-	source, err := b.captureBrowserSource(ctx, candidate.Location, nil, b.observeBackgroundRead)
+func (b *Browser) runClaudeChainValidation(candidate claudeSegment, identity string, evidence []claudeRangeEvidence) error {
+	source, err := captureFileSourceWithObserver(candidate.Location, b.observeBackgroundRead)
 	if err != nil {
-		if b.installed != nil && terminalProviderError(err) {
-			return err
-		}
 		return errClaudeChainLineageChanged
 	}
-	defer func() {
-		if b.installed != nil {
-			result = sourceResult(result, source.close())
-		} else {
-			_ = source.close()
-		}
-	}()
+	defer source.close()
 	if err := b.validateClaudeChainCandidateMetadata(source, candidate); err != nil {
 		return err
 	}
 	for _, item := range evidence {
-		if err := ctx.Err(); err != nil {
+		if err := b.ctx.Err(); err != nil {
 			return err
 		}
 		if identity != "" && fileIdentity(source.info) != identity || item.End > source.end {
 			return errClaudeChainLineageChanged
 		}
 		b.observeRangeRead(item.End - item.Start)
-		digest, digestErr := fileRangeDigestObserved(ctx, source.file, item.Start, item.End, nil, b.observeBackgroundRead)
+		digest, digestErr := fileRangeDigestObserved(b.ctx, source.file, item.Start, item.End, nil, b.observeBackgroundRead)
 		if digestErr != nil {
 			return digestErr
 		}
@@ -942,9 +839,6 @@ func (b *Browser) runClaudeChainValidation(ctx context.Context, candidate claude
 	// distinct key instead of reusing this result.
 	latest, statErr := source.file.Stat()
 	if statErr != nil {
-		if b.installed != nil && terminalProviderError(statErr) {
-			return statErr
-		}
 		return errClaudeChainLineageChanged
 	}
 	if latest.Size() > candidate.CapturedEnd {
@@ -966,9 +860,6 @@ func (b *Browser) validateClaudeChainCandidateMetadata(source fileSource, candid
 	// otherwise the apparent post-scan fence just compares the old snapshot.
 	info, err := source.file.Stat()
 	if err != nil {
-		if b.installed != nil && terminalProviderError(err) {
-			return err
-		}
 		return errClaudeChainLineageChanged
 	}
 	if info.Size() > candidate.CapturedEnd {
@@ -995,28 +886,18 @@ func (b *Browser) validateClaudeChainCandidateMetadata(source fileSource, candid
 	return nil
 }
 
-func (b *Browser) revalidateClaudeChainCandidate(ctx context.Context, candidate claudeSegment, _ ...*claudeChainForegroundBudget) (result error) {
+func (b *Browser) revalidateClaudeChainCandidate(ctx context.Context, candidate claudeSegment, _ ...*claudeChainForegroundBudget) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	source, err := b.openBrowserSource(ctx, candidate.Location)
+	file, info, err := openContainedConversationFile(candidate.Location)
 	if err != nil {
-		if b.installed != nil && (terminalProviderError(err) || errors.Is(err, ErrSourceCleanupUncertain)) {
-			return err
-		}
 		return errClaudeChainLineageChanged
 	}
-	defer func() {
-		if b.installed != nil {
-			result = sourceResult(result, source.close())
-		} else {
-			_ = source.close()
-		}
-	}()
-	info := source.info
+	defer file.Close()
 	if info.Size() > candidate.CapturedEnd {
 		return errClaudeChainValidationStale
 	}
@@ -1033,7 +914,7 @@ func (b *Browser) revalidateClaudeChainCandidate(ctx context.Context, candidate 
 	return nil
 }
 
-func (b *Browser) digestClaudeChainValidationRange(ctx context.Context, file browserFile, start, end int64, foreground ...*claudeChainForegroundBudget) (string, error) {
+func (b *Browser) digestClaudeChainValidationRange(ctx context.Context, file *os.File, start, end int64, foreground ...*claudeChainForegroundBudget) (string, error) {
 	var budget *claudeChainForegroundBudget
 	if len(foreground) > 0 {
 		budget = foreground[0]
@@ -1044,7 +925,7 @@ func (b *Browser) digestClaudeChainValidationRange(ctx context.Context, file bro
 	return b.digestClaudeChainValidationRangeObserved(ctx, file, start, end, budget)
 }
 
-func (b *Browser) digestClaudeChainValidationRangeObserved(ctx context.Context, file browserFile, start, end int64, budget *claudeChainForegroundBudget) (string, error) {
+func (b *Browser) digestClaudeChainValidationRangeObserved(ctx context.Context, file *os.File, start, end int64, budget *claudeChainForegroundBudget) (string, error) {
 	length := end - start
 	if end < start || length < 0 || length > claudeChainForegroundValidationBytes {
 		return "", errors.New("Claude chain validation range is too large")
@@ -1066,7 +947,7 @@ func (b *Browser) digestClaudeChainValidationRangeObserved(ctx context.Context, 
 // page before a prepared index can become visible. It runs on the normal
 // preparation worker, not the request goroutine, so a clipped large range is
 // never silently replaced by a digest of the already-rewritten source.
-func (b *Browser) validateClaudeChainJobEvidence(file browserFile, capturedEnd int64, identity string, evidence []claudeRangeEvidence) error {
+func (b *Browser) validateClaudeChainJobEvidence(file *os.File, capturedEnd int64, identity string, evidence []claudeRangeEvidence) error {
 	if file == nil {
 		return errors.New("conversation source is closed")
 	}
@@ -1167,9 +1048,6 @@ func (b *Browser) recordClaudeChainLineageLocked(scopeID string, segments []clau
 	b.compactClaudeChainEvidenceLocked(merged)
 	now := time.Now()
 	lineage := claudeChainLineage{segments: merged, lastAccess: now}
-	if previous, ok := b.chainLineage[scopeID]; ok {
-		lineage.terminalErr = previous.terminalErr
-	}
 	b.chainLineage[scopeID] = lineage
 	b.schedulePendingClaudeChainCompactionsLocked(scopeID, &lineage)
 	if identity, ok := b.chainLineageIdentity[scopeID]; ok {
@@ -1318,7 +1196,7 @@ func claudeChainEvidenceGeneration(segment claudeSegment) string {
 }
 
 func (b *Browser) schedulePendingClaudeChainCompactionsLocked(scopeID string, lineage *claudeChainLineage) {
-	if lineage == nil || b.closing || b.ctx.Err() != nil {
+	if lineage == nil || b.closing {
 		return
 	}
 	if b.chainCompactions == nil {
@@ -1365,40 +1243,12 @@ func (b *Browser) schedulePendingClaudeChainCompactionsLocked(scopeID string, li
 
 func (b *Browser) runClaudeChainEvidenceCompaction(task *claudeChainEvidenceCompaction) {
 	defer b.validationWG.Done()
-	ran := false
-	err := b.doBrowserBackgroundContext(func(ctx context.Context) error {
-		ran = true
-		b.runClaudeChainEvidenceCompactionBody(ctx, task)
-		return nil
-	})
-	if ran {
-		return
-	}
-	b.mu.Lock()
-	if b.chainCompactions[task.key] == task {
-		delete(b.chainCompactions, task.key)
-		if lineage, ok := b.chainLineage[task.scopeID]; ok && task.segment < len(lineage.segments) {
-			lineage.segments[task.segment].EvidenceCompactionPending = false
-			lineage.segments[task.segment].EvidenceCompactionError = err.Error()
-			lineage.terminalErr = errors.Join(lineage.terminalErr, err)
-			b.chainLineage[task.scopeID] = lineage
-		}
-	}
-	if b.chainCompactionActive > 0 {
-		b.chainCompactionActive--
-	}
-	b.mu.Unlock()
-}
-
-func (b *Browser) runClaudeChainEvidenceCompactionBody(ctx context.Context, task *claudeChainEvidenceCompaction) {
 	var result error
-	source, err := b.captureBrowserSource(ctx, task.candidate.Location, nil, b.observeBackgroundRead)
+	source, err := captureFileSourceWithObserver(task.candidate.Location, b.observeBackgroundRead)
 	if err != nil {
-		result = err
-		if b.installed == nil || !terminalProviderError(err) {
-			result = errClaudeChainLineageChanged
-		}
+		result = errClaudeChainLineageChanged
 	} else {
+		defer source.close()
 		if task.start < 0 || task.end <= task.start || source.end < task.end || task.candidate.FileIdentity != "" && fileIdentity(source.info) != task.candidate.FileIdentity ||
 			(source.end == task.candidate.CapturedEnd && (source.revision != task.candidate.FileRevision ||
 				task.candidate.SourceChangeToken != "" && fileChangeToken(source.info) != task.candidate.SourceChangeToken)) {
@@ -1411,7 +1261,7 @@ func (b *Browser) runClaudeChainEvidenceCompactionBody(ctx context.Context, task
 						return errClaudeChainLineageChanged
 					}
 					b.observeRangeRead(item.End - item.Start)
-					oldDigest, digestErr := fileRangeDigestObserved(ctx, source.file, item.Start, item.End, nil, b.observeBackgroundRead)
+					oldDigest, digestErr := fileRangeDigestObserved(b.ctx, source.file, item.Start, item.End, nil, b.observeBackgroundRead)
 					if digestErr != nil {
 						return digestErr
 					}
@@ -1428,11 +1278,11 @@ func (b *Browser) runClaudeChainEvidenceCompactionBody(ctx context.Context, task
 			// be converted into a digest that retroactively authorizes old evidence.
 			if result = validateItems(); result == nil {
 				b.observeChainCompactionPhase()
-				firstDigest, digestErr := fileRangeDigestObserved(ctx, source.file, task.start, task.end, nil, b.observeBackgroundRead)
+				firstDigest, digestErr := fileRangeDigestObserved(b.ctx, source.file, task.start, task.end, nil, b.observeBackgroundRead)
 				if digestErr != nil {
 					result = digestErr
 				} else if result = validateItems(); result == nil {
-					secondDigest, secondErr := fileRangeDigestObserved(ctx, source.file, task.start, task.end, nil, b.observeBackgroundRead)
+					secondDigest, secondErr := fileRangeDigestObserved(b.ctx, source.file, task.start, task.end, nil, b.observeBackgroundRead)
 					if secondErr != nil {
 						result = secondErr
 					} else if firstDigest != secondDigest {
@@ -1441,13 +1291,7 @@ func (b *Browser) runClaudeChainEvidenceCompactionBody(ctx context.Context, task
 						task.digest = secondDigest
 						latest, statErr := source.file.Stat()
 						switch {
-						case statErr != nil:
-							if b.installed != nil && terminalProviderError(statErr) {
-								result = statErr
-							} else {
-								result = errClaudeChainLineageChanged
-							}
-						case latest.Size() < task.end:
+						case statErr != nil || latest.Size() < task.end:
 							result = errClaudeChainLineageChanged
 						case latest.Size() == source.info.Size() &&
 							(latest.ModTime().UnixNano() != source.info.ModTime().UnixNano() || fileChangeToken(latest) != fileChangeToken(source.info)):
@@ -1465,12 +1309,6 @@ func (b *Browser) runClaudeChainEvidenceCompactionBody(ctx context.Context, task
 		}
 	}
 
-	if source.owned != nil {
-		result = sourceResult(result, source.close())
-	} else if source.file != nil {
-		_ = source.close()
-	}
-	cancelled := b.ctx.Err() != nil || ctx.Err() != nil
 	b.mu.Lock()
 	if b.chainCompactionActive > 0 {
 		b.chainCompactionActive--
@@ -1482,12 +1320,9 @@ func (b *Browser) runClaudeChainEvidenceCompactionBody(ctx context.Context, task
 		delete(b.chainCompactions, task.key)
 	}
 	lineage, ok := b.chainLineage[task.scopeID]
-	if owned && ok && !cancelled && task.segment >= 0 && task.segment < len(lineage.segments) {
+	if owned && ok && task.segment >= 0 && task.segment < len(lineage.segments) {
 		current := &lineage.segments[task.segment]
 		if current.EvidenceCompactionPending {
-			if b.installed != nil && terminalProviderError(result) {
-				lineage.terminalErr = errors.Join(lineage.terminalErr, result)
-			}
 			if claudeChainEvidenceGeneration(*current) != task.generation {
 				// An older preparation or projection may publish while we scan.
 				// Neither success nor failure for the superseded generation can
@@ -1521,11 +1356,6 @@ func (b *Browser) runClaudeChainEvidenceCompactionBody(ctx context.Context, task
 }
 
 func (b *Browser) resetClaudeChainScope(scopeID string) {
-	identity, err := randomIdentifier()
-	if err != nil {
-		digest := sha256.Sum256([]byte(fmt.Sprintf("%s-%d", scopeID, time.Now().UnixNano())))
-		identity = hex.EncodeToString(digest[:])
-	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for id, chain := range b.chains {
@@ -1542,6 +1372,11 @@ func (b *Browser) resetClaudeChainScope(scopeID string) {
 		if compaction.scopeID == scopeID {
 			delete(b.chainCompactions, key)
 		}
+	}
+	identity, err := randomIdentifier()
+	if err != nil {
+		digest := sha256.Sum256([]byte(fmt.Sprintf("%s-%d", scopeID, time.Now().UnixNano())))
+		identity = hex.EncodeToString(digest[:])
 	}
 	b.chainLineageIdentity[scopeID] = claudeChainLineageIdentity{id: identity, lastAccess: time.Now()}
 }
@@ -1742,8 +1577,8 @@ func (b *Browser) buildClaudeChainContext(ctx context.Context, _ BrowseScope, ch
 	return context, nil
 }
 
-func (b *Browser) captureClaudeChainSource(ctx context.Context, location Location, budget *claudeChainForegroundBudget) (fileSource, error) {
-	return b.captureBrowserSource(ctx, location, reserveClaudeChainPhysical(budget), b.observeValidationRead)
+func (b *Browser) captureClaudeChainSource(location Location, budget *claudeChainForegroundBudget) (fileSource, error) {
+	return captureFileSourceWithReserve(location, reserveClaudeChainPhysical(budget), b.observeValidationRead)
 }
 
 func reserveClaudeChainPhysical(budget *claudeChainForegroundBudget) func(int64) error {
@@ -1758,7 +1593,7 @@ func reserveClaudeChainPhysical(budget *claudeChainForegroundBudget) func(int64)
 	}
 }
 
-func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope BrowseScope, chain *claudeChainContext, segmentIndex int, budget *claudeChainRequestBudget) (projection recentProjection, err error) {
+func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope BrowseScope, chain *claudeChainContext, segmentIndex int, budget *claudeChainRequestBudget) (recentProjection, error) {
 	segment, ok := b.claudeChainSegmentSnapshot(chain, segmentIndex)
 	if !ok {
 		return recentProjection{}, errors.New("invalid Claude chain segment")
@@ -1767,23 +1602,14 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 	if budget != nil {
 		foregroundBudget = budget.validation
 	}
-	source, err := b.captureClaudeChainSource(ctx, segment.Location, foregroundBudget)
-	if b.installed != nil && terminalProviderError(err) {
-		return recentProjection{}, err
-	}
+	source, err := b.captureClaudeChainSource(segment.Location, foregroundBudget)
 	if errors.Is(err, errClaudeChainForegroundBudget) {
 		return recentProjection{}, errClaudeChainRecentBudget
 	}
 	if err != nil {
 		return recentProjection{}, err
 	}
-	defer func() {
-		if b.installed != nil {
-			err = sourceResult(err, source.close())
-		} else {
-			_ = source.close()
-		}
-	}()
+	defer source.close()
 	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
 		segment.FileIdentity != "" && fileIdentity(source.info) != segment.FileIdentity {
 		return recentProjection{}, errors.New("Claude chain source changed")
@@ -1825,14 +1651,7 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 	if err != nil {
 		return recentProjection{}, err
 	}
-	if b.installed != nil {
-		if e := source.close(); e != nil {
-			return recentProjection{}, e
-		}
-		if e := ctx.Err(); e != nil {
-			return recentProjection{}, e
-		}
-	}
+	projection.Entries = namespaceClaudeProjectedEntries(projection.Entries, segment, segmentIndex == 0)
 	// If the selected recent range starts at zero, its digest is already the
 	// captured-range evidence. Never recompute an entire transcript merely to
 	// populate a manifest field, and never replace evidence established by a
@@ -1844,13 +1663,7 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 			return recentProjection{}, errors.New("Claude chain captured range changed")
 		}
 	}
-	cacheProjection := cloneRecentProjection(projection)
-	projection.Entries = namespaceClaudeProjectedEntries(projection.Entries, segment, segmentIndex == 0)
 	b.mu.Lock()
-	if ctx.Err() != nil || b.ctx.Err() != nil {
-		b.mu.Unlock()
-		return recentProjection{}, errors.Join(ctx.Err(), b.ctx.Err())
-	}
 	if segmentIndex < len(chain.chain.Segments) {
 		current := &chain.chain.Segments[segmentIndex]
 		if current.RecentDigest != "" && (current.RecentStart != start || current.RecentEnd != segment.CapturedEnd || current.RecentDigest != digest) {
@@ -1871,12 +1684,6 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 		b.updateClaudeChainLineageEvidenceLocked(chain)
 	}
 	b.mu.Unlock()
-	if b.installed != nil {
-		if err := ctx.Err(); err != nil {
-			return recentProjection{}, err
-		}
-		b.recentCache.putIn(ctx, b.recentProjectionKey(scope, source, start, segment.CapturedEnd, digest, false), cacheProjection, time.Now())
-	}
 	return projection, nil
 }
 
@@ -1910,7 +1717,7 @@ func namespaceClaudeProjectedEntries(entries []projectedEntry, segment claudeSeg
 	return entries
 }
 
-func (b *Browser) validateClaudeChainSegment(ctx context.Context, segment claudeSegment, foreground ...*claudeChainForegroundBudget) (result error) {
+func (b *Browser) validateClaudeChainSegment(ctx context.Context, segment claudeSegment, foreground ...*claudeChainForegroundBudget) error {
 	var foregroundBudget *claudeChainForegroundBudget
 	if len(foreground) > 0 {
 		foregroundBudget = foreground[0]
@@ -1918,23 +1725,14 @@ func (b *Browser) validateClaudeChainSegment(ctx context.Context, segment claude
 	if foregroundBudget == nil {
 		foregroundBudget = &claudeChainForegroundBudget{validationRemaining: claudeChainForegroundValidationBytes, physicalRemaining: claudeChainForegroundPhysicalBytes}
 	}
-	source, err := b.captureBrowserSource(ctx, segment.Location, reserveClaudeChainPhysical(foregroundBudget), b.observeValidationRead)
+	source, err := captureFileSourceWithReserve(segment.Location, reserveClaudeChainPhysical(foregroundBudget), b.observeValidationRead)
 	if err != nil {
-		if b.installed != nil && terminalProviderError(err) {
-			return err
-		}
 		if errors.Is(err, errClaudeChainForegroundBudget) {
 			return errClaudeChainValidationPending
 		}
 		return err
 	}
-	defer func() {
-		if b.installed != nil {
-			result = sourceResult(result, source.close())
-		} else {
-			_ = source.close()
-		}
-	}()
+	defer source.close()
 	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd {
 		return errors.New("Claude chain source changed")
 	}
@@ -2055,15 +1853,6 @@ func (b *Browser) claudeChainAdmissionFailure(scope BrowseScope, chain *claudeCh
 }
 
 func (b *Browser) startClaudeChainJob(scope BrowseScope, chain *claudeChainContext, segmentIndex int, foreground ...*claudeChainForegroundBudget) (*browseJob, *BrowsePage) {
-	if b.installed != nil {
-		page := browseFailure(true, "index_failed", "History preparation requires an owned request.", browseErrorFor("index_failed", "History preparation requires an owned request.", false))
-		return nil, &page
-	}
-	job, page, _ := b.startClaudeChainJobIn(context.Background(), scope, chain, segmentIndex, foreground...)
-	return job, page
-}
-
-func (b *Browser) startClaudeChainJobIn(ctx context.Context, scope BrowseScope, chain *claudeChainContext, segmentIndex int, foreground ...*claudeChainForegroundBudget) (*browseJob, *BrowsePage, error) {
 	var foregroundBudget *claudeChainForegroundBudget
 	if len(foreground) > 0 {
 		foregroundBudget = foreground[0]
@@ -2074,11 +1863,11 @@ func (b *Browser) startClaudeChainJobIn(ctx context.Context, scope BrowseScope, 
 	b.mu.Lock()
 	if segmentIndex < 0 || segmentIndex >= len(chain.jobs) {
 		b.mu.Unlock()
-		return nil, nil, nil
+		return nil, nil
 	}
 	if existing := chain.jobs[segmentIndex]; existing != nil {
 		b.mu.Unlock()
-		return existing, nil, nil
+		return existing, nil
 	}
 	segment := chain.chain.Segments[segmentIndex]
 	if lineage, ok := b.chainLineage[chain.scopeID]; ok && segmentIndex < len(lineage.segments) {
@@ -2088,7 +1877,7 @@ func (b *Browser) startClaudeChainJobIn(ctx context.Context, scope BrowseScope, 
 			// union is being compacted. Public cursor reads apply the same gate.
 			b.mu.Unlock()
 			page := b.claudeChainValidationPendingPage(scope, chain, "")
-			return nil, &page, nil
+			return nil, &page
 		}
 		// A context stores only its current descriptor fields. Bind the job to
 		// the scope lineage as well so evidence authenticated by earlier append
@@ -2098,31 +1887,22 @@ func (b *Browser) startClaudeChainJobIn(ctx context.Context, scope BrowseScope, 
 	chainID := chain.id
 	b.mu.Unlock()
 
-	source, err := b.captureClaudeChainSource(ctx, segment.Location, foregroundBudget)
-	if b.installed != nil && terminalProviderError(err) {
-		return nil, nil, err
-	}
+	source, err := b.captureClaudeChainSource(segment.Location, foregroundBudget)
 	if errors.Is(err, errClaudeChainForegroundBudget) {
 		page := b.claudeChainValidationPendingPage(scope, chain, "")
-		return nil, &page, nil
+		return nil, &page
 	}
 	if err != nil {
-		if b.installed != nil && terminalProviderError(err) {
-			return nil, nil, err
-		}
 		page := browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
-		return nil, &page, nil
+		return nil, &page
 	}
 	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
 		source.end == segment.CapturedEnd &&
 			(segment.SourceModTime != 0 && source.info.ModTime().UnixNano() != segment.SourceModTime ||
 				segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken) {
-		closeErr := source.close()
-		if b.installed != nil && closeErr != nil {
-			return nil, nil, closeErr
-		}
+		source.close()
 		page := browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
-		return nil, &page, nil
+		return nil, &page
 	}
 	// A chain job indexes only the descriptor's captured end. The file may have
 	// grown since discovery, but those later records belong to a new latest
@@ -2139,56 +1919,43 @@ func (b *Browser) startClaudeChainJobIn(ctx context.Context, scope BrowseScope, 
 		footerStart: segment.FooterStart, footerEnd: segment.FooterEnd,
 		footerDigest: segment.FooterDigest, observedRanges: claudeChainEvidence(segment),
 	}
-	job, page := b.createJob(ctx, scope, source, 0, segment.CapturedEnd, segment.CapturedEnd, fullDigest, false, chainID, segmentIndex, binding)
+	job, page := b.createJob(scope, source, 0, segment.CapturedEnd, segment.CapturedEnd, fullDigest, false, chainID, segmentIndex, binding)
 	if page != nil || job == nil {
 		if job == nil {
-			if closeErr := source.close(); b.installed != nil && closeErr != nil {
-				return nil, nil, closeErr
-			}
+			source.close()
 		}
-		if b.installed != nil && ctx.Err() != nil {
-			return nil, nil, ctx.Err()
-		}
-		return job, page, nil
+		return job, page
 	}
 	job.mu.RLock()
-	ownedByJob := job.source.owned != nil && job.source.owned == source.owned || job.source.owned == nil && job.source.file == source.file
+	ownedByJob := job.source.file == source.file
 	job.mu.RUnlock()
 	if !ownedByJob {
 		// createJob returned an already registered job. It owns a different
 		// source handle; do not leak the handle opened by this request.
-		if closeErr := source.close(); b.installed != nil && closeErr != nil {
-			return nil, nil, closeErr
-		}
+		source.close()
 	}
 	b.mu.Lock()
 	if segmentIndex < len(chain.jobs) && chain.jobs[segmentIndex] == nil {
 		chain.jobs[segmentIndex] = job
 		b.mu.Unlock()
-		return job, nil, nil
+		return job, nil
 	}
 	b.mu.Unlock()
-	return job, nil, nil
+	return job, nil
 }
 
-func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequest, chain *claudeChainContext, segmentIndex int, boundary int64, byteBoundary bool, job *browseJob, budget *claudeChainRequestBudget) (BrowsePage, error) {
+func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequest, chain *claudeChainContext, segmentIndex int, boundary int64, byteBoundary bool, job *browseJob, budget *claudeChainRequestBudget) BrowsePage {
 	if !b.retainJob(job) {
-		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)), nil
+		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
 	}
 	defer b.releaseJob(job)
 	job.mu.RLock()
 	state, failure := job.state, job.err
 	job.mu.RUnlock()
 	if state == BrowsePreparing {
-		return b.claudeChainPreparingPageForJob(request.Scope, request.Limit, chain, segmentIndex, boundary, byteBoundary, job), nil
+		return b.claudeChainPreparingPageForJob(request.Scope, request.Limit, chain, segmentIndex, boundary, byteBoundary, job)
 	}
 	if state == BrowseFailed {
-		job.mu.RLock()
-		terminal := job.terminalErr
-		job.mu.RUnlock()
-		if b.installed != nil && terminal != nil {
-			return BrowsePage{}, terminal
-		}
 		if failure == nil {
 			failure = browseErrorFor("index_failed", "History preparation failed.", true)
 		}
@@ -2202,66 +1969,53 @@ func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequ
 				job.mu.Unlock()
 			}
 			if b.retryJob(ctx, job, budgetForeground(budget)) {
-				return b.claudeChainPreparingPageForJob(request.Scope, request.Limit, chain, segmentIndex, boundary, byteBoundary, job), nil
+				return b.claudeChainPreparingPageForJob(request.Scope, request.Limit, chain, segmentIndex, boundary, byteBoundary, job)
 			}
-		}
-		job.mu.RLock()
-		terminal = job.terminalErr
-		job.mu.RUnlock()
-		if b.installed != nil && terminal != nil {
-			return BrowsePage{}, terminal
 		}
 		view := b.claudeChainView(chain)
 		cursor, _ := b.claudeChainCursor(request.Scope, chain, segmentIndex, boundary, byteBoundary)
 		return BrowsePage{Available: true, State: BrowseFailed, Mode: BrowseSnapshot,
 			SourceRevision: view.publicRevision, SnapshotID: view.snapshotID,
 			Diagnostics: view.diagnostics, ReasonCode: failure.Code, Reason: failure.Message,
-			Error: failure, NextCursor: cursor, HasMore: cursor != ""}, nil
+			Error: failure, NextCursor: cursor, HasMore: cursor != ""}
 	}
 	b.mu.Lock()
-	if b.installed != nil && (ctx.Err() != nil || b.ctx.Err() != nil) {
-		b.mu.Unlock()
-		return BrowsePage{}, errors.Join(ctx.Err(), b.ctx.Err())
-	}
 	if segmentIndex >= 0 && segmentIndex < len(chain.prepared) {
 		chain.preparing[segmentIndex] = false
 		chain.prepared[segmentIndex] = true
 	}
-	// The worker established the captured digest before publishing the index.
+	b.mu.Unlock()
+	// The worker established the full captured digest in the background. Keep
+	// that evidence in the shared lineage before serving the first page.
+	b.mu.Lock()
 	b.updateClaudeChainLineageEvidenceLocked(chain)
 	b.mu.Unlock()
 	return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chain, segmentIndex, boundary, request.Retry, budget)
 }
 
-func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, segmentIndex int, boundary int64, retry bool, budget *claudeChainRequestBudget) (result BrowsePage, err error) {
+func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, segmentIndex int, boundary int64, retry bool, budget *claudeChainRequestBudget) BrowsePage {
 	if budget == nil {
 		budget = newClaudeChainRequestBudget(b.options.RecentBytes)
 	}
 	b.mu.Lock()
 	if segmentIndex < 0 || segmentIndex >= len(chain.jobs) {
 		b.mu.Unlock()
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false)), nil
+		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false))
 	}
 	job := chain.jobs[segmentIndex]
 	b.mu.Unlock()
 	if job == nil {
 		recent, err := b.loadClaudeChainRecentWithBudget(ctx, scope, chain, segmentIndex, budget)
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
-		}
 		if errors.Is(err, errClaudeChainRecentBudget) {
-			return b.claudeChainBudgetPage(scope, chain, segmentIndex), nil
-		}
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
+			return b.claudeChainBudgetPage(scope, chain, segmentIndex)
 		}
 		if err != nil {
-			return b.claudeChainSourceFailure(ctx, err), nil
+			return b.claudeChainSourceFailure(ctx, err)
 		}
 		return b.claudeChainPageAt(ctx, scope, limit, chain, false, segmentIndex, len(recent.Entries), recent.Entries, budget, false)
 	}
 	if !b.retainJob(job) {
-		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)), nil
+		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
 	}
 	defer b.releaseJob(job)
 	job.mu.RLock()
@@ -2274,47 +2028,24 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 		if state == BrowseFailed {
 			return b.continueClaudeChainJob(ctx, BrowseRequest{Scope: scope, Limit: limit, Retry: retry}, chain, segmentIndex, boundary, true, job, budget)
 		}
-		return b.claudeChainPreparingPageForJob(scope, limit, chain, segmentIndex, boundary, true, job), nil
-	}
-	if b.installed != nil {
-		capturedEnd := source.end
-		source, err = b.captureBrowserSource(ctx, source.location, reserveClaudeChainPhysical(budgetForeground(budget)), b.observeValidationRead)
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
-		}
-		if errors.Is(err, errClaudeChainForegroundBudget) {
-			return b.claudeChainPreparingPage(scope, limit, chain, segmentIndex, boundary, true), nil
-		}
-		if err != nil {
-			return BrowsePage{}, err
-		}
-		defer func() { err = sourceResult(err, source.close()) }()
-		if source.end < capturedEnd || source.revision != job.source.revision {
-			return b.claudeChainSourceFailure(ctx, errors.New("Claude chain source changed")), nil
-		}
-		source.end = capturedEnd
-	} else {
-		source = b.bindBrowserSource(source, ctx)
+		return b.claudeChainPreparingPageForJob(scope, limit, chain, segmentIndex, boundary, true, job)
 	}
 	if err := b.validateSnapshotJob(ctx, job, source, budgetForeground(budget)); err != nil {
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
-		}
 		if errors.Is(err, errClaudeChainValidationPending) {
-			return b.claudeChainPreparingPage(scope, limit, chain, segmentIndex, boundary, true), nil
+			return b.claudeChainPreparingPage(scope, limit, chain, segmentIndex, boundary, true)
 		}
 		if ctx.Err() != nil {
-			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
 		}
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
 	}
 	entries, hasMore, err := index.entriesBefore(boundary, limit)
 	if err != nil {
-		return browseFailure(true, "index_failed", "The prepared conversation history could not be read.", browseErrorFor("index_failed", "The prepared conversation history could not be read.", true)), nil
+		return browseFailure(true, "index_failed", "The prepared conversation history could not be read.", browseErrorFor("index_failed", "The prepared conversation history could not be read.", true))
 	}
 	view := b.claudeChainView(chain)
 	if segmentIndex < 0 || segmentIndex >= len(view.chain.Segments) {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false)), nil
+		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false))
 	}
 	entries = namespaceClaudeProjectedEntries(entries, view.chain.Segments[segmentIndex], segmentIndex == 0)
 	base := BrowsePage{Available: true, State: BrowseReady, Mode: BrowseSnapshot,
@@ -2335,28 +2066,25 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 			base.NextCursor, err = b.claudeChainCursor(scope, chain, segmentIndex, boundary, true)
 		}
 		if err != nil {
-			return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true)), nil
+			return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
 		}
 	} else {
 		if budget == nil {
 			budget = newClaudeChainRequestBudget(b.options.RecentBytes)
 		}
 		nextSegment, nextBoundary, hasNext, nextIsOffset, nextErr := b.claudeChainOlderPosition(ctx, scope, chain, segmentIndex, 0, budget, false)
-		if b.installed != nil && terminalProviderError(nextErr) {
-			return BrowsePage{}, nextErr
-		}
 		if nextErr != nil && !errors.Is(nextErr, errClaudeChainRecentBudget) {
-			return b.claudeChainSourceFailure(ctx, nextErr), nil
+			return b.claudeChainSourceFailure(ctx, nextErr)
 		}
 		if hasNext {
 			base.NextCursor, err = b.claudeChainCursor(scope, chain, nextSegment, nextBoundary, nextIsOffset)
 			if err != nil {
-				return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true)), nil
+				return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
 			}
 			base.HasMore = true
 		}
 	}
-	return b.enforcePageBudget(base), nil
+	return b.enforcePageBudget(base)
 }
 
 func mergeBrowseDiagnostics(left, right BrowseDiagnostics) BrowseDiagnostics {
@@ -2380,9 +2108,9 @@ func maxInt(left, right int) int {
 	return right
 }
 
-func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, budget *claudeChainRequestBudget) (BrowsePage, error) {
+func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, budget *claudeChainRequestBudget) BrowsePage {
 	if chain == nil {
-		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)), nil
+		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
 	}
 	if budget == nil {
 		budget = newClaudeChainRequestBudget(b.options.RecentBytes)
@@ -2397,30 +2125,21 @@ func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, 
 			// Once a clipped segment has been prepared, latest must use the
 			// byte-indexed snapshot. Returning to the tail projection here would
 			// create an entry-count cursor that jumps over the prepared prefix.
-			page, err := b.claudeChainPreparedPageAt(ctx, scope, limit, chain, index, view.chain.Segments[index].CapturedEnd, false, budget)
-			if err != nil {
-				return BrowsePage{}, err
-			}
+			page := b.claudeChainPreparedPageAt(ctx, scope, limit, chain, index, view.chain.Segments[index].CapturedEnd, false, budget)
 			// The index is an internal implementation detail for this cursorless
 			// request. Latest always remains recent-mode on the wire; snapshot
 			// mode is reserved for frozen older browsing.
 			page.Mode = BrowseRecent
 			page.SnapshotID = ""
-			return page, nil
+			return page
 		}
 		recentTailExhausted := index < len(view.recentComplete) && !view.recentComplete[index]
 		recent, err := b.loadClaudeChainRecentWithBudget(ctx, scope, chain, index, budget)
-		if b.installed != nil && terminalProviderError(err) {
-			return BrowsePage{}, err
-		}
 		if errors.Is(err, errClaudeChainRecentBudget) {
-			return b.claudeChainBudgetPage(scope, chain, index), nil
+			return b.claudeChainBudgetPage(scope, chain, index)
 		}
 		if err != nil {
-			if b.installed != nil && terminalProviderError(err) {
-				return BrowsePage{}, err
-			}
-			return b.claudeChainSourceFailure(ctx, err), nil
+			return b.claudeChainSourceFailure(ctx, err)
 		}
 		if len(recent.Entries) > 0 {
 			return b.claudeChainPageAt(ctx, scope, limit, chain, true, index, len(recent.Entries), recent.Entries, budget, recentTailExhausted)
@@ -2432,14 +2151,14 @@ func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, 
 				Entries: []Entry{}, SourceRevision: view.publicRevision, Diagnostics: mergeBrowseDiagnostics(view.diagnostics, recent.Diagnostics)}
 			cursor, err := b.claudeChainCursor(scope, chain, index, segment.RecentStart, true)
 			if err != nil {
-				return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true)), nil
+				return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
 			}
 			page.NextCursor, page.HasMore = cursor, cursor != ""
-			return page, nil
+			return page
 		}
 	}
 	view = b.claudeChainView(chain)
-	return BrowsePage{Available: true, State: BrowseReady, Mode: BrowseRecent, Entries: []Entry{}, Total: nil, Diagnostics: view.diagnostics}, nil
+	return BrowsePage{Available: true, State: BrowseReady, Mode: BrowseRecent, Entries: []Entry{}, Total: nil, Diagnostics: view.diagnostics}
 }
 
 func (b *Browser) claudeChainBudgetPage(scope BrowseScope, chain *claudeChainContext, segmentIndex int) BrowsePage {
@@ -2463,13 +2182,13 @@ func (b *Browser) claudeChainBudgetPage(scope BrowseScope, chain *claudeChainCon
 		Reason: "Older history can be prepared on this computer…"}
 }
 
-func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, latest bool, segmentIndex, boundary int, entries []projectedEntry, budget *claudeChainRequestBudget, recentTailExhausted bool) (BrowsePage, error) {
+func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, latest bool, segmentIndex, boundary int, entries []projectedEntry, budget *claudeChainRequestBudget, recentTailExhausted bool) BrowsePage {
 	if budget == nil {
 		budget = newClaudeChainRequestBudget(b.options.RecentBytes)
 	}
 	view := b.claudeChainView(chain)
 	if chain == nil || segmentIndex < 0 || segmentIndex >= len(view.chain.Segments) {
-		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)), nil
+		return browseFailure(true, "cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
 	}
 	if boundary < 0 {
 		boundary = len(entries)
@@ -2491,9 +2210,6 @@ func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limi
 	for {
 		selected := entries[start:boundary]
 		nextSegment, nextBoundary, hasNext, nextIsOffset, nextErr := b.claudeChainOlderPosition(ctx, scope, chain, segmentIndex, start, budget, recentTailExhausted)
-		if b.installed != nil && terminalProviderError(nextErr) {
-			return BrowsePage{}, nextErr
-		}
 		page := base
 		page.Entries = projectedEntries(selected)
 		if hasNext && (nextErr == nil || errors.Is(nextErr, errClaudeChainRecentBudget)) {
@@ -2513,7 +2229,7 @@ func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limi
 			}
 		}
 		if nextErr != nil && !errors.Is(nextErr, errClaudeChainRecentBudget) {
-			return b.claudeChainSourceFailure(ctx, nextErr), nil
+			return b.claudeChainSourceFailure(ctx, nextErr)
 		}
 		if !hasNext {
 			page.HasMore = false
@@ -2523,7 +2239,7 @@ func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limi
 			if b.pageSize(page) > b.options.ResponseBytes && len(page.Entries) == 1 {
 				page.Entries[0] = boundBrowseEntry(page.Entries[0], b.options.ResponseBytes)
 			}
-			return b.enforcePageBudget(page), nil
+			return b.enforcePageBudget(page)
 		}
 		start++
 	}
@@ -2558,9 +2274,6 @@ func (b *Browser) claudeChainOlderPosition(ctx context.Context, scope BrowseScop
 			return index, view.chain.Segments[index].CapturedEnd, true, true, nil
 		}
 		recent, err := b.loadClaudeChainRecentWithBudget(ctx, scope, chain, index, budget)
-		if b.installed != nil && terminalProviderError(err) {
-			return 0, 0, false, false, err
-		}
 		if errors.Is(err, errClaudeChainRecentBudget) {
 			return index, view.chain.Segments[index].CapturedEnd, true, true, err
 		}

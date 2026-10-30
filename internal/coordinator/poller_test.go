@@ -125,10 +125,9 @@ func TestPollerEventCommitPublishesRecoveryAfterPausedEnrichment(t *testing.T) {
 	poller := NewPoller(client, state, time.Second, testLogger())
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	poller.SetEnrich(func(context.Context, []*AgentState) error {
+	poller.SetEnrich(func(context.Context, []*AgentState) {
 		close(entered)
 		<-release
-		return nil
 	})
 	var mu sync.Mutex
 	var statuses []string

@@ -108,8 +108,8 @@ func liveDatabaseFixture(t *testing.T, format string, count int) (*sql.DB, *Brow
 	t.Cleanup(func() { _ = browser.Close() })
 	watch := browser.NewDatabaseWatch(BrowseScope{Provider: provider, SessionID: session, CWD: root})
 	page, reset := watch.Refresh(t.Context())
-	if reset || page.State != BrowseReady || len(page.Entries) != min(count, maxPageSize) || page.SourceRevision != watch.revision {
-		t.Fatalf("initial page reset=%v page=%+v watch revision=%q", reset, page, watch.revision)
+	if reset || page.State != BrowseReady || len(page.Entries) != min(count, maxPageSize) {
+		t.Fatalf("initial page reset=%v page=%+v", reset, page)
 	}
 	seed(1, count-maxPageSize)
 	var stored int

@@ -8,7 +8,7 @@ Keep Tailscale Serve unavailable until one implementation can prove, in-process 
 
 **Preferred candidate for owner review, not selected:** a version-pinned Tailscale LocalAPI client owned by the long-running relay process. That same process would acquire managed owner **O**, hold the LocalAPI watcher and opaque session handle, own the local server/control lifecycle, and conditionally install the route. The existing separate `tailscale serve` foreground child must not be treated as authority. Keep `ServeRouteOwned=false` production behavior unchanged unless a separately approved R2 change completes this protocol.
 
-The recommendation is conditional on explicit owner choices for the exact Tailscale macOS distribution(s), Linux package/build scope, Go dependency, local write-privilege model, and version policy. Source research does not qualify all Linux or Mac installations. See the [R1 owner decision brief](../../docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md) and [pinned source-evidence inventory](../../docs/plans/tailscale-macos/execution/R1-SOURCE-EVIDENCE.json).
+The recommendation is conditional on explicit owner choices for the exact Tailscale macOS distribution(s), Linux package/build scope, Go dependency, local write-privilege model, and version policy. Source research does not qualify all Linux or Mac installations.
 
 ## Scope and evidence boundary
 

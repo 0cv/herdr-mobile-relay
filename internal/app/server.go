@@ -30,7 +30,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
-	"github.com/0cv/herdr-mobile-relay/internal/conversationlife"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
@@ -103,8 +102,6 @@ type Server struct {
 	sessions                        *session.Resolver
 	historyM                        *history.Manager
 	conversationM                   *conversation.Reader
-	conversationOwner               *conversationlife.Owner
-	conversationCollect             sync.Once
 	conversationB                   *conversation.Browser
 	profiles                        *profiles.Resolver
 	webH                            *web.Handler
@@ -131,7 +128,6 @@ type Server struct {
 	appDeployM                      *appdeploy.Manager
 	hybrid                          *hybridTransport
 	uploadM                         *upload.Manager
-	installedUpload                 *installedUploadOwner
 	deviceAuth                      *deviceauth.Store
 	deviceAuthMu                    sync.RWMutex
 	bootstrapGate                   *deviceauth.BootstrapGate
@@ -500,46 +496,14 @@ func newServerWithStartup(
 	authority managedTailscaleAuthority,
 	policy startupPolicy,
 ) *Server {
-	return newServerWithResources(cfg, version, revision, logger, owner, authority, policy, ordinaryUploadResources)
-}
-
-func newServerWithResources(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner, authority managedTailscaleAuthority, policy startupPolicy, resources uploadResourcePolicy) *Server {
-	return newServerWithResourcesIn(context.Background(), cfg, version, revision, logger, owner, authority, policy, resources)
-}
-
-func newServerWithResourcesIn(ctx context.Context, cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner, authority managedTailscaleAuthority, policy startupPolicy, resources uploadResourcePolicy) *Server {
-	// Installed selection binds all conversation consumers before the remaining
-	// server factories, store access or request publication. No ordinary Reader
-	// fallback is constructed on an installed acquisition failure.
 	home, _ := os.UserHomeDir()
-	var conversationReader *conversation.Reader
-	var conversationBrowser *conversation.Browser
-	var sessResolver *session.Resolver
-	var conversationOwner *conversationlife.Owner
-	if resources == cliInstalledUploadResources {
-		if cfg == nil || cfg.Transport != config.TransportTailscaleCLI || ctx == nil || !filepath.IsAbs(home) {
-			return &Server{cfg: cfg, initErr: conversationlife.ErrRefused}
-		}
-		conversationOwner = conversationlife.New()
-		var err error
-		conversationReader, conversationBrowser, sessResolver, err = acquireInstalledConversation(ctx, home, cfg.CacheDir, conversationOwner)
-		if err != nil {
-			conversationOwner.Join()
-			return &Server{cfg: cfg, initErr: err}
-		}
-	}
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
 	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
 	_, clipboardRead, _ := clipboard.Reader()
 	pollInterval := time.Duration(cfg.PollInterval * float64(time.Second))
-	var hostname string
-	if resources == cliInstalledUploadResources {
-		hostname, _ = installedConstructorHostname()
-	} else {
-		hostname, _ = os.Hostname()
-	}
-	poller := coordinator.NewPollerWithHostname(herdrClient, state, pollInterval, logger, hostname)
+	poller := coordinator.NewPoller(herdrClient, state, pollInterval, logger)
+	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "relay"
 	} else if idx := strings.Index(hostname, "."); idx > 0 {
@@ -551,19 +515,16 @@ func newServerWithResourcesIn(ctx context.Context, cfg *config.Config, version, 
 			logger.Warn("profile ownership requires recovery; relaunch is disabled", "error", err)
 		}
 	}
-	if conversationOwner == nil {
-		conversationReader = conversation.NewReader(home)
-		cacheRoot := ""
-		if strings.TrimSpace(cfg.CacheDir) != "" {
-			cacheRoot = filepath.Join(cfg.CacheDir, "conversation-history")
-		}
-		var browserErr error
-		conversationBrowser, browserErr = conversation.NewBrowser(conversationReader, cacheRoot, conversation.DefaultBrowserOptions())
-		if browserErr != nil {
-			logger.Warn("interactive conversation browsing unavailable", "error", browserErr)
-		}
-		sessResolver = session.NewResolverWithReader(home, conversationReader)
+	conversationReader := conversation.NewReader(home)
+	cacheRoot := ""
+	if strings.TrimSpace(cfg.CacheDir) != "" {
+		cacheRoot = filepath.Join(cfg.CacheDir, "conversation-history")
 	}
+	conversationBrowser, browserErr := conversation.NewBrowser(conversationReader, cacheRoot, conversation.DefaultBrowserOptions())
+	if browserErr != nil {
+		logger.Warn("interactive conversation browsing unavailable", "error", browserErr)
+	}
+	sessResolver := session.NewResolverWithReader(home, conversationReader)
 	histManager := history.NewManager(cfg.CacheDir)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
 
@@ -571,7 +532,7 @@ func newServerWithResourcesIn(ctx context.Context, cfg *config.Config, version, 
 	if strings.TrimSpace(cfg.CacheDir) != "" {
 		uploadRoot = filepath.Join(cfg.CacheDir, "uploads")
 	}
-	uploadManager, uploadOwner, uploadErr := acquireAppUpload(resources, upload.Config{Root: uploadRoot, Logger: logger})
+	uploadManager, uploadErr := upload.NewManager(upload.Config{Root: uploadRoot, Logger: logger})
 	if uploadErr != nil {
 		logger.Warn("attachment uploads unavailable", "error", uploadErr)
 	}
@@ -632,9 +593,6 @@ func newServerWithResourcesIn(ctx context.Context, cfg *config.Config, version, 
 	speechLanguages := serverSpeechLanguages()
 	logger.Info("speech synthesis available", "languages", strings.Join(speechLanguages, ","))
 	initialInventory := state.InventorySnapshot()
-	if fatal := fatalUploadConstruction(uploadErr); fatal != nil {
-		deviceStoreErr = errors.Join(deviceStoreErr, fatal)
-	}
 
 	return &Server{
 		cfg:                 cfg,
@@ -661,13 +619,11 @@ func newServerWithResourcesIn(ctx context.Context, cfg *config.Config, version, 
 		sessions:            sessResolver,
 		historyM:            histManager,
 		conversationM:       conversationReader,
-		conversationOwner:   conversationOwner,
 		conversationB:       conversationBrowser,
 		updateM:             newUpdateManager(cfg, version, revision, healthURL),
 		piIntegration:       piintegration.New(herdrmobilerelay.PiCommandBridge(), func() []string { return agentroots.PiConfigDirs(home) }),
 		appDeployM:          newAppDeployManager(cfg, version, revision),
 		uploadM:             uploadManager,
-		installedUpload:     uploadOwner,
 		deviceAuth:          deviceStore,
 		bootstrapGate:       bootstrapGate,
 		managedOwner:        owner,
@@ -979,13 +935,9 @@ func projectContextForAgent(agent *coordinator.AgentState) conversation.ProjectC
 	})
 }
 
-func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState, contexts ...context.Context) error {
-	ctx := context.Background()
-	if len(contexts) > 0 {
-		ctx = contexts[0]
-	}
+func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	if agent == nil {
-		return nil
+		return
 	}
 	agent.SessionName = ""
 	// Every other consumer of a pane's reported session (Reader.Read,
@@ -1008,38 +960,26 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState, contexts
 	agent.AgentSessionID = sessionID
 	agent.ConversationHistoryAvailable = sessionID != "" && conversation.Supported(agent.Agent)
 	if sessionID == "" {
-		return nil
+		return
 	}
-	var title string
+	title := ""
 	if conversation.IsKimi(agent.Agent) && agent.ConversationInferred {
 		id, location, code := s.conversationM.SelectKimiSession(projectContextForAgent(agent), "")
 		if id != sessionID || code != "" || conversation.KimiSourceIdentity(location) != agent.ConversationSource {
-			return nil
+			return
 		}
 		title = location.Title
-	} else if s.conversationOwner != nil {
-		var err error
-		title, err = s.sessions.SessionNameWithProjectContext(ctx, agent.Agent, projectContextForAgent(agent), sessionID)
-		if conversation.IsTerminalProviderError(err) || ctx.Err() != nil {
-			return errors.Join(err, ctx.Err())
-		}
 	} else {
 		title = s.sessions.SessionNameWithProject(agent.Agent, projectContextForAgent(agent), sessionID)
 	}
-	if title != "" && ctx.Err() == nil {
-		agent.SessionName = title
-		agent.Session = title
+	if title == "" {
+		return
 	}
-	return nil
+	agent.SessionName = title
+	agent.Session = title
 }
 
 func (s *Server) Run(ctx context.Context) (runErr error) {
-	if s.installedUpload != nil {
-		defer func() { runErr = s.installedUpload.result(runErr) }()
-	}
-	if s.conversationOwner != nil {
-		defer func() { runErr = errors.Join(runErr, s.collectInstalledConversation()) }()
-	}
 	if s.cfg != nil && s.cfg.Transport == config.TransportTailscaleCLI && s.developmentCLIWorkflow == nil && s.installedCLI == nil && s.installedSetup == nil {
 		return tailscalecli.ErrWorkflowRequired
 	}
@@ -1067,18 +1007,8 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 	s.transitionTasks = newLifecycleTasks(ctx)
 	s.historyTasks = newLifecycleTasks(ctx)
 	defer s.drainLifecycleWork()
-	if s.uploadM != nil && s.installedUpload == nil {
+	if s.uploadM != nil {
 		defer s.uploadM.Close()
-	}
-	// Fence promptly on producer cancellation; join the cancellation observer
-	// before terminal release, including every early return below.
-	if s.installedUpload != nil {
-		observer := observeInstalledUpload(ctx, s.installedUpload)
-		defer func() {
-			s.installedUpload.begin()
-			cancelRun()
-			observer.stopOrJoin()
-		}()
 	}
 	if err := s.state.EnableTriagePersistence(s.cfg.CacheDir); err != nil {
 		s.recordSafeError("durable agent triage unavailable", err)
@@ -1124,14 +1054,7 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		})
 	})
 
-	var installedDrain *installedDispatcherCleanup
-	if s.installedCLI != nil || s.installedSetup != nil {
-		s.dispatcher = coordinator.NewInstalledDispatcher(s.herdrC, s.state, s.journal, s.logger)
-		installedDrain = newInstalledDispatcherCleanup(cancelRun, s.dispatcher)
-		defer func() { runErr = errors.Join(runErr, installedDrain.drain()) }()
-	} else {
-		s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, s.journal, s.logger)
-	}
+	s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, s.journal, s.logger)
 	s.dispatcher.SetProfiles(s.profiles)
 	s.dispatcher.SetBroadcast(s.broadcastCommitted)
 	s.dispatcher.SetWakePoll(func() { s.poller.Wake() })
@@ -1808,15 +1731,10 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 
 	s.setInventoryPublisher(ctx)
 
-	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) error {
+	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
 		s.enrichKimiSessions(ctx, agents)
 		for _, a := range agents {
-			if err := s.resolveAgentSessionName(a, ctx); err != nil {
-				return err
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
+			s.resolveAgentSessionName(a)
 			if a.Status != "blocked" {
 				continue
 			}
@@ -1834,7 +1752,6 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 			}
 			setAgentAttention(s.state, a, question.Classify(string(read.Content), a.Agent))
 		}
-		return ctx.Err()
 	})
 
 	handler := s.httpHandler()
@@ -2143,14 +2060,8 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		}
 		<-serveDone
 	}
-	if s.conversationOwner != nil {
-		s.conversationOwner.Begin()
-	}
-	s.installedUpload.begin()
 	cancelRun()
-	if installedDrain != nil {
-		installedDrain.begin()
-	} else if s.dispatcher != nil {
+	if s.dispatcher != nil {
 		s.dispatcher.CancelInflight()
 	}
 	paneSizeShutdownCtx, cancelPaneSizes := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2183,10 +2094,7 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 	}
 	bg.Wait()
 	s.drainLifecycleWork()
-	if installedDrain != nil {
-		// Collect only in the deferred return join, after all other tail errors.
-		_ = installedDrain.drain()
-	} else if s.dispatcher != nil {
+	if s.dispatcher != nil {
 		dispatcherCloseCtx, cancelDispatcher := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.dispatcher.Close(dispatcherCloseCtx); runErr == nil && err != nil {
 			runErr = err
@@ -3343,12 +3251,8 @@ func (s *Server) latestConversationResponse(ctx context.Context, agent, cwd, ses
 	}
 	var page conversation.Page
 	var err error
-	if s.conversationOwner != nil {
-		page, err = s.conversationM.ReadWithProjectContext(ctx, agent, project, sessionID, "", 1)
-	} else {
-		page, err = s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
-	}
-	if (s.conversationOwner != nil && conversation.IsTerminalProviderError(err)) || ctx.Err() != nil {
+	page, err = s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
+	if ctx.Err() != nil {
 		return "", errors.Join(err, ctx.Err())
 	}
 	if err != nil || !page.Available || len(page.Entries) == 0 {
@@ -3408,17 +3312,7 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 
 // slashLocation permits the static catalog only for nonterminal lookup misses.
 func (s *Server) slashLocation(ctx context.Context, agent string, project conversation.ProjectContext, sessionID string) (conversation.Location, error) {
-	if s.conversationOwner == nil {
-		return s.conversationM.LocateWithProject(agent, project, sessionID), ctx.Err()
-	}
-	location, err := s.conversationM.LocateWithProjectContext(ctx, agent, project, sessionID)
-	if conversation.IsTerminalProviderError(err) || ctx.Err() != nil {
-		return conversation.Location{}, errors.Join(err, ctx.Err())
-	}
-	if err != nil {
-		return conversation.Location{}, nil
-	}
-	return location, nil
+	return s.conversationM.LocateWithProject(agent, project, sessionID), ctx.Err()
 }
 
 func locatedAgentDir(home, agent string, location conversation.Location) string {
@@ -5260,18 +5154,7 @@ func (s *Server) enrichActivityResponses(ctx context.Context, entries []activity
 			var loaded bool
 			page, loaded = pages[cacheKey]
 			if !loaded {
-				if s.conversationOwner != nil {
-					var err error
-					page, err = s.conversationM.ReadWithProjectContext(ctx, agentName, project, sessionID, "", 200)
-					if conversation.IsTerminalProviderError(err) || ctx.Err() != nil {
-						return nil, errors.Join(err, ctx.Err())
-					}
-					if err != nil {
-						continue
-					}
-				} else {
-					page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
-				}
+				page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
 				if err := ctx.Err(); err != nil {
 					return nil, err
 				}

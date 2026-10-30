@@ -53,22 +53,19 @@ func runInstalledCLI(ctx context.Context, selected config.InstalledConfig, versi
 func runInstalledCLIApp(ctx context.Context, cfg *config.Config, version, revision string, logger *slog.Logger, authority *tailscalecli.InstalledSession, run func(*Server, context.Context) error) (result error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s := newServerWithResourcesIn(ctx, cfg, version, revision, logger, nil, nil, installedServiceStartup, cliInstalledUploadResources)
+	s := newServerWithStartup(cfg, version, revision, logger, nil, nil, installedServiceStartup)
 	if s.initErr != nil && s.hub == nil {
 		return s.initErr
 	}
 	s.installedCLI = authority
 	s.tailscaleCLIRegistration = authority
 	defer func() {
-		s.installedUpload.begin()
 		cancel()
 		s.quarantineTailscaleCLI()
 		_ = s.hub.Shutdown(context.Background())
 		if s.conversationB != nil {
 			result = errors.Join(result, s.conversationB.Close())
 		}
-		result = errors.Join(result, s.collectInstalledConversation())
-		result = s.installedUpload.result(result)
 	}()
 	if s.initErr != nil {
 		return s.initErr

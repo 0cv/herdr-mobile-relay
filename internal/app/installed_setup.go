@@ -199,14 +199,13 @@ func runInstalledSetupCLI(ctx context.Context, selected config.InstalledConfig, 
 		defer cancel()
 		operator, retire := context.WithCancel(lifetime)
 		a := &installedSetupState{active: true, lifetime: operator, cancel: retire, session: session, binding: selected.Binding(), cfg: cfg, published: make(chan struct{})}
-		s := newServerWithResourcesIn(ctx, &cfg, version, revision, logger, nil, nil, installedServiceStartup, cliInstalledUploadResources)
+		s := newServerWithStartup(&cfg, version, revision, logger, nil, nil, installedServiceStartup)
 		if s.initErr != nil && s.hub == nil {
 			return s.initErr
 		}
 		s.installedSetup = a
 		s.tailscaleCLIRegistration = a
 		defer func() {
-			s.installedUpload.begin()
 			cancel()
 			a.retire()
 			s.quarantineTailscaleCLI()
@@ -214,8 +213,6 @@ func runInstalledSetupCLI(ctx context.Context, selected config.InstalledConfig, 
 			if s.conversationB != nil {
 				result = errors.Join(result, s.conversationB.Close())
 			}
-			result = errors.Join(result, s.collectInstalledConversation())
-			result = s.installedUpload.result(result)
 		}()
 		if s.initErr != nil {
 			return s.initErr
@@ -240,7 +237,7 @@ func runInstalledSetupCLI(ctx context.Context, selected config.InstalledConfig, 
 		}
 		done := make(chan struct{})
 		var controlErr error
-		join := s.installedUpload.bindControl(cancel, done)
+		join := func() { cancel(); <-done }
 		defer join()
 		go func() {
 			defer close(done)
@@ -261,7 +258,6 @@ func runInstalledSetupCLI(ctx context.Context, selected config.InstalledConfig, 
 			controlErr = control(operator, s, InstalledSetupControl{state: a})
 		}()
 		err := installedCLIRunner()(s, lifetime)
-		s.installedUpload.begin()
 		join() // includes callback retirement and every admitted operation
 		return errors.Join(err, controlErr)
 	})

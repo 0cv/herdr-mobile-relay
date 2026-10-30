@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -194,9 +193,8 @@ func TestPollerTopologyStaleCommitDoesNotBackOff(t *testing.T) {
 		time.Second,
 		testLogger(),
 	)
-	poller.SetEnrich(func(context.Context, []*AgentState) error {
+	poller.SetEnrich(func(context.Context, []*AgentState) {
 		state.MarkTopologyChanged()
-		return nil
 	})
 
 	poller.poll(context.Background())
@@ -417,77 +415,6 @@ func startPollerTestSocket(t *testing.T, responder func(method string) (result a
 		<-done
 	})
 	return socketPath
-}
-
-// Both production post-fetch paths must discard an enrichment failure while
-// their caller stays live (as with independent installed-owner retirement).
-func TestPollerTerminalEnrichmentCannotCommit(t *testing.T) {
-	for _, path := range []string{"poll", "event"} {
-		t.Run(path, func(t *testing.T) {
-			state := testState()
-			state.CommitInventory([]*AgentState{{PaneID: "original", Agent: "pi", Status: "idle"}}, state.RevisionCounter())
-			state.CommitWorkspaces([]herdr.Workspace{{ID: "original-workspace"}})
-			// Do not construct a Client or call NewPoller (which reads the host name).
-			poller := &Poller{state: state, logger: testLogger(), wakeup: make(chan struct{}, 1)}
-			panes := []herdr.Pane{{ID: "replacement", Agent: "claude", Status: "working"}}
-			workspaces := []herdr.Workspace{{ID: "replacement-workspace"}}
-			topology := herdr.TopologySnapshot{Workspaces: workspaces}
-			before := state.InventorySnapshot()
-			revision := state.RevisionCounter()
-			ctx := context.Background()
-			calls := 0
-			poller.SetEnrich(func(callCtx context.Context, agents []*AgentState) error {
-				calls++
-				if callCtx != ctx || callCtx.Err() != nil || len(agents) != 1 || agents[0].PaneID != "replacement" {
-					t.Errorf("%s enrichment received wrong caller or fetched agent: %+v, caller=%v", path, agents, callCtx.Err())
-				}
-				return context.Canceled
-			})
-			commit := func() {
-				if path == "poll" {
-					poller.commitPolledInventory(ctx, panes, nil, workspaces, state.BeginPoll())
-				} else {
-					poller.commitFetchedEventTopology(ctx, panes, topology, state.RevisionCounter())
-				}
-			}
-			commit()
-			if calls != 1 || ctx.Err() != nil || state.RevisionCounter() != revision {
-				t.Fatalf("terminal %s enrichment committed: calls=%d revision=%d want=%d caller=%v", path, calls, state.RevisionCounter(), revision, ctx.Err())
-			}
-			if got := state.InventorySnapshot(); !reflect.DeepEqual(got, before) {
-				t.Fatalf("terminal %s enrichment changed original inventory: got=%+v want=%+v", path, got, before)
-			}
-			if agent, ok := state.Agent("original"); !ok || agent.Agent != "pi" {
-				t.Fatalf("terminal %s enrichment replaced original: %+v, %t", path, agent, ok)
-			}
-			if _, ok := state.Agent("replacement"); ok {
-				t.Fatalf("terminal %s enrichment published replacement", path)
-			}
-
-			// The same post-fetch path must actually commit on ordinary success.
-			successCalls := 0
-			poller.SetEnrich(func(callCtx context.Context, agents []*AgentState) error {
-				successCalls++
-				if callCtx != ctx || callCtx.Err() != nil || len(agents) != 1 || agents[0].PaneID != "replacement" {
-					t.Errorf("%s successful enrichment received wrong caller or agent", path)
-				}
-				return nil
-			})
-			commit()
-			if successCalls != 1 || state.RevisionCounter() <= revision {
-				t.Fatalf("successful %s enrichment did not commit: calls=%d revision=%d", path, successCalls, state.RevisionCounter())
-			}
-			if _, ok := state.Agent("original"); ok {
-				t.Fatalf("successful %s enrichment retained original", path)
-			}
-			if agent, ok := state.Agent("replacement"); !ok || agent.Agent != "claude" {
-				t.Fatalf("successful %s enrichment did not publish replacement: %+v, %t", path, agent, ok)
-			}
-			if got := state.Workspaces(); !reflect.DeepEqual(got, workspaces) {
-				t.Fatalf("successful %s enrichment did not publish workspaces: %+v", path, got)
-			}
-		})
-	}
 }
 
 func pollerSuccessResult(method string) any {

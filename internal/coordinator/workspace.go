@@ -24,11 +24,6 @@ func (d *Dispatcher) HandleWorkspaceCreate(
 	requestID, cwd, label string,
 ) *CommandResult {
 	const action = "workspace_create"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	label = strings.TrimSpace(label)
 	if err := validWorkspaceLabel(label); err != nil {
 		return d.fail(requestID, action, "", err.Error())
@@ -45,9 +40,6 @@ func (d *Dispatcher) HandleWorkspaceCreate(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 	created, err := d.herdr.WorkspaceCreate(commandCtx, resolved, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -68,11 +60,6 @@ func (d *Dispatcher) HandleWorkspaceRename(
 	requestID, workspaceID, label string,
 ) *CommandResult {
 	const action = "workspace_rename"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	workspace, result := d.workspaceTarget(requestID, action, workspaceID)
 	if result != nil {
 		return result
@@ -86,9 +73,6 @@ func (d *Dispatcher) HandleWorkspaceRename(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 	if err := d.herdr.WorkspaceRename(commandCtx, workspace.ID, label); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -103,11 +87,6 @@ func (d *Dispatcher) HandleWorkspaceReorder(
 	insertIndex *int,
 ) *CommandResult {
 	const action = "workspace_reorder"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	workspace, result := d.workspaceTarget(requestID, action, workspaceID)
 	if result != nil {
 		return result
@@ -120,9 +99,6 @@ func (d *Dispatcher) HandleWorkspaceReorder(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 	if err := d.herdr.WorkspaceMove(commandCtx, workspace.ID, *insertIndex); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -138,11 +114,6 @@ func (d *Dispatcher) HandleWorkspaceReorderBlock(
 	beforeWorkspaceID string,
 ) *CommandResult {
 	const action = "workspace_reorder"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	if len(workspaceIDs) == 0 || len(workspaceIDs) > maxTabInsertIndex {
 		return d.fail(requestID, action, "", "Workspace selection is invalid")
 	}
@@ -169,9 +140,6 @@ func (d *Dispatcher) HandleWorkspaceReorderBlock(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 	if err := d.herdr.WorkspaceMoveBlock(commandCtx, workspaceIDs, beforeWorkspaceID); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -190,11 +158,6 @@ func (d *Dispatcher) HandleWorkspaceClose(
 	expectedWorkspaceIDs []string,
 ) *CommandResult {
 	const action = "workspace_close"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
 		return d.fail(requestID, action, "", "Workspace is required")
@@ -204,9 +167,6 @@ func (d *Dispatcher) HandleWorkspaceClose(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 
 	authoritative, err := d.herdr.WorkspaceList(commandCtx)
 	if err != nil {
@@ -368,11 +328,6 @@ func (d *Dispatcher) HandleWorktreeList(
 	requestID, workspaceID string,
 ) *CommandResult {
 	const action = "worktree_list"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	workspace, result := d.workspaceTarget(requestID, action, workspaceID)
 	if result != nil {
 		return result
@@ -391,11 +346,6 @@ func (d *Dispatcher) HandleWorktreeCreate(
 	requestID, workspaceID, branch, base, path, label string,
 ) *CommandResult {
 	const action = "worktree_create"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	workspace, result := d.workspaceTarget(requestID, action, workspaceID)
 	if result != nil {
 		return result
@@ -418,9 +368,6 @@ func (d *Dispatcher) HandleWorktreeCreate(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 	created, err := d.herdr.WorktreeCreate(commandCtx, workspace.ID, branch, base, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -435,11 +382,6 @@ func (d *Dispatcher) HandleWorktreeOpen(
 	requestID, workspaceID, path, branch, label string,
 ) *CommandResult {
 	const action = "worktree_open"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	workspace, result := d.workspaceTarget(requestID, action, workspaceID)
 	if result != nil {
 		return result
@@ -458,9 +400,6 @@ func (d *Dispatcher) HandleWorktreeOpen(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 	opened, err := d.herdr.WorktreeOpen(commandCtx, workspace.ID, path, branch, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -476,11 +415,6 @@ func (d *Dispatcher) HandleWorktreeRemove(
 	force bool,
 ) *CommandResult {
 	const action = "worktree_remove"
-	ctx, release, entryErr := d.enterInstalled(ctx)
-	if entryErr != nil {
-		return &CommandResult{RequestID: requestID, Action: action, Phase: "failed", Error: entryErr.Error()}
-	}
-	defer release()
 	workspace, result := d.workspaceTarget(requestID, action, workspaceID)
 	if result != nil {
 		return result
@@ -493,9 +427,6 @@ func (d *Dispatcher) HandleWorktreeRemove(
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if d.installed != nil && commandCtx.Err() != nil {
-		return installedTopologyRefusal(requestID, action, commandCtx.Err())
-	}
 	removed, err := d.herdr.WorktreeRemove(commandCtx, workspace.ID, force)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)

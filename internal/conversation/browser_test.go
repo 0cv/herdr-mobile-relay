@@ -578,36 +578,9 @@ func TestBrowserPreparationReportsQuotaFailureAndSupportsExplicitRetry(t *testin
 	if page.State != BrowseFailed || page.ReasonCode != "index_capacity_exceeded" || page.Error == nil || !page.Error.Retryable || !page.HasMore {
 		t.Fatalf("quota page = %#v, want an explicit retryable quota failure", page)
 	}
-	// Lift the deliberately tiny quota after observing its failure so the
-	// explicit retry can finish successfully. The worker is asynchronous and
-	// may complete before ReadPage returns, so accept either preparing or the
-	// already-ready result and then require the final ready page.
-	browser.options.SnapshotQuota = 1024 * 1024
-	// The failed worker publishes its failure before it releases the job, so an
-	// explicit retry in that window still reports the failure. Reissue only the
-	// explicit retry until the released job accepts it.
-	var retry BrowsePage
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		retry, err = browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1, Retry: true})
-		if err != nil || retry.State != BrowseFailed || !time.Now().Before(deadline) {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if err != nil || (retry.State != BrowsePreparing && retry.State != BrowseReady) {
+	retry, err := browser.ReadPage(ctx, BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1, Retry: true})
+	if err != nil || retry.State != BrowsePreparing {
 		t.Fatalf("explicit retry page = %#v, err = %v", retry, err)
-	}
-	deadline = time.Now().Add(2 * time.Second)
-	for retry.State == BrowsePreparing && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-		retry, err = browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if retry.State != BrowseReady || !retry.Available {
-		t.Fatalf("explicit retry did not complete successfully: %#v", retry)
 	}
 }
 

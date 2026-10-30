@@ -82,11 +82,11 @@ CANDIDATE_PATHS = (*FILES, QUALIFY_GATE)
 # a frozen literal of explicit repo-relative paths (no globs, no directory
 # prefixes). The integration adds only observed changed paths; listing a path is
 # not a review or qualification. A later new path must extend the scope deliberately.
-# The installed Tailscale source at 59eda0d adds 275 paths outside the earlier
-# BYO list. Pin that *exact sorted path set* separately: this is path provenance,
-# not a review or qualification of installed runtime behavior. No glob, prefix,
-# ancestry shortcut, or arbitrary subset of the new set is admitted. The
-# workflow's producer and the runtime use the same predicate.
+# The installed Tailscale source adds paths outside the earlier BYO list. Pin
+# that *exact sorted path set* separately: this is path provenance, not a review
+# or qualification of installed runtime behavior. No glob, prefix, ancestry
+# shortcut, or arbitrary subset of the set is admitted. The workflow's producer
+# and the runtime use the same predicate.
 REQUIRED = (FILES[0], FILES[1], QUALIFY_GATE)
 ALLOWED = (
     # M5 reconciliation, release pipeline and runtime ports from main (8b44cd8f #57, 3901f13f 0.22.6,
@@ -153,31 +153,6 @@ ALLOWED = (
     "cmd/herdr-mobile-relay/main_test.go",
     "docs/collie-tailscale-comparison.md",
     "docs/collie-tailscale-delivery-plan.md",
-    "docs/plans/tailscale-macos/NEXT-RUN.md",
-    "docs/plans/tailscale-macos/PLAN.md",
-    "docs/plans/tailscale-macos/R1-OWNERSHIP-DESIGN.md",
-    "docs/plans/tailscale-macos/REMAINING-IMPLEMENTATION-PLAN.md",
-    "docs/plans/tailscale-macos/REVIEW.md",
-    "docs/plans/tailscale-macos/execution/CI-REVIEW.md",
-    "docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md",
-    "docs/plans/tailscale-macos/execution/R1-SOURCE-EVIDENCE.json",
-    "docs/plans/tailscale-macos/execution/STATUS.json",
-    "docs/plans/tailscale-macos/execution/WORKER-LOG.md",
-    "docs/plans/tailscale-macos/imported/ACCEPTANCE-MATRIX.md",
-    "docs/plans/tailscale-macos/imported/HANDOFF.md",
-    "docs/plans/tailscale-macos/imported/MACOS-RUNBOOK.md",
-    "docs/plans/tailscale-macos/imported/PLAN-VALIDATION.md",
-    "docs/plans/tailscale-macos/imported/PLAN.md",
-    "docs/plans/tailscale-macos/imported/SHA256SUMS",
-    "docs/plans/tailscale-macos/imported/SLICE-TEMPLATE.md",
-    "docs/plans/tailscale-macos/imported/START-HERE.md",
-    "docs/plans/tailscale-macos/imported/VERIFICATION.md",
-    "docs/plans/tailscale-macos/imported/handoff/UNAPPROVED-portable-bool.patch",
-    "docs/plans/tailscale-macos/imported/handoff/plan-checks.json",
-    "docs/plans/tailscale-macos/imported/handoff/provenance.json",
-    "docs/plans/tailscale-macos/imported/handoff/source-inventory.json",
-    "docs/plans/tailscale-macos/imported/status.json",
-    "docs/plans/tailscale-macos/imported/verify-source.py",
     "docs/tailscale-cli-background-plan.md",
     "internal/app/server.go",
     "internal/app/server_test.go",
@@ -959,9 +934,9 @@ ALLOWED = (
     "web/builds/0.23.5-485-6064d1318317d710/index.html.br",
 )
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
-# SCOPE_BASE to 59eda0d83a785822696da03461601eca906231c6. A future new path
-# must update this pin explicitly; the BYO receipt still asserts BYO only.
-INSTALLED_PATH_SET_SHA256 = "471649e5c4c937ca9e9e5f3f6f8634d347d1f72d3020cb40b12465474ef13164"
+# SCOPE_BASE to the candidate. Adding or removing a path must update this pin
+# explicitly; the BYO receipt still asserts BYO only.
+INSTALLED_PATH_SET_SHA256 = "1a53d58ec2762aa495268e13de0000d53c638ae96b35497798d98a6f641432b5"
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")
 LIMITS = MappingProxyType({

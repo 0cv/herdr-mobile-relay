@@ -30,7 +30,7 @@ type Poller struct {
 	eventReconnectWait func(context.Context) bool
 	onInventoryChange  func() error
 	onPollStart        func() func([]*AgentState, []herdr.Workspace, bool)
-	enrich             func(context.Context, []*AgentState) error
+	enrich             func(context.Context, []*AgentState)
 	hostname           string
 	topologyRetries    int
 	// Owned by the polling goroutine; event commits must not reset it.
@@ -42,12 +42,6 @@ type Poller struct {
 
 func NewPoller(client *herdr.Client, state *State, interval time.Duration, logger *slog.Logger) *Poller {
 	hostname, _ := os.Hostname()
-	return NewPollerWithHostname(client, state, interval, logger, hostname)
-}
-
-// NewPollerWithHostname is used by the installed constructor so its inert
-// build can avoid host metadata before the runner is substituted.
-func NewPollerWithHostname(client *herdr.Client, state *State, interval time.Duration, logger *slog.Logger, hostname string) *Poller {
 	if idx := strings.Index(hostname, "."); idx > 0 {
 		hostname = hostname[:idx]
 	}
@@ -76,7 +70,7 @@ func (p *Poller) SetOnPollStart(fn func() func([]*AgentState, []herdr.Workspace,
 	p.onPollStart = fn
 }
 
-func (p *Poller) SetEnrich(fn func(context.Context, []*AgentState) error) {
+func (p *Poller) SetEnrich(fn func(context.Context, []*AgentState)) {
 	p.enrich = fn
 }
 
@@ -190,23 +184,10 @@ func (p *Poller) poll(ctx context.Context) {
 		topologyPanes = inv.Panes
 	}
 	hydrateWorkspaceCwds(workspaces, tabs, topologyPanes)
-	freshAgents, ready = p.commitPolledInventory(ctx, inv.Panes, tabs, workspaces, token)
-	if ready {
-		freshWorkspaces = workspaces
-	}
-}
+	agents := p.agentsFromTopology(inv.Panes, tabs)
 
-// commitPolledInventory receives the rows after the required and optional
-// fetches. Keep enrichment and the token-checked commit on this same path.
-func (p *Poller) commitPolledInventory(ctx context.Context, panes []herdr.Pane, tabs []herdr.Tab, workspaces []herdr.Workspace, token PollToken) ([]*AgentState, bool) {
-	agents := p.agentsFromTopology(panes, tabs)
 	if p.enrich != nil {
-		if err := p.enrich(ctx, agents); err != nil {
-			return nil, false
-		}
-	}
-	if ctx.Err() != nil {
-		return nil, false
+		p.enrich(ctx, agents)
 	}
 
 	_, committed := p.state.CommitPoll(agents, workspaces, token)
@@ -214,12 +195,14 @@ func (p *Poller) commitPolledInventory(ctx context.Context, panes []herdr.Pane, 
 		p.logger.Debug("discarded topology-stale inventory sample")
 		p.handleTopologyStale()
 		p.notifyInventoryChange()
-		return nil, false
+		return
 	}
 	p.topologyRetries = 0
+	freshAgents = agents
+	freshWorkspaces = workspaces
+	ready = true
 	p.notifyInventoryChange()
 	p.logger.Debug("inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
-	return agents, true
 }
 
 func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*AgentState {
@@ -391,20 +374,9 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 		p.Wake()
 		return
 	}
-	p.commitFetchedEventTopology(ctx, inventory.Panes, topology, baseRevision)
-}
-
-// commitFetchedEventTopology receives the refreshed inventory after the event
-// fetch; the event snapshot supplies tabs and workspaces for the real commit.
-func (p *Poller) commitFetchedEventTopology(ctx context.Context, panes []herdr.Pane, topology herdr.TopologySnapshot, baseRevision int64) {
-	agents := p.agentsFromTopology(panes, topology.Tabs)
+	agents := p.agentsFromTopology(inventory.Panes, topology.Tabs)
 	if p.enrich != nil {
-		if err := p.enrich(ctx, agents); err != nil {
-			return
-		}
-	}
-	if ctx.Err() != nil {
-		return
+		p.enrich(ctx, agents)
 	}
 	// Event topology is an independent health source. It may recover the
 	// public poll-health counter, but must not erase a reconciliation retry
