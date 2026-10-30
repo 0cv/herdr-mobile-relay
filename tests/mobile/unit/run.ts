@@ -111,7 +111,11 @@ function mockIOSNativeObservation(platform: IOSPlatform): void {
   let settings: Record<string, unknown> = {};
   driver.updateSettings = async (value: Record<string, unknown>) => { settings = { ...settings, ...value }; return null; };
   driver.settings = async () => settings;
-  driver.mobile = async (name: string) => { assert.equal(name, 'queryAppState'); return 4; };
+  driver.mobile = async (name: string) => {
+    if (name === 'installedContextContract') return { contract: 'herdr-installed-contexts-v1', selector: 'herdr-installed-contexts-v1' };
+    assert.equal(name, 'queryAppState');
+    return 4;
+  };
   driver.command = async (path: string) => {
     if (path === '/element/springboard-root/elements') return [{ 'element-6066-11e4-a52e-4f735466cecf': 'springboard-root' }];
     assert.equal(path, '/alert/text');
@@ -2367,9 +2371,11 @@ test('iOS attachment selects a page without enumerating windows', async () => {
   (platform as any).installedBundleId = 'com.apple.webapp';
   const calls: string[] = [];
   mockIOSNativeObservation(platform);
-  driver.contextMetadata = async () => [{
-    id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
-  }];
+  driver.contextMetadata = async () => { assert.fail('installed attachment must not enumerate unscoped contexts'); };
+  driver.installedContextMetadata = async (targetApp: unknown) => {
+    assert.deepEqual(targetApp, { bundleId: 'com.apple.webapp', nativePid: 19193 });
+    return [{ id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {} }];
+  };
   driver.switchContext = async (name: string) => { calls.push(`context:${name}`); driver.selectedContext = name; };
   driver.currentUrl = async () => 'https://fixture.test/';
   driver.activeAppInfo = async () => ({ bundleId: 'com.apple.webapp', pid: '19193' });
@@ -2381,7 +2387,7 @@ test('iOS attachment selects a page without enumerating windows', async () => {
 
 test('iOS attachment rejects incorrect foreground, origin, and standalone state', async () => {
   const cases = [
-    { foreground: 'com.apple.mobilesafari', url: 'https://fixture.test/', standalone: true, error: /native provider/ },
+    { foreground: 'com.apple.mobilesafari', url: 'https://fixture.test/', standalone: true, error: /installed provider is not foreground before discovery/ },
     { foreground: 'com.apple.webapp', url: 'https://other.test/', standalone: true, error: /document origin/ },
     { foreground: 'com.apple.webapp', url: 'https://fixture.test/', standalone: false, error: /not standalone/ },
   ];
@@ -2397,9 +2403,11 @@ test('iOS attachment rejects incorrect foreground, origin, and standalone state'
     const driver = platform.driver as any;
     (platform as any).installedBundleId = 'com.apple.webapp';
     mockIOSNativeObservation(platform);
-    driver.contextMetadata = async () => [{
-      id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
-    }];
+    driver.contextMetadata = async () => { assert.fail('installed attachment must not enumerate unscoped contexts'); };
+    driver.installedContextMetadata = async (targetApp: unknown) => {
+      assert.deepEqual(targetApp, { bundleId: 'com.apple.webapp', nativePid: 19193 });
+      return [{ id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {} }];
+    };
     driver.switchContext = async (name: string) => { driver.selectedContext = name; };
     driver.currentUrl = async () => scenario.url;
     driver.activeAppInfo = async () => ({ bundleId: scenario.foreground, pid: '19193' });
@@ -2427,9 +2435,11 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
     if (name === 'WEBVIEW_OLD') throw new Error('no such context');
     driver.selectedContext = name;
   };
-  driver.contextMetadata = async () => [{
-    id: 'WEBVIEW_NEW', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
-  }];
+  driver.contextMetadata = async () => { assert.fail('installed attachment must not enumerate unscoped contexts'); };
+  driver.installedContextMetadata = async (targetApp: unknown) => {
+    assert.deepEqual(targetApp, { bundleId: 'com.apple.webapp', nativePid: 19193 });
+    return [{ id: 'WEBVIEW_NEW', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {} }];
+  };
   driver.currentUrl = async () => 'https://fixture.test/';
   driver.activeAppInfo = async () => ({ bundleId: 'com.apple.webapp', pid: '19193' });
   driver.execute = async () => ({ origin: 'https://fixture.test', standalone: true });

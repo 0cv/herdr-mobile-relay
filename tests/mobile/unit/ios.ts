@@ -3013,7 +3013,7 @@ for (const mode of ['missing', 'loading'] as const) {
   });
 }
 
-test('Home observation timeout quarantines failure evidence and still permits owned DELETE cleanup', async () => {
+test('Home observation timeout quarantines failure evidence and blocks owned DELETE cleanup', async () => {
   const a = await lifecycleReplay('home-timeout', { home: 'timeout' });
   await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /APPIUM_TIMEOUT/u);
   const stopped = a.requests.length;
@@ -3052,11 +3052,16 @@ test('Home observation timeout quarantines failure evidence and still permits ow
   assert.equal(JSON.stringify(events).includes('synthetic-secret'), false);
   assert.equal(a.requests.filter(request => request.path === '/session' && request.method === 'POST').length, 1);
 
-  await a.platform.stopOwnedResources();
-  const deletion = a.requests.at(-1)!;
-  assert.equal(deletion.method, 'DELETE');
-  assert.match(deletion.path, /\/session\/protocol$/u);
-  assert.equal(a.driver.snapshot().sessionId, '');
+  const saved = structuredClone(a.driver.snapshot());
+  const owner = (a.driver as any).sessionOwner;
+  await assert.rejects(() => a.platform.stopOwnedResources(), /APPIUM_SESSION_UNUSABLE/u);
+  await assert.rejects(() => a.driver.command('/status', 'GET'), /APPIUM_SESSION_UNUSABLE/u);
+  await assert.rejects(() => a.driver.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.requests.length, stopped);
+  assert.equal(a.requests.some(request => request.method === 'DELETE'), false);
+  assert.equal(a.driver.snapshot().sessionId, '[active]');
+  assert.deepEqual(a.driver.snapshot(), saved);
+  assert.equal((a.driver as any).sessionOwner, owner);
   assert.deepEqual(a.driver.snapshot().firstFatal, first);
   assert.equal(a.requests.filter(request => request.path === '/session' && request.method === 'POST').length, 1);
 });
@@ -4071,6 +4076,7 @@ async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode
     if (body.script === 'mobile: activeAppInfo') { trace.push('foreground'); return value({ bundleId: 'com.apple.webapp', pid: 42 }); }
     if (body.script === 'mobile: getInstalledContexts') {
       assert.equal((a.platform as any).launchObservation.queryEligible, false);
+      assert.deepEqual(body.args.targetApp, { bundleId: 'com.apple.webapp', nativePid: 42 });
       trace.push('attachment');
       return value([published]);
     }
@@ -4081,7 +4087,8 @@ async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode
   const internal = a.platform as any;
   internal.udid = receiptUdid;
   internal.launchObservation = new IOSLaunchObservation(clock);
-  internal.observeCurrentNativeForeground = async () => 'com.apple.springboard';
+  const observeCurrentNativeForeground = internal.observeCurrentNativeForeground.bind(a.platform);
+  internal.observeCurrentNativeForeground = async (...args: unknown[]) => tapped ? observeCurrentNativeForeground(...args) : 'com.apple.springboard';
   internal.setNativeObservationTarget = async () => undefined;
   internal.ensureSpringBoardForeground = async () => undefined;
   internal.observeHomeIcon = async () => {

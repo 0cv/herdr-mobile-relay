@@ -97,7 +97,7 @@ const RETAINED_LAUNCH_SCENARIOS = [
   'still-browser-confirmation', 'recorded-two-page',
 ];
 const TEARDOWN_SCENARIOS = [
-  'held-successful-delete', 'held-timeout-delete', 'held-resolved-fatal-delete', 'warm-inspection', 'termination-home',
+  'held-successful-delete', 'held-timeout-delete', 'held-unexpected-404-delete', 'warm-inspection', 'termination-home',
   'setup-settings-post', 'setup-chrome-post', 'setup-settings-timeout', 'setup-before-settings', 'setup-overlap',
   'setup-synchronous-stop', 'cold-replacement-post',
 ];
