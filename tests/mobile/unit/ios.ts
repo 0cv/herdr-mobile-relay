@@ -95,6 +95,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
       requests.push(request);
       onRequest?.(request);
       if (request.path === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
+      if (request.body.script === 'mobile: installedContextContract') return value({ contract: 'herdr-installed-contexts-v1', selector: 'herdr-installed-contexts-v1' });
       if (nativeDefaults) {
         if (request.path.endsWith('/appium/settings')) {
           if (request.method === 'GET') return value(settings);
@@ -151,7 +152,11 @@ async function attachment(name: string, overrides: {
   now?: () => number;
 } = {}) {
   return adapter(name, ({ path, body }) => {
-    if (body.script === 'mobile: getContexts') return value(overrides.contexts?.() ?? [published]);
+    if (body.script === 'mobile: getInstalledContexts') {
+      assert.equal(body.args.targetApp.bundleId, 'com.apple.webapp');
+      assert.equal(typeof body.args.targetApp.nativePid, 'number');
+      return value(overrides.contexts?.() ?? [published]);
+    }
     if (body.script === 'mobile: activeAppInfo') return value(overrides.foreground?.() ?? recorded.foreground);
     if (path.endsWith('/context')) return overrides.switchContext?.(body.name) ?? value(null);
     if (path.endsWith('/url') && !body.url) return value(overrides.url?.() ?? `${origin}/`);
@@ -184,7 +189,7 @@ for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const)
     let releaseBody!: (body: string) => void;
     const lateBody = new Promise<string>(resolve => { releaseBody = resolve; });
     const { platform, driver, requests, budget } = await adapter(`attachment-timing-${mode}`, ({ path, body, method }) => {
-      if (body.script === 'mobile: getContexts') {
+      if (body.script === 'mobile: getInstalledContexts') {
         discoveries++;
         now += 2_000;
         return value(publications);
@@ -207,7 +212,8 @@ for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const)
       }
       if (body.script === 'mobile: activeAppInfo') {
         activeObservations++;
-        if (activeObservations === 1) {
+        if (activeObservations === 1) return value({ bundleId: 'com.apple.webapp', pid: 29073 });
+        if (activeObservations === 2) {
           now += 1_000;
           return value({ bundleId: 'com.apple.webapp', pid: 29073 });
         }
@@ -243,12 +249,13 @@ for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const)
     assert.equal(appStates, 2);
     assert.equal(roots, 2);
     assert.equal(alerts, 2);
-    assert.equal(activeObservations, 2);
+    assert.equal(activeObservations, 3);
     assert.equal(budget.recoveryCount, 0);
     assert.equal((driver as any).budget, budget, 'diagnostic scope must not replace the enforcement budget');
     assert.equal((driver as any).timingScope, undefined, 'scope restored on every failure path');
     const native = driver.snapshot().commands.filter(command => command.timing?.scope.endsWith('-native'));
     assert.deepEqual(native.map(command => [command.timing!.scope, command.timing!.operation]), [
+      ['ios-attachment-pre-discovery-native', 'active-app'],
       ...['app-state', 'native-elements', 'alert', 'active-app'].map(operation => ['ios-attachment-discovery-native', operation]),
       ...['context', 'app-state', 'native-elements', 'alert', 'active-app'].map(operation => ['ios-attachment-pre-attachment-native', operation]),
     ]);
@@ -341,6 +348,32 @@ test('recorded initial publication waits passively for the same page before actu
   assert.equal(driver.snapshot().unusable, false);
 });
 
+test('installed scoped discovery carries a fresh native PID and rejects a changed owner before attachment', async () => {
+  let pid = Number(recorded.foreground.pid);
+  const { platform, requests } = await attachment('scope-native-race', {
+    foreground: () => ({ bundleId: 'com.apple.webapp', pid }),
+    contexts: () => { pid++; return [published]; },
+  });
+  await assertPermanentFailure(platform, requests, () => platform.attachToInstalledView());
+  const listing = requests.find(request => request.body.script === 'mobile: getInstalledContexts')!;
+  assert.deepEqual(listing.body.args.targetApp, { bundleId: 'com.apple.webapp', nativePid: pid - 1 });
+  assert.equal(requests.some(request => request.body.script === 'mobile: getContexts'), false);
+  assert.equal(requests.some(request => request.body.name === published.id || request.body.script?.startsWith('return {')), false);
+});
+
+test('installed scoped discovery admits no partial request after native observation consumes its original reserve', async () => {
+  let now = 0;
+  const { platform, driver, requests, budget } = await attachment('scope-reserve', {
+    now: () => now,
+    foreground: () => { now += 3_000 * timingScale; return recorded.foreground; },
+  });
+  await assert.rejects(() => platform.attachToInstalledView(30_000), /IOS_CONTEXT: no installed/u);
+  assert.equal(requests.some(request => request.body.script === 'mobile: getInstalledContexts'), false);
+  assert.equal(driver.snapshot().firstFatal, undefined);
+  assert.equal(driver.snapshot().unusable, false);
+  assert.equal(budget.recoveryCount, 0);
+});
+
 test('installed discovery timeout preserves the hosted phase and ignores late listing replies', async () => {
   let clockMs = 0;
   let discoveries = 0;
@@ -350,7 +383,10 @@ test('installed discovery timeout preserves the hosted phase and ignores late li
   const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
   const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
     if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
-    assert.equal(JSON.parse(String(init?.body)).script, 'mobile: getContexts');
+    const body = JSON.parse(String(init?.body));
+    if (body.script === 'mobile: installedContextContract') return value({ contract: 'herdr-installed-contexts-v1', selector: 'herdr-installed-contexts-v1' });
+    if (body.script === 'mobile: activeAppInfo') return value(recorded.foreground);
+    assert.equal(body.script, 'mobile: getInstalledContexts');
     discoveries++;
     return new Promise<Response>(resolve => { reply = resolve; });
   }, now, {
@@ -390,7 +426,7 @@ for (const mode of ['delayed', 'hung'] as const) {
     let failure = '';
     const { platform, driver, requests, budget, outputDir } = await adapter(`publication-${mode}`, async ({ body, signal }) => {
       if (body.script === 'mobile: activeAppInfo') return value(recorded.foreground);
-      assert.equal(body.script, 'mobile: getContexts', 'pending publication must remain passive');
+      assert.equal(body.script, 'mobile: getInstalledContexts', 'pending publication must remain passive');
       discoveries += 1;
       if (mode === 'hung') {
         return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
@@ -410,7 +446,7 @@ for (const mode of ['delayed', 'hung'] as const) {
       assert.equal(platform.evidenceSnapshot().selectedInstalledContext, '');
       assert.equal(platform.evidenceSnapshot().installedDocumentBound, false);
       assert.equal(platform.evidenceSnapshot().ownershipFailure, undefined);
-      const commands = driver.snapshot().commands.filter((_entry, index) => requests[index]?.body.script === 'mobile: getContexts');
+      const commands = driver.snapshot().commands.filter((_entry, index) => requests[index]?.body.script === 'mobile: getInstalledContexts');
       assert.equal(commands.length, discoveries);
       assert.ok(commands.every((entry) => entry.timeoutMs === 20_000), 'every dispatched discovery needs the complete WebKit allowance');
       if (mode === 'hung') {
@@ -430,7 +466,7 @@ for (const mode of ['delayed', 'hung'] as const) {
       const pending = (platform.evidenceSnapshot().events as any[]).filter((event) => event.operation === 'initial-publication-pending');
       assert.equal(pending.length, discoveries);
       assert.ok(pending.every((event) => event.context === installed.id && event.detail.nativePid === String(recorded.foreground.pid)));
-      assert.equal(requests.filter((request) => request.body.script === 'mobile: activeAppInfo').length, discoveries);
+      assert.equal(requests.filter((request) => request.body.script === 'mobile: activeAppInfo').length, discoveries * 2);
       assert.deepEqual(await driver.activeAppInfo(), recorded.foreground, 'ordinary delayed publication must leave the session usable');
     } finally {
       await writeSanitizedJson(join(outputDir, 'publication-result.json'), { failure, discoveries, completed, evidence: platform.evidenceSnapshot() });
@@ -2679,7 +2715,8 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
       state.installed = true;
       return value(null);
     }
-    if (body.script === 'mobile: getContexts') {
+    if (body.script === 'mobile: getInstalledContexts') {
+      assert.deepEqual(body.args.targetApp, { bundleId: 'com.apple.webapp', nativePid: Number(state.pid) });
       if (state.blankPublications > 0) {
         state.blankPublications -= 1;
         return value([{ ...published, url: 'about:blank', title: '' }]);
@@ -2813,7 +2850,8 @@ test('provider UI is observed before pinning SpringBoard during retained relaunc
   assert.equal(relaunchRequests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
   assert.equal(relaunchRequests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 1);
   assert.equal(relaunchRequests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
-  assert.equal(relaunchRequests.some((request) => request.body.script === 'mobile: getContexts'), true);
+  assert.equal(relaunchRequests.some((request) => request.body.script === 'mobile: getInstalledContexts'), true);
+  assert.equal(relaunchRequests.some((request) => request.body.script === 'mobile: getContexts'), false);
   assert.equal(relaunchRequests.some((request) => request.path.endsWith('/url') && !request.body.url), true);
   assert.equal(relaunchRequests.some((request) => request.path.endsWith('/execute/sync') && request.body.script?.startsWith('return {')), true);
   assert.equal(a.platform.evidenceSnapshot().installedBundleId, 'com.apple.webapp');
@@ -4031,7 +4069,7 @@ async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode
     if (path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert', message: 'No alert' } }, { status: 404 });
     if (path.endsWith('/element/springboard-root/elements')) return value([element('springboard-root')]);
     if (body.script === 'mobile: activeAppInfo') { trace.push('foreground'); return value({ bundleId: 'com.apple.webapp', pid: 42 }); }
-    if (body.script === 'mobile: getContexts') {
+    if (body.script === 'mobile: getInstalledContexts') {
       assert.equal((a.platform as any).launchObservation.queryEligible, false);
       trace.push('attachment');
       return value([published]);

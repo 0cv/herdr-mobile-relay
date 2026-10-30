@@ -132,11 +132,12 @@ export class AndroidPlatform {
     if (captureMode === 'changed') { this.confirmationCapture.status='unavailable'; this.confirmationCapture.source.dispatchedOrdinal=99; this.confirmationCapture.projection.nodes.pop(); }
     if (captureMode === 'product-first') this.confirmationCapture.acknowledgement.dispatchedOrdinal=99;
     if (captureMode) this.extraEvidence.nativeDiagnosticsBlocked=this.driver.unusable;
+    if (mode === 'fatal-failure-cleanup-failure') throw new Error('APPIUM_SESSION_UNUSABLE: quarantined teardown');
     if (mode.includes('cleanup-failure')) throw new Error('CLEANUP_FAILED');
   }
 }
 `;
-export const runnerProtocolCases = ['success', 'component-drift', 'unknown-relation', 'gms-out-of-order', 'gms-missing-post-begin', 'fresh-failure', 'baseline-failure', 'baseline-failure-cleanup-failure', 'scenario-failure', 'fatal-failure', 'post-failure', 'scenario-failure-post-failure', 'recovery-failure-post-failure', 'scenario-failure-post-failure-cleanup-failure', 'cleanup-failure', 'shutdown-failure', 'fixture-stop-failure', 'reverse-acquire-failure', 'reverse-remove-failure', 'fixture-log-failure', 'private-failure', 'event-write-failure', 'result-write-failure', 'sticky-driver-failure', 'late-driver-failure'] as const;
+export const runnerProtocolCases = ['success', 'component-drift', 'unknown-relation', 'gms-out-of-order', 'gms-missing-post-begin', 'fresh-failure', 'baseline-failure', 'baseline-failure-cleanup-failure', 'scenario-failure', 'fatal-failure', 'fatal-failure-cleanup-failure', 'post-failure', 'scenario-failure-post-failure', 'recovery-failure-post-failure', 'scenario-failure-post-failure-cleanup-failure', 'cleanup-failure', 'shutdown-failure', 'fixture-stop-failure', 'reverse-acquire-failure', 'reverse-remove-failure', 'fixture-log-failure', 'private-failure', 'event-write-failure', 'result-write-failure', 'sticky-driver-failure', 'late-driver-failure'] as const;
 
 async function replay(mode: string, platform: string, suite: string, captureMode?: CaptureMode): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'herdr-scenario-protocol-'));
@@ -361,6 +362,17 @@ mock.module('node:fs/promises',()=>({...original,
   if (/scenario-failure|recovery-failure/u.test(mode)) { assert.equal(result.primary_failure.message, mode.includes('recovery-failure') ? 'ORIGIN_ORIGINAL: recovery failure' : 'STANDALONE_ORIGINAL: invitation failure'); assert.equal(result.qualification_failure.code, mode.includes('recovery-failure') ? 'ORIGIN_ORIGINAL' : 'STANDALONE_ORIGINAL'); }
   if (mode.includes('baseline-failure')) { assert.equal(result.primary_failure.message,'ANDROID_ENVIRONMENT: baseline failure'); assert.ok(result.additional_failures.some((error:any)=>error.message==='COLLECTOR_CLOSE_FAILED')); }
   if (mode === 'fatal-failure') { assert.equal(result.evidence.driver.firstFatal.code,'APPIUM_TIMEOUT'); assert.equal(events.includes('install'),false); }
+  if (mode === 'fatal-failure-cleanup-failure') {
+    assert.equal(result.primary_failure.message, 'APPIUM_TIMEOUT: original');
+    assert.equal(result.product.status, 'FAIL');
+    assert.equal(result.finalization.status, 'FAIL');
+    assert.ok(result.additional_failures.some((failure:any) => failure.stage === 'session-teardown' && /APPIUM_SESSION_UNUSABLE/u.test(failure.message)));
+    assert.ok(result.finalization.failures.some((failure:any) => failure.stage === 'session-teardown' && /APPIUM_SESSION_UNUSABLE/u.test(failure.message)));
+    assert.equal(result.evidence.driver.firstFatal.code, 'APPIUM_TIMEOUT');
+    assert.equal(result.evidence.teardown.driver.firstFatal.code, 'APPIUM_TIMEOUT');
+    before('cleanup:platform', 'cleanup:fixture');
+    assert.ok(events.includes('control:/shutdown'));
+  }
   if (mode === 'sticky-driver-failure') { assert.equal(result.product.status,'FAIL'); assert.equal(result.evidence.driver.firstFatal.operation,'first-inspection'); assert.equal(result.evidence.driver.firstFatal.later200,true); }
   if (mode === 'late-driver-failure') { assert.equal(result.product.status,'PASS'); assert.equal(result.finalization.status,'FAIL'); assert.equal(result.evidence.driver.firstFatal,null); assert.equal(result.evidence.teardown.driver.firstFatal.operation,'teardown'); }
   if (mode === 'reverse-acquire-failure') { assert.ok(events.includes('command:-s emulator-protocol reverse --remove tcp:52101')); assert.ok(!events.includes('command:-s emulator-protocol reverse --remove tcp:52102')); }
@@ -372,6 +384,7 @@ export const scenarioRunnerTests: Array<[string, () => Promise<void>]> = [
   ...runnerProtocolCases.map(mode => [`production runner Android ${mode} preserves the preparation/measurement/cleanup contract`, () => replay(mode, 'android', 'smoke')] as [string, () => Promise<void>]),
   ['production runner release records the lifecycle operation without rebaseline', () => replay('success', 'android', 'release')],
   ['production runner iOS never starts Android measurement', () => replay('success', 'ios', 'release')],
+  ['production runner iOS fatal remains primary when quarantined teardown rejects and other cleanup continues', () => replay('fatal-failure-cleanup-failure', 'ios', 'release')],
   ...(['success', 'scenario-failure', 'fatal-failure', 'cleanup-failure', 'sticky-driver-failure', 'late-driver-failure', 'event-write-failure', 'final-snapshot-failure'] as const).map(mode => [
     `production runner iOS terminal byte-pressure ${mode} retains only the frozen capture and all other evidence`,
     () => replay(mode, 'ios', 'release', mode === 'success' ? 'unchanged' : 'changed'),

@@ -1,0 +1,238 @@
+{
+  "remote/lib/mixins/connect.ts": [
+    [
+      "  ignoreAboutBlankUrl: boolean = false,\n): Promise<Page[]> {",
+      "  ignoreAboutBlankUrl: boolean = false,\n  targetApp?: InstalledTarget,\n): Promise<Page[]> {"
+    ],
+    [
+      "  const timer = new timing.Timer().start();\n  if (util.isEmpty(getAppDict(this)))",
+      "  const scope = targetApp === undefined ? undefined : validateInstalledTarget(targetApp);\n  if (scope) installedContextContract.call(this);\n  const timer = new timing.Timer().start();\n  if (util.isEmpty(getAppDict(this)))"
+    ],
+    [
+      "  if (isAppIgnored(this)) {",
+      "  if (scope ? !Object.keys(getAppDict(this)).some(id => installedEligible(getAppDict(this), id, scope)) : isAppIgnored(this)) {"
+    ],
+    [
+      "(currentUrl, maxTries, ignoreAboutBlankUrl);",
+      "(currentUrl, maxTries, ignoreAboutBlankUrl, scope);"
+    ],
+    [
+      "if (!Array.isArray(info.pageArray) || !info.isActive)",
+      "if (!Array.isArray(info.pageArray) || !info.isActive || (scope && !installedEligible(getAppDict(this), app, scope)))"
+    ],
+    [
+      "if (!(ignoreAboutBlankUrl && page.url === BLANK_PAGE_URL))",
+      "if (!(ignoreAboutBlankUrl && page.url === BLANK_PAGE_URL) && (!scope || installedPageEligible(getAppDict(this), app, page, scope)))"
+    ],
+    [
+      "        pageDict.bundleId = info.bundleId;",
+      "        pageDict.bundleId = scope && providerRole(info.bundleId) === 'generic' ? getAppDict(this)[info.hostId!].bundleId : info.bundleId;"
+    ],
+    [
+      "  ignoreAboutBlankUrl: boolean,\n): Promise<AppPage>",
+      "  ignoreAboutBlankUrl: boolean,\n  scope?: InstalledTarget,\n): Promise<AppPage>"
+    ],
+    [
+      "    const possibleAppIds = getPossibleDebuggerAppKeys.bind(this)(bundleIds);",
+      "    const possibleAppIds = scope ? Object.keys(getAppDict(this)) : getPossibleDebuggerAppKeys.bind(this)(bundleIds);"
+    ],
+    [
+      "      const appInfo = getAppDict(this)[attemptedAppIdKey];",
+      "      if (scope) {\n        logInstalledCandidate.call(this, getAppDict(this), attemptedAppIdKey, scope);\n        if (!installedEligible(getAppDict(this), attemptedAppIdKey, scope)) continue;\n      }\n      const appInfo = getAppDict(this)[attemptedAppIdKey];"
+    ],
+    [
+      "      this.log.debug(`Attempting app '${attemptedAppIdKey}'`);",
+      "      const proof = scope ? installedProof(getAppDict(this), attemptedAppIdKey, scope) : undefined;\n      const responseProofs = scope ? new Map(Object.keys(getAppDict(this)).filter(id => installedEligible(getAppDict(this), id, scope)).map(id => [id, installedProof(getAppDict(this), id, scope)])) : undefined;\n      this.log.debug(`Attempting app '${attemptedAppIdKey}'`);"
+    ],
+    [
+      "        // save the page array for this app\n        getAppDict(this)[appIdKey].pageArray = pageArrayFromDict(pageDict);",
+      "        // Recheck after the await: redirects, disconnects and owner changes cannot widen scope.\n        const apps = getAppDict(this);\n        if (scope && (!installedEligible(apps, attemptedAppIdKey, scope) ||\n            !sameInstalledProof(proof, installedProof(apps, attemptedAppIdKey, scope)) ||\n            !installedEligible(apps, String(appIdKey), scope) ||\n            !sameInstalledProof(responseProofs?.get(String(appIdKey)), installedProof(apps, String(appIdKey), scope)))) continue;\n        // save the page array for this app\n        apps[appIdKey].pageArray = pageArrayFromDict(pageDict);\n        if (scope) apps[appIdKey].installedPageScope = installedProof(apps, String(appIdKey), scope, apps[appIdKey].pageArray);"
+    ],
+    [
+      "(getAppDict(this), currentUrl, ignoreAboutBlankUrl);",
+      "(getAppDict(this), currentUrl, ignoreAboutBlankUrl, scope);"
+    ],
+    [
+      "  ignoreAboutBlankUrl: boolean = false,\n): AppPage | null",
+      "  ignoreAboutBlankUrl: boolean = false,\n  scope?: InstalledTarget,\n): AppPage | null"
+    ],
+    [
+      "  for (const appDict of Object.values(appsDict)) {",
+      "  for (const [id, appDict] of Object.entries(appsDict)) {"
+    ],
+    [
+      "    for (const page of appDict.pageArray) {",
+      "    for (const page of appDict.pageArray) {\n      if (scope && !installedPageEligible(appsDict, id, page, scope)) continue;"
+    ],
+    [
+      "const APP_CONNECT_TIMEOUT_MS = 0;",
+      "\nexport type InstalledTarget = Readonly<{bundleId: 'com.apple.webapp'; nativePid: number}>;\nconst INSTALLED_CONTRACT = 'herdr-installed-contexts-v1';\n\nexport function installedContextContract(this: RemoteDebugger): string {\n  if (this.selectApp !== selectApp) {\n    throw new Error('Installed selector contract unavailable');\n  }\n  return INSTALLED_CONTRACT;\n}\n\nexport function validateInstalledTarget(target: InstalledTarget): InstalledTarget {\n  if (!target || Object.keys(target).sort().join(',') !== 'bundleId,nativePid' ||\n      target.bundleId !== 'com.apple.webapp' || typeof target.nativePid !== 'number' ||\n      !Number.isSafeInteger(target.nativePid) || target.nativePid <= 0 || target.nativePid > 9999999999) {\n    throw new Error('Invalid installed target');\n  }\n  return Object.freeze({bundleId: 'com.apple.webapp', nativePid: target.nativePid});\n}\n\nfunction numericId(value: unknown): number | undefined {\n  if (typeof value === 'number') {\n    return Number.isSafeInteger(value) && value > 0 && value <= 9999999999 ? value : undefined;\n  }\n  if (typeof value !== 'string' || !/^PID:[1-9]\\d{0,9}$/.test(value)) return undefined;\n  return Number(value.slice(4));\n}\n\nfunction providerRole(bundleId: string | undefined): 'webapp' | 'service' | 'generic' | 'other' | 'unknown' {\n  if (typeof bundleId !== 'string' || !bundleId) return 'unknown';\n  if (bundleId === 'com.apple.webapp') return 'webapp';\n  if (bundleId === SAFARI_VIEW_BUNDLE_ID) return 'service';\n  if ([WEB_CONTENT_BUNDLE_ID, WEB_CONTENT_PROCESS_BUNDLE_ID, SAFARI_VIEW_PROCESS_BUNDLE_ID].includes(bundleId)) return 'generic';\n  return 'other';\n}\n\nfunction providerHost(apps: AppDict, hostId: unknown, scope: InstalledTarget): boolean {\n  const pid = numericId(hostId);\n  if (!pid) return false;\n  const host = apps[`PID:${pid}`];\n  const native = apps[`PID:${scope.nativePid}`];\n  const nativeValid = !native || (native.id === `PID:${scope.nativePid}` && !!native.installedIdentity && native.isActive &&\n    providerRole(native.bundleId) === 'webapp' && (native.hostId === undefined || numericId(native.hostId) === scope.nativePid));\n  if (pid === scope.nativePid) return nativeValid;\n  // A service PID need not equal the native PID. Preserve the inspector's one-hop proxy relationship.\n  return !!host && host.id === `PID:${pid}` && !!host.installedIdentity && host.isActive && ['webapp', 'service'].includes(providerRole(host.bundleId)) &&\n    (host.hostId === undefined || (numericId(host.hostId) === scope.nativePid && nativeValid));\n}\n\nfunction installedReason(apps: AppDict, id: string, scope: InstalledTarget): string {\n  const app = apps[id];\n  if (!app || !app.isActive) return 'inactive';\n  if (!app.installedIdentity) return 'unreported';\n  if (!numericId(id) || app.id !== id) return 'malformed';\n  const role = providerRole(app.bundleId);\n  if (role === 'other' || role === 'unknown') return 'unsupported';\n  if (app.hostId !== undefined && !numericId(app.hostId)) return 'malformed';\n  if (app.hostId !== undefined && !providerHost(apps, app.hostId, scope)) return 'wrong-host';\n  if (role === 'generic') {\n    return app.isProxy === true && app.hostId !== undefined && !!apps[app.hostId] && providerHost(apps, app.hostId, scope)\n      ? 'proxy' : 'unowned';\n  }\n  if (app.hostId !== undefined && numericId(app.hostId) !== scope.nativePid && app.isProxy !== true) return 'wrong-host';\n  return app.hostId === undefined ? 'provider' : 'host';\n}\n\nfunction installedEligible(apps: AppDict, id: string, scope: InstalledTarget): boolean {\n  return ['provider', 'host', 'proxy'].includes(installedReason(apps, id, scope));\n}\n\nfunction installedProof(apps: AppDict, id: string, scope: InstalledTarget, pages: Page[] = []): NonNullable<AppDict[string]['installedPageScope']> {\n  const app = apps[id];\n  return {nativePid: scope.nativePid, owner: app.installedIdentity!, host: app.hostId === undefined ? undefined : apps[app.hostId]?.installedIdentity,\n    native: apps[`PID:${scope.nativePid}`]?.installedIdentity,\n    pages: pages.map(page => {\n      const host = apps[`PID:${numericId(page.hostId)}`];\n      return {id: page.hostId, owner: host?.installedIdentity, host: host?.hostId === undefined ? undefined : apps[host.hostId]?.installedIdentity};\n    })};\n}\n\nfunction sameInstalledProof(a: AppDict[string]['installedPageScope'], b: AppDict[string]['installedPageScope']): boolean {\n  return !!a && !!b && a.nativePid === b.nativePid && a.owner === b.owner && a.host === b.host && a.native === b.native &&\n    a.pages.length === b.pages.length && a.pages.every((page, index) =>\n      page.id === b.pages[index].id && page.owner === b.pages[index].owner && page.host === b.pages[index].host);\n}\n\nfunction installedPageEligible(apps: AppDict, id: string, page: Page, scope: InstalledTarget): boolean {\n  if (!installedEligible(apps, id, scope) || !sameInstalledProof(apps[id].installedPageScope, installedProof(apps, id, scope, apps[id].pageArray))) return false;\n  return page.hostId === undefined || (numericId(page.hostId) !== undefined && providerHost(apps, page.hostId, scope));\n}\n\nfunction logInstalledCandidate(this: RemoteDebugger, apps: AppDict, id: string, scope: InstalledTarget): void {\n  const app = apps[id];\n  const reason = installedReason(apps, id, scope);\n  const action = ['provider', 'host', 'proxy'].includes(reason) ? 'list' : 'skip';\n  this.log.debug(`Installed candidate app=${numericId(id) ?? 0} host=${numericId(app?.hostId) ?? 0} native=${scope.nativePid} role=${providerRole(app?.bundleId)} reason=${reason} action=${action}`);\n}\n\nconst APP_CONNECT_TIMEOUT_MS = 0;"
+    ]
+  ],
+  "remote/lib/types.ts": [
+    [
+      "  pageArray?: Page[];",
+      "  pageArray?: Page[];\n  installedIdentity?: object;\n  installedPageScope?: {nativePid: number; owner: object; host?: object; native?: object; pages: {id: unknown; owner?: object; host?: object}[]};"
+    ],
+    [
+      "  bundleId?: string;\n}",
+      "  bundleId?: string;\n  hostId?: unknown;\n}"
+    ]
+  ],
+  "remote/lib/utils/inspector.ts": [
+    [
+      "    id,\n    isProxy,",
+      "    id,\n    installedIdentity: {},\n    isProxy,"
+    ],
+    [
+      "        isKey: dict.WIRConnectionIdentifierKey !== undefined,",
+      "        isKey: dict.WIRConnectionIdentifierKey !== undefined,\n        ...(Object.hasOwn(dict, 'WIRHostApplicationIdentifierKey') ? {hostId: dict.WIRHostApplicationIdentifierKey} : {}),"
+    ]
+  ],
+  "remote/lib/mixins/message-handlers.ts": [
+    [
+      "deepEqual, defaults, pageArrayFromDict",
+      "deepEqual, pageArrayFromDict"
+    ],
+    [
+      "  Object.assign(getAppDict(this), defaults(getAppDict(this), newDict));",
+      "  for (const [id, entry] of Object.entries(newDict)) {\n    const previous = getAppDict(this)[id];\n    if (previous) {\n      entry.pageArray = previous.pageArray;\n      entry.installedPageScope = previous.installedPageScope;\n      if (previous.installedIdentity && ['id', 'bundleId', 'hostId', 'isProxy', 'isActive'].every(key => (previous as any)[key] === (entry as any)[key])) {\n        entry.installedIdentity = previous.installedIdentity;\n      }\n    }\n    getAppDict(this)[id] = entry;\n  }\n  for (const [id, entry] of Object.entries(getAppDict(this))) {\n    if (!Object.hasOwn(newDict, id)) entry.installedIdentity = undefined;\n  }"
+    ],
+    [
+      "    entry.pageArray = getAppDict(this)[id].pageArray;",
+      "    entry.pageArray = getAppDict(this)[id].pageArray;\n    entry.installedPageScope = getAppDict(this)[id].installedPageScope;"
+    ],
+    [
+      "\n  getAppDict(this)[id] = entry;",
+      "\n  const previous = getAppDict(this)[id];\n  if (previous?.installedIdentity && ['id', 'bundleId', 'hostId', 'isProxy', 'isActive'].every(key =>\n      (previous as any)[key] === (entry as any)[key])) {\n    entry.installedIdentity = previous.installedIdentity;\n  }\n  getAppDict(this)[id] = entry;"
+    ]
+  ],
+  "remote/lib/remote-debugger.ts": [
+    [
+      "  selectApp = connectMixins.selectApp;",
+      "  selectApp = connectMixins.selectApp;\n  installedContextContract = connectMixins.installedContextContract;"
+    ]
+  ],
+  "xcuitest/lib/commands/context.ts": [
+    [
+      "const WEBVIEW_WIN = 'WEBVIEW';",
+      "\nexport type InstalledTarget = Readonly<{bundleId: 'com.apple.webapp'; nativePid: number}>;\n\n/** No device/inspector discovery: attest the loaded driver and selector, not just disk bytes. */\nexport function mobileInstalledContextContract(this: XCUITestDriver): {contract: string; selector: string} {\n  if (this.mobileGetInstalledContexts !== mobileGetInstalledContexts ||\n      this.getContextsAndViews !== getContextsAndViews || this.listWebFrames !== listWebFrames) {\n    throw new Error('Installed driver contract unavailable');\n  }\n  const selector = new RemoteDebugger({log: this.log});\n  const remote = this._remote ?? selector;\n  if (typeof remote.installedContextContract !== 'function' || remote.installedContextContract !== selector.installedContextContract) {\n    throw new Error('Installed selector contract unavailable');\n  }\n  return {contract: 'herdr-installed-contexts-v1', selector: remote.installedContextContract()};\n}\n\nexport async function mobileGetInstalledContexts(this: XCUITestDriver, targetApp: InstalledTarget): Promise<Array<FullContext & {hostId?: number}>> {\n  if (!targetApp || Object.keys(targetApp).sort().join(',') !== 'bundleId,nativePid' ||\n      targetApp.bundleId !== 'com.apple.webapp' || typeof targetApp.nativePid !== 'number' ||\n      !Number.isSafeInteger(targetApp.nativePid) || targetApp.nativePid <= 0 || targetApp.nativePid > 9999999999) {\n    throw new errors.InvalidArgumentError('Invalid installed target');\n  }\n  const scope: InstalledTarget = Object.freeze({bundleId: 'com.apple.webapp', nativePid: targetApp.nativePid});\n  mobileInstalledContextContract.call(this);\n  const contexts = await this.getContextsAndViews(false, scope);\n  return contexts.map(context => {\n    const rawHost = (context.view as any)?.hostId;\n    const hostId = typeof rawHost === 'number' ? rawHost :\n      typeof rawHost === 'string' && /^PID:[1-9]\\d{0,9}$/.test(rawHost) ? Number(rawHost.slice(4)) : undefined;\n    return {\n      id: context.id.toString(), title: context.view?.title, url: context.view?.url,\n      bundleId: context.view?.bundleId,\n      ...(typeof hostId === 'number' && Number.isSafeInteger(hostId) && hostId > 0 && hostId <= 9999999999 ? {hostId} : {}),\n    };\n  }) as Array<FullContext & {hostId?: number}>;\n}\n\nconst WEBVIEW_WIN = 'WEBVIEW';"
+    ],
+    [
+      "export async function getContextsAndViews(this: XCUITestDriver, useUrl: boolean = true): Promise<ViewContext[]>",
+      "export async function getContextsAndViews(this: XCUITestDriver, useUrl: boolean = true, targetApp?: InstalledTarget): Promise<ViewContext[]>"
+    ],
+    [
+      "await this.listWebFrames(useUrl);",
+      "await this.listWebFrames(useUrl, targetApp);"
+    ],
+    [
+      "    await this.connectToRemoteDebugger();",
+      "    await this.connectToRemoteDebugger(targetApp);"
+    ],
+    [
+      "export async function connectToRemoteDebugger(this: XCUITestDriver): Promise<void> {",
+      "export async function connectToRemoteDebugger(this: XCUITestDriver, targetApp?: InstalledTarget): Promise<void> {"
+    ],
+    [
+      "  this._remote = await this.getNewRemoteDebugger();",
+      "  this._remote = await this.getNewRemoteDebugger();\n  if (targetApp) mobileInstalledContextContract.call(this);"
+    ],
+    [
+      "export async function listWebFrames(this: XCUITestDriver, useUrl: boolean = true): Promise<Page[]> {",
+      "export async function listWebFrames(this: XCUITestDriver, useUrl: boolean = true, targetApp?: InstalledTarget): Promise<Page[]> {\n  if (targetApp) mobileInstalledContextContract.call(this);"
+    ],
+    [
+      "  const doListPages = async (retries: number): Promise<Page[]> => {",
+      "  if (targetApp && this.remote.installedContextContract() !== 'herdr-installed-contexts-v1') throw new Error('Installed selector contract unavailable');\n  const doListPages = async (retries: number): Promise<Page[]> => {"
+    ],
+    [
+      "        this.opts.ignoreAboutBlankUrl,",
+      "        targetApp ? false : this.opts.ignoreAboutBlankUrl,\n        targetApp,"
+    ]
+  ],
+  "xcuitest/lib/driver.ts": [
+    [
+      "  mobileGetContexts = contextCommands.mobileGetContexts;",
+      "  mobileGetContexts = contextCommands.mobileGetContexts;\n  mobileGetInstalledContexts = contextCommands.mobileGetInstalledContexts;\n  mobileInstalledContextContract = contextCommands.mobileInstalledContextContract;"
+    ]
+  ],
+  "xcuitest/lib/execute-method-map.ts": [
+    [
+      "  'mobile: getContexts': {",
+      "  'mobile: installedContextContract': {command: 'mobileInstalledContextContract'},\n  'mobile: getInstalledContexts': {\n    command: 'mobileGetInstalledContexts',\n    params: {required: ['targetApp']},\n  },\n  'mobile: getContexts': {"
+    ]
+  ],
+  "remote/build/lib/mixins/connect.d.ts": [
+    [
+      "ignoreAboutBlankUrl?: boolean): Promise<Page[]>;",
+      "ignoreAboutBlankUrl?: boolean, targetApp?: InstalledTarget): Promise<Page[]>;"
+    ],
+    [
+      "//# sourceMappingURL=connect.d.ts.map",
+      "export type InstalledTarget = Readonly<{bundleId: 'com.apple.webapp'; nativePid: number}>;\nexport declare function installedContextContract(this: RemoteDebugger): string;\nexport declare function validateInstalledTarget(target: InstalledTarget): InstalledTarget;"
+    ]
+  ],
+  "remote/build/lib/types.d.ts": [
+    [
+      "    pageArray?: Page[];",
+      "    pageArray?: Page[];\n    installedIdentity?: object;\n    installedPageScope?: {nativePid: number; owner: object; host?: object; native?: object; pages: {id: unknown; owner?: object; host?: object}[]};"
+    ],
+    [
+      "    bundleId?: string;\n}",
+      "    bundleId?: string;\n    hostId?: unknown;\n}"
+    ],
+    [
+      "//# sourceMappingURL=types.d.ts.map",
+      ""
+    ]
+  ],
+  "remote/build/lib/remote-debugger.d.ts": [
+    [
+      "    selectApp: typeof connectMixins.selectApp;",
+      "    selectApp: typeof connectMixins.selectApp;\n    installedContextContract: typeof connectMixins.installedContextContract;"
+    ],
+    [
+      "//# sourceMappingURL=remote-debugger.d.ts.map",
+      ""
+    ]
+  ],
+  "xcuitest/build/lib/commands/context.d.ts": [
+    [
+      "useUrl?: boolean): Promise<ViewContext[]>;",
+      "useUrl?: boolean, targetApp?: InstalledTarget): Promise<ViewContext[]>;"
+    ],
+    [
+      "useUrl?: boolean): Promise<Page[]>;",
+      "useUrl?: boolean, targetApp?: InstalledTarget): Promise<Page[]>;"
+    ],
+    [
+      "connectToRemoteDebugger(this: XCUITestDriver): Promise<void>;",
+      "connectToRemoteDebugger(this: XCUITestDriver, targetApp?: InstalledTarget): Promise<void>;"
+    ],
+    [
+      "//# sourceMappingURL=context.d.ts.map",
+      "export type InstalledTarget = Readonly<{bundleId: 'com.apple.webapp'; nativePid: number}>;\nexport declare function mobileInstalledContextContract(this: XCUITestDriver): {contract: string; selector: string};\nexport declare function mobileGetInstalledContexts(this: XCUITestDriver, targetApp: InstalledTarget): Promise<Array<FullContext & {hostId?: number}>>;"
+    ]
+  ],
+  "xcuitest/build/lib/driver.d.ts": [
+    [
+      "    mobileGetContexts: typeof contextCommands.mobileGetContexts;",
+      "    mobileGetContexts: typeof contextCommands.mobileGetContexts;\n    mobileGetInstalledContexts: typeof contextCommands.mobileGetInstalledContexts;\n    mobileInstalledContextContract: typeof contextCommands.mobileInstalledContextContract;"
+    ],
+    [
+      "//# sourceMappingURL=driver.d.ts.map",
+      ""
+    ]
+  ],
+  "xcuitest/build/lib/execute-method-map.d.ts": [
+    [
+      "    readonly 'mobile: getContexts': {",
+      "    readonly 'mobile: installedContextContract': {readonly command: 'mobileInstalledContextContract'};\n    readonly 'mobile: getInstalledContexts': {readonly command: 'mobileGetInstalledContexts'; readonly params: {readonly required: readonly ['targetApp']}};\n    readonly 'mobile: getContexts': {"
+    ],
+    [
+      "//# sourceMappingURL=execute-method-map.d.ts.map",
+      ""
+    ]
+  ]
+}

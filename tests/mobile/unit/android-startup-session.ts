@@ -128,7 +128,18 @@ async function replay(mode: Mode): Promise<void> {
     await assert.rejects(platform.startFreshDevice());
     assert.deepEqual(await calls(), before);
   } finally {
-    try { await platform.stopOwnedResources(); } finally {
+    try {
+      const stopping = platform.stopOwnedResources();
+      if (mode === 'timeout') {
+        const before = [...trace];
+        const fatal = client.snapshot().firstFatal;
+        await assert.rejects(stopping, /APPIUM_SESSION_UNUSABLE/u);
+        assert.equal(platform.stopOwnedResources(), stopping);
+        await assert.rejects(platform.stopOwnedResources(), /APPIUM_SESSION_UNUSABLE/u);
+        assert.deepEqual(trace, before);
+        assert.equal(client.snapshot().firstFatal, fatal);
+      } else await stopping;
+    } finally {
       AndroidStartupLog.prototype.start = start;
       if (saved.adb === undefined) delete process.env.ADB; else process.env.ADB = saved.adb;
       if (saved.ownership === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE; else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = saved.ownership;

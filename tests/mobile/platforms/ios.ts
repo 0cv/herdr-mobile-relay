@@ -470,6 +470,7 @@ export class IOSPlatform implements MobilePlatform {
   private lastCompletion?: UpdateCompletionEvidence;
   private lastNativeActivity = '';
   private lastNativePid = '';
+  private installedContextContractReady = false;
   private simulatorReadyAt = '';
   private ownershipFailure?: QualificationFatalError;
   private nativeObservationFailure?: unknown;
@@ -1200,16 +1201,30 @@ export class IOSPlatform implements MobilePlatform {
           }
         }
         phase.assertAvailable('discover installed page metadata');
-        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) {
+        if (phase.remainingMs < (IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) * timingScale) {
           lastError ||= `not enough time for WebKit discovery and foreground observation (${phase.remainingMs}ms remains)`;
           break;
         }
+        if (!this.installedContextContractReady) {
+          this.driver.setRequestTimingScope('ios-attachment-contract', phase);
+          await this.driver.installedContextContract(IOS_INSTALLED_FOREGROUND_MS);
+          this.installedContextContractReady = true;
+        }
+        this.driver.setRequestTimingScope('ios-attachment-pre-discovery-native', phase);
+        const foreground = await this.observeCurrentNativeForeground(phase, IOS_INSTALLED_FOREGROUND_MS);
+        if (foreground !== IOS_INSTALLED_BUNDLE_ID) {
+          this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider is not foreground before discovery');
+        }
+        // These observations consume the original phase, never a new discovery clock.
+        if (phase.remainingMs < (IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) * timingScale) break;
+        const targetApp = Object.freeze({ bundleId: IOS_INSTALLED_BUNDLE_ID, nativePid: Number(this.lastNativePid) });
         this.driver.setRequestTimingScope('ios-attachment-discovery', phase);
-        const contexts = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
+        const contexts = await this.driver.installedContextMetadata(targetApp, IOS_WEBKIT_DISCOVERY_COMMAND_MS);
         phase.assertAvailable('validate installed discovery foreground');
         if (phase.remainingMs < IOS_INSTALLED_FOREGROUND_MS) break;
         this.driver.setRequestTimingScope('ios-attachment-discovery-native', phase);
         await this.requireInstalledProviderForeground(IOS_INSTALLED_FOREGROUND_MS);
+        if (Number(this.lastNativePid) !== targetApp.nativePid) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'native provider changed during scoped discovery');
         let candidateError: unknown;
         if (!contexts.length) {
           lastError = 'installed page metadata is unavailable';
@@ -1246,6 +1261,7 @@ export class IOSPlatform implements MobilePlatform {
               this.driver.setRequestTimingScope('ios-attachment-pre-attachment-native', phase);
               await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
               await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
+              if (Number(this.lastNativePid) !== targetApp.nativePid) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'native provider changed before scoped attachment');
               this.driver.setRequestTimingScope('ios-attachment-validation', phase);
               await this.driver.switchContext(context.id, Math.max(1, phase.remainingMs));
               if (this.installedBindingState !== 'bound') this.installedBindingState = 'inspecting';
@@ -2284,14 +2300,14 @@ export class IOSPlatform implements MobilePlatform {
     }
   }
 
-  private async observeCurrentNativeForeground(phase: PhaseBudget): Promise<string> {
+  private async observeCurrentNativeForeground(phase: PhaseBudget, timeoutMs?: number): Promise<string> {
     this.assertOwnershipClear();
     try {
       if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') {
-        await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
+        await this.driver.switchContext('NATIVE_APP', timeoutMs ?? phase.remainingMs);
       }
       phase.assertAvailable('observe current native foreground');
-      const info = await this.driver.activeAppInfo(phase.remainingMs);
+      const info = await this.driver.activeAppInfo(timeoutMs ?? phase.remainingMs);
       const activeValue = info?.bundleId ?? info?.bundleID;
       const active = typeof activeValue === 'string' ? activeValue : '';
       const pid = info?.pid;

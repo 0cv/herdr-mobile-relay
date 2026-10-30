@@ -337,6 +337,41 @@ function simulate(workflow: any, rows: Row[], overrides: Record<string, Status> 
   return completed;
 }
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
+  ['mobile iOS producer install/start binds the post-install gate and never invokes a shadow global Appium', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun;
+    const document = runtime.YAML.parse(await readFile(repositoryPath('.github/actions/mobile-device-run/action.yml'), 'utf8'));
+    const steps = document.runs.steps;
+    const install = steps.find((step: any) => step.name === 'Install pinned Appium and platform driver');
+    assert.match(install.run, /bash tests\/mobile\/ios-appium\/ci\.sh install/u);
+    assert.doesNotMatch(install.run, /npm install --global|appium driver install/u);
+    const start = steps.find((step: any) => step.name === 'Start Appium');
+    assert.match(start.run, /ios-appium\/ci\.sh verify\n\s+bash tests\/mobile\/ios-appium\/ci\.sh start/u);
+    assert.doesNotMatch(start.run, /^\s*appium /mu);
+    assert.match(start.run, /\n\s+kill -0 "\$appium_pid"/u);
+    assert.doesNotMatch(start.run, /(?:sed|cat|tail|head).*appium\.log/u);
+    const script = await readFile(repositoryPath('tests/mobile/ios-appium/ci.sh'), 'utf8');
+    assert.ok(script.indexOf('npm install ') < script.indexOf('gate.ts" pristine'));
+    assert.ok(script.indexOf('gate.ts" pristine') < script.indexOf('"$root/test.ts" original'));
+    assert.ok(script.indexOf('"$root/test.ts" original') < script.indexOf('gate.ts" patch'));
+    assert.ok(script.indexOf('gate.ts" patch') < script.indexOf('"$root/test.ts" patched'));
+    assert.doesNotMatch(script, /MOBILE_UNIT_FILTER|test:unit/u);
+    const ordinary = await readFile(repositoryPath('tests/mobile/unit/run.ts'), 'utf8');
+    assert.doesNotMatch(ordinary, /iosProducerTests|iosProducerGateTests|IOS_PRODUCER_HOME/u);
+    const entry = await readFile(repositoryPath('tests/mobile/ios-appium/test.ts'), 'utf8');
+    assert.match(entry, /Unexpected fixture regression inventory/u);
+    assert.doesNotMatch(entry, /# SKIP|MOBILE_UNIT_FILTER/u);
+    const retain = steps.find((step: any) => step.name === 'Retain captured iOS producer integrity');
+    assert.equal(retain.if, "always() && inputs.platform == 'ios'");
+    assert.match(retain.run, /bun tests\/mobile\/ios-appium\/evidence\.ts "\$APPIUM_HOME" "\$MOBILE_OUTPUT"/u);
+    assert.doesNotMatch(retain.run, /verify|appium .*driver|\|\| true/u);
+    const scenarios = steps.findIndex((step: any) => step.name === 'Run installed-PWA upgrade scenarios');
+    const upload = steps.findIndex((step: any) => step.name === 'Upload mobile evidence');
+    const cleanup = steps.findIndex((step: any) => step.name === 'Stop owned mobile processes and devices');
+    assert.ok(scenarios < steps.indexOf(retain) && steps.indexOf(retain) < upload && upload < cleanup);
+    assert.equal(retain['continue-on-error'], undefined);
+    assert.match(script, /--install-strategy=nested/u);
+    assert.match(script, /start\)[\s\S]*gate.ts" verify "\$APPIUM_HOME"\n\s+exec "\$node_binary" "\$APPIUM_HOME\/node_modules\/appium\/build\/lib\/main.js" "\$@"/u);
+  }],
   ['mobile evidence accepts exactly one shared baseline across Android and iOS', async () => {
     const android = await evidenceFixture('android'), ios = await evidenceFixture('ios');
     const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-two-rows-'));
@@ -558,7 +593,8 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
         for (const [index, candidate] of steps.entries()) {
           if (!candidate.run?.includes('appium.log') || candidate === step) continue;
           assert.ok(copyIndex > index, 'only startup logging may precede capture');
-          assert.match(candidate.run, /sed -n '1,160p' "\$RUNNER_TEMP\/appium.log"/u);
+          assert.doesNotMatch(candidate.run, /(?:sed|cat|head|tail).*appium\.log/u);
+          assert.match(candidate.run, /payload-bearing log withheld/u);
           assert.doesNotMatch(candidate.run, /MOBILE_OUTPUT\/appium.log/u);
         }
         for (const upload of steps.filter((candidate: any) => candidate.uses?.startsWith('actions/upload-artifact'))) {

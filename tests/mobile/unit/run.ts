@@ -67,6 +67,9 @@ import { scenarioRunnerTests } from './scenario-runner';
 import { androidProductEnvironmentTests, checkCLI, measurementIdentity, persistAndroidProof, resultContract, driverFixture } from './android-product-environment';
 import { mobileWorkflowTests } from './mobile-workflow';
 import { webdriverInterruptionTests } from './webdriver-interruption';
+import { webdriverFatalTests } from './webdriver-fatal';
+import { iosProducerPrivacyTests, iosInstalledClientTests } from './ios-producer';
+import { iosIntegrityEvidenceTests } from './ios-integrity-evidence';
 import { stableTestIdentities, type TestCaseIdentity } from './test-registry';
 import { testShardTests } from './test-shards-tests';
 import { testShardCiTests } from './test-shard-ci-tests';
@@ -1711,7 +1714,7 @@ test('Appium timeout preserves context and blocks follow-up commands', async () 
   assert.equal(client.snapshot().firstFatal?.code, 'APPIUM_TIMEOUT');
 });
 
-test('Appium failed teardown retains the session quarantine until confirmed', async () => {
+test('Appium failed teardown permanently retains the session quarantine', async () => {
   let requests = 0;
   const client = new AppiumClient('http://fake.test', 50, async (_input, init) => {
     requests += 1;
@@ -1726,11 +1729,13 @@ test('Appium failed teardown retains the session quarantine until confirmed', as
   assert.equal(client.snapshot().sessionId, '[active]');
   assert.equal(client.snapshot().unusable, true);
   await assert.rejects(() => client.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/);
-  await client.close();
-  assert.equal(client.snapshot().sessionId, '');
-  assert.equal(client.snapshot().unusable, false);
-  await client.create({ capabilities: {} });
-  assert.equal(requests, 4);
+  const saved = structuredClone(client.snapshot());
+  await assert.rejects(() => client.close(), /APPIUM_SESSION_UNUSABLE/);
+  await assert.rejects(() => client.close(), /APPIUM_SESSION_UNUSABLE/);
+  await assert.rejects(() => client.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/);
+  assert.deepEqual(client.snapshot(), saved);
+  assert.equal(client.snapshot().firstFatal?.code, 'APPIUM_COMMAND');
+  assert.equal(requests, 2);
 });
 
 test('Appium teardown ignores an expired scenario budget', async () => {
@@ -2439,6 +2444,9 @@ for (const [name, body] of scenarioRunnerTests) test(name, body);
 for (const [name, body] of androidProductEnvironmentTests) test(name, body);
 for (const [name, body] of mobileWorkflowTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
+for (const [name, body] of webdriverFatalTests) test(name, body);
+for (const [name, body] of iosInstalledClientTests) test(name, body);
+for (const [name, body] of [...iosProducerPrivacyTests, ...iosIntegrityEvidenceTests]) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
 for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests, ...ownedInputTests]) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', async () =>
