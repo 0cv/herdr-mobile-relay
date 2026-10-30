@@ -81,8 +81,10 @@ import { constants, gzipSync } from 'node:zlib';
 // correctness, with modest margin for the release guard.
 // Raised from 168 to 169 KiB by owner authorization for eager hashing recovery;
 // this ceiling is not a claim of bundle savings or permission for future increases.
-// The Svelte 5.57 runtime (about 0.4 KiB gzip) is also inside this ceiling.
-const limitKiB = 169;
+// Raised from 169 to 170 KiB by owner authorization after merging the Svelte
+// 5.57 runtime (which already used one KiB of headroom) with the work above;
+// this ceiling is not permission for future increases.
+const limitKiB = 170;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
