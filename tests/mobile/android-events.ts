@@ -275,7 +275,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const browserDeaths = !exit && ending ? records.filter((record) => record.tag === 'chromium'
       && isChromeBrowserAt(record)
       && new RegExp(`^\\[WARNING:compositor_view\\.cc\\(\\d+\\)\\] Child process died \\(type=\\d+\\) pid=${pid}\\)$`, 'u').test(record.message)
-      && after(record, ending)) : [];
+      && child && after(record, child)) : [];
     // The helper and the zygote stamp their records independently, so the helper's first lines may carry a slightly earlier time than the fork.
     const earliestHelperTime = fork.time - 20;
     const startup = records.filter((record) => record.pid === pid && record.lineNumber < fork.lineNumber);
