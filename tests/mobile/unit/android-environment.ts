@@ -9,13 +9,16 @@ import type { Readable } from 'node:stream';
 import { createConnection as createNetConnection, createServer as createNetServer, type Server, type Socket } from 'node:net';
 import { repositoryPath, repositoryRoot } from '../support/paths';
 import { fileSha256 } from '../support/artifacts';
-import { ANDROID_LOG_LIMIT, parseAndroidGmsComponentState, type AndroidEnvironmentSnapshot, type AndroidPreparation } from '../android-environment';
+import { ANDROID_LOG_LIMIT, parseAndroidGmsComponentState, type AndroidEnvironmentSnapshot, type AndroidPreparation, type AndroidPlannedTermination } from '../android-environment';
 import { AndroidEnvironmentMeasurement as Measurement, gmsWriterProgress, type AndroidMeasurementIO } from '../android-measurement';
 import { BoundedCommandError, boundedCommand } from '../support/bounded-process';
 import { callerDeadlineToRuntime, callerDurationToRuntime, monotonicNowNs, processGroupAbsent, spawnOwnedProcess, type OwnedProcessHandle, type RetirementEvidence } from '../support/owned-process';
 import { admitNonblockingDescriptor, createOwnedGroupPollOwner, createSupervisorObservationWriter, type GroupPollPhase } from '../support/owned-process-runtime';
 import { PhaseBudget } from '../support/budget';
-import { redactText } from '../support/diagnostics';
+import { redactText, writeSanitizedJson } from '../support/diagnostics';
+import { CommandError, command, type CommandResult } from '../support/process';
+import { FailureLedger, qualified } from '../support/mobile-result';
+import { QualificationFailureLatch, QualificationFatalError } from '../support/oracle';
 import { checkCLI, measurementIdentity, rehashPackage } from './android-product-environment';
 import { androidTransportNormalRecords } from './android-transport';
 
@@ -4612,6 +4615,133 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           assert.deepEqual(operations[0].processes, { '6538': 'com.android.chrome', ...children });
           assert.doesNotMatch(await readFile(join(fixture.fixtureDirectory, 'native.log'), 'utf8'), /OP_END/u);
         }
+      } finally {
+        await measurement.finish().catch(() => undefined);
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+      }
+    });
+  }
+  for (const variant of ['typed timeout', 'typed exit failure', 'unknown error', 'unknown signal', 'invalid fields',
+    'receipt write failure', 'unexpected output', 'exit inventory failure', 'OP_END failure', 'complete']) {
+    test(`termination command receipt: ${variant}`, async () => {
+      const fixture = await harness.createFixture();
+      await state(fixture, { absent: true });
+      const saved = { ...process.env };
+      Object.assign(process.env, fixture.environment);
+      const canary = 'RECEIPT_CANARY_args_output_error_session_device_secret';
+      const secondary = new Error('receipt evidence write failed');
+      const synthetic = !['unexpected output', 'exit inventory failure', 'OP_END failure', 'complete'].includes(variant);
+      const helperResult: CommandResult = { code: variant === 'typed exit failure' ? 7 : 1, durationMs: 20_073,
+        signal: variant === 'typed exit failure' ? 'SIGKILL' : 'SIGTERM', timedOut: variant !== 'typed exit failure', stdout: canary, stderr: canary };
+      if (variant === 'unknown signal') helperResult.signal = canary;
+      if (variant === 'invalid fields') Object.assign(helperResult, { code: Number.MAX_SAFE_INTEGER + 1, durationMs: -1, timedOut: canary, signal: canary });
+      const primary = variant === 'unknown error'
+        ? Object.assign(new Error(`COMMAND_FAILED: ${canary}`), helperResult, { exitCode: 9, args: [canary], sessionId: canary })
+        : Object.assign(new CommandError(canary, [canary], helperResult), { sessionId: canary, errorBody: canary });
+      const publications: AndroidPlannedTermination[][] = [];
+      let commandCalls = 0;
+      let successfulResult: CommandResult | undefined;
+      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
+        command: async (binary, args, timeoutMs, options) => {
+          commandCalls++;
+          assert.deepEqual([binary, args, timeoutMs], ['adb', ['-s', 'emulator-5554', 'shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'], 20_000]);
+          assert.equal(options, undefined);
+          if (synthetic) throw primary;
+          successfulResult = await command(binary, args, timeoutMs, options);
+          if (variant === 'exit inventory failure') await state(fixture, { absent: true, processListFail: true });
+          return variant === 'unexpected output' ? { ...successfulResult, stdout: canary } : successfulResult;
+        },
+        writeJson: async (path, value) => {
+          if (path === join(fixture.root, 'android-environment-operations.json')) {
+            const operations = JSON.parse(JSON.stringify(value)) as AndroidPlannedTermination[];
+            publications.push(operations);
+            if (variant === 'receipt write failure' && operations[0]?.commandReceipt) throw secondary;
+          }
+          await writeSanitizedJson(path, value);
+        },
+      });
+      try {
+        if (variant === 'OP_END failure') {
+          const adb = join(fixture.environment.PATH!.split(':')[0], 'adb');
+          const source = await readFile(adb, 'utf8');
+          await writeFile(adb, source.replace('\n', "\nif (process.argv.slice(2).join(' ').includes(' OP_END ')) process.exit(1);\n"));
+        }
+        await measurement.begin();
+        const hostBefore = Date.now();
+        let thrown: unknown;
+        try { await measurement.terminate('com.android.chrome', '6538'); } catch (error) { thrown = error; }
+        const hostAfter = Date.now();
+        const operations = JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8')) as AndroidPlannedTermination[];
+        const retained = measurement.plannedOperations()[0];
+        assert.ok(retained.commandReceipt, 'planned termination is missing its command receipt');
+        const receipt = retained.commandReceipt;
+        assert.deepEqual(Object.keys(receipt).sort(), ['operation', 'source', 'timeoutMs', 'hostStartedAtMs', 'hostSettledAtMs',
+          'durationMs', 'helperExitCode', 'signal', 'timedOut'].sort());
+        assert.equal(receipt.operation, 'am-force-stop-user-0');
+        assert.equal(receipt.timeoutMs, 20_000);
+        assert.ok(Number.isSafeInteger(receipt.hostStartedAtMs) && receipt.hostStartedAtMs! >= hostBefore);
+        assert.ok(Number.isSafeInteger(receipt.hostSettledAtMs) && receipt.hostSettledAtMs! >= receipt.hostStartedAtMs!
+          && receipt.hostSettledAtMs! <= hostAfter);
+        assert.ok(Buffer.byteLength(JSON.stringify(receipt)) < 512);
+        assert.equal(JSON.stringify(receipt).includes(canary), false);
+        assert.equal(JSON.stringify(operations).includes(canary), false);
+        assert.equal(commandCalls, 1);
+        assert.equal(retained.succeeded, variant === 'complete');
+        assert.equal(operations[0].succeeded, variant === 'complete');
+        assert.equal(publications.length, variant === 'complete' ? 3 : 2);
+        assert.equal(publications[0][0].commandReceipt, undefined);
+        assert.equal(publications[1][0].succeeded, false);
+        assert.deepEqual(publications[1][0].commandReceipt, receipt);
+        if (variant === 'receipt write failure') {
+          assert.equal(operations[0].commandReceipt, undefined);
+          assert.ok(measurement.failureOutcome().errors.includes(secondary));
+        } else assert.deepEqual(operations[0].commandReceipt, receipt);
+        if (synthetic) {
+          assert.equal(thrown, primary);
+          assert.equal(receipt.source, variant === 'unknown error' ? 'unknown-error' : 'command-error');
+          assert.equal(receipt.helperExitCode, ['unknown error', 'invalid fields'].includes(variant) ? null : helperResult.code);
+          assert.equal(receipt.durationMs, ['unknown error', 'invalid fields'].includes(variant) ? null : helperResult.durationMs);
+          assert.equal(receipt.timedOut, ['unknown error', 'invalid fields'].includes(variant) ? null : helperResult.timedOut);
+          assert.equal(receipt.signal, variant === 'unknown error' ? null : ['unknown signal', 'invalid fields'].includes(variant) ? 'OTHER' : helperResult.signal);
+        } else {
+          assert.equal(receipt.source, 'command-result');
+          assert.equal(receipt.helperExitCode, 0);
+          assert.equal(receipt.durationMs, successfulResult!.durationMs);
+          assert.equal(receipt.signal, null);
+          assert.equal(receipt.timedOut, false);
+        }
+        const latch = new QualificationFailureLatch();
+        if (variant === 'complete') assert.equal(thrown, undefined);
+        else {
+          assert.ok(thrown);
+          let wrapped: unknown;
+          try { latch.fail(thrown, 'lifecycle'); } catch (error) { wrapped = error; }
+          assert.ok(wrapped instanceof QualificationFatalError);
+          assert.equal(wrapped.cause, thrown);
+          assert.throws(() => latch.assertClear(), error => error === wrapped);
+          const ledger = new FailureLedger();
+          const measured = measurement.failureOutcome();
+          const category = measured.errors.some(error => error === wrapped || error === wrapped.cause) ? 'COLLECTION' : 'PRODUCT';
+          ledger.retain(wrapped, 'lifecycle', category);
+          assert.equal(ledger.snapshot().primary_failure?.category, 'PRODUCT');
+          if (synthetic) assert.equal(latch.snapshot()?.code, 'COMMAND_FAILED');
+          assert.equal((latch.snapshot() as any).durationMs, undefined);
+          assert.deepEqual(measurement.plannedOperations()[0].commandReceipt, receipt);
+        }
+        const requests = await readFile(fixture.log, 'utf8');
+        assert.doesNotMatch(requests, /shell am start|KEYCODE_HOME|disable-user/u);
+        if (variant !== 'complete' && variant !== 'OP_END failure') assert.doesNotMatch(requests, /OP_END/u);
+        await state(fixture, { absent: true });
+        const outcome = await measurement.finish();
+        if (variant === 'receipt write failure') assert.ok(outcome.errors.includes(secondary));
+        if (variant === 'complete') assert.equal(outcome.assessment?.status, 'PASS');
+        if (['exit inventory failure', 'OP_END failure', 'unexpected output'].includes(variant)) assert.equal(outcome.assessment?.status, 'FAIL');
+        assert.equal(qualified({ product: { status: thrown ? 'FAIL' : 'PASS', categories: [] },
+          finalization: { status: outcome.errors.length ? 'FAIL' : 'PASS', failures: [] },
+          environment_qualification: { platform: 'android', status: outcome.assessment?.status ?? 'UNKNOWN',
+            collection: outcome.assessment?.collection.status ?? 'UNKNOWN', assessmentSha256: outcome.assessmentSha256 ?? '', measurementId: measurement.id } }), variant === 'complete');
+        assert.equal(measurement.plannedOperations()[0].succeeded, variant === 'complete');
       } finally {
         await measurement.finish().catch(() => undefined);
         for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];

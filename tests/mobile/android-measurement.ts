@@ -3,11 +3,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { validateMeasurementIdentity, type MeasurementIdentity } from './support/mobile-result';
 import { basename, dirname, join, resolve } from 'node:path';
+import { constants as osConstants } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Writable } from 'node:stream';
 import { ANDROID_GMS_OBSERVATION_FILE, checkedTemporaryFile } from './android-measurement-cleanup';
 import { ANDROID_LOG_LIMIT, androidMeasurementMarker, parseAndroidProcesses, assessAndroidEnvironment, readEnvironmentInputs, type AndroidEnvironmentCheck, type AndroidPlannedTermination, type AndroidGmsComponentState } from './android-environment';
-import { command } from './support/process';
+import { CommandError, command, type CommandResult } from './support/process';
 import { BoundedCommandError, boundedCommand, type BoundedCommandResult } from './support/bounded-process';
 import { spawnOwnedProcess, type OwnedProcess, type RetirementEvidence } from './support/owned-process';
 import { PhaseBudget } from './support/budget';
@@ -72,8 +73,27 @@ const ANDROID_MEASUREMENT_FILE_WRITE_TIMEOUT_MS = 5_000;
 const ANDROID_BEGIN_OPERATION_TIMEOUT_MS = 1_000;
 const ANDROID_BEGIN_TOTAL_TIMEOUT_MS = 4_000;
 const ANDROID_PLANNED_TERMINATION_EXIT_MS = 5_000;
+const ANDROID_TERMINATION_COMMAND_TIMEOUT_MS = 20_000;
 // The event checker rejects planned operations whose OP_BEGIN and OP_END are more than 30 seconds apart.
 const ANDROID_PLANNED_TERMINATION_OPERATION_MS = 25_000;
+
+function terminationCommandReceipt(result: CommandResult | CommandError | undefined, hostStartedAtMs: number,
+  hostSettledAtMs: number): NonNullable<AndroidPlannedTermination['commandReceipt']> {
+  const helperExitCode = result instanceof CommandError ? result.exitCode : result?.code;
+  const signal = result?.signal;
+  return {
+    operation: 'am-force-stop-user-0',
+    source: result instanceof CommandError ? 'command-error' : result ? 'command-result' : 'unknown-error',
+    timeoutMs: ANDROID_TERMINATION_COMMAND_TIMEOUT_MS,
+    hostStartedAtMs: Number.isSafeInteger(hostStartedAtMs) && hostStartedAtMs >= 0 ? hostStartedAtMs : null,
+    hostSettledAtMs: Number.isSafeInteger(hostSettledAtMs) && hostSettledAtMs >= 0 ? hostSettledAtMs : null,
+    durationMs: typeof result?.durationMs === 'number' && Number.isFinite(result.durationMs)
+      && result.durationMs >= 0 && result.durationMs <= Number.MAX_SAFE_INTEGER ? result.durationMs : null,
+    helperExitCode: typeof helperExitCode === 'number' && Number.isSafeInteger(helperExitCode) ? helperExitCode : null,
+    signal: signal === undefined ? null : typeof signal === 'string' && Object.hasOwn(osConstants.signals, signal) ? signal as NodeJS.Signals : 'OTHER',
+    timedOut: typeof result?.timedOut === 'boolean' ? result.timedOut : null,
+  };
+}
 
 function collectorRetired(evidence: RetirementEvidence): boolean {
   return evidence.targetExitObserved && evidence.targetCloseObserved && evidence.anchorExitObserved
@@ -1006,13 +1026,24 @@ export class AndroidEnvironmentMeasurement {
       command: ['shell', 'am', 'force-stop', '--user', '0', packageName], succeeded: false,
     };
     this.operations.push(operation);
-    await writeSanitizedJson(this.path('operations'), this.operations);
+    await this.io.writeJson(this.path('operations'), this.operations);
     const operationStarted = this.io.monotonicNow();
     await androidMeasurementMarker(this.serial, `${this.id} OP_BEGIN ${operation.id} ${packageName} ${pid}`);
-    const stopped = await command('adb', ['-s', this.serial, ...operation.command], 20_000);
+    const hostStartedAtMs = Date.now();
+    let stopped: CommandResult;
+    try {
+      stopped = await this.io.command('adb', ['-s', this.serial, ...operation.command], ANDROID_TERMINATION_COMMAND_TIMEOUT_MS);
+    } catch (error) {
+      operation.commandReceipt = terminationCommandReceipt(error instanceof CommandError ? error : undefined, hostStartedAtMs, Date.now());
+      await this.attempt(() => this.io.writeJson(this.path('operations'), this.operations));
+      throw error;
+    }
+    const hostSettledAtMs = Date.now();
+    const stoppedAt = this.io.monotonicNow();
+    operation.commandReceipt = terminationCommandReceipt(stopped, hostStartedAtMs, hostSettledAtMs);
+    await this.io.writeJson(this.path('operations'), this.operations);
     if (stopped.stdout.trim() || stopped.stderr.trim()) throw new Error('ANDROID_ENVIRONMENT: force-stop returned unexpected output');
     // force-stop returns once it has signalled the processes; a large process can take a moment to exit.
-    const stoppedAt = this.io.monotonicNow();
     const operationDeadline = operationStarted + ANDROID_PLANNED_TERMINATION_OPERATION_MS;
     const exitDeadline = Math.min(stoppedAt + this.io.plannedTerminationExitMs, operationDeadline);
     const inventoryDeadline = Math.min(stoppedAt + ANDROID_PLANNED_TERMINATION_EXIT_MS, operationDeadline);
@@ -1029,7 +1060,7 @@ export class AndroidEnvironmentMeasurement {
     }
     await androidMeasurementMarker(this.serial, `${this.id} OP_END ${operation.id} ${packageName} ${pid}`);
     operation.succeeded = true;
-    await writeSanitizedJson(this.path('operations'), this.operations);
+    await this.io.writeJson(this.path('operations'), this.operations);
   }
 
   async observeBootstrapClose(driver: AppiumClient): Promise<void> {
