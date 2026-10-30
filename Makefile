@@ -125,7 +125,7 @@ shell-check-service-suites:
 
 shell-check-ci-complement:
 	shellcheck --severity=warning -x -P relay relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
-	bun test tests/pi-command-bridge.test.mjs
+	bun test tests/pi-command-bridge.test.mjs tests/pi-prompt.test.mjs tests/pi-activity.test.mjs tests/pi-notices.test.mjs tests/pi-reload.test.mjs
 	bash tests/test_pi_commands.sh
 	bash tests/test_dev_pi_commands.sh
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
