@@ -223,7 +223,7 @@ func TestCapabilitySameVersionRestartClearsLearnedEvidence(t *testing.T) {
 	}
 }
 func TestCapabilityRefreshDropsStaleInFlightResultAfterInvalidation(t *testing.T) {
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "herdr.sock"), Net: "unix"})
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(testSocketDir(t), "herdr.sock"), Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -55,23 +55,24 @@ var piBuiltins = []Command{
 // only and explicitly keeps /skill:<name> working, so it is not a palette hide
 // and nothing here filters on it.
 func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	reader := newCatalogReader()
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(piBuiltins))
 		copy(builtins, piBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.
-		custom, truncated := discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(piBuiltins, custom), truncated
+		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+		return builtinsWithCustom(piBuiltins, custom), truncated || reader.truncated
 	}
 
-	settings := loadPiSkillSettings(ctx)
+	settings := reader.loadPiSkillSettings(ctx)
 	if !settings.enableSkillCommands {
 		builtins := make([]Command, len(piBuiltins))
 		copy(builtins, piBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 
 	truncated := false
@@ -92,7 +93,7 @@ func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	seenFiles := make(map[string]bool)
 	seenDirs := make(map[string]bool)
 	scanScope := func(source string, roots []string, scope piSkillScope) {
-		commands, trunc := scanPiSkillRoots(roots, scope.paths, scope.patterns, source, &budget, seenFiles, seenDirs)
+		commands, trunc := reader.scanPiSkillRoots(roots, scope.paths, scope.patterns, source, &budget, seenFiles, seenDirs)
 		apply(commands)
 		truncated = truncated || trunc
 	}
@@ -121,7 +122,7 @@ func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
 
 type piConfiguredSkillPath struct {
@@ -146,12 +147,12 @@ type piSettingsValues struct {
 	defaultProjectTrust string
 }
 
-func loadPiSkillSettings(ctx DiscoverContext) piSkillSettings {
+func (reader *catalogReader) loadPiSkillSettings(ctx DiscoverContext) piSkillSettings {
 	agentDir := selectedAgentDir(ctx, ".pi", "HERDR_PI_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
 	result := piSkillSettings{enableSkillCommands: true}
 	var global piSettingsValues
 	if filepath.IsAbs(agentDir) {
-		if data, found, ok := settingsFileIn(agentDir, "settings.json"); found && ok {
+		if data, found, ok := reader.settingsFileIn(agentDir, "settings.json"); found && ok {
 			global = parsePiSettings(data)
 			if global.enableSkillCommands != nil {
 				result.enableSkillCommands = *global.enableSkillCommands
@@ -160,12 +161,12 @@ func loadPiSkillSettings(ctx DiscoverContext) piSkillSettings {
 		}
 	}
 
-	result.projectTrusted = piProjectTrusted(agentDir, ctx.Cwd, global.defaultProjectTrust)
+	result.projectTrusted = reader.piProjectTrusted(agentDir, ctx.Cwd, global.defaultProjectTrust)
 	if !result.projectTrusted || !filepath.IsAbs(ctx.Cwd) {
 		return result
 	}
 	projectSettingsDir := filepath.Join(ctx.Cwd, ".pi")
-	data, found, ok := settingsFileIn(projectSettingsDir, "settings.json")
+	data, found, ok := reader.settingsFileIn(projectSettingsDir, "settings.json")
 	if !found || !ok {
 		return result
 	}
@@ -270,30 +271,18 @@ func canonicalPiPattern(path string) string {
 	return filepath.Join(canonicalPiPath(base), filenamePrefix+suffix)
 }
 
-func piProjectTrusted(agentDir, cwd, defaultTrust string) bool {
+func (reader *catalogReader) piProjectTrusted(agentDir, cwd, defaultTrust string) bool {
 	if cwd == "" {
 		return false
 	}
 	var decisions map[string]*bool
 	if filepath.IsAbs(agentDir) {
-		if data, found, ok := settingsFileIn(agentDir, "trust.json"); found {
+		if data, found, ok := reader.settingsFileIn(agentDir, "trust.json"); found {
 			if !ok || json.Unmarshal(data, &decisions) != nil {
 				return false
 			}
 		}
 	}
-	canonicalDecisions := make(map[string]*bool, len(decisions))
-	for path, decision := range decisions {
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			continue
-		}
-		if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-			absolute = resolved
-		}
-		canonicalDecisions[filepath.Clean(absolute)] = decision
-	}
-	decisions = canonicalDecisions
 	current, err := filepath.Abs(cwd)
 	if err != nil {
 		return false
@@ -315,27 +304,27 @@ func piProjectTrusted(agentDir, cwd, defaultTrust string) bool {
 	return strings.EqualFold(strings.TrimSpace(defaultTrust), "always")
 }
 
-func scanPiSkillRoots(paths []string, configured []piConfiguredSkillPath, patterns []string, source string, budget *int, seenFiles, seenDirs map[string]bool) ([]Command, bool) {
+func (reader *catalogReader) scanPiSkillRoots(paths []string, configured []piConfiguredSkillPath, patterns []string, source string, budget *int, seenFiles, seenDirs map[string]bool) ([]Command, bool) {
 	var commands []Command
 	truncated := false
 	for _, entry := range configured {
-		found, trunc := scanPiSkillTree(entry.path, source, patterns, false, true, budget, seenFiles, seenDirs)
+		found, trunc := reader.scanPiSkillTree(entry.path, source, patterns, false, true, budget, seenFiles, seenDirs)
 		commands = append(commands, found...)
 		truncated = truncated || trunc
 	}
 	for _, path := range paths {
-		found, trunc := scanPiSkillTree(path, source, patterns, true, true, budget, seenFiles, seenDirs)
+		found, trunc := reader.scanPiSkillTree(path, source, patterns, true, true, budget, seenFiles, seenDirs)
 		commands = append(commands, found...)
 		truncated = truncated || trunc
 	}
 	return commands, truncated
 }
 
-func scanPiSkillTree(path, source string, patterns []string, auto, includeFlat bool, budget *int, seenFiles, seenDirs map[string]bool) ([]Command, bool) {
+func (reader *catalogReader) scanPiSkillTree(path, source string, patterns []string, auto, includeFlat bool, budget *int, seenFiles, seenDirs map[string]bool) ([]Command, bool) {
 	if !filepath.IsAbs(path) {
 		return nil, false
 	}
-	if *budget <= 0 {
+	if *budget <= 0 || reader.truncated {
 		return nil, true
 	}
 	info, err := os.Stat(path)
@@ -352,7 +341,7 @@ func scanPiSkillTree(path, source string, patterns []string, auto, includeFlat b
 			return nil, false
 		}
 		seenFiles[real] = true
-		command := skillCommandFromFile(real, strings.TrimSuffix(filepath.Base(real), filepath.Ext(real)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
+		command := reader.skillCommandFromFile(real, strings.TrimSuffix(filepath.Base(real), filepath.Ext(real)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
 		if command == nil {
 			return nil, false
 		}
@@ -369,7 +358,7 @@ func scanPiSkillTree(path, source string, patterns []string, auto, includeFlat b
 			return nil, false
 		}
 		seenFiles[skillFile] = true
-		command := skillCommandFromFile(skillFile, filepath.Base(real), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
+		command := reader.skillCommandFromFile(skillFile, filepath.Base(real), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
 		if command == nil {
 			return nil, false
 		}
@@ -382,7 +371,7 @@ func scanPiSkillTree(path, source string, patterns []string, auto, includeFlat b
 	}
 	var commands []Command
 	for _, entry := range entries {
-		if *budget <= 0 {
+		if *budget <= 0 || reader.truncated {
 			return commands, true
 		}
 		name := entry.Name()
@@ -395,7 +384,7 @@ func scanPiSkillTree(path, source string, patterns []string, auto, includeFlat b
 			continue
 		}
 		if childInfo.IsDir() {
-			found, truncated := scanPiSkillTree(child, source, patterns, auto, false, budget, seenFiles, seenDirs)
+			found, truncated := reader.scanPiSkillTree(child, source, patterns, auto, false, budget, seenFiles, seenDirs)
 			commands = append(commands, found...)
 			if truncated {
 				return commands, true
@@ -416,7 +405,7 @@ func scanPiSkillTree(path, source string, patterns []string, auto, includeFlat b
 			continue
 		}
 		seenFiles[realFile] = true
-		if command := skillCommandFromFile(realFile, strings.TrimSuffix(name, filepath.Ext(name)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true}); command != nil {
+		if command := reader.skillCommandFromFile(realFile, strings.TrimSuffix(name, filepath.Ext(name)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true}); command != nil {
 			commands = append(commands, *command)
 		}
 	}

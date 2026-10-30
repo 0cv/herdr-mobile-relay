@@ -1765,7 +1765,7 @@ func TestInstalledOpenCodeLegacyLiveOccupancy(t *testing.T) {
 			if name == "cachedQuery" || name == "storeQuery" {
 				wantCode = ""
 			}
-			if !returned || recovered != nil || holds != 1 || code != wantCode || rows != nil || entries != nil || paths != nil || more || hit || corrupt || metadata != (openCodeRow{}) || layout != (openCodeLayout{}) {
+			if !returned || recovered != nil || holds != 1 || code != wantCode || rows != nil || entries != nil || paths != nil || more || hit || corrupt || !reflect.DeepEqual(metadata, openCodeRow{}) || layout != (openCodeLayout{}) {
 				t.Fatalf("returned=%v panic=%v holds=%d code=%q rows=%v entries=%v paths=%v more=%v hit=%v corrupt=%v metadata=%+v layout=%+v", returned, recovered, holds, code, rows, entries, paths, more, hit, corrupt, metadata, layout)
 			}
 			if f.unplanned != 0 || !reflect.DeepEqual(f.counts, wantCounts) || !reflect.DeepEqual(observations, wantObservations) || !reflect.DeepEqual(f.reader.cache, wantCache) || !reflect.DeepEqual(f.reader.layouts, wantLayouts) {
@@ -2436,10 +2436,10 @@ func TestInstalledOpenCodeNormalMultiDatabaseSearch(t *testing.T) {
 			}
 			if tc.selected != "" {
 				wantMetadata := openCodeRow{SessionID: "ses_test", Title: "selected", Directory: "/planned/project", MessageID: "old", MessageData: `{"role":"user"}`, PartID: "p1", PartData: `{"type":"text","text":"first"}`, Total: 2, CursorFound: 1, Database: tc.selected}
-				if !reflect.DeepEqual(entries, []Entry{{ID: "old", Role: "user", Text: "first"}, {ID: "new", Role: "user", Text: "second"}}) || metadata != wantMetadata {
+				if !reflect.DeepEqual(entries, []Entry{{ID: "old", Role: "user", Text: "first"}, {ID: "new", Role: "user", Text: "second"}}) || !reflect.DeepEqual(metadata, wantMetadata) {
 					t.Fatalf("entries=%+v metadata=%+v", entries, metadata)
 				}
-			} else if entries != nil || metadata != (openCodeRow{}) {
+			} else if entries != nil || !reflect.DeepEqual(metadata, openCodeRow{}) {
 				t.Fatal("exhaustion returned partial page")
 			}
 			wantCache := map[string]openCodeCacheEntry{"independent-seed": {rows: []openCodeRow{{MessageID: "keep", MessageData: "unchanged"}}, hasMore: true}}
@@ -2580,7 +2580,7 @@ func TestInstalledOpenCodeDatabaseWALStampOutcomes(t *testing.T) {
 			}
 			f.check(t)
 			if wantErr != nil {
-				if !errors.Is(errs[0], wantErr) || codes[0] != "query_failed" || rows[0] != nil || entries != nil || metadata != (openCodeRow{}) || corrupt || more[0] {
+				if !errors.Is(errs[0], wantErr) || codes[0] != "query_failed" || rows[0] != nil || entries != nil || !reflect.DeepEqual(metadata, openCodeRow{}) || corrupt || more[0] {
 					t.Fatalf("errs=%v codes=%v rows=%v entries=%v", errs, codes, rows, entries)
 				}
 			} else if errs != [2]error{} || codes != [2]string{} || more != [2]bool{} || !reflect.DeepEqual(rows[0], openCodeMetadataExpectedRows()) || !reflect.DeepEqual(rows[1], openCodeMetadataExpectedRows()) {
@@ -2738,7 +2738,7 @@ func TestInstalledOpenCodeIndependentSQLPages(t *testing.T) {
 			f.check(t)
 			wantMetadata := openCodeSQLOracleRows(tc.v2)[0]
 			wantMetadata.Database = openCodeFixtureDB
-			if err != nil || code != "" || !more || corrupt || !reflect.DeepEqual(entries, wantEntries) || metadata != wantMetadata {
+			if err != nil || code != "" || !more || corrupt || !reflect.DeepEqual(entries, wantEntries) || !reflect.DeepEqual(metadata, wantMetadata) {
 				t.Fatalf("err=%v code=%q more=%v corrupt=%v entries=%+v metadata=%+v", err, code, more, corrupt, entries, metadata)
 			}
 			stamp := openCodeFileStamp{databaseSize: 100, databaseTime: 1, walSize: 20, walTime: 2}
@@ -2834,13 +2834,13 @@ func TestInstalledOpenCodeLogicalByteBoundaries(t *testing.T) {
 				t.Fatalf("budget/raw-length receipts mismatch: got=%d want=%d", len(receipts), len(wantReceipts))
 			}
 			if failure != "" {
-				if !errors.Is(err, sqliteexec.ErrOutputLimit) || code != "output_limit" || entries != nil || more || corrupt || metadata != (openCodeRow{}) {
+				if !errors.Is(err, sqliteexec.ErrOutputLimit) || code != "output_limit" || entries != nil || more || corrupt || !reflect.DeepEqual(metadata, openCodeRow{}) {
 					t.Fatalf("err=%v code=%q entries=%d more=%v corrupt=%v", err, code, len(entries), more, corrupt)
 				}
 			} else {
 				wantMetadata := openCodeByteBoundaryExpectedRows()[0]
 				wantMetadata.Database = openCodeFixtureDB
-				if err != nil || code != "" || more || corrupt || !reflect.DeepEqual(entries, []Entry{{ID: "one", Role: "user", Text: "hello"}}) || metadata != wantMetadata {
+				if err != nil || code != "" || more || corrupt || !reflect.DeepEqual(entries, []Entry{{ID: "one", Role: "user", Text: "hello"}}) || !reflect.DeepEqual(metadata, wantMetadata) {
 					t.Fatalf("err=%v code=%q entries=%d more=%v corrupt=%v", err, code, len(entries), more, corrupt)
 				}
 			}
@@ -3161,7 +3161,7 @@ func TestInstalledOpenCodeTerminalSQLMarkers(t *testing.T) {
 						return err
 					})
 					openCodeTerminalInspect(t, f, raw, counts)
-					if selected != 1 || !live || !cached || code != "query_failed" || entries != nil || more || corrupt || metadata != (openCodeRow{}) {
+					if selected != 1 || !live || !cached || code != "query_failed" || entries != nil || more || corrupt || !reflect.DeepEqual(metadata, openCodeRow{}) {
 						t.Fatalf("selected=%d live=%v cached=%v code=%q err=%v", selected, live, cached, code, err)
 					}
 					for _, identity := range []error{context.Canceled, context.DeadlineExceeded, conversationlife.ErrRefused, primary, sqliteexec.ErrCleanupUncertain} {
@@ -3299,7 +3299,7 @@ func TestInstalledOpenCodeTerminalSQLActualCancellation(t *testing.T) {
 			releaseAll()
 			<-done
 			openCodeTerminalInspect(t, f, raw, counts)
-			if !returned || recovered != nil || selected != 1 || observations != 1 || !cached || !errors.Is(got, context.Canceled) || errors.Is(got, context.DeadlineExceeded) || errors.Is(got, conversationlife.ErrRefused) || errors.Is(got, sqliteexec.ErrCleanupUncertain) != (tc.slots > 0) || code != "query_failed" || entries != nil || more || corrupt || metadata != (openCodeRow{}) {
+			if !returned || recovered != nil || selected != 1 || observations != 1 || !cached || !errors.Is(got, context.Canceled) || errors.Is(got, context.DeadlineExceeded) || errors.Is(got, conversationlife.ErrRefused) || errors.Is(got, sqliteexec.ErrCleanupUncertain) != (tc.slots > 0) || code != "query_failed" || entries != nil || more || corrupt || !reflect.DeepEqual(metadata, openCodeRow{}) {
 				t.Fatalf("returned=%v panic=%v selected=%d observed=%d cached=%v code=%q err=%v", returned, recovered, selected, observations, cached, code, got)
 			}
 			for _, operand := range raw {
@@ -3351,7 +3351,7 @@ func openCodeSemanticRead(t *testing.T, v2 bool, rows []openCodeRow, want []Entr
 	f.check(t)
 	wantMetadata := rows[0]
 	wantMetadata.Database = openCodeFixtureDB
-	if err != nil || code != "" || more || corrupt != damaged || metadata != wantMetadata || !reflect.DeepEqual(entries, want) {
+	if err != nil || code != "" || more || corrupt != damaged || !reflect.DeepEqual(metadata, wantMetadata) || !reflect.DeepEqual(entries, want) {
 		// Never log bounded-but-large inputs, outputs, metadata or cache rows.
 		t.Fatalf("semantic result mismatch: error=%v code=%q more=%v corrupt=%v entries=%d checks=%d", err, code, more, corrupt, len(entries), checks)
 	}

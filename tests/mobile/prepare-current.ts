@@ -1,6 +1,7 @@
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { assertDistinctUpgrade, assertStylesheetMode, validateWebRoot, writeBundleSet, type BundleExpectation, type BundleSet, type PreparedBundle } from './support/artifacts';
 import { command } from './support/process';
 import { prepareOutput, repositoryPath, repositoryRoot } from './support/paths';
@@ -15,6 +16,8 @@ function required(name: string): string {
   if (!value) throw new Error(`missing ${name}`);
   return value;
 }
+
+type BuildMetadata = { version: string; assets: number };
 
 async function buildVariant(sourceRoot: string, destination: string, variant: string, stylesheetMode: 'changed' | 'unchanged'): Promise<void> {
   const frontendSource = join(repositoryRoot, 'frontend');
@@ -38,9 +41,22 @@ async function buildVariant(sourceRoot: string, destination: string, variant: st
     const stylesheetFile = join(frontendTarget, 'src', 'app.css');
     const stylesheet = await readFile(stylesheetFile, 'utf8');
     await writeFile(stylesheetFile, `${stylesheet}\n.app-shell[data-mobile-ci-variant="candidate"] { --mobile-ci-current-code: 1; }\n`);
+    const versionsFile = join(frontendTarget, 'build-versions.json');
+    const versions = JSON.parse(await readFile(versionsFile, 'utf8')) as { assets?: unknown; [key: string]: unknown };
+    if (!Number.isSafeInteger(versions.assets) || Number(versions.assets) < 0) {
+      throw new Error('CURRENT_BUILD: build asset version must be a non-negative safe integer');
+    }
+    await writeFile(versionsFile, `${JSON.stringify({ ...versions, assets: Number(versions.assets) + 1 }, null, 2)}\n`);
   }
   await command('bun', ['run', 'build'], 300_000, { cwd: frontendTarget });
   await cp(join(frontendTarget, 'dist'), destination, { recursive: true });
+}
+
+const lazyAssetPattern = /import\(\s*[`'"]\.\/([A-Za-z0-9_.-]+-[0-9]+\.js)[`'"]\s*\)/g;
+
+async function lazyAssets(bundle: PreparedBundle): Promise<Set<string>> {
+  const source = await readFile(join(bundle.root, bundle.identity.script.slice(1)), 'utf8');
+  return new Set([...source.matchAll(lazyAssetPattern)].map(match => `/assets/${match[1]}`));
 }
 
 async function main(): Promise<void> {
@@ -52,36 +68,45 @@ async function main(): Promise<void> {
     join(repositoryRoot, 'frontend'), join(repositoryRoot, 'herdr-plugin.toml'), join(repositoryRoot, 'contracts'),
   ]);
   await mkdir(join(output, 'bundles'), { recursive: true, mode: 0o700 });
-  const temporary = await mkdtemp(join('/tmp', 'herdr-mobile-current-'));
+  const temporary = await mkdtemp(join(tmpdir(), 'herdr-mobile-current-'));
   try {
     const baselineRoot = join(output, 'bundles', 'current-code-baseline');
     const candidateRoot = join(output, 'bundles', 'current-code-target');
     await buildVariant(join(temporary, 'baseline'), baselineRoot, 'baseline', stylesheetMode);
     await buildVariant(join(temporary, 'candidate'), candidateRoot, 'candidate', stylesheetMode);
-    const baselineMetadata = JSON.parse(await readFile(join(baselineRoot, 'version.json'), 'utf8')) as { version: string; assets: number };
+    const baselineMetadata = JSON.parse(await readFile(join(baselineRoot, 'version.json'), 'utf8')) as BuildMetadata;
+    const candidateMetadata = JSON.parse(await readFile(join(candidateRoot, 'version.json'), 'utf8')) as BuildMetadata;
     const revision = option('--revision') || 'synthetic-current-code';
-    const expectation = (name: string): BundleExpectation => ({
+    const expectation = (name: string, metadata: BuildMetadata): BundleExpectation => ({
       name,
-      version: baselineMetadata.version,
-      assets: baselineMetadata.assets,
+      version: metadata.version,
+      assets: metadata.assets,
       sourceRelease: 'synthetic current-code build',
       sourceCommit: revision,
     });
+    const baselineExpectation = expectation('current-code-baseline', baselineMetadata);
+    const candidateExpectation = expectation('current-code-target', candidateMetadata);
     const baseline: PreparedBundle = {
       name: 'current-code-baseline',
-      provenance: expectation('current-code-baseline'),
+      provenance: baselineExpectation,
       root: baselineRoot,
-      identity: await validateWebRoot(baselineRoot, expectation('current-code-baseline')),
+      identity: await validateWebRoot(baselineRoot, baselineExpectation),
       archiveSha256: '',
     };
     const candidate: PreparedBundle = {
       name: 'current-code-target',
-      provenance: expectation('current-code-target'),
+      provenance: candidateExpectation,
       root: candidateRoot,
-      identity: await validateWebRoot(candidateRoot, expectation('current-code-target')),
+      identity: await validateWebRoot(candidateRoot, candidateExpectation),
       archiveSha256: '',
     };
     assertDistinctUpgrade(baseline, candidate);
+    const baselineLazyAssets = await lazyAssets(baseline);
+    const candidateLazyAssets = await lazyAssets(candidate);
+    if (!baselineLazyAssets.size || !candidateLazyAssets.size
+      || [...baselineLazyAssets].some(asset => candidateLazyAssets.has(asset))) {
+      throw new Error('CURRENT_BUILD: synthetic variants must expose distinct lazy asset URLs');
+    }
     assertStylesheetMode(baseline.identity, candidate.identity, stylesheetMode);
     const portable = (bundle: PreparedBundle): PreparedBundle => ({
       ...bundle,

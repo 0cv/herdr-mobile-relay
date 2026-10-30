@@ -422,7 +422,7 @@ func TestBroadcastAgentIdentitySatisfiesExactTargetValidation(t *testing.T) {
 		Agent: "omp", Status: "working",
 		Session: "/home/user/.omp/agent/sessions/-work/2026-08-30T19-57-25-194Z_x.jsonl",
 	}
-	server.resolveAgentSessionName(context.Background(), agent)
+	server.resolveAgentSessionName(agent)
 	server.state.CommitInventory([]*coordinator.AgentState{agent}, server.state.RevisionCounter())
 
 	data, err := json.Marshal(server.state.Snapshot())
@@ -503,14 +503,14 @@ func TestResolveAgentSessionName(t *testing.T) {
 	// named carries a canonical session id with both an index record and the
 	// rollout the reader would serve, the shape Locate requires post round-3.
 	named := &coordinator.AgentState{Agent: "codex", Session: codexSessionID}
-	s.resolveAgentSessionName(context.Background(), named)
+	s.resolveAgentSessionName(named)
 	if named.SessionName != "current-session" || named.Session != "current-session" ||
 		named.SessionID != codexSessionID || !named.ConversationHistoryAvailable {
 		t.Fatalf("named session = %#v, want resolved display name and retained history identity", named)
 	}
 
 	unnamed := &coordinator.AgentState{Agent: "codex", Session: "missing-session"}
-	s.resolveAgentSessionName(context.Background(), unnamed)
+	s.resolveAgentSessionName(unnamed)
 	if unnamed.SessionName != "" || unnamed.Session != "missing-session" ||
 		unnamed.SessionID != "missing-session" || !unnamed.ConversationHistoryAvailable {
 		t.Fatalf("unnamed session = %#v, want preserved history identity", unnamed)
@@ -537,7 +537,7 @@ func TestResolveAgentSessionNameTrimsWhitespaceOnlySession(t *testing.T) {
 	s.sessions = session.NewResolver(home)
 
 	agent := &coordinator.AgentState{Agent: "claude", Cwd: cwd, Session: "   "}
-	s.resolveAgentSessionName(context.Background(), agent)
+	s.resolveAgentSessionName(agent)
 	if agent.SessionName != "" {
 		t.Fatalf("SessionName = %q, want empty for a whitespace-only session", agent.SessionName)
 	}
@@ -1534,7 +1534,7 @@ func fixtureConnectionTornDown(err error) bool {
 }
 
 func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "s")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1869,10 +1869,16 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
+	cancel()
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("production poller did not stop")
+	}
 }
 
 func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -4247,10 +4253,11 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 
 func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	response := map[string]any{
-		"type":    "pane_content",
-		"pane_id": "w1:p1",
-		"content": "unchanged output",
-		"format":  "ansi",
+		"request_id": "identified-read",
+		"type":       "pane_content",
+		"pane_id":    "w1:p1",
+		"content":    "unchanged output",
+		"format":     "ansi",
 		"target": protocol.TargetRef{
 			ServerSessionID: "primary",
 			PaneID:          "w1:p1",
@@ -4271,6 +4278,9 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 	if unchanged["target"] != response["target"] {
 		t.Fatalf("unchanged response lost exact target: %#v", unchanged)
+	}
+	if unchanged["request_id"] != response["request_id"] {
+		t.Fatalf("unchanged response lost read identity: %#v", unchanged)
 	}
 	if _, included := unchanged["content"]; included {
 		t.Fatalf("unchanged response included terminal content: %#v", unchanged)

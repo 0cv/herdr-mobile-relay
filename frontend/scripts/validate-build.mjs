@@ -75,18 +75,24 @@ if (applicationScripts.length !== 1 || workerScripts.length !== 1 || unexpectedS
 if (versions.withdrawnScripts.includes(`assets/${applicationScripts[0]}`)) {
   throw new Error(`Release uses withdrawn application script: assets/${applicationScripts[0]}`);
 }
-const lazyReferencePattern = /import\(\s*[`'"]\.\/([A-Za-z0-9_.-]+-[0-9]+\.js)[`'"]\s*\)/g;
-const applicationSource = await readFile(join(root, 'assets', applicationScripts[0]), 'utf8');
+const scriptReferencePattern = /(?:import\(\s*|from\s*)[`'"]\.\/([A-Za-z0-9_.-]+\.js)[`'"]/g;
 const referencedLazyScripts = new Set();
-for (const match of applicationSource.matchAll(lazyReferencePattern)) {
-  const name = match[1];
-  if (!name.endsWith(`-${versions.assets}.js`) || !lazyScripts.includes(name)) {
-    throw new Error(`Application references an invalid lazy chunk: ${name}`);
+const pendingScripts = [applicationScripts[0]];
+for (const script of pendingScripts) {
+  const source = await readFile(join(root, 'assets', script), 'utf8');
+  for (const match of source.matchAll(scriptReferencePattern)) {
+    const name = match[1];
+    if (name === applicationScripts[0]) continue;
+    if (!name.endsWith(`-${versions.assets}.js`) || !lazyScripts.includes(name)) {
+      throw new Error(`Application references an invalid lazy chunk: ${name}`);
+    }
+    if (referencedLazyScripts.has(name)) continue;
+    referencedLazyScripts.add(name);
+    pendingScripts.push(name);
   }
-  referencedLazyScripts.add(name);
 }
 if (lazyScripts.some((name) => !referencedLazyScripts.has(name))) {
-  throw new Error(`Lazy chunks must be referenced by the application: ${lazyScripts.join(', ')}`);
+  throw new Error(`Lazy chunks must be reachable from the application: ${lazyScripts.join(', ')}`);
 }
 if (applicationStyles.length !== 1 || styles.length !== 1) {
   throw new Error(`Expected one content-addressed app stylesheet; found ${styles.join(', ')}`);

@@ -107,7 +107,8 @@ func Supports(agent string) bool {
 		ompAskAgent(agent) ||
 		strings.Contains(agent, "opencode") ||
 		strings.Contains(agent, "qoder") ||
-		strings.Contains(agent, "hermes")
+		strings.Contains(agent, "hermes") ||
+		isAgyAgent(agent)
 }
 
 func ompAskAgent(agent string) bool {

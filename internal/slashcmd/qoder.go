@@ -27,10 +27,11 @@ var qoderBuiltins = []Command{
 }
 
 func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	reader := newCatalogReader()
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(qoderBuiltins))
 		copy(builtins, qoderBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 	truncated := false
 	budget := maxCustomFiles
@@ -47,11 +48,11 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				continue
 			}
 			cmdDir := filepath.Join(dir, "commands")
-			projectCmds, commandSuppressions, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
+			projectCmds, commandSuppressions, trunc := reader.walkCommandDirBudget(cmdDir, "project", &budget)
 			truncated = truncated || trunc
 
 			skillDir := filepath.Join(dir, "skills")
-			projectSkills, skillSuppressions, trunc := scanSkillDirBudget(skillDir, "project", &budget)
+			projectSkills, skillSuppressions, trunc := reader.scanSkillDirBudget(skillDir, "project", &budget)
 			truncated = truncated || trunc
 			projectScopes = append(projectScopes, qoderProjectScope{
 				commands:   projectCmds,
@@ -62,13 +63,13 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	personalCmdDir := filepath.Join(ctx.Home, ".qoder", "commands")
-	cmds, suppressed, trunc := walkCommandDirBudget(personalCmdDir, "personal", &budget)
+	cmds, suppressed, trunc := reader.walkCommandDirBudget(personalCmdDir, "personal", &budget)
 	personalCmds = append(personalCmds, cmds...)
 	personalSuppressed = append(personalSuppressed, suppressed...)
 	truncated = truncated || trunc
 
 	personalSkillDir := filepath.Join(ctx.Home, ".qoder", "skills")
-	cmds, suppressed, trunc = scanSkillDirBudget(personalSkillDir, "personal", &budget)
+	cmds, suppressed, trunc = reader.scanSkillDirBudget(personalSkillDir, "personal", &budget)
 	personalSkills = append(personalSkills, cmds...)
 	personalSuppressed = append(personalSuppressed, suppressed...)
 	truncated = truncated || trunc
@@ -84,7 +85,7 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
 
 // dedupQoder implements Qoder precedence:

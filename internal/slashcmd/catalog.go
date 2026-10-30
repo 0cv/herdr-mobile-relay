@@ -16,6 +16,7 @@ const (
 	maxEntries         = 4096
 	maxMetadataSize    = 64 * 1024
 	maxCommandFileSize = 1 << 20
+	maxCatalogReadSize = 16 << 20
 )
 
 var commandNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$`)
@@ -117,6 +118,8 @@ func profileIDForAgentName(agent string) string {
 		return "opencode"
 	case "hermes", "hermes-agent", "hermes agent":
 		return "hermes"
+	case "agy", "antigravity", "antigravity-cli", "antigravity cli":
+		return "agy"
 	}
 	return ""
 }

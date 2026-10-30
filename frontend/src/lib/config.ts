@@ -24,6 +24,7 @@ export const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
 export const HANDLED_NOTIFICATION_ACTIONS_KEY = 'herdr_handled_notification_actions';
 export const DEFAULT_AGENT_VIEW_KEY = 'herdr_default_agent_view';
 export const PANE_AGENT_VIEW_OVERRIDES_KEY = 'herdr_pane_agent_view_overrides';
+export const HIDDEN_SERVERS_KEY = 'herdr_hidden_servers';
 
 export const APP_PROTOCOL_VERSION = __APP_PROTOCOL_VERSION__;
 export const APP_VERSION = __APP_VERSION__;

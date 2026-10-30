@@ -10,6 +10,8 @@ import (
 var frontmatterKeyPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+):\s*(.*?)\s*$`)
 
 func parseFrontmatterBytes(data []byte) (map[string]string, bool) {
+	oversized := len(data) > maxMetadataSize
+	data = data[:min(len(data), maxMetadataSize)]
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
 		return map[string]string{}, true
@@ -34,6 +36,9 @@ func parseFrontmatterBytes(data []byte) (map[string]string, bool) {
 			value = value[1 : len(value)-1]
 		}
 		result[key] = value
+	}
+	if oversized {
+		return nil, false
 	}
 	return result, true
 }
@@ -118,8 +123,8 @@ func foldBlockScalar(rest []string, folded bool) (string, int) {
 	return strings.Join(parts, separator), consumed
 }
 
-func readSkillMetadata(path string) (map[string]string, bool) {
-	data, ok := readCommandFile(path)
+func (reader *catalogReader) readSkillMetadata(path string) (map[string]string, bool) {
+	data, ok := reader.readCommandFile(path)
 	if !ok {
 		return nil, false
 	}
@@ -149,4 +154,20 @@ func readBoundedCommandFile(file *os.File) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+func (reader *catalogReader) readSkillMetadataFile(file *os.File) (map[string]string, bool) {
+	data, ok := reader.readBoundedCommandFile(file)
+	if !ok {
+		return nil, false
+	}
+	return parseFrontmatterBytes(data)
+}
+
+func (reader *catalogReader) readCommandFile(path string) ([]byte, bool) {
+	return reader.readPath(path, maxCommandFileSize, maxMetadataSize+1)
+}
+
+func (reader *catalogReader) readBoundedCommandFile(file *os.File) ([]byte, bool) {
+	return reader.readFile(file, maxCommandFileSize, maxMetadataSize+1)
 }

@@ -37,10 +37,15 @@ type openCodeReader struct {
 }
 
 type openCodeFileStamp struct {
-	databaseSize int64
-	databaseTime int64
-	walSize      int64
-	walTime      int64
+	databaseSize   int64
+	databaseTime   int64
+	walSize        int64
+	walTime        int64
+	databaseID     string
+	databaseChange string
+	walID          string
+	walChange      string
+	walIndex       string
 }
 
 type openCodeCacheEntry struct {
@@ -50,22 +55,24 @@ type openCodeCacheEntry struct {
 }
 
 type openCodeRow struct {
-	SessionID   string `json:"session_id"`
-	Directory   string `json:"directory"`
-	Title       string `json:"title"`
-	Updated     int64  `json:"time_updated"`
-	Agent       string `json:"agent"`
-	MessageID   string `json:"message_id"`
-	Created     int64  `json:"time_created"`
-	MessageData string `json:"message_data"`
-	PartID      string `json:"part_id"`
-	PartData    string `json:"part_data"`
-	Total       int    `json:"message_total"`
-	CursorFound int    `json:"cursor_found"`
-	MessageType string `json:"message_type"`
-	HasMessages int    `json:"has_messages"`
-	Database    string `json:"-"`
-	V2          bool   `json:"-"`
+	SchemaVersion int    `json:"schema_version"`
+	SessionID     string `json:"session_id"`
+	Directory     string `json:"directory"`
+	Title         string `json:"title"`
+	Updated       int64  `json:"time_updated"`
+	Agent         string `json:"agent"`
+	MessageID     string `json:"message_id"`
+	Created       int64  `json:"time_created"`
+	MessageData   string `json:"message_data"`
+	PartID        string `json:"part_id"`
+	PartData      string `json:"part_data"`
+	Total         int    `json:"message_total"`
+	CursorFound   int    `json:"cursor_found"`
+	MessageType   string `json:"message_type"`
+	HasMessages   int    `json:"has_messages"`
+	Database      string `json:"-"`
+	V2            bool   `json:"-"`
+	pendingIDs    []string
 }
 
 func newOpenCodeReader(home string) *openCodeReader {
@@ -159,6 +166,7 @@ func (r *openCodeReader) readContext(ctx context.Context, sessionID, before stri
 		metadata := rows[0]
 		metadata.Database = database
 		entries, corrupt := parseOpenCodeRows(rows)
+		metadata.pendingIDs = openCodePendingIDs(rows, entries)
 		return entries, hasMore, corrupt, metadata, ""
 	}
 	if firstFailure != "" {
@@ -172,11 +180,14 @@ func openCodeStamp(database string) (openCodeFileStamp, bool) {
 	if err != nil {
 		return openCodeFileStamp{}, false
 	}
-	stamp := openCodeFileStamp{databaseSize: info.Size(), databaseTime: info.ModTime().UnixNano()}
+	stamp := openCodeFileStamp{databaseSize: info.Size(), databaseTime: info.ModTime().UnixNano(), databaseID: fileIdentity(info), databaseChange: fileChangeToken(info)}
 	if info, err = os.Stat(database + "-wal"); err == nil {
 		stamp.walSize = info.Size()
 		stamp.walTime = info.ModTime().UnixNano()
+		stamp.walID = fileIdentity(info)
+		stamp.walChange = fileChangeToken(info)
 	}
+	stamp.walIndex = walIndexHeader(database)
 	return stamp, true
 }
 
@@ -355,7 +366,7 @@ func openCodeV1SQL(sessionID, before string, limit int) string {
 		`WITH %s,selected AS (`+
 			`SELECT m.id,m.time_created,m.data FROM message AS m WHERE m.session_id=CAST(X'%s' AS TEXT)%s `+
 			`ORDER BY m.time_created DESC,m.id DESC LIMIT %d`+
-			`) SELECT s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,`+
+			`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,`+
 			`COALESCE(sm.id,'') AS message_id,COALESCE(sm.time_created,0) AS time_created,COALESCE(sm.data,'null') AS message_data,`+
 			`COALESCE(p.id,'') AS part_id,COALESCE(p.data,'null') AS part_data,`+
 			`(SELECT COUNT(*) FROM message WHERE session_id=s.id) AS message_total,%s AS cursor_found `+
@@ -466,6 +477,10 @@ func decodeOpenCodeRows(ctx context.Context, raw []byte, limit int, v2 bool, obs
 			return nil, false, "query_failed", err
 		}
 		rows[index].V2 = v2
+		rows[index].V2 = v2
+		if v2 {
+			rows[index].Total = UnknownTotal
+		}
 	}
 	messageIDs := make([]string, 0, limit+1)
 	seen := make(map[string]struct{}, limit+1)
@@ -1020,6 +1035,35 @@ func validOpenCodeSessionID(value string) bool {
 	return true
 }
 
+func openCodePendingIDs(rows []openCodeRow, entries []Entry) []string {
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		seen[entry.ID] = true
+	}
+	var pending []string
+	for _, row := range rows {
+		if seen[row.MessageID] || row.MessageID == "" || len(row.MessageID) > 256 || strings.ContainsAny(row.MessageID, "\x00\r\n") {
+			continue
+		}
+		role := row.MessageType
+		if !row.V2 {
+			var message struct {
+				Role string `json:"role"`
+			}
+			if json.Unmarshal([]byte(row.MessageData), &message) != nil {
+				continue
+			}
+			role = message.Role
+		}
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		seen[row.MessageID] = true
+		pending = append(pending, row.MessageID)
+	}
+	return pending
+}
+
 func parseOpenCodeRows(rows []openCodeRow) ([]Entry, bool) {
 	entries, corrupt, _ := parseOpenCodeRowsContext(context.Background(), rows)
 	return entries, corrupt
@@ -1105,9 +1149,13 @@ func parseOpenCodeRowsContext(ctx context.Context, rows []openCodeRow) (result [
 				input = string(part.State.Input)
 			}
 			activity := newToolActivity(part.CallID, part.Tool, input)
+			activity.State = openCodeToolState(part.State.Status)
 			activity.Output, activity.Truncated = clampText(sanitizeText(part.State.Output), maxEntryBytes)
 			activity.Error = part.State.Status == "error" || strings.TrimSpace(part.State.Error) != "" ||
 				openCodeExitFailed(part.State.Metadata)
+			if activity.Error {
+				activity.State = "failed"
+			}
 			entry.Tools = append(entry.Tools, activity)
 		}
 	}

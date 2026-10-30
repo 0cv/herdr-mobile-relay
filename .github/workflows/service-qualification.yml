@@ -33,33 +33,33 @@ jobs:
       matrix:
         runner: [macos-15, ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
         with:
           fetch-depth: 1
           persist-credentials: false
       # Python is pinned, not the runner image's ambient python3 (the script requires 3.11 or newer).
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         timeout-minutes: 5
         with:
           python-version: "3.14.0"
       - name: Verify event commit, clean state, modes, bytes, and source membership
         timeout-minutes: 3
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         timeout-minutes: 8
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: false
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         timeout-minutes: 5
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
       - name: Run the non-native service and installer suites
         run: /bin/bash scripts/ci/run-service-qualification.sh suites
       - name: Upload sanitized service suites summary
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: service-suites-fast-${{ matrix.runner }}-${{ github.sha }}
           path: ${{ runner.temp }}/service-qualification/summary.json
@@ -77,28 +77,28 @@ jobs:
         runner: [macos-15, ubuntu-24.04]
         shard: [1, 2, 3, 4, 5]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         timeout-minutes: 5
         with:
           python-version: "3.14.0"
       - name: Verify event commit, clean state, modes, bytes, and source membership
         timeout-minutes: 3
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         timeout-minutes: 8
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: false
       - name: Run the native-install fast shard (the suite keeps its 900s bound)
         run: /bin/bash scripts/ci/run-service-qualification.sh native fast ${{ matrix.shard }}/5
       - name: Upload sanitized shard summary and completed-cell evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: service-native-fast-${{ matrix.runner }}-s${{ matrix.shard }}-${{ github.sha }}
           path: |
@@ -118,28 +118,28 @@ jobs:
         runner: [macos-15, ubuntu-24.04]
         shard: [1]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         timeout-minutes: 5
         with:
           python-version: "3.14.0"
       - name: Verify event commit, clean state, modes, bytes, and source membership
         timeout-minutes: 3
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
-      - uses: actions/setup-go@v7  # the driver's guards require go on PATH; this suite builds nothing
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0; the driver's guards require go on PATH; this suite builds nothing
         timeout-minutes: 8
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: false
       - name: Run the uninstall CLI fast shard (the suite keeps its 900s bound)
         run: /bin/bash scripts/ci/run-service-qualification.sh uninstall-cli fast ${{ matrix.shard }}/1
       - name: Upload sanitized shard summary and completed-cell evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: service-uninstall-cli-fast-${{ matrix.runner }}-s${{ matrix.shard }}-${{ github.sha }}
           path: |
@@ -160,18 +160,18 @@ jobs:
     env:
       HERDR_NEEDS_JSON: ${{ toJSON(needs) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3.14.0"
       - name: Verify event commit, clean state, modes, bytes, and source membership
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
       - name: Require every dependency to have succeeded
         run: python3 -I -B tests/service_qualification_matrix.py needs suites native uninstall_cli
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: service-*-fast-*-${{ github.sha }}
           path: service-evidence

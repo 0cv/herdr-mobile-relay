@@ -75,15 +75,12 @@ import { constants, gzipSync } from 'node:zlib';
 // safe Conversation routing with native-transcript fallback.
 // Raised from 164 KiB for bounded history diagnostics, source-change recovery,
 // and snapshot-aware refresh handling.
-// Raised from 165 KiB for main's opt-in Resize Session (#60) integrated with the
-// branch's eager shell: the per-device consent switch in Settings, its
-// remembered preference and the lease gating in the store add about 500 B gzip
-// (1,490 B raw) to the single application script. The integrated 0.23.0
-// payload measures 169,451 B against the old 169,216 B ceiling, where the
-// branch without #60 measured 168,938 B (Bun's zlib, this guard's complete
-// eager accounting).
-const limitKiB = 166;
-const limit = limitKiB * 1024 + 256;
+// Raised from 166 KiB for the per-server filter on the home list (about
+// 0.6 KiB gzip).
+// Raised from 167 KiB for the Svelte 5.57 runtime (about 0.4 KiB gzip), which
+// lands the payload just over the old ceiling with no application change.
+const limitKiB = 168;
+const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
 const appScript = assetNames.find((name) => /^app-[a-f0-9]{64}\.js$/.test(name));

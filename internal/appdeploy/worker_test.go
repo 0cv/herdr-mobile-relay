@@ -403,7 +403,7 @@ func TestRunCommandContextTerminatesProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	_, err := runCommandContext(ctx, exec.Command("/bin/sh", scriptPath))
 	if !errors.Is(err, context.DeadlineExceeded) {

@@ -75,7 +75,7 @@ func TestInstalledServerCallerCancellationRetiresDiscovery(t *testing.T) {
 					defer close(done)
 					switch kind {
 					case "poller_title":
-						callErr = s.resolveAgentSessionName(ctx, agent)
+						callErr = s.resolveAgentSessionName(agent, ctx)
 					case "activity_response":
 						result, callErr = s.recentActivities(ctx, 1)
 					case "slash_location":

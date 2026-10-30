@@ -17,19 +17,19 @@
     sortedAgents,
     tabName,
   } from '$lib/agents';
-  import { homeLayout } from '$lib/preferences';
-  import { answerFailureToast, returnedInteraction } from '$lib/questions';
   import { resumeMetrics, shownOnScreen, shownRelayRows } from '$lib/resume-metrics';
+  import { hiddenServers, homeLayout, setServerHidden } from '$lib/preferences';
+  import { answerFailureToast, returnedInteraction } from '$lib/questions';
   import { relayStore, type CommandError } from '$lib/store';
   import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
-    agents,
-    relays,
+    agents: allAgents,
+    relays: allRelays,
     connections = new Map(),
     locked = true,
-    workspaces = [],
+    workspaces: allWorkspaces = [],
     workspaceDisclosure = $bindable<Record<string, boolean>>({}),
     responding,
     onopen,
@@ -43,6 +43,32 @@
     responding: Set<string>;
     onopen: (agent: Agent) => void;
   } = $props();
+
+  const serverFilterVisible = $derived(allRelays.length > 1);
+  const hidden = $derived(serverFilterVisible ? $hiddenServers : []);
+  const relays = $derived(allRelays.filter((relay) => !hidden.includes(relay.id)));
+  const agents = $derived(allAgents.filter((agent) => !hidden.includes(agent.relay_id)));
+  const workspaces = $derived(allWorkspaces.filter((workspace) => !hidden.includes(workspace.relay_id)));
+
+  // try/catch rather than URL.canParse, which needs Safari 17.
+  function urlHost(url: string): string {
+    try {
+      return new URL(url).host;
+    } catch {
+      return '';
+    }
+  }
+
+  function serverFilterLabel(relay: RelayConfig): string {
+    const label = relay.label || relay.id;
+    if (allRelays.filter((other) => other.label === relay.label).length < 2) return label;
+    return `${label} (${urlHost(relay.url) || relay.id})`;
+  }
+
+  function hiddenNeedsAttention(relayId: string): number {
+    if (!hidden.includes(relayId)) return 0;
+    return allAgents.filter((agent) => agent.relay_id === relayId && ['blocked', 'attention'].includes(agentStatusGroup(agent))).length;
+  }
 
   const lastKnown = relayStore.lastKnown;
   const summaries = $derived(locked ? [] : relays.flatMap((relay) => {
@@ -709,6 +735,18 @@
 {/snippet}
 
 <main bind:this={listRoot} class="agent-list" aria-label="Agents">
+  {#if serverFilterVisible}
+    <div class="server-filters" role="group" aria-label="Show servers">
+      {#each allRelays as relay (relay.id)}
+        {@const waiting = hiddenNeedsAttention(relay.id)}
+        <Button
+          variant="secondary"
+          aria-pressed={!hidden.includes(relay.id)}
+          onclick={() => setServerHidden(relay.id, !hidden.includes(relay.id))}
+        >{serverFilterLabel(relay)}{#if waiting}<span class="section-count" role="img" aria-label={`${waiting} need attention while hidden`}>{waiting}</span>{/if}</Button>
+      {/each}
+    </div>
+  {/if}
   {#each summaries as { relay, summary } (relay.id)}
     <LastKnownView {summary} relayLabel={relay.label} />
   {/each}
@@ -726,7 +764,9 @@
     </section>
   {/each}
 
-  {#if !agents.length && !relays.length}
+  {#if serverFilterVisible && !relays.length}
+    <div class="empty-state" role="status">All servers are hidden.</div>
+  {:else if !agents.length && !relays.length}
     <div class="empty-state">
       <span class="empty-icon" aria-hidden="true">🐑</span>
       <h2>Herdr Mobile Relay</h2>

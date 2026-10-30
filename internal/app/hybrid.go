@@ -108,10 +108,11 @@ func (s *Server) startHybridTransport(ctx context.Context) *hybridTransport {
 	}
 
 	gateway, err := transport.NewGatewayClient(s.hub, transport.GatewayOptions{
-		URLs:      s.cfg.GatewayURLs,
-		Selection: s.cfg.GatewaySelection,
-		RelayKey:  s.cfg.Token,
-		Logger:    s.logger,
+		URLs:              s.cfg.GatewayURLs,
+		Selection:         s.cfg.GatewaySelection,
+		RelayKey:          s.cfg.Token,
+		RegistrationToken: s.cfg.GatewayRegistrationToken,
+		Logger:            s.logger,
 	})
 	if err != nil {
 		s.recordSafeError("gateway transport unavailable", err)

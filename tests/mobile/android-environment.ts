@@ -1,4 +1,6 @@
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, lstat } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
+import { environmentStatus, validateMeasurementIdentity, type EnvironmentStatus, type MeasurementIdentity } from './support/mobile-result';
 import { createHash } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { requireOwnedDevice } from './support/device';
@@ -9,7 +11,9 @@ import { redactText, writeSanitizedJson } from './support/diagnostics';
 const ANDROID_PACKAGES = ['com.google.android.gms', 'com.google.android.trichromelibrary', 'com.android.chrome'] as const;
 const PLAY_STORE_PACKAGE = 'com.android.vending';
 const PACKAGE_DUMP_LIMIT = 2_000_000;
+const PACKAGE_DUMP_LINE_LIMIT = 65_536;
 export const ANDROID_LOG_LIMIT = 104_857_600;
+const ANDROID_GMS_OBSERVATION_FILE = 'android-environment-gms-observations.json';
 const ACQUISITION_COMMAND_LIMIT = 64;
 const ACQUISITION_PREVIEW_LIMIT = 4_000;
 const DEFAULT_ADB_TIMEOUT_MS = 30_000;
@@ -104,8 +108,26 @@ export interface AndroidPreparation {
   mutation: 'none' | 'disable-user-0';
 }
 
+export type EnvironmentFindingCategory = 'GMS_COMPONENT_DRIFT' | 'IDENTITY_DEVIATION' | 'ADVERSE_DEATH' | 'RETIREMENT_PROOF_UNKNOWN' | 'MODULE_CHANGE' | 'PACKAGE_REPLACEMENT' | 'EVIDENCE_INVALID';
+export interface EnvironmentFinding {
+  category: EnvironmentFindingCategory;
+  packageName?: string;
+  field?: string;
+  eventIndex?: number;
+}
 export interface AndroidEnvironmentCheck {
-  schema: 1;
+  schema: 3;
+  identity: MeasurementIdentity;
+  inputs: Record<'before' | 'after' | 'log' | 'operations' | 'collector', { bytes: number; sha256: string }> & {
+    gmsObservations?: { bytes: number; sha256: string };
+  };
+  status: EnvironmentStatus;
+  collection: { status: 'PASS' | 'UNKNOWN'; issues: string[] };
+  findings: EnvironmentFinding[];
+  coverage: 'bounded-operations';
+  plannedOperations: AndroidPlannedTermination[];
+  processBoundaryProof?: AndroidProcessBoundaryProof;
+  componentDeltas: Array<{ packageName: string; field: string; before: { total: number; names: string[]; withheldCount: number }; after: { total: number; names: string[]; withheldCount: number } }>;
   checkedAt: string;
   before: string;
   after: string;
@@ -113,6 +135,9 @@ export interface AndroidEnvironmentCheck {
   issues: string[];
   forcedRestartEvents: string[];
   nativeEvents: ReturnType<typeof androidEventDetails>[];
+  normalRetirements: ReturnType<typeof measuredAndroidEvents>['normalRetirements'];
+  boundaryDiscordances: ReturnType<typeof measuredAndroidEvents>['boundaryDiscordances'];
+  eventCounts: { rawEvents: number; distinctDeathPids: number; fatalEvents: number; normalRetirementPids: number };
   passed: boolean;
   observability: string;
 }
@@ -482,14 +507,28 @@ function boundedLines(source: string, label: string): string[] {
 
 function completePackageLines(dump: string): string[] {
   const lines = boundedLines(dump, 'package dump');
+  if (lines.length > PACKAGE_DUMP_LINE_LIMIT) throw new Error('ANDROID_ENVIRONMENT: package dump exceeds line limit');
   const footer = lines.findIndex((line) => line.trim() === 'Compiler stats:');
   if (footer < 0 || !lines.slice(footer + 1).some((line) => line.trim())) throw new Error('ANDROID_ENVIRONMENT: package dump is truncated before its compiler footer');
-  for (let index = 1; index < lines.length; index++) {
-    if (!/^ optional:(?:true|false)$/u.test(lines[index])) continue;
-    lines[index - 1] += lines[index];
-    lines.splice(index--, 1);
+  const complete: string[] = [];
+  let priorLine = -1;
+  let continuations: string[] = [];
+  const flush = () => {
+    if (priorLine >= 0 && continuations.length) complete[priorLine] += continuations.join('');
+    continuations = [];
+  };
+  for (const line of lines) {
+    if (/^ optional:(?:true|false)$/u.test(line)) {
+      if (priorLine < 0) throw new Error('ANDROID_ENVIRONMENT: package dump has an orphaned library continuation');
+      continuations.push(line);
+      continue;
+    }
+    flush();
+    complete.push(line);
+    priorLine = complete.length - 1;
   }
-  return lines;
+  flush();
+  return complete;
 }
 
 function activePackageRecord(dump: string, name: string): string {
@@ -501,6 +540,10 @@ function activePackageRecord(dump: string, name: string): string {
   for (const line of lines) {
     if (!line.trim()) continue;
     const indent = line.length - line.trimStart().length;
+    const isComponentHeading = ['enabledComponents', 'disabledComponents'].some(name => line.trimStart().startsWith(name));
+    if (name === 'com.google.android.gms' && record >= 0 && indent <= record && isComponentHeading) {
+      throw new Error('ANDROID_ENVIRONMENT: GMS component section is malformed or outside its package record');
+    }
     if (section >= 0 && indent <= section) section = -1;
     if (record >= 0 && indent <= record) record = -1;
     if (line.trim() === 'Packages:' && indent === rootIndent) {
@@ -534,8 +577,10 @@ function namedSections(lines: string[], names: string[]): Record<string, string[
   const seen = new Set<string>();
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    const name = line.trim().replace(/:$/u, '');
-    if (!names.includes(name) || !line.endsWith(':')) continue;
+    const trimmed = line.trim();
+    const name = names.find((candidate) => trimmed.startsWith(candidate));
+    if (!name) continue;
+    if (trimmed !== `${name}:`) throw new Error(`ANDROID_ENVIRONMENT: malformed ${name} section heading`);
     if (seen.has(name)) throw new Error(`ANDROID_ENVIRONMENT: ambiguous ${name} section`);
     seen.add(name);
     const indent = line.length - line.trimStart().length;
@@ -562,6 +607,10 @@ function packageIdentity(packageName: string, record: string, paths: string): An
   let end = userIndex + 1;
   while (end < lines.length && lines[end].length - lines[end].trimStart().length > indent) end++;
   const user = lines.slice(userIndex + 1, end);
+  const componentHeading = (line: string) => ['enabledComponents', 'disabledComponents'].some(name => line.trimStart().startsWith(name));
+  if (lines.some((line, index) => (index <= userIndex || index >= end) && componentHeading(line))) {
+    throw new Error(`ANDROID_ENVIRONMENT: ${packageName} component section is outside User 0`);
+  }
   const dependencyConfig: Record<string, string[]> = {
     ...namedSections(lines.slice(1, lines.findIndex((line) => /^User \d+:/u.test(line.trim()))), [
       'dynamic libraries', 'static library', 'SDK library', 'usesLibraries', 'usesStaticLibraries', 'usesSdkLibraries',
@@ -582,8 +631,16 @@ function packageIdentity(packageName: string, record: string, paths: string): An
         : name === 'static library' ? /^name:\S+ version:\d+$/u
           : name === 'SDK library' ? /^name:\S+ versionMajor:\d+$/u
             : name === 'usesLibraryFiles' ? /^\/[^\s\p{Cc}]+$/u
-              : /^(?:uses|dynamic libraries|enabledComponents|disabledComponents)/u.test(name) ? /^[A-Za-z0-9_.$+-]+$/u : undefined;
+              : /^(?:uses|dynamic libraries)/u.test(name) ? /^[A-Za-z0-9_.$+-]+$/u : undefined;
     if (grammar && values.some((value) => !grammar.test(value))) throw new Error(`ANDROID_ENVIRONMENT: malformed ${name} values`);
+    if ((name === 'enabledComponents' || name === 'disabledComponents')
+      && values.some((value) => !/^(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*(?:\$[A-Za-z0-9_$]+)*$/u.test(value))) {
+      throw new Error(`ANDROID_ENVIRONMENT: malformed ${name} component names`);
+    }
+  }
+  const enabledComponents = new Set(dependencyConfig.enabledComponents);
+  if (dependencyConfig.disabledComponents.some((component) => enabledComponents.has(component))) {
+    throw new Error('ANDROID_ENVIRONMENT: enabled and disabled component sections contradict each other');
   }
   const staticLibrary = staticLibraryMetadata(record);
   const apkPaths = paths === '' ? [] : boundedLines(paths, 'APK paths').slice(0, -1);
@@ -616,6 +673,45 @@ function packageIdentity(packageName: string, record: string, paths: string): An
     dependencyConfigSha256: sha256(JSON.stringify(dependencyConfig)),
   };
   return { ...identity, dumpSha256: sha256(record), identitySha256: sha256(JSON.stringify(identity)) };
+}
+
+export interface AndroidGmsComponentState {
+  packageName: 'com.google.android.gms';
+  versionName: string;
+  versionCode: string;
+  enabled: string;
+  installed: boolean;
+  enabledComponents: string[];
+  disabledComponents: string[];
+  componentStateSha256: string;
+  packageIdentitySha256: string;
+  dumpSha256: string;
+}
+
+export function parseAndroidGmsComponentState(dump: string): AndroidGmsComponentState {
+  if (Buffer.byteLength(dump) > PACKAGE_DUMP_LIMIT) throw new Error('ANDROID_ENVIRONMENT: GMS package dump exceeds parsing limit');
+  const record = activePackageRecord(dump, 'com.google.android.gms');
+  const identity = packageIdentity('com.google.android.gms', record, '');
+  const enabledComponents = identity.dependencyConfig.enabledComponents;
+  const disabledComponents = identity.dependencyConfig.disabledComponents;
+  if (identity.packageRecordName !== 'com.google.android.gms' || !identity.versionName || !/^\d+$/u.test(identity.versionCode)
+    || !identity.installed || !['0', '1'].includes(identity.enabled)
+    || enabledComponents.length > 4096 || disabledComponents.length > 4096
+    || [...enabledComponents, ...disabledComponents].some(value => Buffer.byteLength(value) > 256)) {
+    throw new Error('ANDROID_ENVIRONMENT: GMS component observation is incomplete or exceeds its normalized limit');
+  }
+  return {
+    packageName: 'com.google.android.gms',
+    versionName: identity.versionName,
+    versionCode: identity.versionCode,
+    enabled: identity.enabled,
+    installed: identity.installed,
+    enabledComponents,
+    disabledComponents,
+    componentStateSha256: sha256(JSON.stringify({ enabledComponents, disabledComponents })),
+    packageIdentitySha256: identity.identitySha256,
+    dumpSha256: sha256(dump),
+  };
 }
 
 function packageVersionMatches(identity: AndroidPackageIdentity, packageName: string, declared: string): boolean {
@@ -999,9 +1095,7 @@ export function parseAndroidProcesses(source: string): Record<string, string> {
   return processes;
 }
 
-async function readSnapshot(filename: string): Promise<AndroidEnvironmentSnapshot> {
-  if ((await stat(filename)).size > 8_000_000) throw new Error('snapshot exceeds bound');
-  const value = JSON.parse(await readFile(filename, 'utf8')) as AndroidEnvironmentSnapshot;
+export function validateAndroidSnapshot(value: AndroidEnvironmentSnapshot): AndroidEnvironmentSnapshot {
   if (value.schema !== 1 || !value.provenance || !value.vending || !value.measurement || !value.measurement.processes
     || !value.packages || !value.system || Object.values(value.system).some((entry) => typeof entry !== 'string' || !entry)) {
     throw new Error('incomplete snapshot');
@@ -1029,49 +1123,265 @@ async function readSnapshot(filename: string): Promise<AndroidEnvironmentSnapsho
   }
   if (!packageVersionMatches(value.packages[value.policy.browserPackage], value.policy.browserPackage, value.policy.browserVersion)
     || !packageVersionMatches(value.packages[value.policy.trichromeLibraryPackage], value.policy.trichromeLibraryPackage, value.policy.trichromeLibraryVersion)) throw new Error('snapshot pinned package identity mismatch');
+  if (sha256(value.provenance.avdConfig) !== value.provenance.avdConfigSha256 || sha256(value.provenance.sdkProperties) !== value.provenance.sdkPropertiesSha256) throw new Error('snapshot provenance hash mismatch');
+  if (!isDeepStrictEqual(Object.keys(value.packages).sort(), [...ANDROID_PACKAGES].sort())) throw new Error('snapshot package set mismatch');
+  for (const identity of [...Object.values(value.packages), ...(value.vending.identity ? [value.vending.identity] : [])]) validatePackageHashes(identity);
+  requireVendingPolicy(value.vending);
   return value;
 }
 
-async function runCheck(): Promise<void> {
-  const beforeFile = required('--before');
-  const afterFile = required('--after');
-  const logFile = required('--log');
-  let events: string[] = [];
-  const issues: string[] = [];
-  try {
-    const before = await readSnapshot(beforeFile);
-    const after = await readSnapshot(afterFile);
-    issues.push(...compareAndroidEnvironment(before, after));
-    if (Date.parse(after.capturedAt) < Date.parse(before.capturedAt)) issues.push('snapshot time order is invalid');
-    const size = (await stat(logFile)).size;
-    if (!size || size > ANDROID_LOG_LIMIT) throw new Error('measurement log is empty or exceeds its bound');
-    const log = await readFile(logFile, 'utf8');
-    const operationsFile = required('--operations');
-    if ((await stat(operationsFile)).size > 64_000) throw new Error('measurement operations exceed bound');
-    const operations = JSON.parse(await readFile(operationsFile, 'utf8')) as AndroidPlannedTermination[];
-    if (!Array.isArray(operations) || operations.length > 8) throw new Error('measurement operations are malformed');
-    const measured = measuredAndroidEvents(log, before, after, operations);
-    events = measured.events;
-    issues.push(...measured.issues);
-    if (events.length) issues.push('native process death, dependency configuration change or package replacement was observed');
-  } catch (error) {
-    issues.push(`measurement evidence unavailable or invalid: ${error instanceof Error ? error.message : String(error)}`);
+const dependencyFields = ['dynamic libraries', 'static library', 'SDK library', 'usesLibraries', 'usesStaticLibraries', 'usesSdkLibraries',
+  'usesOptionalLibraries', 'usesNativeLibraries', 'usesOptionalNativeLibraries', 'usesLibraryFiles', 'enabledComponents', 'disabledComponents',
+  'flags', 'splits', 'privateFlags', 'pkgFlags', 'privatePkgFlags', 'updateOwnerPackageName', 'apkSigningVersion'] as const;
+const identityFields = ['packageName', 'packageRecordName', 'staticLibraryName', 'staticLibraryVersion', 'versionName', 'versionCode',
+  'installerPackageName', 'initiatingPackageName', 'originatingPackageName', 'packageSource', 'firstInstallTime', 'lastUpdateTime',
+  'enabled', 'installed', 'hidden', 'suspended', 'codePath', 'apkPaths', 'dependencyConfig', 'dependencyConfigSha256'] as const;
+
+export function validatePackageHashes(identity: AndroidPackageIdentity): void {
+  if (!isDeepStrictEqual(Object.keys(identity).sort(), [...identityFields, 'dumpSha256', 'identitySha256'].sort())
+    || !isDeepStrictEqual(Object.keys(identity.dependencyConfig).sort(), [...dependencyFields].sort())) throw new Error('package identity fields are incomplete or unknown');
+  const dependencyConfig = Object.fromEntries(dependencyFields.map(name => {
+    const values = identity.dependencyConfig[name];
+    if (!Array.isArray(values) || values.some(value => typeof value !== 'string' || !value || value.includes('[REDACTED]'))
+      || new Set(values).size !== values.length || !isDeepStrictEqual(values, [...values].sort())) throw new Error('dependency section is malformed');
+    const grammar = name === 'usesStaticLibraries' ? /^\S+ version:\d+$/u
+      : name === 'usesSdkLibraries' ? /^\S+ version:\d+ optional:(?:true|false)$/u
+        : name === 'static library' ? /^name:\S+ version:\d+$/u
+          : name === 'SDK library' ? /^name:\S+ versionMajor:\d+$/u
+            : name === 'usesLibraryFiles' ? /^\/[^\s\p{Cc}]+$/u
+              : /^(?:uses|dynamic libraries|enabledComponents|disabledComponents)/u.test(name) ? /^[A-Za-z0-9_.$+-]+$/u : undefined;
+    if (grammar && values.some(value => !grammar.test(value))) throw new Error('dependency section grammar mismatch');
+    return [name, values];
+  }));
+  if (sha256(JSON.stringify(dependencyConfig)) !== identity.dependencyConfigSha256) throw new Error('dependency hash mismatch');
+  const canonical = Object.fromEntries(identityFields.map(name => [name, name === 'dependencyConfig' ? dependencyConfig : identity[name]]));
+  if (sha256(JSON.stringify(canonical)) !== identity.identitySha256) throw new Error('identity hash mismatch');
+}
+
+export interface EnvironmentInputBytes {
+  before: string;
+  after: string;
+  log: string;
+  operations: string;
+  collector: string;
+  gmsObservations?: string;
+}
+export const environmentLeaves = {
+  before: 'android-environment-before.json', after: 'android-environment-after.json', log: 'android-qualification-logcat.log',
+  operations: 'android-environment-operations.json', collector: 'android-environment-collector.json',
+} as const;
+export async function readEnvironmentInputs(directory: string): Promise<EnvironmentInputBytes> {
+  const values: Partial<EnvironmentInputBytes> = {};
+  for (const [name, leaf] of Object.entries(environmentLeaves)) {
+    const maximum = name === 'log' ? ANDROID_LOG_LIMIT : name === 'operations' ? 64_000 : 8_000_000;
+    const path = join(directory, leaf);
+    try {
+      const metadata = await lstat(path);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || !metadata.size || metadata.size > maximum) throw new Error('invalid input');
+      const bytes = await readFile(path);
+      if (bytes.length !== metadata.size || bytes.length > maximum) throw new Error('changed input');
+      const text = bytes.toString('utf8');
+      if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('invalid UTF-8 input');
+      values[name as keyof EnvironmentInputBytes] = text;
+    } catch {
+      values[name as keyof EnvironmentInputBytes] = '';
+    }
   }
-  const result: AndroidEnvironmentCheck = {
-    schema: 1,
-    checkedAt: new Date().toISOString(),
-    before: beforeFile,
-    after: afterFile,
-    log: logFile,
-    issues,
-    forcedRestartEvents: events,
-    nativeEvents: events.map(androidEventDetails),
-    passed: issues.length === 0,
-    observability: 'PackageManager persistent dependency sections and supported PID/package-attributed native log events only; dumpsys package does not expose a complete runtime Dynamite/Chimera module inventory.',
+  try {
+    const collector = JSON.parse(values.collector || 'null');
+    if (collector && Object.hasOwn(collector, 'gmsObservations')) {
+      const path = join(directory, ANDROID_GMS_OBSERVATION_FILE);
+      try {
+        const metadata = await lstat(path);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || !metadata.size || metadata.size > 8_000_000) throw new Error('invalid GMS observation');
+        const bytes = await readFile(path);
+        if (bytes.length !== metadata.size || bytes.length > 8_000_000) throw new Error('changed GMS observation');
+        const text = bytes.toString('utf8');
+        values.gmsObservations = Buffer.from(text, 'utf8').equals(bytes) ? text : '';
+      } catch {
+        values.gmsObservations = '';
+      }
+    }
+  } catch {
+    values.gmsObservations = '';
+  }
+  return values as EnvironmentInputBytes;
+}
+
+export interface AndroidProcessBoundaryProof {
+  clock: 'logcat-epoch-ms' | 'logcat-month-day-ms';
+  start: { line: number; time: number };
+  end: { line: number; time: number };
+  operations: Array<{ id: string; begin: { line: number; time: number }; end: { line: number; time: number } }>;
+  before: Record<string, string>;
+  after: Record<string, string>;
+  births: Array<{ pid: string; name: string; line: number; time: number }>;
+  events: Array<{ eventOrdinal: number; line: number; time: number }>;
+}
+
+function processBoundaryProof(log: string, before: AndroidEnvironmentSnapshot | undefined, after: AndroidEnvironmentSnapshot | undefined, operations: AndroidPlannedTermination[], events: string[]): AndroidProcessBoundaryProof | undefined {
+  if (!before?.measurement || !after?.measurement) return undefined;
+  const records = log.split(/\r?\n/u).flatMap((text, index) => {
+    const match = text.match(/^(?:(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})|[ \t]*(\d{10}\.\d{3,6}))\s+\d+\s+\d+\s+[VDIWEF]\s+([^:]+?)\s*:\s?(.*)$/u);
+    if (!match) return [];
+    return [{ text, line: index + 1, time: match[2] ? Number(match[2]) * 1000 : Date.parse(`2000-${match[1].replace(' ', 'T')}Z`), clock: match[2] ? 'logcat-epoch-ms' as const : 'logcat-month-day-ms' as const, tag: match[3].trim(), message: match[4] }];
+  });
+  const marker = (message: string) => records.filter(record => record.tag === 'HerdrMeasure' && record.message === `${before.measurement!.id} ${message}`);
+  const starts = marker('START'), ends = marker('END');
+  if (starts.length !== 1 || ends.length !== 1 || records.some(record => record.clock !== starts[0].clock)) return undefined;
+  const point = (record: typeof records[number]) => ({ line: record.line, time: record.time });
+  const intervals: AndroidProcessBoundaryProof['operations'] = [];
+  for (const operation of operations) {
+    const begin = marker(`OP_BEGIN ${operation.id} ${operation.packageName} ${operation.pid}`), end = marker(`OP_END ${operation.id} ${operation.packageName} ${operation.pid}`);
+    if (begin.length !== 1 || end.length !== 1) return undefined;
+    intervals.push({ id: operation.id, begin: point(begin[0]), end: point(end[0]) });
+  }
+  return { clock: starts[0].clock, start: point(starts[0]), end: point(ends[0]), operations: intervals,
+    before: structuredClone(before.measurement.processes), after: structuredClone(after.measurement.processes),
+    births: records.flatMap(record => { const birth = record.tag === 'ActivityManager' && record.message.match(/^Start proc (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)? for /u); return birth ? [{ pid: birth[1], name: birth[2], ...point(record) }] : []; }),
+    events: events.flatMap((event, index) => { const matches = records.filter(record => record.text === event); return matches.length === 1 ? [{ eventOrdinal: index + 1, ...point(matches[0]) }] : []; }),
   };
-  const output = option('--output');
-  if (output) await writeSanitizedJson(output, result);
-  if (issues.length) throw new Error(`ANDROID_ENVIRONMENT: ${issues.join('; ')}`);
+}
+
+function validGmsTerminalEvidence(collector: Record<string, any>, source: string | undefined): boolean {
+  const receipt = collector.gmsObservations;
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || typeof source !== 'string') return false;
+  if (receipt.file !== ANDROID_GMS_OBSERVATION_FILE || receipt.finalized !== true || receipt.terminalConfirmation !== 'confirmed'
+    || !/^[a-f0-9]{64}$/u.test(receipt.observationSha256 || '') || receipt.observationSha256 !== sha256(source)
+    || receipt.errors !== 0 || receipt.persistenceRetirement !== 'retired' || receipt.temporaryEvidenceCleanup !== 'not-needed') return false;
+  let observations: Record<string, any>;
+  try { observations = JSON.parse(source) as Record<string, any>; } catch { return false; }
+  const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'];
+  if (observations.schema !== 1 || observations.packageName !== 'com.google.android.gms' || observations.finalized !== true
+    || observations.terminalPublication !== 'awaiting-collector-confirmation' || !Array.isArray(observations.errors) || observations.errors.length !== 0 || !Array.isArray(observations.stages)
+    || observations.stages.length !== stages.length || !observations.stages.every((entry: any, index: number) =>
+      entry?.stage === stages[index] && entry.outcome === 'collected' && entry.state && typeof entry.state === 'object')
+    || observations.persistenceRetirement !== 'retired' || observations.temporaryEvidenceCleanup !== 'not-needed') return false;
+  const stageReceipt = observations.stages.map(({ stage, outcome }: { stage: string; outcome: string }) => ({ stage, outcome }));
+  const persistedTotal = observations.priorPersistenceAttemptMs;
+  const finalTotal = receipt.persistenceAttemptMsThroughFinalization;
+  return isDeepStrictEqual(receipt.stages, stageReceipt)
+    && receipt.totalCommandOutputBytes === observations.totalCommandOutputBytes
+    && receipt.totalRetainedCommandOutputBytes === observations.totalRetainedCommandOutputBytes
+    && receipt.totalCollectionMs === observations.totalCollectionMs
+    && Number.isSafeInteger(persistedTotal) && persistedTotal >= 0
+    && Number.isSafeInteger(finalTotal) && finalTotal >= persistedTotal
+    && finalTotal <= observations.limits.totalPersistenceLimitMs;
+}
+
+export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity: MeasurementIdentity): AndroidEnvironmentCheck {
+  validateMeasurementIdentity(identity);
+  const findings: EnvironmentFinding[] = [];
+  const issues: string[] = [];
+  const collectionIssues: string[] = [];
+  let events: string[], fatalEvents: string[];
+  let normalRetirements: AndroidEnvironmentCheck['normalRetirements'] = [];
+  let boundaryDiscordances: AndroidEnvironmentCheck['boundaryDiscordances'] = [];
+  const componentDeltas: AndroidEnvironmentCheck['componentDeltas'] = [];
+  const project = (values: string[]) => {
+    const names = values.filter(value => /^(?:com\.google\.android\.gms|com\.android\.chrome|com\.google\.android\.trichromelibrary)\.[A-Za-z0-9_.$]+$/u.test(value) && Buffer.byteLength(value) <= 256).slice(0, 128);
+    return { total: values.length, names, withheldCount: values.length - names.length };
+  };
+  const snapshot = (name: 'before' | 'after') => {
+    try {
+      const value = validateAndroidSnapshot(JSON.parse(input[name]));
+      if (value.measurement?.id !== identity.measurementId || value.measurement.boundary !== (name === 'before' ? 'start' : 'end')) throw new Error('measurement identity mismatch');
+      return value;
+    } catch { collectionIssues.push(`${name} snapshot invalid`); return undefined; }
+  };
+  for (const name of Object.keys(environmentLeaves) as Array<keyof EnvironmentInputBytes>) {
+    const maximum = name === 'log' ? ANDROID_LOG_LIMIT : name === 'operations' ? 64_000 : 8_000_000;
+    if (typeof input[name] !== 'string' || !input[name].length || Buffer.byteLength(input[name]) > maximum) collectionIssues.push(`${name} input unavailable or oversized`);
+  }
+  const before = snapshot('before'), after = snapshot('after');
+  let operations: AndroidPlannedTermination[];
+  try {
+    operations = JSON.parse(input.operations);
+    if (!Array.isArray(operations) || operations.length > 8 || operations.some(value => !value || typeof value !== 'object')) throw new Error('invalid operations');
+  } catch { operations = []; collectionIssues.push('measurement operations malformed'); }
+  if (before && after) {
+    if (Date.parse(after.capturedAt) < Date.parse(before.capturedAt)) collectionIssues.push('measurement time order mismatch');
+    for (const name of ANDROID_PACKAGES) {
+      const previous = before.packages[name], current = after.packages[name];
+      for (const field of identityFields.filter(field => !['dependencyConfig', 'dependencyConfigSha256'].includes(field))) {
+        if (!isDeepStrictEqual(previous[field], current[field])) findings.push({ category: 'IDENTITY_DEVIATION', packageName: name, field });
+      }
+      for (const field of dependencyFields) {
+        if (isDeepStrictEqual(previous.dependencyConfig[field], current.dependencyConfig[field])) continue;
+        findings.push({ category: name === 'com.google.android.gms' && ['enabledComponents', 'disabledComponents'].includes(field) ? 'GMS_COMPONENT_DRIFT' : 'IDENTITY_DEVIATION', packageName: name, field });
+        if (['enabledComponents', 'disabledComponents'].includes(field)) componentDeltas.push({ packageName: name, field, before: project(previous.dependencyConfig[field]), after: project(current.dependencyConfig[field]) });
+      }
+    }
+    const withoutPackages = (snapshot: AndroidEnvironmentSnapshot) => ({ serial: snapshot.serial, avdName: snapshot.avdName, policy: snapshot.policy,
+      system: snapshot.system, emulatorVersion: snapshot.emulatorVersion, adbVersion: snapshot.adbVersion, vending: stableVending(snapshot.vending), provenance: snapshot.provenance });
+    if (!isDeepStrictEqual(withoutPackages(before), withoutPackages(after))) findings.push({ category: 'IDENTITY_DEVIATION', field: 'device-policy-provenance' });
+    issues.push(...compareAndroidEnvironment(before, after));
+  }
+  try {
+    if (before && after) {
+      const measured = measuredAndroidEvents(input.log, before, after, operations);
+      events = measured.events; fatalEvents = measured.fatalEvents; normalRetirements = measured.normalRetirements; boundaryDiscordances = measured.boundaryDiscordances;
+      collectionIssues.push(...measured.issues);
+      if (measured.issues.length && !events.length) events = fatalEvents = androidLogEvents(input.log, before.measurement!.processes);
+    } else events = fatalEvents = androidLogEvents(input.log, before?.measurement?.processes);
+  } catch {
+    collectionIssues.push('event evaluation incomplete');
+    events = fatalEvents = androidLogEvents(input.log || '', before?.measurement?.processes);
+  }
+  for (const line of fatalEvents) {
+      const event = androidEventDetails(line);
+      const category = event.kind === 'module-config' ? 'MODULE_CHANGE' : event.kind === 'package-replacement' ? 'PACKAGE_REPLACEMENT'
+        : /exited cleanly \(0\)$/u.test(line) ? 'RETIREMENT_PROOF_UNKNOWN' : 'ADVERSE_DEATH';
+      findings.push({ category, eventIndex: events.indexOf(line) });
+  }
+  try {
+    const collector = JSON.parse(input.collector);
+    if (collector.failure != null || collector.transportObservationFailure != null || !Number.isSafeInteger(collector.bytes) || collector.bytes <= 0 || collector.bytes > ANDROID_LOG_LIMIT || collector.bytes !== Buffer.byteLength(input.log)) collectionIssues.push('collector unavailable or failed');
+    if (Object.hasOwn(collector, 'gmsObservations') && !validGmsTerminalEvidence(collector, input.gmsObservations)) {
+      collectionIssues.push('GMS terminal observation confirmation is unavailable or invalid');
+    }
+  } catch { collectionIssues.push('collector receipt invalid'); }
+  if (fatalEvents.length) issues.push('native process death, dependency configuration change or package replacement was observed');
+  if (collectionIssues.length) findings.push({ category: 'EVIDENCE_INVALID' });
+  issues.push(...collectionIssues);
+  const status = environmentStatus(findings.length ? findings.map(finding => ['EVIDENCE_INVALID', 'RETIREMENT_PROOF_UNKNOWN'].includes(finding.category) ? 'UNKNOWN' : 'FAIL') : ['PASS']);
+  return {
+    schema: 3, identity: structuredClone(identity), inputs: Object.fromEntries(Object.entries(input).map(([name, value]) => [name, { bytes: Buffer.byteLength(value), sha256: sha256(value) }])) as AndroidEnvironmentCheck['inputs'],
+    checkedAt: new Date().toISOString(), before: environmentLeaves.before, after: environmentLeaves.after, log: environmentLeaves.log,
+    status, collection: { status: collectionIssues.length ? 'UNKNOWN' : 'PASS', issues: collectionIssues }, findings, coverage: 'bounded-operations', plannedOperations: structuredClone(operations), componentDeltas,
+    processBoundaryProof: collectionIssues.length ? undefined : processBoundaryProof(input.log, before, after, operations, events),
+    issues, forcedRestartEvents: fatalEvents, nativeEvents: events.map(androidEventDetails), normalRetirements, boundaryDiscordances,
+    eventCounts: { rawEvents: events.length, distinctDeathPids: new Set(events.map(line => androidEventDetails(line).pid).filter(Boolean)).size, fatalEvents: fatalEvents.length, normalRetirementPids: normalRetirements.length },
+    passed: status === 'PASS', observability: 'Receive-bounded main/system evidence and bounded operations; not continuous child-to-target coverage or initiating actor attribution.',
+  };
+}
+export function sameAssessment(first: AndroidEnvironmentCheck, second: AndroidEnvironmentCheck): boolean {
+  const semantic = ({ checkedAt: _time, before: _before, after: _after, log: _log, ...value }: AndroidEnvironmentCheck) => value;
+  const persisted = (value: AndroidEnvironmentCheck) => JSON.parse(JSON.stringify(semantic(value)));
+  return isDeepStrictEqual(persisted(first), persisted(second));
+}
+async function readCheckJson(path: string, maximum: number): Promise<any> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || !metadata.size || metadata.size > maximum) throw new Error('ANDROID_ENVIRONMENT: required receipt invalid');
+  const bytes = await readFile(path);
+  if (bytes.length !== metadata.size || bytes.length > maximum) throw new Error('ANDROID_ENVIRONMENT: receipt changed during read');
+  return JSON.parse(bytes.toString('utf8'));
+}
+async function runCheck(): Promise<void> {
+  const contract = required('--contract');
+  if (!['report', 'qualification'].includes(contract)) throw new Error('ANDROID_ENVIRONMENT: explicit report or qualification contract required');
+  const directory = required('--directory');
+  const identity = await readCheckJson(required('--identity'), 64_000) as MeasurementIdentity;
+  const bundles = await readCheckJson(required('--bundle-set'), 8_000_000);
+  const session = await readCheckJson(join(directory, 'android-environment-session.json'), 64_000);
+  const expected = { runId: required('--run-id'), attempt: required('--attempt'), suite: required('--suite'), platform: 'android', baseline: required('--baseline'),
+    scenario: required('--scenario'), sourceCommit: bundles.candidate.provenance.sourceCommit, sourceRunHeadSha: required('--source-run-head-sha'),
+    candidateWebHash: bundles.candidate.identity.webHash, candidateBuild: bundles.candidate.identity.build, measurementId: session.id };
+  if (!isDeepStrictEqual(identity, expected)) throw new Error('ANDROID_ENVIRONMENT: independent workflow identity mismatch');
+  const result = assessAndroidEnvironment(await readEnvironmentInputs(directory), identity);
+  const original = await readCheckJson(join(directory, 'android-environment-check.json'), 8_000_000) as AndroidEnvironmentCheck;
+  if (!sameAssessment(original, result)) throw new Error('ANDROID_ENVIRONMENT: immutable assessment mismatch');
+  if (result.collection.status !== 'PASS' || (contract === 'qualification' && result.status !== 'PASS')) throw new Error(`ANDROID_ENVIRONMENT: ${result.status}`);
 }
 
 async function main(): Promise<void> {
@@ -1092,8 +1402,8 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  main().catch((error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+  main().catch(() => {
+    process.stderr.write('ANDROID_ENVIRONMENT_INVALID: required environment evidence or operation failed\n');
     process.exitCode = 1;
   });
 }

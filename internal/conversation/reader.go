@@ -24,6 +24,7 @@ import (
 )
 
 const (
+	UnknownTotal            = -1
 	maxConversationBytes    = 16 * 1024 * 1024
 	maxEntryBytes           = 128 * 1024
 	maxToolCount            = 128
@@ -47,6 +48,8 @@ var (
 type ToolActivity struct {
 	ID            string `json:"id,omitempty"`
 	Name          string `json:"name"`
+	State         string `json:"state,omitempty"`
+	ParentID      string `json:"parent_id,omitempty"`
 	associationID string
 	Input         string `json:"input,omitempty"`
 	Output        string `json:"output,omitempty"`
@@ -55,6 +58,7 @@ type ToolActivity struct {
 }
 
 type Entry struct {
+	Kind      string         `json:"kind,omitempty"`
 	ID        string         `json:"id"`
 	Timestamp string         `json:"timestamp,omitempty"`
 	Role      string         `json:"role"`
@@ -76,6 +80,19 @@ type Page struct {
 	ContinuationReason     string        `json:"continuation_reason,omitempty"`
 	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
 }
+
+func (page Page) MarshalJSON() ([]byte, error) {
+	type wirePage Page
+	var total *int
+	if page.Total != UnknownTotal {
+		total = &page.Total
+	}
+	return json.Marshal(struct {
+		wirePage
+		Total *int `json:"total"`
+	}{wirePage(page), total})
+}
+
 type locationKey struct {
 	Agent         string
 	CWD           string
@@ -84,14 +101,19 @@ type locationKey struct {
 }
 
 type Reader struct {
-	home      string
-	mu        sync.Mutex
-	locations map[locationKey]locationCacheEntry
-	locating  map[locationKey]chan struct{}
-	installed *installedReaderBinding
-	omoCache  map[string]omoCacheEntry
-	openCode  *openCodeReader
-	hermes    *hermesReader
+	home            string
+	mu              sync.Mutex
+	locations       map[locationKey]locationCacheEntry
+	locating        map[locationKey]chan struct{}
+	installed       *installedReaderBinding
+	omoCache        map[string]omoCacheEntry
+	agy             *agyReader
+	kimiMu          sync.Mutex
+	kimiSources     map[string]kimiSourceState
+	kimiSelectionMu sync.Mutex
+	kimiSelections  map[string]kimiSelection
+	openCode        *openCodeReader
+	hermes          *hermesReader
 }
 
 type locationCacheEntry struct {
@@ -114,7 +136,7 @@ func NewReader(home string) *Reader {
 	return &Reader{
 		home: home, locations: make(map[locationKey]locationCacheEntry),
 		locating: make(map[locationKey]chan struct{}), omoCache: make(map[string]omoCacheEntry),
-		openCode: newOpenCodeReader(home), hermes: newHermesReader(home),
+		openCode: newOpenCodeReader(home), hermes: newHermesReader(home), agy: newAgyReader(home),
 	}
 }
 
@@ -131,10 +153,15 @@ func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 func (r *Reader) cursorRoots() []string { return agentroots.Cursor(r.home) }
 
 func Supported(agent string) bool {
+	return RecordedSupported(agent)
+}
+
+func RecordedSupported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
-		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode",
-		"hermes", "hermesagent", "cursor", "cursoragent":
+		"pi", "picodingagent", "omp", "ohmypi", "cursor", "cursoragent",
+		"opencode", "hermes", "hermesagent", "omo", "ohmyopencode", "kimi", "kimicode",
+		"agy", "antigravity", "antigravitycli":
 		return true
 	default:
 		return false
@@ -173,8 +200,18 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 		return r.ReadWithProjectContext(context.Background(), agent, project, sessionID, before, limit)
 	}
 	project = NormalizeProjectContext(agent, project)
+	if IsKimi(agent) {
+		projection, _, code := r.readKimi(context.Background(), project, sessionID)
+		if code != "" {
+			return unavailableCode(code, kimiReason(code)), nil
+		}
+		return kimiPage(projection, before, limit), nil
+	}
 	if isHermesAgent(agent) {
 		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
+	}
+	if isAgyAgent(agent) {
+		return r.readAgyFor(sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "opencode" {
 		return r.readOpenCode(sessionID, before, limit)
@@ -257,8 +294,15 @@ func (r *Reader) LocateWithProject(agent string, project ProjectContext, session
 	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
 	agentKey := normalizedAgent(agent)
+	if IsKimi(agent) {
+		_, location, _ := r.SelectKimiSession(project, sessionID)
+		return location
+	}
 	if isHermesAgent(agent) {
 		agentKey = "hermes"
+	}
+	if isAgyAgent(agent) {
+		agentKey = "agy"
 	}
 	key := locationKey{Agent: agentKey, CWD: project.CWD, ForegroundCWD: project.ForegroundCWD, SessionID: sessionID}
 	for {
@@ -335,6 +379,11 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
 		return r.hermes.locate(project.CWD, sessionID)
+	case "agy", "antigravity", "antigravitycli":
+		return r.agy.locate(sessionID)
+	case "kimi", "kimicode":
+		_, location, _ := r.SelectKimiSession(project, sessionID)
+		return location
 	case "cursor", "cursoragent":
 		return findCursorSession(r.cursorRoots(), project, sessionID)
 	default:

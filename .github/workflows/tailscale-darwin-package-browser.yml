@@ -11,6 +11,19 @@ permissions:
 env:
   GOTOOLCHAIN: local
   GOFLAGS: -mod=readonly
+  HERDR_PUSH_BEFORE_JSON: ${{ toJSON(github.event.before) }}
+  HERDR_PUSH_AFTER_JSON: ${{ toJSON(github.event.after) }}
+  HERDR_PUSH_REF_JSON: ${{ toJSON(github.event.ref) }}
+  HERDR_PUSH_REPOSITORY_JSON: ${{ toJSON(github.event.repository.full_name) }}
+  HERDR_PUSH_FORCED_JSON: ${{ toJSON(github.event.forced) }}
+  HERDR_PUSH_CREATED_JSON: ${{ toJSON(github.event.created) }}
+  HERDR_PUSH_DELETED_JSON: ${{ toJSON(github.event.deleted) }}
+  HERDR_PUSH_CONTEXT_REPOSITORY_JSON: ${{ toJSON(github.repository) }}
+  HERDR_PUSH_CONTEXT_REF_JSON: ${{ toJSON(github.ref) }}
+  HERDR_PUSH_CONTEXT_SHA_JSON: ${{ toJSON(github.sha) }}
+  HERDR_PUSH_CONTEXT_RUN_ID_JSON: ${{ toJSON(github.run_id) }}
+  HERDR_PUSH_CONTEXT_RUN_ATTEMPT_JSON: ${{ toJSON(github.run_attempt) }}
+  HERDR_PUSH_CONTEXT_EVENT_NAME_JSON: ${{ toJSON(github.event_name) }}
 
 # A fresh, explicit producer avoids pretending the inherited one-day artifact
 # still exists. Both jobs bind this exact push SHA; this is not workflow_run.
@@ -23,14 +36,14 @@ jobs:
       artifact-id: ${{ steps.bundle.outputs.artifact-id }}
       artifact-digest: ${{ steps.bundle.outputs.artifact-digest }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       # Python is pinned, not the mutable runner image's ambient python3: the scope
       # check below and every later python3 step run under this exact version, which
       # the receipt and the qualification gate also require (PYTHON_VERSION).
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3.14.0"
       # The scope allowlist lives in exactly one place: the Darwin runner module,
@@ -60,14 +73,28 @@ jobs:
           ], timeout=10).decode().splitlines()
           if not module.candidate_scope_allowed(observed):
               raise SystemExit('candidate is outside the reviewed scope')
+          import os
+          from pathlib import Path
+          projection = module.ci_push_projection()
+          event_path = os.environ['GITHUB_EVENT_PATH']
+          print('raw_push_event_bytes=' + str(Path(event_path).stat().st_size),
+                'projection_bytes=' + str(len(module.json.dumps(projection).encode()) if projection else 0))
+          target = {'system': 'Darwin', 'machine': 'arm64', 'enabled': '1',
+              'repository': os.environ.get('GITHUB_REPOSITORY'), 'ref': os.environ.get('GITHUB_REF'),
+              'attempt': os.environ.get('GITHUB_RUN_ATTEMPT'), 'event_name': os.environ.get('GITHUB_EVENT_NAME'),
+              'candidate_sha': os.environ.get('GITHUB_SHA'), 'run_id': os.environ.get('GITHUB_RUN_ID'),
+              'runner_environment': 'github-hosted', 'image_os': 'macos15'}
+          target = module.first_push_observation(target, event_path, Path.cwd(), projection=projection)
+          if module.selected_grant_id(target) is None:
+              raise SystemExit('push admission refused')
           PY
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: false
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
       - name: Focused lint of the actual new workflow
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
@@ -85,7 +112,7 @@ jobs:
             dist/release/checksums.txt "$version" "$GITHUB_SHA" linux/amd64
       - name: Publish this candidate's checksum/manifest-bound input
         id: bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-bundles
           path: dist/release/
@@ -101,7 +128,7 @@ jobs:
     # (Go, Node, Bun and the pinned Python).
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -117,18 +144,18 @@ jobs:
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           test "$(uname -s)" = Darwin
           test "$(uname -m)" = arm64
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: false
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
-      - uses: oven-sh/setup-bun@v2
+          node-version: 26.13.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
       # Pinned Python for the offline controls, the cell and its publication step.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3.14.0"
       # The offline negative controls and the qualification gate's own self-test run
@@ -140,28 +167,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 -I -B tests/test_tailscale_darwin_package_browser_scope.py
           python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check parser
           python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check archive
           python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check phase-caps
           python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check cleanup
           python3 -I -B scripts/qualify-darwin-package-browser.py --self-test
-      # Frozen fast-forward grant projection. The runner binds the bounded push
-      # event before/after, the sole candidate parent and three git history facts
-      # (the scope base precedes `before`, `before` precedes the candidate, and the
-      # pushed range before..candidate contains no merge commit) before ANY
-      # launcher/query, and revalidates those inputs at both launcher boundaries.
-      # Any attempt-1, non-forced, linear fast-forward push to this branch whose
-      # `before` descends from the pinned scope base is admitted, so later pushes
-      # of the CI loop pass; reruns, redispatch, created or deleted refs, force
-      # pushes, a merge commit anywhere in the pushed range and a `before` that is
-      # not an ancestor of the candidate refuse. This is not a global nonce across
-      # forbidden resets. These are operational admission checks, NOT cryptographic
-      # authentication or a security boundary against a local caller forging
-      # environment/event inputs. The grant permits max-two label-scoped read-only
-      # queries ONLY in this isolated hosted runner. No local runtime or local
-      # launchctl is authorized, even if fabricated local inputs could satisfy the
-      # predicate. This literal is a projection, not owner authority: no effect can
-      # occur before the owner approves the push that is its only trigger.
+      # The selected packet follows the real push event and checked-out graph.
+      # q3 still accepts only linear pushes; the owner-approved exception accepts
+      # only the pinned two-parent integration. Both retain the same hosted-only,
+      # first-attempt, two-read-only-query limit. The launcher rechecks the inputs
+      # before each query. These observations do not authorize local execution.
       # Consumer contract: this cell passes only if this step/job succeeds
       # (runner exit 0) AND its published receipt validates as pass for the exact
       # SHA/run/source/producer. A receipt alone never establishes pass. Command
@@ -181,12 +197,31 @@ jobs:
           test -n "$PRODUCER_ARTIFACT_DIGEST"
           # The runner writes PRIVATE staging only. Always capture its completed
           # exit status before the separate bounded, offline publication command.
+          grant=$(python3 -I -B - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+          import sys
+          spec = importlib.util.spec_from_file_location('darwin_gate', 'tests/test_tailscale_darwin_package_browser.py')
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
+          projection = module.ci_push_projection()
+          event_path = os.environ['GITHUB_EVENT_PATH']
+          print('raw_push_event_bytes=' + str(Path(event_path).stat().st_size),
+                'projection_bytes=' + str(len(module.json.dumps(projection).encode()) if projection else 0),
+                file=sys.stderr)
+          context = module.first_push_observation(module.ci_environment(), event_path, Path.cwd(),
+                                                  projection=projection)
+          print(module.grant_packet(module.selected_grant_id(context)))
+          PY
+          )
           runner_status=0
           python3 -I -B tests/test_tailscale_darwin_package_browser.py \
             --fresh-producer --producer-sha "$GITHUB_SHA" \
             --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
             --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
-            --launchctl-query-grant '{"grantId":"q3-roadmap-launchctl-print-ff-c77855cb-20261014","authorized":true,"pinnedParent":"c77855cb4e779c00a85d194f5bffe72ac3016554","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of a fast-forward push to refs/heads/ci/tailscale-native-preflight-ef9f843 whose before descends from c77855cb4e779c00a85d194f5bffe72ac3016554"}}' \
+            --launchctl-query-grant "$grant" \
             --private-root "$RUNNER_TEMP/herdr-dpb-private" \
             --evidence "$RUNNER_TEMP/herdr-dpb-staging/darwin-package-browser.json" \
             --budget-seconds 1260 || runner_status=$?
@@ -197,6 +232,7 @@ jobs:
           # the runner's actual status, not the receipt's claimed result.
           python3 -I -B tests/test_tailscale_darwin_package_browser.py \
             --publish-receipt --runner-exit-code "$runner_status" \
+            --launchctl-query-grant "$grant" \
             --fresh-producer --producer-sha "$GITHUB_SHA" \
             --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
             --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
@@ -207,7 +243,7 @@ jobs:
       # on failure retains evidence, not cell acceptance; see consumer contract.
       - name: Upload only the sanitized bounded cell receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: darwin-package-browser-cell
           path: ${{ runner.temp }}/herdr-dpb-evidence/darwin-package-browser.json

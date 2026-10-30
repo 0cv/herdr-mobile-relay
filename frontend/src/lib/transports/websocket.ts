@@ -30,6 +30,12 @@ export function createWebSocketTransport(
   return createEncryptedTransport({
     kind: 'websocket',
     token: relay.token,
+    allowPlaintext: () => {
+      try {
+        const url = new URL(relay.url);
+        return /^wss?:$/.test(url.protocol) && /^(localhost|127(?:\.\d+){3}|\[::1\])$/.test(url.hostname);
+      } catch { return false; }
+    },
     codec: 'json',
     handlers,
     ...authentication,
@@ -50,6 +56,7 @@ function createWebSocketChannel(
 ): FrameChannel {
   let socket: WebSocket | null = null;
   let closed = false;
+  let relayTls = false;
 
   function fail(reason: string): void {
     if (closed) return;
@@ -73,16 +80,17 @@ function createWebSocketChannel(
         return;
       }
       socket.onopen = () => {
-        if (closed) return;
+        if (closed || !socket) return;
         // A relay that ignores the encrypted subprotocol would otherwise get a
         // plaintext hello, so refuse the socket before anything is sent.
         if (encrypted
           && typeof socket?.protocol === 'string'
           && socket.protocol !== E2EE_SUBPROTOCOL) {
-          fail('Relay did not negotiate encrypted transport');
+          fail('Encrypted transport required');
           return;
         }
         observePhase(observe, 'open', 'websocket');
+        relayTls = encrypted && socket.url.startsWith('wss:');
         handlers.onOpen();
       };
       socket.onmessage = (event) => {
@@ -99,10 +107,10 @@ function createWebSocketChannel(
         // the same rejected material, so the path manager must not.
         if (event?.code === UNAUTHORIZED_CLOSE_CODE) {
           handlers.onClose({
-            reason: 'This relay no longer accepts this device',
+            reason: 'Device credential rejected',
             fatal: true,
             code: 'device_unauthorized',
-          });
+          }, relayTls);
           return;
         }
         handlers.onClose({ reason: 'Relay disconnected' });

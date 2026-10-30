@@ -1,6 +1,6 @@
 <script lang="ts">
   import Button from '$components/ui/Button.svelte';
-  import type { AttachmentBatchSnapshot } from '$lib/attachments';
+  import { attachmentIssueText, type AttachmentBatchSnapshot } from '$lib/attachments';
 
   let {
     snapshot,
@@ -32,7 +32,7 @@
           <span>{stateLabel(item.state)}</span>
         </div>
         <progress max="100" value={Math.round(item.progress * 100)} aria-label={`${item.name} upload progress`}></progress>
-        {#if item.issue}<small role="alert">{item.issue.code.replaceAll('_', ' ')}</small>{/if}
+        {#if item.issue}<small role="alert">{attachmentIssueText(item.issue)}</small>{/if}
       </li>
     {/each}
   </ul>

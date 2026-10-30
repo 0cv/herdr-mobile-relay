@@ -45,7 +45,7 @@ func TestLiteralKeyNames(t *testing.T) {
 }
 
 func TestSendLiteralKeySeparateRequests(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "herdr.sock")
+	path := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestSendLiteralKeyRejectsBeforeConnection(t *testing.T) {
 }
 
 func TestSendLiteralKeyLostAcknowledgementDoesNotRetry(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "herdr.sock")
+	path := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)

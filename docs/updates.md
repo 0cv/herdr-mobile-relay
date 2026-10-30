@@ -16,6 +16,28 @@ failed update restarts and verifies the previous release without changing that d
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.
 
+## Upgrading to v0.23.0
+
+Conversation / Full history is the default when an agent has native history;
+saved view preferences and the Terminal fallback remain available. Pi's optional
+integration streams live text and tool progress without a launch flag. Codex,
+Claude Code, Cursor, Qoder and Oh My Pi deliver updates after native records are
+written; OpenCode and Hermes still refresh recorded history periodically.
+
+Restart the relay after upgrading; the verified updater does this as part of
+activation. Enable Pi's optional integration with **Settings → Pi Integration**
+on its computer (controller access required). It defaults to off. Startup
+refreshes only existing marker-owned installations in the relay's known Pi
+profiles; it never adopts an unowned directory. The setting reports per-profile
+results and also recognizes manual CLI installations.
+
+Run `/reload` in each affected Pi pane, or restart Pi, to load refreshed files;
+this is never sent automatically. The CLI remains available as
+`bash relay/setup.sh --pi-install /absolute/profile/agent` (or `--pi-remove`).
+Turning the setting off removes only owned integration files. Live partials are
+visible to authorized paired readers as well as controllers while Full history is open; completion-time redactions cannot
+retract earlier updates. See the [Pi privacy policy](conversation-activity.md#pi-privacy-policy).
+
 ## Upgrading to v0.21.0
 
 Version 0.21.0 adds live Herdr compatibility reporting, JSON-backed workspace

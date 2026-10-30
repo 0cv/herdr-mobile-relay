@@ -21,21 +21,14 @@ func sameSlashTarget(before, after *coordinator.AgentState) bool {
 }
 
 type paneProcessReader interface {
-	PaneProcessInfo(context.Context, string) (*herdr.PaneProcessInfo, error)
+	PaneProcessInfoFresh(context.Context, string) (*herdr.PaneProcessInfo, error)
 }
 
 func foregroundRoot(info *herdr.PaneProcessInfo, pane string) (int, error) {
-	if info == nil || info.PaneID != pane || info.ForegroundProcessGroupID <= 0 || info.ForegroundProcessGroupID == info.ShellPID {
-		return 0, errors.New("no agent foreground process")
-	}
-	count := 0
-	for _, process := range info.ForegroundProcesses {
-		if process.PID == info.ForegroundProcessGroupID {
-			count++
-		}
-	}
-	if count != 1 {
-		return 0, errors.New("ambiguous foreground process")
+	if info == nil || pane == "" || info.PaneID != pane || info.ShellPID <= 0 ||
+		info.ForegroundProcessGroupID <= 0 || info.ForegroundProcessGroupID == info.ShellPID ||
+		len(info.ForegroundProcesses) != 1 || info.ForegroundProcesses[0].PID != info.ForegroundProcessGroupID {
+		return 0, errors.New("foreground ownership unavailable")
 	}
 	return info.ForegroundProcessGroupID, nil
 }
@@ -56,7 +49,7 @@ func runtimePiCatalog(ctx context.Context, reader paneProcessReader, socket, pan
 	if err != nil {
 		return slashcmd.Catalog{}, err
 	}
-	before, err := reader.PaneProcessInfo(ctx, pane)
+	before, err := reader.PaneProcessInfoFresh(ctx, pane)
 	if err != nil {
 		return slashcmd.Catalog{}, err
 	}
@@ -68,7 +61,7 @@ func runtimePiCatalog(ctx context.Context, reader paneProcessReader, socket, pan
 	if err != nil {
 		return slashcmd.Catalog{}, err
 	}
-	after, err := reader.PaneProcessInfo(ctx, pane)
+	after, err := reader.PaneProcessInfoFresh(ctx, pane)
 	if err != nil {
 		return slashcmd.Catalog{}, err
 	}

@@ -6,8 +6,9 @@ successful first-attempt push run for each of the four required workflows on
 the exact SHA/branch AND the supplied Darwin receipt is a complete PASS under
 the runner's own receipt contract (tests/test_tailscale_darwin_package_browser.py
 receipt_values_safe/receipt_policy/publish_receipt), bound to that Darwin run,
-to the exact SHA, to the pinned launchctl grant, and to the SHA256 of the four
-runner source blobs at that SHA.
+to the exact SHA, to the applicable pinned launchctl rule, and to the SHA256
+of the four runner source blobs at that SHA. The integration rule additionally
+requires the candidate commit's immutable tree and exact ordered parents.
 
 This tool never observes GitHub, downloads, commits, publishes or runs the
 candidate. Normal mode only reads the two JSON files you name and (read-only)
@@ -55,14 +56,13 @@ FILES = (
     "tests/test_tailscale_extracted_package_browser.py",
     "tests/tailscale-package-browser.mjs",
 )
-# The launchctl grant projection the runner stamps into its receipt, in lockstep with
-# LAUNCHCTL_GRANT_ID / LAUNCHCTL_PINNED_PARENT in the Darwin runner and the workflow's
-# --launchctl-query-grant literal. PINNED_PARENT keeps its receipt-key name but is the
-# grant's pinned scope base (the CI-branch tip the candidate descends from), not a
-# single parent. This is a projection, not owner authority: it takes effect only when
-# the owner approves the push that triggers the hosted run.
+# The q3 receipt identity remains the pinned scope base, not a single parent.
+# The separate integration identity is bound to the exact ordered commit parents.
 GRANT_ID = "q3-roadmap-launchctl-print-ff-c77855cb-20261014"
 PINNED_PARENT = "c77855cb4e779c00a85d194f5bffe72ac3016554"
+INTEGRATION_GRANT_ID = "q4-owner-hosted-integration-9aed9d04-27054011-20261030"
+INTEGRATION_BEFORE = "9aed9d0464ed28e241608cb9365d26f064a31cf9"
+INTEGRATION_MAIN = "27054011fd8137d5f9702cc9e718aff1bd73443d"
 # The exact Python the workflow pins (actions/setup-python); the receipt must record it,
 # like Node, Bun and Go, in lockstep with PYTHON_VERSION in the Darwin runner.
 PYTHON_VERSION = "3.14.0"
@@ -113,6 +113,7 @@ PASS_FIELDS = frozenset({
     "cleanup", "owned_cleanup", "request_counts", "fixture_operations", "captured_output_bytes",
     "dependency_payload_bytes_peak", "launchctl_query_grant_id", "github_run_id", "github_run_attempt",
     "launchctl_query_pinned_parent", "socket_diagnostics"})
+INTEGRATION_FIELDS = frozenset({"integration_before", "integration_parents"})
 DIGEST = re.compile(r"[0-9a-f]{64}")
 REVISION = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}")
@@ -299,7 +300,7 @@ def check_trust(trust):
     browser = trust["browser"]
     require(is_exact(browser, ("ok", "observations", "argv_ok", "version", "contexts_closed"))
             and all(browser[key] is True for key in ("ok", "argv_ok", "contexts_closed"))
-            and browser["version"] == "151.0.7922.34" and browser["observations"] == [
+            and browser["version"] == "153.0.8010.12" and browser["observations"] == [
         "empty_profile_refuses_ca", "trusted_profile_accepts_ip", "trusted_profile_refuses_unknown_ca",
         "trusted_profile_refuses_wrong_host"], "receipt_browser_trust")
     controls = trust["python_curl_packaged_go"]
@@ -352,19 +353,19 @@ def check_phases_and_cases(value):
 
 
 def check_identities(value):
-    require(value["source_proof"] == {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c",
-            "playwright_tag": "v1.62.1", "go_tag": "go1.27.1", "trust": "TRUST-PROOF.md"}, "receipt_source_proof")
+    require(value["source_proof"] == {"chromium_commit": "971a7443b0c9b0a9b2860529b33331b76077ec62",
+            "playwright_tag": "v1.63.0", "go_tag": "go1.27.3", "trust": "TRUST-PROOF.md"}, "receipt_source_proof")
     compiler = value["compiler"]
-    require(is_exact(compiler, ("version", "target", "metadata_sha256")) and compiler["version"] == "go1.27.1"
+    require(is_exact(compiler, ("version", "target", "metadata_sha256")) and compiler["version"] == "go1.27.3"
             and compiler["target"] == "darwin/arm64" and is_digest(compiler["metadata_sha256"]), "receipt_compiler")
     browser = value["browser_identity"]
     require(is_exact(browser, ("sha256", "version", "revision", "playwright", "switches_sha256", "target"))
-            and browser["version"] == "151.0.7922.34" and browser["revision"] == "1234"
-            and browser["playwright"] == "1.62.1" and browser["target"] == "darwin/arm64"
+            and browser["version"] == "153.0.8010.12" and browser["revision"] == "1243"
+            and browser["playwright"] == "1.63.0" and browser["target"] == "darwin/arm64"
             and is_digest(browser["sha256"]) and is_digest(browser["switches_sha256"]), "receipt_browser")
     tools = value["tools"]
     require(is_exact(tools, ("python", "node", "bun", "go", "curl", "openssl")) and tools["python"] == PYTHON_VERSION
-            and tools["node"] == "24.21.0" and tools["bun"] == "1.4.0" and tools["go"] == "1.27.1"
+            and tools["node"] == "26.13.0" and tools["bun"] == "1.4.4" and tools["go"] == "1.27.3"
             and all(type(v) is str and TOOL_VERSION.fullmatch(v) for v in tools.values()), "receipt_tools")
     policy = value["profile_policy"]
     require(is_exact(policy, ("schema", "root_der_sha256", "trust_blob", "platform_integration", "sandbox", "mock_keychain"))
@@ -460,14 +461,19 @@ def validate_receipt(value, sha, run_id):
             early.append("receipt_failure_present")
         if early:
             return early
-        require(set(value) == PASS_FIELDS, "receipt_fields")
+        integration = value.get("launchctl_query_grant_id") == INTEGRATION_GRANT_ID
+        require(set(value) == PASS_FIELDS | (INTEGRATION_FIELDS if integration else set()), "receipt_fields")
         require(is_int(value["schemaVersion"], 1, 1) and value["scope"] == "darwin_arm64_byo_only", "receipt_identity")
         require(value["candidate_sha"] == sha, "receipt_sha")
         require(run_id is not None and is_int(value["github_run_id"], 1, RUN_ID_MAX) and value["github_run_id"] == run_id,
                 "receipt_run_binding")
         require(is_int(value["github_run_attempt"], 1, 1), "receipt_attempt")
-        require(value["launchctl_query_grant_id"] == GRANT_ID and value["launchctl_query_pinned_parent"] == PINNED_PARENT,
+        require((value["launchctl_query_grant_id"], value["launchctl_query_pinned_parent"]) ==
+                ((INTEGRATION_GRANT_ID, INTEGRATION_BEFORE) if integration else (GRANT_ID, PINNED_PARENT)),
                 "receipt_grant")
+        if integration:
+            require(value["integration_before"] == INTEGRATION_BEFORE
+                    and value["integration_parents"] == [INTEGRATION_BEFORE, INTEGRATION_MAIN], "receipt_grant")
         producer = value["producer"]
         # The producer is a job in this same workflow run: fresh, same SHA, same run.
         require(is_exact(producer, ("sha", "run", "artifact", "zip_sha256", "fresh")) and producer["sha"] == sha
@@ -546,7 +552,10 @@ def git_blob_reader(repo, sha, popen=subprocess.Popen, ready=None, read=None, cl
     def read_blob(path):
         try:
             require(type(repo) is str and os.path.isdir(repo), "source_blob_unavailable")
-            process = popen(git_command(sha, path), cwd=repo, env=dict(GIT_ENV), stdin=subprocess.DEVNULL,
+            command = (git_command(sha, path) if path is not None else
+                       ["git", "--no-replace-objects", "--no-optional-locks", "-c", "protocol.allow=never",
+                        "cat-file", "commit", sha])
+            process = popen(command, cwd=repo, env=dict(GIT_ENV), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False)
             code, data = collect_bounded(process, BLOB_CAP, GIT_TIMEOUT, clock, ready, read)
         except (OSError, subprocess.SubprocessError):
@@ -590,6 +599,17 @@ def evaluate(sha, load_runs, load_receipt, read_blob, load_reviewed=None):
     except Exception:  # noqa: BLE001 - any acquisition failure is the same fixed code
         computed = None
         failures.append("source_blob_unavailable")
+    if type(receipt) is dict and receipt.get("launchctl_query_grant_id") == INTEGRATION_GRANT_ID:
+        try:
+            commit = read_blob(None)
+            require(type(commit) is bytes and len(commit) <= BLOB_CAP, "integration_graph_unavailable")
+            header = commit.split(b"\n\n", 1)[0].splitlines()
+            tree = (b"tree " + receipt["candidate_tree"].encode("ascii"))
+            parents = [b"parent " + parent.encode("ascii") for parent in (INTEGRATION_BEFORE, INTEGRATION_MAIN)]
+            require(header[:3] == [tree, *parents] and
+                    not any(line.startswith(b"parent ") for line in header[3:]), "integration_graph_mismatch")
+        except Exception:  # noqa: BLE001 - never treat a missing commit as graph evidence
+            failures.append("integration_graph_mismatch")
     receipt_hashes = receipt.get("source_hashes") if type(receipt) is dict else None
     if computed is not None and receipt_hashes != computed:
         failures.append("source_hash_mismatch")
@@ -648,13 +668,13 @@ def fixture_receipt(sha=SELF_SHA, run=SELF_RUNS["darwin"]):
         "producer": {"sha": sha, "run": run, "artifact": 777, "zip_sha256": digest("2"), "fresh": True},
         "archive_hashes": {"herdr-mobile-relay_1.2.3_darwin_arm64.tar.gz": digest("3"), "checksums.txt": digest("4")},
         "version": "1.2.3", "manifest_sha256": digest("5"), "binary_sha256": digest("6"),
-        "compiler": {"version": "go1.27.1", "target": "darwin/arm64", "metadata_sha256": digest("7")},
-        "browser_identity": {"sha256": digest("8"), "version": "151.0.7922.34", "revision": "1234",
-            "playwright": "1.62.1", "switches_sha256": digest("9"), "target": "darwin/arm64"},
-        "tools": {"python": PYTHON_VERSION, "node": "24.21.0", "bun": "1.4.0", "go": "1.27.1", "curl": "8.7.1",
+        "compiler": {"version": "go1.27.3", "target": "darwin/arm64", "metadata_sha256": digest("7")},
+        "browser_identity": {"sha256": digest("8"), "version": "153.0.8010.12", "revision": "1243",
+            "playwright": "1.63.0", "switches_sha256": digest("9"), "target": "darwin/arm64"},
+        "tools": {"python": PYTHON_VERSION, "node": "26.13.0", "bun": "1.4.4", "go": "1.27.3", "curl": "8.7.1",
                   "openssl": "1.1.1w"},
-        "source_proof": {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c", "playwright_tag": "v1.62.1",
-                         "go_tag": "go1.27.1", "trust": "TRUST-PROOF.md"},
+        "source_proof": {"chromium_commit": "971a7443b0c9b0a9b2860529b33331b76077ec62", "playwright_tag": "v1.63.0",
+                         "go_tag": "go1.27.3", "trust": "TRUST-PROOF.md"},
         "profile_inputs": {"controller": {"database_sha256": digest("a"), "preferences_sha256": digest("b")},
             "reader": {"database_sha256": digest("c"), "preferences_sha256": digest("d")},
             "negative": {"database_absent": True, "preferences_sha256": digest("e")}},
@@ -666,7 +686,7 @@ def fixture_receipt(sha=SELF_SHA, run=SELF_RUNS["darwin"]):
             "observations": [observation(1), observation(2)]},
         "trust_controls": {"python_curl_packaged_go": [control("positive", None, 0, 0), control("unknown_ca", 20, 60, 1),
                                                        control("wrong_host", 64, 60, 1)],
-            "browser": {"ok": True, "argv_ok": True, "contexts_closed": True, "version": "151.0.7922.34",
+            "browser": {"ok": True, "argv_ok": True, "contexts_closed": True, "version": "153.0.8010.12",
                 "observations": ["empty_profile_refuses_ca", "trusted_profile_accepts_ip",
                                  "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"]}},
         "cases": [case("enroll", ENROLL, ASSERT_ENROLL), case("reprint", PRESERVE, ASSERT_PRESERVE),
@@ -746,6 +766,34 @@ def self_test():
         return runs
 
     expect("accept_all_pass", run(SELF_SHA, fixture_runs(), fixture_receipt()))
+    integrated = mutated(lambda r: r.update(launchctl_query_grant_id=INTEGRATION_GRANT_ID,
+        launchctl_query_pinned_parent=INTEGRATION_BEFORE, integration_before=INTEGRATION_BEFORE,
+        integration_parents=[INTEGRATION_BEFORE, INTEGRATION_MAIN]))
+    commit = ("tree " + integrated["candidate_tree"] + "\nparent " + INTEGRATION_BEFORE +
+              "\nparent " + INTEGRATION_MAIN + "\nauthor inert <inert@example.invalid> 1 +0000\n\nmessage\n").encode()
+    def integrated_reader(path, content=commit):
+        return content if path is None else blobs(path)
+    expect("accept_exact_integration_graph", run(SELF_SHA, fixture_runs(), integrated, integrated_reader))
+    for name, content in (("wrong_parent", commit.replace(INTEGRATION_MAIN.encode(), b"b" * 40)),
+            ("reversed_parents", commit.replace(("parent " + INTEGRATION_BEFORE + "\nparent " + INTEGRATION_MAIN).encode(),
+                ("parent " + INTEGRATION_MAIN + "\nparent " + INTEGRATION_BEFORE).encode())),
+            ("missing_parent", commit.replace(("parent " + INTEGRATION_MAIN + "\n").encode(), b"")),
+            ("extra_parent", commit.replace(b"\nauthor ", b"\nparent " + b"b" * 40 + b"\nauthor ")),
+            ("wrong_tree", commit.replace(integrated["candidate_tree"].encode(), b"b" * 40))):
+        expect("reject_integration_" + name, run(SELF_SHA, fixture_runs(), integrated,
+            lambda path, content=content: integrated_reader(path, content)), "integration_graph_mismatch")
+    expect("reject_integration_missing_commit", run(SELF_SHA, fixture_runs(), integrated), "integration_graph_mismatch")
+    for name, change in (("before", {"integration_before": PINNED_PARENT}),
+            ("main", {"integration_parents": [INTEGRATION_BEFORE, "b" * 40]}),
+            ("reversed_metadata", {"integration_parents": [INTEGRATION_MAIN, INTEGRATION_BEFORE]}),
+            ("spent_id", {"launchctl_query_grant_id": "q2-owner-launchctl-print-push-2230f96f-20261013"}),
+            ("q3_id", {"launchctl_query_grant_id": GRANT_ID}),
+            ("wrong_source", {"source_hashes": {**integrated["source_hashes"], FILES[0]: "b" * 64}})):
+        changed = copy.deepcopy(integrated)
+        changed.update(change)
+        expect("reject_integration_" + name, run(SELF_SHA, fixture_runs(), changed, integrated_reader),
+               "source_hash_mismatch" if name == "wrong_source" else
+               "receipt_fields" if name in {"q3_id", "spent_id"} else "receipt_grant")
     expect("accept_reviewed_hashes", run(SELF_SHA, fixture_runs(), fixture_receipt(), reviewed=SELF_HASHES))
     expect("accept_unrelated_extra_workflow", run(SELF_SHA, fixture_runs() + [{**fixture_runs()[0],
         "workflowName": "unrelated", "databaseId": 9, "conclusion": "failure"}], fixture_receipt()))

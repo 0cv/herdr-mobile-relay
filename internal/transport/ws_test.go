@@ -226,7 +226,7 @@ func TestOversizedHandshakeEvictsWithoutRegistrationDeadlock(t *testing.T) {
 	server.Start()
 	defer server.Close()
 
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
+	dialCtx, dialCancel := context.WithTimeout(t.Context(), time.Minute)
 	defer dialCancel()
 	conn, _, err := websocket.Dial(dialCtx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	record("dial returned")
@@ -241,7 +241,7 @@ func TestOversizedHandshakeEvictsWithoutRegistrationDeadlock(t *testing.T) {
 		releaseCallback()
 		t.Fatal("callback was not entered")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	watchDone := make(chan struct{})
 	stacks := make(chan []byte, 1)

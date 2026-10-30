@@ -1,0 +1,995 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { measuredAndroidEvents, parseAndroidAuditSubject } from '../android-events';
+import type { AndroidEnvironmentSnapshot, AndroidPlannedTermination } from '../android-environment';
+
+const processName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:2';
+const line = (time: number, pid: number, tag: string, message: string) => `178910637${time}.000 ${pid} ${pid} I ${tag}: ${message}\n`;
+const start = line(0, 1, 'HerdrMeasure', 'synthetic START');
+const end = line(9, 1, 'HerdrMeasure', 'synthetic END');
+const fork = line(1, 100, 'Zygote', 'Forked child process 200');
+const birth = line(2, 559, 'ActivityManager', `Start proc 200:${processName}/u0ai2 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:2}`);
+const child = line(3, 200, 'chromium', '[INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.');
+const death = line(4, 559, 'ActivityManager', `Killing 200:${processName}/u0a145i-8998 (adj 0): isolated not needed`);
+const exit = line(5, 100, 'Zygote', 'Process 200 exited cleanly (0)');
+const body = fork + birth + child + death + exit;
+const quickDeath = death.replace('6374.000', '6372.500');
+const quickExit = exit.replace('6375.000', '6372.600');
+const quickBody = fork + birth + quickDeath + quickExit;
+const uid = line(2, 200, 'CompatChangeReporter', 'Compat change id reported: 242716250; UID 90002; state: ENABLED');
+const recordedProcessName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22';
+const recordedLine = (value: string) => `${value}\n`;
+const recordedStart = recordedLine('         1790252388.000 2000 2000 I HerdrMeasure: recorded START');
+const recordedEnd = recordedLine('         1790252390.000 2000 2000 I HerdrMeasure: recorded END');
+const recordedStartup = recordedLine('         1790252389.327 9917 9917 I cessService0:22: Using CollectorTypeCMC GC.')
+  + recordedLine('         1790252389.328 9917 9917 W cessService0:22: Unexpected CPU variant for x86: x86_64.')
+  + recordedLine('         1790252389.328 9917 9917 W cessService0:22: Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default');
+const recordedFork = recordedLine('         1790252389.328 5253 5253 D Zygote  : Forked child process 9917');
+const recordedBirth = recordedLine(`         1790252389.334 553 1773 I ActivityManager: Start proc 9917:${recordedProcessName}/u0ai22 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:22}`);
+const recordedUid = recordedLine('         1790252389.337 9917 9917 D CompatChangeReporter: Compat change id reported: 242716250; UID 90022; state: ENABLED');
+const recordedSplit = recordedLine(`         1790252389.358 9917 9917 I cr_SplitCompatApp: version=131.0.6778.200 (677820038) minSdkVersion=29 isBundle=true processName=${recordedProcessName} isIsolatedProcess=true`);
+const recordedAudit = recordedLine('         1790252389.408 9917 9917 W ThreadPoolForeg: type=1400 audit(0.0:277): avc:  denied  { setattr } for  name="real_time_url_checks_allowlist.pb" dev="dm-46" ino=385623 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0');
+const recordedChild = recordedLine('         1790252389.432 9917 9930 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.');
+const recordedDeath = recordedLine(`         1790252389.435 553 1783 I ActivityManager: Killing 9917:${recordedProcessName}/u0a145i-8978 (adj 0): isolated not needed`);
+const recordedExit = recordedLine('         1790252389.452 5253 5253 I Zygote  : Process 9917 exited cleanly (0)');
+const recordedBody = recordedStartup + recordedFork + recordedBirth + recordedUid + recordedSplit + recordedAudit + recordedChild + recordedDeath + recordedExit;
+const recordedSnapshot = (boundary: 'start' | 'end', processes: Record<string, string> = { '5253': 'com.android.chrome_zygote', '553': 'system_server', '6538': 'com.android.chrome' }) => ({
+  measurement: { id: 'recorded', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const measureRecorded = (log: string, before = recordedSnapshot('start'), after = recordedSnapshot('end')) => measuredAndroidEvents(log, before, after, []);
+const audit = line(3, 200, 'ThreadPoolForeg', 'type=1400 audit(0.0:238): avc:  denied  { setattr } for  name="arbitrary.txt" dev="dm-46" ino=65621 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0').replace(' I ', ' W ');
+const auditBody = body.replace(birth, birth + uid);
+const snapshot = (boundary: 'start' | 'end', processes: Record<string, string> = { '100': 'com.android.chrome_zygote', '559': 'system_server' }) => ({
+  measurement: { id: 'synthetic', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const measure = (log: string, before = snapshot('start'), after = snapshot('end')) => measuredAndroidEvents(log, before, after, []);
+
+export const androidEventTests: [string, () => Promise<void>][] = [
+  ['recorded isolated-child startup receipt order is preserved and admitted only as bounded Zygote log skew', async () => {
+    const log = recordedStart + recordedBody + recordedEnd;
+    const result = measureRecorded(log);
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.normalRetirements.length, 1);
+    assert.deepEqual(result.fatalEvents, []);
+    assert.equal(result.events.length, 1);
+    const retirement = result.normalRetirements[0];
+    assert.equal(retirement.pid, '9917');
+    assert.equal(retirement.uid, 90022);
+    assert.equal(retirement.auditSubjects.length, 1);
+    assert.deepEqual(retirement.proof.slice(0, 3).map((proof) => proof.line), recordedStartup.trimEnd().split('\n'));
+    assert.deepEqual(retirement.proof.map((proof) => log.split('\n')[proof.lineNumber - 1]), retirement.proof.map((proof) => proof.line));
+    assert.ok(retirement.proof.some((proof) => proof.line === recordedFork.trimEnd()));
+    assert.ok(retirement.proof.some((proof) => proof.line === recordedBirth.trimEnd()));
+    assert.ok(retirement.proof.some((proof) => proof.line === recordedExit.trimEnd()));
+    assert.deepEqual(log.split('\n').filter(Boolean).length, 13);
+  }],
+  ['synthetic normal helper has complete traceable proof, distinct from fatal events', async () => {
+    const result = measure(start + body + end);
+    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.fatalEvents, []);
+    assert.equal(result.events.length, 1);
+    assert.equal(result.normalRetirements.length, 1);
+    assert.equal(result.normalRetirements[0].uid, 90002);
+    const consistentIdentity = uid + line(2, 200, 'cr_SplitCompatApp', `version=1 processName=${processName} isIsolatedProcess=true`);
+    assert.equal(measure(start + body.replace(child, consistentIdentity + child) + end).normalRetirements.length, 1);
+    for (const proof of result.normalRetirements[0].proof) assert.equal((start + body + end).split('\n')[proof.lineNumber - 1], proof.line);
+    const unrelated = line(0, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50');
+    assert.equal(measure(start + unrelated + body + end).normalRetirements.length, 1);
+    for (const producer of [559, 100]) {
+      const postProof = line(8, 42, 'Zygote', `Process ${producer} exited due to signal 9 (Killed)`);
+      assert.equal(measure(start + body + postProof + end).normalRetirements.length, 1);
+    }
+    assert.equal(measure(start + body.replace(child, child + unrelated.replace('6370', '6373').replace('user=0', 'user=1')) + end).normalRetirements.length, 1);
+  }],
+  ['recorded startup skew admits the exact twenty-millisecond boundary and covers pre-fork adverse events', async () => {
+    const log = recordedStart + recordedBody + recordedEnd;
+    const exactBoundary = log.replace('1790252389.327 9917', '1790252389.308 9917');
+    const accepted = measureRecorded(exactBoundary);
+    assert.equal(accepted.normalRetirements.length, 1);
+    assert.deepEqual(accepted.fatalEvents, []);
+    assert.equal(accepted.normalRetirements[0].proof[0].line, recordedStartup.split('\n')[0].replace('1790252389.327', '1790252389.308'));
+    const outside = measureRecorded(log.replace('1790252389.327 9917', '1790252389.307 9917'));
+    assert.equal(outside.normalRetirements.length, 0);
+    assert.ok(outside.fatalEvents.includes(recordedDeath.trimEnd()));
+    const forceStop = recordedLine('         1790252389.327 553 1783 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 50');
+    const packageChange = recordedLine('         1790252389.327 553 1783 I PackageManager: Replacing package com.android.chrome');
+    for (const adverse of [forceStop, packageChange]) {
+      for (const candidate of [
+        recordedStart + adverse + recordedBody + recordedEnd,
+        log.replace(recordedFork, recordedFork + adverse.replace('1790252389.327', '1790252389.326')),
+      ]) {
+        const result = measureRecorded(candidate);
+        assert.equal(result.normalRetirements.length, 0, adverse);
+        assert.ok(result.fatalEvents.length > 0 || result.issues.length > 0, adverse);
+      }
+    }
+  }],
+  ['recorded child startup content and order are not required; foreign identities, producers and adverse outcomes are rejected', async () => {
+    const log = recordedStart + recordedBody + recordedEnd;
+    const rejected = (candidate: string, before = recordedSnapshot('start'), after = recordedSnapshot('end')) => {
+      const result = measureRecorded(candidate, before, after);
+      assert.equal(result.normalRetirements.length, 0, candidate);
+      assert.ok(result.fatalEvents.length > 0 || result.issues.length > 0, candidate);
+    };
+    const startupToFork = recordedStartup + recordedFork;
+    const firstStartup = recordedStartup.split('\n')[0];
+    for (const candidate of [
+      log.replace(firstStartup, firstStartup.replace('9917 9917 I', '9918 9918 I')),
+      log.replace(firstStartup, firstStartup.replace('cessService0:22', 'foreignTag')),
+      log.replace(firstStartup, firstStartup.replace('Using CollectorTypeCMC GC.', 'Using unexpected collector.')),
+      log.replace(firstStartup, firstStartup.replace('cessService0:22:', 'cessService0:22')),
+      log.replace(startupToFork, recordedLine('         1790252389.326 9917 9917 I Other: earlier child history within the clock allowance') + startupToFork),
+      log.replace(recordedStartup, recordedStartup.replace(firstStartup + '\n', '')),
+      log.replace(recordedStartup, recordedStartup + recordedLine('         1790252389.328 9917 9917 I cessService0:22: Using CollectorTypeCMC GC.')),
+      log.replace(recordedStartup, recordedStartup.replaceAll('cessService0:22', 'cessService0:23')),
+      log.replace(recordedStartup, recordedStartup.split('\n').slice(1).join('\n') + '\n' + firstStartup + '\n'),
+    ]) {
+      const result = measureRecorded(candidate);
+      assert.deepEqual(result.fatalEvents, [], candidate);
+      assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['9917'], candidate);
+    }
+    for (const candidate of [
+      log.replace(recordedFork, recordedFork + recordedFork),
+      log.replace(recordedBirth, recordedBirth + recordedBirth),
+      log.replace(recordedFork, recordedFork.replace('5253 5253', '5254 5254')),
+      log.replace(recordedBirth, recordedBirth.replace('553 1773', '554 1773')),
+      log.replace(recordedDeath, recordedDeath.replace('i-8978', 'i-8977')),
+      log.replace(recordedChild, recordedLine('         1790252389.430 9917 9917 E AndroidRuntime: FATAL EXCEPTION: main') + recordedChild),
+      log.replace(recordedChild, recordedChild + recordedLine('         1790252389.433 553 1783 I Process: Sending signal. PID: 9917 SIG: 9')),
+      log.replace(recordedExit, recordedExit.replace('cleanly (0)', 'cleanly (1)')),
+      log.replace(recordedAudit, recordedAudit.replace('scontext=u:r:isolated_app:', 'scontext=u:r:untrusted_app:')),
+      log.replace(firstStartup, firstStartup.replace('1790252389.327', '1790252387.999')),
+    ]) rejected(candidate);
+    for (const candidate of [log.replace(recordedFork, ''), log.replace(recordedFork, recordedFork.replace('5253', '5254'))]) rejected(candidate);
+    const mainDeath = recordedLine('         1790252389.460 553 1783 I ActivityManager: Process com.android.chrome (pid 6538) has died: fg TOP');
+    const mixed = measureRecorded(recordedStart + recordedBody + mainDeath + recordedEnd,
+      recordedSnapshot('start'), recordedSnapshot('end', { '5253': 'com.android.chrome_zygote', '553': 'system_server' }));
+    assert.equal(mixed.normalRetirements.length, 1);
+    assert.ok(mixed.fatalEvents.includes(mainDeath.trimEnd()), 'main-process death remains fatal');
+  }],
+];
+
+androidEventTests.push(['hosted 39765785984 helper PID digits in another helper UID do not create a second death', async () => {
+  const other = body.replace(/\b200\b/gu, '300').replaceAll('Service0:2', 'Service0:3')
+    .replace('/u0ai2 ', '/u0ai8800 ').replace('/u0a145i-8998 ', '/u0a145i-200 ');
+  const log = start + body + other + end;
+  const accepted = measure(log);
+  assert.deepEqual(accepted.issues, []);
+  assert.deepEqual(accepted.fatalEvents, []);
+  assert.equal(accepted.events.length, 2);
+  assert.deepEqual(accepted.normalRetirements.map((retirement) => retirement.pid), ['200', '300']);
+  for (const adverse of [
+    other.replace('isolated not needed', 'signal sent to pid 200'),
+    other + line(6, 559, 'ActivityManager', `Killing 200:${processName}/u0a145i-8998 (adj 0): remove task`),
+    other + line(6, 559, 'Process', 'Sending signal. PID: 200 SIG: 9'),
+  ]) {
+    const rejected = measure(start + body + adverse + end);
+    assert.ok(!rejected.normalRetirements.some((retirement) => retirement.pid === '200'));
+    assert.ok(rejected.fatalEvents.includes(death.trimEnd()));
+  }
+  const wrongUid = measure(log.replace('/u0a145i-200 ', '/u0a145i-201 '));
+  assert.ok(!wrongUid.normalRetirements.some((retirement) => retirement.pid === '300'));
+}]);
+
+androidEventTests.push(['synthetic delayed audit retains typed subject attribution, not helper execution', async () => {
+  const log = start + auditBody + audit + end;
+  const result = measure(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  const subjects = result.normalRetirements[0].auditSubjects;
+  assert.equal(subjects.length, 1);
+  assert.equal(subjects[0].attribution, 'logd-audit-subject');
+  assert.equal(subjects[0].subjectPid, '200');
+  assert.equal(subjects[0].serial, '238');
+  assert.equal(subjects[0].time, 1789106373000);
+  assert.equal(log.split('\n')[subjects[0].lineNumber - 1], subjects[0].line);
+  assert.equal(parseAndroidAuditSubject(audit.trimEnd())?.subjectPid, '200');
+}]);
+
+androidEventTests.push(['synthetic receive boundaries retain ordinary producer inversions diagnostically', async () => {
+  for (const timestamp of ['1789106369.984', '1789106380.016']) {
+    const ordinary = line(1, 888, 'OtherProducer', 'ordinary record').replace('1789106371.000', timestamp);
+    const log = start + ordinary + body + end;
+    const result = measure(log);
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.normalRetirements.length, 1);
+    assert.deepEqual(result.boundaryDiscordances, [{ lineNumber: 2, line: ordinary.trimEnd() }]);
+    for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+}]);
+
+androidEventTests.push(['synthetic adverse spill cannot expire attributed deaths or hide truncated forms', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  for (const [tag, message] of [
+    ['Process', 'Sending signal. PID: 300 SIG:'],
+    ['Zygote', 'Process 300 exited due to unknown'],
+    ['ActivityManager', 'Process com.android.chrome (pid 300) has died'],
+  ]) {
+    const initial = line(1, 559, 'ActivityManager', 'Process com.android.chrome (pid 300) has died: fg TOP');
+    const spill = line(8, 559, tag, message);
+    const result = measure(start + initial + end + spill, before);
+    assert.deepEqual(result.fatalEvents, [initial.trimEnd(), spill.trimEnd()]);
+  }
+}]);
+
+const boundaryNegatives: [string, string][] = [
+  ['fork before marker time', start + body.replace('1789106371.000', '1789106369.984') + end],
+  ['exit after marker time', start + body.replace('1789106375.000', '1789106380.016') + end],
+  ['fork before START receipt', fork + start + body.replace(fork, '') + end],
+  ['exit after END receipt', start + body.replace(exit, '') + end + exit],
+  ['audit after END receipt', start + auditBody + end + audit],
+  ['audit before marker time', start + auditBody + audit.replace('1789106373.000', '1789106369.984') + end],
+  ['audit after marker time', start + auditBody + audit.replace('1789106373.000', '1789106380.016') + end],
+  ['in-time post-END signal', start + body + end + line(4, 559, 'Process', 'Sending signal. PID: 200 SIG: 9')],
+  ['out-of-time received signal', start + body + line(4, 559, 'Process', 'Sending signal. PID: 200 SIG: 9').replace('1789106374.000', '1789106369.984') + end],
+  ['unknown helper spill outside both', start + body + end + line(8, 888, 'Other', 'unknown subject 200').replace('1789106378.000', '1789106380.016')],
+  ['truncated adverse shape spill', start + body + end + line(4, 559, 'Process', 'Sending signal. PID: 200 SIG:')],
+  ['malformed spill', start + body + end + 'unparsed adverse record\n'],
+  ['pre-START malformed', 'unparsed adverse record\n' + start + body + end],
+];
+for (const [name, log] of boundaryNegatives) androidEventTests.push([`synthetic capture boundary rejects ${name}`, async () => {
+  const result = measure(log);
+  assert.equal(result.normalRetirements.length, 0);
+  assert.ok(result.fatalEvents.length > 0 || result.issues.length > 0);
+}]);
+
+androidEventTests.push(['synthetic F001 historical identity cannot erase START snapshot attribution', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const historical = line(1, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service').replace('1789106371', '1789106369');
+  const signal = line(4, 559, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [historical + start + signal + end, historical + start + end + signal, start + historical + signal + end]) {
+    const result = measure(log, before);
+    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.fatalEvents, [signal.trimEnd()]);
+  }
+  const unrelatedSnapshot = snapshot('start', { '300': 'com.example.other' });
+  assert.deepEqual(measure(historical.replace('com.example.other', 'com.android.chrome') + signal + start + end, unrelatedSnapshot).fatalEvents, [signal.trimEnd()]);
+  const reuse = historical.replace('1789106369', '1789106372');
+  assert.deepEqual(measure(start + reuse + signal + end, before).fatalEvents, []);
+}]);
+
+androidEventTests.push(['synthetic F003 later reuse cannot exclude an earlier-timestamp adverse record', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const reuse = line(8, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service').replace('1789106378', '1789106380');
+  const signal = line(4, 559, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [start + end + reuse + signal, start + reuse + signal + end,
+    start + reuse + reuse.replace('1789106380', '1789106373').replace('com.example.other', 'com.example.third') + signal + end,
+    start + reuse.replace('1789106380', '1789106374') + signal + end]) {
+    assert.deepEqual(measure(log, before).fatalEvents, [signal.trimEnd()]);
+  }
+  for (const adverse of [line(4, 559, 'Zygote', 'Process 300 exited cleanly (0)'),
+    line(4, 300, 'ChimeraCfgMgr', 'Updating module config: old -> new'), signal.replace('SIG: 9', 'SIG:')]) {
+    assert.deepEqual(measure(start + end + reuse + adverse, before).fatalEvents, [adverse.trimEnd()]);
+  }
+  assert.deepEqual(measure(start + reuse.replace('1789106380', '1789106372') + signal + end, before).fatalEvents, []);
+  assert.deepEqual(measure(start + end + reuse + signal + signal.replace('1789106374', '1789106381'), before).fatalEvents, [signal.trimEnd()]);
+}]);
+
+androidEventTests.push(['synthetic F004 delayed relevant identity attributes already-received adverse records', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const reuse = line(2, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service');
+  const birth = line(3, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity');
+  const signal = line(4, 300, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [start + reuse + end + signal + birth, start + reuse + signal + birth + end,
+    start + reuse + end + signal + birth.replace('6373', '6374')]) {
+    assert.deepEqual(measure(log, before).fatalEvents, [signal.trimEnd()]);
+  }
+  for (const adverse of [line(4, 559, 'Zygote', 'Process 300 exited cleanly (0)'),
+    line(4, 300, 'ChimeraCfgMgr', 'Updating module config: old -> new'), signal.replace('SIG: 9', 'SIG:')]) {
+    assert.deepEqual(measure(start + reuse + end + adverse + birth, before).fatalEvents, [adverse.trimEnd()]);
+  }
+  assert.deepEqual(measure(start + reuse + signal + end, before).fatalEvents, []);
+  assert.deepEqual(measure(start + reuse + signal + birth.replace('6373', '6375') + end, before).fatalEvents, []);
+  const death = line(3, 559, 'ActivityManager', 'Process com.android.chrome (pid 300) has died: fg TOP');
+  assert.deepEqual(measure(start + reuse + end + signal + death, before).fatalEvents, [signal.trimEnd(), death.trimEnd()]);
+}]);
+
+androidEventTests.push(['synthetic F003 identity retirement requires ordered replacement of the identity itself', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const chrome = line(3, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity');
+  const unrelated = line(2, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service').replace('559 559', '559 560');
+  const signal = line(4, 300, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [start + chrome + unrelated + end + signal, start + chrome + unrelated + signal + end,
+    start + chrome + chrome.replace('6373', '6371') + unrelated + end + signal,
+    start + chrome + unrelated.replace('6372', '6373') + end + signal]) {
+    assert.deepEqual(measure(log, before).fatalEvents, [signal.trimEnd()]);
+  }
+  for (const adverse of [line(4, 559, 'Zygote', 'Process 300 exited cleanly (0)'),
+    line(4, 300, 'ChimeraCfgMgr', 'Updating module config: old -> new'), signal.replace('SIG: 9', 'SIG:')]) {
+    assert.deepEqual(measure(start + chrome + unrelated + end + adverse, before).fatalEvents, [adverse.trimEnd()]);
+  }
+  assert.deepEqual(measure(start + unrelated + signal + end, before).fatalEvents, []);
+  assert.deepEqual(measure(start + chrome.replace('6373', '6371') + unrelated + signal + end, before).fatalEvents, []);
+}]);
+
+androidEventTests.push(['synthetic explicit operations require receive and timestamp containment for markers and events', async () => {
+  const operation: AndroidPlannedTermination = {
+    id: 'stop', measurementId: 'synthetic', packageName: 'com.android.chrome', pid: '300',
+    processes: { '300': 'com.android.chrome' }, succeeded: true,
+    command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'],
+  };
+  const begin = line(2, 1, 'HerdrMeasure', 'synthetic OP_BEGIN stop com.android.chrome 300');
+  const finish = line(6, 1, 'HerdrMeasure', 'synthetic OP_END stop com.android.chrome 300');
+  const kill = line(3, 559, 'ActivityManager', 'Killing 300:com.android.chrome/u0a145 (adj 0): stop com.android.chrome due to from pid 50');
+  const signal = line(4, 100, 'Zygote', 'Process 300 exited due to signal 9 (Killed)');
+  const check = (log: string, operations = [operation]) => measuredAndroidEvents(log, snapshot('start', { '300': 'com.android.chrome' }), snapshot('end'), operations);
+  const valid = start + begin + kill + signal + finish + end;
+  assert.deepEqual(check(valid).issues, []);
+  assert.deepEqual(check(valid).fatalEvents, []);
+  for (const log of [
+    begin + start + kill + signal + finish + end,
+    start + begin + kill + signal + end + finish,
+    start + begin + kill + finish + signal + end,
+    start + begin + kill + finish + end + signal,
+    start + begin + kill + signal.replace('6374', '6369') + finish + end,
+    start + begin + finish + end + kill + signal,
+    valid.replace(begin, begin + line(8, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity')),
+    valid.replace(begin, line(4, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity') + begin),
+    valid + line(4, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity'),
+    valid.replace(signal, signal.replace('due to signal 9 (Killed)', 'due to unknown')),
+    valid.replace(signal, line(4, 559, 'Process', 'Sending signal. PID: 300 SIG:')),
+    valid.replace(begin, ''),
+    valid.replace(begin, begin + begin),
+  ]) {
+    const result = check(log);
+    assert.ok(result.issues.length || result.fatalEvents.length);
+  }
+  assert.ok(check(valid, [{ ...operation, succeeded: false }]).issues.length);
+  assert.ok(check(valid, []).issues.length);
+}]);
+
+const malformedAudits = [
+  audit.replace('200 200', '200 201'), audit.replace(' W ', ' I '),
+  audit.replace('type=1400', 'type=1300'), audit.replace('audit(0.0:', 'audit(1789106373.0:'),
+  audit.replace('isolated_app', 'untrusted_app'), audit.replace('c512,c768', 'c513,c768'),
+  audit.replace('permissive=0', 'permissive=1'), audit.replace('ino=65621 ', ''),
+  audit.replace(' for  ', ' for  pid=200 '), audit.replace('\n', ' extra=field\n'),
+  audit.replace('name="arbitrary.txt"', 'name="unclosed'),
+];
+for (const [index, malformed] of malformedAudits.entries()) androidEventTests.push([`synthetic audit parser rejects unsupported shape ${index}`, async () => {
+  assert.equal(parseAndroidAuditSubject(malformed.trimEnd()), undefined);
+}]);
+
+const conflictingAudit = audit.replace('0.0:238', '0.0:239').replace('scontext=u:r:isolated_app:', 'scontext=u:r:untrusted_app:');
+const negative: [string, string][] = [
+  ['recovery F002 direct UID contradiction without audit', auditBody.replace('UID 90002', 'UID 90003')],
+  ['recovery F002 direct process contradiction without audit', body.replace(child, line(2, 200, 'cr_SplitCompatApp', 'version=1 processName=com.example isIsolatedProcess=true') + child)],
+  ['recovery F002 direct isolation contradiction without audit', body.replace(child, line(2, 200, 'cr_SplitCompatApp', `version=1 processName=${processName} isIsolatedProcess=false`) + child)],
+  ['recovery F002 malformed direct UID without audit', auditBody.replace('UID 90002', 'UID unknown')],
+  ['recovery F001 in-lifetime conflicting audit subject with delayed valid audit', auditBody.replace(child, conflictingAudit + child) + audit],
+  ['recovery F001 conflicting audit without supported audit', auditBody.replace(child, conflictingAudit + child)],
+  ['recovery F001 conflicting audit user categories', auditBody.replace(child, audit.replace('0.0:238', '0.0:239').replace('s0:c512,c768', 's0:c513,c768') + child) + audit],
+  ['recovery F001 duplicated contradictory source context', auditBody.replace(child, audit.replace('0.0:238', '0.0:239').replace(' tcontext=', ' scontext=u:r:untrusted_app:s0:c512,c768 tcontext=') + child) + audit],
+  ...malformedAudits.flatMap((value, index): [string, string][] => value.includes(' scontext=u:r:isolated_app:s0:c512,c768 ')
+    ? [] : [[`delayed audit with a conflicting security context ${index}`, auditBody + value]]),
+  ['audit missing UID corroboration', body + audit],
+  ['audit conflicting UID', auditBody.replace('UID 90002', 'UID 90003') + audit],
+  ['audit malformed UID', auditBody.replace('UID 90002', 'UID unknown') + audit],
+  ['audit contradictory process identity', auditBody.replace(uid, uid + line(2, 200, 'cr_SplitCompatApp', 'version=1 processName=com.example isIsolatedProcess=true')) + audit],
+  ['audit contradictory isolation', auditBody.replace(uid, uid + line(2, 200, 'cr_SplitCompatApp', `version=1 processName=${processName} isIsolatedProcess=false`)) + audit],
+  ['audit duplicate serial', auditBody + audit + audit],
+  ['audit contradictory serial subject', auditBody + audit + audit.replaceAll('200 200', '201 201')],
+  ['audit timestamp before fork', auditBody + audit.replace('6373', '6370')],
+  ['audit timestamp after exit', auditBody + audit.replace('6373', '6378')],
+  ['audit adverse content retained', auditBody + audit.replace('arbitrary.txt', 'fatal-signal.txt')],
+  ['audit does not replace clean-exit proof', auditBody.replace(exit, '') + audit],
+  ['signal9 after a different kill reason', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)')).replace('isolated not needed', 'remove task')],
+  ['crash signal after isolated-not-needed', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 11 (Segmentation fault)'))],
+  ['signal9 without the system reaping record', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)')).replace(death, '')],
+  ['signal9 reaped helper with an additional signal', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)')) + line(8, 559, 'Process', 'Sending signal. PID: 200 SIG: 9')],
+  ['nonzero', body.replace('cleanly (0)', 'cleanly (1)')],
+  ['contradictory exit', body + exit.replace('6375', '6376').replace('cleanly (0)', 'due to signal 9 (Killed)')],
+  ['late contradictory signal', body + line(8, 559, 'Process', 'Sending signal. PID: 200 SIG: 9')],
+  ['misordered adverse clock', body.replace(child, child + line(0, 559, 'Process', 'Sending signal. PID: 200 SIG: 9'))],
+  ['duplicate death observation', body + death],
+  ['missing fork', body.replace(fork, '')],
+  ['missing birth', body.replace(birth, '')],
+  ['missing child after a different kill reason', quickBody.replace('isolated not needed', 'remove task')],
+  ['missing child with duplicate system reaping', quickBody + quickDeath],
+  ['missing system exit', body.replace(exit, '')],
+  ['reused PID', body + birth.replace('6372', '6376')],
+  ['wrong user', body.replace('/u0ai2', '/u1ai2')],
+  ['wrong isolated UID', body.replace('i-8998', 'i-8997')],
+  ['wrong component', body.replace('for  {com.android.chrome/', 'for  {com.example/')],
+  ['wrong process', body.replace(`Killing 200:${processName}`, 'Killing 200:com.android.chrome:privileged_process0')],
+  ['unexpected kill reason', body.replace('isolated not needed', 'remove task')],
+  ['mismatched death user', body + death.replace('/u0a145', '/u1a145')],
+  ['force stop', body.replace(child, child + line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50'))],
+  ['R34-F002 force stop after the fork but before an early-received later-stamped helper record',
+    line(2, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50').replace('6372.000', '6372.500')
+      + line(3, 200, 'Other', 'unattributed earlier receipt') + body],
+  ['F001 forward-misordered force-stop clock', body.replace(child, child + line(8, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50'))],
+  ['F001 truncated force-stop attribution', body.replace(child, child + line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome'))],
+  ['F001 incomplete other-user attribution', body.replace(child, child + line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=1:'))],
+  ['F002 reused ActivityManager producer', line(0, 42, 'ActivityManager', 'Start proc 559:com.example/u0a123 for service') + body],
+  ...[559, 100].flatMap((producer): [string, string][] => [
+    [`F002 terminated producer ${producer}`, line(0, 42, 'Zygote', `Process ${producer} exited due to signal 9 (Killed)`) + body],
+    [`F002 cleanly exited producer ${producer}`, line(0, 42, 'Zygote', `Process ${producer} exited cleanly (0)`) + body],
+    [`F002 AM producer death ${producer}`, line(0, 42, 'ActivityManager', `Process com.example (pid ${producer}) has died: fg TOP`) + body],
+    [`F002 producer kill ${producer}`, line(0, 42, 'ActivityManager', `Killing ${producer}:com.example/u0a123 (adj 0): stop`) + body],
+    [`F002 producer signal ${producer}`, line(0, 42, 'Process', `Sending signal. PID: ${producer} SIG: 9`) + body],
+    [`F002 producer death forward clock ${producer}`, line(8, 42, 'Zygote', `Process ${producer} exited due to signal 9 (Killed)`) + body],
+  ]),
+  ['replacement', body.replace(child, child + line(3, 559, 'PackageManager', 'Replacing package com.android.chrome'))],
+  ['crash', body.replace(child, child + line(3, 200, 'AndroidRuntime', 'FATAL EXCEPTION: main'))],
+  ['signal despite clean', body.replace(child, child + line(3, 200, 'Process', 'Sending signal. PID: 200 SIG: 15'))],
+  ['wrong zygote', body.replace('6375.000 100 100', '6375.000 101 101')],
+  ['wrong AM producer', body.replaceAll('559 559', '558 558')],
+  ['unknown earlier PID use', line(0, 200, 'Other', 'unattributed earlier lifetime') + body],
+  ['F003 helper observation after its exit time', body + line(6, 200, 'Other', 'unattributed later lifetime')],
+  ['reused zygote', body + line(6, 559, 'ActivityManager', 'Start proc 100:com.example/u0a123 for service')],
+  ['kill signal after a reaping record received and timestamped after the exit', fork + birth + quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)') + quickDeath.replace('6372.500', '6372.700')],
+  ...['com.android.chrome', 'com.android.chrome:privileged_process0', 'com.google.android.gms'].map((name): [string, string] => [name + ' clean death', body.replaceAll(processName, name)]),
+];
+const orderVariations: [string, string][] = [
+  ...malformedAudits.flatMap((value, index): [string, string][] => value.includes(' scontext=u:r:isolated_app:s0:c512,c768 ')
+    ? [[`unparsed in-lifetime audit-like record ${index}`, auditBody + value]] : []),
+  ['audit received before the fork', audit + auditBody],
+  ['in-lifetime audit and record received after the exit', auditBody + audit + line(3, 200, 'Other', 'unknown')],
+  ['clean exit without a child exit or reaping record', quickBody.replace(quickDeath, '')],
+  ['reaping record received and timestamped after a clean exit, as hosted 39793077230 recorded for helper 5460', fork + birth + quickExit + quickDeath.replace('6372.500', '6372.700')],
+  ['clean exit more than one second after reaping', quickBody.replace(quickExit, quickExit.replace('6372.600', '6373.501'))],
+  ['reaping more than two seconds after the fork without a child exit', body.replace(child, '')],
+  ['kill signal more than two seconds after the fork without a child exit', body.replace(child, '').replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)'))],
+  ['in-lifetime record received before the fork', line(3, 200, 'Other', 'unattributed earlier receipt') + body],
+  ['in-lifetime record received after the exit', body + line(3, 200, 'Other', 'unattributed later receipt')],
+  ['child exit received before the birth record', fork + child + birth + death + exit],
+  ['child exit stamped at the fork time', body.replace('6373.000', '6371.000')],
+];
+for (const [name, value] of orderVariations) androidEventTests.push([`synthetic helper timing or receipt-order variation is admitted: ${name}`, async () => {
+  const result = measure(start + value + end);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['200']);
+}]);
+
+androidEventTests.push(['hosted 39822066139 helper first line stamped one millisecond before its fork retires normally', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-39822066139-helper-clock-skew.log', import.meta.url), 'utf8');
+  const id = '3f87346e-8339-4117-8197-3c73a7e8fa42';
+  const processes = { '361': 'zygote64', '561': 'system_server', '5294': 'com.android.chrome', '5332': 'com.android.chrome_zygote' };
+  const measureSkew = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = id;
+    after.measurement!.id = id;
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const forkLine = log.split('\n')[1];
+  const firstChild = log.split('\n')[2];
+  assert.match(forkLine, /^ +1792694518\.080 +5332 +5332 D Zygote +: Forked child process 5833$/u);
+  assert.match(firstChild, /^ +1792694518\.079 +5833 +5833 I ocessService0:8: Using CollectorTypeCMC GC\.$/u);
+  const result = measureSkew(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => [retirement.pid, retirement.uid]), [['5833', 90008]]);
+  for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  const kill = log.split('\n').find((entry) => entry.includes('isolated not needed'))!;
+  for (const [name, value] of [
+    ['first line stamped more than twenty milliseconds before the fork', log.replace(firstChild, firstChild.replace('1792694518.079', '1792694518.059'))],
+    ['crash signal exit', log.replace('Process 5833 exited cleanly (0)', 'Process 5833 exited due to signal 11 (Segmentation fault)')],
+    ['fatal exception', log.replace(kill, `         1792694518.720  5833  5833 E AndroidRuntime: FATAL EXCEPTION: main\n${kill}`)],
+    ['renderer crash report', log.replace(kill, `${kill}\n         1792694518.728  5294  5294 W chromium: Renderer process crashed pid=5833`)],
+    ['different kill reason', log.replace('isolated not needed', 'remove task')],
+    ['another isolated UID', log.replace('/u0a145i-8992 ', '/u0a145i-8991 ')],
+    ['exit from an unknown zygote', log.replace('1792694518.780  5332  5332 I Zygote', '1792694518.780  5333  5333 I Zygote')],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    const rejected = measureSkew(value);
+    assert.ok(!rejected.normalRetirements.some((retirement) => retirement.pid === '5833'), name);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('5833')), name);
+  }
+}]);
+
+androidEventTests.push(['hosted 40306915048 helper straddling END retires normally when its kernel audit records arrive after END', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40306915048-helper-late-audit.log', import.meta.url), 'utf8');
+  const processes = { '559': 'system_server', '5526': 'com.android.chrome', '5564': 'com.android.chrome_zygote' };
+  const measureLateAudit = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = '40306915048';
+    after.measurement!.id = '40306915048';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const lines = log.split('\n');
+  const end = lines.findIndex((entry) => entry.endsWith('HerdrMeasure: 40306915048 END'));
+  const lateAudit = lines[end + 1];
+  assert.match(lateAudit, /^ +1793011715\.608 +10840 +10840 W ThreadPoolForeg: type=1400 audit\(0\.0:275\): /u);
+  assert.match(lines[end], /^ +1793011715\.612 /u);
+  const result = measureLateAudit(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => [retirement.pid, retirement.uid]), [['10840', 90022]]);
+  for (const [name, value] of [
+    ['an ordinary own record received after END but stamped before it', log.replace(lateAudit, '         1793011715.608 10840 10840 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar')],
+    ['an audit record stamped more than twenty milliseconds before the fork', log.replace(lateAudit, lateAudit.replace('1793011715.608', '1793011715.500'))],
+    ['an audit record from another security context', log.replace(lateAudit, lateAudit.replace(/scontext=\S+/u, 'scontext=u:r:untrusted_app:s0:c512,c768'))],
+    ['an audit record from another process received after END', log.replace(lateAudit, lateAudit.replace(' 10840 10840 W ', ' 10841 10841 W ').replace('denied ', 'denied pid=10840 '))],
+    ['a non-AVC audit record received after END', log.replace(lateAudit, lateAudit.replace(/avc: .*$/u, 'apparmor="STATUS" operation="profile_load"'))],
+    ['a late audit record of a helper that retired before END', (() => {
+      const endLine = lines[end];
+      const exitLine = lines.find((entry) => entry.includes('Process 10840 exited cleanly (0)'))!;
+      return log.replace(`${endLine}\n`, '').replace(`${lateAudit}\n`, '')
+        .replace(`${exitLine}\n`, `${exitLine}\n${endLine.replace('1793011715.612', '1793011715.700')}\n${lateAudit}\n`);
+    })()],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    const rejected = measureLateAudit(value);
+    assert.ok(!rejected.normalRetirements.some((retirement) => retirement.pid === '10840'), name);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('10840')), name);
+  }
+}]);
+
+androidEventTests.push(['hosted 40317275070 helper whose PID equals the Chrome app UID retires normally despite later UID mentions', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40317275070-helper-pid-equals-chrome-uid.log', import.meta.url), 'utf8');
+  const processes = { '366': 'zygote64', '563': 'system_server', '5502': 'com.android.chrome', '5542': 'com.android.chrome_zygote' };
+  const measureCollision = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = '40317275070';
+    after.measurement!.id = '40317275070';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const forceStop = log.split('\n').find((entry) => entry.includes('Force stopping com.android.chrome appid=10145 user=0'))!;
+  const exit = log.split('\n').find((entry) => entry.includes('Process 10145 exited cleanly (0)'))!;
+  assert.ok(forceStop && exit);
+  const retired = (value: string) => measureCollision(value).normalRetirements.some((retirement) => retirement.pid === '10145');
+  assert.deepEqual(measureCollision(log).issues, []);
+  assert.ok(retired(log));
+  for (const [name, mention] of [
+    ['UID', 'D CompatChangeReporter: Compat change id reported: 263076149; UID 10145; state: ENABLED'],
+    ['uid =', 'V GrammaticalInflectionUtils: AttributionSource: AttributionSource { uid = 10145, packageName = null }'],
+    ['uid/pid', 'D ConnectivityService: requestNetwork for uid/pid:10145/5502 activeRequest: null'],
+    ['task affinity', 'V WindowManager: Task{b7ed3bc #13 type=standard A=10145:com.android.chrome}'],
+    ['UID: [', 'I PlayCore: UID: [10145]  PID: [13185]'],
+    ['uids={', 'D InetDiagMessage: Destroyed live tcp sockets for uids={10145} in 3ms'],
+    ['uid=', 'I ActivityManager: Changes in uid=10145 state'],
+    ['uid', 'I AppWidgetServiceImpl: stopped masked state for uid 10145 package com.android.chrome'],
+    ['app:', 'I AppWidgetServiceImpl: Provider{ProviderId{user:0, app:10145, cmp:ComponentInfo{}}}'],
+  ] as [string, string][]) {
+    assert.ok(retired(log.replace(forceStop, `${forceStop}\n         1793016227.200   563   563 ${mention} fatal`)), name);
+  }
+  for (const [name, value] of [
+    ['a later crash report naming the PID', log.replace(exit, `${exit}\n         1793016189.300  5502  5502 W chromium: Renderer process crashed pid=10145`)],
+    ['a force stop naming the PID', log.replace('appid=10145 user=0', 'pid=10145 user=0')],
+    ['a signal sent to the PID', log.replace(forceStop, `${forceStop}\n         1793016227.200   563   563 I Process : Sending signal. PID: 10145 SIG: 9`)],
+    ['a fatal record naming the UID and the PID', log.replace(forceStop, `${forceStop}\n         1793016227.200   563   563 E ActivityManager: uid=10145 pid=10145 fatal`)],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    assert.ok(!retired(value), name);
+    assert.ok(measureCollision(value).fatalEvents.some((event) => event.includes('Killing 10145:')), name);
+  }
+}]);
+
+androidEventTests.push(['hosted 40427620028 helpers already running at START retire normally only with a clean, fully observed exit', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40427620028-helpers-running-at-start.log', import.meta.url), 'utf8');
+  const helper = (index: number) => `com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:${index}`;
+  const processes: Record<string, string> = { '366': 'zygote64', '556': 'system_server', '5399': 'com.android.chrome', '5439': 'com.android.chrome_zygote',
+    '5909': helper(5), '5920': helper(6), '5947': helper(7), '5956': 'com.android.chrome_zygote' };
+  const measureStart = (value: string, start = processes, end = { '366': 'zygote64', '556': 'system_server', '5399': 'com.android.chrome', '5439': 'com.android.chrome_zygote' } as Record<string, string>) => {
+    const before = snapshot('start', start);
+    const after = snapshot('end', end);
+    before.measurement!.id = '40427620028';
+    after.measurement!.id = '40427620028';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const retiredPids = (value: string, start = processes, end?: Record<string, string>) => measureStart(value, start, end).normalRetirements.map((retirement) => retirement.pid).sort();
+  const result = measureStart(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(retiredPids(log), ['5909', '5920', '5947', '5956']);
+  for (const retirement of result.normalRetirements) {
+    for (const proof of retirement.proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+  const line = (pattern: string) => log.split('\n').find((entry) => entry.includes(pattern))!;
+  const startMarker = line('40427620028 START');
+  for (const [name, value, start, end, rejected] of [
+    ['a crash naming the helper', log.replace(line('Process 5920 exited'), `${line('Process 5920 exited')}\n         1793067759.095  5399  5399 W chromium: Renderer process crashed pid=5920`), processes, undefined, '5920'],
+    ['a killed instead of clean zygote exit', log.replace('Process 5909 exited cleanly (0)', 'Process 5909 exited due to signal 9 (Killed)'), processes, undefined, '5909'],
+    ['no own child exit', log.replace(line('5947  5998 I chromium'), ''), processes, undefined, '5947'],
+    ['an unrelated START inventory name', log, { ...processes, '5956': 'com.android.chrome' }, undefined, '5956'],
+    ['a restart of the PID inside the measurement', log.replace(startMarker, `${startMarker}\n         1793067758.900   556   590 I ActivityManager: Start proc 5947:${helper(7)}/u0ai7 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:7}`), processes, undefined, '5947'],
+    ['a reaper UID for another helper', log.replace('u0a145i-8993', 'u0a145i-8990'), processes, undefined, '5947'],
+    ['an exit reported by another zygote', log.replace('5439  5439 I Zygote  : Process 5956 exited', '366   366 I Zygote  : Process 5956 exited'), processes, undefined, '5956'],
+    ['a helper still listed at END', log, processes, { '556': 'system_server', '5439': 'com.android.chrome_zygote', '5920': helper(6) }, '5920'],
+    ['an unlabelled death record', log.replace('has died: vis BTOP', 'has died: crashed'), processes, undefined, '5920'],
+    ['an unexplained system mention', log.replace(line('Process 5909 exited'), `${line('Process 5909 exited')}\n         1793067758.890   556  1759 W ActivityManager: Unable to deliver result to 5909`), processes, undefined, '5909'],
+    ['an own record after the zygote exit', log.replace(line('Process 5956 exited'), `${line('Process 5956 exited')}\n         1793067759.050  5956  5956 I chromium: late record`), processes, undefined, '5956'],
+    ['an earlier process with the same PID', log.replace(line('Forked child process 5947'), `         1793067700.000  5947  5947 I other: earlier owner\n${line('Forked child process 5947')}`), processes, undefined, '5947'],
+    ['a fork without its system start record', log.replace(line('Start proc 5956:'), ''), processes, undefined, '5956'],
+    ['a zygote that died before reporting the exit', log.replace(line('Process 5909 exited'), `         1793067758.880   556  1759 I ActivityManager: Process com.android.chrome_zygote (pid 5439) has died: fg  TOP\n${line('Process 5909 exited')}`), processes, undefined, '5909'],
+    ['a force stop of Chrome while the helper ran', log.replace(startMarker, `${startMarker}\n         1793067758.830   556  1759 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 9999`), processes, undefined, '5909'],
+    ['a package change of Chrome while the helper ran', log.replace(startMarker, `${startMarker}\n         1793067758.830   556  1759 I PackageManager: Updating package com.android.chrome`), processes, undefined, '5909'],
+  ] as [string, string, Record<string, string>, Record<string, string> | undefined, string][]) {
+    assert.ok(value.split('\n').length >= log.split('\n').length - 1, name);
+    const rejectedResult = measureStart(value, start, end);
+    assert.deepEqual(rejectedResult.issues, [], name);
+    const unaffected = ['5909', '5920', '5947', '5956'].filter((pid) => pid !== rejected);
+    assert.deepEqual(retiredPids(value, start, end), /force stop|package change|zygote that died/u.test(name) ? [] : unaffected, name);
+    assert.ok(rejectedResult.fatalEvents.some((event) => event.includes(`${rejected}:`) || event.includes(`(pid ${rejected})`)), name);
+  }
+}]);
+
+androidEventTests.push(['synthetic system-reaped helper admits a missing child exit or the kill signal only with the reaping record', async () => {
+  const killed = exit.replace('cleanly (0)', 'due to signal 9 (Killed)');
+  const quickKilled = quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)');
+  for (const [name, value, events, ending] of [
+    ['missing child', quickBody, [quickDeath], quickExit],
+    ['kill signal', body.replace(exit, killed), [death, killed], killed],
+    ['missing child and kill signal', quickBody.replace(quickExit, quickKilled), [quickDeath, quickKilled], quickKilled],
+  ] as [string, string, string[], string][]) {
+    const log = start + value + end;
+    const result = measure(log);
+    assert.deepEqual(result.issues, [], name);
+    assert.deepEqual(result.fatalEvents, [], name);
+    assert.equal(result.normalRetirements.length, 1, name);
+    assert.deepEqual(result.normalRetirements[0].events, events.map((entry) => entry.trimEnd()), name);
+    for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line, name);
+    assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === events[0].trimEnd()), name);
+    assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === ending.trimEnd()), name);
+  }
+}]);
+
+const hostedMissingExitProcesses = {
+  '564': 'system_server', '5609': 'com.android.chrome', '5649': 'com.android.chrome_zygote',
+};
+const hostedMissingExitSnapshot = (boundary: 'start' | 'end', processes: Record<string, string> = hostedMissingExitProcesses) => ({
+  measurement: { id: '40095544451', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const hostedMissingExitFixturePath = 'tests/mobile/unit/fixtures/android-hosted-40095544451-helper-missing-zygote-exit.log';
+const hostedMissingExitFixtureSha256 = 'b1d60de5b658061e84ddf9757714f92658d09da901ef113b6bfda6b185e985f8';
+const hostedMissingExitProjection = [
+  '         1792874856.500   564   564 I HerdrMeasure: 40095544451 START',
+  '         1792874856.540  5649  5649 D Zygote  : Forked child process 10658',
+  '         1792874856.550   564   975 I ActivityManager: Start proc 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0ai12 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:12}',
+  '         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.',
+  '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed',
+  '         1792874856.626  5609  5609 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10658)',
+  '         1792874856.700 10755 10755 I HerdrMeasure: 40095544451 END',
+].join('\n') + '\n';
+const hostedMissingExitLog = () => readFile(new URL(`./${hostedMissingExitFixturePath.slice('tests/mobile/unit/'.length)}`, import.meta.url), 'utf8');
+const measureHostedMissingExit = (log: string) => measuredAndroidEvents(log,
+  hostedMissingExitSnapshot('start'), hostedMissingExitSnapshot('end'), []);
+
+androidEventTests.push(['hosted 40095544451 Chrome helper without a Zygote exit is retired only with browser observation', async () => {
+  const log = await hostedMissingExitLog();
+  assert.equal(log, hostedMissingExitProjection);
+  assert.equal(createHash('sha256').update(log).digest('hex'), hostedMissingExitFixtureSha256);
+  const result = measureHostedMissingExit(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['10658']);
+  assert.deepEqual(result.normalRetirements[0].events, [
+    '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed',
+  ]);
+  for (const expected of [
+    '         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.',
+    '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed',
+    '         1792874856.626  5609  5609 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10658)',
+  ]) assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === expected), expected);
+}]);
+
+androidEventTests.push(['hosted 40445020397 helper that leaves while bound retires without a zygote exit only with its own exit and browser observation', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-40445020397-helper-departure-without-zygote-exit.log', import.meta.url), 'utf8');
+  const processes = { '369': 'zygote64', '568': 'system_server', '5467': 'com.android.chrome', '5509': 'com.android.chrome_zygote' };
+  const measureDeparture = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = '40445020397';
+    after.measurement!.id = '40445020397';
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const line = (pattern: string) => log.split('\n').find((entry) => entry.includes(pattern))!;
+  const death = line('(pid 6048) has died: vis BTOP');
+  const selfExit = line('ChildProcessService: Exiting child process.');
+  const browserDeath = line('Child process died (type=6) pid=6048)');
+  assert.ok(death && selfExit && browserDeath);
+  const result = measureDeparture(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['6048']);
+  assert.deepEqual(result.normalRetirements[0].events, [death]);
+  for (const expected of [selfExit, death, browserDeath]) assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === expected), expected);
+  const at = (time: string, rest: string) => `         ${time} ${rest}`;
+  for (const [name, value] of [
+    ['a death label that names a cause', log.replace('has died: vis BTOP', 'has died: crashed')],
+    ['no own exit message', log.replace(`${selfExit}\n`, '')],
+    ['no browser observation', log.replace(`${browserDeath}\n`, '')],
+    ['a browser observation before the death record', log.replace(`${browserDeath}\n`, '').replace(death, `${browserDeath.replace('1793078340.796', '1793078340.795')}\n${death}`)],
+    ['a low-memory kill naming the helper', log.replace(death, `${at('1793078340.793', '  300   300 I lowmemorykiller: Kill \'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9\' (6048), uid 90009, oom_score_adj 100')}\n${death}`)],
+    ['a native crash in the helper', log.replace(selfExit, `${at('1793078340.790', ' 6048  6058 F libc    : Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0 in tid 6058')}\n${selfExit}`)],
+    ['a crash report from another process naming the helper', log.replace(death, `${at('1793078340.794', ' 6100  6100 F DEBUG   : pid: 6048, tid: 6058, name: ThreadPoolForeg')}\n${death}`)],
+    ['a second death record', log.replace(death, `${death}\n${death.replace('1793078340.796', '1793078340.797')}`)],
+    ['a helper record after the death record', log.replace(browserDeath, `${browserDeath}\n${at('1793078340.800', ' 6048  6058 I chromium: late record')}`)],
+    ['a zygote exit by signal', log.replace(browserDeath, `${browserDeath}\n${at('1793078340.798', ' 5509  5509 I Zygote  : Process 6048 exited due to signal 9 (Killed)')}`)],
+    ['a death record from a process other than the system server', log.replace('   568  1224 I ActivityManager: Process', '  5467  1224 I ActivityManager: Process')],
+    ['a system kill for another reason', log.replace(death, `${at('1793078340.794', '  568  1224 I ActivityManager: Killing 6048:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9/u0a145i-8991 (adj 0): stop com.android.chrome')}\n${death}`)],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    const rejected = measureDeparture(value);
+    assert.deepEqual(rejected.issues, [], name);
+    assert.deepEqual(rejected.normalRetirements, [], name);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('(pid 6048)')), name);
+  }
+}]);
+
+androidEventTests.push(['synthetic missing-Zygote-exit retirement rejects incomplete or adverse helper observations', async () => {
+  const log = await hostedMissingExitLog();
+  const selfExit = '         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.\n';
+  const kill = '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed\n';
+  const browserDeath = '         1792874856.626  5609  5609 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10658)\n';
+  const end = '         1792874856.700 10755 10755 I HerdrMeasure: 40095544451 END\n';
+  const fatal = '         1792874856.614 10658 10658 E AndroidRuntime: FATAL EXCEPTION: main\n';
+  const forceStop = '         1792874856.616   564   975 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 50\n';
+  const helperAfterKill = '         1792874856.616 10658 10668 I Other: later helper record\n';
+  const packageChange = '         1792874856.616   564   975 I PackageManager: Replacing package com.android.chrome\n';
+  const browserPidReuse = '         1792874856.622   564   975 I ActivityManager: Start proc 5609:com.example.app/u0a123 for service\n';
+  const rejected: [string, string][] = [
+    ['self-exit missing', log.replace(selfExit, '')],
+    ['browser-observed death missing', log.replace(browserDeath, '')],
+    ['browser-observed death before the kill', log.replace(kill + browserDeath, browserDeath.replace('1792874856.626', '1792874856.613') + kill)],
+    ['browser-observed death stamped before the kill but received after it', log.replace(browserDeath, browserDeath.replace('1792874856.626', '1792874856.610'))],
+    ['browser-observed death stamped before the self-exit but received after the kill', log.replace(browserDeath, browserDeath.replace('1792874856.626', '1792874856.605'))],
+    ['browser PID reused by another Android user before the observation', log.replace(browserDeath, browserPidReuse.replace('/u0a123', '/u10a123') + browserDeath)],
+    ['browser-observed death from a non-Chrome pid', log.replace('1792874856.626  5609  5609', '1792874856.626  5649  5649')],
+    ['browser PID reused by a non-Chrome process before the observation', log.replace(browserDeath, browserPidReuse + browserDeath)],
+    ['browser PID reuse stamped before the observation but received after it', log.replace(browserDeath, browserDeath + browserPidReuse)],
+    ['browser-observed death after END without another retirement event', log.replace(browserDeath + end,
+      '         1792874856.620 10755 10755 I HerdrMeasure: 40095544451 END\n' + browserDeath)],
+    ['reason other than isolated not needed', log.replace('isolated not needed', 'remove task')],
+    ['mismatched isolated UID', log.replace('i-8988', 'i-8987')],
+    ['two kills', log.replace(kill, kill + kill.replace('1792874856.615', '1792874856.616'))],
+    ['helper record after the kill', log.replace(kill, kill + helperAfterKill)],
+    ['package change during the helper lifetime', log.replace(kill, kill + packageChange)],
+    ['crash or fatal record', log.replace(kill, fatal + kill)],
+    ['Zygote exit with a non-reaper signal', log.replace(end, '         1792874856.640  5649  5649 I Zygote  : Process 10658 exited due to signal 11 (Segmentation fault)\n' + end)],
+    ['force stop during the helper lifetime', log.replace(kill, forceStop + kill)],
+  ];
+  for (const [name, candidate] of rejected) {
+    const result = measureHostedMissingExit(candidate);
+    assert.deepEqual(result.issues, [], name);
+    assert.equal(result.normalRetirements.length, 0, name);
+    assert.ok(result.fatalEvents.length > 0, name);
+  }
+}]);
+
+const hostedProcesses = {
+  before: { '364': 'zygote64', '559': 'system_server', '5242': 'com.android.chrome', '5283': 'com.android.chrome_zygote' },
+  after: { '364': 'zygote64', '559': 'system_server', '12943': 'com.android.chrome', '12987': 'com.android.chrome_zygote' },
+};
+const hostedSnapshot = (boundary: 'start' | 'end', processes: Record<string, string>) => ({
+  measurement: { id: '8ef766af-ac79-417d-a2a7-7007e7d12d91', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const measureHosted = (log: string, after: Record<string, string> = hostedProcesses.after) => measuredAndroidEvents(log,
+  hostedSnapshot('start', hostedProcesses.before), hostedSnapshot('end', after), []);
+const hostedHelperLog = () => readFile(new URL('./fixtures/android-hosted-39634239574-helper-retirements.log', import.meta.url), 'utf8');
+
+androidEventTests.push(['hosted 39634239574 helpers retire through interleaved startup, system reaping and a relaunched Chrome zygote', async () => {
+  const log = await hostedHelperLog();
+  const result = measureHosted(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => [retirement.pid, retirement.events.length]), [['5716', 1], ['9619', 2], ['13837', 1]]);
+  const interleaved = result.normalRetirements[0].proof;
+  assert.match(interleaved[0].line, /5716 {2}5716 I ocessService0:3: Using CollectorTypeCMC GC\.$/u);
+  assert.match(interleaved[1].line, /Forked child process 5716$/u);
+  for (const retirement of result.normalRetirements) {
+    for (const proof of retirement.proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+}]);
+
+const hostedRejections: [string, string, (log: string) => string, Record<string, string>?][] = [
+  ['reaped helper with a different kill reason', '9619', (log) => log.replace('(adj 0): isolated not needed\n         1792601029.076', '(adj 0): remove task\n         1792601029.076')],
+  ['reaped helper with a crash signal', '9619', (log) => log.replace('Process 9619 exited due to signal 9 (Killed)', 'Process 9619 exited due to signal 11 (Segmentation fault)')],
+  ['relaunched zygote missing from the final inventory', '13837', (log) => log, { '364': 'zygote64', '559': 'system_server', '12943': 'com.android.chrome' }],
+  ['relaunched zygote forked by an unknown parent', '13837', (log) => log.replace('1792601069.463   364   364 D Zygote', '1792601069.463   365   365 D Zygote')],
+  ['relaunched zygote with a second fork record', '13837', (log) => log.replace(/^( *1792601069\.463 +364 +364 D Zygote *: Forked child process 12987\n)/mu, '$1$1')],
+  ['relaunched zygote that exited', '13837', (log) => log.replace('Process 13837 exited cleanly (0)\n', 'Process 13837 exited cleanly (0)\n         1792601081.095 12987 12987 I Zygote  : Process 12987 exited cleanly (0)\n')],
+  ['startup line more than twenty milliseconds before the fork', '5716', (log) => log.replace('1792600976.843  5716', '1792600976.826  5716')],
+];
+androidEventTests.push(['hosted 39634239574 helper startup line tags and messages are not required', async () => {
+  const original = await hostedHelperLog();
+  for (const log of [
+    original.replace('I ocessService0:3: Using', 'I cessService0:3: Using'),
+    original.replace('I ocessService0:3: Using CollectorTypeCMC GC.', 'W ocessService0:3: Unexpected CPU variant for x86: x86_64.'),
+  ]) {
+    assert.notEqual(log, original);
+    const result = measureHosted(log);
+    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.fatalEvents, []);
+    assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['5716', '9619', '13837']);
+  }
+}]);
+for (const [name, pid, mutate, after] of hostedRejections) androidEventTests.push([`hosted 39634239574 helper rejection: ${name}`, async () => {
+  const original = await hostedHelperLog();
+  const log = mutate(original);
+  assert.notEqual(log === original, after === undefined, 'each rejection must change the log or the final inventory');
+  const result = measureHosted(log, after);
+  assert.ok(!result.normalRetirements.some((retirement) => retirement.pid === pid));
+  assert.ok(result.fatalEvents.some((event) => event.includes(` ${pid}:`) || event.includes(`Process ${pid} `)));
+}]);
+
+const lateProcesses = {
+  before: { '358': 'zygote64', '556': 'system_server', '5492': 'com.android.chrome', '5531': 'com.android.chrome_zygote' },
+  after: { '358': 'zygote64', '556': 'system_server', '13129': 'com.android.chrome', '13170': 'com.android.chrome_zygote' },
+};
+const lateSnapshot = (boundary: 'start' | 'end', processes: Record<string, string>) => ({
+  measurement: { id: '0bf6b509-b835-4dc7-ab8f-3b2a8493789c', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const measureLate = (log: string) => measuredAndroidEvents(log, lateSnapshot('start', lateProcesses.before), lateSnapshot('end', lateProcesses.after), []);
+const lateHelperLog = () => readFile(new URL('./fixtures/android-hosted-39656482139-helper-retirements.log', import.meta.url), 'utf8');
+
+androidEventTests.push(['hosted 39656482139 helpers retire with any process-state death label and across the END marker', async () => {
+  const log = await lateHelperLog();
+  const result = measureLate(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154']);
+  assert.match(result.normalRetirements[0].events[0], /\(pid 10768\) has died: fg {2}SVC $/u);
+  for (const retirement of result.normalRetirements) {
+    for (const proof of retirement.proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+  for (const label of ['vis+1 BTOP', 'fg  + 5 SVC ', 'cch+75 CEM ', 'prcp FGS ']) {
+    const relabelled = measureLate(log.replace('has died: fg  SVC ', `has died: ${label}`));
+    assert.deepEqual(relabelled.fatalEvents, [], label);
+    assert.deepEqual(relabelled.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154'], label);
+  }
+  const sameMillisecond = measureLate(log.replace('1792609794.698 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar',
+    '1792609794.694 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar'));
+  assert.deepEqual(sameMillisecond.fatalEvents, []);
+}]);
+
+androidEventTests.push(['hosted 39750084306 a helper still listed in the END inventory under its own name retires inside the measurement', async () => {
+  const log = await lateHelperLog();
+  const helper = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22';
+  const listed = (name: string) => measuredAndroidEvents(log, lateSnapshot('start', lateProcesses.before),
+    lateSnapshot('end', { ...lateProcesses.after, '10768': name }), []);
+  const own = listed(helper);
+  assert.deepEqual(own.issues, []);
+  assert.deepEqual(own.fatalEvents, []);
+  assert.deepEqual(own.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154']);
+  const other = listed(`${helper.slice(0, -2)}23`);
+  assert.ok(!other.normalRetirements.some((retirement) => retirement.pid === '10768'));
+  assert.ok(other.fatalEvents.some((event) => event.includes('(pid 10768)')));
+}]);
+
+const lateRejections: [string, string, (log: string) => string][] = [
+  ['death label without a process state', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg')],
+  ['death label with extra words', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg  SVC  extra')],
+  ['start record received after the END marker', '14154', (log) => log.replace(/^(.*HerdrMeasure: .* END\n)/mu, '').replace(/^(.*Start proc 14154:.*\n)/mu,
+    '         1792609794.686 14165 14165 I HerdrMeasure: 0bf6b509-b835-4dc7-ab8f-3b2a8493789c END\n$1')],
+  ['own record received after END but timestamped before it', '14154', (log) => log.replace('1792609794.698 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar',
+    '1792609794.690 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar')],
+  ['post-END mention timestamped before the END marker', '14154', (log) => log.replace('1792609794.781 13129 13129', '1792609794.690 13129 13129')],
+  ['post-END crash exit', '14154', (log) => log.replace('Process 14154 exited cleanly (0)', 'Process 14154 exited due to signal 11 (Segmentation fault)')],
+];
+androidEventTests.push(['hosted 39656482139 helper clean exit across END does not require the child exit message', async () => {
+  const original = await lateHelperLog();
+  const log = original.replace(/^.*\b14154 +14167 I chromium: .*Exiting child process\.\n/mu, '');
+  assert.notEqual(log, original);
+  const result = measureLate(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154']);
+}]);
+for (const [name, pid, mutate] of lateRejections) androidEventTests.push([`hosted 39656482139 helper rejection: ${name}`, async () => {
+  const original = await lateHelperLog();
+  const log = mutate(original);
+  assert.notEqual(log, original);
+  const result = measureLate(log);
+  assert.deepEqual(result.issues, []);
+  assert.ok(!result.normalRetirements.some((retirement) => retirement.pid === pid));
+  assert.ok(result.fatalEvents.some((event) => event.includes(`(pid ${pid})`) || event.includes(`Process ${pid} `)));
+}]);
+
+androidEventTests.push(['synthetic planned Chrome force-stop covers observed helpers the system reaps inside the operation', async () => {
+  const helper = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
+  const operation: AndroidPlannedTermination = {
+    id: 'stop', measurementId: 'synthetic', packageName: 'com.android.chrome', pid: '300',
+    processes: { '300': 'com.android.chrome', '301': helper }, succeeded: true,
+    command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'],
+  };
+  const processes: Record<string, string> = { '100': 'com.android.chrome_zygote', '300': 'com.android.chrome', '301': helper, '559': 'system_server' };
+  const begin = line(2, 1, 'HerdrMeasure', 'synthetic OP_BEGIN stop com.android.chrome 300');
+  const finish = line(6, 1, 'HerdrMeasure', 'synthetic OP_END stop com.android.chrome 300');
+  const stopping = line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50');
+  const kill = line(3, 559, 'ActivityManager', 'Killing 300:com.android.chrome/u0a145 (adj 0): stop com.android.chrome due to from pid 50');
+  const reap = line(4, 559, 'ActivityManager', `Killing 301:${helper}/u0a145i-9000 (adj 0): isolated not needed`);
+  const helperExit = line(4, 100, 'Zygote', 'Process 301 exited due to signal 9 (Killed)');
+  const signal = line(5, 100, 'Zygote', 'Process 300 exited due to signal 9 (Killed)');
+  const check = (log: string, operations = [operation], before = processes) => measuredAndroidEvents(log, snapshot('start', before), snapshot('end'), operations);
+  const operationLog = (...records: string[]) => start + begin + records.join('') + finish + end;
+  const valid = operationLog(stopping, kill, reap, helperExit, signal);
+  assert.deepEqual(check(valid).issues, []);
+  assert.deepEqual(check(valid).fatalEvents, []);
+  assert.deepEqual(check(operationLog(stopping, kill, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal)).fatalEvents, []);
+  const cleanExit = helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)');
+  assert.deepEqual(check(operationLog(stopping, kill, cleanExit, reap, signal)).fatalEvents, []);
+  const earlyCleanExit = cleanExit.replace('6374.000', '6373.750');
+  assert.deepEqual(check(operationLog(stopping, kill, earlyCleanExit, reap, signal)).fatalEvents, []);
+  const otherProcesses = { ...operation, processes: { '300': 'com.android.chrome' } };
+  const otherName = { ...operation, processes: { '300': 'com.android.chrome', '301': `${helper}1` } };
+  for (const [name, log, operations] of [
+    ['early clean exit without reaping', operationLog(stopping, kill, earlyCleanExit, signal), [operation]],
+    ['early crash exit', operationLog(stopping, kill, earlyCleanExit.replace('cleanly (0)', 'due to signal 11 (Segmentation fault)'), reap, signal), [operation]],
+    ['clean exit received before force-stop', operationLog(earlyCleanExit, stopping, kill, reap, signal), [operation]],
+    ['clean exit timestamped before force-stop', operationLog(stopping, kill, earlyCleanExit.replace('6373.750', '6372.500'), reap, signal), [operation]],
+    ['early clean exit from unknown zygote', operationLog(stopping, kill, earlyCleanExit.replace('100 100', '101 101'), reap, signal), [operation]],
+    ['early clean exit with another signal', operationLog(stopping, kill, earlyCleanExit, reap, line(4, 559, 'Process', 'Sending signal. PID: 301 SIG: 9'), signal), [operation]],
+    ['early clean exit with duplicate exit', operationLog(stopping, kill, earlyCleanExit, reap, cleanExit, signal), [operation]],
+    ['early clean exit with wrong helper identity', operationLog(stopping, kill, earlyCleanExit, reap, signal), [otherName]],
+    ['early clean exit with unknown reaper', operationLog(stopping, kill, earlyCleanExit, reap.replace('559 559', '558 558'), signal), [operation]],
+    ['helper outside the observed process set', valid, [otherProcesses]],
+    ['helper with a different observed name', valid, [otherName]],
+    ['reaping received after the operation', start + begin + stopping + kill + signal + finish + reap + helperExit + end, [operation]],
+    ['reaping timestamped after the operation', operationLog(stopping, kill, reap.replace('6374.000', '6377.000'), helperExit, signal), [operation]],
+    ['reaping before the force-stop record', operationLog(reap, helperExit, stopping, kill, signal), [operation]],
+    ['force-stop record for another user', operationLog(stopping.replace('user=0', 'user=10'), kill, reap, helperExit, signal), [operation]],
+    ['reaping by an unknown producer', operationLog(stopping, kill, reap.replace('559 559', '558 558'), helperExit, signal), [operation]],
+    ['different reaping reason', operationLog(stopping, kill, reap.replace('isolated not needed', 'remove task'), helperExit, signal), [operation]],
+    ['crash signal after reaping', operationLog(stopping, kill, reap, helperExit.replace('signal 9 (Killed)', 'signal 11 (Segmentation fault)'), signal), [operation]],
+    ['additional signal after reaping', operationLog(stopping, kill, reap, helperExit, line(4, 559, 'Process', 'Sending signal. PID: 301 SIG: 9'), signal), [operation]],
+    ['second exit after reaping', operationLog(stopping, kill, reap, helperExit, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal), [operation]],
+    ['helper exit from an unknown zygote', operationLog(stopping, kill, reap, helperExit.replace('100 100', '101 101'), signal), [operation]],
+    ['force-stop record from an unknown producer', operationLog(stopping.replace('559 559', '558 558'), kill, reap, helperExit, signal), [operation]],
+    ['repeated reaping record', operationLog(stopping, kill, reap, reap, helperExit, signal), [operation]],
+    ['force-stop kill of a sandboxed helper', operationLog(stopping, kill, reap.replace('/u0a145i-9000 (adj 0): isolated not needed', '/u0ai2 (adj 0): stop com.android.chrome due to from pid 50'), reap, helperExit, signal), [operation]],
+    ['reaping repeated after the exit', operationLog(stopping, kill, reap, helperExit, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal), [operation]],
+  ] as [string, string, AndroidPlannedTermination[]][]) {
+    const result = check(log, operations);
+    assert.deepEqual(result.issues, [], name);
+    assert.ok(result.fatalEvents.some((event) => event.includes('301')), name);
+  }
+}]);
+
+androidEventTests.push(['hosted 39793077230 planned-stop excerpt correlates clean exit before system reaping', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-39793077230-planned-stop.log', import.meta.url), 'utf8');
+  const id = '65047b4c-6b5d-49d3-b557-fa384afcd7ea';
+  const processes = {
+    '5409': 'com.android.chrome',
+    '5460': 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0',
+    '5489': 'com.android.chrome:privileged_process0',
+    '6132': 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:10',
+  };
+  const before = snapshot('start', { ...processes, '558': 'system_server', '5449': 'com.android.chrome_zygote' });
+  const after = snapshot('end', {});
+  before.measurement!.id = id;
+  after.measurement!.id = id;
+  const operation: AndroidPlannedTermination = {
+    id: '0bfbeb9d-5d35-487e-93de-34a42d48b3de', measurementId: id,
+    packageName: 'com.android.chrome', pid: '5409', processes, succeeded: true,
+    command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'],
+  };
+  const result = measuredAndroidEvents(log, before, after, [operation]);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.boundaryDiscordances, []);
+  assert.deepEqual(result.fatalEvents, []);
+  for (const operations of [[], [{ ...operation, succeeded: false }]]) {
+    const rejected = measuredAndroidEvents(log, before, after, operations);
+    assert.ok(rejected.issues.length > 0);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('5460')));
+  }
+}]);
+
+for (const [name, value] of negative) androidEventTests.push([`synthetic helper rejection: ${name}`, async () => {
+  const result = measure(start + value + end);
+  assert.equal(result.normalRetirements.length, 0);
+  assert.ok(result.fatalEvents.length > 0);
+}]);
+for (const [name, log] of [
+  ['missing start', body + end], ['missing end', start + body], ['reversed markers', end + body + start],
+  ['duplicate start', start + start + body + end], ['truncated', (start + body + end).trimEnd()],
+  ['malformed', start + body + 'broken record\n' + end],
+] as [string, string][]) androidEventTests.push([`synthetic invalid coverage: ${name}`, async () => {
+  const result = measure(log);
+  assert.ok(result.issues.length);
+  assert.equal(result.normalRetirements.length, 0);
+}]);
+androidEventTests.push(['synthetic mixed fatal and normal observations and inventory contradictions stay fatal', async () => {
+  const result = measure(start + body + line(6, 559, 'ActivityManager', 'Process com.android.chrome (pid 300) has died: fg TOP') + end);
+  assert.equal(result.normalRetirements.length, 1);
+  assert.equal(result.fatalEvents.length, 1);
+  for (const [before, after] of [[snapshot('start', { '200': processName }), snapshot('end')], [snapshot('start'), snapshot('end', { '200': 'com.example' })]]) {
+    assert.equal(measure(start + body + end, before, after).normalRetirements.length, 0);
+  }
+}]);

@@ -1,7 +1,7 @@
 // Command herdr-gateway runs the blind WebSocket rendezvous gateway that pairs
-// Herdr computer relays with their phones. It holds no secrets, sees only
-// ciphertext, and is configured entirely through the environment so a container
-// needs no command line.
+// Herdr computer relays with their phones. It sees only ciphertext and may hold
+// a separate registration secret. It is configured entirely through the
+// environment so a container needs no command line.
 package main
 
 import (
@@ -16,8 +16,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/0cv/herdr-mobile-relay/internal/gateway"
+	"github.com/0cv/herdr-mobile-relay/internal/gatewaywire"
 )
 
 // drainTimeout bounds how long the HTTP server is given to finish in-flight
@@ -103,6 +105,20 @@ func run() error {
 func loadOptions() (gateway.Options, error) {
 	var opts gateway.Options
 	var err error
+
+	opts.RegistrationToken = os.Getenv("HERDR_GATEWAY_REGISTRATION_TOKEN")
+	allowed := strings.FieldsFunc(os.Getenv("HERDR_GATEWAY_ALLOWED_RELAY_IDS"), func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	if len(allowed) > 0 {
+		opts.AllowedRelayIDs = make(map[string]bool, len(allowed))
+		for _, id := range allowed {
+			if !gatewaywire.ValidRelayID(id) {
+				return opts, fmt.Errorf("gateway: HERDR_GATEWAY_ALLOWED_RELAY_IDS contains invalid relay id %q; expected a full 22-character base64url id", id)
+			}
+			opts.AllowedRelayIDs[id] = true
+		}
+	}
 
 	if opts.MaxRelays, err = envInt("HERDR_GATEWAY_MAX_RELAYS"); err != nil {
 		return opts, err

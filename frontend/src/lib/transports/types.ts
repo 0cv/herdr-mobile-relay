@@ -81,7 +81,7 @@ export interface FrameChannel {
 export interface FrameChannelHandlers {
   onOpen(): void;
   onFrame(frame: E2EEWireFrame): void;
-  onClose(detail?: TransportStatusDetail): void;
+  onClose(detail?: TransportStatusDetail, relayTls?: boolean): void;
 }
 
 /**

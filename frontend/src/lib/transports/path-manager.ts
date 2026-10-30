@@ -265,6 +265,7 @@ export function createHybridTransport(
     stabilityTimer = setTimeout(() => {
       stabilityTimer = null;
       gatewayReady = false;
+      gatewayAttempt += 1;
       gateway?.close();
       gateway = null;
     }, DIRECT_STABILITY_MS);
@@ -278,6 +279,7 @@ export function createHybridTransport(
     attemptTimer = null;
     clearTimeout(stabilityTimer ?? undefined);
     stabilityTimer = null;
+    directAttempt += 1;
     direct.close();
     direct = null;
     directReady = false;
@@ -299,7 +301,7 @@ export function createHybridTransport(
     const scoped = scopedAuthentication(() => attempt === gatewayAttempt);
     gateway = makeGateway(dialed, {
       onMessage(message: Record<string, any>): void {
-        if (closed) return;
+        if (closed || attempt !== gatewayAttempt) return;
         for (const handler of [...signalHandlers]) handler(message);
         if (SIGNALING_TYPES[String(message.type)]) return;
         if (active !== 'gateway') {
@@ -309,12 +311,13 @@ export function createHybridTransport(
         handlers.onMessage(message);
       },
       onStatus(status, detail): void {
-        if (closed) return;
+        if (closed || attempt !== gatewayAttempt) return;
         if (status === 'closed') {
           // Resume timing records how this gateway dial ended before the list
           // moves on, so a later gateway's success cannot erase it. A device
           // refusal is reported by the store as an authorization outcome.
           if (detail?.code !== DEVICE_UNAUTHORIZED_CODE) observePhase(scoped.observe, 'failed', 'gateway');
+          gatewayAttempt += 1;
           gatewayReady = false;
           gateway = null;
           if (detail?.code === DEVICE_UNAUTHORIZED_CODE) {
@@ -338,7 +341,7 @@ export function createHybridTransport(
           // Every entry has failed in this pass. The legacy WSS URL is the last
           // resort; otherwise a relayed session that dies while it is carrying
           // traffic ends the whole transport and the store reconnects.
-          if (detail?.fatal && startLegacy(detail)) return;
+          if (startLegacy(detail)) return;
           closed = true;
           stop();
           handlers.onStatus('closed', detail);
@@ -370,11 +373,11 @@ export function createHybridTransport(
    * network, gateway outage, relay not registered — falls back to the path
    * that was working before the migration instead of being stranded.
    */
-  function startLegacy(detail: TransportStatusDetail): boolean {
+  function startLegacy(detail?: TransportStatusDetail): boolean {
     if (legacyTried || !relay.url) return false;
     legacyTried = true;
     active = 'legacy';
-    handlers.onStatus('connecting', { reason: detail.reason });
+    handlers.onStatus('connecting', { reason: detail?.reason });
     const scoped = scopedAuthentication(() => active === 'legacy');
     legacy = makeLegacy(relay, {
       onMessage(message: Record<string, any>): void {
@@ -397,6 +400,8 @@ export function createHybridTransport(
   }
 
   function stop(): void {
+    gatewayAttempt += 1;
+    directAttempt += 1;
     clearTimeout(retryTimer ?? undefined);
     retryTimer = null;
     clearTimeout(attemptTimer ?? undefined);

@@ -412,7 +412,7 @@ async function openProfile(profile, path, url, developmentImport = false) {
       const session = await context.newCDPSession(page);
       const info = await session.send('Browser.getVersion');
       const { arguments: argv } = await session.send('Browser.getBrowserCommandLine');
-      if (info.product !== 'Chrome/151.0.7922.34' || !launchArgumentsAllowed(argv, path)) {
+      if (info.product !== 'Chrome/153.0.8010.12' || !launchArgumentsAllowed(argv, path)) {
         throw new Error('owned profile browser identity or launch arguments differ');
       }
       await session.detach();

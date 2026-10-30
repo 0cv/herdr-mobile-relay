@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createConnection } from 'node:net';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { normalizeCommands, startBridge } from '../relay/pi-command-bridge/bridge.mjs';
@@ -9,7 +10,7 @@ import { normalizeCommands, startBridge } from '../relay/pi-command-bridge/bridg
 if (!process.env.PI_TEST_PACKAGE) throw new Error('Set PI_TEST_PACKAGE to the installed Pi package directory');
 const originalEnv = { ...process.env };
 const root = resolve(process.env.PI_TEST_PACKAGE);
-const dir = mkdtempSync('/tmp/pi-provenance-');
+const dir = mkdtempSync(join(tmpdir(), 'pi-provenance-'));
 const cwd = join(dir, 'project');
 const agentDir = join(dir, 'agent');
 process.env.HOME = dir;

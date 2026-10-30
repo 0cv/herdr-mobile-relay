@@ -24,6 +24,7 @@
     "pane_size_opt_in_rows",
     "workspace_inspection",
     "semantic_input",
+    "manual_terminal_input",
     "secret_input",
     "speech_voice_management",
     "invitation_qr"

@@ -5,183 +5,194 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.23.0] - 2026-10-21
-
-This release adds optional Tailscale connection paths, read-only diagnostics, an
-opt-in encrypted last-known summary and local resume timing on the phone, and
-stricter service, update and uninstall handling. None of the Tailscale paths has
-been qualified on a physical phone or against a real Tailscale daemon, and each
-entry below states its limits.
-
 ### Added
 
-- Add managed Tailscale Serve as an optional foreground connection path for a
-  tailnet HTTPS address. Start it with
-  `relay/plugin-choose-transport.sh tailscale` or
-  `HERDR_RELAY_TRANSPORT=tailscale`; the setup menu does not offer it. The relay
-  stays on `127.0.0.1`. After a read-only identity, version, Serve and Funnel
-  check and per-run consent, the relay process owns a temporary HTTPS route
-  through Tailscale's LocalAPI. It never runs `tailscale login` or
-  `tailscale serve`, never enables Funnel, and refuses to adopt or overwrite an
-  existing Serve or Funnel configuration, leaving it untouched. Keep the pane
-  open: Ctrl-C requests authenticated retirement, and if route clearing cannot
-  be confirmed the owner record and recovery evidence are kept. Limits: pinned
-  to Tailscale 1.102.4 on Linux and the open-source Darwin daemon socket; the
-  macOS App Store and GUI builds are unsupported; no real-daemon or
-  physical-phone qualification.
-- Add operator-owned HTTPS Serve (BYO) as a second foreground Tailscale path,
-  chosen under **3 Tailscale** > **2 Your own HTTPS route (advanced BYO)** in
-  the setup menu. You route a canonical `https://host[:port]` origin to the
-  loopback relay yourself. Herdr stores it as
-  `HERDR_RELAY_TRANSPORT=tailscale-external` and `HERDR_EXTERNAL_HTTPS_ORIGIN`,
-  checks the origin's TLS certificate, relay instance and release before arming
-  an invitation, disables automatic PCP/UPnP router mapping, and makes no
-  Tailscale CLI or LocalAPI call. It never creates, inspects or removes the
-  route, which stays yours when Herdr stops. The phone app may stay on an
-  independently hosted origin, whose exact bundle Herdr verifies before pairing.
-- Add development-only Tailscale tooling for checkouts: `make dev-tailscale`
-  (guided foreground Serve with a private state root and nonproduction ports),
-  `make dev-tailscale-cli` (CLI-backed persistent Serve for the exact
-  macOS/arm64 App Store Tailscale 1.102.4 profile) and a connection chooser in
-  `make dev-tunnel`. The isolated CLI-backed development mode is not
-  runtime-qualified. Post-install setup visibly dispatches **Tailscale > Always
-  on** to the installed CLI selector, but production, installed-manager and
-  RuntimeQualified gates remain closed; installed activation is refused pending
-  actual qualification and separate enablement. The development route survives
-  stopping the relay and is removed only by a separate, explicitly confirmed
-  operation.
-- Add read-only `herdr-mobile-relay doctor` and `status` commands, with
-  `--json`, `--config ABSOLUTE_FILE` and `--probe-ingress`. The plugin's Status
-  pane and the setup menu header now render them. They check the selected
-  configuration, the installed package's manifest and file hashes (Linux), exact
-  loopback relay health and, for ordinary Cloudflare, gateway and BYO
-  selections, one Herdr `ping`. The exit status is 2 for an invalid invocation
-  or configuration, 1 for an observed failure, 3 when a required check cannot be
-  observed and 0 when every applicable required check completes. This first
-  slice is partial: service lifecycle, the full Herdr comparison, pairing and
-  phone activity are not checked, `--probe-ingress` sends no external request,
-  and on macOS the installed-package byte check and the Herdr ping are reported
-  unavailable instead of guessed, so a healthy relay does not yet report exit 0.
-- Add an opt-in **Keep an Encrypted Last-known Summary** switch, off by default,
-  and **Forget last-known data** to Settings. While a relay reconnects, the app
-  can show a dated, read-only list of agents and workspaces (display labels,
-  coarse type and status, time last seen) from this tab's encrypted
-  `sessionStorage`. Nothing in it opens a terminal or acts on an agent, and it
-  is replaced, never merged, when the relay reports authoritative inventory.
-  Entries expire after 60 minutes, are bounded to 200 rows and 50 groups per
-  relay, 10 relays and 512 KiB, and exclude terminal, conversation, prompt,
-  approval, attachment and path content. Locking removes the summary;
-  forgetting, opting out, removing a relay or changing credentials invalidates
-  it in every tab. Labels may be sensitive, a new Home Screen launch, a closed
-  tab or browser eviction can lose the cache, and browser-refused deletion is
-  reported rather than promised. This is a candidate feature with no
-  physical-phone performance claim.
-- Add **Settings > Resume Timing**, which measures how long the app takes to
-  show fresh agents after each wake, by connection path (Cloudflare WSS,
-  Tailscale WSS, gateway relayed or direct) and kind of wake. It is on by
-  default but local: at most 100 wakes from the last 24 hours stay in this tab's
-  memory and are never uploaded. Turn **Measure Resume Timing** off to stop and
-  clear them, use **Clear Resume Timings**, or **Export Redacted Summary** for
-  aggregates and sample counts only. The delay before the app's code runs and
-  DNS, TCP and TLS inside a connection cannot be observed and are reported as
-  unavailable. Relays add an optional coarse `ingress` label (`cloudflare`,
-  `gateway`, `tailscale-managed`, `tailscale-byo` or `tailscale-cli`) to the
-  encrypted push configuration so paths are labelled without guessing from
-  hostnames; older apps ignore it and older relays omit it. No performance claim
-  is made.
+- Add optional foreground Tailscale Serve and operator-owned HTTPS Serve (BYO)
+  connection paths. Managed routes require read-only identity checks and fresh
+  consent, never adopt another route, and retain recovery evidence if retirement
+  cannot be confirmed. BYO leaves the operator's route unchanged. The installed
+  CLI selector remains disabled pending runtime and physical-phone qualification;
+  isolated checkout tools support only the documented development profiles.
+- Add read-only relay doctor/status diagnostics and an opt-in encrypted last-known
+  phone summary. Resume timing remains local to the phone with redacted export.
 
 ### Changed
 
-- Reorganize the setup menu into **1 Cloudflare**, **2 WebRTC Gateway** and
-  **3 Tailscale** submenus, with **4 Show setup QR**,
-  **5 Publish the phone app to your Cloudflare Pages (advanced)** and
-  **6 Doctor** at the top level. `b` goes back and `q` exits; a blank answer at
-  the top opens Cloudflare and never starts a tunnel. In the Tailscale submenu
-  **Always on** dispatches the installed CLI selector, and **Remove Herdr's own
-  route** dispatches its selected, consented removal action. Both remain refused
-  while installed activation is disabled pending qualification and separate enablement.
-- Require fresh, authenticated inventory before the phone app acts on a relay.
-  After each connection, path change or wake the app sends one snapshot request
-  with a random nonce, which the relay answers from an inventory poll that
-  started after the request. Reads and writes, such as watching a pane, sending
-  input, leasing a pane size and uploading, wait for it, and a hidden or locked
-  app drops that authority, allowing only cleanup and connection recovery.
-  Relays now advertise `inventory_snapshot_v1`; a relay older than this release
-  cannot provide it, so upgrade relays together with the phone app. The
-  pane-size lease follows the same rule: a hidden or locked app gives its lease
-  back and does not renew it, the relay keeps the size for its ten-second grace,
-  and the phone leases again once fresh inventory is confirmed. This replaces
-  the five-minute hidden renewal.
-- Keep background paths away from foreground Tailscale. While managed or
-  operator-owned Tailscale Serve is selected, background service installation
-  and phone-managed updates are refused, and a plugin update is refused if a
-  background service is installed. A recorded foreground session also blocks
-  plugin updates, full uninstall and choosing another transport. Phone-managed
-  updates are likewise refused for CLI-backed installations. Stop the foreground
-  pane first.
-- Explain expired, already-used or refused setup links in Settings: if no phone
-  has paired yet, retry the original bootstrap link while the same relay is
-  running, because its ten-minute window renews when presented; ordinary device
-  invitations expire ten minutes after issue and need a new invitation from a
-  paired owner.
-- Verify a gateway service installation before reporting success. The installer
-  now needs an already selected HTTPS phone app, checks that it serves the exact
-  packaged bundle, and requires the relay to report a verified gateway
-  registration with usable inventory. Phone reachability is still not proved.
-- Package the Tailscale launchers, the transport-switch helper, the Status
-  wrapper, `speech-voices.sh` and `.env.example` in release archives, and have
-  release verification reject an archive without the transport-switch helper.
-- Require a successful Full service qualification run of the tagged commit
-  before a release is published, in addition to `check.yml`. The fast per-push
-  run is not accepted: dispatch the Full run, or use the nightly one, for the
-  commit to be tagged. See `docs/ci-test-tiers.md`.
+- Group Cloudflare, gateway and Tailscale choices in the setup menu. Require a
+  fresh authenticated inventory snapshot before phone actions after reconnect,
+  path change or wake; older relays need upgrading with the phone app.
+- Refuse service installation and phone-managed updates for foreground Tailscale
+  selections, and verify the selected app bundle before gateway installation.
 
 ### Fixed
 
-- Ignore setup links that repeat an invitation selector (`invite`,
-  `invite_version`, `invite_expires`, `setup`, `relay_id` or `rendezvous`) and
-  links that carry invitation metadata without a valid invitation, instead of
-  choosing one of the values.
-- Keep the reader's place when a terminal find match lands just above the
-  bottom: new output no longer resumes following until the reader reaches the
-  bottom or taps Jump to latest.
-- Roll back fully when a plugin update restarted a running service whose
-  definition is not at the default path and the new release then failed
-  verification: the service is restarted on the previous release and verified,
-  instead of the new release being left running.
+- Reject ambiguous setup invitations and preserve terminal find position until
+  the reader jumps to the latest output. Restore a previously running service
+  when a failed plugin update rolls back a nondefault service definition.
 
-### Security
+## [0.23.5] - 2026-10-29
 
-- Make full uninstall refuse before it changes anything when it cannot prove
-  what it would remove. It now refuses while a foreground Tailscale or
-  operator-owned Serve session is recorded, when the service configuration
-  cannot be selected unambiguously, and when release files have more than one
-  link. On Linux the relay's own mount guard also checks, before any effect and
-  again before each destructive step, that no release, config or cache root has
-  a mount at, beneath or aliasing it, including a temporary directory that
-  aliases a root. macOS has no mount-confinement proof; its path is unchanged.
-- Make native user-service installation and replacement (systemd and launchd) a
-  guarded transaction. It refuses to touch a loaded service of the same label
-  unless it comes from Herdr's own definition, verifies readiness of the
-  replacement and, on failure, rolls back only after the services are confirmed
-  quiescent. The previous service is reactivated only when its readiness was
-  recorded before the change; otherwise the services stay stopped and the
-  recovery evidence is kept. On disposable CI runners, real systemd user and
-  launchd services now pass install, start, stop, login-style relaunch and full
-  uninstall, and the official Herdr CLI's plugin update, rollback of a failed
-  update and full uninstall. Signals, legacy-label migration through the CLI
-  and login/logout on a physical machine are not yet qualified.
-- Print a bounded, historical `support-public-v1` projection from
-  `herdr-mobile-relay support` instead of the whole persisted snapshot, which
-  can hold operational metadata and recent errors. It records protocol,
-  readiness and inventory state and counters, and is not current health. The
-  snapshot must be a private regular file in an absolute canonical runtime
-  directory. On macOS it is read only when descriptor ACL evidence shows it is
-  private; that path is not yet qualified on a real macOS host.
-- Require device authorization for pane-size lease and release requests at
-  admission and again right before each Herdr dispatch, and make the relay check
-  the dispatch boundary immediately before resizing so that a request whose
-  target changed since the last Herdr lookup writes nothing.
+### Added
+
+- Protect self-hosted gateway registrations with an optional shared registration
+  token and relay-id allow-list. Relays prove knowledge of the token without
+  sending it over the wire; both restrictions must pass when configured.
+- Support Antigravity CLI (`agy`) panes: its own logo and name, clean
+  **Conversation** and **Full history** from the native conversation database
+  with live updates, slash command suggestions for builtins and
+  `~/.gemini/skills`, and approval cards for its permission dialog. Approval
+  cards appear only once Herdr marks the dialog as blocked; Herdr's agy manifest
+  does not yet detect the Antigravity CLI 1.4.7 dialog.
+
+### Fixed
+
+- Use the rightmost non-empty `X-Forwarded-For` entry across all header fields
+  behind a trusted reverse proxy, preventing forged earlier fields or entries
+  from bypassing per-IP rate limits.
+- Forward the optional registration token and relay-id allow-list from generated
+  deployment bundles into the gateway container.
+- Preserve existing gateway `.env` settings when regenerating or uploading a
+  deployment bundle, so normal upgrades cannot clear registration protection.
+- Detect Antigravity conversation commits even when the relay polls between
+  WAL writes and commit publication.
+- Recognize ANSI-styled Antigravity approval menus and keep pending approvals
+  valid when focus or the quota countdown changes, while still rejecting
+  responses to a changed command.
+
+## [0.23.4] - 2026-10-27
+
+### Fixed
+
+- `/reload` in Pi now picks up an updated relay command integration. Pi kept
+  running the previous version until it was restarted, so after a relay update
+  the phone could miss new slash-command or activity behaviour.
+- A Home Screen app that restarts on an outdated build address after an update
+  now opens the deployed build instead of reopening the old one from the
+  browser cache.
+
+## [0.23.3] - 2026-10-26
+
+### Fixed
+
+- Queue terminal key taps instead of dropping them while the previous key waits
+  for its relay acknowledgement. On a high-latency link such as a Cloudflare
+  tunnel, a quick second **Esc** was ignored because the key row disabled itself
+  until the first send was confirmed, so agents that stop on a double Esc could
+  not be stopped from the phone. Taps queued before or after the question view
+  closes are still sent once that acknowledgement arrives. (#82)
+
+### Changed
+
+- Replace **Type in terminal** with a **Keyboard** button in the terminal key
+  row, shown only when the composer cannot send: the agent awaits an approval
+  or question answer, its pane needs inspection, or an earlier terminal send is
+  unconfirmed. It no longer takes a row of its own, which leaves more room for
+  terminal output. Delivery warnings show its icon instead of naming it, and
+  the panel's long back button is now **Close**.
+
+## [0.23.2] - 2026-10-25
+
+### Added
+
+- Show questions that Claude Code asks (AskUserQuestion) in **Conversation**
+  and **Full history**, with their options and the chosen answer. While the
+  agent waits for a reply, the question is marked as waiting. (#63)
+
+## [0.23.1] - 2026-10-25
+
+### Added
+
+- With two or more computers paired, toggle each one above the agent list to
+  show or hide its sessions and workspaces. A hidden computer shows a count of
+  sessions that need attention. Visibility is remembered on this device without
+  changing connections, notifications, or the selected home layout. (#76)
+
+### Fixed
+
+- Keep **Settings** steady while the relay sends updates. The Pi Integration
+  card no longer reloads on every update, so the page stops shifting and taps,
+  such as Back, are no longer lost.
+- Treat terminal input state as stale as soon as its 3-second limit passes, so
+  a draft typed afterwards is never saved on the phone and the waiting notice
+  appears.
+
+## [0.23.0] - 2026-10-24
+
+### Added
+
+- Open supported native histories in clean **Conversation** by default, with
+  **Full history** for intermediate messages and tool details. Terminal remains
+  one tap away and is the fallback when history is unavailable; saved view
+  preferences still win.
+- Enable the optional, computer-side **Settings → Pi Integration** to discover
+  live Pi commands and stream text, tool progress and extension notices.
+  Controllers can enable it for known profiles and inspect per-profile results;
+  readers cannot change it. It starts off, refreshes relay-owned copies after
+  updates, and requires `/reload` or a Pi restart after changes.
+- Show Pi extension notices in Conversation and Full history. A controller can
+  reply to a **Needs inspection** Pi pane through its live exact-session bridge
+  when fresh terminal evidence permits it. Sends are explicitly unconfirmed;
+  uncertainty survives reloads, fences duplicate sends across tabs, and never
+  falls back to terminal input. Earlier streamed content cannot be retracted by
+  completion-time redaction; see the [Pi privacy policy](docs/conversation-activity.md#pi-privacy-policy).
+- Refresh recorded conversation messages and tool activity for Codex, Claude
+  Code, Cursor, Qoder, Oh My Pi, OpenCode, Hermes and Oh My OpenCode through a
+  bounded 250 ms observation feed. These are updates after records reach disk,
+  not token streaming from the running terminal.
+- Read supported native Kimi Code journals, including validated undo branches.
+  Imports, human-engine-only histories and unsupported structures use Terminal
+  fallback. Hidden reasoning, media and injected origins are excluded.
+- Open the read-only workspace file and Git inspector from Conversation's
+  workspace button. Discover OpenCode custom Markdown slash commands from its
+  supported project, user and XDG directories.
+
+### Changed
+
+- Open history recent-first and mount at most 24 messages at a time. Load older
+  turns on upward demand or explicit action, preserving the reading anchor.
+  Kimi, Hermes and older/unindexed OpenCode histories can still require
+  full-session work on a cold open; small pages do not make that cost bounded.
+- Keep following new output while streaming until the reader scrolls away or
+  selects text; scrolling to the actual end resumes following. Remove Jump to
+  latest, Show newer loaded messages, Pi scroll controls and retained terminal
+  snapshots instead of cluttering Conversation with terminal controls.
+- Share prompt drafts, slash commands and attachments across both views.
+  Literal input and terminal keys remain explicit Terminal-only controls;
+  drafts stay editable while structured input or uncertain delivery blocks sends.
+- Turn **Resize Session** on by default; explicitly saved off choices stay off.
+  Terminal height leasing remains off by default. Conversation never resizes panes.
+
+### Fixed
+
+- Revalidate connections after wake, focus and network changes, preserve visible
+  output during recovery, and stop retrying a rejected paired device. Remote
+  tokenless relays cannot silently reconnect through plaintext development mode.
+- Keep updates, provisional messages, attachments and input delivery tied to the
+  exact target. Never persist text typed while terminal echo evidence is stale,
+  missing, hidden or belongs to another target.
+- Preserve Terminal's reading position and following state across structured
+  questions, layout changes and small scroll-up gestures.
+- Bound slash-catalog reads, honor Pi trust-directory decisions, retain Oh My Pi
+  registry order, and recover cached phone stylesheets without clearing storage.
+- Nest list items indented to their parent item's text in Conversation and
+  keep code blocks indented under an item inside it. Keep lists together across
+  blank lines, and keep a numbered list's numbering after a code block
+  interrupts it.
+- After a deploy, reload an already open app into the deployed build when
+  Conversation, the launch form, question controls or Type in terminal fail to
+  load. Without a newer build, an automatic Conversation opening falls back to
+  Terminal instead of an error. Automatic reloads wait while a terminal send is
+  unconfirmed or a draft is not saved on this phone, and **Load Update** names
+  what it would discard.
+- Deliver every OpenCode and Hermes conversation update. An update written
+  while the relay was reading could be missed until the next change.
+
+### Upgrade
+
+Restart the relay after upgrading. Enable or inspect **Settings → Pi Integration**
+for each computer that uses it, then `/reload` or restart its affected Pi panes.
+Existing relay-owned integrations are refreshed automatically; Herdr's own
+integration and settings are left untouched.
 
 ## [0.22.13] - 2026-10-23
 
@@ -1952,7 +1963,12 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...HEAD
+[0.23.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...v0.23.5
+[0.23.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...v0.23.4
+[0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3
+[0.23.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...v0.23.2
+[0.23.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...v0.23.0
 [0.22.13]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...v0.22.13
 [0.22.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.22.12

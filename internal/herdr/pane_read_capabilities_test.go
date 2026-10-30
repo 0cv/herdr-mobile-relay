@@ -103,7 +103,7 @@ func TestPaneReadCapabilityProbeClassifiesEvidence(t *testing.T) {
 }
 
 func TestPaneReadCapabilityProbeDoesNotTargetLivePane(t *testing.T) {
-	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "herdr.sock"))
+	listener, err := net.Listen("unix", filepath.Join(testSocketDir(t), "herdr.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}

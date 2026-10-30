@@ -63,6 +63,11 @@ Run an agent in Herdr or tap **＋** in the phone app. You can inspect output,
 send prompts, answer approvals and plan questions, upload images, and manage the
 agent lifecycle.
 
+For Pi, enable **Settings → Pi Integration** for its computer, then run `/reload`
+in Pi or restart it. This is off until a controller enables it; the relay keeps
+owned copies current after updates. The CLI alternative is
+`bash relay/setup.sh --pi-install [agent-dir]`.
+
 On hosts with a published Piper runtime, setup downloads the engine and the
 English voice that reads responses aloud, cached outside the release so updates
 never fetch them again. Reading aloud turns itself on the first time. French,

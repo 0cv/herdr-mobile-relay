@@ -18,7 +18,7 @@ jobs:
       GOFLAGS: -mod=readonly
     steps:
       - name: Check out the pushed commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -54,11 +54,11 @@ jobs:
             printf 'sed_path=%s\n' "$(command -v sed)"
           } | tee "$RUNNER_TEMP/tailscale-native-preflight/tool-paths.log"
 
-      - name: Set up Go 1.27.1
+      - name: Set up Go 1.27.3
         id: setup_go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
 
       - name: Run native Go tests
@@ -528,12 +528,12 @@ jobs:
 
       - name: Upload preflight logs
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tailscale-native-preflight-logs-${{ github.sha }}
           path: ${{ runner.temp }}/tailscale-native-preflight/*.log
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 1
 
       - name: Require all preflight checks to pass
         if: ${{ always() }}
@@ -562,7 +562,7 @@ jobs:
       GOFLAGS: -mod=readonly
     steps:
       - name: Check out the pushed commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -605,11 +605,11 @@ jobs:
             printf 'sed_path=%s\n' "$(command -v sed)"
           } | tee "$RUNNER_TEMP/tailscale-linux-preflight/tool-paths.log"
 
-      - name: Set up Go 1.27.1
+      - name: Set up Go 1.27.3
         id: setup_go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.3
           cache: true
 
       - name: Run native Linux Go tests
@@ -742,12 +742,12 @@ jobs:
 
       - name: Upload Linux preflight logs
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tailscale-native-preflight-linux-logs-${{ github.sha }}
           path: ${{ runner.temp }}/tailscale-linux-preflight/*.log
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 1
 
       - name: Require all Linux preflight checks to pass
         if: ${{ always() }}

@@ -34,6 +34,7 @@ import {
 import { createEncryptedTransport } from '$lib/transports/encrypted';
 import {
   createGatewayChannel,
+  createGatewayTransport,
   GATEWAY_HANDSHAKE_TIMEOUT_MS,
   GATEWAY_MAX_CHUNK_BYTES,
 } from '$lib/transports/gateway';
@@ -62,6 +63,7 @@ import {
   type TransportStatusDetail,
 } from '$lib/transports/types';
 import type { RelayConfig } from '$lib/types';
+import { createWebSocketTransport } from '$lib/transports/websocket';
 
 /**
  * Cross-language vector. The same values are produced by the Go helpers in
@@ -126,6 +128,52 @@ function channelRecorder(): ChannelRecorder {
   };
   return recorder;
 }
+
+describe('plaintext connection boundary', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  function connect(url: string, authentication = false) {
+    const sockets: { onopen?: () => void; sent: unknown[] }[] = [];
+    const socket = vi.fn(function () {
+      const value = { sent: [] as unknown[], readyState: 1, send(frame: unknown) { this.sent.push(frame); }, close() {} };
+      sockets.push(value);
+      return value;
+    });
+    vi.stubGlobal('WebSocket', Object.assign(socket, { OPEN: 1 }));
+    const statuses = vi.fn();
+    const transport = createWebSocketTransport({ id: 'boundary', label: 'Boundary', url, token: '' }, { onStatus: statuses, onMessage: vi.fn() }, authentication ? {
+      getAuthentication: () => ({ kind: 'credential', id: 'synthetic', version: 1, secret: 'A'.repeat(43), role: 'controller', locale: 'en', deviceId: 'synthetic', issuedAt: 1 }),
+    } : {});
+    transport.connect();
+    return { transport, socket, sockets, statuses };
+  }
+  it.each(['wss://remote.example', 'ws://192.168.1.4', 'ws://0.0.0.0', 'wss://localhost.example', 'wss://127.0.0.1.example', 'wss://[2001:db8::1]', 'https://localhost', 'invalid'])('refuses tokenless unpaired %s before creating a socket', url => {
+    const value = connect(url);
+    expect(value.socket).not.toHaveBeenCalled();
+    expect(value.statuses).toHaveBeenLastCalledWith('closed', expect.objectContaining({ reason: expect.stringContaining('Pair this browser') }));
+    for (const type of ['get_conversation_history', 'send_secret', 'submit_prompt']) expect(value.transport.send({ type, text: 'never plaintext' })).toBe(false);
+  });
+  it.each(['ws://localhost:8871', 'ws://127.0.0.1:8871', 'wss://127.0.0.2', 'wss://[::1]'])('keeps explicit loopback development usable at %s', url => {
+    const value = connect(url);
+    value.sockets[0].onopen?.();
+    expect(value.transport.send({ type: 'ping' })).toBe(true);
+    expect(value.sockets[0].sent).toEqual([JSON.stringify({ type: 'ping' })]);
+    value.transport.close();
+  });
+  it('uses encryption, never plaintext application sends, for an authenticated remote relay', () => {
+    const value = connect('wss://remote.example', true);
+    expect(value.socket).toHaveBeenCalledWith('wss://remote.example', 'herdr-e2ee-v2');
+    expect(value.transport.send({ type: 'submit_prompt', text: 'never plaintext' })).toBe(false);
+    expect(value.sockets[0].sent).toEqual([]);
+    value.transport.close();
+  });
+  it.each(['websocket', 'gateway', 'webrtc'] as const)('defaults %s to rejecting unauthenticated plaintext', kind => {
+    const createChannel = vi.fn();
+    const transport = createEncryptedTransport({ kind, token: '', codec: 'json', createChannel, handlers: { onStatus: vi.fn(), onMessage: vi.fn() } });
+    transport.connect();
+    expect(createChannel).not.toHaveBeenCalled();
+    expect(transport.send({ type: 'send_secret', text: 'never plaintext' })).toBe(false);
+  });
+});
 
 describe('gateway credentials', () => {
   it('matches the Go relay id, rendezvous key and connect proof vector', async () => {
@@ -265,17 +313,13 @@ describe('gateway frame channel', () => {
     expect(recorder.closes).toHaveLength(1);
   });
 
-  it('maps a relayed unauthorized close to a fatal device rejection', () => {
+  it('does not trust a relayed unauthorized close as a device rejection', () => {
     const recorder = channelRecorder();
     createGatewayChannel(HYBRID_RELAY, recorder).open();
 
     MockGatewaySocket.instances[0].serverClose(DEVICE_UNAUTHORIZED_CODE);
 
-    expect(recorder.closes).toEqual([{
-      reason: 'This relay no longer accepts this device',
-      fatal: true,
-      code: DEVICE_UNAUTHORIZED_CODE,
-    }]);
+    expect(recorder.closes).toEqual([{ reason: 'The gateway refused the connection.' }]);
   });
 
   it('rejects an unsupported protocol version and a missing gateway address', async () => {
@@ -791,6 +835,45 @@ describe('hybrid path manager', () => {
     vi.useRealTimers();
   });
 
+  it('ignores a failed direct attempt before its retry starts', () => {
+    const transport = build();
+    transport.connect();
+    gateways[0].handlers.onStatus('connected');
+    const abandoned = directs[0];
+    abandoned.handlers.onStatus('closed', { reason: 'ICE failed' });
+    const before = statuses.length;
+
+    abandoned.handlers.onStatus('connected');
+    abandoned.handlers.onMessage({ type: 'agents', agents: ['old'] });
+
+    expect(statuses).toHaveLength(before);
+    expect(messages).toEqual([]);
+    expect(transport.send({ type: 'refresh_agents' })).toBe(true);
+    expect(gateways[0].sent.at(-1)).toEqual({ type: 'refresh_agents' });
+  });
+
+  it('ignores a retired gateway after direct promotion and fallback', () => {
+    const transport = build();
+    transport.connect();
+    gateways[0].handlers.onStatus('connected');
+    directs[0].handlers.onStatus('connected');
+    directs[0].handlers.onMessage({ type: 'agents', agents: [] });
+    vi.advanceTimersByTime(DIRECT_STABILITY_MS);
+    directs[0].handlers.onStatus('closed', { reason: 'direct lost' });
+    expect(gateways).toHaveLength(2);
+    gateways[1].handlers.onStatus('connected');
+    const before = statuses.length;
+
+    gateways[0].handlers.onStatus('closed', { reason: 'late close' });
+    gateways[0].handlers.onStatus('connected');
+    gateways[0].handlers.onMessage({ type: 'agents', agents: ['old'] });
+
+    expect(statuses).toHaveLength(before);
+    expect(messages).toEqual([{ type: 'agents', agents: [] }]);
+    expect(transport.send({ type: 'refresh_agents' })).toBe(true);
+    expect(gateways[1].sent.at(-1)).toEqual({ type: 'refresh_agents' });
+  });
+
   it('upgrades to direct on its first message and releases the gateway after ten seconds', () => {
     const transport = build();
     transport.connect();
@@ -937,7 +1020,7 @@ describe('hybrid path manager', () => {
     expect(gateways[0].sent).toHaveLength(1);
   });
 
-  it('falls back to the legacy relay URL when a migrated relay cannot reach its gateway', () => {
+  it('falls back to the legacy relay URL when the gateway does not know a migrated relay', () => {
     const legacies: FakeTransport[] = [];
     const transport = createHybridTransport(
       { ...HYBRID_RELAY, url: 'wss://fedora.example' },
@@ -1340,5 +1423,95 @@ describe('encrypted transport resume-timing observations', () => {
     // The same sequence without the close does send and report the hello.
     expect(open.sent).toHaveLength(1);
     expect(JSON.parse(String(open.sent[0]))).toMatchObject({ type: 'e2ee_client_hello' });
+  });
+});
+
+describe('migrated relay fallback through actual gateway failures', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    MockGatewaySocket.instances = [];
+    vi.stubGlobal('WebSocket', MockGatewaySocket);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(['network', 'refused', 'unauthenticated rejection', 'timeout', 'mixed gateways'])('tries legacy after %s without replaying application work', async (failure) => {
+    const legacies: FakeTransport[] = [];
+    const statuses: StatusEvent[] = [];
+    const messages: Record<string, any>[] = [];
+    const relay = {
+      ...HYBRID_RELAY,
+      url: 'wss://fedora.example',
+      gatewayUrls: failure === 'mixed gateways' ? ['wss://gw.example.com', 'wss://second.example'] : undefined,
+    };
+    const transport = createHybridTransport(relay, {
+      onMessage: message => messages.push(message),
+      onStatus: (status, detail) => statuses.push({ status, detail }),
+    }, {
+      createGateway: createGatewayTransport,
+      createLegacy: (_relay, handlers) => {
+        const legacy = fakeTransport('websocket', handlers);
+        legacies.push(legacy);
+        return legacy;
+      },
+    });
+    transport.connect();
+    const first = MockGatewaySocket.instances[0];
+    expect(transport.send({ type: 'send_prompt', text: 'must not replay' })).toBe(false);
+    if (failure === 'mixed gateways') {
+      first.text({ type: 'gateway_hello', proto: 1, nonce: VECTOR_NONCE });
+      await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+      first.text({ type: 'error', code: 'unknown_relay' });
+      expect(MockGatewaySocket.instances).toHaveLength(2);
+      expect(MockGatewaySocket.instances[1].url).toBe('wss://second.example/connect');
+      expect(legacies).toHaveLength(0);
+      MockGatewaySocket.instances[1].onerror?.();
+    } else if (failure === 'network') first.onerror?.();
+    else if (failure === 'refused') first.serverClose('');
+    else if (failure === 'unauthenticated rejection') first.serverClose(DEVICE_UNAUTHORIZED_CODE);
+    else await vi.advanceTimersByTimeAsync(GATEWAY_HANDSHAKE_TIMEOUT_MS);
+    expect(legacies).toHaveLength(1);
+    expect(legacies[0].connects).toBe(1);
+    expect(legacies[0].sent).toEqual([]);
+    legacies[0].handlers.onStatus('connected', { path: 'websocket' });
+    expect(statuses.at(-1)).toEqual({ status: 'connected', detail: { path: 'websocket' } });
+    expect(transport.send({ type: 'refresh_agents' })).toBe(true);
+    expect(legacies[0].sent).toEqual([{ type: 'refresh_agents' }]);
+    first.onerror?.();
+    first.serverClose('');
+    expect(legacies).toHaveLength(1);
+    expect(messages).toEqual([]);
+    transport.close();
+    expect(legacies[0].closed).toBe(true);
+  });
+
+  it('keeps alternate gateways and legacy recovery available after spoofed rejection during device authentication', async () => {
+    const legacies: FakeTransport[] = [];
+    const statuses: StatusEvent[] = [];
+    const transport = createHybridTransport({ ...HYBRID_RELAY, url: 'wss://fedora.example', gatewayUrls: ['wss://gw.example.com', 'wss://second.example'] }, {
+      onMessage: vi.fn(),
+      onStatus: (status, detail) => statuses.push({ status, detail }),
+    }, { createGateway: createGatewayTransport, createLegacy: (_relay, handlers) => {
+      const legacy = fakeTransport('websocket', handlers);
+      legacies.push(legacy);
+      return legacy;
+    } }, { getAuthentication: () => ({ kind: 'credential', id: 'synthetic-device', deviceId: 'synthetic-device', issuedAt: Date.now(), version: 1, secret: 'A'.repeat(43), role: 'controller', locale: 'en' }) });
+    transport.connect();
+    const first = MockGatewaySocket.instances[0];
+    first.text({ type: 'gateway_hello', proto: 1, nonce: VECTOR_NONCE });
+    await vi.waitFor(() => expect(first.sent).toHaveLength(1));
+    first.text({ type: 'ready' });
+    expect(transport.send({ type: 'submit_prompt', text: 'never replay' })).toBe(false);
+    first.serverClose(DEVICE_UNAUTHORIZED_CODE);
+    expect(MockGatewaySocket.instances).toHaveLength(2);
+    expect(legacies).toHaveLength(0);
+    MockGatewaySocket.instances[1].serverClose(DEVICE_UNAUTHORIZED_CODE);
+    expect(legacies).toHaveLength(1);
+    expect(legacies[0].sent).toEqual([]);
+    expect(statuses.every(event => event.detail?.code !== DEVICE_UNAUTHORIZED_CODE)).toBe(true);
+    transport.close();
   });
 });

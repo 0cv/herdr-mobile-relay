@@ -16,8 +16,8 @@ if [[ -e "$TARGET" ]]; then
     [[ -f "$MARKER" && ! -L "$MARKER" && "$(<"$MARKER")" = herdr-mobile-relay-pi-commands-v1 ]] || {
         echo "Refusing to change an unowned extension directory" >&2; exit 1;
     }
-    for file in index.ts bridge.mjs; do
-        [[ ! -L "$TARGET/$file" ]] || { echo "Refusing a symlinked integration file" >&2; exit 1; }
+    for file in index.ts bridge.mjs activity.mjs; do
+        [[ ! -L "$TARGET/$file" && ( ! -e "$TARGET/$file" || -f "$TARGET/$file" ) ]] || { echo "Refusing a symlinked or invalid integration file" >&2; exit 1; }
     done
 elif [[ "$ACTION" = remove ]]; then
     exit 0
@@ -26,12 +26,13 @@ if [[ "$ACTION" = install ]]; then
     mkdir -p "$TARGET"
     chmod 700 "$TARGET"
     install -m 600 "$SCRIPT_DIR/pi-command-bridge/bridge.mjs" "$TARGET/bridge.mjs"
+    install -m 600 "$SCRIPT_DIR/pi-command-bridge/activity.mjs" "$TARGET/activity.mjs"
     install -m 600 "$SCRIPT_DIR/pi-command-bridge/index.ts" "$TARGET/index.ts"
     printf '%s\n' herdr-mobile-relay-pi-commands-v1 > "$MARKER"
     chmod 600 "$MARKER"
     echo "Installed relay command metadata integration in $TARGET"
 else
-    rm -f "$TARGET/index.ts" "$TARGET/bridge.mjs" "$MARKER"
+    rm -f "$TARGET/index.ts" "$TARGET/bridge.mjs" "$TARGET/activity.mjs" "$MARKER"
     rmdir "$TARGET" 2>/dev/null || true
     echo "Removed relay-owned command integration files from $TARGET"
 fi

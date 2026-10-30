@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
@@ -39,6 +41,7 @@ type CommandResult struct {
 
 type Dispatcher struct {
 	installed        *installedDispatcher
+	terminalTextKey  string
 	herdr            *herdr.Client
 	state            *State
 	journal          *activity.Journal
@@ -92,15 +95,17 @@ func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal
 func newDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger, installed *installedDispatcher) *Dispatcher {
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	dispatcher := &Dispatcher{
-		herdr:         client,
-		state:         state,
-		journal:       journal,
-		logger:        logger,
-		installed:     installed,
-		testGates:     make(map[string]chan struct{}),
-		reads:         make(map[string]*paneRead),
-		watcherCtx:    watcherCtx,
-		watcherCancel: watcherCancel,
+		herdr:           client,
+		state:           state,
+		journal:         journal,
+		terminalTextKey: rand.Text(),
+		scheduler:       NewScheduler(defaultHerdrCapacity, logger),
+		logger:          logger,
+		installed:       installed,
+		testGates:       make(map[string]chan struct{}),
+		reads:           make(map[string]*paneRead),
+		watcherCtx:      watcherCtx,
+		watcherCancel:   watcherCancel,
 	}
 	if installed != nil {
 		dispatcher.scheduler = newInstalledScheduler(defaultHerdrCapacity, logger)
@@ -358,6 +363,8 @@ func (d *Dispatcher) handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleFilterText(ctx, receivedAt, requestID, paneID, message)
 	case "send_input":
 		return d.handleInput(ctx, receivedAt, requestID, paneID, message)
+	case "send_terminal_text":
+		return d.handleTerminalText(ctx, receivedAt, requestID, paneID, message)
 	case "send_secret":
 		return d.handleSecret(ctx, receivedAt, requestID, paneID, message)
 	case "respond":
@@ -641,6 +648,16 @@ func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, req
 		// scheduler, its ledger or its logs may carry the secret itself.
 		Command: d.command(ctx, receivedAt, requestID, CommandSecret, paneID, commandDeadline, len(runes)),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
+			return EffectResult{Result: stale}
+		}
+		read, err := d.herdr.ReadPaneVisible(effectCtx, paneID, 30, "text")
+		if err != nil {
+			return EffectResult{Result: d.fail(requestID, "send_secret", paneID, "Hidden prompt could not be verified")}
+		}
+		if _, ok := noecho.Match(string(read.Content)); !ok {
+			return EffectResult{Result: d.fail(requestID, "send_secret", paneID, "The terminal is no longer asking for a hidden value")}
+		}
 		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
 			return EffectResult{Result: stale}
 		}
@@ -1328,7 +1345,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	defer cancel()
 	generation := d.state.Generation(paneID)
 	revision := d.state.ContentRevision(paneID)
-	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d", paneID, lines, format, terminalColumns, generation)
+	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d\x00%s", paneID, lines, format, terminalColumns, generation, stringValue(message, "request_id"))
 	d.readMu.Lock()
 	call := d.reads[key]
 	owner := call == nil

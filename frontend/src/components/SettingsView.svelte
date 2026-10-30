@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import DeviceSettings from '$components/DeviceSettings.svelte';
+  import PiIntegration from '$components/PiIntegration.svelte';
   import NotificationSettings from '$components/NotificationSettings.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
@@ -83,6 +84,7 @@
   } from '$lib/security';
   import { wakeLockState } from '$lib/wake-lock';
   import { relayStore } from '$lib/store';
+  import { reloadRisk, reloadRiskMessage, type ReloadRisk } from '$lib/reload-guard';
   import {
     appUpdateStatus,
     CHECKOUT_UPDATE_COMMAND,
@@ -218,6 +220,7 @@
   let deviceLock = $state(deviceVerificationEnabled());
   let updateOpen = $state(false);
   let pendingUpdateAction = $state<SafeUpdateAction | null>(null);
+  let pendingReloadRisk = $state<ReloadRisk | null>(null);
   let manualRelayId = $state('');
   let manualOpen = $state(false);
   let removalRelayId = $state('');
@@ -517,6 +520,7 @@
   function requestSafeUpdate() {
     if (!safeUpdateAction) return;
     pendingUpdateAction = safeUpdateAction;
+    pendingReloadRisk = safeUpdateAction.kind === 'reload_app' ? reloadRisk() : null;
     updateOpen = true;
   }
 
@@ -544,6 +548,13 @@
     updateOpen = false;
     if (!action || action.kind !== 'reload_app' && isReadOnlyRelay(action.relayId)) return;
     if (action.kind === 'reload_app') {
+      const risk = reloadRisk();
+      if (risk && risk !== pendingReloadRisk) {
+        pendingUpdateAction = action;
+        pendingReloadRisk = risk;
+        updateOpen = true;
+        return;
+      }
       const relayIds = relayRows.filter(({ relay }) => !isReadOnlyRelay(relay.id)).map(({ relay }) => relay.id);
       queueUpdateProgressForReload(action.targetVersion, relayIds, action.phoneTarget);
       reloadApp(action.targetVersion, action.phoneTarget);
@@ -780,6 +791,10 @@
     <p class="hint">Use one relay URL per computer. Relay keys stay in this browser’s local storage and encrypt relay messages end to end.</p>
   </Card>
   {#each relayRows as { relay, connection } (relay.id)}
+    {#if connection?.capabilities.includes('pi_integration')}
+      <PiIntegration relayId={relay.id} label={relay.label} {connection}
+        readOnly={isReadOnlyRelay(relay.id) || relayStore.deviceCredential(relay.id)?.role !== 'controller'} />
+    {/if}
     {@const credential = relayStore.deviceCredential(relay.id)}
     {#if credential}
       <DeviceSettings
@@ -877,7 +892,7 @@
         if (setTerminalResizeSession(value) === 'unavailable') relayStore.showToast('Resize Session preference could not be saved.');
       }}
     />
-    <p class="hint" id="resize-session-hint">Off by default, saved on this device. Resizes the shared terminal to fit this phone while the phone has it open. Until the phone lets go, the laptop and SSH views of that pane look garbled, and agents may leave narrow copies of their output in the scrollback. Resizing may truncate scrollback and lose older output. The previous size is restored when the phone leaves the pane, unless it was changed on the laptop meanwhile. Unavailable on relays that do not support it. When off, controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width.</p>
+    <p class="hint" id="resize-session-hint">On by default, saved on this device. Resizes the shared terminal to fit this phone while the phone has it open. Until the phone lets go, the laptop and SSH views of that pane look garbled, and agents may leave narrow copies of their output in the scrollback. Resizing may truncate scrollback and lose older output. The previous size is restored when the phone leaves the pane, unless it was changed on the laptop meanwhile. Unavailable on relays that do not support it. When off, controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width.</p>
     <AppSwitch
       checked={$terminalHeightLease}
       disabled={!$terminalResizeSession || !heightLeaseSupported}
@@ -1080,9 +1095,10 @@
   description={pendingUpdateAction?.description || 'No safe update path is currently available.'}
 >
   <p class="hint">Herdr selects the safe order automatically: publish the phone app first when required, then update each relay one at a time while preserving running agents.</p>
+  {#if pendingReloadRisk}<p class="warning" role="alert">{reloadRiskMessage(pendingReloadRisk)}</p>{/if}
   <div class="dialog-actions">
     <Button disabled={!pendingUpdateAction || Boolean(busyRelayId)} onclick={startSafeUpdate}>
-      {pendingUpdateAction?.kind === 'reload_app' ? 'Load Update' : 'Start Update'}
+      {pendingUpdateAction?.kind !== 'reload_app' ? 'Start Update' : pendingReloadRisk ? 'Load Update Anyway' : 'Load Update'}
     </Button>
     <Button variant="ghost" onclick={() => { updateOpen = false; pendingUpdateAction = null; }}>Cancel</Button>
   </div>

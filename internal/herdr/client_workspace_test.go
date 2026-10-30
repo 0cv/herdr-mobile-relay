@@ -78,7 +78,7 @@ func TestWorktreeCreateParsesWorkspaceAndRootPane(t *testing.T) {
 }
 
 func TestSupportsWorkspaceMoveBlockUsesLiveServerProbe(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestSupportsWorkspaceMoveBlockUsesLiveServerProbe(t *testing.T) {
 }
 
 func TestWorkspaceCloseEOFIsDispatchedUnknownWithoutRetry(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)

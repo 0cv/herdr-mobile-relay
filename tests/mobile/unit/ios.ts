@@ -1,46 +1,99 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
+import { closeSync, createWriteStream, openSync, readFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { readFile, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { spawnOwnedProcess } from '../support/owned-process';
 import { setTimeout as wait } from 'node:timers/promises';
-import { IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
-import { AppiumClient, isRetryableElementLookupError } from '../support/webdriver';
-import { PhaseBudget } from '../support/budget';
+import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
+import { AppiumClient, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
+import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
+import { PhaseBudget, timingScale } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
-import { CommandError, command } from '../support/process';
+import { CommandError, command, type CommandResult } from '../support/process';
 import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
+import { stableTestIdentities } from './test-registry';
+import { iosConfirmationProjectionCases } from './ios-confirmation-capture';
+import { IOS_CONFIRMATION_CAPTURE_LIMITS } from '../support/ios-confirmation-capture';
 
 const origin = 'https://localhost:52101';
 const fixtureDir = fileURLToPath(new URL('./fixtures/ios/', import.meta.url));
 const outputRoot = process.env.IOS_TEST_OUTPUT || join(tmpdir(), 'herdr-mobile-ci-ios-unit');
+const XML_CHECK_TIMEOUT_MS = 5_000;
 const value = (data: unknown) => Response.json({ value: data });
 const element = (id: string) => ({ 'element-6066-11e4-a52e-4f735466cecf': id });
 const missing = () => Response.json({ value: { error: 'no such element', message: 'No such element' } }, { status: 404 });
 const installed = recorded.contexts.find((context) => context.bundleId === 'com.apple.SafariViewService')!;
 const published = { ...installed, url: recorded.publishedPages[0].url, title: recorded.publishedPages[0].title };
-type Request = { path: string; body: any; method: string; signal?: AbortSignal | null };
+type Request = { path: string; body: any; method: string; signal?: AbortSignal | null; dispatchedOrdinal: number };
 type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
 const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([name, body]);
+tests.push(...iosConfirmationProjectionCases);
 
-async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, nativeDefaults = true) {
+async function within<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${description} exceeded ${timeoutMs}ms fixture watchdog`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw signal.reason || new Error('fixture aborted');
+  let abort!: () => void;
+  const stopped = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(signal.reason || new Error('fixture aborted'));
+    signal.addEventListener('abort', abort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, stopped]);
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
+}
+
+async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, nativeDefaults = true,
+  enforcementClock?: RequestEnforcementClock, onRequest?: (request: Request) => void, fixtureSignal?: AbortSignal,
+  beforeNativeDispatch?: (phase: PhaseBudget) => void) {
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
   const budget = new PhaseBudget(name, { timeoutMs: 120_000, recoveryLimit: 0, now });
   const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
   const requests: Request[] = [];
+  const nativeAdmissions: Array<{ phase: string; phaseRemainingMs: number; rootRemainingMs: number }> = [];
+  let dispatchedOrdinal = 0;
   let inFlight = 0;
   let settings: Record<string, unknown> = { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 };
   const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
+    if (fixtureSignal?.aborted) throw fixtureSignal.reason || new Error('fixture aborted');
     assert.equal(++inFlight, 1, 'Appium requests must not overlap');
     try {
-      const request = { path: new URL(String(input)).pathname, body: init?.body ? JSON.parse(String(init.body)) : {}, method: init?.method || 'GET', signal: init?.signal };
+      const requestSignal = fixtureSignal
+        ? init?.signal ? AbortSignal.any([init.signal, fixtureSignal]) : fixtureSignal
+        : init?.signal;
+      const request: Request = {
+        path: new URL(String(input)).pathname,
+        body: init?.body ? JSON.parse(String(init.body)) : {},
+        method: init?.method || 'GET',
+        signal: requestSignal,
+        dispatchedOrdinal: ++dispatchedOrdinal,
+      };
       requests.push(request);
+      onRequest?.(request);
       if (request.path === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
       if (nativeDefaults) {
         if (request.path.endsWith('/appium/settings')) {
@@ -52,17 +105,41 @@ async function adapter(name: string, handler: (request: Request) => Response | P
         if (request.path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert', message: 'No alert is open' } }, { status: 404 });
         if (request.path.endsWith('/element/springboard-root/elements')) return value([element('springboard-root')]);
       }
-      return await handler(request);
+      return await abortable(Promise.resolve().then(() => handler(request)), fixtureSignal);
     } finally {
       inFlight -= 1;
     }
-  });
+  }, now, enforcementClock || (now ? { now, timer: (callback, ms) => setTimeout(callback, ms), clear: timer => clearTimeout(timer) } : undefined));
+  const nativeRequestPolicy = driver.nativeRequestPolicy.bind(driver);
+  driver.nativeRequestPolicy = (phase) => {
+    const policy = nativeRequestPolicy(phase);
+    return Object.freeze({
+      ...policy,
+      beforeDispatch: () => {
+        policy.beforeDispatch();
+        beforeNativeDispatch?.(phase);
+        nativeAdmissions.push({ phase: phase.phase, phaseRemainingMs: phase.remainingMs, rootRemainingMs: budget.remainingMs });
+      },
+    });
+  };
   await driver.create({ capabilities: {} });
   driver.setBudget(budget);
   (platform as any).driver = driver;
   (platform as any).installedBundleId = 'com.apple.webapp';
   (platform as any).springBoardRoot = 'springboard-root';
-  return { platform, driver, requests, budget, outputDir };
+  return { platform, driver, requests, budget, outputDir, nativeAdmissions };
+}
+
+function commandForRequest(driver: AppiumClient, requests: Request[], matchesRequest: (request: Request) => boolean) {
+  const matchingRequests = requests.filter(matchesRequest);
+  assert.equal(matchingRequests.length, 1, 'the expected Appium request must have one transport receipt');
+  const request = matchingRequests[0]!;
+  const command = driver.snapshot().commands.find((entry) => entry.timing?.dispatchedOrdinal === request.dispatchedOrdinal);
+  assert.ok(command, `no command receipt for dispatched request ${request.dispatchedOrdinal}`);
+  assert.equal(command.path, request.path);
+  assert.equal(command.method, request.method);
+  assert.equal(command.timing?.operation, 'execute');
+  return command;
 }
 
 async function attachment(name: string, overrides: {
@@ -93,6 +170,142 @@ async function assertPermanentFailure(platform: IOSPlatform, requests: Request[]
   const count = requests.length;
   await assert.rejects(() => platform.attachToInstalledView(), (error) => error === first);
   assert.equal(requests.length, count, 'latched ownership failure must not admit another command');
+}
+
+for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const) {
+  test(`iOS attachment timing second native bracket ${mode} preserves original admission and late-settlement fences`, async () => {
+    let now = 0;
+    let activeObservations = 0;
+    let alerts = 0;
+    let roots = 0;
+    let appStates = 0;
+    let discoveries = 0;
+    let publications = [published];
+    let releaseBody!: (body: string) => void;
+    const lateBody = new Promise<string>(resolve => { releaseBody = resolve; });
+    const { platform, driver, requests, budget } = await adapter(`attachment-timing-${mode}`, ({ path, body, method }) => {
+      if (body.script === 'mobile: getContexts') {
+        discoveries++;
+        now += 2_000;
+        return value(publications);
+      }
+      if (body.script === 'mobile: queryAppState') {
+        assert.equal(body.args.bundleId, 'com.apple.webapp');
+        now += ++appStates === 1 ? 1_000 : 3_000;
+        return value(4);
+      }
+      if (path.endsWith('/element/springboard-root/elements')) {
+        assert.equal(body.using, 'xpath');
+        assert.match(body.value, /XCUIElementTypeAlert/u);
+        now += ++roots === 1 ? 1_000 : 4_000;
+        return value([element('springboard-root')]);
+      }
+      if (path.endsWith('/alert/text')) {
+        assert.equal(method, 'GET');
+        now += ++alerts === 1 ? 1_000 : 13_000;
+        return Response.json({ value: { error: 'no such alert', message: 'No alert is open' } }, { status: 404 });
+      }
+      if (body.script === 'mobile: activeAppInfo') {
+        activeObservations++;
+        if (activeObservations === 1) {
+          now += 1_000;
+          return value({ bundleId: 'com.apple.webapp', pid: 29073 });
+        }
+        assert.equal(now, 28_000, 'last native observation is admitted with 2000ms, not an already-expired budget');
+        if (mode === 'timeout' || mode === 'interrupted') {
+          const response = new Response(null);
+          response.text = () => mode === 'timeout' ? lateBody : Promise.reject(new TypeError('native body interrupted'));
+          return response;
+        }
+        now = 30_000 - Number.parseInt(mode, 10);
+        return value({ bundleId: 'com.apple.webapp', pid: 29073 });
+      }
+      if (path.endsWith('/context')) {
+        if (body.name === 'NATIVE_APP') now += 2_000;
+        else {
+          assert.equal(mode, '250ms', 'sub-250ms switch must never reach transport');
+          assert.equal(body.name, published.id);
+          assert.equal(method, 'POST');
+        }
+        return value(null);
+      }
+      if (path.endsWith('/url')) {
+        assert.equal(mode, '250ms');
+        return value(`${origin}/`);
+      }
+      throw new Error(`unexpected attachment timing operation ${path}`);
+    }, () => now, false); // No default handler may silently satisfy a native fence.
+    const fatal = mode === 'timeout' || mode === 'interrupted';
+    await assert.rejects(() => platform.attachToInstalledView(), fatal
+      ? mode === 'timeout' ? /APPIUM_TIMEOUT/u : /APPIUM_INTERRUPTED/u
+      : /APPIUM_COMMAND_NOT_ADMITTED/u);
+    assert.equal(discoveries, 1);
+    assert.equal(appStates, 2);
+    assert.equal(roots, 2);
+    assert.equal(alerts, 2);
+    assert.equal(activeObservations, 2);
+    assert.equal(budget.recoveryCount, 0);
+    assert.equal((driver as any).budget, budget, 'diagnostic scope must not replace the enforcement budget');
+    assert.equal((driver as any).timingScope, undefined, 'scope restored on every failure path');
+    const native = driver.snapshot().commands.filter(command => command.timing?.scope.endsWith('-native'));
+    assert.deepEqual(native.map(command => [command.timing!.scope, command.timing!.operation]), [
+      ...['app-state', 'native-elements', 'alert', 'active-app'].map(operation => ['ios-attachment-discovery-native', operation]),
+      ...['context', 'app-state', 'native-elements', 'alert', 'active-app'].map(operation => ['ios-attachment-pre-attachment-native', operation]),
+    ]);
+    assert.ok(native.every(command => command.timing!.admitted && command.timing!.sent));
+    assert.ok(native.every(command => command.timing!.phaseRemainingAtDispatchMs! >= (command.timing!.operation === 'alert' || command.timing!.operation === 'context' ? 250 : 1_000)));
+    assert.equal(native.at(-1)!.timing!.phaseRemainingAtEntryMs, 2_000);
+    assert.equal(native.filter(command => command.timing!.operation === 'alert').every(command => command.timing!.status === 404 && command.timing!.completed), true);
+    const snapshot = platform.evidenceSnapshot();
+    assert.equal(snapshot.selectedInstalledContext, '');
+    assert.equal(snapshot.installedDocumentBound, false);
+    assert.equal(snapshot.installedBindingState, mode === '250ms' ? 'inspecting' : 'unselected');
+    assert.equal(snapshot.lastIdentity, undefined);
+    assert.equal(snapshot.lastCompletion, undefined);
+    assert.equal(snapshot.ownershipFailure, undefined);
+    assert.equal(requests.some(request => request.body.script?.startsWith('return {')), false, 'no document/runtime acceptance');
+    assert.equal(requests.filter(request => request.path.endsWith('/context') && request.body.name !== 'NATIVE_APP').length, mode === '250ms' ? 1 : 0);
+    assert.equal(requests.filter(request => request.path.endsWith('/url')).length, mode === '250ms' ? 1 : 0);
+    assert.equal(driver.snapshot().selectedContext, mode === '250ms' ? published.id : 'NATIVE_APP');
+    assert.equal(driver.snapshot().unusable, fatal);
+    assert.equal(driver.snapshot().firstFatal?.code, fatal ? mode === 'timeout' ? 'APPIUM_TIMEOUT' : 'APPIUM_INTERRUPTED' : undefined);
+    if (!fatal) {
+      const refusal = snapshot.attachmentFirstRefusal as any;
+      assert.equal(Object.isFrozen(refusal), true);
+      assert.equal(refusal.outcome, 'not-admitted');
+      assert.equal(refusal.scope, 'ios-attachment-validation');
+      assert.equal(refusal.phaseRemainingAtEntryMs, Number.parseInt(mode, 10));
+      assert.equal(refusal.phaseRemainingAtSettlementMs, Number.parseInt(mode, 10));
+      assert.equal(refusal.dispatchMs, undefined);
+      assert.equal(refusal.dispatchedOrdinal, undefined);
+      assert.equal(refusal.sent, false);
+      if (mode === '250ms') {
+        const switchReceipt = driver.snapshot().commands.find(command => command.timing?.scope === 'ios-attachment-validation' && command.timing.operation === 'context')!;
+        assert.equal(switchReceipt.timing!.sent, true);
+        assert.equal(switchReceipt.timeoutMs, 250);
+      } else {
+        assert.equal(refusal.operation, 'context');
+        assert.equal(native.at(-1)!.timing!.phaseRemainingAtSettlementMs, Number.parseInt(mode, 10));
+      }
+    } else assert.equal(snapshot.attachmentFirstRefusal, undefined);
+    const saved = structuredClone(snapshot);
+    const count = requests.length;
+    publications = [{ ...published, title: 'late publication' }];
+    now = 30_001;
+    releaseBody(JSON.stringify({ value: { bundleId: 'com.apple.webapp', pid: 29073 } }));
+    await lateBody;
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(requests.length, count, 'late publication/body must not implicitly issue another command');
+    assert.deepEqual(platform.evidenceSnapshot(), saved, 'first refusal/fatal, binding and history remain immutable');
+    // An admission refusal is only this attempt's refusal, not a permanent
+    // attachment latch. Only fatal body failures prohibit a new invocation.
+    if (fatal) {
+      await assert.rejects(() => platform.attachToInstalledView(), /APPIUM_SESSION_UNUSABLE/u);
+      assert.equal(requests.length, count);
+      assert.deepEqual(driver.snapshot().firstFatal, (saved.driver as any).firstFatal);
+    }
+  });
 }
 
 test('recorded initial publication waits passively for the same page before actual document binding', async () => {
@@ -126,6 +339,48 @@ test('recorded initial publication waits passively for the same page before actu
   assert.equal(pending.nativeProvider, 'com.apple.webapp');
   assert.equal(pending.detail.nativePid, String(recorded.foreground.pid));
   assert.equal(driver.snapshot().unusable, false);
+});
+
+test('installed discovery timeout preserves the hosted phase and ignores late listing replies', async () => {
+  let clockMs = 0;
+  let discoveries = 0;
+  let reply!: (response: Response) => void;
+  const now = () => clockMs;
+  const budget = new PhaseBudget('recorded-hosted-discovery', { timeoutMs: 45 * 60_000, now, recoveryLimit: 0 });
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
+  const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
+    if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
+    assert.equal(JSON.parse(String(init?.body)).script, 'mobile: getContexts');
+    discoveries++;
+    return new Promise<Response>(resolve => { reply = resolve; });
+  }, now, {
+    now,
+    timer: (callback, ms) => setTimeout(() => { clockMs += ms; callback(); }, 0),
+    clear: timer => clearTimeout(timer),
+  });
+  await driver.create({ capabilities: {} });
+  driver.setBudget(budget);
+  (platform as any).driver = driver;
+  await assert.rejects(() => platform.attachToInstalledView(60_000), /APPIUM_TIMEOUT/u);
+  const snapshot = driver.snapshot();
+  const receipt = snapshot.lastCommand!;
+  assert.equal(receipt.timeoutMs, 20_000 * timingScale);
+  assert.equal(receipt.timing?.phaseRemainingAtEntryMs, 60_000 * timingScale);
+  assert.equal(receipt.timing?.phaseRemainingAtSettlementMs, 40_000 * timingScale);
+  assert.equal(receipt.timing?.responseAvailableMs, undefined);
+  assert.equal(receipt.timing?.outcome, 'timeout');
+  assert.equal(snapshot.unusable, true);
+  assert.equal(discoveries, 1);
+  assert.equal(budget.recoveryCount, 0);
+  const frozen = JSON.stringify(snapshot);
+  reply(value(recorded.contexts));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(driver.snapshot()), frozen, 'late replies must not change terminal timeout evidence');
+  assert.equal(platform.evidenceSnapshot().installedDocumentBound, false);
+  assert.equal(platform.evidenceSnapshot().selectedInstalledContext, '');
+  await assert.rejects(() => platform.attachToInstalledView(60_000), /APPIUM_SESSION_UNUSABLE/u);
+  await assert.rejects(() => driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(discoveries, 1, 'no recovery or subsequent Appium dispatch is permitted');
 });
 
 for (const mode of ['delayed', 'hung'] as const) {
@@ -199,14 +454,77 @@ test('recorded 18302ms native-only discovery settles before subsequent Safari pu
     throw new Error(`unexpected Safari operation ${path}`);
   });
   const start = Date.now();
-  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget.phaseView('navigation', 86_000));
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget.phaseView('navigation', 136_000));
   assert.equal(discoveries, 2);
-  assert.ok(Date.now() - start < 46_000);
+  assert.ok(Date.now() - start < 96_000);
   assert.equal(driver.snapshot().unusable, false);
   assert.equal(driver.snapshot().firstFatal, undefined);
   assert.equal(requests.some((request) => request.body.url || request.body.script === 'mobile: activateApp'), false);
-  assert.ok(driver.snapshot().commands.filter((entry) => entry.path.endsWith('/execute/sync')).every((entry) => entry.timeoutMs === 20_000 && !entry.timedOut));
+  assert.ok(driver.snapshot().commands.filter((entry) => entry.path.endsWith('/execute/sync')).every((entry) => entry.timeoutMs === 45_000 && !entry.timedOut));
 });
+
+for (const mode of ['ready', 'absent'] as const) {
+  test(`hosted 39755232141 Safari ${mode} after near-limit native-only discovery uses the bounded readiness phase`, async () => {
+    let now = 0;
+    let discoveries = 0;
+    let navigations = 0;
+    const { platform, driver, requests, budget } = await adapter(`hosted-safari-${mode}`, ({ path, body }) => {
+      if (body.script === 'mobile: getContexts') {
+        discoveries += 1;
+        now += discoveries === 1 ? 44_889 : 44_500;
+        return value(discoveries === 1 || mode === 'absent'
+          ? [{ id: 'NATIVE_APP' }]
+          : [{ id: 'WEBVIEW_46542.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
+      }
+      if (path.endsWith('/context')) {
+        now += body.name === 'NATIVE_APP' ? 900 : 14_900;
+        return value(null);
+      }
+      if (path.endsWith('/url') && !body.url) {
+        now += 900;
+        return value(`${origin}/`);
+      }
+      throw new Error(`unexpected hosted Safari operation ${path}`);
+    }, () => now);
+    (platform as any).simulatorReadyAt = '2026-10-22T09:56:48.108Z';
+    (platform as any).navigationCommand = async (binary: string, args: string[], timeoutMs: number) => {
+      assert.equal(binary, 'xcrun');
+      assert.deepEqual(args, ['simctl', 'openurl', 'protocol-only', `${origin}/`]);
+      assert.equal(timeoutMs, 90_000);
+      navigations += 1;
+      now += 8_971;
+      return { code: 0, stdout: '', stderr: '', durationMs: 8_971, timedOut: false };
+    };
+    const originalWait = PhaseBudget.prototype.wait;
+    PhaseBudget.prototype.wait = async function (milliseconds: number) {
+      assert.equal(this.phase, 'ios-safari-readiness');
+      assert.equal(milliseconds, 250);
+      now += 264;
+      this.assertAvailable('fixture wait');
+    };
+    try {
+      if (mode === 'ready') await platform.openSetupURL(`${origin}/`);
+      else await assert.rejects(() => platform.openSetupURL(`${origin}/`), /IOS_NAVIGATION.*native-only/u);
+    } finally {
+      PhaseBudget.prototype.wait = originalWait;
+    }
+    assert.equal(navigations, 1);
+    assert.equal(discoveries, 2);
+    assert.equal(driver.snapshot().unusable, false);
+    assert.equal(driver.snapshot().firstFatal, undefined);
+    assert.equal(budget.recoveryCount, 0);
+    assert.ok(now - 8_971 < 110_000);
+    assert.deepEqual(driver.snapshot().commands.filter(entry => entry.timing?.operation === 'contexts').map(entry => entry.timeoutMs), [45_000, 45_000]);
+    assert.equal(requests.some(request => request.body.url || request.body.script === 'mobile: activateApp'), false);
+    if (mode === 'ready') {
+      assert.deepEqual(requests.filter(request => request.path.endsWith('/context')).map(request => request.body.name), ['WEBVIEW_46542.1', 'NATIVE_APP']);
+      assert.equal((platform.evidenceSnapshot().safariNavigation as any).lastObservation.result, 'expected-origin');
+    } else {
+      assert.equal(requests.some(request => request.path.endsWith('/context') || request.path.endsWith('/url')), false);
+      assert.equal((platform.evidenceSnapshot().safariNavigation as any).reserveExhaustion.reason, 'discovery-observation');
+    }
+  });
+}
 
 test('cold Safari attach consumes recorded backend duration plus synthetic send and full-body overhead', async () => {
   const { platform, driver, requests, budget } = await adapter('cold-safari-attach', async ({ path, body, signal }) => {
@@ -224,7 +542,7 @@ test('cold Safari attach consumes recorded backend duration plus synthetic send 
     if (path.endsWith('/url')) return value(`${origin}/`);
     throw new Error(`unexpected cold attach operation ${path}`);
   });
-  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget);
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget);
   const switches = driver.snapshot().commands.filter(entry => entry.path.endsWith('/context'));
   assert.deepEqual(switches.map(entry => entry.timeoutMs), [15_000, 1_000]);
   assert.equal(requests.filter(request => request.body.name === 'WEBVIEW_23086.1').length, 1);
@@ -237,7 +555,7 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
     let settled = false;
     const { platform, driver, requests, budget } = await adapter(`cold-attach-${mode}`, async ({ path, body }) => {
       if (body.script === 'mobile: getContexts') {
-        if (mode === 'insufficient') now = 30_000;
+        if (mode === 'insufficient') now = 80_000;
         return value([{ id: 'WEBVIEW_23086.1', bundleId: 'com.apple.mobilesafari' }]);
       }
       assert.ok(path.endsWith('/context'));
@@ -246,7 +564,7 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
       settled = true;
       return value(null);
     }, mode === 'insufficient' ? () => now : undefined);
-    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget), mode === 'insufficient' ? /IOS_NAVIGATION/u : /APPIUM_/u);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget), mode === 'insufficient' ? /IOS_NAVIGATION/u : /APPIUM_/u);
     const count = requests.length;
     assert.equal(requests.filter(request => request.path.endsWith('/context')).length, mode === 'insufficient' ? 0 : 1);
     assert.equal(requests.some(request => request.path.endsWith('/url')), false);
@@ -269,14 +587,14 @@ test('bounded discovery admits initial app wait plus settled RPC and completion 
   const { platform, driver, budget } = await adapter('discovery-envelope', async ({ path, body, signal }) => {
     if (body.script === 'mobile: getContexts') {
       await wait(5_000, undefined, { signal: signal! });
-      await wait(14_500, undefined, { signal: signal! });
+      await wait(39_500, undefined, { signal: signal! });
       return value([{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
     }
     if (path.endsWith('/context')) return value(null);
     if (path.endsWith('/url')) return value(`${origin}/`);
     throw new Error(`unexpected bounded discovery operation ${path}`);
   });
-  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget);
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget);
   assert.equal(driver.snapshot().unusable, false);
   assert.ok(driver.snapshot().commands.every((entry) => !entry.timedOut));
 });
@@ -287,12 +605,12 @@ for (const mode of ['parent', 'absent', 'backend-error', 'interrupted-body'] as 
     const { platform, driver, requests, budget } = await adapter(`safari-discovery-${mode}`, ({ body }) => {
       assert.equal(body.script, 'mobile: getContexts');
       if (mode === 'interrupted-body') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('interrupted discovery body')); } }));
-      now += 20_000;
+      now += 45_000;
       if (mode === 'backend-error') return Response.json({ value: { error: 'unknown error', message: 'discovery backend unavailable' } }, { status: 500 });
       return value([{ id: 'NATIVE_APP' }]);
     }, () => now);
-    const phase = budget.phaseView('navigation', mode === 'parent' ? 25_999 : 46_000);
-    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, phase), mode === 'interrupted-body' ? /APPIUM_/u : /IOS_NAVIGATION/u);
+    const phase = budget.phaseView('navigation', mode === 'parent' ? 50_999 : 96_000);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, phase), mode === 'interrupted-body' ? /APPIUM_/u : /IOS_NAVIGATION/u);
     assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, mode === 'parent' ? 0 : mode === 'interrupted-body' ? 1 : 2);
     assert.equal(requests.some((request) => request.path.endsWith('/context') || request.body.url), false);
     assert.equal(driver.snapshot().unusable, mode === 'interrupted-body');
@@ -305,11 +623,11 @@ for (const late of [[{ id: 'NATIVE_APP' }], [{ id: 'WEBVIEW_18099.1', bundleId: 
     let settled = false;
     const { platform, driver, requests, budget } = await adapter('late-safari-discovery', async ({ body }) => {
       assert.equal(body.script, 'mobile: getContexts');
-      await wait(20_300);
+      await wait(45_300);
       settled = true;
       return value(late);
     });
-    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget), /APPIUM_TIMEOUT/u);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget), /APPIUM_TIMEOUT/u);
     const first = driver.snapshot().firstFatal;
     const count = requests.length;
     await wait(500);
@@ -320,6 +638,150 @@ for (const late of [[{ id: 'NATIVE_APP' }], [{ id: 'WEBVIEW_18099.1', bundleId: 
     assert.equal(requests.length, count);
   });
 }
+
+test('Safari native-only discovery retains the first cause and reserve boundary after late publication', async () => {
+  let now = 0;
+  let published = false;
+  let discoveries = 0;
+  let availableContexts = [{ id: 'NATIVE_APP' }];
+  const lateContexts = [{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }];
+  let releasePublication!: () => void;
+  const publication = new Promise<void>((resolve) => {
+    releasePublication = () => {
+      published = true;
+      availableContexts = lateContexts;
+      resolve();
+    };
+  });
+  const { platform, driver, requests, budget } = await adapter('safari-boundary-publication', ({ body }) => {
+    if (body.script === 'mobile: getContexts') {
+      assert.equal(published, false, 'late page publication must not trigger another discovery');
+      discoveries += 1;
+      now = discoveries === 1 ? 45_000 : 45_001;
+      return value(availableContexts);
+    }
+    throw new Error(`unexpected late-publication operation ${JSON.stringify(body)}`);
+  }, () => now);
+
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
+  let failure = '';
+  try {
+    await assert.rejects(
+      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
+      (error) => {
+        failure = String(error);
+        return /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u.test(failure);
+      },
+    );
+  } finally {
+    (globalThis as any).setTimeout = originalSetTimeout;
+  }
+  const beforeLatePublication = structuredClone(platform.evidenceSnapshot().safariNavigation);
+  const eventsBeforeLatePublication = (platform.evidenceSnapshot().events as any[])
+    .filter((event) => event.operation === 'safari-navigation-first-failure');
+  assert.equal(eventsBeforeLatePublication.length, 1);
+  assert.equal((beforeLatePublication as any).lastDiscovery.result, 'native-only');
+  assert.equal((beforeLatePublication as any).lastDiscovery.cause, 'Safari did not publish a web context');
+  assert.equal(discoveries, 2);
+  assert.equal((beforeLatePublication as any).lastDiscovery.remainingMs, 50_999);
+  assert.equal((beforeLatePublication as any).reserveExhaustion.reason, 'discovery-observation');
+  assert.equal((beforeLatePublication as any).reserveExhaustion.remainingMs, 50_999);
+  assert.equal((beforeLatePublication as any).firstFailure.kind, 'discovery');
+  assert.equal((beforeLatePublication as any).firstFailure.cause, 'Safari did not publish a web context');
+  assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, 2);
+  assert.equal(requests.some((request) => request.path.endsWith('/context')
+    || request.path.endsWith('/url')
+    || request.body.script === 'mobile: activeAppInfo'
+    || request.body.script?.startsWith('return {')), false);
+  assert.equal((platform.evidenceSnapshot() as any).installedBundleId, 'com.apple.webapp');
+  assert.equal((platform.evidenceSnapshot() as any).installedBindingState, 'unselected');
+  assert.equal((platform.evidenceSnapshot() as any).lastIdentity, undefined);
+  assert.match(failure, /Safari did not publish a web context/u);
+
+  releasePublication();
+  await publication;
+  assert.deepEqual(availableContexts, lateContexts);
+  const afterLatePublication = platform.evidenceSnapshot();
+  assert.deepEqual(afterLatePublication.safariNavigation, beforeLatePublication);
+  assert.equal(afterLatePublication.installedBindingState, 'unselected');
+  assert.equal(afterLatePublication.lastIdentity, undefined);
+  assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, 2);
+  assert.equal((afterLatePublication.events as any[])
+    .filter((event) => event.operation === 'safari-navigation-first-failure').length, 1);
+  assert.equal(driver.snapshot().unusable, false);
+});
+
+test('Safari diagnostic inspection caps oversized metadata without changing selection work', async () => {
+  let now = 0;
+  let discoveries = 0;
+  const hugeUrl = 'x'.repeat(100_000);
+  const oversizedMetadata = [
+    { id: 'WEBVIEW-oversized', bundleId: 'not-safari', url: hugeUrl },
+    ...Array.from({ length: 4_096 }, () => ({ id: 'NATIVE_APP' })),
+  ];
+  const { platform, driver, requests, budget } = await adapter('safari-oversized-diagnostics', ({ body }) => {
+    if (body.script === 'mobile: getContexts') {
+      discoveries += 1;
+      now = 45_001;
+      return value(oversizedMetadata);
+    }
+    throw new Error(`unexpected oversized-diagnostics operation ${JSON.stringify(body)}`);
+  }, () => now);
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
+  try {
+    await assert.rejects(
+      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
+      /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u,
+    );
+  } finally {
+    (globalThis as any).setTimeout = originalSetTimeout;
+  }
+  const navigation = platform.evidenceSnapshot().safariNavigation as any;
+  assert.equal(discoveries, 1);
+  assert.equal(navigation.lastDiscovery.result, 'inspection-truncated');
+  assert.equal(navigation.lastDiscovery.contextCount, 64);
+  assert.equal(navigation.lastDiscovery.inspectedContextCount, 64);
+  assert.equal(navigation.lastDiscovery.contextInspectionTruncated, true);
+  assert.equal(navigation.lastDiscovery.stringInspectionTruncated, true);
+  assert.equal(JSON.stringify(navigation).includes(hugeUrl), false);
+  assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, 1);
+  assert.equal(requests.some((request) => request.path.endsWith('/context') || request.path.endsWith('/url')), false);
+  assert.equal(driver.snapshot().unusable, false);
+});
+
+test('Safari discovery and observation evidence remain separate at reserve exhaustion', async () => {
+  let now = 0;
+  const { platform, requests, budget } = await adapter('safari-observation-reserve', ({ path, body }) => {
+    if (body.script === 'mobile: getContexts') return value([{ id: 'WEBVIEW-18099.1', bundleId: 'com.apple.mobilesafari' }]);
+    if (path.endsWith('/context')) return value(null);
+    if (path.endsWith('/url') && !body.url) {
+      now = 80_001;
+      return value('https://other.invalid/');
+    }
+    if (path.endsWith('/url') && body.url) return value(null);
+    throw new Error(`unexpected observation-reserve operation ${path} ${JSON.stringify(body)}`);
+  }, () => now);
+
+  await assert.rejects(
+    () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
+    /IOS_NAVIGATION: Safari fixture page was not ready/u,
+  );
+  const navigation = platform.evidenceSnapshot().safariNavigation as any;
+  assert.equal(navigation.lastDiscovery.result, 'safari-context');
+  assert.equal(navigation.lastDiscovery.cause, 'Safari web context was published');
+  assert.equal(navigation.lastDiscovery.elapsedMs, 0);
+  assert.equal(navigation.lastDiscovery.remainingMs, 96_000);
+  assert.equal(navigation.lastObservation.result, 'origin-mismatch');
+  assert.equal(navigation.lastObservation.cause, 'Safari page did not report the fixture origin');
+  assert.equal(navigation.lastObservation.remainingMs, 15_999);
+  assert.equal(navigation.reserveExhaustion.reason, 'discovery-observation');
+  assert.equal(navigation.firstFailure.kind, 'observation');
+  assert.equal(navigation.firstFailure.cause, 'Safari page did not report the fixture origin');
+  assert.equal(requests.filter((request) => request.path.endsWith('/context')).length, 1);
+  assert.equal(requests.filter((request) => request.path.endsWith('/url')).length, 2);
+});
 
 for (const budgetSource of ['attachment', 'parent'] as const) {
   test(`insufficient ${budgetSource} budget does not dispatch initial publication discovery`, async () => {
@@ -412,17 +874,21 @@ test('a page already inspected during initial binding cannot regain the blank-pu
   assert.equal(discoveries, 2);
 });
 
-const before = await readFile(join(fixtureDir, 'ios-share-0-hierarchy.xml'), 'utf8');
-const after = await readFile(join(fixtureDir, 'ios-share-1-hierarchy.xml'), 'utf8');
-const browser = await readFile(join(fixtureDir, 'ios-before-share-hierarchy.xml'), 'utf8');
-const hypotheticalConfirmation = await readFile(join(fixtureDir, 'ios-confirmation-hypothetical.xml'), 'utf8');
+async function shareFixtures() {
+  const [before, after, browser, hypotheticalConfirmation] = await Promise.all([
+    'ios-share-0-hierarchy.xml', 'ios-share-1-hierarchy.xml', 'ios-before-share-hierarchy.xml', 'ios-confirmation-hypothetical.xml',
+  ].map((file) => readFile(join(fixtureDir, file), 'utf8')));
+  return { before, after, browser, hypotheticalConfirmation };
+}
 
 function xpathCount(source: string, xpath: string): number {
-  return Number(execFileSync('xmllint', ['--xpath', `count(${xpath})`, '-'], { input: source, encoding: 'utf8' }).trim());
+  return Number(execFileSync('xmllint', ['--xpath', `count(${xpath})`, '-'], {
+    input: source, encoding: 'utf8', timeout: XML_CHECK_TIMEOUT_MS, killSignal: 'SIGKILL',
+  }).trim());
 }
 
 function requireXmlLint(): undefined {
-  try { execFileSync('xmllint', ['--version'], { stdio: 'pipe' }); }
+  try { execFileSync('xmllint', ['--version'], { stdio: 'pipe', timeout: XML_CHECK_TIMEOUT_MS, killSignal: 'SIGKILL' }); }
   catch (cause) {
     throw new Error('xmllint is required for XML XPath protocol checks; install libxml2-utils on Ubuntu before running the mobile tests', { cause });
   }
@@ -435,20 +901,36 @@ const confirmationProfiles: Record<string, number[]> = {
   'latest-pr': [1_488, 4_587],
 };
 
-for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'latest-push', 'earlier-pr', 'earlier-push', 'latest-pr', 'add-missing', 'add-disabled', 'add-hidden', 'add-not-hittable', 'add-budget', 'add-hung'] as const) {
+for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'compact-hidden', 'compact-disabled', 'compact-web-content', 'compact-not-hittable', 'compact-hung', 'disabled', 'dismissed', 'limit', 'eighth', 'latest-push', 'earlier-pr', 'earlier-push', 'latest-pr', 'add-missing', 'add-disabled', 'add-hidden', 'add-not-hittable', 'add-budget', 'add-hung'] as const) {
   test(`recorded Share sheet protocol ${mode} keeps scoped controls and bounded gestures`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
+    const { before, after, browser, hypotheticalConfirmation } = await shareFixtures();
+    const compact = mode.startsWith('compact');
+    const compactBrowser = compact ? (await readFile(join(fixtureDir, 'ios-hosted-39765785984-before-share.xml'), 'utf8'))
+      .replace(/<XCUIElementTypeButton\b[^>]*name="MoreMenuButton"[^>]*>[\s\S]*?<\/XCUIElementTypeButton>/u, (button) => {
+        if (mode === 'compact-hidden') return button.replace('visible="true"', 'visible="false"');
+        if (mode === 'compact-disabled') return button.replace('enabled="true"', 'enabled="false"');
+        if (mode === 'compact-web-content') return `<XCUIElementTypeWebView>${button}</XCUIElementTypeWebView>`;
+        return button;
+      }) : '';
+    const collapsedSheet = mode === 'collapsed' ? await readFile(join(fixtureDir, 'ios-hosted-39774217447-share-collapsed.xml'), 'utf8') : '';
+    let expanded = false;
+    let menuOpened = false;
     let sheet = mode === 'limit' || mode === 'eighth';
     let scrolls = 0;
     let reads = 0;
     let source = browser;
     const clicks: string[] = [];
     let confirmationLookups = 0;
+    let confirming = false;
     let now = 0;
     const scrolling = mode === 'limit' || mode === 'eighth';
     const ready = () => scrolling ? scrolls >= (mode === 'eighth' ? 8 : 9) : scrolls > 0;
     const currentSource = () => {
+      if (confirming) return hypotheticalConfirmation;
+      if (mode === 'collapsed' && sheet && !expanded) return collapsedSheet;
+      if (compact && !sheet && (!menuOpened || mode === 'compact-no-share')) return compactBrowser;
       if (!sheet || (mode === 'dismissed' && scrolls > 0) || (!scrolling && reads++ === 0)) return browser;
       if (ready()) return after;
       if (!scrolling) return before;
@@ -467,6 +949,10 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       }
       if (path.endsWith('/elements')) {
         assert.equal(body.using, 'xpath');
+        if (body.value.includes("@label='View More'")) {
+          assert.equal(xpathCount(source, body.value), 1);
+          return value([element('view-more')]);
+        }
         if (body.value.includes('XCUIElementTypeNavigationBar')) {
           assert.equal(xpathCount(hypotheticalConfirmation, body.value), 1);
           return value([element('add')]);
@@ -475,10 +961,18 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
         return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
       }
       if (path.endsWith('/element')) {
-        if (body.value === 'ShareButton') return value(element('share'));
+        if (body.value.includes('MoreMenuButton')) {
+          assert.equal(body.using, 'xpath');
+          if (mode === 'compact-hung') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+          return xpathCount(source, body.value) === 1 ? value(element('page-menu')) : missing();
+        }
+        if (body.value === 'ShareButton') {
+          if (compact && (!menuOpened || mode === 'compact-no-share')) return missing();
+          return value(element('share'));
+        }
         assert.ok(!body.value.includes('Open as Web App'), 'the pinned confirmation must not probe optional controls');
-        if (body.value === 'Add') {
-          assert.equal(body.using, 'accessibility id');
+        if (body.value === IOS_CONFIRMATION_ADD_XPATH) {
+          assert.equal(body.using, 'xpath');
           confirmationLookups += 1;
           if (mode === 'add-hung') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
           if (mode === 'add-missing') { now += 5_000; return missing(); }
@@ -497,6 +991,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
         return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
       }
       if (path.includes('/attribute/')) {
+        if (path.includes('/page-menu/') && path.endsWith('/hittable') && mode === 'compact-not-hittable') return value('false');
         if (path.includes('/add/')) {
           if (mode === 'add-disabled' && path.endsWith('/enabled')) { now += 5_000; return value('false'); }
           if (mode === 'add-hidden' && path.endsWith('/visible')) { now += 5_000; return value('false'); }
@@ -509,8 +1004,11 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       if (path.endsWith('/click')) {
         const id = path.split('/element/')[1].split('/')[0];
         if (id === 'share') sheet = true;
+        else if (id === 'page-menu') menuOpened = true;
+        else if (id === 'view-more') expanded = true;
         else if (id.startsWith('target')) {
           assert.ok(ready());
+          confirming = true;
           if (mode === 'add-budget') now = 116_000;
         }
         clicks.push(id);
@@ -524,13 +1022,19 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       else assert.equal(await operation(), 'target-8');
       assert.equal(scrolls, 8);
       assert.deepEqual(clicks, []);
-    } else if (mode === 'success' || mode in confirmationProfiles) {
+    } else if (mode === 'success' || mode === 'compact' || mode === 'collapsed' || mode in confirmationProfiles) {
       await platform.installFromBrowser();
-      assert.deepEqual(clicks, ['share', 'target-1', 'add']);
+      const actions = compact ? ['page-menu', 'share'] : mode === 'collapsed' ? ['share', 'view-more'] : ['share'];
+      assert.deepEqual(clicks, [...actions, 'target-1', 'add']);
       assert.equal(scrolls, 1);
       assert.equal(confirmationLookups, (confirmationProfiles[mode]?.length ?? 0) + 1);
+    } else if (compact) {
+      await assert.rejects(() => platform.installFromBrowser(), /IOS_SHARE|APPIUM_TIMEOUT/u);
+      assert.deepEqual(clicks, mode === 'compact-no-share' ? ['page-menu'] : []);
+      assert.equal(scrolls, 0);
+      assert.equal(confirmationLookups, 0);
     } else if (mode.startsWith('add-')) {
-      await assert.rejects(() => platform.installFromBrowser(), mode === 'add-hung' ? /APPIUM_TIMEOUT/u : mode === 'add-budget' ? /insufficient whole transaction allowance/u : /Add: confirmation control was not ready/u);
+      await assert.rejects(() => platform.installFromBrowser(), /APPIUM_TIMEOUT|confirmation control was not ready/u);
       assert.deepEqual(clicks, ['share', 'target-1']);
       if (mode === 'add-budget') assert.equal(confirmationLookups, 0, 'do not dispatch a partial confirmation lookup');
       if (mode === 'add-hung') {
@@ -544,15 +1048,260 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       assert.equal(scrolls, mode === 'disabled' ? 0 : 1);
     }
     const commands = driver.snapshot().commands;
-    const lookups = commands.filter((_entry, index) => requests[requests.length - commands.length + index]?.body.value === 'Add');
+    const lookups = commands.filter((_entry, index) => requests[requests.length - commands.length + index]?.body.value === IOS_CONFIRMATION_ADD_XPATH
+      && requests[requests.length - commands.length + index]?.path.endsWith('/element'));
     assert.ok(lookups.every((entry) => entry.timeoutMs === 8_000), 'confirmation probes must receive a complete native transaction, never optional-loop leftovers');
-    assert.equal(driver.snapshot().unusable, mode === 'add-hung');
+    assert.equal(driver.snapshot().unusable, ['compact-hung', 'add-hung', 'add-budget', 'add-disabled', 'add-hidden', 'add-not-hittable'].includes(mode));
+  });
+}
+
+for (const mode of ['ready', 'unchanged', 'no-target', 'ambiguous', 'hidden', 'disabled', 'not-hittable', 'web-content', 'foreign-app', 'budget', 'click-budget', 'context-lookup', 'context-click', 'malformed-array', 'malformed-entry', 'malformed-empty-id', 'malformed-number-id', 'malformed-null-entry', 'lookup-timeout', 'click-timeout'] as const) {
+  test(`hosted 39774217447 collapsed Share actions ${mode} require one verified expansion`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const { after } = await shareFixtures();
+    let collapsed = await readFile(join(fixtureDir, 'ios-hosted-39774217447-share-collapsed.xml'), 'utf8');
+    collapsed = collapsed.replace(/<XCUIElementTypeCell\b[^>]*label="View More"[^>]*>[\s\S]*?<\/XCUIElementTypeCell>/u, (cell) => {
+      if (mode === 'hidden') return cell.replace('visible="true"', 'visible="false"');
+      if (mode === 'disabled') return cell.replace('enabled="true"', 'enabled="false"');
+      if (mode === 'web-content') return `<XCUIElementTypeWebView>${cell}</XCUIElementTypeWebView>`;
+      return cell;
+    });
+    if (mode === 'foreign-app') collapsed = collapsed.replace('name="Safari"', 'name="Other"');
+    assert.equal(nativeActionListEvidence(collapsed, 'Add to Home Screen'), undefined);
+    let now = 0;
+    let expanded = false;
+    let source = '';
+    let expansionLookups = 0;
+    const clicks: string[] = [];
+    const { platform, driver, requests, budget } = await adapter(`share-expand-${mode}`, async ({ path, body, signal }) => {
+      if (path.endsWith('/context')) return value(null);
+      if (path.endsWith('/source')) {
+        now += mode === 'budget' ? 60_000 : 1_000;
+        source = expanded && mode !== 'unchanged' ? after : collapsed;
+        if (mode === 'no-target') source = source.replaceAll('Add to Home Screen', 'Different action');
+        return value(source);
+      }
+      if (path.endsWith('/elements')) {
+        assert.equal(body.using, 'xpath');
+        if (body.value.includes("@label='View More'")) {
+          expansionLookups += 1;
+          if (mode === 'lookup-timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+          const count = xpathCount(source, body.value);
+          assert.equal(count, ['hidden', 'disabled', 'web-content', 'foreign-app'].includes(mode) ? 0 : 1);
+          if (mode === 'malformed-array') return value(element('expand'));
+          if (mode === 'malformed-entry') return value([element('expand'), {}]);
+          if (mode === 'malformed-empty-id') return value([element('expand'), element('')]);
+          if (mode === 'malformed-number-id') return value([element('expand'), { 'element-6066-11e4-a52e-4f735466cecf': 5 }]);
+          if (mode === 'malformed-null-entry') return value([element('expand'), null]);
+          return value(count ? mode === 'ambiguous' ? [element('expand-1'), element('expand-2')] : [element('expand')] : []);
+        }
+        return value(nativeActionListEvidence(source, 'Add to Home Screen')?.targetRows.length ? [element('target')] : []);
+      }
+      if (path.endsWith('/rect')) return value(nativeActionListEvidence(source, 'Add to Home Screen')!.targetRows[0].bounds);
+      if (path.includes('/attribute/')) {
+        if (path.includes('/expand/') && path.endsWith('/hittable')) {
+          if (mode === 'not-hittable') return value('false');
+        }
+        return value('true');
+      }
+      if (path.endsWith('/click')) {
+        assert.ok(path.includes('/expand/'));
+        clicks.push('expand');
+        if (mode === 'click-timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+        expanded = true;
+        return value(null);
+      }
+      throw new Error(`unexpected expansion command ${path} ${JSON.stringify(body)}`);
+    }, () => now);
+    if (mode === 'context-lookup') {
+      const findAll = driver.findAll.bind(driver);
+      driver.findAll = async (...args: Parameters<AppiumClient['findAll']>) => {
+        if (args[0].value.includes("@label='View More'")) await driver.switchContext('WEBVIEW_changed');
+        return findAll(...args);
+      };
+    }
+    if (mode === 'click-budget' || mode === 'context-click') {
+      const attribute = driver.attribute.bind(driver);
+      driver.attribute = async (...args: Parameters<AppiumClient['attribute']>) => {
+        const result = await attribute(...args);
+        if (args[0] === 'expand' && args[1] === 'hittable') {
+          if (mode === 'click-budget') now += 21_000;
+          else await driver.switchContext('WEBVIEW_changed');
+        }
+        return result;
+      };
+    }
+    const operation = () => (platform as any).findNativeScrollable([{ using: 'xpath', value: "//*[@name='ActivityListView']//*[@name='activityCollectionView']//*[@name='actionGroupCell' and contains(@label, 'Add to Home Screen')]" }], 'Add to Home Screen', 84_000);
+    if (mode === 'ready') assert.equal(await operation(), 'target');
+    else if (mode.startsWith('malformed-')) await assert.rejects(operation, /APPIUM_ELEMENT: malformed element list response/u);
+    else await assert.rejects(operation, mode.startsWith('context-') ? /APPIUM_SESSION: original native request context is unavailable/u : /IOS_SHARE|APPIUM_TIMEOUT/u);
+    assert.deepEqual(clicks, ['ready', 'unchanged', 'no-target', 'click-timeout'].includes(mode) ? ['expand'] : []);
+    if (mode === 'budget' || mode === 'context-lookup') assert.equal(expansionLookups, 0);
+    if (clicks.length) assert.equal(expansionLookups, 1, 'an unchanged sheet must not reissue View More');
+    assert.equal(driver.snapshot().unusable, mode.endsWith('timeout'));
+    assert.ok(!requests.some((request) => ['mobile: tap', 'mobile: scroll', 'mobile: swipe'].includes(request.body.script)));
+    assert.ok(driver.snapshot().commands.filter((command) => command.path.endsWith('/elements') || command.path.endsWith('/click')).every((command) => command.timeoutMs <= 5_000));
+    assert.equal(budget.recoveryCount, 0);
+  });
+}
+
+for (const mode of ['empty', 'mixed-malformed', 'unfocused'] as const) {
+  test(`keyboard dismissal ${mode} requires a valid absence observation`, async () => {
+    let reattachments = 0;
+    const { platform, driver, requests } = await adapter(`keyboard-hide-${mode}`, ({ path, body }) => {
+      if (path.endsWith('/context')) return value(null);
+      if (body.script?.startsWith('const composer = document.querySelector')) {
+        assert.match(body.script, /document\.activeElement !== composer\) return false; composer\.blur\(\); return true;$/u);
+        return value(mode !== 'unfocused');
+      }
+      if (path.endsWith('/elements')) {
+        assert.deepEqual(body, { using: 'class name', value: 'XCUIElementTypeKeyboard' });
+        return value(mode === 'empty' ? [] : [element('visible-keyboard'), {}]);
+      }
+      if (path.endsWith('/rect')) return value({ x: 0, y: 500, width: 400, height: 300 });
+      if (path.endsWith('/attribute/visible')) return value('true');
+      if (body.script?.startsWith('return document.querySelector')) return value('retained draft');
+      throw new Error(`unexpected keyboard command ${path} ${JSON.stringify(body)}`);
+    });
+    platform.attachToInstalledView = async () => { reattachments += 1; };
+    (platform as any).keyboardDraft = 'retained draft';
+    if (mode === 'empty') await platform.hideKeyboard();
+    else if (mode === 'unfocused') await assert.rejects(() => platform.hideKeyboard(), /IOS_KEYBOARD: composer was not focused before dismissal/u);
+    else await assert.rejects(() => platform.hideKeyboard(), /APPIUM_ELEMENT: malformed element list response/u);
+    assert.equal(reattachments, mode === 'empty' ? 2 : 1);
+    assert.equal(requests.filter(request => request.path.endsWith('/elements')).length, mode === 'unfocused' ? 0 : 1);
+    assert.equal(requests.some(request => request.body.script === 'mobile: hideKeyboard'), false);
+    if (mode === 'empty') assert.ok(requests.findIndex(request => request.body.script?.startsWith('const composer'))
+      < requests.findIndex(request => request.path.endsWith('/elements')));
+    assert.equal(driver.snapshot().unusable, false);
+  });
+}
+
+// Appium's remote debugger deletes these property names from every web script result.
+function appiumScriptValue<T extends Record<string, unknown>>(result: T): T {
+  const copy: Record<string, unknown> = { ...result };
+  for (const property of ['ceil', 'clone', 'floor', 'round', 'scale', 'toString']) delete copy[property];
+  return copy as T;
+}
+
+for (const mode of ['shown', 'ambiguous', 'not-shown', 'composer-missing', 'not-foreground', 'unexposed', 'unexposed-threshold', 'unexposed-below-threshold', 'unexposed-baseline-covered', 'unexposed-baseline-error', 'unexposed-insufficient', 'unexposed-zoomed', 'unexposed-landscape', 'unexposed-unfocused', 'unexposed-script-error', 'hidden-element'] as const) {
+  test(`keyboard show ${mode} taps the composer natively before requiring the native keyboard`, async () => {
+    let tapped = false;
+    let typed = '';
+    const baselineCover = mode === 'unexposed-baseline-covered' ? 396 : 60;
+    const pageCover = mode === 'not-shown' ? 60 : mode === 'unexposed-insufficient' ? 210
+      : mode === 'unexposed-threshold' ? 250 : mode === 'unexposed-below-threshold' ? 249 : 396;
+    const page = (focused: boolean, cover: number, zoom = 1, portrait = true) => appiumScriptValue({
+      focused, portrait, zoom, innerHeight: 812, screenHeight: 874, viewportHeight: 874 - cover, cover,
+    });
+    const accepted = ['shown', 'unexposed', 'unexposed-threshold', 'unexposed-baseline-covered', 'unexposed-baseline-error'].includes(mode);
+    const { platform, driver, requests } = await adapter(`keyboard-show-${mode}`, ({ path, body }) => {
+      if (path.endsWith('/context')) return value(null);
+      if (path.endsWith('/element') && body.value === 'textarea[aria-label="Prompt"]') return value(element('web-composer'));
+      if (path.endsWith('/elements') && body.using === '-ios predicate string') {
+        assert.match(body.value, /label == 'Prompt' AND visible == 1$/u);
+        return value(mode === 'composer-missing' ? [] : mode === 'ambiguous' ? [element('native-composer'), element('native-composer-2')] : [element('native-composer')]);
+      }
+      if (body.script === 'mobile: activeAppInfo') return value({ bundleId: mode === 'not-foreground' ? 'com.apple.mobilesafari' : 'com.apple.webapp', pid: 4242 });
+      if (path.endsWith('/element/native-composer/click')) { tapped = true; return value(null); }
+      if (path.endsWith('/element/web-composer/value')) { typed = body.text ?? body.value?.join(''); return value(null); }
+      if (path.endsWith('/execute/sync') && String(body.script).includes('visualViewport')) {
+        if (!typed && mode === 'unexposed-baseline-error') return Response.json({ value: { error: 'javascript error', message: 'viewport unavailable' } }, { status: 500 });
+        if (!typed) return value(page(false, baselineCover));
+        if (mode === 'unexposed-script-error') return Response.json({ value: { error: 'javascript error', message: 'viewport unavailable' } }, { status: 500 });
+        const zoom = mode === 'unexposed-zoomed' ? 1.4 : mode === 'unexposed-threshold' ? 1.04 : 1;
+        return value(page(mode !== 'unexposed-unfocused', pageCover, zoom, mode !== 'unexposed-landscape'));
+      }
+      if (path.endsWith('/elements') && body.value === 'XCUIElementTypeKeyboard') return value((mode === 'shown' || mode === 'hidden-element') && tapped ? [element('keyboard')] : []);
+      if (path.endsWith('/element/keyboard/rect')) return value({ x: 0, y: 500, width: 400, height: 300 });
+      if (path.endsWith('/element/keyboard/attribute/visible')) return value(mode === 'hidden-element' ? 'false' : 'true');
+      throw new Error(`unexpected keyboard command ${path} ${JSON.stringify(body)}`);
+    });
+    platform.attachToInstalledView = async () => {};
+    (platform as any).installedBundleId = 'com.apple.webapp';
+    (platform as any).springBoardRoot = 'springboard-root';
+    if (accepted) await platform.showKeyboardOnComposer();
+    else await assert.rejects(() => platform.showKeyboardOnComposer(),
+      mode === 'ambiguous' ? /IOS_CONTEXT_OWNERSHIP: native composer is ambiguous/u
+        : mode === 'composer-missing' ? /IOS_KEYBOARD: composer was not exposed to native input/u
+        : mode === 'not-foreground' ? /IOS_CONTEXT_OWNERSHIP: native provider com\.apple\.webapp is not identified in foreground/u
+        : mode === 'hidden-element' ? /IOS_KEYBOARD: expected visible native keyboard \(visible=false, element seen\)$/u
+        : mode === 'unexposed-script-error' ? /IOS_KEYBOARD: expected visible native keyboard \(visible=false\); page unmeasured$/u
+        : mode === 'unexposed-insufficient' ? /; page focused=true portrait=true zoom=1 inner=812 screen=874 visual=664 cover=210 baseline=60$/u
+        : mode === 'unexposed-below-threshold' ? /; page focused=true portrait=true zoom=1 inner=812 screen=874 visual=625 cover=249 baseline=60$/u
+        : mode === 'unexposed-zoomed' ? /; page focused=true portrait=true zoom=1\.4 /u
+        : mode === 'unexposed-landscape' ? /; page focused=true portrait=false /u
+        : mode === 'unexposed-unfocused' ? /; page focused=false /u
+        : /IOS_KEYBOARD: expected visible native keyboard \(visible=false\); page focused=true portrait=true zoom=1 inner=812 screen=874 visual=814 cover=60 baseline=60$/u);
+    assert.equal(tapped, !['ambiguous', 'composer-missing', 'not-foreground'].includes(mode));
+    const operations = (platform as any).diagnostics.snapshot().map((event: { operation: string }) => event.operation);
+    assert.equal(operations.includes('keyboard-shown-by-page-viewport'), accepted && mode !== 'shown');
+    assert.equal(operations.includes('keyboard-not-shown-by-page-viewport'), !accepted && mode !== 'hidden-element' && tapped);
+    if (mode === 'not-foreground') assert.equal(requests.some(request => request.body.using === '-ios predicate string'), false);
+    if (tapped) {
+      const click = requests.findIndex(request => request.path.endsWith('/element/native-composer/click'));
+      assert.equal(requests[click - 1].body.script, 'mobile: activeAppInfo');
+    }
+    assert.equal(requests.some(request => /\/element\/web-composer\/click$/u.test(request.path)), false);
+    if (tapped) assert.equal(typed, 'mobile-device-ci draft');
+    if (mode === 'shown') assert.ok(requests.findIndex(request => request.path.endsWith('/element/native-composer/click'))
+      < requests.findIndex(request => request.path.endsWith('/element/web-composer/value')));
+    assert.equal(driver.snapshot().unusable, false);
+  });
+}
+
+for (const mode of ['restored', 'still-covered'] as const) {
+  test(`keyboard dismissal after a page-observed keyboard ${mode === 'restored' ? 'passes once the page viewport is restored' : 'fails when the page viewport stays covered'}`, async () => {
+    let tapped = false;
+    let typed = '';
+    let blurred = false;
+    let cycle = 1;
+    const { platform, driver } = await adapter(`keyboard-page-dismissal-${mode}`, ({ path, body }) => {
+      if (path.endsWith('/context')) return value(null);
+      if (path.endsWith('/element') && body.value === 'textarea[aria-label="Prompt"]') return value(element('web-composer'));
+      if (path.endsWith('/elements') && body.using === '-ios predicate string') return value([element('native-composer')]);
+      if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.webapp', pid: 4242 });
+      if (path.endsWith('/element/native-composer/click')) { tapped = true; return value(null); }
+      if (path.endsWith('/element/web-composer/value')) { typed = body.text ?? body.value?.join(''); return value(null); }
+      if (path.endsWith('/elements') && body.value === 'XCUIElementTypeKeyboard') return value(cycle === 2 && !blurred ? [element('keyboard')] : []);
+      if (path.endsWith('/element/keyboard/rect')) return value({ x: 0, y: 500, width: 400, height: 300 });
+      if (path.endsWith('/element/keyboard/attribute/visible')) return value('true');
+      if (path.endsWith('/execute/sync') && String(body.script).includes('visualViewport')) {
+        const page = (focused: boolean, cover: number) => appiumScriptValue({
+          focused, portrait: true, zoom: 1, innerHeight: 812, screenHeight: 874, viewportHeight: 874 - cover, cover,
+        });
+        if (!typed) return value(page(false, 60));
+        if (cycle === 2) return value(page(!blurred, 396));
+        return value(page(!blurred, blurred && mode === 'restored' ? 60 : 396));
+      }
+      if (path.endsWith('/execute/sync') && String(body.script).includes('composer.blur()')) { blurred = true; return value(true); }
+      if (path.endsWith('/execute/sync') && String(body.script).includes('?.value')) return value(typed);
+      throw new Error(`unexpected keyboard command ${path} ${JSON.stringify(body)}`);
+    });
+    platform.attachToInstalledView = async () => {};
+    (platform as any).installedBundleId = 'com.apple.webapp';
+    (platform as any).springBoardRoot = 'springboard-root';
+    await platform.showKeyboardOnComposer();
+    assert.equal(tapped, true);
+    if (mode === 'restored') {
+      await platform.hideKeyboard();
+      cycle = 2;
+      typed = '';
+      blurred = false;
+      await platform.showKeyboardOnComposer();
+      await platform.hideKeyboard();
+    } else {
+      await assert.rejects(() => platform.hideKeyboard(), /IOS_KEYBOARD: page viewport stayed covered after dismissal; page focused=false portrait=true zoom=1 inner=812 screen=874 visual=478 cover=396 baseline=60$/u);
+    }
+    assert.equal(blurred, true);
+    assert.equal(driver.snapshot().unusable, false);
   });
 }
 
 type ConfirmationState = 'ready' | 'missing' | 'stale-lookup' | 'stale-enabled' | 'stale-visible' | 'stale-hittable' | 'disabled' | 'hidden' | 'not-hittable' | 'indeterminate';
-type ConfirmationFault = 'stale' | 'unrelated' | 'invalid-session' | 'misleading-404' | 'malformed' | 'malformed-value' | 'transport' | 'interrupted' | 'hung';
-type ConfirmationBoundary = 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
+type ConfirmationFault = 'stale' | 'unrelated' | 'invalid-session' | 'misleading-404' | 'malformed' | 'malformed-value' | 'transport' | 'interrupted' | 'hung' | 'body-hung' | 'body-interrupted' | 'body-late' | 'late-missing';
+type ConfirmationBoundary = 'activity-click' | 'source' | 'foreground' | 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
 
 async function confirmationReplay(name: string, options: {
   recorded?: typeof recordedConfirmation[number];
@@ -563,17 +1312,29 @@ async function confirmationReplay(name: string, options: {
   replaceReadyIdentity?: 'once' | 'always';
   replaceFirstIdentity?: boolean;
   oldIdentityPolicy?: boolean;
+  oldFinalAddPolicy?: boolean;
+  finalActionDuration?: number;
   foreground?: string;
   fault?: ConfirmationFault;
   faultAt?: ConfirmationBoundary;
+  faultOnIdentityRead?: number;
   fourthReadStale?: boolean;
   after?: (boundary: string, lookup: number) => number;
+  remainingAt?: (boundary: string, lookup: number, identityRead: number) => number | undefined;
+  initialConfirmationRemaining?: number;
+  confirmationSource?: unknown;
+  confirmationOwnerChange?: 'context' | 'generation' | 'session';
+  confirmationUnhealthy?: 'unusable' | 'firstFatal';
+  activityDuration?: number;
+  afterConfirmationValidation?: number;
   parentRemaining?: number;
   latency?: Partial<Record<ConfirmationBoundary, number>>;
 } = {}) {
   const fixture = options.recorded;
+  const { before, after, browser, hypotheticalConfirmation } = await shareFixtures();
   const shareSources = fixture ? await Promise.all(Object.values(fixture.sources).map((path) => readFile(join(fixtureDir, path), 'utf8'))) : [browser, before, after];
   let now = 0;
+  let confirmationStart = 0;
   let sheet = false;
   let confirming = false;
   let scrolls = 0;
@@ -586,13 +1347,35 @@ async function confirmationReplay(name: string, options: {
   const states = options.states || ['ready'];
   const state = () => states[Math.min(lookups - 1, states.length - 1)];
   const stale = () => Response.json({ value: (fixture || recordedConfirmation[0]).response.value }, { status: 404 });
+  const pendingAdvances: Array<() => void> = [];
   const advance = (boundary: string) => {
-    now += options.after?.(boundary, lookups) || 0;
-    observations.push({ boundary, lookup: lookups, now });
+    pendingAdvances.push(() => {
+      now += options.after?.(boundary, lookups) || 0;
+      const remaining = options.remainingAt?.(boundary, lookups, identityReads);
+      if (remaining !== undefined) now = confirmationStart + 75_000 - remaining;
+      observations.push({ boundary, lookup: lookups, now });
+    });
   };
   const { platform, driver, requests, budget, outputDir } = await adapter(`confirmation-${name}`, async ({ path, body, signal }) => {
+    const responseBody = (kind: 'hung' | 'interrupted' | 'late') => new Response(new ReadableStream({
+      start(controller) {
+        if (kind === 'interrupted') {
+          controller.enqueue(new TextEncoder().encode('{"value":'));
+          queueMicrotask(() => controller.error(new Error('synthetic response body interruption')));
+        } else if (kind === 'late') {
+          setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify({ value: element('late') })));
+            controller.close();
+          }, 12_500);
+        }
+      },
+    }));
     const fault = () => {
       if (options.fault === 'hung') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+      if (options.fault === 'body-hung') return responseBody('hung');
+      if (options.fault === 'body-interrupted') return responseBody('interrupted');
+      if (options.fault === 'body-late') return responseBody('late');
+      if (options.fault === 'late-missing') return wait(8_100).then(() => missing());
       if (options.fault === 'transport') throw new Error('synthetic connection reset');
       if (options.fault === 'interrupted') throw new DOMException('synthetic interrupted transport', 'TimeoutError');
       if (options.fault === 'malformed') return new Response('not-json', { status: 200 });
@@ -603,10 +1386,18 @@ async function confirmationReplay(name: string, options: {
     };
     if (path.endsWith('/context')) return value(null);
     if (body.script === 'mobile: activeAppInfo') {
-      if (confirming) advance('foreground');
+      if (confirming) {
+        advance('foreground');
+        if (options.faultAt === 'foreground') return fault();
+      }
       return value({ bundleId: confirming ? options.foreground ?? 'com.apple.mobilesafari' : 'com.apple.mobilesafari', pid: 20640 });
     }
     if (path.endsWith('/source')) {
+      if (confirming) {
+        advance('source');
+        if (options.faultAt === 'source') return fault();
+        return value(Object.hasOwn(options, 'confirmationSource') ? options.confirmationSource : hypotheticalConfirmation);
+      }
       source = !sheet ? shareSources[0] : scrolls ? shareSources[2] : shareSources[1];
       return value(source);
     }
@@ -620,10 +1411,10 @@ async function confirmationReplay(name: string, options: {
       assert.equal(body.using, 'xpath');
       if (confirming) {
         await wait(options.latency?.identity || 0);
-        advance('identity');
         identityReads++;
+        advance('identity');
         if (identityReads === options.staleIdentityRead) return stale();
-        if (options.faultAt === 'identity') return fault();
+        if (options.faultAt === 'identity' && (options.faultOnIdentityRead === undefined || options.faultOnIdentityRead === identityReads)) return fault();
         let xml = hypotheticalConfirmation;
         const replaced = (options.dialog === 'replaced' && lookups > 1) || (options.dialog === 'replaced-after-ready' && identityReads > 1);
         if (options.dialog === 'different' || replaced) xml = xml.replace('name="Add to Home Screen"', 'name="Add Bookmark"');
@@ -636,12 +1427,14 @@ async function confirmationReplay(name: string, options: {
         return value([element(options.dialog === 'unrelated-add' ? 'expected-add' : `add-${lookups + (replacedAdd ? 1 : 0)}`)]);
       }
       assert.ok(xpathCount(source, body.value) > 0, 'real adapter selector must match recorded Share XML');
-      return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
+      const target = body.value.includes('Add to Home Screen');
+      if (target && options.parentRemaining !== undefined && !confirming) now = 120_000 - options.parentRemaining;
+      return value([element(`${target ? 'target' : 'container'}-${scrolls}`)]);
     }
     if (path.endsWith('/element')) {
       if (body.value === 'ShareButton') return value(element('share'));
       assert.ok(confirming, 'confirmation lookup cannot precede the verified activity click');
-      assert.deepEqual(body, { using: 'accessibility id', value: 'Add' }, 'no optional or unscoped replacement selectors');
+      assert.deepEqual(body, { using: 'xpath', value: IOS_CONFIRMATION_ADD_XPATH }, 'no optional or unscoped replacement selectors');
       lookups++;
       await wait(options.latency?.lookup || 0);
       advance('lookup');
@@ -683,20 +1476,49 @@ async function confirmationReplay(name: string, options: {
       if (id === 'share') sheet = true;
       if (id.startsWith('target-')) {
         assert.equal(scrolls, 1);
+        if (options.faultAt === 'activity-click') return fault();
+        now += options.activityDuration || 0;
+        confirmationStart = now;
         confirming = true;
-        if (options.parentRemaining !== undefined) now = 120_000 - options.parentRemaining;
       }
       if (id.startsWith('add-')) {
+        now += options.finalActionDuration || 0;
         advance('click');
         if (options.faultAt === 'click') return fault();
       }
       return value(null);
     }
     throw new Error(`unexpected confirmation request ${path} ${JSON.stringify(body)}`);
-  }, fixture || options.latency ? undefined : () => now);
-  if (options.oldIdentityPolicy) {
-    const original = driver.command.bind(driver);
-    driver.command = (path, method, body, timeoutMs) => original(path, method, body, path === '/elements' && confirming ? 8_000 : timeoutMs);
+  }, fixture || options.latency || options.faultAt === 'activity-click' ? undefined : () => now);
+  const originalCommand = driver.command.bind(driver);
+  driver.command = async (path, method, body, timeoutMs, policy) => {
+    try {
+      if (path === '/execute/sync' && confirming && options.confirmationOwnerChange) {
+        const original = policy!;
+        policy = { ...original, beforeDispatch: () => {
+          if (options.confirmationOwnerChange === 'context') (driver as any).selectedContext = 'WEBVIEW_replaced';
+          if (options.confirmationOwnerChange === 'generation') (driver as any).sessionGeneration++;
+          if (options.confirmationOwnerChange === 'session') (driver as any).sessionOwner = {};
+          original.beforeDispatch();
+        } };
+      }
+      const cap = options.oldIdentityPolicy && path === '/elements' && confirming ? 8_000
+        : options.oldFinalAddPolicy && /\/element\/add-[^/]+\/click$/u.test(path) ? 5_000 : timeoutMs;
+      return await originalCommand(path, method, body, cap, policy) as any;
+    } finally {
+      for (const advance of pendingAdvances.splice(0)) advance();
+    }
+  };
+  if (options.initialConfirmationRemaining !== undefined || options.afterConfirmationValidation !== undefined || options.confirmationUnhealthy) {
+    const original = (platform as any).waitForInstallConfirmation.bind(platform);
+    (platform as any).waitForInstallConfirmation = async (phase: PhaseBudget, policy: unknown) => {
+      if (options.initialConfirmationRemaining !== undefined) now = confirmationStart + 75_000 - options.initialConfirmationRemaining;
+      if (options.confirmationUnhealthy === 'unusable') (driver as any).unusable = true;
+      if (options.confirmationUnhealthy === 'firstFatal') (driver as any).firstFatal = { code: 'APPIUM_INTERRUPTED', path: '/prior', method: 'GET', at: 1, detail: 'hypothetical prior fatal' };
+      const result = await original(phase, policy);
+      now += options.afterConfirmationValidation || 0;
+      return result;
+    };
   }
   (platform as any).installedBundleId = '';
   let error: unknown;
@@ -710,17 +1532,365 @@ async function confirmationReplay(name: string, options: {
   assert.equal(platform.evidenceSnapshot().installedDocumentBound, false);
   assert.equal(requests.filter((request) => request.path.endsWith('/context')).length, 1, 'no context reset during reacquisition');
   assert.equal(requests.some((request) => /activateApp|pressButton/u.test(request.body.script || '') || request.path.endsWith('/url')), false, 'never restart installation or navigation');
-  assert.deepEqual(clicks.slice(0, 2), ['share', 'target-1']);
+  const targetClickIndex = requests.findIndex((request) => request.path.endsWith('/element/target-1/click'));
+  if (targetClickIndex >= 0) assert.deepEqual(clicks.slice(0, 2), ['share', 'target-1']);
+  else assert.deepEqual(clicks, ['share']);
   assert.ok(clicks.length <= 3, 'final Add must be dispatched at most once');
   const settingsWrites = requests.filter(request => request.path.endsWith('/appium/settings') && 'waitForIdleTimeout' in (request.body.settings || {}));
+  if (settingsWrites.length && targetClickIndex >= 0) {
+    assert.ok(requests.indexOf(settingsWrites[0]) < targetClickIndex, 'confirmation settings must be established before the activity click');
+  }
   if (!error) assert.equal(settingsWrites.length, 2, 'a successful confirmation must apply and restore the scoped backend policy');
   if (settingsWrites.length) {
     assert.deepEqual(settingsWrites[0].body.settings, { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 });
-    assert.equal(settingsWrites.length, driver.snapshot().firstFatal ? 1 : 2);
-    if (!driver.snapshot().firstFatal) assert.deepEqual(settingsWrites[1].body.settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
+    const restoreRefused = options.confirmationOwnerChange !== undefined;
+    assert.equal(settingsWrites.length, driver.snapshot().firstFatal || driver.snapshot().unusable || restoreRefused ? 1 : 2);
+    if (!driver.snapshot().firstFatal && !driver.snapshot().unusable && !restoreRefused) assert.deepEqual(settingsWrites[1].body.settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
   }
-  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now };
+  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now, outputDir };
 }
+
+test('confirmation product-first proceeds directly from acknowledged row to foreground and final Add checks', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('product-first-order');
+  assert.equal(a.error, undefined);
+  const target = a.requests.findIndex(request => request.path.endsWith('/target-1/click'));
+  const following = a.requests.slice(target + 1);
+  assert.equal(following[0].body.script, 'mobile: activeAppInfo');
+  assert.ok(following[1].path.endsWith('/element'));
+  assert.deepEqual(following[1].body, { using: 'xpath', value: IOS_CONFIRMATION_ADD_XPATH });
+  assert.equal(following.some(request => /\/(?:source|screenshot)$/u.test(request.path)), false);
+  assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+  assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
+  const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+  assert.deepEqual(Object.keys(capture).sort(), ['acknowledgement', 'status']);
+  assert.equal(capture.status, 'not-requested-product-first');
+  assert.equal(capture.acknowledgement.completed, true);
+  assert.equal(capture.acknowledgement.outcome, 'success');
+  const foreground = a.driver.snapshot().commands.find(command => command.timing?.dispatchedOrdinal === following[0].dispatchedOrdinal)!;
+  assert.equal(foreground.timing?.operation, 'active-app');
+  assert.equal(foreground.timing?.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal + 1);
+  assert.equal(foreground.timing?.sessionGeneration, capture.acknowledgement.sessionGeneration);
+  assert.equal(foreground.timing?.scope, 'ios-install-confirmation');
+  assert.equal(foreground.timing?.phaseRemainingAtEntryMs, 75_000);
+  assert.equal(a.driver.snapshot().lastCommand?.timing?.scope, 'unscoped');
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'confirmation-result.json'), 'utf8'));
+  assert.match(persisted.proofKind, /Hypothetical.*not observed native recovery/u);
+  assert.deepEqual(persisted.evidence.confirmationCapture, capture);
+  assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
+  capture.acknowledgement.outcome = 'changed-copy';
+  assert.equal((a.platform.evidenceSnapshot().confirmationCapture as any).acknowledgement.outcome, 'success');
+});
+
+test('confirmation product-first disposition does not depend on retired capture surplus', async () => {
+  requireXmlLint();
+  for (const remaining of [73_000, 72_999]) {
+    const a = await confirmationReplay(`product-first-budget-${remaining}`, { parentRemaining: 87_500, activityDuration: 82_000 - remaining });
+    assert.equal(a.error, undefined);
+    const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
+    const commands = a.driver.snapshot().commands.filter(command => command.timing?.scope === 'ios-install-confirmation');
+    assert.equal(commands[0].timing?.phaseRemainingAtEntryMs, remaining);
+    assert.equal(commands.some(command => command.path.endsWith('/source')), false);
+  }
+});
+
+test('confirmation product-first keeps the original confirmation clock after readiness consumption', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('product-first-consumption', { after: boundary => boundary === 'enabled' ? 70_500 : 0 });
+  const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+  assert.equal(capture.status, 'not-requested-product-first');
+  assert.match(String(a.error), /confirmation control was not ready/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.driver.snapshot().firstFatal, undefined);
+  assert.equal(a.observations.find(observation => observation.boundary === 'enabled')?.now, 70_500);
+});
+
+test('confirmation product-first never requests malformed private or oversized confirmation sources', async () => {
+  requireXmlLint();
+  for (const confirmationSource of [null, '<private-malformed>', `<A name="${'secret'.repeat(50_000)}"/>`, `<A>${'<XCUIElementTypeButton label="Add"/>'.repeat(600)}</A>`]) {
+    const a = await confirmationReplay('product-first-source-withheld', { confirmationSource });
+    assert.equal(a.error, undefined);
+    assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
+    const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.equal(capture.projection, undefined);
+    assert.equal(a.observations.some(observation => observation.boundary === 'source'), false);
+    assert.doesNotMatch(JSON.stringify(capture), /private|secret/u);
+    assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
+  }
+  const disabled = await confirmationReplay('product-first-not-readiness', { states: ['disabled'], after: boundary => boundary === 'enabled' ? 70_001 : 0 });
+  assert.equal((disabled.platform.evidenceSnapshot().confirmationCapture as any).status, 'not-requested-product-first');
+  assert.match(String(disabled.error), /confirmation control was not ready.*disabled/u);
+  assert.deepEqual(disabled.clicks, ['share', 'target-1']);
+});
+
+for (const fault of ['unrelated', 'malformed', 'malformed-value', 'hung', 'interrupted', 'body-hung', 'body-interrupted', 'body-late', 'late-missing'] as const) {
+  test(`confirmation product-first unrequested ${fault} source cannot block the actual final Add`, async () => {
+    requireXmlLint();
+    const a = await confirmationReplay(`product-first-source-${fault}`, { faultAt: 'source', fault });
+    assert.equal(a.error, undefined);
+    assert.equal(a.lookups, 1);
+    assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
+    assert.equal(a.observations.some(observation => observation.boundary === 'source'), false);
+    const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.equal(a.requests.some(request => request.path.endsWith('/source') && request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal), false);
+    assert.equal(a.driver.snapshot().firstFatal, undefined);
+    assert.equal(a.driver.snapshot().unusable, false);
+  });
+}
+
+test('confirmation unhealthy snapshots propagate before foreground or lookup without restoration or later native work', async () => {
+  requireXmlLint();
+  for (const confirmationUnhealthy of ['unusable', 'firstFatal'] as const) {
+    const a = await confirmationReplay(`confirmation-${confirmationUnhealthy}`, { confirmationUnhealthy });
+    assert.match(String(a.error), /APPIUM_SESSION_UNUSABLE/u);
+    const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.equal(a.lookups, 0);
+    assert.deepEqual(a.clicks, ['share', 'target-1']);
+    assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+    assert.equal(a.requests.at(-1)?.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal);
+    const first = structuredClone(a.driver.snapshot().firstFatal);
+    if (confirmationUnhealthy === 'firstFatal') assert.equal(first?.code, 'APPIUM_INTERRUPTED');
+    await a.platform.captureSanitizedEvidence('failure');
+    for (const action of [() => a.platform.installFromBrowser(), () => a.platform.launchInstalledApp(), () => a.platform.attachToInstalledView()]) {
+      await assert.rejects(action, error => error === a.error);
+    }
+    assert.deepEqual(a.driver.snapshot().firstFatal, first);
+    assert.equal(a.requests.at(-1)?.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal);
+  }
+});
+
+test('confirmation original native ownership generation and context are fenced at foreground dispatch', async () => {
+  requireXmlLint();
+  for (const confirmationOwnerChange of ['context', 'generation', 'session'] as const) {
+    const a = await confirmationReplay(`confirmation-owner-${confirmationOwnerChange}`, { confirmationOwnerChange });
+    const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    const subsequent = a.requests.filter(request => request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal);
+    assert.match(String(a.error), /original (?:native request context|usable session owner) is unavailable/u);
+    assert.deepEqual(a.clicks, ['share', 'target-1']);
+    assert.equal(a.lookups, 0);
+    assert.deepEqual(subsequent, []);
+    const refused = a.driver.snapshot().commands.filter(command => command.timing?.scope === 'ios-install-confirmation');
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0].timing?.sent, false);
+    assert.equal(refused[0].timing?.admitted, false);
+    assert.equal(refused[0].timing?.outcome, 'transport-error');
+  }
+});
+
+test('confirmation late404 lookup cannot replace first fatal or persisted diagnostic evidence', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('product-first-late404-lookup', { faultAt: 'lookup', fault: 'late-missing' });
+  assert.match(String(a.error), /APPIUM_TIMEOUT/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.lookups, 1);
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  const capture = a.platform.evidenceSnapshot().confirmationCapture;
+  const count = a.requests.length;
+  await wait(200);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  assert.deepEqual(a.platform.evidenceSnapshot().confirmationCapture, capture);
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.requests.length, count);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.deepEqual(persisted.confirmationCapture, capture);
+  assert.equal(persisted.driver.firstFatal.code, 'APPIUM_TIMEOUT');
+  await assert.rejects(() => a.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.requests.length, count);
+});
+
+test('activity click timeout records its boundary without further native commands', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('activity-timeout', { fault: 'hung', faultAt: 'activity-click' });
+  assert.match(String(a.error), /APPIUM_TIMEOUT/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.lookups, 0);
+  assert.equal(a.driver.snapshot().unusable, true);
+  assert.equal(a.platform.evidenceSnapshot().confirmationCapture, undefined);
+  const fatal = a.driver.snapshot().firstFatal;
+  assert.equal(fatal?.code, 'APPIUM_TIMEOUT');
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  const count = a.requests.length;
+  let captures = 0;
+  a.driver.screenshot = async () => { captures++; throw new Error('unexpected screenshot'); };
+  a.driver.pageSource = async () => { captures++; throw new Error('unexpected hierarchy'); };
+  (a.platform as any).diagnosticCommand = async () => { captures++; throw new Error('unexpected native diagnostic'); };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(captures, 0);
+  assert.equal(a.requests.length, count);
+  assert.deepEqual(a.driver.snapshot().firstFatal, fatal);
+  const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
+  const clicks = events.filter((event: { operation: string }) => event.operation.startsWith('activity-click-'));
+  assert.deepEqual(clicks.map((event: { operation: string }) => event.operation), ['activity-click-started', 'activity-click-failed']);
+  assert.equal(clicks[0].timeoutMs, 12_000);
+  assert.deepEqual(clicks[1].detail, { fatal: true });
+  assert.equal(a.requests.at(-1)?.path.endsWith('/element/target-1/click'), true);
+});
+
+test('activity click nonfatal failure retains settings restoration and original error', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('activity-nonfatal', { fault: 'unrelated', faultAt: 'activity-click' });
+  assert.match(String(a.error), /synthetic protocol failure/u);
+  assert.equal(a.platform.evidenceSnapshot().confirmationCapture, undefined);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.lookups, 0);
+  assert.equal(a.driver.snapshot().unusable, false);
+  assert.equal(a.driver.snapshot().firstFatal, undefined);
+  const events = (a.platform as any).diagnostics.snapshot().filter((event: { operation: string }) => event.operation.startsWith('activity-click-'));
+  assert.deepEqual(events.map((event: { operation: string }) => event.operation), ['activity-click-started', 'activity-click-failed']);
+  assert.deepEqual(events[1].detail, { fatal: false });
+});
+
+test('confirmation SM57 final Add12000 is isolated from all other caps', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('SM57-caps');
+  assert.equal(a.error, undefined);
+  const activities = (a.platform as any).diagnostics.snapshot().filter((event: { operation: string }) => event.operation.startsWith('activity-click-'));
+  assert.deepEqual(activities.map((event: { operation: string }) => event.operation), ['activity-click-started', 'activity-click-acknowledged']);
+  const history = a.driver.snapshot().commands;
+  const commands = history.slice(history.findIndex(command => command.path.endsWith('/element/target-1/click')));
+  assert.equal(commands.find(command => command.path.endsWith('/element/add-1/click'))?.timeoutMs, 12_000);
+  assert.equal(commands.find(command => command.path.endsWith('/element/target-1/click'))?.timeoutMs, 12_000);
+  assert.ok(commands.filter(command => command.path.endsWith('/elements')).every(command => command.timeoutMs === 12_000));
+  assert.equal(commands.find(command => command.path.endsWith('/element') && command.timeoutMs === 8_000)?.timeoutMs, 8_000);
+  assert.ok(commands.filter(command => command.path.includes('/add-1/attribute/')).every(command => command.timeoutMs === 5_000));
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+  assert.equal(a.requests.filter(request => request.body.script === 'mobile: queryAppState').length, 1);
+  assert.equal(a.platform.evidenceSnapshot().launchReceipt, undefined);
+});
+
+test('confirmation SM57 final Add full allocation or no SEND at every parent boundary', async () => {
+  for (const limiting of ['root', 'operation', 'confirmation'] as const) {
+    for (const remaining of [12_000, 11_999]) {
+      let now = 0;
+      let sends = 0;
+      const root = new PhaseBudget('root', { timeoutMs: limiting === 'root' ? remaining : 120_000, now: () => now });
+      const operation = root.phaseView('operation', limiting === 'operation' ? remaining : 80_000);
+      const confirmation = operation.phaseView('confirmation', limiting === 'confirmation' ? remaining : 75_000);
+      const driver = new AppiumClient('http://policy.invalid', 30_000, async (input, init) => {
+        if (String(input).endsWith('/session')) return Response.json({ value: {}, sessionId: 'policy' });
+        sends++;
+        assert.equal(init?.body, undefined);
+        now += 11_999;
+        return value(null);
+      }, undefined, { now: () => now, timer: () => 0 as unknown as ReturnType<typeof setTimeout>, clear: () => undefined });
+      await driver.create({ capabilities: {} });
+      driver.setBudget(root);
+      const policy = { ...driver.nativeRequestPolicy(confirmation), finalAction: true };
+      if (remaining === 12_000) await driver.click('typed-add', 12_000, policy);
+      else await assert.rejects(() => driver.click('typed-add', 12_000, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
+      assert.equal(sends, remaining === 12_000 ? 1 : 0);
+      assert.equal(driver.snapshot().lastCommand!.timing!.sent, remaining === 12_000);
+    }
+  }
+});
+
+test('confirmation SM57 final identity to dispatch gap refuses without SEND', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('SM57-gap', {
+    remainingAt: (boundary, _lookup, identityRead) => boundary === 'identity' && identityRead === 2 ? 12_000 : undefined,
+    afterConfirmationValidation: 1,
+  });
+  assert.match(String(a.error), /insufficient time to complete confirmation click/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+  for (const changed of ['context', 'generation']) {
+    let sends = 0;
+    const driver = new AppiumClient('http://policy.invalid', 30_000, async () => { sends++; return Response.json({ value: null, sessionId: 'same-id' }); });
+    await driver.create({ capabilities: {} });
+    const policy = { ...driver.nativeRequestPolicy(new PhaseBudget('confirmation', { timeoutMs: 75_000 })), finalAction: true };
+    if (changed === 'context') await driver.switchContext('WEBVIEW-other');
+    else { await driver.close(); await driver.create({ capabilities: {} }); }
+    const before = sends;
+    await assert.rejects(() => driver.click('typed-add', 12_000, policy), /original.*(?:context|owner)/u);
+    assert.equal(sends, before);
+  }
+});
+
+test('confirmation SM57 fresh triplet and final identity survive pre-SEND replacement only', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('SM57-replacement', { replaceReadyIdentity: 'once', after: () => 500 });
+  assert.equal(a.error, undefined);
+  assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable', 'add-2:enabled', 'add-2:visible', 'add-2:hittable']);
+  assert.deepEqual(a.clicks, ['share', 'target-1', 'add-2']);
+  for (const options of [
+    { foreground: 'com.example.wrong' }, { fault: 'malformed-value' as const, faultAt: 'lookup' as const },
+    { dialog: 'hidden' as const, persistent: true }, { dialog: 'ambiguous' as const, persistent: true },
+  ]) {
+    const refused = await confirmationReplay('SM57-identity-refused', options);
+    assert.ok(refused.error);
+    assert.equal(refused.clicks.length, 2);
+  }
+});
+
+test('confirmation SM57 sent stale Add cannot retry or recover installation', async () => {
+  requireXmlLint();
+  const old = await confirmationReplay('SM57-original5000-late200', { oldFinalAddPolicy: true, finalActionDuration: 5_000 });
+  assert.match(String(old.error), /APPIUM_TIMEOUT/u);
+  const oldAdd = old.driver.snapshot().commands.filter(command => /\/element\/add-[^/]+\/click$/u.test(command.path));
+  assert.equal(oldAdd.length, 1);
+  assert.equal(oldAdd[0].timeoutMs, 5_000);
+  assert.equal(oldAdd[0].timing!.sent, true);
+  assert.equal(oldAdd[0].timing!.outcome, 'timeout');
+  assert.equal(oldAdd[0].timing!.completed, false);
+  const count = old.requests.length;
+  await assert.rejects(() => old.platform.installFromBrowser(), error => error === old.error);
+  await assert.rejects(() => old.platform.launchInstalledApp(), error => error === old.error);
+  await old.platform.captureSanitizedEvidence('failure');
+  assert.equal(old.requests.length, count);
+  assert.equal(old.platform.evidenceSnapshot().launchReceipt, undefined);
+  assert.equal(old.requests.some(request => /activateApp|pressButton/u.test(request.body.script || '')), false);
+  for (const fault of ['stale', 'transport', 'malformed-value', 'malformed'] as const) {
+    const a = await confirmationReplay(`SM57-sent-${fault}`, { fault, faultAt: 'click' });
+    assert.ok(a.error);
+    assert.equal(a.driver.snapshot().unusable, true);
+    assert.equal(a.lookups, 1);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
+    const count = a.requests.length;
+    const first = a.driver.snapshot().firstFatal;
+    for (const action of [() => a.platform.installFromBrowser(), () => a.platform.launchInstalledApp(), () => a.platform.attachToInstalledView()]) {
+      await assert.rejects(action, error => error === a.error);
+    }
+    await assert.rejects(() => a.driver.settings(), /APPIUM_SESSION_UNUSABLE/u);
+    await assert.rejects(() => a.driver.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/u);
+    await a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.requests.length, count);
+    assert.equal(a.driver.snapshot().firstFatal, first);
+    assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+    assert.equal(a.platform.evidenceSnapshot().launchReceipt, undefined);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+  }
+});
+
+test('confirmation SM57 independent absolute phases and restoration tail never renew', async () => {
+  requireXmlLint();
+  for (const remaining of [87_500, 87_499]) {
+    const a = await confirmationReplay(`SM57-entry-${remaining}`, { parentRemaining: remaining });
+    if (remaining === 87_500) assert.equal(a.error, undefined);
+    else assert.match(String(a.error), /insufficient whole transaction allowance/u);
+    const settings = a.requests.filter(request => request.path.endsWith('/appium/settings') && 'waitForIdleTimeout' in (request.body.settings || {}));
+    assert.equal(settings.length, remaining === 87_500 ? 2 : 0);
+    assert.equal(a.lookups, remaining === 87_500 ? 1 : 0);
+  }
+  const a = await confirmationReplay('SM57-no-renewal', { parentRemaining: 88_000, replaceReadyIdentity: 'always', after: boundary => boundary === 'identity' ? 1_000 : 0 });
+  assert.match(String(a.error), /confirmation control was not ready/u);
+  assert.ok(a.lookups > 1);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.ok(a.now < 120_000 - 5_500);
+});
 
 test('confirmation cycle13 old 8s policy rejects recorded 8650ms aggregate plus synthetic 50ms overhead', async () => {
   const skip = requireXmlLint();
@@ -783,6 +1953,41 @@ test('confirmation hypothetical stale then disabled loading then ready clicks on
   assert.equal(replay.clicks.at(-1), 'add-3');
 });
 
+test('confirmation admits a synthetic late enabled prefix without an early click', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('late-ready-27s', {
+    states: [...Array.from({ length: 8 }, () => 'disabled' as const), 'ready'],
+    after: (boundary) => boundary === 'lookup' ? 3_000 : 0,
+  });
+  assert.equal(replay.error, undefined);
+  assert.equal(replay.lookups, 9);
+  assert.deepEqual(replay.attributes, [
+    ...Array.from({ length: 8 }, (_value, index) => `add-${index + 1}:enabled`),
+    'add-9:enabled', 'add-9:visible', 'add-9:hittable',
+  ]);
+  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-9']);
+  assert.ok(replay.observations.some((entry) => entry.lookup === 9 && entry.boundary === 'enabled' && entry.now >= 25_000 && entry.now <= 30_000));
+  const readyEnabled = replay.observations.findIndex((entry) => entry.lookup === 9 && entry.boundary === 'enabled');
+  assert.deepEqual(replay.observations.slice(readyEnabled, readyEnabled + 4).map((entry) => entry.boundary), ['enabled', 'visible', 'hittable', 'identity']);
+  assert.equal(replay.driver.snapshot().unusable, false);
+});
+
+test('confirmation child starts after activity click and keeps its full completion window', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('activity-click-duration', {
+    states: [...Array.from({ length: 12 }, () => 'disabled' as const), 'ready'],
+    activityDuration: 4_000,
+    after: (boundary) => boundary === 'lookup' ? 3_000 : 0,
+  });
+  assert.equal(replay.error, undefined);
+  assert.equal(replay.lookups, 13);
+  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-13']);
+  assert.ok(replay.observations.some((entry) => entry.lookup === 13 && entry.boundary === 'enabled' && entry.now === 43_000));
+  assert.equal(replay.driver.snapshot().unusable, false);
+});
+
 test('confirmation has no fourth-read duplicate validation outside its observation boundary', async () => {
   const skip = requireXmlLint();
   if (skip) return skip;
@@ -794,17 +1999,111 @@ test('confirmation has no fourth-read duplicate validation outside its observati
 });
 
 for (const state of ['missing', 'stale-enabled', 'stale-visible', 'stale-hittable', 'disabled', 'hidden', 'not-hittable', 'indeterminate'] as const) {
-  test(`confirmation persistent hypothetical ${state} exhausts the original deadline without a click`, async () => {
+  test(`confirmation persistent hypothetical ${state} observes while complete prefixes fit, then stops without a click`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
     const replay = await confirmationReplay(`persistent-${state}`, { states: [state], persistent: true });
     assert.match(String(replay.error), /Add: confirmation control was not ready/u);
     assert.match(String(replay.error), state === 'missing' ? /no such element/u : state.startsWith('stale') ? /stale element reference/u : new RegExp(state, 'u'));
-    assert.ok(replay.lookups >= 2 && replay.lookups <= 8);
-    assert.ok(replay.now <= 30_000);
+    assert.ok(replay.lookups > 8 && replay.lookups <= 24);
+    assert.ok(replay.now > 30_000 && replay.now <= 75_000);
     assert.equal(replay.clicks.length, 2);
     assert.equal(replay.driver.snapshot().unusable, false);
   });
+}
+
+for (const prefix of ['foreground', 'lookup', 'identity', 'enabled'] as const) {
+  for (const exact of [true, false]) {
+    test(`confirmation ${prefix} prefix ${exact ? 'threshold' : 'threshold-minus-one'} admits only complete allowances`, async () => {
+      const skip = requireXmlLint();
+      if (skip) return skip;
+      const replay = await confirmationReplay(`prefix-${prefix}-${exact ? 'exact' : 'minus-one'}`, {
+        initialConfirmationRemaining: prefix === 'foreground' ? exact ? 5_000 : 4_999 : 20_000,
+        remainingAt: (boundary, _lookup, identityRead) => {
+          if (prefix === 'lookup' && boundary === 'foreground') return exact ? 8_000 : 7_999;
+          if (prefix === 'identity' && boundary === 'lookup') return exact ? 12_000 : 11_999;
+          if (prefix === 'identity' && boundary === 'identity' && identityRead === 1) return 4_999;
+          if (prefix === 'enabled' && boundary === 'identity' && identityRead === 1) return exact ? 5_000 : 4_999;
+          return undefined;
+        },
+      });
+      assert.match(String(replay.error), /Add: confirmation control was not ready/u);
+      assert.deepEqual(replay.clicks, ['share', 'target-1']);
+      const commands = replay.driver.snapshot().commands;
+      const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
+      const confirmation = commands.slice(targetClick + 1).filter((entry) => !entry.path.endsWith('/appium/settings'));
+      assert.ok(confirmation.every((entry) => !entry.error && !entry.timedOut));
+      assert.ok(confirmation.every((entry) => entry.path.endsWith('/execute/sync') ? entry.timeoutMs === 5_000
+        : entry.path.endsWith('/element') ? entry.timeoutMs === 8_000
+        : entry.path.endsWith('/elements') ? entry.timeoutMs === 12_000
+        : entry.path.includes('/attribute/') ? entry.timeoutMs === 5_000
+        : true));
+      const afterTarget = replay.requests.slice(targetClick + 1);
+      const foregroundReads = afterTarget.filter((request) => request.body.script === 'mobile: activeAppInfo');
+      const canonicalReads = afterTarget.filter((request) => request.path.endsWith('/elements'));
+      if (prefix === 'foreground') {
+        assert.equal(foregroundReads.length, exact ? 1 : 0);
+        assert.equal(replay.lookups, 0);
+      }
+      if (prefix === 'lookup') {
+        assert.equal(foregroundReads.length, 1);
+        assert.equal(replay.lookups, exact ? 1 : 0);
+        assert.equal(canonicalReads.length, 0);
+      }
+      if (prefix === 'identity') {
+        assert.equal(foregroundReads.length, 1);
+        assert.equal(replay.lookups, 1);
+        assert.equal(canonicalReads.length, exact ? 1 : 0);
+      }
+      if (prefix === 'enabled') assert.deepEqual(replay.attributes, exact ? ['add-1:enabled'] : []);
+      assert.ok(replay.observations.every((entry, index, all) => index === 0 || entry.now >= all[index - 1].now));
+      assert.equal(replay.driver.snapshot().unusable, false);
+    });
+  }
+}
+
+for (const suffix of ['enabled', 'visible', 'hittable', 'identity', 'click'] as const) {
+  for (const exact of [true, false]) {
+    test(`confirmation ${suffix} completion ${exact ? 'threshold' : 'threshold-minus-one'} preserves the final click boundary`, async () => {
+      const skip = requireXmlLint();
+      if (skip) return skip;
+      const replay = await confirmationReplay(`completion-${suffix}-${exact ? 'exact' : 'minus-one'}`, {
+        initialConfirmationRemaining: 40_000,
+        afterConfirmationValidation: suffix === 'click' && !exact ? 1 : undefined,
+        remainingAt: (boundary, _lookup, identityRead) => {
+          if (boundary === 'enabled') return suffix === 'enabled' ? exact ? 34_000 : 33_999 : 34_000;
+          if (boundary === 'visible') return suffix === 'visible' ? exact ? 29_000 : 28_999 : 29_000;
+          if (boundary === 'hittable') return suffix === 'hittable' ? exact ? 24_000 : 23_999 : 24_000;
+          if (boundary === 'identity' && identityRead === 2) return suffix === 'identity' ? exact ? 12_000 : 11_999 : 12_000;
+          return undefined;
+        },
+      });
+      const expectedAttributes = suffix === 'enabled'
+        ? ['add-1:enabled']
+        : suffix === 'visible'
+          ? ['add-1:enabled', 'add-1:visible']
+          : ['add-1:enabled', 'add-1:visible', 'add-1:hittable'];
+      if (exact) {
+        assert.equal(replay.error, undefined);
+        assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+        assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-1']);
+      } else {
+        assert.ok(replay.error);
+        if (suffix === 'click') assert.match(String(replay.error), /insufficient time to complete confirmation click/u);
+        assert.deepEqual(replay.attributes, expectedAttributes);
+        assert.deepEqual(replay.clicks, ['share', 'target-1']);
+      }
+      const commands = replay.driver.snapshot().commands;
+      const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
+      const confirmation = commands.slice(targetClick + 1).filter((entry) => !entry.path.endsWith('/appium/settings'));
+      assert.ok(confirmation.every((entry) => !entry.error && !entry.timedOut));
+      assert.ok(confirmation.every((entry) => entry.path.endsWith('/element') ? entry.timeoutMs === 8_000
+        : entry.path.endsWith('/elements') ? entry.timeoutMs === 12_000
+        : entry.path.endsWith('/click') ? entry.timeoutMs === 12_000
+        : entry.path.includes('/attribute/') || entry.path.endsWith('/execute/sync') ? entry.timeoutMs === 5_000
+        : true));
+    });
+  }
 }
 
 for (const identityRead of [1, 2]) {
@@ -836,8 +2135,8 @@ test('confirmation hypothetical same-dialog Add replacement reacquires a complet
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
-for (const remaining of [68_000, 70_000]) {
-  test(`confirmation hypothetical repeated same-dialog Add replacements keep the original ${remaining}ms deadline`, async () => {
+for (const remaining of [88_000, 90_000]) {
+  test(`confirmation hypothetical repeated same-dialog Add replacements do not renew the ${remaining}ms child deadline`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
     const replay = await confirmationReplay(`same-dialog-deadline-${remaining}`, {
@@ -845,12 +2144,18 @@ for (const remaining of [68_000, 70_000]) {
       after: (boundary) => boundary === 'identity' ? 1_000 : 0,
     });
     assert.match(String(replay.error), /confirmation control was not ready.*Add control was replaced/u);
-    assert.equal(replay.lookups, remaining === 68_000 ? 4 : 5);
+    assert.ok(replay.lookups > 8 && replay.lookups <= 24);
     assert.deepEqual(replay.clicks, ['share', 'target-1']);
-    assert.equal(replay.now - (120_000 - remaining), remaining === 68_000 ? 8_000 : 10_000);
+    assert.ok(replay.now - (120_000 - remaining) < 75_000);
     const commands = replay.driver.snapshot().commands;
     const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
-    assert.ok(commands.slice(targetClick + 1).every((entry) => entry.timeoutMs === (entry.path.endsWith('/appium/settings') ? 2_000 : entry.path.endsWith('/elements') ? 12_000 : entry.path.endsWith('/element') ? 8_000 : 5_000) && !entry.error && !entry.timedOut));
+    const afterClick = commands.slice(targetClick + 1);
+    const restoreSettings = afterClick.filter((entry) => entry.path.endsWith('/appium/settings'));
+    const restoreTimeoutMs = restoreSettings[0]?.timeoutMs;
+    assert.ok(restoreTimeoutMs === 2_000 || restoreTimeoutMs === 4_000);
+    assert.equal(restoreSettings.length, 2);
+    assert.ok(restoreSettings.every((entry) => entry.timeoutMs === restoreTimeoutMs));
+    assert.ok(afterClick.every((entry) => entry.timeoutMs === (entry.path.endsWith('/appium/settings') ? restoreTimeoutMs : entry.path.endsWith('/elements') ? 12_000 : entry.path.endsWith('/element') ? 8_000 : 5_000) && !entry.error && !entry.timedOut));
     assert.equal(replay.driver.snapshot().unusable, false);
   });
 }
@@ -937,15 +2242,15 @@ test('confirmation foreground read cannot consume the allowance of the next look
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
-for (const remaining of [4_999, 7_999, 8_000, 66_999]) {
+for (const remaining of [4_999, 7_999, 8_000, 66_999, 71_999]) {
   test(`confirmation parent budget ${remaining} never admits a partial tail observation`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
     const replay = await confirmationReplay(`parent-${remaining}`, { parentRemaining: remaining, after: (boundary) => boundary === 'lookup' ? 1_001 : 0 });
-    assert.match(String(replay.error), /insufficient whole transaction allowance/u);
+    assert.match(String(replay.error), /insufficient (?:whole transaction allowance|time to complete native scroll and hierarchy verification)/u);
     assert.equal(replay.lookups, 0);
     assert.deepEqual(replay.attributes, []);
-    assert.equal(replay.clicks.length, 2);
+    assert.equal(replay.clicks.length, 1);
     assert.equal(replay.driver.snapshot().unusable, false);
   });
 }
@@ -967,7 +2272,7 @@ test('confirmation final click requires its complete parent allowance after all 
   if (skip) return skip;
   let identityReads = 0;
   const replay = await confirmationReplay('click-admission', {
-    parentRemaining: 67_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 58_001 : 0,
+    parentRemaining: 88_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 63_501 : 0,
   });
   assert.match(String(replay.error), /insufficient time to complete confirmation click/u);
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
@@ -975,25 +2280,69 @@ test('confirmation final click requires its complete parent allowance after all 
   assert.equal(replay.clicks.length, 2);
 });
 
-for (const boundary of ['lookup', 'identity', 'enabled', 'click'] as const) {
+for (const boundary of ['foreground', 'lookup', 'identity', 'enabled', 'click'] as const) {
   for (const fault of ['hung', 'interrupted'] as const) {
     test(`confirmation ${fault} ${boundary} preserves single-flight, first fatal evidence and quarantine`, async () => {
       const skip = requireXmlLint();
       if (skip) return skip;
       const replay = await confirmationReplay(`${fault}-${boundary}`, { fault, faultAt: boundary });
       assert.match(String(replay.error), /APPIUM_TIMEOUT/u);
-      assert.equal(replay.lookups, 1);
+      assert.equal(replay.lookups, boundary === 'foreground' ? 0 : 1);
       assert.equal(replay.clicks.length, boundary === 'click' ? 3 : 2);
       assert.equal(replay.driver.snapshot().unusable, true);
       const first = replay.driver.snapshot().firstFatal;
       assert.equal(first?.code, 'APPIUM_TIMEOUT');
       const count = replay.requests.length;
       await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
-      await assert.rejects(() => replay.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
+      await assert.rejects(() => replay.platform.installFromBrowser(), boundary === 'click' ? error => error === replay.error : /APPIUM_SESSION_UNUSABLE/u);
       assert.equal(replay.requests.length, count);
       assert.deepEqual(replay.driver.snapshot().firstFatal, first);
     });
   }
+}
+
+for (const scenario of [
+  { fault: 'body-hung' as const, boundary: 'foreground' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
+  { fault: 'body-interrupted' as const, boundary: 'foreground' as const, code: 'APPIUM_INTERRUPTED', identityRead: undefined },
+  { fault: 'body-late' as const, boundary: 'foreground' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
+  { fault: 'body-hung' as const, boundary: 'lookup' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
+  { fault: 'body-hung' as const, boundary: 'identity' as const, code: 'APPIUM_TIMEOUT', identityRead: 2 },
+  { fault: 'body-interrupted' as const, boundary: 'lookup' as const, code: 'APPIUM_INTERRUPTED', identityRead: undefined },
+  { fault: 'body-interrupted' as const, boundary: 'identity' as const, code: 'APPIUM_INTERRUPTED', identityRead: 2 },
+  { fault: 'body-late' as const, boundary: 'identity' as const, code: 'APPIUM_TIMEOUT', identityRead: 2 },
+]) {
+  test(`confirmation ${scenario.fault} ${scenario.boundary} body preserves fatal quarantine and no later work`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`${scenario.fault}-${scenario.boundary}-${scenario.identityRead || 'pending'}`, {
+      fault: scenario.fault, faultAt: scenario.boundary, faultOnIdentityRead: scenario.identityRead,
+    });
+    assert.match(String(replay.error), new RegExp(scenario.code, 'u'));
+    assert.equal(replay.driver.snapshot().unusable, true);
+    assert.equal(replay.driver.snapshot().firstFatal?.code, scenario.code);
+    assert.deepEqual(replay.clicks, ['share', 'target-1']);
+    assert.equal(replay.requests.some((request) => request.path.endsWith('/element/add-1/click')), false);
+    const settingsWrites = replay.requests.filter((request) => request.path.endsWith('/appium/settings') && 'waitForIdleTimeout' in (request.body.settings || {}));
+    assert.equal(settingsWrites.length, 1);
+    const first = replay.driver.snapshot().firstFatal;
+    const count = replay.requests.length;
+    await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
+    await assert.rejects(() => replay.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
+    assert.equal(replay.requests.length, count);
+    assert.deepEqual(replay.driver.snapshot().firstFatal, first);
+    if (scenario.boundary === 'foreground') {
+      assert.equal(replay.lookups, 0);
+      assert.equal(replay.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+      assert.equal((replay.platform.evidenceSnapshot().confirmationCapture as any).status, 'not-requested-product-first');
+      await replay.platform.captureSanitizedEvidence('failure');
+      assert.equal(replay.requests.length, count);
+    }
+    if (scenario.fault === 'body-late') {
+      await wait(scenario.boundary === 'foreground' ? 7_700 : 1_000);
+      assert.equal(replay.requests.length, count);
+      assert.deepEqual(replay.driver.snapshot().firstFatal, first);
+    }
+  });
 }
 
 for (const boundary of ['lookup', 'identity'] as const) {
@@ -1075,6 +2424,7 @@ test('recorded openurl timeout preserves signal and duration without inventing a
 
 for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeout', 'diagnostic-failure', 'discovery-interrupted', 'pre-diagnostic-timeout', 'post-simulator-timeout'] as const) {
   test(`openurl ${mode} records bounded serial diagnostics without reissuing navigation`, async () => {
+    const { browser } = await shareFixtures();
     let processActive = false;
     const { platform, requests, outputDir } = await adapter(`navigation-${mode}`, ({ path, body, signal }) => {
       assert.equal(processActive, false, 'no Appium request while a process is unsettled');
@@ -1097,13 +2447,17 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     const processes: Array<{ binary: string; args: string[]; timeoutMs: number }> = [];
     let listCalls = 0;
     let navigationError: unknown;
+    // Successful diagnostics settle on a timer instead of a real process so a slow host cannot turn them into timeouts.
+    const settledOutput = (stdout: string) => new Promise<CommandResult>((resolve) => setTimeout(() => resolve({
+      stdout, stderr: '', code: 0, durationMs: 5, timedOut: false,
+    }), 5));
     (platform as any).navigationCommand = async (binary: string, args: string[], timeoutMs: number) => {
       assert.equal(processActive, false);
       processActive = true;
       processes.push({ binary, args, timeoutMs });
       try {
         if (args.includes('openurl')) {
-          assert.equal(timeoutMs, 30_000);
+          assert.equal(timeoutMs, 90_000);
           if (mode === 'real-process-timeout') {
             try { return await command('/bin/sleep', ['2'], 40); }
             catch (error) { navigationError = error; throw error; }
@@ -1118,7 +2472,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
           assert.ok(args.includes('--start') && args.includes('--end'));
           assert.ok(timeoutMs <= 5_000);
           if (mode === 'diagnostic-failure') throw new Error('host log unavailable');
-          return command('/usr/bin/printf', ['%s', 'host trace #invite=fixture-secret'], timeoutMs);
+          return settledOutput('host trace #invite=fixture-secret');
         }
         assert.deepEqual(args, ['simctl', 'list', 'devices', 'available', '--json']);
         assert.ok(timeoutMs <= 3_000);
@@ -1126,7 +2480,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
         if ((mode === 'pre-diagnostic-timeout' && listCalls === 1) || (mode === 'post-simulator-timeout' && listCalls === 2)) {
           return command('/bin/sleep', ['2'], 40);
         }
-        return command('/usr/bin/printf', ['%s', JSON.stringify({ devices: { runtime: [{ udid: 'protocol-only', state: 'Booted', isAvailable: true }] } })], timeoutMs);
+        return settledOutput(JSON.stringify({ devices: { runtime: [{ udid: 'protocol-only', state: 'Booted', isAvailable: true }] } }));
       } finally {
         processActive = false;
       }
@@ -1135,6 +2489,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     assert.equal(processes.filter((process) => process.args.includes('openurl')).length, 1);
     assert.equal(requests.some((request) => request.path.endsWith('/url') || /activateApp|navigate/u.test(request.body.script || '')), false);
     const events = platform.evidenceSnapshot().events as any[];
+    const eventDetails = JSON.stringify(events.map((event) => ({ operation: event.operation, outcome: event.detail?.outcome, durationMs: event.durationMs })));
     const start = events.find((event) => event.operation === 'simctl openurl started');
     const failure = events.find((event) => event.operation === 'simctl openurl failed');
     assert.ok(start && failure);
@@ -1143,8 +2498,8 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     assert.equal(failure.detail.process.timedOut, mode !== 'uncertain-failure');
     assert.equal(failure.detail.startedAt, start.detail.startedAt);
     assert.ok(events.some((event) => event.operation === 'before-openurl-boot-state'
-      && event.detail.outcome === (mode === 'pre-diagnostic-timeout' ? 'unavailable' : 'collected')));
-    assert.ok(events.some((event) => event.operation === 'after-openurl-foreground' && event.detail.outcome === 'collected'));
+      && event.detail.outcome === (mode === 'pre-diagnostic-timeout' ? 'unavailable' : 'collected')), eventDetails);
+    assert.ok(events.some((event) => event.operation === 'after-openurl-foreground' && event.detail.outcome === 'collected'), eventDetails);
     if (mode === 'post-simulator-timeout') {
       assert.ok(events.some((event) => event.operation === 'after-openurl-boot-state' && event.detail.outcome === 'unavailable'));
     }
@@ -1180,27 +2535,45 @@ test('an insufficient navigation budget records prerequisite skips without admit
   assert.ok(events.length > 0 && events.every((event) => event.detail.outcome === 'skipped'));
 });
 
-test('Plan13 recorded hierarchy inputs retain their exact evidence hashes', async () => {
+test('Plan13 recorded provenance retains its historical tool tuple and run identities', async () => {
+  assert.deepEqual({
+    sourceCommit: recordedIteration13.sourceCommit,
+    versions: recordedIteration13.versions,
+    runs: {
+      safariAUTFailure: recordedIteration13.safariAUTFailure.run,
+      share: recordedIteration13.share.run,
+      confirmation: recordedIteration13.confirmation.run,
+    },
+  }, {
+    sourceCommit: 'f35ab6ffa9defa57ef653eb39a5f351bda4dd23c',
+    versions: { appium: '3.1.1', xcuitest: '12.10.0', wda: '16.12.1' },
+    runs: { safariAUTFailure: '34488014724', share: '34488020101', confirmation: '34488014724' },
+  });
   for (const [file, expected] of Object.entries(recordedIteration13.files)) {
     assert.equal(createHash('sha256').update(await readFile(join(fixtureDir, file))).digest('hex'), expected);
   }
 });
 
 const lifecycleError = recordedIteration13.safariAUTFailure.response;
+type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' | 'loading' | 'timeout' | 'readiness-transition' | 'not-ready' | 'malformed-reference'
+  | 'page-settling' | 'icon-settling' | 'today-view';
 
-async function lifecycleReplay(name: string) {
+async function lifecycleReplay(name: string, options: { foreground?: string; home?: HomeLaunchMode; page?: string } = {}) {
+  const homeMode = options.home || 'ready';
   const state = {
-    safariRunning: true, foreground: 'com.apple.mobilesafari', installed: false, pid: 16089 as unknown,
+    safariRunning: true, foreground: options.foreground ?? 'com.apple.mobilesafari', installed: false, pid: 16089 as unknown,
     overlay: '', documentOrigin: origin, standalone: true, url: `${origin}/`,
     settingsFault: '', stateFault: undefined as unknown, activeFault: undefined as unknown,
     alertFault: false, ignoreHome: false, wrongLaunch: '', systemObservationFault: '', slowInstalledObservation: false,
-    systemName: 'SpringBoard', systemRootCount: 1,
+    systemName: 'SpringBoard', systemRootCount: 1, blankPublications: 0,
   };
   let settings: Record<string, unknown> = { defaultActiveApplication: 'auto', respectSystemAlerts: false };
+  let homeObservations = 0;
+  let todayView = homeMode === 'today-view';
   const appState = (bundle: string) => {
     if (bundle === 'com.apple.webapp' && state.stateFault !== undefined) return state.stateFault;
     if (bundle === state.foreground) return 4;
-    if (bundle === 'com.apple.springboard') return state.overlay && state.overlay !== 'app-dialog' ? 4 : 2;
+    if (bundle === 'com.apple.springboard') return state.overlay && state.overlay !== 'app-dialog' ? 4 : state.foreground === 'com.apple.webapp' ? 4 : 2;
     if (bundle === 'com.apple.webapp') return state.installed ? 2 : 1;
     return state.safariRunning ? 2 : 1;
   };
@@ -1213,7 +2586,8 @@ async function lifecycleReplay(name: string) {
     if (!state.safariRunning) return '';
     return state.overlay ? 'com.apple.springboard' : state.foreground;
   };
-  const replay = await adapter(`lifecycle-${name}`, async ({ path, body, method }) => {
+  const replay = await adapter(`lifecycle-${name}`, async ({ path, body, method, signal }) => {
+    if (method === 'DELETE' && /\/session\/[^/]+$/u.test(path)) return value(null);
     if (path.endsWith('/appium/settings')) {
       if (method === 'GET') return value(state.settingsFault === 'readback' ? { ...settings, defaultActiveApplication: 'auto' } : state.settingsFault === 'malformed-readback' ? [] : settings);
       if (state.settingsFault === 'unsupported') return Response.json({ value: { error: 'invalid argument', message: 'unsupported setting' } }, { status: 400 });
@@ -1241,6 +2615,8 @@ async function lifecycleReplay(name: string) {
     }
     if (body.script === 'mobile: swipe') {
       assert.equal(active(), 'com.apple.springboard');
+      if (body.args.direction === 'left') todayView = false;
+      if (homeMode === 'today-view' && body.args.direction === 'right') todayView = true;
       return value(null);
     }
     if (body.script === 'mobile: activateApp') {
@@ -1267,19 +2643,49 @@ async function lifecycleReplay(name: string) {
     }
     if (path.endsWith('/elements')) {
       assert.equal(active(), 'com.apple.springboard');
+      if (body.value.includes('XCUIElementTypePageIndicator')) {
+        if (state.foreground !== 'com.apple.springboard') return value([]);
+        if (homeMode === 'timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+        if (homeMode === 'loading') return value([]);
+        homeObservations += 1;
+        if (homeMode === 'page-settling' && homeObservations === 1) return value([element('home-container')]);
+        if (todayView) return value([element('home-container')]);
+        const icons = homeMode === 'missing' || (homeMode === 'icon-settling' && homeObservations === 1) ? [] : homeMode === 'ambiguous' ? [element('home-icon'), element('home-icon-2')] : [element('home-icon')];
+        const references: unknown[] = [element('home-container'), ...icons, element('home-page'), ...(homeMode === 'duplicate-reference' ? [element('home-icon')] : [])];
+        if (homeMode === 'malformed-reference') references.push({});
+        return value(references);
+      }
       if (body.value.includes('XCUIElementTypeApplication')) {
         const xml = `<AppiumAUT>${Array.from({ length: state.systemRootCount }, () => `<XCUIElementTypeApplication name="${state.systemName}"/>`).join('')}</AppiumAUT>`;
         return value(Array.from({ length: xpathCount(xml, String(body.value)) }, (_, index) => element(index ? `other-root-${index}` : 'springboard-root')));
       }
       return value([element('home-icon')]);
     }
-    if (path.endsWith('/home-icon/attribute/hittable')) return value('true');
+    if (path.includes('/home-container/attribute/')) {
+      const attribute = path.split('/attribute/')[1];
+      return value(attribute === 'type' ? 'XCUIElementTypeOther' : attribute === 'name' ? 'Home screen icons' : null);
+    }
+    if (path.includes('/home-icon/attribute/') || path.includes('/home-icon-2/attribute/')) {
+      const attribute = path.split('/attribute/')[1];
+      const ready = homeMode !== 'not-ready' && (homeMode !== 'readiness-transition' || homeObservations > 1);
+      return value(attribute === 'type' ? 'XCUIElementTypeIcon' : attribute === 'name' ? 'Herdr Mobile Relay' : attribute === 'enabled' ? ready ? 'true' : 'false' : attribute === 'visible' || attribute === 'hittable' ? 'true' : null);
+    }
+    if (path.includes('/home-page/attribute/')) {
+      const attribute = path.split('/attribute/')[1];
+      return value(attribute === 'type' ? 'XCUIElementTypePageIndicator' : attribute === 'name' ? 'Page control' : attribute === 'value' ? options.page || 'Page 1 of 1' : null);
+    }
     if (path.endsWith('/home-icon/click')) {
       state.foreground = state.wrongLaunch || 'com.apple.webapp';
       state.installed = true;
       return value(null);
     }
-    if (body.script === 'mobile: getContexts') return value([published]);
+    if (body.script === 'mobile: getContexts') {
+      if (state.blankPublications > 0) {
+        state.blankPublications -= 1;
+        return value([{ ...published, url: 'about:blank', title: '' }]);
+      }
+      return value([published]);
+    }
     if (path.endsWith('/url')) return value(state.url);
     if (body.script?.startsWith('return {')) return value({ origin: state.documentOrigin, standalone: state.standalone, applicationInitialized: true });
     throw new Error(`unexpected lifecycle request ${path} ${JSON.stringify(body)}`);
@@ -1308,6 +2714,51 @@ test('Cycle4 unnamed system application retains native ownership and overlay obs
   await assert.rejects(() => a.platform.attachToInstalledView(), /IOS_CONTEXT_OWNERSHIP/u);
 });
 
+for (const summaryClick of ['native', 'refused'] as const) {
+  test(`fixture agent inside a collapsed workspace card opens the card before clicking the agent with a ${summaryClick} summary click`, async () => {
+    const summarySelector = 'details.workspace-card:not([open]):has(button.agent-open[aria-label="Open mobile-ci on fixture"]) > summary';
+    const clicked: string[] = [];
+    const a = await adapter(`collapsed-workspace-agent-${summaryClick}`, ({ path, body }) => {
+      if (path.endsWith('/url')) return value(`${origin}/`);
+      if (path.endsWith('/elements') && String(body.value).includes('details.workspace-card')) {
+        return value(clicked.includes('workspace-summary') ? [] : [element('workspace-summary')]);
+      }
+      if (path.endsWith('/element')) return value(element('agent'));
+      if (path.endsWith('/attribute/disabled')) return value(null);
+      if (path.endsWith('/execute/sync')) {
+        assert.equal(summaryClick, 'refused');
+        assert.deepEqual(body.args, [summarySelector]);
+        clicked.push('workspace-summary');
+        return value(null);
+      }
+      const click = /\/element\/([^/]+)\/click$/u.exec(path);
+      if (click?.[1] === 'workspace-summary' && summaryClick === 'refused') {
+        return Response.json({ value: { error: 'element not interactable', message: 'element not interactable' } }, { status: 400 });
+      }
+      if (click) {
+        clicked.push(click[1]!);
+        return value(null);
+      }
+      throw new Error(`unexpected agent request ${path} ${JSON.stringify(body)}`);
+    });
+    (a.platform as any).attachToInstalledView = async () => undefined;
+    const marker = join(a.outputDir, 'ios-ownership');
+    await writeFile(marker, 'ios:protocol-only\n');
+    const previous = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    process.env.MOBILE_DEVICE_OWNERSHIP_FILE = marker;
+    try {
+      await a.platform.openFixtureAgent('fixture');
+    } finally {
+      if (previous === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+      else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previous;
+    }
+    assert.deepEqual(clicked, ['workspace-summary', 'agent']);
+    const lookup = a.requests.find((request) => request.path.endsWith('/elements'));
+    assert.equal(lookup?.body.value, summarySelector);
+    assert.equal(a.requests.some((request) => request.path.endsWith('/execute/sync')), summaryClick === 'refused');
+  });
+}
+
 for (const count of [0, 2]) {
   test(`Cycle4 system application root count ${count} fails before launch without retry`, async () => {
     const a = await lifecycleReplay(`root-count-${count}`);
@@ -1319,6 +2770,258 @@ for (const count of [0, 2]) {
     assert.equal(a.requests.some((request) => request.path.endsWith('/home-icon/click')), false);
   });
 }
+
+test('current-page-first launch clicks a ready Page 2 icon without Home navigation', async () => {
+  const a = await lifecycleReplay('current-page2', { foreground: 'com.apple.springboard', page: 'Page 2 of 2' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: pressButton').length, 0);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  const homeQueries = a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator'));
+  assert.equal(homeQueries.length, 1);
+  assert.equal(homeQueries[0].body.using, '-ios predicate string');
+  assert.ok(homeQueries[0].body.value.includes("(type == 'XCUIElementTypeOther' AND name == 'Home screen icons' AND visible == 1)"));
+  assert.ok(homeQueries[0].body.value.includes("label IN {'Herdr Mobile Relay', 'Herdr Relay'}) AND visible == 1)"));
+  assert.equal(homeQueries[0].body.value.includes('contains('), false);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
+
+test('non-Home foreground receives one verified Home navigation before page inspection', async () => {
+  const a = await lifecycleReplay('non-home-current-page', { foreground: 'com.apple.mobilesafari' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: pressButton').length, 1);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+});
+
+test('provider UI is observed before pinning SpringBoard during retained relaunch', async () => {
+  const a = await lifecycleReplay('provider-ui-retained-target');
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.platform.evidenceSnapshot().installedBundleId, 'com.apple.webapp');
+  const beforeRelaunch = a.requests.length;
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  const relaunchRequests = a.requests.slice(beforeRelaunch);
+  const foregroundRead = relaunchRequests.findIndex((request) => request.body.script === 'mobile: activeAppInfo');
+  const springBoardTarget = relaunchRequests.findIndex((request) => request.path.endsWith('/appium/settings')
+    && request.method === 'POST' && request.body.settings.defaultActiveApplication === 'com.apple.springboard');
+  assert.ok(foregroundRead >= 0);
+  assert.ok(springBoardTarget >= 0);
+  assert.ok(foregroundRead < springBoardTarget, 'current foreground must be observed before changing the observation target');
+  assert.equal(relaunchRequests.filter((request) => request.body.script === 'mobile: pressButton').length, 1);
+  assert.equal(relaunchRequests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  assert.equal(relaunchRequests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 1);
+  assert.equal(relaunchRequests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(relaunchRequests.some((request) => request.body.script === 'mobile: getContexts'), true);
+  assert.equal(relaunchRequests.some((request) => request.path.endsWith('/url') && !request.body.url), true);
+  assert.equal(relaunchRequests.some((request) => request.path.endsWith('/execute/sync') && request.body.script?.startsWith('return {')), true);
+  assert.equal(a.platform.evidenceSnapshot().installedBundleId, 'com.apple.webapp');
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.ok(a.platform.evidenceSnapshot().selectedInstalledContext);
+  assert.equal(a.settings().defaultActiveApplication, 'com.apple.webapp');
+});
+
+test('current-page readiness transition is polled without page navigation', async () => {
+  const a = await lifecycleReplay('current-page-readiness-transition', { home: 'readiness-transition' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 2);
+});
+
+for (const mode of ['page-settling', 'icon-settling'] as const) {
+  test(`Home ${mode} on arrival is polled without page navigation`, async () => {
+    const a = await lifecycleReplay(`current-page-${mode}`, { home: mode });
+    await a.owned(() => a.platform.launchInstalledApp());
+    assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 2);
+  });
+}
+
+test('Home Today View on arrival returns to the first page with one left swipe', async () => {
+  const a = await lifecycleReplay('current-page-today-view', { home: 'today-view' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  const swipes = a.requests.filter((request) => request.body.script === 'mobile: swipe');
+  assert.deepEqual(swipes.map((request) => request.body.args.direction), ['left']);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
+
+test('cold relaunch after termination waits for the new process to publish its page', async () => {
+  const a = await lifecycleReplay('cold-initial-publication');
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  await a.owned(() => a.platform.terminateInstalledApp());
+  a.state.pid = 17001;
+  a.state.blankPublications = 1;
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.platform.evidenceSnapshot().nativePid, '17001');
+  const pending = (a.platform.evidenceSnapshot().events as any[]).filter((event) => event.operation === 'initial-publication-pending');
+  assert.equal(pending.length, 1);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
+
+test('cold relaunch keeps waiting for a first page that publishes after the ordinary attachment window', async () => {
+  const a = await lifecycleReplay('cold-late-publication');
+  await a.owned(() => a.platform.launchInstalledApp());
+  await a.owned(() => a.platform.terminateInstalledApp());
+  a.state.pid = 17001;
+  a.state.blankPublications = 20;
+  const started = Date.now();
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  assert.ok(Date.now() - started > 4_000);
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.platform.evidenceSnapshot().nativePid, '17001');
+  const pending = (a.platform.evidenceSnapshot().events as any[]).filter((event) => event.operation === 'initial-publication-pending');
+  assert.equal(pending.length, 20);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
+
+test('a blank page after a warm relaunch is still an ownership failure', async () => {
+  const a = await lifecycleReplay('warm-blank-publication');
+  await a.owned(() => a.platform.launchInstalledApp());
+  await a.owned(() => a.platform.backgroundApp());
+  a.state.blankPublications = 1;
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), /IOS_CONTEXT_OWNERSHIP: origin null is not/u);
+});
+
+test('malformed current foreground identity fails before Home navigation', async () => {
+  const a = await lifecycleReplay('malformed-current-foreground');
+  a.state.activeFault = { bundleId: 42, pid: 42 };
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => {
+    first = error;
+    return /IOS_CONTEXT_OWNERSHIP/u.test(String(error));
+  });
+  const stopped = a.requests.length;
+  assert.equal(a.requests.some((request) => request.body.script === 'mobile: pressButton' || request.body.script === 'mobile: swipe' || request.path.endsWith('/home-icon/click')), false);
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+test('unexpected relaunch foreground fails closed before Home navigation', async () => {
+  const a = await lifecycleReplay('unexpected-relaunch-foreground');
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  a.state.foreground = 'com.example.other';
+  const beforeRelaunch = a.requests.length;
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => {
+    first = error;
+    return /allowed iOS lifecycle identity/u.test(String(error));
+  });
+  const attempted = a.requests.slice(beforeRelaunch);
+  assert.equal(attempted.filter((request) => request.path.endsWith('/appium/settings') && request.method === 'POST').length, 0);
+  assert.equal(attempted.some((request) => request.body.script === 'mobile: pressButton'
+    || request.body.script === 'mobile: swipe' || request.path.endsWith('/home-icon/click')), false);
+  assert.equal(a.platform.evidenceSnapshot().installedBundleId, 'com.apple.webapp');
+  const stopped = a.requests.length;
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+test('same Home element reference in the union is deduplicated before classification', async () => {
+  const a = await lifecycleReplay('duplicate-home-reference', { home: 'duplicate-reference' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 1);
+});
+
+test('distinct same-label Home icons fail closed before any launch action', async () => {
+  const a = await lifecycleReplay('ambiguous-home-icons', { home: 'ambiguous' });
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => {
+    first = error;
+    return /Home screen icon is ambiguous/u.test(String(error));
+  });
+  const stopped = a.requests.length;
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 0);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+test('malformed extra Home element reference fails closed before any launch action', async () => {
+  const a = await lifecycleReplay('malformed-home-reference', { home: 'malformed-reference' });
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => {
+    first = error;
+    return /Home observation element reference .* malformed/u.test(String(error));
+  });
+  const stopped = a.requests.length;
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 0);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+for (const mode of ['missing', 'loading'] as const) {
+  test(`Home ${mode} never authorizes an arbitrary icon click`, async () => {
+    const a = await lifecycleReplay(`home-${mode}`, { home: mode });
+    await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /IOS_CONTEXT/u);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 0);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon-2/click')).length, 0);
+    const swipes = a.requests.filter((request) => request.body.script === 'mobile: swipe');
+    if (mode === 'loading') {
+      assert.equal(swipes.length, 0);
+    } else {
+      assert.equal(swipes.filter((request) => request.body.args.direction === 'right').length, 8);
+      assert.equal(swipes.filter((request) => request.body.args.direction === 'left').length, 7);
+    }
+    assert.equal(a.driver.snapshot().unusable, false);
+  });
+}
+
+test('Home observation timeout quarantines failure evidence and still permits owned DELETE cleanup', async () => {
+  const a = await lifecycleReplay('home-timeout', { home: 'timeout' });
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /APPIUM_TIMEOUT/u);
+  const stopped = a.requests.length;
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  let screenshotCalls = 0;
+  let pageSourceCalls = 0;
+  const screenshot = a.driver.screenshot.bind(a.driver);
+  const pageSource = a.driver.pageSource.bind(a.driver);
+  (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
+  (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
+  const native: string[][] = [];
+  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.requests.length, stopped);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('failure'), capture);
+  await capture;
+  const evidenceRequests = a.requests.slice(stopped);
+  assert.equal(evidenceRequests.some(request => request.path.endsWith('/screenshot') || request.path.endsWith('/source')), false);
+  assert.equal(screenshotCalls, 0);
+  assert.equal(pageSourceCalls, 0);
+  assert.deepEqual(native, []);
+  assert.equal(a.driver.snapshot().unusable, true);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  const evidence = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(evidence.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(evidence.driver.firstFatal, first);
+  const receipt = JSON.parse(await readFile(join(a.outputDir, 'ios-launch-receipt.json'), 'utf8'));
+  assert.equal(receipt.outcome, 'not-eligible');
+  assert.equal(receipt.query, null);
+  assert.equal(receipt.process.spawnAttempted, false);
+  const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
+  assert.ok(Array.isArray(events));
+  assert.equal(JSON.stringify(events).includes('synthetic-secret'), false);
+  assert.equal(a.requests.filter(request => request.path === '/session' && request.method === 'POST').length, 1);
+
+  await a.platform.stopOwnedResources();
+  const deletion = a.requests.at(-1)!;
+  assert.equal(deletion.method, 'DELETE');
+  assert.match(deletion.path, /\/session\/protocol$/u);
+  assert.equal(a.driver.snapshot().sessionId, '');
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  assert.equal(a.requests.filter(request => request.path === '/session' && request.method === 'POST').length, 1);
+});
 
 test('Plan13 lifecycle supported handoff survives obsolete Safari through background cold termination and relaunch', async () => {
   const a = await lifecycleReplay('complete');
@@ -1346,11 +3049,12 @@ test('Plan13 lifecycle supported handoff survives obsolete Safari through backgr
     const index = a.requests.indexOf(transition);
     assert.equal(a.requests[index + 1].method, 'GET');
     assert.ok(a.requests[index + 1].path.endsWith('/appium/settings'));
-    assert.ok(/pressButton|terminateApp/u.test(a.requests[index + 2].body.script || '') || a.requests[index + 2].path.endsWith('/home-icon/click'));
+    assert.ok(/activeAppInfo|queryAppState|pressButton|terminateApp/u.test(a.requests[index + 2].body.script || '')
+      || a.requests[index + 2].path.endsWith('/context') || a.requests[index + 2].path.endsWith('/home-icon/click'));
   }
   assert.equal(a.requests.some((r) => /activateApp|launchApp/u.test(r.body.script || '') || (r.path.endsWith('/url') && r.method === 'POST')), false);
   assert.equal(a.driver.snapshot().unusable, false);
-  await writeSanitizedJson(join(a.outputDir, 'ios-lifecycle-result.json'), { proofKind: 'Source-derived WDA 16.12.1 branch model with hypothetical lifecycle and system-state replies; actual adapter/client, no native execution.', requests: a.requests, evidence: a.platform.evidenceSnapshot() });
+  await writeSanitizedJson(join(a.outputDir, 'ios-lifecycle-result.json'), { proofKind: 'Source-derived WDA 16.12.8 branch model with hypothetical lifecycle and system-state replies; actual adapter/client, no native execution.', requests: a.requests, evidence: a.platform.evidenceSnapshot() });
 });
 
 test('Plan13 lifecycle complete native proof is not cut off by the former five-second provider phase', async () => {
@@ -1417,8 +3121,14 @@ for (const fault of ['wrong-launch', 'springboard-overlay', 'home-failed']) {
   });
 }
 
-async function hierarchyReplay(mode: string) {
-  const sources = await Promise.all(['ios-34488020101-before-share-hierarchy.xml', 'ios-34488020101-share-0-hierarchy.xml', 'ios-34488014724-share-1-hierarchy.xml'].map((file) => readFile(join(fixtureDir, file), 'utf8')));
+async function hierarchyReplay(mode: string, fixture: AbortController) {
+  const fixtureSignal = fixture.signal;
+  const [sources, hypotheticalConfirmation] = await within(Promise.all([
+    Promise.all(['ios-34488020101-before-share-hierarchy.xml', 'ios-34488020101-share-0-hierarchy.xml', 'ios-34488014724-share-1-hierarchy.xml']
+      .map((file) => readFile(join(fixtureDir, file), { encoding: 'utf8', signal: fixtureSignal }))),
+    readFile(join(fixtureDir, 'ios-confirmation-hypothetical.xml'), { encoding: 'utf8', signal: fixtureSignal }),
+  ]), 'hierarchy XML fixture reads');
+  if (fixtureSignal.aborted) throw fixtureSignal.reason || new Error('fixture aborted');
   let source = sources[0];
   let now = 0;
   let sheet = false;
@@ -1431,30 +3141,41 @@ async function hierarchyReplay(mode: string) {
   let identities = 0;
   const clicks: string[] = [];
   const pending: Promise<unknown>[] = [];
-  const timed = mode === 'recorded-latency' || mode.startsWith('slow-');
-  const waitFor = async (ms: number) => {
-    const promise = wait(ms);
+  const requestClock = mode === 'hung-gesture' || mode === 'late-gesture' ? new ReceiptClock() : undefined;
+  let releaseGesture: ((response: Response) => void) | undefined;
+  let rejectGesture: ((error: Error) => void) | undefined;
+  let reportGestureDispatch!: (request: Request) => void;
+  let gesturePolicyAttempts = 0;
+  const gestureDispatch = new Promise<Request>((resolve) => { reportGestureDispatch = resolve; });
+  const cleanupGesture = () => {
+    rejectGesture?.(new Error('fixture canceled'));
+    releaseGesture?.(value(null));
+  };
+  fixtureSignal.addEventListener('abort', cleanupGesture, { once: true });
+  const timed = mode === 'recorded-latency' || (mode.startsWith('slow-') && !mode.endsWith('-gesture'));
+  const waitFor = async (ms: number, signal?: AbortSignal | null) => {
+    const promise = wait(ms, undefined, { signal: signal || fixtureSignal });
     pending.push(promise);
     await promise;
   };
-  const a = await adapter(`hierarchy-${mode}`, async ({ path, body, signal }) => {
+  const a = await within(adapter(`hierarchy-${mode}`, async ({ path, body, signal }) => {
     if (path.endsWith('/context')) {
       if (mode === 'parent-initial') now = 112_001;
       return value(null);
     }
     if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.mobilesafari', pid: 20640 });
     if (path.endsWith('/source')) {
+      if (confirming) return value(hypotheticalConfirmation);
       reads++;
       if (sheet) sheetReads++;
       source = !sheet ? sources[0] : scrolls ? sources[2] : sources[1];
       if (mode === 'recorded-latency' && sheet && sheetReads < 3) source = sources[0];
-      if (mode === 'publication-tail' && sheetReads === 1) { source = sources[0]; now += 7_001; }
-      if (mode === 'search-tail' && sheetReads === 1) now += 52_001;
-      if (mode === 'fallback-tail' && scrolls === 1) now = 52_001;
-      if (mode === 'fallback-reserve' && scrolls === 1) now = 47_001;
+      if (mode === 'publication-tail' && sheetReads === 1) { source = sources[0]; now += 22_001; }
+      if (mode === 'cold-publication' && sheetReads === 1) { source = sources[0]; now += 16_001; }
+      if (mode === 'search-tail' && sheetReads === 1) now += 76_001;
       if (mode === 'malformed-source' && scrolls === 1) return value(source.slice(0, -100));
       if (mode === 'hung-source' && scrolls === 1) return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
-      if (mode === 'late-source' && scrolls === 1) await waitFor(8_200);
+      if (mode === 'late-source' && scrolls === 1) await waitFor(8_200, signal);
       if (mode.startsWith('interrupted-') && scrolls === 1) {
         const error = mode === 'interrupted-reset' ? new TypeError('hypothetical source connection reset')
           : new DOMException('interrupted source body', mode === 'interrupted-abort' ? 'AbortError' : 'TimeoutError');
@@ -1465,66 +3186,90 @@ async function hierarchyReplay(mode: string) {
         return new Response(new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode(payload.slice(0, 50_000)));
-            const completion = wait(mode === 'slow-body' ? 5_764 : 8_200).then(() => {
+            const completion = wait(mode === 'slow-body' ? 5_764 : 8_200, undefined, { signal: signal! }).then(() => {
               controller.enqueue(new TextEncoder().encode(payload.slice(50_000)));
               controller.close();
-            });
+            }, (error: unknown) => controller.error(error));
             pending.push(completion);
           },
         }));
       }
       if ((mode === 'slow-initial' && !sheet) || (mode === 'slow-publication' && sheetReads === 1)
         || (mode === 'slow-search' && sheetReads === 2) || (mode === 'slow-fallback' && sheetReads === 3)) {
-        await waitFor(recordedIteration13.share.sourceBackendMs);
+        await waitFor(recordedIteration13.share.sourceBackendMs, signal);
       }
-      if (mode === 'recorded-latency') await waitFor(!sheet ? recordedIteration13.share.initialSourceMs : scrolls ? recordedIteration13.share.sourceBackendMs : recordedIteration13.share.sourceMs[sheetReads - 1] || 0);
+      if (mode === 'recorded-latency') await waitFor(!sheet ? recordedIteration13.share.initialSourceMs : scrolls ? recordedIteration13.share.sourceBackendMs : recordedIteration13.share.sourceMs[sheetReads - 1] || 0, signal);
       return value(source);
     }
     if (path.endsWith('/screenshot')) return value('');
     if (body.script === 'mobile: scroll') {
       assert.deepEqual(body.args, { element: `container-${scrolls}`, direction: 'down', distance: 0.75 });
       scrolls++;
-      if (mode === 'recorded-latency') await waitFor(recordedIteration13.share.scrollClientMs);
-      if (mode === 'fallback-source-admission') now = 52_001;
-      if (mode.startsWith('fallback') || mode === 'slow-fallback') return Response.json({ value: { error: 'unknown error', message: 'completed scroll failure' } }, { status: 500 });
-      if (mode === 'post-source-admission') now = 112_001;
+      if (mode === 'recorded-latency') await waitFor(recordedIteration13.share.scrollClientMs, signal);
+      if (mode === 'slow-gesture') now += 5_250;
+      if (mode === 'hung-gesture') return new Promise<Response>((_resolve, reject) => {
+        rejectGesture = reject;
+        if (signal?.aborted) reject(signal.reason || new Error('fixture canceled'));
+        else signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
+      });
+      if (mode === 'late-gesture') return new Promise<Response>((resolve) => {
+        releaseGesture = resolve;
+        if (fixtureSignal.aborted) resolve(value(null));
+      });
+      if (mode === 'fallback-tail') now += 7_999;
+      if (mode === 'fallback-reserve') now += 3_501;
+      if (mode === 'fallback-source-admission') now += 7_999;
+      if (mode === 'post-source-admission') now += 7_999;
+      if (mode === 'overdue-gesture') now += 8_001;
+      if (mode.startsWith('fallback') || mode === 'slow-fallback' || mode === 'slow-fallback-gesture') {
+        if (mode === 'slow-fallback-gesture') now += 5_250;
+        return Response.json({ value: { error: 'unknown error', message: 'completed scroll failure' } }, { status: 500 });
+      }
       return value(null);
     }
-    if (body.script === 'mobile: swipe') { swipes++; return value(null); }
+    if (body.script === 'mobile: swipe') {
+      swipes++;
+      if (mode === 'slow-fallback-gesture') now += 5_250;
+      return value(null);
+    }
     if (path.endsWith('/elements')) {
       const xml = confirming ? hypotheticalConfirmation : source;
       assert.ok(xpathCount(xml, body.value) > 0);
       if (confirming) {
         identities++;
-        if (mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.identityMs[identities - 1]);
+        if (mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.identityMs[identities - 1], signal);
         return value([element('add')]);
       }
       return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
     }
     if (path.endsWith('/element')) {
       if (body.value === 'ShareButton') return value(element('share'));
-      assert.equal(body.value, 'Add');
+      assert.equal(body.value, IOS_CONFIRMATION_ADD_XPATH);
       lookups++;
       if (mode === 'recorded-latency') {
-        await waitFor(recordedIteration13.confirmation.lookupMs[lookups - 1]);
+        await waitFor(recordedIteration13.confirmation.lookupMs[lookups - 1], signal);
         if (lookups === 1) return missing();
       }
       return value(element('add'));
     }
     if (path.endsWith('/rect')) {
       assert.ok(path.includes(`-${scrolls}/`));
+      if (mode === 'slow-rect') await waitFor(1_448, signal);
       const list = nativeActionListEvidence(source, 'Add to Home Screen')!;
       return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
     }
     if (path.includes('/attribute/')) {
       if (mode === 'recorded-latency' && path.includes('/add/')) {
         const attribute = path.split('/attribute/')[1] as keyof typeof recordedIteration13.confirmation.attributeMs;
-        await waitFor(recordedIteration13.confirmation.attributeMs[attribute]);
+        await waitFor(recordedIteration13.confirmation.attributeMs[attribute], signal);
       }
       if (path.includes('/container-') && path.endsWith('/visible')) {
-        if (mode === 'parent-gesture') now = 107_001;
-        if (mode === 'child-gesture') now = 47_001;
-        if (mode === 'near-gesture') now = 46_500;
+        if (mode === 'parent-gesture') now = 104_001;
+        if (mode === 'child-gesture') now = 68_001;
+        if (mode === 'near-gesture') now = 67_500;
+        if (scrolls === 0 && mode === 'fallback-tail') now = 67_999;
+        if (scrolls === 0 && (mode === 'fallback-reserve' || mode === 'fallback-source-admission')) now = 67_500;
+        if (mode === 'post-source-admission') now = 104_000;
       }
       return value(path.includes('/target-') && /\/(visible|hittable)$/u.test(path) ? String(scrolls > 0) : 'true');
     }
@@ -1533,87 +3278,1492 @@ async function hierarchyReplay(mode: string) {
       clicks.push(id);
       if (id === 'share') sheet = true;
       if (id.startsWith('target')) confirming = true;
-      if (id === 'add' && mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.clickMs);
+      if (id === 'add' && mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.clickMs, signal);
       return value(null);
     }
     throw new Error(`unexpected hierarchy request ${path} ${JSON.stringify(body)}`);
-  }, timed || /^(?:hung|late|interrupted)-/u.test(mode) ? undefined : () => now);
+  }, timed || /^(?:hung|late|interrupted)-/u.test(mode) ? undefined : () => now,
+  true, requestClock, (request) => {
+    if (request.body.script === 'mobile: scroll') reportGestureDispatch(request);
+  }, fixtureSignal, (phase) => {
+    if (phase.phase !== 'ios-share-gesture') return;
+    gesturePolicyAttempts++;
+    if (mode === 'dispatch-reserve-race' && gesturePolicyAttempts === 1) now = 68_001;
+    if (mode === 'fallback-dispatch-reserve-race' && gesturePolicyAttempts === 2) now = 68_001;
+  }), `hierarchy adapter setup ${mode}`);
+  let settledScrollReceipt: ReturnType<typeof commandForRequest> | undefined;
+  if (mode === 'fallback-source-admission' || mode === 'post-source-admission') {
+    const mobile = a.driver.mobile.bind(a.driver);
+    a.driver.mobile = async (...args: Parameters<typeof a.driver.mobile>) => {
+      if (args[0] !== 'scroll') return mobile(...args);
+      try {
+        return await mobile(...args);
+      } finally {
+        const request = a.requests.find((entry) => entry.body.script === 'mobile: scroll');
+        const receipt = a.driver.snapshot().commands.find((entry) => entry.timing?.dispatchedOrdinal === request?.dispatchedOrdinal);
+        if (receipt && !receipt.timedOut && receipt.timing?.admitted && receipt.timing.sent && receipt.timing.completed) {
+          settledScrollReceipt = receipt;
+          now += mode === 'fallback-source-admission' ? 502 : 2;
+        }
+      }
+    };
+  }
+  let searchBudget: PhaseBudget | undefined;
+  const createPhaseView = a.budget.phaseView.bind(a.budget);
+  a.budget.phaseView = (name, timeoutMs, reserveParentMs = 0) => {
+    if ((mode === 'parent-gesture' || mode === 'post-source-admission') && name === 'ios-share-search') now = 36_001;
+    const phase = createPhaseView(name, timeoutMs, reserveParentMs);
+    if (name === 'ios-share-search') searchBudget = phase;
+    return phase;
+  };
   let error: unknown;
-  try { await a.platform.installFromBrowser(); } catch (caught) { error = caught; }
+  let operation: Promise<unknown> | undefined;
+  try {
+    if (mode === 'hung-gesture' || mode === 'late-gesture') {
+      operation = a.platform.installFromBrowser();
+      const completion = operation.then(() => {}, (caught) => { error = caught; });
+      const dispatched = await within(Promise.race([
+        gestureDispatch,
+        completion.then(() => { throw new Error(`install settled before gesture dispatch: ${String(error || 'success')}`); }),
+      ]), 'native gesture dispatch');
+      assert.equal(dispatched.body.script, 'mobile: scroll');
+      assert.ok(dispatched.path.endsWith('/execute/sync'));
+      assert.ok(dispatched.signal);
+      assert.equal(dispatched.signal?.aborted, false);
+      await within(new Promise<void>((resolve) => setImmediate(resolve)), 'gesture timer arm');
+      const armedTimers = [...requestClock!.timers.values()].filter((timer) => timer.at - requestClock!.elapsed === 8_000);
+      if (armedTimers.length !== 1) {
+        if (mode === 'late-gesture') releaseGesture?.(value(null));
+        else rejectGesture?.(new Error('fixture cleanup: gesture deadline timer was not armed'));
+        await within(completion, 'gesture fixture cleanup');
+        assert.fail(`expected one armed 8000ms gesture deadline, received ${armedTimers.length}`);
+      }
+      requestClock!.advance(8_000);
+      await within(completion, 'timed-out gesture completion');
+      if (mode === 'late-gesture') {
+        const saved = a.driver.snapshot();
+        const stopped = a.requests.length;
+        const firstFatal = saved.firstFatal;
+        releaseGesture!(value(null));
+        await within(new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve))), 'late gesture transport cleanup');
+        assert.deepEqual(a.driver.snapshot(), saved, 'a late gesture response cannot restore the timed-out session');
+        assert.equal(a.requests.length, stopped, 'a late gesture response cannot trigger product work');
+        assert.deepEqual(a.driver.snapshot().firstFatal, firstFatal, 'the first timeout remains sticky after a late response');
+      }
+    } else {
+      operation = a.platform.installFromBrowser();
+      try {
+        await within(operation, `hierarchy install ${mode}`, 60_000);
+      } catch (caught) {
+        if (caught instanceof Error && /fixture watchdog/u.test(caught.message)) throw caught;
+        error = caught;
+      }
+    }
+  } catch (caught) {
+    if (!fixtureSignal.aborted) fixture.abort(caught);
+    cleanupGesture();
+    if (operation) await within(operation.then(() => undefined, () => undefined), `hierarchy install cleanup ${mode}`, 5_000);
+    await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 5_000);
+    assert.equal(requestClock?.timers.size || 0, 0, 'fixture failure retires every fake-clock request timer');
+    fixtureSignal.removeEventListener('abort', cleanupGesture);
+    throw caught;
+  }
   const stopped = a.requests.length;
   const first = a.driver.snapshot().firstFatal;
-  if (/^(?:hung|late|interrupted)-/u.test(mode)) {
+  if (/^(?:hung|late|interrupted)-/u.test(mode) || mode === 'overdue-gesture') {
     assert.match(String(error), /APPIUM_(?:TIMEOUT|INTERRUPTED)/u);
     await assert.rejects(() => a.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
-    await Promise.allSettled(pending);
+    await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 10_000);
     await assert.rejects(() => a.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
     assert.equal(a.requests.length, stopped);
     assert.deepEqual(a.driver.snapshot().firstFatal, first);
-  } else await Promise.allSettled(pending);
-  await writeSanitizedJson(join(a.outputDir, 'ios-hierarchy-result.json'), {
+  } else await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 10_000);
+  assert.equal(requestClock?.timers.size || 0, 0, 'settled gesture fixtures leave no fake-clock request timer');
+  await within(writeSanitizedJson(join(a.outputDir, 'ios-hierarchy-result.json'), {
     proofKind: 'Actual-client protocol replay. PR pre-scroll XML and latencies recorded; completing post-scroll XML from push, confirmation XML hypothetical. Budget, body and hung controls hypothetical. No native acceptance.',
     error: String(error || ''), clicks, reads, sheetReads, scrolls, swipes, lookups, evidence: a.platform.evidenceSnapshot(),
-  });
-  return { ...a, error, clicks, reads, sheetReads, scrolls, swipes, lookups };
+  }), `hierarchy result persistence ${mode}`, 5_000);
+  fixtureSignal.removeEventListener('abort', cleanupGesture);
+  return { ...a, error, clicks, reads, sheetReads, scrolls, swipes, lookups, searchBudget: searchBudget?.snapshot(), settledScrollReceipt };
 }
 
-for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'slow-search', 'slow-fallback', 'near-gesture', 'fallback-success']) {
+async function boundedHierarchyReplay(mode: string) {
+  const fixture = new AbortController();
+  const replay = hierarchyReplay(mode, fixture);
+  try {
+    return await within(replay, `hierarchy ${mode} fixture`, 70_000);
+  } catch (error) {
+    fixture.abort(error);
+    await within(replay.then(() => undefined, () => undefined), `hierarchy ${mode} fixture cleanup`, 5_000);
+    throw error;
+  }
+}
+
+for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'cold-publication', 'slow-rect', 'slow-search', 'slow-fallback', 'slow-gesture', 'slow-fallback-gesture', 'fallback-success']) {
   test(`Plan13 hierarchy full install ${mode} completes with full source allowances and one final Add`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
-    const a = await hierarchyReplay(mode);
+    const a = await boundedHierarchyReplay(mode);
     assert.equal(a.error, undefined);
     assert.deepEqual(a.clicks, ['share', 'target-1', 'add']);
+    const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+    assert.ok(capture);
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.equal(capture.projection, undefined);
+    assert.equal(a.requests.some(request => request.path.endsWith('/source') && request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal), false);
     assert.equal(a.scrolls, 1);
     assert.equal(a.swipes, mode.includes('fallback') ? 1 : 0);
+    if (mode === 'cold-publication') assert.ok(a.sheetReads >= 2, 'the cold Share sheet is read again after the old 15s window');
     assert.equal(a.driver.snapshot().unusable, false);
     assert.ok(a.driver.snapshot().commands.filter((r) => r.path.endsWith('/source')).every((r) => r.timeoutMs === 8_000));
+    if (mode === 'slow-gesture' || mode === 'slow-fallback-gesture') {
+      const script = mode === 'slow-gesture' ? 'mobile: scroll' : 'mobile: swipe';
+      const command = commandForRequest(a.driver, a.requests, (request) => request.body.script === script);
+      assert.equal(command.timeoutMs, 8_000);
+      assert.equal(command.timedOut, false);
+      assert.ok(command.timing?.admitted && command.timing.sent && command.timing.completed);
+      const clicks = a.driver.snapshot().commands.filter((entry) => /\/element\/(?:share|target-[^/]+)\/click$/u.test(entry.path));
+      assert.ok(clicks.every((entry) => entry.timeoutMs === (entry.path.endsWith('/element/share/click') ? 5_000 : 12_000)),
+        'Share keeps its 5s bound and Add to Home Screen keeps its 12s acknowledgement bound');
+      const elapsed = command.timing!.settlementMs! - command.timing!.dispatchMs!;
+      assert.ok(elapsed > 5_000 && elapsed < 8_000, `gesture receipt elapsed ${elapsed}ms outside the 5s-8s bounds`);
+      const admissions = a.nativeAdmissions.filter((receipt) => receipt.phase === 'ios-share-gesture');
+      assert.equal(admissions.length, mode === 'slow-fallback-gesture' ? 2 : 1);
+      assert.ok(admissions.every((receipt) => receipt.phaseRemainingMs >= 8_000 && receipt.rootRemainingMs >= 16_000),
+        'dispatch must retain an 8s gesture allowance plus an 8s hierarchy reserve');
+    }
   });
 }
 
-for (const mode of ['parent-initial', 'publication-tail', 'search-tail', 'parent-gesture', 'child-gesture', 'fallback-tail', 'fallback-reserve', 'fallback-source-admission', 'post-source-admission', 'malformed-source']) {
+for (const mode of ['parent-initial', 'publication-tail', 'search-tail', 'parent-gesture', 'child-gesture', 'fallback-tail', 'fallback-reserve', 'fallback-source-admission', 'post-source-admission', 'dispatch-reserve-race', 'fallback-dispatch-reserve-race', 'malformed-source', 'near-gesture']) {
   test(`Plan13 hierarchy full install ${mode} never dispatches a short source or an unverifiable gesture`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
-    const a = await hierarchyReplay(mode);
+    const a = await boundedHierarchyReplay(mode);
     assert.ok(a.error);
     assert.ok(a.clicks.length <= 1);
-    assert.equal(a.scrolls, /fallback|post-source|malformed/u.test(mode) ? 1 : 0);
+    assert.equal(a.scrolls, /fallback|post-source|malformed|near-gesture/u.test(mode) ? 1 : 0);
     assert.equal(a.swipes, 0);
     if (mode === 'parent-initial') assert.equal(a.reads, 0);
     if (mode === 'publication-tail' || mode === 'search-tail') assert.equal(a.sheetReads, 1);
-    if (mode === 'fallback-source-admission' || mode === 'post-source-admission') assert.equal(a.sheetReads, 2);
+    if (mode === 'fallback-source-admission' || mode === 'post-source-admission') {
+      assert.equal(a.reads, 3, 'only the initial and two pre-scroll hierarchy sources may be requested');
+      assert.equal(a.sheetReads, 2, 'no hierarchy source may be requested after the completed gesture');
+      assert.equal(a.requests.filter((request) => request.path.endsWith('/source')).length, 3);
+      assert.equal(a.driver.snapshot().commands.filter((command) => command.path.endsWith('/source')).length, 3);
+    }
+    if (mode === 'near-gesture') {
+      const admissions = a.nativeAdmissions.filter((receipt) => receipt.phase === 'ios-share-gesture');
+      assert.equal(admissions.length, 1);
+      assert.ok(admissions[0]!.phaseRemainingMs >= 8_000 && admissions[0]!.phaseRemainingMs < 9_000);
+      assert.ok(admissions[0]!.rootRemainingMs >= 16_000);
+    }
+    if (mode === 'parent-gesture') {
+      assert.equal(a.budget.remainingMs, 15_999);
+      assert.equal(a.searchBudget?.remainingMs, 15_999);
+      assert.equal(a.searchBudget?.deadline, a.budget.snapshot().deadline, 'the global install deadline caps the local search phase');
+    }
+    if (mode === 'child-gesture') {
+      assert.equal(a.budget.remainingMs, 51_999);
+      assert.equal(a.searchBudget?.remainingMs, 15_999);
+      assert.notEqual(a.searchBudget?.deadline, a.budget.snapshot().deadline, 'the local search deadline caps its child gesture budget');
+    }
+    if (mode === 'dispatch-reserve-race' || mode === 'fallback-dispatch-reserve-race') {
+      const admissions = a.nativeAdmissions.filter((receipt) => receipt.phase === 'ios-share-gesture');
+      assert.equal(admissions.length, mode === 'dispatch-reserve-race' ? 1 : 2);
+      assert.equal(admissions.at(-1)?.phaseRemainingMs, 7_999);
+      assert.ok((admissions.at(-1)?.rootRemainingMs || 0) > 16_000);
+      assert.equal(a.driver.snapshot().commands.filter((command) => command.timing?.outcome === 'not-admitted').length, 1);
+      assert.equal(a.requests.some((request) => request.body.script === 'mobile: swipe'), false);
+    }
+    if (mode === 'fallback-source-admission') {
+      const scroll = commandForRequest(a.driver, a.requests, (request) => request.body.script === 'mobile: scroll');
+      assert.equal(scroll.timedOut, false);
+      assert.equal(scroll.timing?.outcome, 'command-error');
+      assert.equal(scroll.timing!.settlementMs! - scroll.timing!.dispatchMs!, 7_999);
+      assert.deepEqual(a.settledScrollReceipt, scroll, 'the admission clock changes only after the actual scroll receipt settles');
+      assert.equal(a.searchBudget?.remainingMs, 7_999);
+      assert.match(String(a.error), /completed scroll failure/u);
+      assert.equal(a.swipes, 0);
+    }
+    if (mode === 'post-source-admission') {
+      const scroll = commandForRequest(a.driver, a.requests, (request) => request.body.script === 'mobile: scroll');
+      assert.equal(scroll.timedOut, false);
+      assert.equal(scroll.timing?.outcome, 'success');
+      assert.equal(scroll.timing!.settlementMs! - scroll.timing!.dispatchMs!, 7_999);
+      const lastSource = a.requests.filter((request) => request.path.endsWith('/source')).at(-1)!;
+      const sourceReceipt = a.driver.snapshot().commands.find((command) => command.timing?.dispatchedOrdinal === lastSource.dispatchedOrdinal)!;
+      assert.equal(sourceReceipt.timeoutMs, 8_000);
+      assert.equal(sourceReceipt.timedOut, false);
+      assert.equal(a.settledScrollReceipt?.timing?.settlementMs, scroll.timing?.settlementMs,
+        'the admission clock changes only after the actual scroll receipt settles');
+      assert.match(String(a.error), /insufficient time to complete native hierarchy observation/u);
+      assert.equal(a.budget.remainingMs, 7_999, 'the global 120s deadline prevents a post-scroll hierarchy request');
+      assert.equal(a.searchBudget?.deadline, a.budget.snapshot().deadline);
+      assert.deepEqual(a.clicks, ['share']);
+      assert.equal(a.lookups, 0);
+    }
     assert.ok(a.driver.snapshot().commands.filter((r) => r.path.endsWith('/source')).every((r) => r.timeoutMs === 8_000 && !r.timedOut));
     assert.equal(a.driver.snapshot().unusable, false);
   });
 }
 
-for (const mode of ['hung-source', 'late-source', 'late-body', 'interrupted-body', 'interrupted-reset', 'interrupted-abort']) {
+for (const mode of ['hung-source', 'late-source', 'late-body', 'hung-gesture', 'late-gesture', 'overdue-gesture', 'interrupted-body', 'interrupted-reset', 'interrupted-abort']) {
   test(`Plan13 hierarchy full install ${mode} preserves quarantine first failure and no late work`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
-    const a = await hierarchyReplay(mode);
+    const a = await boundedHierarchyReplay(mode);
     assert.deepEqual(a.clicks, ['share']);
     assert.equal(a.scrolls, 1);
     assert.equal(a.swipes, 0);
     assert.equal(a.lookups, 0);
     assert.equal(a.driver.snapshot().firstFatal?.code, /interrupted-(?:reset|abort)/u.test(mode) ? 'APPIUM_INTERRUPTED' : 'APPIUM_TIMEOUT');
+    if (mode.endsWith('-gesture')) {
+      const command = commandForRequest(a.driver, a.requests, (request) => request.body.script === 'mobile: scroll');
+      assert.equal(command.timeoutMs, 8_000);
+      assert.equal(command.timedOut, true);
+      assert.equal(command.timing?.outcome, 'timeout');
+    }
   });
 }
 
-export async function runIOSRegressions(): Promise<void> {
-  let failures = 0;
-  for (const [name, body] of tests) {
-    if (process.env.IOS_TEST_FILTER && !new RegExp(process.env.IOS_TEST_FILTER, 'u').test(name)) continue;
+class ReceiptClock implements IOSReceiptClock {
+  elapsed = 0;
+  readonly epoch = Date.UTC(2026, 8, 20, 23, 59, 59, 250);
+  private next = 0;
+  readonly timers = new Map<number, { at: number; callback: () => void }>();
+  wall = () => this.epoch + this.elapsed;
+  mono = () => this.elapsed;
+  now = () => this.elapsed;
+  timer = (callback: () => void, ms: number) => {
+    const id = ++this.next;
+    this.timers.set(id, { at: this.elapsed + ms, callback });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  };
+  clear = (id: ReturnType<typeof setTimeout>) => { this.timers.delete(id as unknown as number); };
+  advance(ms: number): void {
+    const end = this.elapsed + ms;
+    for (;;) {
+      const next = [...this.timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      this.elapsed = Math.max(this.elapsed, next[1].at);
+      this.timers.delete(next[0]);
+      next[1].callback();
+    }
+    this.elapsed = end;
+  }
+}
+
+class ReceiptPipe extends EventEmitter {
+  destroyed = false;
+  destroy(): this { this.destroyed = true; return this; }
+}
+class ReceiptChild extends EventEmitter {
+  pid: number | undefined = 42;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  readonly stdout = new ReceiptPipe();
+  readonly stderr = new ReceiptPipe();
+  readonly signals: string[] = [];
+  acceptsSignal = true;
+  kill(signal: string): boolean { this.signals.push(signal); return this.acceptsSignal; }
+  exit(code: number | null, signal: string | null = null): void {
+    this.exitCode = code; this.signalCode = signal as NodeJS.Signals | null; this.emit('exit', code, signal);
+  }
+  close(code: number | null = 0, signal: string | null = null): void {
+    this.stdout.emit('end'); this.stderr.emit('end');
+    this.stdout.emit('close'); this.stderr.emit('close');
+    this.exit(code, signal); this.emit('close', code, signal);
+  }
+}
+const receiptUdid = '12345678-1234-1234-1234-123456789ABC';
+const receiptClip = 'ADD6F23D30D34C62A8E065D19753E4AF';
+const receiptSession = '12345678-ABCD-1234-ABCD-123456789ABC';
+const receiptLine = (message: string, subsystem = 'com.apple.mobilesafari', category = 'WebApp', producer = 'SafariViewService') =>
+  `2026-09-21 00:00:01.000 Df ${producer}[42:abcd] [${subsystem}:${category}] ${message}\n`;
+const receiptLoad = (clip = receiptClip) => receiptLine(`Loading UIWebClip with identifier '${clip}'; version: 1`);
+function receiptFailure(clock: ReceiptClock): IOSLaunchFailure {
+  return { eligible: true, reason: 'single-acknowledged-tap', stage: 'provider', invocation: 1, taps: 1,
+    bundle: 'com.apple.webapp', readiness: 'ready', page: 1, remainingMs: 120_000,
+    tap: { wallMs: clock.wall(), monoMs: clock.mono() }, settled: { wallMs: clock.wall(), monoMs: clock.mono() },
+    before: null, click: null, fatal: { wallMs: clock.wall() + 30_000, monoMs: clock.mono() + 30_000 } };
+}
+function receiptRun(clock = new ReceiptClock(), failure = receiptFailure(clock), signal?: AbortSignal) {
+  const child = new ReceiptChild();
+  const commands: Array<{ binary: string; argv: string[] }> = [];
+  const result = collectIOSLaunchReceipt(receiptUdid, failure, origin, { clock, signal, spawn: (binary, argv) => {
+    commands.push({ binary, argv }); return child as unknown as ChildProcess;
+  } });
+  child.emit('spawn');
+  return { clock, child, commands, result };
+}
+async function receiptSettled<T>(result: Promise<T>, clock: ReceiptClock): Promise<T> {
+  let settled = false;
+  void result.then(() => { settled = true; }, () => { settled = true; });
+  for (let turn = 0; turn < 100 && !settled; turn++) await Promise.resolve();
+  if (!settled) clock.advance(20_000);
+  for (let turn = 0; turn < 100 && !settled; turn++) await Promise.resolve();
+  assert.equal(settled, true, 'collector must settle within the bounded fake clock control');
+  assert.equal(clock.timers.size, 0);
+  return result;
+}
+function receiptSnapshot(attemptId = 1, path = '/session/mock/element/icon/click'): WebDriverSnapshot {
+  return { sessionId: '[active]', selectedContext: 'NATIVE_APP', selectedWindow: '', unusable: false, commands: [], lookups: [],
+    lastCommand: { command: 'POST', method: 'POST', path, durationMs: 1, timeoutMs: 1_000, timedOut: false, selectedContext: 'NATIVE_APP', selectedWindow: '',
+      timing: { attemptId, dispatchedOrdinal: attemptId, sessionGeneration: 1, operation: 'other', scope: 'unscoped', entryMs: attemptId,
+        dispatchMs: attemptId, settlementMs: attemptId + 1, phaseRemainingAtEntryMs: 1_000, phaseRemainingAtDispatchMs: 1_000,
+        phaseRemainingAtSettlementMs: 999, admitted: true, sent: true, completed: true, outcome: 'success' } } };
+}
+
+test('SM55 receipt query literal UTC window and refusals', async () => {
+  const clock = new ReceiptClock();
+  const failure = receiptFailure(clock);
+  const expected = ['simctl', 'spawn', receiptUdid, 'log', 'show', '--style', 'compact', '--start', '2026-09-20 23:59:54+0000', '--end', '2026-09-21 00:00:30+0000', '--predicate', IOS_LAUNCH_PREDICATE];
+  assert.equal(IOS_LAUNCH_PREDICATE, '((process == "SpringBoard" OR process == "Web" OR process == "runningboardd" OR process == "frontboardd" OR process == "launchd" OR process == "lsd") AND (eventMessage CONTAINS[c] "com.apple.webapp" OR eventMessage CONTAINS[c] "WebClip" OR eventMessage CONTAINS[c] "com.apple.WebKit.PushBundle." OR eventMessage CONTAINS[c] "com.apple.SafariViewService")) OR (process == "Web" AND (subsystem == "com.apple.UIKit" OR subsystem == "com.apple.runningboard" OR subsystem == "com.apple.FrontBoard")) OR (process == "SafariViewService" AND ((subsystem == "com.apple.UIKit" AND (category == "ViewServiceSessionManager" OR category == "ViewServices" OR category == "AppLifecycle")) OR (subsystem == "com.apple.mobilesafari" AND (category == "WebApp" OR category == "WebPush")) OR (subsystem == "com.apple.runningboard" AND category == "monitor")))');
+  assert.deepEqual(iosLaunchQuery(receiptUdid, failure)?.argv, expected);
+  const valid = receiptRun(clock, failure);
+  valid.child.close();
+  assert.deepEqual(valid.commands, [{ binary: 'xcrun', argv: expected }]);
+  assert.deepEqual((await valid.result).receipt.query?.argv, expected);
+  assert.equal(expected.filter(arg => arg === IOS_LAUNCH_PREDICATE).length, 1);
+  assert.equal(IOS_LAUNCH_PREDICATE.includes('TRUEPREDICATE'), false);
+  for (const fatal of [
+    { wallMs: NaN, monoMs: 1 }, { wallMs: failure.tap!.wallMs - 1, monoMs: 1 },
+    { wallMs: failure.tap!.wallMs + 1_001, monoMs: 0 },
+    { wallMs: failure.tap!.wallMs + 121_001, monoMs: 121_001 },
+  ]) assert.equal(iosLaunchQuery(receiptUdid, { ...failure, fatal }), null);
+  for (const udid of ['', 'protocol-only', `${receiptUdid}; log show`, `${receiptUdid}\n`]) assert.equal(iosLaunchQuery(udid, failure), null);
+  const exact = { ...failure, tap: { wallMs: Date.UTC(2026, 0, 1), monoMs: 0 }, fatal: { wallMs: Date.UTC(2026, 0, 1) + 120_000, monoMs: 120_000 } };
+  assert.equal(iosLaunchQuery(receiptUdid, exact)?.endMs, exact.fatal.wallMs);
+  const a = receiptRun(clock, { ...failure, eligible: false });
+  assert.equal((await a.result).receipt.outcome, 'not-eligible');
+  assert.equal(a.commands.length, 0);
+  assert.equal(clock.timers.size, 0);
+});
+
+test('SM55 receipt eligibility command boundaries and ring eviction', async () => {
+  for (const mode of ['eligible', 'no-tap', 'unsent', 'unacknowledged', 'multiple', 'path', 'method', 'generation', 'earlier', 'later', 'unresolved', 'ring-eviction']) {
+    const clock = new ReceiptClock();
+    const observation = new IOSLaunchObservation(clock);
+    observation.begin();
+    if (mode === 'earlier') observation.begin();
+    if (mode !== 'no-tap') observation.arm(receiptSnapshot(), 1, 120_000);
+    const after = receiptSnapshot(2);
+    if (mode === 'unsent') after.lastCommand!.timing = { ...after.lastCommand!.timing!, sent: false, admitted: false, dispatchedOrdinal: undefined };
+    if (mode === 'unacknowledged') after.lastCommand!.timing = { ...after.lastCommand!.timing!, completed: false, outcome: 'timeout' };
+    if (mode === 'path') after.lastCommand!.path = '/session/mock/element/other/click';
+    if (mode === 'method') after.lastCommand!.method = 'GET';
+    if (mode === 'generation') after.lastCommand!.timing = { ...after.lastCommand!.timing!, sessionGeneration: 2 };
+    observation.acknowledge(after, 'icon');
+    if (mode === 'multiple') observation.arm(after, 2, 60_000);
+    observation.enter('provider');
+    if (mode === 'ring-eviction') {
+      for (let index = 0; index < 1_100; index++) after.commands.push(receiptSnapshot(index + 3).lastCommand!);
+      after.commands = after.commands.slice(-50);
+      after.lastCommand = after.commands.at(-1);
+    }
+    if (mode === 'unresolved') after.lastCommand!.timing = { ...after.lastCommand!.timing!, completed: false };
+    if (mode === 'later') observation.enter('attachment');
+    const fatal = new Error('synthetic-first-fatal');
+    observation.freeze(fatal, after);
+    const frozen = observation.failure;
+    observation.freeze(new Error('synthetic-later-fatal'), after);
+    assert.equal(observation.failure, frozen);
+    assert.equal(frozen?.eligible === true, mode === 'eligible' || mode === 'ring-eviction');
+    if (mode === 'earlier' || mode === 'later') assert.equal(frozen, undefined);
+    else assert.equal((observation as any).originalFatal, fatal);
+    if (frozen) assert.ok(Buffer.byteLength(JSON.stringify(frozen)) < IOS_LAUNCH_LIMITS.armBytes);
+  }
+});
+
+test('SM55 receipt process exit signal errno and callback permutations', async () => {
+  for (const mode of ['zero', 'nonzero-empty', 'signal', 'spawn-error', 'stream-error', 'error-exit-close', 'exit-before-kill', 'rejected-signal', 'missing-pid', 'lingering-pipe']) {
+    const a = receiptRun();
+    if (mode === 'zero') a.child.close();
+    if (mode === 'nonzero-empty') a.child.close(64);
+    if (mode === 'signal') a.child.close(null, 'SIGKILL');
+    if (mode === 'spawn-error' || mode === 'error-exit-close') {
+      a.child.emit('error', Object.assign(new Error('synthetic-private-message'), { code: 'ENOENT', path: 'synthetic-private-path', cause: new Error('secret') }));
+      if (mode === 'error-exit-close') a.child.close(64);
+      else a.clock.advance(2_000);
+    }
+    if (mode === 'stream-error') { a.child.stdout.emit('error', { code: 'EIO', message: 'secret' }); a.child.close(); }
+    if (mode === 'exit-before-kill') { a.clock.advance(17_000); a.child.exit(0); a.clock.advance(2_000); }
+    if (mode === 'rejected-signal') { a.child.acceptsSignal = false; a.clock.advance(19_000); }
+    if (mode === 'missing-pid') { a.child.pid = undefined; a.child.emit('spawn'); a.clock.advance(2_000); }
+    if (mode === 'lingering-pipe') { a.child.exit(0); a.clock.advance(2_000); }
+    const result = await receiptSettled(a.result, a.clock);
+    assert.equal(a.commands.length, 1);
+    assert.equal(a.clock.timers.size, 0);
+    assert.equal(a.child.listenerCount('exit'), 0);
+    assert.equal(a.child.listenerCount('close'), 0);
+    assert.equal(a.child.stdout.listenerCount('data'), 0);
+    assert.equal(a.child.listenerCount('error'), 1, 'only a stateless late error consumer remains');
+    assert.equal(result.receipt.process.simulatorWorker, 'unknown');
+    assert.equal(result.receipt.process.hostDescendants, 'unknown');
+    assert.equal(result.receipt.stderr.received, 0);
+    assert.equal(result.receiptText.includes('secret') || result.receiptText.includes('synthetic-private'), false);
+    if (mode === 'nonzero-empty') assert.equal(result.receipt.process.exitCode, 64);
+    if (mode === 'signal') { assert.equal(result.receipt.process.exitCode, null); assert.equal(result.receipt.flags.deadline, false); assert.equal(result.receipt.process.signal, 'SIGKILL'); assert.equal(result.receipt.process.signalState, 'recognized'); }
+    if (mode === 'spawn-error') { assert.equal(result.receipt.process.exitCode, null); assert.equal(result.receipt.process.error, 'ENOENT'); }
+    if (mode === 'exit-before-kill' || mode === 'rejected-signal') assert.deepEqual(a.child.signals, ['SIGTERM']);
+    if (mode === 'lingering-pipe' || mode === 'missing-pid' || mode === 'spawn-error') assert.deepEqual(a.child.signals, []);
+    if (['lingering-pipe', 'exit-before-kill', 'rejected-signal'].includes(mode)) assert.equal(result.blockNativeDiagnostics, true);
+    const frozen = result.receiptText;
+    a.child.emit('error', new Error('late-secret'));
+    a.child.close();
+    a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    a.clock.advance(30_000);
+    assert.equal(result.receiptText, frozen);
+  }
+  const clock = new ReceiptClock();
+  const failed = await collectIOSLaunchReceipt(receiptUdid, receiptFailure(clock), origin, { clock, spawn: () => { throw { code: 'EACCES', message: 'secret' }; } });
+  assert.equal(failed.receipt.process.spawned, false);
+  assert.equal(failed.receipt.process.exitCode, null);
+  assert.equal(failed.receipt.process.error, 'EACCES');
+  assert.equal(iosReceiptError(new Proxy({}, { getOwnPropertyDescriptor() { throw new Error('secret'); } })), 'unknown-withheld');
+});
+
+test('SM55 receipt spawn failure close-only and conflicting status stay distinct', async () => {
+  for (const mode of ['before-spawn', 'close-only', 'conflicting-exit', 'bad-chunk', 'pipe-error', 'delayed-kill', 'SIGEMT', 'unknown-signal', 'close-unknown', 'duplicate-unknown']) {
+    const clock = new ReceiptClock();
+    const child = new ReceiptChild();
+    const resultPromise = collectIOSLaunchReceipt(receiptUdid, receiptFailure(clock), origin, { clock, spawn: () => child as unknown as ChildProcess });
+    if (mode === 'before-spawn') child.emit('error', { code: 'ENOENT', message: 'synthetic-secret' });
+    else child.emit('spawn');
+    if (mode === 'SIGEMT' || mode === 'unknown-signal') child.close(null, mode === 'SIGEMT' ? 'SIGEMT' : 'synthetic-private-signal');
+    else if (mode === 'close-unknown') { child.exit(0); child.emit('close', 0, 'synthetic-private-signal'); }
+    else if (mode === 'duplicate-unknown') { child.exit(0); child.exit(0, 'synthetic-private-signal'); child.emit('close', 0, null); }
+    else if (mode === 'close-only') child.emit('close', 64, null);
+    else if (mode === 'conflicting-exit') { child.exit(64); child.exit(0); child.emit('close', 64, null); }
+    else if (mode === 'bad-chunk') { child.stdout.emit('data', { message: 'synthetic-secret' }); child.close(); }
+    else if (mode === 'pipe-error') { child.stderr.emit('error', new Error('synthetic-secret')); child.close(); }
+    else if (mode === 'delayed-kill') {
+      clock.advance(17_000);
+      clock.elapsed = 19_500;
+      clock.advance(0);
+    } else clock.advance(2_000);
+    const result = await receiptSettled(resultPromise, clock);
+    assert.equal(result.receipt.outcome, 'incomplete');
+    if (['SIGEMT', 'unknown-signal', 'close-unknown', 'duplicate-unknown'].includes(mode)) {
+      assert.equal(result.receipt.process.unknownSignalObserved, true);
+      assert.equal(result.receipt.process.signal, null);
+      assert.equal(result.receipt.flags.deadline, false);
+      assert.equal(result.receipt.process.exitCode, mode === 'close-unknown' || mode === 'duplicate-unknown' ? 0 : null);
+      assert.equal(result.receipt.process.statusConflict, true);
+      assert.equal(result.receipt.process.signalState, mode === 'close-unknown' || mode === 'duplicate-unknown' ? 'absent' : 'unknown-withheld');
+      assert.equal(result.receiptText.includes('SIGEMT') || result.receiptText.includes('synthetic-private-signal'), false);
+    }
+    assert.equal(result.receiptText.includes('synthetic-secret'), false);
+    if (mode === 'before-spawn') { assert.equal(result.receipt.process.spawnError, 'ENOENT'); assert.equal(result.receipt.process.spawned, false); }
+    if (mode === 'close-only') { assert.equal(result.receipt.process.exitCode, null); assert.equal(result.receipt.process.closeCode, 64); }
+    if (mode === 'conflicting-exit') { assert.equal(result.receipt.process.exitCode, 64); assert.equal(result.receipt.process.statusConflict, true); }
+    if (mode === 'delayed-kill') assert.deepEqual(child.signals, ['SIGTERM']);
+    assert.equal(clock.timers.size, 0);
+    child.emit('error', new Error('late-secret'));
+    child.stderr.emit('error', new Error('late-secret'));
+  }
+});
+
+test('SM55 receipt absolute deadline cancellation caps and scheduling overrun', async () => {
+  for (const at of [16_999, 17_000, 17_500, 20_001]) {
+    const a = receiptRun();
+    a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    a.clock.elapsed = at;
+    a.child.exit(0);
+    a.child.emit('close', 0, null);
+    const result = await receiptSettled(a.result, a.clock);
+    assert.equal(result.receipt.flags.deadline, at >= 17_000);
+    assert.equal(result.receipt.flags.overrun, at > 20_000);
+    assert.equal(result.receipt.process.exitCode, 0);
+    assert.equal(result.receipt.process.signal, null);
+    if (at < 19_000) assert.equal(result.receipt.process.closeCode, 0);
+    assert.equal(result.receipt.outcome, at < 17_000 ? 'public-projection-unreviewed' : 'incomplete');
+    assert.deepEqual(a.child.signals, []);
+  }
+  for (const at of [999, 1_000, 1_500, 2_000, 2_001]) {
+    const a = receiptRun();
+    a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    a.child.exit(0);
+    a.clock.elapsed = at;
+    a.child.emit('close', 0, null);
+    const result = await receiptSettled(a.result, a.clock);
+    assert.equal(result.receipt.flags.deadline, at >= 1_000);
+    assert.equal(result.receipt.process.exitCode, 0);
+    assert.equal(result.receipt.process.closeCode, 0);
+    assert.equal(result.receipt.process.localStop, 'confirmed');
+    assert.deepEqual(a.child.signals, []);
+  }
+  for (const setup of ['abort-inside-spawn', 'abort-without-spawn-event', 'abort-overrun', 'abort-then-throw', 'setup-error', 'setup-error-after-spawn']) {
+    const clock = new ReceiptClock();
+    const child = new ReceiptChild();
+    const controller = new AbortController();
+    if (setup.startsWith('setup-error')) {
+      const onOutput = child.stdout.on.bind(child.stdout);
+      child.stdout.on = function (event, listener) {
+        if (event === 'data') throw { code: 'EIO', message: 'synthetic-setup-secret' };
+        return onOutput(event, listener);
+      };
+      if (setup === 'setup-error-after-spawn') {
+        const on = child.on.bind(child);
+        child.on = function (event, listener) {
+          on(event, listener);
+          if (event === 'spawn') child.emit('spawn');
+          return child;
+        };
+      }
+    }
+    const promise = collectIOSLaunchReceipt(receiptUdid, receiptFailure(clock), origin, { clock, signal: controller.signal, spawn: () => {
+      if (setup === 'abort-overrun') clock.elapsed = 20_001;
+      if (setup.startsWith('abort')) controller.abort(new Error('synthetic-setup-secret'));
+      if (setup === 'abort-then-throw') throw { code: 'ENOENT', message: 'synthetic-setup-secret' };
+      return child as unknown as ChildProcess;
+    } });
+    if (setup === 'abort-inside-spawn') child.emit('spawn');
+    clock.advance(2_000);
+    const result = await receiptSettled(promise, clock);
+    assert.equal(result.receipt.outcome, 'incomplete');
+    assert.equal(result.blockNativeDiagnostics, true);
+    assert.equal(result.receipt.process.exitCode, null);
+    assert.equal(result.receipt.process.localStop, 'unconfirmed');
+    assert.deepEqual(child.signals, setup === 'abort-inside-spawn' || setup === 'abort-without-spawn-event' ? ['SIGTERM', 'SIGKILL'] : []);
+    if (setup !== 'abort-then-throw') {
+      assert.equal(child.stdout.destroyed, true);
+      assert.equal(child.stderr.destroyed, true);
+    }
+    assert.equal(child.listenerCount('exit'), 0);
+    assert.equal(child.listenerCount('close'), 0);
+    assert.equal(child.stdout.listenerCount('data'), 0);
+    assert.equal(result.receiptText.includes('synthetic-setup-secret'), false);
+    assert.equal(result.receipt.process.spawnError, setup === 'abort-then-throw' ? 'ENOENT' : setup === 'setup-error' ? 'EIO' : null);
+    assert.equal(clock.timers.size, 0);
+  }
+  for (const mode of ['deadline', 'before-cancel', 'after-cancel', 'cap-deadline', 'overrun', 'overrun-after-term']) {
+    const clock = new ReceiptClock();
+    const controller = new AbortController();
+    if (mode === 'before-cancel') controller.abort(new Error('synthetic-private-cancel'));
+    const a = receiptRun(clock, receiptFailure(clock), controller.signal);
+    if (mode === 'after-cancel') controller.abort(new Error('synthetic-private-cancel'));
+    if (mode === 'cap-deadline') {
+      clock.elapsed = 17_000;
+      a.child.stdout.emit('data', Buffer.alloc(IOS_LAUNCH_LIMITS.stdoutBytes + 7, 120));
+    }
+    if (mode === 'overrun' || mode === 'overrun-after-term') {
+      if (mode === 'overrun-after-term') clock.advance(17_000);
+      clock.elapsed = 20_001;
+      a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    }
+    clock.advance(20_000);
+    const result = await receiptSettled(a.result, clock);
+    assert.equal(result.receipt.outcome, 'incomplete');
+    assert.equal(result.receiptText.includes('synthetic-private'), false);
+    assert.equal(clock.timers.size, 0);
+    if (mode === 'before-cancel') assert.equal(a.commands.length, 0);
+    if (mode === 'cap-deadline') { assert.equal(result.receipt.flags.receiveCap, true); assert.equal(result.receipt.flags.deadline, true); assert.equal(result.receipt.stdout.overshoot, 7); }
+    if (mode === 'overrun' || mode === 'overrun-after-term') {
+      assert.equal(result.receipt.flags.overrun, true);
+      assert.ok(result.receipt.collection.overrunMs > 0);
+      assert.deepEqual(a.child.signals, mode === 'overrun' ? [] : ['SIGTERM']);
+    }
+  }
+});
+
+test('SM55 receipt byte UTF8 grammar and hostile secret withholding', async () => {
+  const a = receiptRun();
+  const secret = 'SYNTHETIC_SECRET';
+  const text = Buffer.from(`unknown € https://user:${secret}@${secret}.invalid/path?key=${secret}#${secret}\n`);
+  for (const byte of text) a.child.stdout.emit('data', Buffer.from([byte]));
+  a.child.stdout.emit('data', Buffer.from([0xc3, 0x28, 10]));
+  a.child.stdout.emit('data', Buffer.from('x'.repeat(8_193) + '\n'));
+  a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`Loading UIWebClip with identifier '${receiptClip}'; version: 1 ${secret}`)));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`Loading UIWebClip with identifier '<private>'; version: 1`)));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`Loading UIWebClip with identifier '${receiptClip}'; version: 1`, 'com.apple.UIKit', 'unknown')));
+  a.child.stderr.emit('data', Buffer.from(`log: Permission denied\nlog: Invalid predicate\nlog: Invalid start date\nsimctl: No such file or directory\n${secret}\n`));
+  a.child.stdout.emit('data', Buffer.from('incomplete-' + secret));
+  a.child.close();
+  const result = await a.result;
+  assert.equal(result.receipt.outcome, 'incomplete');
+  assert.equal(result.receipt.stdout.invalidUTF8, 1);
+  assert.equal(result.receipt.stdout.overlong, 1);
+  assert.equal(result.receipt.stdout.incompleteTail, 1);
+  assert.equal(result.receipt.eventCount, 1);
+  assert.deepEqual(result.receipt.stderrClasses, ['permission-denied', 'unsupported-predicate', 'unsupported-date', 'missing-executable']);
+  assert.equal((result.receiptText + result.eventsText).includes(secret), false);
+  assert.equal(result.eventsText.includes(receiptClip), true);
+  assert.equal(result.receipt.stdout.received, result.receipt.stdout.retained + result.receipt.stdout.discarded);
+  const b = receiptRun();
+  const invalid = Buffer.from(receiptLoad() + receiptInvalidOrigin() + 'SYNTHETIC_FAULT_SECRET\n');
+  b.child.stdout.emit('data', invalid);
+  b.child.close();
+  const withheld = await receiptSettled(b.result, b.clock);
+  assert.equal(withheld.receipt.stdout.received, invalid.byteLength);
+  assert.equal(withheld.receipt.stdout.retained, invalid.byteLength);
+  assert.equal(withheld.receipt.stdout.discarded, 0);
+  assert.equal(withheld.receipt.stdout.withheld, 2);
+  assert.equal(withheld.receipt.eventCount, 1);
+  assert.equal(withheld.receipt.flags.handlerFault, false);
+  assert.equal((withheld.receiptText + withheld.eventsText).includes('SYNTHETIC_FAULT_SECRET'), false);
+  const c = receiptRun();
+  let expected!: ReturnType<typeof receiptFaultChunk>;
+  queueMicrotask(() => { expected = receiptFaultChunk(c.child); c.clock.advance(2_000); });
+  const faulted = await receiptSettled(c.result, c.clock);
+  for (const key of ['received', 'retained', 'discarded'] as const) assert.equal(faulted.receipt.stdout[key], expected[key]);
+  assert.equal(faulted.receipt.stdout.withheld, 2);
+  assert.equal(faulted.receipt.eventCount, 1);
+  assert.equal(faulted.receipt.flags.handlerFault, true);
+  assert.equal(faulted.receipt.outcome, 'incomplete');
+  assert.deepEqual(c.child.signals, []);
+  assert.equal((faulted.receiptText + faulted.eventsText).includes('SYNTHETIC_FAULT_SECRET'), false);
+});
+
+test('SM55 receipt receive line record and public byte cap boundaries', async () => {
+  for (const kind of ['stdout', 'stderr'] as const) {
+    const cap = kind === 'stdout' ? IOS_LAUNCH_LIMITS.stdoutBytes : IOS_LAUNCH_LIMITS.stderrBytes;
+    for (const delta of [-1, 0, 1]) {
+      const a = receiptRun();
+      a.child[kind].emit('data', Buffer.alloc(cap + delta, 120));
+      a.child.close();
+      const result = await a.result;
+      assert.equal(result.receipt[kind].received, cap + delta);
+      assert.equal(result.receipt.flags.receiveCap, delta >= 0);
+      assert.equal(result.receipt[kind].overshoot, Math.max(0, delta));
+      if (delta >= 0) { assert.equal(result.receipt[kind].retained, 0); assert.equal(result.receipt[kind].discarded, cap + delta); }
+    }
+  }
+  for (const length of [8_191, 8_192, 8_193]) {
+    const a = receiptRun();
+    a.child.stdout.emit('data', Buffer.from('x'.repeat(length) + '\n'));
+    a.child.close();
+    assert.equal((await a.result).receipt.stdout.overlong, length > 8_192 ? 1 : 0);
+  }
+  const a = receiptRun();
+  for (let index = 0; index < 4_097; index++) a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+  a.child.close();
+  const result = await a.result;
+  assert.equal(result.receipt.flags.outputCap || result.receipt.flags.recordCap, true);
+  assert.ok(result.receipt.eventCount <= 4_096);
+  assert.ok(Buffer.byteLength(result.eventsText) <= 524_288);
+  assert.ok(Buffer.byteLength(result.receiptText) <= 32_768);
+  assert.ok(Buffer.byteLength(result.receipt.stderrClasses.join('\n')) <= 8_192);
+});
+
+test('SM55 receipt conflicting native identities retain only explicit relations', async () => {
+  const a = receiptRun();
+  for (const clip of [receiptClip, 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB']) a.child.stdout.emit('data', Buffer.from(receiptLoad(clip)));
+  for (const host of [101, 202]) a.child.stdout.emit('data', Buffer.from(receiptLine(`Configuring connection on service com.apple.uikit.viewservice.com.apple.SafariViewService to host pid ${host} for session ${receiptSession}`, 'com.apple.UIKit', 'ViewServiceSessionManager')));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`sceneOfRecord: sceneID: sceneID:com.apple.SafariViewService-default  persistentID: ${receiptSession}`, 'com.apple.UIKit', 'AppLifecycle')));
+  for (const host of ['localhost', 'synthetic-secret.invalid']) a.child.stdout.emit('data', Buffer.from(receiptLine(`Web Clip with identifier '${receiptClip}', script from origin <WKSecurityOrigin: 0x1234; protocol = https; host = ${host}; port = 52101> updated app badge count to 0`, 'com.apple.mobilesafari', 'WebPush')));
+  a.child.stdout.emit('data', Buffer.from(receiptLine('Received state update for 101 (app<com.apple.webapp((null))>, running-Foreground', 'com.apple.runningboard', 'monitor', 'Web')));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`request=${receiptSession} token=${receiptClip} https://synthetic-secret.invalid/`, 'com.apple.FrontBoard', 'unknown', 'SpringBoard')));
+  a.child.stdout.emit('data', Buffer.from(receiptLoad().replace('2026-09-21', '2020-01-01')));
+  a.child.close();
+  const result = await a.result;
+  const records = result.eventsText.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(result.receipt.outcome, 'public-projection-unreviewed');
+  assert.deepEqual(records.filter(record => record.hostPid).map(record => record.hostPid), [101, 202]);
+  assert.deepEqual(records.filter(record => record.origin).map(record => record.origin), ['fixture-origin', 'other-origin']);
+  assert.ok(records.every(record => record.clockMapping === 'unknown' && record.temporalRelationToFatal === 'unavailable'));
+  assert.equal(result.receipt.coverage.tapToRequest, 'unproved');
+  assert.equal(result.receipt.coverage.clipToHost, 'unproved');
+  assert.equal(result.eventsText.includes('synthetic-secret'), false);
+  assert.equal(records.length, 9);
+  assert.equal(records.at(-1).temporalRelationToFatal, 'unavailable', 'no host/native clock mapping is invented for an outlying native timestamp');
+});
+
+async function receiptCaptureAdapter(name: string, clock = new ReceiptClock()) {
+  const a = await adapter(`receipt-${name}`, ({ path }) => {
+    if (path.endsWith('/screenshot')) return value('');
+    throw new Error('unexpected receipt gameplay command');
+  }, clock.mono);
+  const internal = a.platform as any;
+  internal.udid = receiptUdid;
+  internal.launchObservation = new IOSLaunchObservation(clock);
+  internal.launchObservation.failure = Object.freeze(receiptFailure(clock));
+  const native: string[][] = [];
+  internal.diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  const writes: Array<{ path: string; text: string; options: unknown }> = [];
+  internal.launchMkdir = async () => undefined;
+  internal.launchWrite = async (path: string, text: string, options: unknown) => { writes.push({ path, text, options }); };
+  const child = new ReceiptChild();
+  let queries = 0;
+  internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => collectIOSLaunchReceipt(udid, failure, fixture, {
+    ...hooks, clock, spawn: () => {
+      queries += 1;
+      queueMicrotask(() => { child.emit('spawn'); child.stdout.emit('data', Buffer.from(receiptLoad())); child.close(); });
+      return child as unknown as ChildProcess;
+    },
+  });
+  return { ...a, internal, clock, native, writes, child, queries: () => queries };
+}
+
+type ReceiptLaunchMode = 'failure' | 'success' | 'unrelated' | '99' | 'driver-fatal';
+async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode = 'failure') {
+  const clock = new ReceiptClock();
+  const trace: string[] = [];
+  let mode = initialMode;
+  let tapped = false;
+  let rounds = 0;
+  let contexts = 0;
+  const a = await adapter(`receipt-launch-${name}`, ({ path, body }) => {
+    if (path.endsWith('/screenshot')) { trace.push('screenshot'); return value(''); }
+    if (path.endsWith('/context')) {
+      if (tapped && mode === '99') { contexts += 1; clock.elapsed += 11; }
+      return value(null);
+    }
+    if (path.endsWith('/click')) { tapped = true; trace.push('click'); return value(null); }
+    if (body.script === 'mobile: queryAppState') {
+      if (mode === '99') {
+        const web = body.args.bundleId === 'com.apple.webapp';
+        trace.push(web ? '1' : '4');
+        if (!web) rounds += 1;
+        return value(web ? 1 : 4);
+      }
+      if (mode === 'failure') return Response.json({ value: { error: 'unknown error', message: 'synthetic provider refusal' } }, { status: 500 });
+      if (mode === 'driver-fatal') {
+        const response = new Response(null);
+        response.text = async () => { throw new TypeError('synthetic body interrupted'); };
+        return response;
+      }
+      return value(4);
+    }
+    if (path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert', message: 'No alert' } }, { status: 404 });
+    if (path.endsWith('/element/springboard-root/elements')) return value([element('springboard-root')]);
+    if (body.script === 'mobile: activeAppInfo') { trace.push('foreground'); return value({ bundleId: 'com.apple.webapp', pid: 42 }); }
+    if (body.script === 'mobile: getContexts') {
+      assert.equal((a.platform as any).launchObservation.queryEligible, false);
+      trace.push('attachment');
+      return value([published]);
+    }
+    if (path.endsWith('/url')) return value(`${origin}/`);
+    if (body.script?.startsWith('return {')) return value({ origin, standalone: true, applicationInitialized: true });
+    throw new Error('unexpected receipt launch command');
+  }, clock.mono, false);
+  const internal = a.platform as any;
+  internal.udid = receiptUdid;
+  internal.launchObservation = new IOSLaunchObservation(clock);
+  internal.observeCurrentNativeForeground = async () => 'com.apple.springboard';
+  internal.setNativeObservationTarget = async () => undefined;
+  internal.ensureSpringBoardForeground = async () => undefined;
+  internal.observeHomeIcon = async () => {
+    if (mode === 'unrelated') throw new Error('synthetic unrelated preparation failure');
+    return { state: 'ready', icon: 'icon', page: { current: 1, total: 1, raw: 'Page 1 of 1' } };
+  };
+  internal.waitForHomeIconReadiness = async (observation: unknown) => observation;
+  const native: string[][] = [];
+  internal.diagnosticCommand = async (_binary: string, argv: string[]) => { trace.push('native'); native.push(argv); return ''; };
+  const writes: Array<{ path: string; text: string; options: unknown }> = [];
+  internal.launchMkdir = async () => { trace.push('mkdir'); };
+  internal.launchWrite = async (path: string, text: string, options: unknown) => { trace.push('write'); writes.push({ path, text, options }); };
+  const child = new ReceiptChild();
+  let queries = 0;
+  let collect: () => void = () => { child.stdout.emit('data', Buffer.from(receiptLoad())); child.close(); };
+  internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => {
+    trace.push('collector');
+    return receiptSettled(collectIOSLaunchReceipt(udid, failure, fixture, { ...hooks, clock, spawn: () => {
+      queries += 1;
+      queueMicrotask(() => { child.emit('spawn'); collect(); });
+      return child as unknown as ChildProcess;
+    } }), clock);
+  };
+  const marker = join(a.outputDir, 'synthetic-receipt-ownership');
+  await writeFile(marker, `ios:${receiptUdid}\n`);
+  const launch = async () => {
+    const previousMarker = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    const previousWait = PhaseBudget.prototype.wait;
+    process.env.MOBILE_DEVICE_OWNERSHIP_FILE = marker;
+    PhaseBudget.prototype.wait = async function (ms: number) {
+      if (mode !== '99') return;
+      if (!tapped) return;
+      clock.elapsed += ms;
+      if (rounds === 99) clock.elapsed = 29_247;
+    };
+    try { await a.platform.launchInstalledApp(); }
+    finally {
+      PhaseBudget.prototype.wait = previousWait;
+      if (previousMarker === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+      else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousMarker;
+    }
+  };
+  return { ...a, internal, clock, trace, native, writes, child, launch, queries: () => queries, rounds: () => rounds, contexts: () => contexts,
+    setMode: (next: ReceiptLaunchMode) => { mode = next; tapped = false; }, collect: (callback: () => void) => { collect = callback; } };
+}
+
+const receiptInvalidOrigin = () => receiptLine(`Web Clip with identifier '${receiptClip}', script from origin <WKSecurityOrigin: 0x1234; protocol = https; host = 999.999.999.999; port = 0> updated app badge count to 0`, 'com.apple.mobilesafari', 'WebPush');
+function receiptFaultChunk(child: ReceiptChild) {
+  const prefix = receiptLoad() + receiptInvalidOrigin();
+  const fault = receiptLoad('CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC');
+  const tail = 'https://synthetic:SYNTHETIC_FAULT_SECRET@secret.invalid/private?key=SYNTHETIC_FAULT_SECRET\n';
+  const chunk = Buffer.from(prefix + fault + tail);
+  const stringify = JSON.stringify;
+  JSON.stringify = ((record: any) => {
+    if (record?.webClip === 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC') throw Object.assign(new Error('SYNTHETIC_FAULT_SECRET'), { path: tail, cause: new Error(tail) });
+    return stringify(record);
+  }) as typeof JSON.stringify;
+  try { child.stdout.emit('data', chunk); }
+  finally { JSON.stringify = stringify; }
+  return { received: chunk.byteLength, retained: Buffer.byteLength(prefix + fault), discarded: Buffer.byteLength(tail) };
+}
+
+test('SM55 receipt ordinary delayed writes stay owned and frozen on reentry', async () => {
+  const a = await receiptCaptureAdapter('delayed');
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const writing = new Promise<void>(resolve => { started = resolve; });
+  a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+    a.writes.push({ path, text, options });
+    if (a.writes.length === 1) { started(); await pending; }
+  };
+  const first = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('failure'), first);
+  await writing;
+  const frozen = a.internal.launchReceipt;
+  const payload = frozen.receiptText;
+  assert.ok(Object.isFrozen(frozen.receipt.flags));
+  let settled = false;
+  void first.then(() => { settled = true; }, () => { settled = true; });
+  assert.equal(a.platform.captureSanitizedEvidence('candidate'), first);
+  a.clock.advance(25_000);
+  a.child.stdout.emit('data', Buffer.from(receiptLoad('CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC')));
+  a.child.emit('error', { code: 'ENOENT', message: 'late-secret' });
+  a.child.close();
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(a.internal.launchPersistence.events.state, 'pending');
+  assert.equal(a.internal.launchReceipt, frozen);
+  assert.equal(frozen.receiptText, payload);
+  assert.equal(a.requests.some(request => request.path.endsWith('/screenshot')), false);
+  release();
+  await first;
+  assert.equal(a.queries(), 1);
+  assert.equal(a.writes.length, 2);
+  assert.equal(a.internal.launchPersistence.events.elapsedMs, 25_000);
+  assert.equal(a.internal.launchPersistence.receipt.state, 'fulfilled');
+  assert.equal(JSON.parse(a.writes[1].text).persistenceCompletion, 'unavailable-pre-write');
+  assert.deepEqual(a.writes.map(write => write.path.split('/').at(-1)), ['ios-launch-owner-events.jsonl', 'ios-launch-receipt.json']);
+  assert.ok(a.writes.every(write => JSON.stringify(write.options) === JSON.stringify({ flag: 'wx', mode: 0o600 })));
+  assert.equal(a.native.some(argv => argv.includes('log')), false);
+  assert.equal(a.native.length, 2);
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.writes.length, 2);
+});
+
+test('ordinary failure evidence includes the SpringBoard, CoreSimulatorBridge and lsd simulator log', async () => {
+  const a = await receiptCaptureAdapter('springboard-log');
+  a.internal.launchObservation = new IOSLaunchObservation(a.clock);
+  await a.platform.captureSanitizedEvidence('failure');
+  const springboard = a.native.find(argv => argv.at(-1) === 'process == "SpringBoard" OR process == "CoreSimulatorBridge" OR process == "lsd"');
+  assert.deepEqual(springboard?.slice(0, 9), ['simctl', 'spawn', receiptUdid, 'log', 'show', '--last', '10m', '--style', 'compact']);
+  assert.equal(a.native.filter(argv => argv.includes('log')).length, 3);
+  assert.equal(a.writes.length, 0);
+});
+
+test('ordinary failure evidence saves one bounded native hierarchy and records hierarchy errors without failing', async () => {
+  const source = '<?xml version="1.0" encoding="UTF-8"?><AppiumAUT><XCUIElementTypeApplication name="Safari"/></AppiumAUT>';
+  for (const mode of ['saved', 'missing', 'blocked'] as const) {
+    const a = await adapter(`failure-hierarchy-${mode}`, ({ path }) => {
+      if (path.endsWith('/screenshot')) return value('');
+      if (path.endsWith('/source')) return mode === 'saved' ? value(source) : missing();
+      throw new Error(`unexpected failure evidence command ${path}`);
+    });
+    const internal = a.platform as any;
+    internal.diagnosticCommand = async () => '';
+    internal.nativeDiagnosticsBlocked = mode === 'blocked';
+    await a.platform.captureSanitizedEvidence('failure');
+    const sources = a.driver.snapshot().commands.filter((command) => command.path.endsWith('/source'));
+    assert.equal(sources.length, mode === 'blocked' ? 0 : 1, mode);
+    if (mode !== 'blocked') assert.equal(sources[0].timeoutMs, 8_000);
+    const saved = await readFile(join(a.outputDir, 'failure-hierarchy.xml'), 'utf8').catch(() => undefined);
+    assert.equal(saved, mode === 'saved' ? source : undefined, mode);
+    const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
+    assert.equal(JSON.stringify(events).includes('"operation":"hierarchy"'), mode === 'missing', mode);
+  }
+});
+
+for (const state of ['firstFatal-only', 'unusable-only'] as const) {
+  test(`evidence quarantine latches ${state} across paired and candidate captures`, async () => {
+    let screenshotAttempts = 0;
+    const a = await adapter(`evidence-quarantine-${state}`, ({ path }) => {
+      if (path.endsWith('/screenshot')) { screenshotAttempts += 1; return value(''); }
+      throw new Error(`unexpected quarantined request ${path}`);
+    });
+    if (state === 'firstFatal-only') {
+      (a.driver as any).firstFatal = { code: 'APPIUM_TIMEOUT', path: '/elements', method: 'POST', at: Date.now(), detail: 'fixture timeout' };
+    } else {
+      (a.driver as any).unusable = true;
+    }
+    let nativeAttempts = 0;
+    (a.platform as any).diagnosticCommand = async () => { nativeAttempts += 1; return ''; };
+    await a.platform.captureSanitizedEvidence('paired');
+    await a.platform.captureSanitizedEvidence('candidate');
+    assert.equal(screenshotAttempts, 0);
+    assert.equal(nativeAttempts, 0);
+    assert.equal(a.requests.length, 1, 'quarantine must not issue another Appium request');
+    const evidence = JSON.parse(await readFile(join(a.outputDir, 'candidate-appium.json'), 'utf8'));
+    assert.equal(evidence.nativeDiagnosticsBlocked, true);
+    assert.equal(evidence.driver.unusable, state === 'unusable-only');
+    assert.equal(evidence.driver.firstFatal?.code, state === 'firstFatal-only' ? 'APPIUM_TIMEOUT' : undefined);
+  });
+}
+
+test('fatal screenshot quarantine skips hierarchy and every later native command', async () => {
+  const a = await adapter('evidence-fatal-screenshot', ({ path }) => {
+    if (path.endsWith('/screenshot')) {
+      const response = new Response(null);
+      response.text = async () => { throw new TypeError('fixture screenshot body interrupted'); };
+      return response;
+    }
+    if (path.endsWith('/source')) return value('<AppiumAUT/>');
+    throw new Error(`unexpected screenshot-quarantine request ${path}`);
+  });
+  let screenshotCalls = 0;
+  let pageSourceCalls = 0;
+  const screenshot = a.driver.screenshot.bind(a.driver);
+  const pageSource = a.driver.pageSource.bind(a.driver);
+  (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
+  (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
+  const native: string[][] = [];
+  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.requests.filter(request => request.path.endsWith('/screenshot')).length, 1);
+  assert.equal(a.requests.filter(request => request.path.endsWith('/source')).length, 0);
+  assert.equal(screenshotCalls, 1);
+  assert.equal(pageSourceCalls, 0);
+  assert.deepEqual(native, []);
+  const first = a.driver.snapshot().firstFatal;
+  assert.equal(first?.code, 'APPIUM_INTERRUPTED');
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+});
+
+test('fatal hierarchy quarantine skips every later native command', async () => {
+  const a = await adapter('evidence-fatal-hierarchy', ({ path }) => {
+    if (path.endsWith('/screenshot')) return value('');
+    if (path.endsWith('/source')) {
+      const response = new Response(null);
+      response.text = async () => { throw new TypeError('fixture hierarchy body interrupted'); };
+      return response;
+    }
+    throw new Error(`unexpected hierarchy-quarantine request ${path}`);
+  });
+  const native: string[][] = [];
+  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.requests.filter(request => request.path.endsWith('/screenshot')).length, 1);
+  assert.equal(a.requests.filter(request => request.path.endsWith('/source')).length, 1);
+  assert.deepEqual(native, []);
+  const first = a.driver.snapshot().firstFatal;
+  assert.equal(first?.code, 'APPIUM_INTERRUPTED');
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+});
+
+test('fatal driver preserves an eligible launch receipt offline without collector spawn', async () => {
+  const a = await receiptCaptureAdapter('fatal-eligible-offline');
+  (a.driver as any).firstFatal = { code: 'APPIUM_TIMEOUT', path: '/elements', method: 'POST', at: Date.now(), detail: 'fixture timeout' };
+  assert.equal(a.internal.launchObservation.queryEligible, true);
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('candidate'), capture);
+  await capture;
+  assert.equal(a.queries(), 0);
+  assert.equal(a.requests.length, 1);
+  assert.deepEqual(a.native, []);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  const receipt = JSON.parse(a.writes.at(-1)!.text);
+  assert.equal(receipt.outcome, 'not-eligible');
+  assert.equal(receipt.query, null);
+  assert.equal(receipt.process.spawnAttempted, false);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+});
+
+test('fatal failure capture without a launch failure omits receipt and all live evidence', async () => {
+  const a = await adapter('evidence-fatal-no-launch-failure', ({ path }) => {
+    if (path.endsWith('/screenshot') || path.endsWith('/source')) return value('unexpected live evidence');
+    throw new Error(`unexpected fatal evidence request ${path}`);
+  });
+  const observation = (a.platform as any).launchObservation as IOSLaunchObservation;
+  Object.defineProperty(observation, 'queryEligible', { configurable: true, get: () => true });
+  assert.equal(observation.failure, undefined);
+  assert.equal(observation.queryEligible, true);
+  const fatal = { code: 'APPIUM_TIMEOUT', path: '/elements', method: 'POST', at: Date.now(), detail: 'fixture timeout' };
+  (a.driver as any).firstFatal = fatal;
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  let collectorCalls = 0;
+  let spawnAttempts = 0;
+  (a.platform as any).launchCollector = (_udid: string, _failure: IOSLaunchFailure, _fixture: string, hooks: IOSReceiptHooks) => {
+    collectorCalls += 1;
+    if (hooks.queryEligible) spawnAttempts += 1;
+    return Promise.reject(new Error('unexpected collector invocation'));
+  };
+  let screenshotCalls = 0;
+  let pageSourceCalls = 0;
+  const screenshot = a.driver.screenshot.bind(a.driver);
+  const pageSource = a.driver.pageSource.bind(a.driver);
+  (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
+  (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
+  let nativeCalls = 0;
+  (a.platform as any).diagnosticCommand = async () => { nativeCalls += 1; return ''; };
+
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('failure'), capture);
+  await capture;
+  assert.equal(collectorCalls, 0);
+  assert.equal(spawnAttempts, 0);
+  assert.equal(screenshotCalls, 0);
+  assert.equal(pageSourceCalls, 0);
+  assert.equal(nativeCalls, 0);
+  assert.equal(a.requests.length, 1);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.equal(Object.hasOwn(persisted, 'launchReceipt'), false);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+  assert.equal(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8').then(() => true), true);
+  for (const filename of ['ios-launch-receipt.json', 'ios-launch-owner-events.jsonl', 'failure.png', 'failure-hierarchy.xml']) {
+    assert.equal(await readFile(join(a.outputDir, filename), 'utf8').then(() => true).catch(() => false), false, filename);
+  }
+});
+
+test('iOS 27 confirmation Add is located by its visible label inside the Add to Home Screen bar only', async () => {
+  requireXmlLint();
+  const { hypotheticalConfirmation } = await shareFixtures();
+  const labelled = `<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication name="Safari" bundleId="com.apple.mobilesafari" visible="true">
+    <XCUIElementTypeWindow visible="true">
+      <XCUIElementTypeToolbar visible="true">
+        <XCUIElementTypeButton name="Add" label="Add" enabled="true" visible="true"/>
+      </XCUIElementTypeToolbar>
+      <XCUIElementTypeOther visible="true">
+        <XCUIElementTypeNavigationBar name="WebClipNavigationBar" visible="true">
+          <XCUIElementTypeButton name="CancelButton" label="Cancel" enabled="true" visible="true"/>
+          <XCUIElementTypeStaticText name="Add to Home Screen" label="Add to Home Screen" value="Add to Home Screen" visible="true"/>
+          <XCUIElementTypeButton name="AddButton" label="Add" enabled="true" visible="true"/>
+        </XCUIElementTypeNavigationBar>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeWindow>
+  </XCUIElementTypeApplication>
+</AppiumAUT>
+`;
+  const previous = "//XCUIElementTypeNavigationBar[@name='Add to Home Screen' and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add']";
+  assert.equal(xpathCount(labelled, previous), 0, 'the previous name-only selector misses a label-only Add');
+  assert.equal(xpathCount(labelled, IOS_CONFIRMATION_ADD_XPATH), 1);
+  assert.equal(xpathCount(hypotheticalConfirmation, IOS_CONFIRMATION_ADD_XPATH), 1);
+  for (const [name, xml] of [
+    ['another sheet title', labelled.replaceAll('"Add to Home Screen"', '"Add Bookmark"')],
+    ['hidden bar', labelled.replace('name="WebClipNavigationBar" visible="true"', 'name="WebClipNavigationBar" visible="false"')],
+    ['hidden container', labelled.replace('<XCUIElementTypeOther visible="true">', '<XCUIElementTypeOther visible="false">')],
+    ['another button label', labelled.replace('name="AddButton" label="Add"', 'name="AddButton" label="Add Bookmark"')],
+    ['title outside the bar', labelled.replace(/ *<XCUIElementTypeStaticText name="Add to Home Screen"[^\n]*\n/u, '')
+      .replace('<XCUIElementTypeToolbar visible="true">', '<XCUIElementTypeToolbar visible="true">\n        <XCUIElementTypeStaticText label="Add to Home Screen" visible="true"/>')],
+  ] as [string, string][]) assert.equal(xpathCount(xml, IOS_CONFIRMATION_ADD_XPATH), 0, name);
+});
+
+test('SM55 receipt rejected partial writes preserve first fatal without retry', async () => {
+  for (const rejected of [1, 2]) {
+    const a = await receiptLaunchAdapter(`reject-${rejected}`);
+    let fatal: unknown;
+    await assert.rejects(a.launch, error => { fatal = error; return true; });
+    const failure = a.internal.launchObservation.failure;
+    const driverFatal = a.driver.snapshot().firstFatal;
+    assert.equal(failure.eligible, true);
+    a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+      a.writes.push({ path, text, options });
+      if (a.writes.length === rejected) { a.clock.advance(25_000); throw Object.assign(new Error('synthetic-private-path'), { code: 'ENOSPC', cause: new Error('secret') }); }
+    };
+    await Promise.all([a.platform.captureSanitizedEvidence('failure'), a.platform.captureSanitizedEvidence('failure')]);
+    assert.equal(a.queries(), 1);
+    assert.equal(a.writes.length, rejected);
+    assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    assert.equal(a.internal.launchObservation.failure, failure);
+    assert.equal(a.driver.snapshot().firstFatal, driverFatal);
+    assert.equal(a.clock.timers.size, 0);
+    const status = a.platform.evidenceSnapshot().launchPersistence as any;
+    assert.equal(status[rejected === 1 ? 'events' : 'receipt'].error, 'ENOSPC');
+    assert.equal(JSON.stringify(status).includes('synthetic-private'), false);
+    assert.equal(a.native.length, 0);
+    await a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.writes.length, rejected);
+  }
+});
+
+test('SM55 receipt pending rejection and directory refusal are owned once', async () => {
+  const a = await receiptCaptureAdapter('pending-rejection');
+  let reject!: (error: unknown) => void;
+  let started!: () => void;
+  const pending = new Promise<void>((_resolve, rejectWrite) => { reject = rejectWrite; });
+  const writing = new Promise<void>(resolve => { started = resolve; });
+  a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+    a.writes.push({ path, text, options }); started(); await pending;
+  };
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  await writing;
+  const frozen = a.internal.launchReceipt.receiptText;
+  a.clock.advance(30_000);
+  assert.equal(a.platform.captureSanitizedEvidence('paired'), capture);
+  assert.equal(a.internal.launchPersistence.events.state, 'pending');
+  reject(Object.assign(new Error('synthetic-secret-path'), { code: 'EIO', cause: new Error('secret') }));
+  await capture;
+  assert.equal(a.internal.launchPersistence.events.state, 'rejected');
+  assert.equal(a.internal.launchPersistence.events.elapsedMs, 30_000);
+  assert.equal(a.platform.evidenceSnapshot().launchCollectionAndPersistenceElapsedMs, 30_000);
+  assert.equal(a.internal.launchReceipt.receiptText, frozen);
+  assert.equal(a.writes.length, 1);
+  assert.equal(a.queries(), 1);
+  assert.equal(a.native.length, 0);
+  assert.equal(JSON.stringify(a.platform.evidenceSnapshot().launchPersistence).includes('synthetic-secret'), false);
+  const b = await receiptCaptureAdapter('directory-refusal');
+  b.internal.launchMkdir = async () => { throw { code: 'EEXIST', path: 'synthetic-secret' }; };
+  await b.platform.captureSanitizedEvidence('failure');
+  await b.platform.captureSanitizedEvidence('failure');
+  assert.equal(b.queries(), 1);
+  assert.equal(b.writes.length, 0);
+  assert.equal(b.internal.launchPersistence.directory.error, 'EEXIST');
+  const c = await receiptCaptureAdapter('collector-refusal');
+  let attempts = 0;
+  c.internal.launchCollector = async () => { attempts += 1; throw new Error('synthetic-private-callback'); };
+  await c.platform.captureSanitizedEvidence('failure');
+  await c.platform.captureSanitizedEvidence('failure');
+  assert.equal(attempts, 1);
+  assert.equal(c.writes.length, 0);
+  assert.equal(c.native.length, 0);
+  assert.equal(c.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  assert.equal(JSON.stringify(c.platform.evidenceSnapshot()).includes('synthetic-private-callback'), false);
+});
+
+test('SM55 receipt unconfirmed stop fences all native diagnostics before persistence', async () => {
+  for (const mode of ['deadline', 'callback-error', 'abort-inside-spawn']) {
+    const a = await receiptLaunchAdapter(`unconfirmed-${mode}`);
+    let fatal: unknown;
+    await assert.rejects(a.launch, error => { fatal = error; return true; });
+    const count = a.requests.length;
+    a.collect(() => {
+      if (mode === 'callback-error') a.child.emit('error', { code: 'EIO', message: 'synthetic-private-error' });
+      a.clock.advance(mode === 'deadline' ? 19_000 : 2_000);
+    });
+    if (mode === 'abort-inside-spawn') {
+      const controller = new AbortController();
+      a.internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => receiptSettled(collectIOSLaunchReceipt(udid, failure, fixture, {
+        ...hooks, signal: controller.signal, spawn: () => {
+          controller.abort();
+          queueMicrotask(() => a.clock.advance(2_000));
+          return a.child as unknown as ChildProcess;
+        },
+      }), a.clock);
+    }
+    let release!: () => void;
+    let writing = false;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+      a.writes.push({ path, text, options });
+      if (a.writes.length === 1) { writing = true; await pending; }
+    };
+    const first = a.platform.captureSanitizedEvidence('failure');
     try {
-      const outcome = await body();
+      for (let turn = 0; turn < 100 && !writing; turn++) await Promise.resolve();
+      assert.equal(writing, true, 'bounded collector must reach the held ordinary write');
+      assert.equal(a.internal.launchPersistence.events.state, 'pending');
+      assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+      assert.equal(a.platform.captureSanitizedEvidence('candidate'), first);
+      assert.equal(a.platform.captureSanitizedEvidence('failure'), first);
+      const frozen = a.internal.launchReceipt.receiptText;
+      a.clock.advance(25_000);
+      a.child.emit('spawn');
+      a.child.close();
+      a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+      assert.equal(a.internal.launchReceipt.receiptText, frozen);
+      assert.equal(a.native.length, 0);
+      assert.equal(a.requests.length, count);
+      assert.equal(a.writes.length, 1);
+      assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    } finally { release(); await first; }
+    assert.equal(a.native.length, 0);
+    assert.equal(a.requests.length, count);
+    assert.equal(a.writes.length, 2);
+    assert.equal(a.clock.timers.size, 0);
+    assert.deepEqual(a.child.signals, mode === 'callback-error' ? [] : ['SIGTERM', 'SIGKILL']);
+  }
+});
+
+test('SM55 receipt ineligible failure omits broad fallback and success adds no query', async () => {
+  const a = await receiptCaptureAdapter('ineligible');
+  a.internal.launchObservation.failure = { ...receiptFailure(a.clock), eligible: false };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.queries(), 0);
+  assert.equal(a.internal.launchReceipt.receipt.outcome, 'not-eligible');
+  assert.equal(a.native.some(argv => argv.includes('log')), false);
+  const b = await receiptLaunchAdapter('success', 'success');
+  await b.launch();
+  assert.equal(b.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(b.internal.launchObservation.queryEligible, false);
+  assert.equal(b.internal.launchObservation.failure, undefined);
+  await b.platform.captureSanitizedEvidence('paired');
+  await b.platform.captureSanitizedEvidence('candidate');
+  assert.equal(b.queries(), 0);
+  assert.equal(b.writes.length, 0);
+  assert.equal(b.trace.includes('collector'), false);
+  assert.equal(b.native.length, 8, 'existing checkpoint commands only');
+  b.setMode('unrelated');
+  await assert.rejects(b.launch);
+  await b.platform.captureSanitizedEvidence('failure');
+  assert.equal(b.queries(), 0);
+  assert.equal(b.trace.includes('collector'), false);
+  assert.equal(b.internal.launchObservation.failure, undefined);
+  for (const later of ['failure', 'success', 'success-unrelated']) {
+    const c = await receiptLaunchAdapter(`revoked-${later}`);
+    let fatal: unknown;
+    await assert.rejects(c.launch, error => { fatal = error; return true; });
+    const failure = c.internal.launchObservation.failure;
+    const facts = JSON.stringify(failure);
+    assert.equal(failure.eligible, true);
+    assert.equal(c.internal.launchObservation.queryEligible, true);
+    c.setMode(later === 'failure' ? 'failure' : 'success');
+    if (later === 'failure') await assert.rejects(c.launch, error => error !== fatal);
+    else await c.launch();
+    assert.equal(c.internal.launchObservation.queryEligible, false);
+    if (later === 'success-unrelated') {
+      c.setMode('unrelated');
+      await assert.rejects(c.launch, error => error !== fatal);
+    }
+    const first = c.platform.captureSanitizedEvidence('failure');
+    assert.equal(c.platform.captureSanitizedEvidence('candidate'), first);
+    await first;
+    assert.equal(c.queries(), 0);
+    assert.equal(c.internal.launchReceipt.receipt.outcome, 'not-eligible');
+    assert.equal(c.internal.launchReceipt.receipt.query, null);
+    assert.equal(c.internal.launchObservation.failure, failure);
+    assert.equal(JSON.stringify(failure), facts);
+    assert.equal(c.internal.launchObservation.originalFatal, fatal);
+    assert.equal(c.native.some(argv => argv.includes('log')), false);
+    assert.equal(c.native.length, 2);
+    assert.equal(c.trace.filter(event => event === 'collector').length, 1);
+    assert.equal(c.clock.timers.size, 0);
+  }
+  const d = await receiptLaunchAdapter('driver-fatal', 'driver-fatal');
+  let fatal: unknown;
+  await assert.rejects(d.launch, error => { fatal = error; return /APPIUM_INTERRUPTED/u.test(String(error)); });
+  const driverFatal = d.driver.snapshot().firstFatal;
+  assert.equal(driverFatal?.code, 'APPIUM_INTERRUPTED');
+  await d.platform.captureSanitizedEvidence('failure');
+  assert.equal(d.queries(), 0);
+  assert.equal(d.internal.launchObservation.originalFatal, fatal);
+  assert.equal(d.driver.snapshot().firstFatal, driverFatal);
+  assert.equal(d.driver.snapshot().unusable, true);
+  assert.equal(d.native.some(argv => argv.includes('log')), false);
+  assert.equal(d.clock.timers.size, 0);
+});
+
+test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering', async () => {
+  for (const outcome of ['zero', 'nonzero', 'timeout', 'cap', 'late', 'projection-fault']) {
+    const a = await receiptLaunchAdapter(`provider-${outcome}`, '99');
+    let fatal: unknown;
+    await assert.rejects(a.launch, error => { fatal = error; return /APPIUM_COMMAND_NOT_ADMITTED/u.test(String(error)); });
+    assert.equal(a.rounds(), 99);
+    assert.equal(a.contexts(), 100);
+    const launchTrace = ['click', ...Array.from({ length: 99 }, () => ['1', '4']).flat()];
+    assert.deepEqual(a.trace, launchTrace);
+    const commands = a.driver.snapshot().commands;
+    assert.equal(commands.at(-2)!.timeoutMs, 753);
+    assert.equal(commands.at(-1)!.timeoutMs, 742);
+    assert.equal(commands.at(-1)!.timing!.sent, false);
+    const failure = a.internal.launchObservation.failure;
+    const driverFatal = a.driver.snapshot().firstFatal;
+    const facts = JSON.stringify(failure);
+    const count = a.requests.length;
+    assert.equal(failure.eligible, true);
+    assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+    assert.equal(a.requests.filter(request => request.path.endsWith('/click')).length, 1);
+    assert.equal(a.budget.recoveryCount, 0);
+    assert.equal(a.requests.some(request => request.path.endsWith('/appium/settings')), false);
+    let faultCounts: ReturnType<typeof receiptFaultChunk> | undefined;
+    a.collect(() => {
+      if (outcome === 'projection-fault') {
+        faultCounts = receiptFaultChunk(a.child);
+        a.clock.advance(2_000);
+        return;
+      }
+      if (outcome === 'timeout') { a.clock.advance(19_000); return; }
+      if (outcome === 'cap') a.child.stdout.emit('data', Buffer.alloc(IOS_LAUNCH_LIMITS.stdoutBytes + 1));
+      else a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+      a.child.close(outcome === 'nonzero' ? 64 : 0);
+    });
+    const capture = a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.platform.captureSanitizedEvidence('candidate'), capture);
+    await capture;
+    const result = a.internal.launchReceipt;
+    const frozen = result.receiptText;
+    if (outcome === 'late') {
+      a.child.stdout.emit('data', Buffer.from(receiptLoad('BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB')));
+      a.child.close();
+      a.clock.advance(25_000);
+    }
+    assert.equal(a.queries(), 1);
+    assert.equal(a.writes.length, 2);
+    assert.equal(result.receipt.failure, failure);
+    assert.equal(result.receiptText, frozen);
+    assert.equal(JSON.stringify(failure), facts);
+    assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    assert.equal(a.driver.snapshot().firstFatal, driverFatal);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+    assert.equal(a.budget.recoveryCount, 0);
+    assert.equal(a.requests.slice(count).every(request => request.path.endsWith('/screenshot')), true);
+    assert.equal(a.native.some(argv => argv.includes('log')), false);
+    const blocked = outcome === 'timeout' || outcome === 'projection-fault';
+    assert.deepEqual(a.trace.slice(launchTrace.length), blocked
+      ? ['collector', 'mkdir', 'write', 'write']
+      : ['collector', 'mkdir', 'write', 'write', 'screenshot', 'native', 'native']);
+    assert.equal(a.requests.length, count + (blocked ? 0 : 1));
+    assert.equal(result.receipt.outcome, outcome === 'zero' || outcome === 'late' ? 'public-projection-unreviewed' : 'incomplete');
+    if (faultCounts) {
+      for (const key of ['received', 'retained', 'discarded'] as const) assert.equal(result.receipt.stdout[key], faultCounts[key]);
+      assert.equal(result.receipt.stdout.received, result.receipt.stdout.retained + result.receipt.stdout.discarded);
+      assert.equal(result.receipt.stdout.withheld, 2);
+      assert.equal(result.receipt.eventCount, 1);
+      assert.equal(result.receipt.flags.handlerFault, true);
+      assert.equal((result.receiptText + result.eventsText).includes('SYNTHETIC_FAULT_SECRET'), false);
+    }
+    await a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.writes.length, 2);
+    assert.equal(a.clock.timers.size, 0);
+  }
+});
+
+async function runIsolatedHierarchyCase(name: string): Promise<void> {
+  const observerDirectory = await mkdtemp(join(tmpdir(), 'herdr-ios-hierarchy-'));
+  const observerPath = join(observerDirectory, 'supervisor.jsonl');
+  const observerFD = openSync(observerPath, 'wx', 0o600);
+  const observerSupervisor = createWriteStream('', { fd: observerFD, autoClose: false });
+  const runStartedAt = performance.now();
+  const boundaries: Array<{ phase: string; startedAtMs: number; durationMs?: number; outcome?: string }> = [];
+  const timeBoundary = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = performance.now();
+    const boundary: { phase: string; startedAtMs: number; durationMs?: number; outcome?: string } = {
+      phase, startedAtMs: Math.floor(startedAt - runStartedAt),
+    };
+    boundaries.push(boundary);
+    try {
+      const value = await operation();
+      boundary.durationMs = Math.floor(performance.now() - startedAt);
+      boundary.outcome = 'completed';
+      return value;
+    } catch (error) {
+      boundary.durationMs = Math.floor(performance.now() - startedAt);
+      boundary.outcome = 'failed';
+      throw error;
+    }
+  };
+  let owned: ReturnType<typeof spawnOwnedProcess> | undefined;
+  let output = '';
+  let diagnostic = '';
+  let binding: Awaited<ReturnType<typeof spawnOwnedProcess>['started']> | undefined;
+  let exit: Awaited<ReturnType<typeof spawnOwnedProcess>['targetExit']> | undefined;
+  let close: Awaited<ReturnType<typeof spawnOwnedProcess>['targetClose']> | undefined;
+  let retirement: Awaited<ReturnType<typeof spawnOwnedProcess>['retirement']> | undefined;
+  let lifecycleFailure: unknown;
+  let retirementFailure: unknown;
+  try {
+    owned = spawnOwnedProcess(process.execPath, ['--no-env-file', fileURLToPath(import.meta.url), '--case', name], {
+      timeoutMs: 70_000, cleanupReservationMs: 5_000, observerSupervisor,
+    });
+    owned.stdout.on('data', (chunk: Buffer) => { output = (output + chunk.toString('utf8')).slice(-8_000); });
+    owned.stderr.on('data', (chunk: Buffer) => { diagnostic = (diagnostic + chunk.toString('utf8')).slice(-8_000); });
+    await timeBoundary('ready', () => owned!.ready);
+    binding = await timeBoundary('started', async () => { owned!.start(); return owned!.started; });
+    exit = await timeBoundary('targetExit', () => owned!.targetExit);
+    close = await timeBoundary('targetClose', () => owned!.targetClose);
+  } catch (error) {
+    lifecycleFailure = error;
+  }
+  if (owned) {
+    try {
+      retirement = await timeBoundary('retire', () => owned!.retire('ios-hierarchy-fixture-complete'));
+    } catch (error) {
+      retirementFailure = error;
+      lifecycleFailure ||= error;
+    }
+  }
+  try {
+    await new Promise<void>(resolve => observerSupervisor.end(resolve));
+  } finally {
+    closeSync(observerFD);
+  }
+  const observerRecords = readFileSync(observerPath, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
+  });
+  const evidenceFields = ['targetExitObserved', 'targetCloseObserved', 'anchorExitObserved', 'anchorCloseObserved',
+    'groupAbsent', 'inputClosedObserved', 'stdoutNaturalEnd', 'stdoutCloseObserved', 'stderrNaturalEnd', 'stderrCloseObserved',
+    'targetStdoutNaturalEnd', 'targetStdoutCloseObserved', 'targetStderrNaturalEnd', 'targetStderrCloseObserved',
+    'managerStdoutNaturalEnd', 'managerStdoutCloseObserved', 'managerStderrNaturalEnd', 'managerStderrCloseObserved',
+    'supervisorStdoutFinished', 'supervisorStdoutCloseObserved', 'supervisorStderrFinished', 'supervisorStderrCloseObserved',
+    'targetDispatchRequested', 'targetProcessCreated', 'targetNoChildObserved', 'targetExecConfirmed',
+    'targetUnconfirmedCloseObserved', 'stopReason', 'firstFailure'];
+  const supervisorSummary = observerRecords.filter(record => ['supervisor-stopping', 'supervisor-retirement-ready',
+    'supervisor-retirement-unproved', 'supervisor-hard-deadline'].includes(String(record.type))).map(record => {
+    const evidence = record.evidence && typeof record.evidence === 'object' ? record.evidence as Record<string, unknown> : undefined;
+    return {
+      type: record.type,
+      reason: record.reason,
+      evidence: evidence && Object.fromEntries(evidenceFields.filter(key => key in evidence).map(key => [key, evidence[key]])),
+    };
+  });
+  const failureDetails = { name, failure: lifecycleFailure instanceof Error ? lifecycleFailure.message : String(lifecycleFailure || ''),
+    retirementFailure: retirementFailure instanceof Error ? retirementFailure.message : undefined,
+    boundaries, binding, exit, close, retirement, output, diagnostic, supervisor: supervisorSummary };
+  await rm(observerDirectory, { recursive: true, force: true });
+  if (lifecycleFailure) throw new Error(`iOS hierarchy fixture lifecycle failed: ${JSON.stringify(failureDetails)}`);
+  if (!owned || !retirement || !binding || exit?.code !== 0 || exit.signal || close?.code !== 0 || close.signal
+    || !retirement.targetExitObserved || !retirement.targetCloseObserved || !retirement.targetStdoutNaturalEnd
+    || !retirement.targetStderrNaturalEnd || !retirement.stdoutNaturalEnd || !retirement.stderrNaturalEnd
+    || !retirement.groupAbsent || !retirement.supervisorExitObserved || !retirement.supervisorCloseObserved
+    || retirement.supervisorExitCode !== 0 || retirement.supervisorSignal !== null || output || diagnostic) {
+    throw new Error(`iOS hierarchy fixture did not complete and retire: ${JSON.stringify(failureDetails)}`);
+  }
+}
+
+export const iosRegressionCases = stableTestIdentities('ios-inner', tests.map(([name]) => `iOS ${name}`));
+
+export async function runIOSRegressions(selectedIds?: readonly string[], honorEnvironmentFilter = true): Promise<void> {
+  let failures = 0;
+  let executedTests = 0;
+  const selected = selectedIds === undefined ? undefined : new Set(selectedIds);
+  const filter = honorEnvironmentFilter && process.env.IOS_TEST_FILTER
+    ? new RegExp(process.env.IOS_TEST_FILTER, 'u') : undefined;
+  for (const [index, [name, body]] of tests.entries()) {
+    if (selected && !selected.has(iosRegressionCases[index]!.id)) continue;
+    if (filter && !filter.test(name)) continue;
+    executedTests++;
+    try {
+      const outcome = name.startsWith('Plan13 hierarchy full install ')
+        ? await runIsolatedHierarchyCase(name) : await body();
       process.stdout.write(outcome ? `ok - iOS ${name} # SKIP ${outcome}\n` : `ok - iOS ${name}\n`);
     } catch (error) {
       failures += 1;
       process.stderr.write(`not ok - iOS ${name}: ${error instanceof Error ? error.stack : String(error)}\n`);
     }
   }
+  if (!executedTests) {
+    const reason = selected ? 'explicit iOS selection' : honorEnvironmentFilter && process.env.IOS_TEST_FILTER ? 'IOS_TEST_FILTER' : 'registered cases';
+    throw new Error(`iOS regressions: no cases matched ${reason}`);
+  }
   if (failures) throw new Error(`iOS regressions: ${failures} failures`);
 }
 
-if (import.meta.main) await runIOSRegressions();
+if (import.meta.main) {
+  if (process.argv[2] === '--case') {
+    const name = process.argv[3];
+    const selected = tests.find(([candidate]) => candidate === name && candidate.startsWith('Plan13 hierarchy full install '));
+    if (!selected) throw new Error(`unknown iOS hierarchy case: ${String(name)}`);
+    const outcome = await selected[1]();
+    if (outcome) throw new Error(`iOS hierarchy fixture skipped: ${outcome}`);
+  } else await runIOSRegressions();
+}

@@ -1,0 +1,19 @@
+{
+  "source": {
+    "runId": "40807328582",
+    "attempt": 1,
+    "stage": "device",
+    "sourceRunHeadSha": "f85dfdf3d6dd922b3b51804d60c9545e20f805d7"
+  },
+  "session": "initial Chrome session after certificate installation",
+  "status": 500,
+  "value": {
+    "error": "unknown error",
+    "message": "Error executing adbExec. Original error: 'adb -P 5037 -s emulator-5554 shell dumpsys package io.appium.uiautomator2.server' exited with code 1; Command output: adb: device offline\n"
+  },
+  "transportEvidence": [
+    "02:54:23.478 adbd: host-18: connection terminated: write failed",
+    "02:54:23.485 adbd: host-18: offline"
+  ],
+  "fixtureWebRequests": 0
+}

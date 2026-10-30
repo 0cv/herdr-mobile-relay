@@ -80,9 +80,8 @@ CANDIDATE_PATHS = (*FILES, QUALIFY_GATE)
 # A candidate is in scope when it contains every REQUIRED gate file (so a candidate
 # that lacks this gate is refused) and touches nothing outside ALLOWED. ALLOWED is
 # a frozen literal of explicit repo-relative paths (no globs, no directory
-# prefixes), exact at the reviewed snapshot: it equals the diff from SCOPE_BASE to
-# the candidate that introduced it, so it carries no speculative entries. A later
-# commit that touches a path outside ALLOWED must extend the scope deliberately.
+# prefixes). The integration adds only observed changed paths; listing a path is
+# not a review or qualification. A later new path must extend the scope deliberately.
 # The installed Tailscale source at 59eda0d adds 275 paths outside the earlier
 # BYO list. Pin that *exact sorted path set* separately: this is path provenance,
 # not a review or qualification of installed runtime behavior. No glob, prefix,
@@ -484,6 +483,461 @@ ALLOWED = (
     "internal/tailscalecli/development_isolation.go",
     "internal/tailscalecli/development_root.go",
     "internal/tailscalecli/development_root_test.go",
+    ".github/workflows/b2-source.yml",
+    ".github/workflows/tailscale-native-preflight.yml",
+    "tests/tailscale-package-browser.mjs",
+    "frontend/tests/unit/attention-runner.test.ts",
+    "tests/tailscale-package-browser.Dockerfile",
+    ".env.example",
+    ".github/actions/mobile-device-run/action.yml",
+    ".github/workflows/main-pr-source.yml",
+    ".github/workflows/mobile-ci.yml",
+    ".pi/prompts/changelog.md",
+    ".pi/prompts/learn.md",
+    ".pi/prompts/rmslop.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Dockerfile.gateway",
+    "cmd/fake-herdr/main.go",
+    "cmd/herdr-gateway/main.go",
+    "cmd/herdr-gateway/main_test.go",
+    "cmd/herdr-mobile-relay/command_test.go",
+    "cmd/herdr-mobile-relay/journal_integration_linux_test.go",
+    "contracts/fixtures/inbound/send_terminal_text.json",
+    "docs/conversation-activity.md",
+    "docs/gateway-self-hosting.md",
+    "docs/mobile-device-ci.md",
+    "frontend/bun.lock",
+    "frontend/eslint.config.js",
+    "frontend/package.json",
+    "frontend/playwright.attention.config.ts",
+    "frontend/playwright.config.ts",
+    "frontend/playwright.terminal-input.config.ts",
+    "frontend/public/manifest-loader.js",
+    "frontend/src/App.svelte",
+    "frontend/src/components/AgentInteraction.svelte",
+    "frontend/src/components/AttachmentProgress.svelte",
+    "frontend/src/components/ConversationHistory.svelte",
+    "frontend/src/components/ConversationMessage.svelte",
+    "frontend/src/components/ManualTerminalInput.svelte",
+    "frontend/src/components/PiIntegration.svelte",
+    "frontend/src/components/PromptComposer.svelte",
+    "frontend/src/components/TerminalInputMode.svelte",
+    "frontend/src/components/TerminalKeys.svelte",
+    "frontend/src/components/ui/KeyboardIcon.svelte",
+    "frontend/src/lib/action-policy.ts",
+    "frontend/src/lib/composer.ts",
+    "frontend/src/lib/conversation-cache.ts",
+    "frontend/src/lib/conversation-history.ts",
+    "frontend/src/lib/conversation-live.ts",
+    "frontend/src/lib/conversation-message-state.ts",
+    "frontend/src/lib/conversation.ts",
+    "frontend/src/lib/input-target-state.ts",
+    "frontend/src/lib/markdown.ts",
+    "frontend/src/lib/pi-prompt.svelte.ts",
+    "frontend/src/lib/prompt-drafts.ts",
+    "frontend/src/lib/reload-guard.ts",
+    "frontend/src/lib/router.ts",
+    "frontend/src/lib/terminal-draft-state.svelte.ts",
+    "frontend/src/lib/terminal-input-delivery.svelte.ts",
+    "frontend/src/lib/terminal-input-policy.ts",
+    "frontend/src/lib/terminal-input.ts",
+    "frontend/src/lib/transports/encrypted.ts",
+    "frontend/src/lib/transports/gateway.ts",
+    "frontend/src/lib/transports/path-manager.ts",
+    "frontend/src/lib/transports/types.ts",
+    "frontend/src/lib/transports/websocket.ts",
+    "frontend/src/lib/updates.ts",
+    "frontend/tests/browser/terminal-input.spec.ts",
+    "frontend/tests/setup.ts",
+    "frontend/tests/unit/adopted-components.test.ts",
+    "frontend/tests/unit/agent-route.test.ts",
+    "frontend/tests/unit/app-history-tools.test.ts",
+    "frontend/tests/unit/agent-view-components.test.ts",
+    "frontend/tests/unit/agent-view-preferences.test.ts",
+    "frontend/tests/unit/connection-lifecycle.test.ts",
+    "frontend/tests/unit/conversation-controls.test.ts",
+    "frontend/tests/unit/conversation-history.test.ts",
+    "frontend/tests/unit/conversation-live-component.test.ts",
+    "frontend/tests/unit/conversation-live.test.ts",
+    "frontend/tests/unit/conversation-message-state.test.ts",
+    "frontend/tests/unit/conversation-recent.test.ts",
+    "frontend/tests/unit/conversation-scroll.test.ts",
+    "frontend/tests/unit/conversation.test.ts",
+    "frontend/tests/unit/draft-privacy.test.ts",
+    "frontend/tests/unit/draft-scope-privacy.test.ts",
+    "frontend/tests/unit/draft-session-privacy.test.ts",
+    "frontend/tests/unit/extension-notices.test.ts",
+    "frontend/tests/unit/footer-removal.test.ts",
+    "frontend/tests/unit/input-target-state.test.ts",
+    "frontend/tests/unit/launch-feedback.test.ts",
+    "frontend/tests/unit/markdown-lists.test.ts",
+    "frontend/tests/unit/optional-kind.test.ts",
+    "frontend/tests/unit/phone-feedback-integration.test.ts",
+    "frontend/tests/unit/phone-feedback.test.ts",
+    "frontend/tests/unit/pi-integration.test.ts",
+    "frontend/tests/unit/pi-prompt.test.ts",
+    "frontend/tests/unit/prompt-drafts.test.ts",
+    "frontend/tests/unit/resize-session-default.test.ts",
+    "frontend/tests/unit/secret-input.test.ts",
+    "frontend/tests/unit/shared-composer.test.ts",
+    "frontend/tests/unit/terminal-input-delivery.test.ts",
+    "frontend/tests/unit/terminal-input.test.ts",
+    "frontend/tests/unit/terminal-keys.test.ts",
+    "frontend/tests/unit/terminal-scroll.test.ts",
+    "frontend/tests/unit/transports.test.ts",
+    "frontend/tests/unit/updates.test.ts",
+    "go.mod",
+    "go.sum",
+    "internal/app/audit_test.go",
+    "internal/app/conversation_content.go",
+    "internal/app/conversation_database_live.go",
+    "internal/app/conversation_database_loaded_test.go",
+    "internal/app/conversation_database_observer_test.go",
+    "internal/app/conversation_database_test.go",
+    "internal/app/conversation_kimi.go",
+    "internal/app/conversation_kimi_e2d_test.go",
+    "internal/app/conversation_kimi_identity_test.go",
+    "internal/app/conversation_kimi_source_test.go",
+    "internal/app/conversation_kimi_test.go",
+    "internal/app/conversation_live.go",
+    "internal/app/conversation_live_test.go",
+    "internal/app/conversation_native_fixture_test.go",
+    "internal/app/conversation_recorded_providers_test.go",
+    "internal/app/conversation_recorded_window.go",
+    "internal/app/conversation_recorded_window_test.go",
+    "internal/app/hybrid.go",
+    "internal/app/inventory_barrier_test.go",
+    "internal/app/kimi_process_darwin.go",
+    "internal/app/kimi_process_darwin_test.go",
+    "internal/app/kimi_process_other.go",
+    "internal/app/optional_kind_inventory_test.go",
+    "internal/app/pi_commands.go",
+    "internal/app/pi_commands_test.go",
+    "internal/app/pi_integration.go",
+    "internal/app/pi_integration_test.go",
+    "internal/app/pi_prompt.go",
+    "internal/app/pi_prompt_test.go",
+    "internal/app/socket_fixture_test.go",
+    "internal/app/terminal_input_test.go",
+    "internal/conversation/agy.go",
+    "internal/conversation/agy_proto.go",
+    "internal/conversation/agy_test.go",
+    "internal/conversation/browser_cursor.go",
+    "internal/conversation/browser_index.go",
+    "internal/conversation/browser_open_budget_test.go",
+    "internal/conversation/browser_retry_test.go",
+    "internal/conversation/browser_test.go",
+    "internal/conversation/changes.go",
+    "internal/conversation/database_changes_test.go",
+    "internal/conversation/database_live.go",
+    "internal/conversation/database_live_restart_test.go",
+    "internal/conversation/database_live_test.go",
+    "internal/conversation/database_revision.go",
+    "internal/conversation/database_tool.go",
+    "internal/conversation/hermes_live_session_test.go",
+    "internal/conversation/kimi.go",
+    "internal/conversation/kimi_browser.go",
+    "internal/conversation/kimi_browser_measure_test.go",
+    "internal/conversation/kimi_cwd_test.go",
+    "internal/conversation/kimi_open_budget_test.go",
+    "internal/conversation/kimi_page_mutation_test.go",
+    "internal/conversation/kimi_page_projection.go",
+    "internal/conversation/kimi_page_projection_test.go",
+    "internal/conversation/kimi_prefix_dependency_test.go",
+    "internal/conversation/kimi_projection.go",
+    "internal/conversation/kimi_projection_cache.go",
+    "internal/conversation/kimi_projection_reference_test.go",
+    "internal/conversation/kimi_read.go",
+    "internal/conversation/kimi_selection.go",
+    "internal/conversation/kimi_selection_test.go",
+    "internal/conversation/kimi_source_identity_test.go",
+    "internal/conversation/kimi_test.go",
+    "internal/conversation/native_open_budget_test.go",
+    "internal/conversation/opencode_live_pending_test.go",
+    "internal/conversation/pi_notice_browser_test.go",
+    "internal/conversation/pi_notice_test.go",
+    "internal/conversation/project_context.go",
+    "internal/conversation/projection.go",
+    "internal/conversation/testdata/kimi/fork/state.json",
+    "internal/conversation/testdata/kimi/fork/wire.jsonl",
+    "internal/conversation/testdata/kimi/hash-cases.json",
+    "internal/conversation/testdata/kimi/interrupted/wire.jsonl",
+    "internal/conversation/testdata/kimi/manifest.json",
+    "internal/conversation/testdata/kimi/rewrites/after.jsonl",
+    "internal/conversation/testdata/kimi/rewrites/before.jsonl",
+    "internal/conversation/testdata/kimi/session_index.jsonl",
+    "internal/conversation/testdata/kimi/v0.36.1-imported/state.json",
+    "internal/conversation/testdata/kimi/v0.36.1-imported/wire.jsonl",
+    "internal/conversation/testdata/kimi/v0.36.1-legacy/state.json",
+    "internal/conversation/testdata/kimi/v0.36.1-legacy/wire.jsonl",
+    "internal/conversation/testdata/kimi/v0.36.1-mutations/wire.jsonl",
+    "internal/conversation/testdata/kimi/v0.36.1-v2/state.json",
+    "internal/conversation/testdata/kimi/v0.36.1-v2/wire.jsonl",
+    "internal/conversation/testdata/kimi/v2.2.0-branches/wire.jsonl",
+    "internal/conversation/testdata/kimi/v2.2.0-privacy/wire.jsonl",
+    "internal/coordinator/agy_approval_test.go",
+    "internal/coordinator/dispatch_safety_test.go",
+    "internal/coordinator/filter_input_controlled_test.go",
+    "internal/coordinator/filter_input_test.go",
+    "internal/coordinator/hermes_launch_feedback_test.go",
+    "internal/coordinator/idempotency_test.go",
+    "internal/coordinator/inventory_socket_test.go",
+    "internal/coordinator/launch_discovery_test.go",
+    "internal/coordinator/launch_finalization_test.go",
+    "internal/coordinator/lifecycle_busy_test.go",
+    "internal/coordinator/lifecycle_create_test.go",
+    "internal/coordinator/optional_kind_control_test.go",
+    "internal/coordinator/pane_read_freshness_test.go",
+    "internal/coordinator/pi_prompt.go",
+    "internal/coordinator/pi_prompt_test.go",
+    "internal/coordinator/question_ingress_test.go",
+    "internal/coordinator/regression_test.go",
+    "internal/coordinator/secret_observation_test.go",
+    "internal/coordinator/secret_test.go",
+    "internal/coordinator/socket_revocation_test.go",
+    "internal/coordinator/state.go",
+    "internal/coordinator/terminal_input.go",
+    "internal/coordinator/terminal_input_test.go",
+    "internal/coordinator/types.go",
+    "internal/coordinator/workspace_close_group_test.go",
+    "internal/coordinator/workspace_test.go",
+    "internal/gateway/relay.go",
+    "internal/gateway/server.go",
+    "internal/gateway/server_test.go",
+    "internal/gatewaywire/gatewaywire.go",
+    "internal/gatewaywire/gatewaywire_test.go",
+    "internal/herdr/client_workspace_test.go",
+    "internal/herdr/events.go",
+    "internal/herdr/events_test.go",
+    "internal/herdr/leak_test.go",
+    "internal/herdr/literal_key_test.go",
+    "internal/herdr/send_input_test.go",
+    "internal/herdr/shelljoin_test.go",
+    "internal/herdr/socket_api_test.go",
+    "internal/herdr/socket_dispatch_check_test.go",
+    "internal/herdr/test_socket_helpers_test.go",
+    "internal/herdr/testmain_test.go",
+    "internal/history/ansi.go",
+    "internal/pibridge/activity.go",
+    "internal/pibridge/activity_test.go",
+    "internal/pibridge/client.go",
+    "internal/pibridge/client_test.go",
+    "internal/pibridge/notice_test.go",
+    "internal/pibridge/prompt.go",
+    "internal/pibridge/prompt_peer_test.go",
+    "internal/pibridge/prompt_test.go",
+    "internal/pibridge/runtime_fixture_test.go",
+    "internal/piintegration/contract_test.go",
+    "internal/piintegration/integration.go",
+    "internal/piintegration/integration_test.go",
+    "internal/protocol/pi_prompt_test.go",
+    "internal/question/agy_approval_test.go",
+    "internal/question/attention.go",
+    "internal/question/input.go",
+    "internal/question/input_test.go",
+    "internal/question/parser.go",
+    "internal/session/kimi_test.go",
+    "internal/slashcmd/agy.go",
+    "internal/slashcmd/agy_test.go",
+    "internal/slashcmd/catalog_budget_test.go",
+    "internal/slashcmd/claude.go",
+    "internal/slashcmd/cursor.go",
+    "internal/slashcmd/cursor_command_limit_test.go",
+    "internal/slashcmd/cursormetadata.go",
+    "internal/slashcmd/cursormetadata_test.go",
+    "internal/slashcmd/generic.go",
+    "internal/slashcmd/hermes.go",
+    "internal/slashcmd/kimi.go",
+    "internal/slashcmd/omp.go",
+    "internal/slashcmd/omp_marketplace_order_test.go",
+    "internal/slashcmd/ompextensions.go",
+    "internal/slashcmd/opencode.go",
+    "internal/slashcmd/opencode_discovery_test.go",
+    "internal/slashcmd/pi.go",
+    "internal/slashcmd/pi_trust_alias_test.go",
+    "internal/slashcmd/qoder.go",
+    "internal/slashcmd/reader.go",
+    "internal/slashcmd/reader_test.go",
+    "internal/transport/e2ee_test.go",
+    "internal/transport/gateway.go",
+    "internal/transport/gateway_test.go",
+    "internal/transport/heartbeat_authenticated_test.go",
+    "internal/transport/heartbeat_test.go",
+    "internal/transport/sendbuffer.go",
+    "internal/transport/sendbuffer_test.go",
+    "internal/transport/ws.go",
+    "internal/transport/ws_shutdown_test.go",
+    "internal/transport/ws_test.go",
+    "internal/transport/ws_unauthorized_test.go",
+    "internal/webrtclink/gatedconn.go",
+    "internal/webrtclink/manager.go",
+    "internal/webrtclink/manager_test.go",
+    "internal/webrtclink/mux_constructor_test.go",
+    "internal/webrtclink/setup_diagnostics_test.go",
+    "pi_command_bridge.go",
+    "relay/dev-pi-commands.sh",
+    "relay/gateway-deploy.sh",
+    "relay/pi-command-bridge/activity.mjs",
+    "relay/pi-command-bridge/index.ts",
+    "relay/pi-commands.sh",
+    "tests/blackbox/socket_fixture_test.go",
+    "tests/blackbox/testmain_test.go",
+    "tests/fixtures/pi-activity-capacity.mjs",
+    "tests/fixtures/pi-herdr-socket.mjs",
+    "tests/fixtures/pi-live-provider.mjs",
+    "tests/fixtures/pi-live-pty.mjs",
+    "tests/fixtures/pi-socket-crash.mjs",
+    "tests/fixtures/pi-socket-restart.mjs",
+    "tests/mobile/AGENTS.md",
+    "tests/mobile/android-appium/adb-inspection.cjs",
+    "tests/mobile/android-appium/adb-inspection.d.cts",
+    "tests/mobile/android-appium/appium-runtime-manifest.json",
+    "tests/mobile/android-appium/ci.sh",
+    "tests/mobile/android-appium/declaration-map.ts",
+    "tests/mobile/android-appium/gate.ts",
+    "tests/mobile/android-appium/kernel-namespace.cjs",
+    "tests/mobile/android-appium/kernel-namespace.d.cts",
+    "tests/mobile/android-appium/package-lock.json",
+    "tests/mobile/android-appium/package.json",
+    "tests/mobile/android-appium/producer-manifest.json",
+    "tests/mobile/android-appium/producer-transform.json",
+    "tests/mobile/android-appium/retained-inspection.cjs",
+    "tests/mobile/android-appium/retained-inspection.d.cts",
+    "tests/mobile/android-appium/runtime-manifest.json",
+    "tests/mobile/android-appium/target-inspection.cjs",
+    "tests/mobile/android-appium/target-inspection.d.cts",
+    "tests/mobile/android-environment.ts",
+    "tests/mobile/android-events.ts",
+    "tests/mobile/android-gms-settle.ts",
+    "tests/mobile/android-measurement-cleanup.ts",
+    "tests/mobile/android-measurement.ts",
+    "tests/mobile/baselines.json",
+    "tests/mobile/bun.lock",
+    "tests/mobile/eslint.config.js",
+    "tests/mobile/integration/cache-recovery.ts",
+    "tests/mobile/platforms/android.ts",
+    "tests/mobile/platforms/ios.ts",
+    "tests/mobile/platforms/types.ts",
+    "tests/mobile/prepare.ts",
+    "tests/mobile/run.ts",
+    "tests/mobile/support/android-product.ts",
+    "tests/mobile/support/android-retained-decoder.ts",
+    "tests/mobile/support/android-startup-log.ts",
+    "tests/mobile/support/android-transport.ts",
+    "tests/mobile/support/bounded-process.ts",
+    "tests/mobile/support/budget.ts",
+    "tests/mobile/support/confirmation-settings.ts",
+    "tests/mobile/support/device.ts",
+    "tests/mobile/support/diagnostics.ts",
+    "tests/mobile/support/evidence.ts",
+    "tests/mobile/support/ios-confirmation-capture.ts",
+    "tests/mobile/support/ios-launch-receipt.ts",
+    "tests/mobile/support/ios-webkit-output.ts",
+    "tests/mobile/support/ios-xctest.ts",
+    "tests/mobile/support/mobile-result.ts",
+    "tests/mobile/support/oracle.ts",
+    "tests/mobile/support/owned-process-runtime.ts",
+    "tests/mobile/support/owned-process.ts",
+    "tests/mobile/support/process.ts",
+    "tests/mobile/support/webdriver.ts",
+    "tests/mobile/support/xctest-output.ts",
+    "tests/mobile/toolchains.json",
+    "tests/mobile/tsconfig.json",
+    "tests/mobile/unit/android-adb-inspection.cjs",
+    "tests/mobile/unit/android-appium-ci.ts",
+    "tests/mobile/unit/android-attachment-refusal.ts",
+    "tests/mobile/unit/android-events.ts",
+    "tests/mobile/unit/android-fake-adb.ts",
+    "tests/mobile/unit/android-gms-settle.ts",
+    "tests/mobile/unit/android-inspection-check.sh",
+    "tests/mobile/unit/android-inspection-integrity.mjs",
+    "tests/mobile/unit/android-inspection-types.mjs",
+    "tests/mobile/unit/android-installed-inspection.mjs",
+    "tests/mobile/unit/android-installed-owner.mjs",
+    "tests/mobile/unit/android-kernel-reader-fixture.ts",
+    "tests/mobile/unit/android-product-environment.ts",
+    "tests/mobile/unit/android-retained-fixture.ts",
+    "tests/mobile/unit/android-retained-inspection.ts",
+    "tests/mobile/unit/android-retained-launch.ts",
+    "tests/mobile/unit/android-retained-responses.ts",
+    "tests/mobile/unit/android-setup-reverse-loss.ts",
+    "tests/mobile/unit/android-socket.ts",
+    "tests/mobile/unit/android-startup-session.ts",
+    "tests/mobile/unit/android-target-inspection.cjs",
+    "tests/mobile/unit/android-transitions.ts",
+    "tests/mobile/unit/android-transport.ts",
+    "tests/mobile/unit/confirmation-settings.ts",
+    "tests/mobile/unit/fixtures/android-gms-persistence-boundary.json",
+    "tests/mobile/unit/fixtures/android-hosted-39634239574-helper-retirements.log",
+    "tests/mobile/unit/fixtures/android-hosted-39656482139-helper-retirements.log",
+    "tests/mobile/unit/fixtures/android-hosted-39793077230-planned-stop.log",
+    "tests/mobile/unit/fixtures/android-hosted-39822066139-helper-clock-skew.log",
+    "tests/mobile/unit/fixtures/android-hosted-40095544451-helper-missing-zygote-exit.log",
+    "tests/mobile/unit/fixtures/android-hosted-40306915048-helper-late-audit.log",
+    "tests/mobile/unit/fixtures/android-hosted-40317275070-helper-pid-equals-chrome-uid.log",
+    "tests/mobile/unit/fixtures/android-hosted-40427620028-helpers-running-at-start.log",
+    "tests/mobile/unit/fixtures/android-hosted-40445020397-helper-departure-without-zygote-exit.log",
+    "tests/mobile/unit/fixtures/android-startup-adb-offline.json",
+    "tests/mobile/unit/fixtures/android-startup-reverse-loss.json",
+    "tests/mobile/unit/fixtures/android/kernel-disabled-chrome-status.txt",
+    "tests/mobile/unit/fixtures/android/kernel-disabled-self-status.txt",
+    "tests/mobile/unit/fixtures/ios/ios-hosted-39765785984-before-share.xml",
+    "tests/mobile/unit/fixtures/ios/ios-hosted-39774217447-share-collapsed.xml",
+    "tests/mobile/unit/gms-assertion-evidence.ts",
+    "tests/mobile/unit/ios-confirmation-capture.ts",
+    "tests/mobile/unit/ios.ts",
+    "tests/mobile/unit/mobile-workflow.ts",
+    "tests/mobile/unit/native-startup.ts",
+    "tests/mobile/unit/owned-control-fixture.ts",
+    "tests/mobile/unit/owned-input.ts",
+    "tests/mobile/unit/scenario-runner.ts",
+    "tests/mobile/unit/test-output-tests.ts",
+    "tests/mobile/unit/test-output.ts",
+    "tests/mobile/unit/test-registry.ts",
+    "tests/mobile/unit/test-shard-ci-tests.ts",
+    "tests/mobile/unit/test-shard-ci.ts",
+    "tests/mobile/unit/test-shards-tests.ts",
+    "tests/mobile/unit/test-shards.ts",
+    "tests/mobile/unit/webdriver-interruption.ts",
+    "tests/mobile/unit/xctest-output.ts",
+    "tests/mobile/unit/xctest-owner.ts",
+    "tests/mobile/validate-environment.ts",
+    "tests/mobile/validate-evidence.ts",
+    "tests/pi-activity.test.mjs",
+    "tests/pi-live-contract.mjs",
+    "tests/pi-live-tui.mjs",
+    "tests/pi-notices.test.mjs",
+    "tests/pi-prompt.test.mjs",
+    "tests/pi-provenance-contract.mjs",
+    "tests/pi-reload.test.mjs",
+    "tests/pi-runtime-contract.mjs",
+    "tests/test_dev_pi_commands.sh",
+    "tests/test_gateway_deploy.sh",
+    "tests/test_pi_commands.sh",
+    "tests/test_tailscale_darwin_package_browser_scope.py",
+    "web/assets/Card-484.js",
+    "web/assets/Card-484.js.br",
+    "web/assets/ConversationHistory-484.js",
+    "web/assets/ConversationHistory-484.js.br",
+    "web/assets/ManualTerminalInput-484.js",
+    "web/assets/ManualTerminalInput-484.js.br",
+    "web/assets/QuestionForm-484.js",
+    "web/assets/QuestionForm-484.js.br",
+    "web/assets/ResumeTimingSettings-484.js",
+    "web/assets/ResumeTimingSettings-484.js.br",
+    "web/assets/SettingsView-484.js",
+    "web/assets/SettingsView-484.js.br",
+    "web/assets/app-a0df51a35dd218f2858550c2e1d5082571b48ab58148ca3b03c2d32781abf94a.css",
+    "web/assets/app-a0df51a35dd218f2858550c2e1d5082571b48ab58148ca3b03c2d32781abf94a.css.br",
+    "web/assets/app-9748cfbee93ccf456b82a66b6135d62fe6177e2de1b6b82d1701c5060f5a3360.js",
+    "web/assets/app-9748cfbee93ccf456b82a66b6135d62fe6177e2de1b6b82d1701c5060f5a3360.js.br",
+    "web/assets/workspace-tools-484.js",
+    "web/assets/workspace-tools-484.js.br",
+    "web/builds/0.23.5-484-e2cd66df5f1cff84/index.html",
+    "web/builds/0.23.5-484-e2cd66df5f1cff84/index.html.br",
+    "web/manifest-loader.js",
+    "web/manifest-loader.js.br",
 )
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
 # SCOPE_BASE to 59eda0d83a785822696da03461601eca906231c6. A future new path
@@ -568,6 +1022,9 @@ FAKE_OPERATIONS_CAP = 262144
 # approves G1, because a push is the only trigger.
 LAUNCHCTL_GRANT_ID = "q3-roadmap-launchctl-print-ff-c77855cb-20261014"
 LAUNCHCTL_PINNED_PARENT = SCOPE_BASE
+INTEGRATION_GRANT_ID = "q4-owner-hosted-integration-9aed9d04-27054011-20261030"
+INTEGRATION_BEFORE = "9aed9d0464ed28e241608cb9365d26f064a31cf9"
+INTEGRATION_MAIN = "27054011fd8137d5f9702cc9e718aff1bd73443d"
 PUSH_EVENT_CAP = 65536
 LAUNCHCTL_SCOPE = MappingProxyType({
     "command": "launchctl print gui/$(id -u)/com.herdr-mobile-relay.service",
@@ -575,6 +1032,9 @@ LAUNCHCTL_SCOPE = MappingProxyType({
     "where": "isolated GitHub-hosted macos-15 Darwin runner only",
     "when": "attempt 1 of a fast-forward push to " + REF + " whose before descends from " + LAUNCHCTL_PINNED_PARENT,
 })
+INTEGRATION_SCOPE = MappingProxyType({**LAUNCHCTL_SCOPE,
+    "when": "attempt 1 of the exact two-parent integration of " + INTEGRATION_BEFORE + " and " + INTEGRATION_MAIN + " to " + REF})
+
 # These are benign only on the client side. Backend calls wrap even these
 # exception types as fatal proxy errors before they reach the client boundary.
 CLIENT_ABORTS = (ssl.SSLError, ConnectionResetError, BrokenPipeError,
@@ -865,18 +1325,19 @@ def receipt_values_safe(value):
     schema = {
         "schemaVersion": integer(1, 1), "candidate_sha": revision, "candidate_tree": revision,
         "source_hashes": {path: digest for path in FILES}, "result": enum("pass", "fail"),
-        "scope": enum("darwin_arm64_byo_only"), "launchctl_query_grant_id": enum(LAUNCHCTL_GRANT_ID),
+        "scope": enum("darwin_arm64_byo_only"), "launchctl_query_grant_id": enum(LAUNCHCTL_GRANT_ID, INTEGRATION_GRANT_ID),
         "github_run_id": integer(10**15 - 1, 1), "github_run_attempt": integer(1, 1),
-        "launchctl_query_pinned_parent": enum(LAUNCHCTL_PINNED_PARENT),
+        "launchctl_query_pinned_parent": enum(LAUNCHCTL_PINNED_PARENT, INTEGRATION_BEFORE),
+        "integration_before": enum(INTEGRATION_BEFORE), "integration_parents": (revision, 2),
         "producer": {"sha": revision, "run": integer(10**15, 1), "artifact": integer(10**15, 1),
                      "zip_sha256": digest, "fresh": boolean},
         "version": version, "manifest_sha256": digest, "binary_sha256": digest,
-        "compiler": {"version": enum("go1.27.1"), "target": enum("darwin/arm64"), "metadata_sha256": digest},
-        "browser_identity": {"sha256": digest, "version": enum("151.0.7922.34"), "revision": enum("1234"),
-            "playwright": enum("1.62.1"), "switches_sha256": digest, "target": enum("darwin/arm64")},
+        "compiler": {"version": enum("go1.27.3"), "target": enum("darwin/arm64"), "metadata_sha256": digest},
+        "browser_identity": {"sha256": digest, "version": enum("153.0.8010.12"), "revision": enum("1243"),
+            "playwright": enum("1.63.0"), "switches_sha256": digest, "target": enum("darwin/arm64")},
         "tools": {key: version for key in ("python", "node", "bun", "go", "curl", "openssl")},
-        "source_proof": {"chromium_commit": enum("782af9cb30a53f54487e5d2e44738645a8ec457c"),
-            "playwright_tag": enum("v1.62.1"), "go_tag": enum("go1.27.1"), "trust": enum("TRUST-PROOF.md")},
+        "source_proof": {"chromium_commit": enum("971a7443b0c9b0a9b2860529b33331b76077ec62"),
+            "playwright_tag": enum("v1.63.0"), "go_tag": enum("go1.27.3"), "trust": enum("TRUST-PROOF.md")},
         "profile_inputs": {name: {"preferences_sha256": digest, **(
             {"database_absent": boolean} if name == "negative" else {"database_sha256": digest})}
             for name in ("controller", "reader", "negative")},
@@ -890,7 +1351,7 @@ def receipt_values_safe(value):
             "python": {"category": tls_category, "verify_code": nullable(integer(1000))},
             "curl": tls_tool, "packaged_go": {**tls_tool, "proof": enum("accepted", "refusal_only")}}, 3),
             "browser": {"ok": boolean, "argv_ok": boolean, "contexts_closed": boolean,
-                "version": enum("151.0.7922.34"), "observations": (enum("empty_profile_refuses_ca",
+                "version": enum("153.0.8010.12"), "observations": (enum("empty_profile_refuses_ca",
                     "trusted_profile_accepts_ip", "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"), 4)}},
         "cases": (case, 3), "phases": ({"id": integer(4), "ok": boolean, "exit_code": integer(1),
             "cap_seconds": lambda item: type(item) is int and item in PHASES, "seconds": seconds}, 5),
@@ -978,7 +1439,7 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
               "fixture_operations", "captured_output_bytes", "dependency_payload_bytes_peak", "failure",
               "failure_detail", "failure_guard", "launchctl_query_grant_id",
               "github_run_id", "github_run_attempt", "launchctl_query_pinned_parent", "socket_diagnostics",
-              "proxy_failure"}
+              "proxy_failure", "integration_before", "integration_parents"}
     require(type(value) is dict and set(value) <= fields, "receipt_fields")
 
     def shape(item, keys):
@@ -1015,7 +1476,16 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     require(type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
             and value.get("candidate_sha") == candidate and value.get("source_hashes") == source_hashes
             and value.get("producer") == producer_identity
-            and value.get("scope") == "darwin_arm64_byo_only" and value.get("result") in {"pass", "fail"},
+            and value.get("scope") == "darwin_arm64_byo_only" and value.get("result") in {"pass", "fail"}
+            and (value.get("result") == "fail" or (
+                value.get("launchctl_query_grant_id") in {LAUNCHCTL_GRANT_ID, INTEGRATION_GRANT_ID}
+                and value.get("launchctl_query_pinned_parent") == (
+                    INTEGRATION_BEFORE if value.get("launchctl_query_grant_id") == INTEGRATION_GRANT_ID else LAUNCHCTL_PINNED_PARENT)
+                and (value.get("launchctl_query_grant_id") != INTEGRATION_GRANT_ID or (
+                    value.get("integration_before") == INTEGRATION_BEFORE
+                    and value.get("integration_parents") == [INTEGRATION_BEFORE, INTEGRATION_MAIN]))
+                and (value.get("launchctl_query_grant_id") != LAUNCHCTL_GRANT_ID or
+                    not ({"integration_before", "integration_parents"} & set(value))))),
             "receipt_identity")
     for item in source_hashes.values():
         digest(item)
@@ -1055,9 +1525,14 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
                 "receipt_failed_output_count")
         return False
     cap("raw", value.get("captured_output_bytes"))
-    require(set(value) == fields - {"failure", "failure_detail", "failure_guard", "proxy_failure"}
+    require(set(value) == fields - {"failure", "failure_detail", "failure_guard", "proxy_failure"} -
+            (set() if value["launchctl_query_grant_id"] == INTEGRATION_GRANT_ID else
+             {"integration_before", "integration_parents"})
             and set(source_hashes) == set(FILES)
-            and value["cleanup"] is True and value["launchctl_query_grant_id"] == LAUNCHCTL_GRANT_ID, "receipt_complete")
+            and value["cleanup"] is True, "receipt_complete")
+    if value["launchctl_query_grant_id"] == INTEGRATION_GRANT_ID:
+        require(value["integration_before"] == INTEGRATION_BEFORE and
+                value["integration_parents"] == [INTEGRATION_BEFORE, INTEGRATION_MAIN], "receipt_integration")
     require(re.fullmatch(r"[0-9a-f]{40}", value["candidate_tree"]), "receipt_tree")
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["version"]), "receipt_version")
     archive_name = f"herdr-mobile-relay_{value['version']}_darwin_arm64.tar.gz"
@@ -1066,21 +1541,21 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
         digest(item)
     compiler = value["compiler"]
     shape(compiler, ("version", "target", "metadata_sha256"))
-    require(compiler["version"] == "go1.27.1" and compiler["target"] == "darwin/arm64", "receipt_compiler")
+    require(compiler["version"] == "go1.27.3" and compiler["target"] == "darwin/arm64", "receipt_compiler")
     digest(compiler["metadata_sha256"])
     browser = value["browser_identity"]
     shape(browser, ("sha256", "version", "revision", "playwright", "switches_sha256", "target"))
-    require(browser["version"] == "151.0.7922.34" and browser["revision"] == "1234"
-            and browser["playwright"] == "1.62.1" and browser["target"] == "darwin/arm64", "receipt_browser")
+    require(browser["version"] == "153.0.8010.12" and browser["revision"] == "1243"
+            and browser["playwright"] == "1.63.0" and browser["target"] == "darwin/arm64", "receipt_browser")
     digest(browser["sha256"])
     digest(browser["switches_sha256"])
     shape(value["tools"], ("python", "node", "bun", "go", "curl", "openssl"))
-    require(value["tools"]["python"] == PYTHON_VERSION and value["tools"]["node"] == "24.21.0"
-            and value["tools"]["bun"] == "1.4.0"
-            and value["tools"]["go"] == "1.27.1" and all(type(v) is str and re.fullmatch(
+    require(value["tools"]["python"] == PYTHON_VERSION and value["tools"]["node"] == "26.13.0"
+            and value["tools"]["bun"] == "1.4.4"
+            and value["tools"]["go"] == "1.27.3" and all(type(v) is str and re.fullmatch(
                 r"[0-9]+\.[0-9]+\.[0-9]+[a-z]?", v) for v in value["tools"].values()), "receipt_tools")
-    require(value["source_proof"] == {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c",
-            "playwright_tag": "v1.62.1", "go_tag": "go1.27.1", "trust": "TRUST-PROOF.md"}, "receipt_source_proof")
+    require(value["source_proof"] == {"chromium_commit": "971a7443b0c9b0a9b2860529b33331b76077ec62",
+            "playwright_tag": "v1.63.0", "go_tag": "go1.27.3", "trust": "TRUST-PROOF.md"}, "receipt_source_proof")
     profile_policy = value["profile_policy"]
     shape(profile_policy, ("schema", "root_der_sha256", "trust_blob", "platform_integration", "sandbox", "mock_keychain"))
     require(type(profile_policy["schema"]) is int and profile_policy["schema"] == 1
@@ -1129,7 +1604,7 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     shape(trust, ("python_curl_packaged_go", "browser"))
     require(trust["browser"] == {"ok": True, "observations": ["empty_profile_refuses_ca", "trusted_profile_accepts_ip",
         "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"], "argv_ok": True,
-        "version": "151.0.7922.34", "contexts_closed": True}, "receipt_browser_trust")
+        "version": "153.0.8010.12", "contexts_closed": True}, "receipt_browser_trust")
     require(type(trust["python_curl_packaged_go"]) is list and len(trust["python_curl_packaged_go"]) == 3, "receipt_tls")
     for expected, control in zip(("positive", "unknown_ca", "wrong_host"), trust["python_curl_packaged_go"]):
         shape(control, ("category", "python", "curl", "packaged_go"))
@@ -1620,16 +2095,22 @@ def launchctl_packet_allowed(packet):
     except (Refusal, UnicodeError):
         return False
     return (type(value) is dict and set(value) == {"grantId", "authorized", "pinnedParent", "scope"}
-            and value.get("grantId") == LAUNCHCTL_GRANT_ID and value.get("authorized") is True
-            and value.get("pinnedParent") == LAUNCHCTL_PINNED_PARENT
-            and type(value.get("scope")) is dict and value["scope"] == dict(LAUNCHCTL_SCOPE)
+            and value.get("authorized") is True
+            and ((value.get("grantId") == LAUNCHCTL_GRANT_ID
+                  and value.get("pinnedParent") == LAUNCHCTL_PINNED_PARENT
+                  and value.get("scope") == dict(LAUNCHCTL_SCOPE))
+                 or (value.get("grantId") == INTEGRATION_GRANT_ID
+                     and value.get("pinnedParent") == INTEGRATION_BEFORE
+                     and value.get("scope") == dict(INTEGRATION_SCOPE)))
             and type(value["scope"].get("maxQueries")) is int)
 
 
 def launchctl_authorized(packet, observation):
     # Operational projection of the hosted-only parent grant, not proof of the
     # caller's host. Forging a local observation never grants local permission.
-    return launchctl_packet_allowed(packet) and admission_policy(observation)
+    if not launchctl_packet_allowed(packet):
+        return False
+    return strict_json(packet.encode())["grantId"] == selected_grant_id(observation)
 
 
 def ci_context_allowed(observation):
@@ -1650,6 +2131,44 @@ def ci_context_allowed(observation):
 def full_sha(value):
     # A lowercase 40-hex object ID that is not all zeros. Never option-like text.
     return type(value) is str and re.fullmatch(r"[0-9a-f]{40}", value) is not None and value != "0" * 40
+
+
+def integration_policy(observation):
+    return (ci_context_allowed(observation)
+            and observation.get("event_before") == INTEGRATION_BEFORE
+            and observation.get("event_after") == observation["candidate_sha"]
+            and observation["event_after"] != INTEGRATION_BEFORE
+            and observation.get("event_ref") == REF
+            and all(observation.get(key) is False for key in ("event_forced", "event_created", "event_deleted"))
+            and observation.get("checked_out_sha") == observation["candidate_sha"]
+            and observation.get("candidate_parents") == [INTEGRATION_BEFORE, INTEGRATION_MAIN]
+            and observation.get("scope_base_precedes_before") is True
+            and observation.get("before_precedes_candidate") is True)
+
+
+def selected_grant_id(observation):
+    if admission_policy(observation):
+        return LAUNCHCTL_GRANT_ID
+    if integration_policy(observation):
+        return INTEGRATION_GRANT_ID
+    return None
+
+
+def grant_packet(grant_id):
+    require(grant_id in {LAUNCHCTL_GRANT_ID, INTEGRATION_GRANT_ID}, "launchctl_authority")
+    return json.dumps({"grantId": grant_id, "authorized": True,
+        "pinnedParent": INTEGRATION_BEFORE if grant_id == INTEGRATION_GRANT_ID else LAUNCHCTL_PINNED_PARENT,
+        "scope": dict(INTEGRATION_SCOPE if grant_id == INTEGRATION_GRANT_ID else LAUNCHCTL_SCOPE)},
+        separators=(",", ":"))
+
+
+def ci_environment():
+    return {"system": platform.system(), "machine": platform.machine(),
+        "enabled": os.environ.get("HERDR_DARWIN_PACKAGE_BROWSER_CI"),
+        "repository": os.environ.get("GITHUB_REPOSITORY"), "ref": os.environ.get("GITHUB_REF"),
+        "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"), "event_name": os.environ.get("GITHUB_EVENT_NAME"),
+        "candidate_sha": os.environ.get("GITHUB_SHA"), "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "runner_environment": os.environ.get("RUNNER_ENVIRONMENT"), "image_os": os.environ.get("ImageOS")}
 
 
 def admission_policy(observation):
@@ -1794,28 +2313,93 @@ def git_candidate_identity(candidate, before, runner=run_git_bounded):
         raise Refusal("launchctl_authority") from None
 
 
+PUSH_PROJECTION_FIELDS = {"before": "HERDR_PUSH_BEFORE_JSON", "after": "HERDR_PUSH_AFTER_JSON",
+    "ref": "HERDR_PUSH_REF_JSON", "repository": "HERDR_PUSH_REPOSITORY_JSON",
+    "forced": "HERDR_PUSH_FORCED_JSON", "created": "HERDR_PUSH_CREATED_JSON",
+    "deleted": "HERDR_PUSH_DELETED_JSON", "context_repository": "HERDR_PUSH_CONTEXT_REPOSITORY_JSON",
+    "context_ref": "HERDR_PUSH_CONTEXT_REF_JSON", "context_sha": "HERDR_PUSH_CONTEXT_SHA_JSON",
+    "context_run_id": "HERDR_PUSH_CONTEXT_RUN_ID_JSON",
+    "context_run_attempt": "HERDR_PUSH_CONTEXT_RUN_ATTEMPT_JSON",
+    "context_event_name": "HERDR_PUSH_CONTEXT_EVENT_NAME_JSON"}
+
+
+def ci_push_projection(environment=os.environ):
+    before = environment.get(PUSH_PROJECTION_FIELDS["before"])
+    if before != json.dumps(INTEGRATION_BEFORE):
+        return None
+    values = {}
+    total = 0
+    for field, name in PUSH_PROJECTION_FIELDS.items():
+        raw = environment.get(name)
+        require(type(raw) is str, "launchctl_authority")
+        require(len(raw) <= PUSH_EVENT_CAP - total, "launchctl_authority")
+        data = raw.encode("utf-8")
+        total += len(data)
+        require(total <= PUSH_EVENT_CAP, "launchctl_authority")
+        values[field] = strict_json(data)
+    require(len(json.dumps(values).encode("utf-8")) <= PUSH_EVENT_CAP, "launchctl_authority")
+    return values
+
+
+def projection_allowed(projection, observation):
+    return (type(projection) is dict and set(projection) == set(PUSH_PROJECTION_FIELDS)
+            and projection.get("before") == INTEGRATION_BEFORE
+            and projection.get("after") == observation["candidate_sha"]
+            and projection.get("ref") == REF and projection.get("repository") == REPOSITORY
+            and all(projection.get(key) is False for key in ("forced", "created", "deleted"))
+            and projection.get("context_repository") == observation["repository"]
+            and projection.get("context_ref") == observation["ref"]
+            and projection.get("context_sha") == observation["candidate_sha"]
+            and type(projection.get("context_run_id")) is int
+            and str(projection["context_run_id"]) == observation["run_id"]
+            and type(projection.get("context_run_attempt")) is int
+            and str(projection["context_run_attempt"]) == observation["attempt"]
+            and projection.get("context_event_name") == observation["event_name"])
+
+
+def push_event_metadata(observation, event_path, projection=None, read_event=read_bounded):
+    require(type(event_path) is str and event_path and Path(event_path).is_absolute(), "launchctl_authority")
+    if type(projection) is dict and projection.get("before") == INTEGRATION_BEFORE:
+        require(projection_allowed(projection, observation), "launchctl_authority")
+        event = projection
+    else:
+        try:
+            event = strict_json(read_event(Path(event_path), PUSH_EVENT_CAP))
+        except (OSError, Refusal):
+            raise Refusal("launchctl_authority") from None
+        require(type(event) is dict, "launchctl_authority")
+    return event
+
+
 def first_push_observation(observation, event_path, candidate, *, read_event=read_bounded,
-                           query_candidate=git_candidate_identity):
+                           query_candidate=git_candidate_identity, projection=None):
     # The caller-selected event and checkout bind the authorized hosted attempt
     # operationally; they do not make a forged local invocation authorized.
     require(ci_context_allowed(observation), "ci_admission")
-    require(type(event_path) is str and event_path and Path(event_path).is_absolute(), "launchctl_authority")
-    try:
-        event = strict_json(read_event(Path(event_path), PUSH_EVENT_CAP))
-    except (OSError, Refusal):
-        raise Refusal("launchctl_authority") from None
-    require(type(event) is dict, "launchctl_authority")
-    # Check the event BEFORE git acquisition, let alone any privileged launcher.
-    # `before` must be a real lowercase 40-hex tip different from `after`.
+    projected_identity = None
+    if type(projection) is dict and projection.get("before") == INTEGRATION_BEFORE:
+        projected_identity = query_candidate(candidate, INTEGRATION_BEFORE)
+    use_projection = (type(projected_identity) is dict
+                      and projected_identity.get("checked_out_sha") == observation["candidate_sha"]
+                      and projected_identity.get("candidate_parents") == [INTEGRATION_BEFORE, INTEGRATION_MAIN])
+    event = push_event_metadata(observation, event_path, projection if use_projection else None, read_event)
+    # Check event fields before any launcher. `before` must be a real lowercase
+    # 40-hex tip different from `after`.
     before = event.get("before")
     require(full_sha(before) and before != event.get("after")
             and event.get("after") == observation["candidate_sha"] and event.get("ref") == REF
             and all(event.get(key) is False for key in ("forced", "created", "deleted")), "launchctl_authority")
-    identity = query_candidate(candidate, before)
+    identity = projected_identity if use_projection else query_candidate(candidate, before)
     require(type(identity) is dict and set(identity) == IDENTITY_KEYS, "launchctl_authority")
     current = {**observation, **identity, "event_before": before, "event_after": event["after"],
         "event_ref": event["ref"], **{"event_" + key: event[key] for key in ("forced", "created", "deleted")}}
-    require(admission_policy(current), "launchctl_authority")
+    grant_id = selected_grant_id(current)
+    require(grant_id is not None and (not use_projection or grant_id == INTEGRATION_GRANT_ID),
+            "launchctl_authority")
+    if grant_id == INTEGRATION_GRANT_ID and not use_projection:
+        require(projection_allowed(projection, observation)
+                and all(event.get(key) == projection[key] for key in
+                        ("before", "after", "ref", "forced", "created", "deleted")), "launchctl_authority")
     return current
 
 
@@ -2744,7 +3328,7 @@ def write_receipt(path, encoded, deadline):
 
 
 def publish_receipt(staged, evidence, runner_exit, candidate, run_id, source_hashes,
-                    producer_identity, deadline):
+                    producer_identity, deadline, grant_id=LAUNCHCTL_GRANT_ID):
     """Offline publication AFTER the runner has exited, with no runtime effects.
 
     A cell passes only with a successful workflow step/job (runner exit 0) AND
@@ -2753,6 +3337,7 @@ def publish_receipt(staged, evidence, runner_exit, candidate, run_id, source_has
     process exit and filesystem publication: a publisher error also fails the
     workflow step, even if its output write completed before that error.
     """
+    require(grant_id in {LAUNCHCTL_GRANT_ID, INTEGRATION_GRANT_ID}, "publication_identity")
     require(type(runner_exit) is int and 0 <= runner_exit <= 255, "publication_exit")
     require(set(source_hashes) == set(FILES), "publication_sources")
     # Fixed, typed fallback: never forward stale pass bytes or invalid staged
@@ -2761,8 +3346,10 @@ def publish_receipt(staged, evidence, runner_exit, candidate, run_id, source_has
     value = {"schemaVersion": 1, "candidate_sha": candidate, "source_hashes": source_hashes,
         "producer": producer_identity, "scope": "darwin_arm64_byo_only", "result": "fail",
         "github_run_id": run_id, "github_run_attempt": 1,
-        "launchctl_query_grant_id": LAUNCHCTL_GRANT_ID,
-        "launchctl_query_pinned_parent": LAUNCHCTL_PINNED_PARENT,
+        "launchctl_query_grant_id": grant_id,
+        "launchctl_query_pinned_parent": INTEGRATION_BEFORE if grant_id == INTEGRATION_GRANT_ID else LAUNCHCTL_PINNED_PARENT,
+        **({"integration_before": INTEGRATION_BEFORE, "integration_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN]}
+           if grant_id == INTEGRATION_GRANT_ID else {}),
         "failure": "command_failed" if runner_exit else "receipt_validation",
         "request_counts": [], "captured_output_bytes": 0, "dependency_payload_bytes_peak": 0}
     if runner_exit:
@@ -2787,8 +3374,9 @@ def publish_receipt(staged, evidence, runner_exit, candidate, run_id, source_has
         # agree. PASS's closed schema requires ALL of these identities.
         require(all(observed.get(key, expected) == expected for key, expected in (
             ("github_run_id", run_id), ("github_run_attempt", 1),
-            ("launchctl_query_grant_id", LAUNCHCTL_GRANT_ID),
-            ("launchctl_query_pinned_parent", LAUNCHCTL_PINNED_PARENT))), "receipt_identity")
+            ("launchctl_query_grant_id", grant_id),
+            ("launchctl_query_pinned_parent", value["launchctl_query_pinned_parent"]),
+            *((key, value[key]) for key in ("integration_before", "integration_parents") if key in value))), "receipt_identity")
         if qualified:
             require(observed_sources == source_hashes, "receipt_identity")
             if runner_exit == 0:
@@ -2842,7 +3430,11 @@ def publication(args):
         sources = {path: sha(read_bounded(candidate / path, 8 * 1024 * 1024)) for path in FILES}
         identity = {"sha": args.producer_sha, "run": args.producer_run, "artifact": args.artifact_id,
                     "zip_sha256": args.artifact_zip_sha256, "fresh": args.fresh_producer}
-        passed = publish_receipt(staged, evidence, args.runner_exit_code, source, run_id, sources, identity, deadline)
+        context = first_push_observation(ci_environment(), os.environ.get("GITHUB_EVENT_PATH"), candidate,
+                                         projection=ci_push_projection())
+        require(launchctl_authorized(args.launchctl_query_grant, context), "publication_identity")
+        passed = publish_receipt(staged, evidence, args.runner_exit_code, source, run_id, sources, identity, deadline,
+                                 grant_id=selected_grant_id(context))
     # A zero-exit runner with absent/invalid/failed staging cannot make the step
     # succeed. A failed runner gets sanitized evidence, then its status is kept
     # by the workflow. No cleanup or retry is performed here.
@@ -3311,7 +3903,7 @@ async function check(context, port, refusal) {
     const session=await trusted.newCDPSession(page);
     const info=await session.send('Browser.getVersion');
     version=info.product.replace(/^Chrome\//,'');
-    if (version !== '151.0.7922.34') throw new Error('browser identity mismatch');
+    if (version !== '153.0.8010.12') throw new Error('browser identity mismatch');
     const {arguments:argv}=await session.send('Browser.getBrowserCommandLine');
     argvOK=launchArgumentsAllowed(argv, path.join(input.profiles,'controller'));
     if (!argvOK) throw new Error('launch argument mismatch');
@@ -3468,7 +4060,7 @@ def tls_controls(root, operations, binary, version, revision, candidate, proxies
             operations.cleanup.error("browser_contexts_unobserved")
     require(result.returncode == 0 and type(value) is dict and value.get("ok") is True
             and value.get("contexts_closed") is True and value.get("argv_ok") is True
-            and value.get("version") == "151.0.7922.34" and value.get("observations") == [
+            and value.get("version") == "153.0.8010.12" and value.get("observations") == [
                 "empty_profile_refuses_ca", "trusted_profile_accepts_ip", "trusted_profile_refuses_unknown_ca",
                 "trusted_profile_refuses_wrong_host"], "browser_trust_controls")
     return {"python_curl_packaged_go": outcomes, "browser": value}
@@ -3476,19 +4068,18 @@ def tls_controls(root, operations, binary, version, revision, candidate, proxies
 
 def runtime(args):
     budget = Budget()  # Admission acquisition consumes the unchanged phase/global caps.
-    ci_context = {"system": platform.system(), "machine": platform.machine(),
-        "enabled": os.environ.get("HERDR_DARWIN_PACKAGE_BROWSER_CI"),
-        "repository": os.environ.get("GITHUB_REPOSITORY"), "ref": os.environ.get("GITHUB_REF"),
-        "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"), "event_name": os.environ.get("GITHUB_EVENT_NAME"),
-        "candidate_sha": os.environ.get("GITHUB_SHA"), "run_id": os.environ.get("GITHUB_RUN_ID"),
-        "runner_environment": os.environ.get("RUNNER_ENVIRONMENT"), "image_os": os.environ.get("ImageOS")}
+    ci_context = ci_environment()
     require(ci_context_allowed(ci_context), "ci_admission")
     require(launchctl_packet_allowed(args.launchctl_query_grant), "launchctl_authority")
     candidate = Path(__file__).resolve().parents[1]
     event_path = os.environ.get("GITHUB_EVENT_PATH")
-    observe = lambda: first_push_observation(ci_context, event_path, candidate)
+    observe = lambda: first_push_observation(ci_context, event_path, candidate, projection=ci_push_projection())
     launchctl_context = observe()
     require(launchctl_authorized(args.launchctl_query_grant, launchctl_context), "launchctl_authority")
+    grant_id = selected_grant_id(launchctl_context)
+    pinned_parent = INTEGRATION_BEFORE if grant_id == INTEGRATION_GRANT_ID else LAUNCHCTL_PINNED_PARENT
+    integration_fields = ({"integration_before": INTEGRATION_BEFORE,
+        "integration_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN]} if grant_id == INTEGRATION_GRANT_ID else {})
     source, run_id = launchctl_context["candidate_sha"], int(launchctl_context["run_id"])
     producer(args.producer_sha, args.producer_run, args.artifact_id, args.artifact_zip_sha256,
              args.fresh_producer, source, run_id)
@@ -3502,8 +4093,8 @@ def runtime(args):
     operations = Operations(root, {}, budget, cleanup, EffectGate(True,
         launchctl_grant=args.launchctl_query_grant, launchctl_context=launchctl_context, launchctl_observe=observe))
     receipt = {"schemaVersion": 1, "candidate_sha": source, "result": "fail", "phases": [],
-               "launchctl_query_grant_id": LAUNCHCTL_GRANT_ID, "launchctl_query_pinned_parent": LAUNCHCTL_PINNED_PARENT,
-               "github_run_id": run_id, "github_run_attempt": int(launchctl_context["attempt"]),
+               "launchctl_query_grant_id": grant_id, "launchctl_query_pinned_parent": pinned_parent,
+               **integration_fields, "github_run_id": run_id, "github_run_attempt": int(launchctl_context["attempt"]),
                "producer": {"sha": args.producer_sha, "run": args.producer_run, "artifact": args.artifact_id,
                             "zip_sha256": args.artifact_zip_sha256, "fresh": args.fresh_producer},
                "cases": [], "request_counts": [], "cleanup": False, "scope": "darwin_arm64_byo_only",
@@ -3555,8 +4146,8 @@ def runtime(args):
             operations.env = environment(root)
             initial_sources = {path: sha(read_bounded(candidate / path, 8 * 1024 * 1024)) for path in FILES}
             receipt["source_hashes"] = initial_sources
-            receipt["source_proof"] = {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c",
-                "playwright_tag": "v1.62.1", "go_tag": "go1.27.1", "trust": "TRUST-PROOF.md"}
+            receipt["source_proof"] = {"chromium_commit": "971a7443b0c9b0a9b2860529b33331b76077ec62",
+                "playwright_tag": "v1.63.0", "go_tag": "go1.27.3", "trust": "TRUST-PROOF.md"}
             require(command(["git", "rev-parse", "HEAD"]).decode().strip() == source, "candidate_head")
             require(not command(["git", "status", "--porcelain=v1", "--untracked-files=all"]), "candidate_dirty")
             changed = command(["git", "diff", "--name-only", SCOPE_BASE, source, "--"]).decode().splitlines()
@@ -3574,24 +4165,24 @@ def runtime(args):
                 match = re.search(rb"[0-9]+\.[0-9]+\.[0-9]+[a-z]?", output)
                 require(match is not None, "tool_version")
                 tools[name] = match[0].decode("ascii")
-            require(tools["python"] == PYTHON_VERSION and tools["node"] == "24.21.0" and tools["bun"] == "1.4.0"
-                    and tools["go"] == "1.27.1", "tool_identity")
+            require(tools["python"] == PYTHON_VERSION and tools["node"] == "26.13.0" and tools["bun"] == "1.4.4"
+                    and tools["go"] == "1.27.3", "tool_identity")
             receipt["tools"] = tools
             command(["bun", "install", "--frozen-lockfile"], 290, candidate / "frontend")
             command(["node", str(candidate / "frontend/node_modules/@playwright/test/cli.js"),
                      "install", "--no-shell", "chromium"], 290)
             browser_manifest = strict_json(read_bounded(candidate / "frontend/node_modules/playwright-core/browsers.json", 65536))
             browser = [b for b in browser_manifest["browsers"] if b["name"] == "chromium"]
-            require(len(browser) == 1 and browser[0]["revision"] == "1234"
-                    and browser[0]["browserVersion"] == "151.0.7922.34", "browser_manifest")
-            require(strict_json(read_bounded(candidate / "frontend/node_modules/@playwright/test/package.json", 65536))["version"] == "1.62.1",
+            require(len(browser) == 1 and browser[0]["revision"] == "1243"
+                    and browser[0]["browserVersion"] == "153.0.8010.12", "browser_manifest")
+            require(strict_json(read_bounded(candidate / "frontend/node_modules/@playwright/test/package.json", 65536))["version"] == "1.63.0",
                     "playwright_version")
-            executables = list((root / "browsers").glob("chromium-1234/**/Contents/MacOS/Google Chrome for Testing"))
+            executables = list((root / "browsers").glob("chromium-1243/**/Contents/MacOS/Google Chrome for Testing"))
             require(len(executables) == 1, "browser_executable")
             browser_bytes = read_bounded(executables[0], LIMITS["dependencies"])
             require(browser_bytes[:8] == bytes.fromhex("cffaedfe0c000001"), "browser_native_arm64")
             receipt["browser_identity"] = {"sha256": sha(browser_bytes), "target": "darwin/arm64",
-                "version": "151.0.7922.34", "revision": "1234", "playwright": "1.62.1",
+                "version": "153.0.8010.12", "revision": "1243", "playwright": "1.63.0",
                 # Identity of the shipped bundle that generates Chromium's default
                 # switches (Playwright 1.62 no longer ships chromiumSwitches.js).
                 "switches_sha256": sha(read_bounded(candidate / "frontend/node_modules/playwright-core/lib/coreBundle.js", 32 * 1024 * 1024))}
@@ -3619,9 +4210,9 @@ def runtime(args):
             receipt["manifest_sha256"] = sha(read_bounded(root / "release/release-manifest.json", LIMITS["receipt"]))
             receipt["binary_sha256"] = sha(read_bounded(binary, LIMITS["individual"]))
             compiler = command(["go", "version", "-m", str(binary)])
-            require(b"go1.27.1" in compiler and b"GOOS=darwin" in compiler and b"GOARCH=arm64" in compiler,
+            require(b"go1.27.3" in compiler and b"GOOS=darwin" in compiler and b"GOARCH=arm64" in compiler,
                     "packaged_compiler")
-            receipt["compiler"] = {"version": "go1.27.1", "target": "darwin/arm64", "metadata_sha256": sha(compiler)}
+            receipt["compiler"] = {"version": "go1.27.3", "target": "darwin/arm64", "metadata_sha256": sha(compiler)}
             certificates(root, operations)
             root_der = read_bounded(root / "ca.der", 65536)
             receipt["profile_inputs"] = profiles(root, root_der, operations.effects)
@@ -3951,13 +4542,13 @@ def offline_check(group):
             "github_run_id": 1, "github_run_attempt": 1,
             "archive_hashes": {"herdr-mobile-relay_1.2.3_darwin_arm64.tar.gz": "4" * 64, "checksums.txt": "5" * 64},
             "manifest_sha256": "6" * 64, "binary_sha256": "7" * 64,
-            "compiler": {"version": "go1.27.1", "target": "darwin/arm64", "metadata_sha256": "8" * 64},
-            "browser_identity": {"sha256": "9" * 64, "version": "151.0.7922.34", "revision": "1234",
-                "playwright": "1.62.1", "target": "darwin/arm64", "switches_sha256": "a" * 64},
-            "tools": {"python": PYTHON_VERSION, "node": "24.21.0", "bun": "1.4.0", "go": "1.27.1",
+            "compiler": {"version": "go1.27.3", "target": "darwin/arm64", "metadata_sha256": "8" * 64},
+            "browser_identity": {"sha256": "9" * 64, "version": "153.0.8010.12", "revision": "1243",
+                "playwright": "1.63.0", "target": "darwin/arm64", "switches_sha256": "a" * 64},
+            "tools": {"python": PYTHON_VERSION, "node": "26.13.0", "bun": "1.4.4", "go": "1.27.3",
                       "curl": "8.7.1", "openssl": "3.3.6"},
-            "source_proof": {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c",
-                "playwright_tag": "v1.62.1", "go_tag": "go1.27.1", "trust": "TRUST-PROOF.md"},
+            "source_proof": {"chromium_commit": "971a7443b0c9b0a9b2860529b33331b76077ec62",
+                "playwright_tag": "v1.63.0", "go_tag": "go1.27.3", "trust": "TRUST-PROOF.md"},
             "profile_policy": {"schema": 1, "root_der_sha256": "b" * 64, "trust_blob": "0a020803",
                 "platform_integration": False, "sandbox": True, "mock_keychain": True},
             "profile_inputs": {name: {"preferences_sha256": "c" * 64, **(
@@ -3970,7 +4561,7 @@ def offline_check(group):
                       for mode in ("enroll", "reprint", "restart")],
             "trust_controls": {"browser": {"ok": True, "observations": ["empty_profile_refuses_ca", "trusted_profile_accepts_ip",
                 "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"], "argv_ok": True,
-                "version": "151.0.7922.34", "contexts_closed": True},
+                "version": "153.0.8010.12", "contexts_closed": True},
                 "python_curl_packaged_go": [{"category": category,
                     "python": {"category": category, "verify_code": code},
                     "curl": {"category": category, "exit_code": 0 if category == "positive" else 60},
@@ -4357,10 +4948,10 @@ def offline_check(group):
                             if owner.delay_at == "close":
                                 now[0] = 30
                     return Writer()
-            def publish(staged, status):
+            def publish(staged, status, grant_id=LAUNCHCTL_GRANT_ID):
                 output = ReceiptFile()
                 qualified = publish_receipt(staged, output, status, BASE, 1, sources, producer_id,
-                                            CleanupDeadline(seconds=5, clock=clock))
+                                            CleanupDeadline(seconds=5, clock=clock), grant_id)
                 observed = strict_json(output.data, "receipt")
                 require(receipt_policy(output.data, BASE, observed["source_hashes"], producer_id) is qualified,
                         "offline_publication_validated")
@@ -4398,6 +4989,15 @@ def offline_check(group):
             write_receipt(staged, encode(valid_receipt), CleanupDeadline(clock=clock))
             qualified, observed, _ = publish(staged, 0)
             require(qualified and observed == valid_receipt, "offline_publication_positive")
+            integrated_pass = {**valid_receipt, "launchctl_query_grant_id": INTEGRATION_GRANT_ID,
+                "launchctl_query_pinned_parent": INTEGRATION_BEFORE, "integration_before": INTEGRATION_BEFORE,
+                "integration_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN]}
+            qualified_integration, published_integration, _ = publish(ReceiptFile(encode(integrated_pass)), 0,
+                                                                    INTEGRATION_GRANT_ID)
+            refused_integration, refused_value, _ = publish(staged, 0, INTEGRATION_GRANT_ID)
+            require(qualified_integration and published_integration == integrated_pass
+                    and not refused_integration and refused_value["result"] == "fail",
+                    "offline_integration_publication_binding")
             qualified, observed, _ = publish(staged, 17)
             require(not qualified and observed["result"] == "fail" and observed["failure_detail"]["exit_code"] == 17
                     and "cases" not in observed and staged.data == encode(valid_receipt), "offline_failed_exit_stale_pass")
@@ -4580,6 +5180,18 @@ def offline_check(group):
             return True
 
         def receipt_cases():
+            integrated_receipt = {**valid_receipt, "launchctl_query_grant_id": INTEGRATION_GRANT_ID,
+                "launchctl_query_pinned_parent": INTEGRATION_BEFORE, "integration_before": INTEGRATION_BEFORE,
+                "integration_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN]}
+            require(receipt_policy(encode(integrated_receipt), BASE, sources, producer_id),
+                    "offline_integration_receipt_positive")
+            for changed in ({"integration_before": LAUNCHCTL_PINNED_PARENT},
+                    {"integration_parents": [INTEGRATION_MAIN, INTEGRATION_BEFORE]},
+                    {"integration_parents": [INTEGRATION_BEFORE]},
+                    {"launchctl_query_grant_id": LAUNCHCTL_GRANT_ID},
+                    {"launchctl_query_pinned_parent": LAUNCHCTL_PINNED_PARENT}):
+                require(rejects(lambda: receipt_policy(encode({**integrated_receipt, **changed}),
+                        BASE, sources, producer_id)), "offline_integration_receipt_refusal")
             # New first-push identity fields are mandatory on PASS; every
             # present field is typed on FAIL as well (never an opaque sink).
             for field in ("launchctl_query_grant_id", "launchctl_query_pinned_parent", "github_run_id", "github_run_attempt"):
@@ -5334,7 +5946,7 @@ def offline_check(group):
             # The three history facts are what git would report for this observation.
             identity = {"checked_out_sha": base["candidate_sha"], "candidate_parents": [LAUNCHCTL_PINNED_PARENT],
                 "scope_base_precedes_before": True, "before_precedes_candidate": True, "pushed_range_linear": True}
-            reads, queries, query_befores = [], [], []
+            reads, queries, query_befores, opens = [], [], [], []
             class EventFile:
                 def __init__(self, data, *, mode=stat.S_IFREG, size=None, links=1):
                     self.data = data
@@ -5344,8 +5956,10 @@ def offline_check(group):
                     return self.info
                 def open(self, mode):
                     require(mode == "rb", "offline_event_read_mode")
+                    opens.append(True)
                     return io.BytesIO(self.data)
-            def observe(observation=base, data=None, commit=identity, path="/inert-push-event.json", **metadata):
+            def observe(observation=base, data=None, commit=identity, path="/inert-push-event.json",
+                        projection=None, **metadata):
                 def read_event(selected, maximum):
                     require(str(selected) == "/inert-push-event.json" and maximum == PUSH_EVENT_CAP == 65536,
                             "offline_event_bound")
@@ -5357,7 +5971,7 @@ def offline_check(group):
                     query_befores.append(before)
                     return commit
                 return first_push_observation(observation, path, Path("/inert-candidate"),
-                    read_event=read_event, query_candidate=query_candidate)
+                    read_event=read_event, query_candidate=query_candidate, projection=projection)
             context = observe()
             packet = {"grantId": LAUNCHCTL_GRANT_ID, "authorized": True,
                 "pinnedParent": LAUNCHCTL_PINNED_PARENT, "scope": dict(LAUNCHCTL_SCOPE)}
@@ -5367,8 +5981,29 @@ def offline_check(group):
                     "offline_launchctl_first_push_positive")
             # Bind the workflow's explicit packet to the same exact frozen values.
             workflow = read_bounded(Path(__file__).resolve().parents[1] / FILES[0], 65536).decode()
-            workflow_packets = re.findall(r"--launchctl-query-grant '([^']+)'", workflow)
-            require(len(workflow_packets) == 1 and workflow.count("--launchctl-query-grant") == 1
+            workflow_packets = [grant_packet(LAUNCHCTL_GRANT_ID)]
+            require(workflow.count('--launchctl-query-grant "$grant"') == 2
+                    and "module.first_push_observation(module.ci_environment()" in workflow
+                    and "module.grant_packet(module.selected_grant_id(context))" in workflow
+                    and "module.selected_grant_id(target)" in workflow
+                    and workflow.count("projection = module.ci_push_projection()") == 2
+                    and "projection=projection" in workflow
+                    and "raw_push_event_bytes=" in workflow and "projection_bytes=" in workflow
+                    and all((name + ": ${{ toJSON(" + source + ") }}") in workflow for name, source in (
+                        ("HERDR_PUSH_BEFORE_JSON", "github.event.before"),
+                        ("HERDR_PUSH_AFTER_JSON", "github.event.after"),
+                        ("HERDR_PUSH_REF_JSON", "github.event.ref"),
+                        ("HERDR_PUSH_REPOSITORY_JSON", "github.event.repository.full_name"),
+                        ("HERDR_PUSH_FORCED_JSON", "github.event.forced"),
+                        ("HERDR_PUSH_CREATED_JSON", "github.event.created"),
+                        ("HERDR_PUSH_DELETED_JSON", "github.event.deleted"),
+                        ("HERDR_PUSH_CONTEXT_REPOSITORY_JSON", "github.repository"),
+                        ("HERDR_PUSH_CONTEXT_REF_JSON", "github.ref"),
+                        ("HERDR_PUSH_CONTEXT_SHA_JSON", "github.sha"),
+                        ("HERDR_PUSH_CONTEXT_RUN_ID_JSON", "github.run_id"),
+                        ("HERDR_PUSH_CONTEXT_RUN_ATTEMPT_JSON", "github.run_attempt"),
+                        ("HERDR_PUSH_CONTEXT_EVENT_NAME_JSON", "github.event_name")))
+                    and "toJSON(github.event)" not in workflow
                     and strict_json(workflow_packets[0].encode()) == packet,
                     "offline_workflow_grant_binding")
             # The literal actually projected by the YAML itself (not only the
@@ -5392,7 +6027,7 @@ def offline_check(group):
                     "offline_workflow_scope_and_controls_binding")
             # The Python runtime is pinned in BOTH jobs, before the first python3 invocation of each
             # job, to the exact value the receipt and the qualify gate require.
-            pins = [m.start() for m in re.finditer(r"uses: actions/setup-python@v6\n(?:        timeout-minutes: [0-9]+\n)?"
+            pins = [m.start() for m in re.finditer(r"uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6\.1\.0\n(?:        timeout-minutes: [0-9]+\n)?"
                                                    r"        with:\n          python-version: \"" + re.escape(PYTHON_VERSION) + r"\"\n",
                                                    workflow)]
             require(workflow.count("actions/setup-python@") == 2 and len(pins) == 2
@@ -5412,6 +6047,98 @@ def offline_check(group):
                 ("q2-owner-launchctl-print-push-3c8f0c8d-20261012", "3c8f0c8db54e9e147bd0034bab83051fe186324e"),
                 ("q2-owner-launchctl-print-push-8c1f22ff-20261013", "8c1f22ff4980335ce0d1acc1731429a3457067a9"),
                 ("q2-owner-launchctl-print-push-dd608845-20261013", "dd608845b73c0323f5cbcfa140ad52affb28ec7f"))
+            projected = {**event, "before": INTEGRATION_BEFORE, "repository": REPOSITORY,
+                "context_repository": REPOSITORY, "context_ref": REF, "context_sha": base["candidate_sha"],
+                "context_run_id": 1, "context_run_attempt": 1, "context_event_name": "push"}
+            integration_identity = {**identity, "candidate_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN],
+                                    "pushed_range_linear": False}
+            projected_env = {name: json.dumps(projected[key]) for key, name in PUSH_PROJECTION_FIELDS.items()}
+            require(ci_push_projection(projected_env) == projected, "offline_projection_from_context")
+            before_projection = (len(reads), len(queries), len(opens))
+            integrated = observe(data=b" " * (PUSH_EVENT_CAP + 1), commit=integration_identity,
+                                 projection=ci_push_projection(projected_env))
+            require((len(reads), len(queries), len(opens)) ==
+                    (before_projection[0], before_projection[1] + 1, before_projection[2])
+                    and query_befores[-1] == INTEGRATION_BEFORE, "offline_oversize_raw_unread")
+            for field, value in (("before", "b" * 40), ("after", "d" * 40),
+                    ("ref", "refs/heads/other"), ("repository", "other/repo"),
+                    ("context_repository", "other/repo"), ("context_ref", "refs/heads/other"),
+                    ("context_sha", "d" * 40), ("context_run_id", 2),
+                    ("context_run_attempt", 2), ("context_event_name", "workflow_dispatch"),
+                    ("forced", True), ("created", True), ("deleted", True),
+                    ("forced", 0), ("context_run_id", "1"), ("context_run_attempt", True)):
+                before = len(opens)
+                require(rejects(lambda: observe(data=b" " * (PUSH_EVENT_CAP + 1),
+                        commit=integration_identity, projection={**projected, field: value}))
+                        and len(opens) == before, "offline_projection_near_miss_" + field)
+            for field in projected:
+                require(rejects(lambda field=field: observe(data=b" " * (PUSH_EVENT_CAP + 1),
+                        commit=integration_identity, projection={key: value for key, value in projected.items()
+                            if key != field})), "offline_projection_missing_" + field)
+            require(rejects(lambda: observe(data=b" " * (PUSH_EVENT_CAP + 1),
+                    commit=integration_identity, projection={**projected, "extra": True})),
+                    "offline_projection_extra")
+            for name in PUSH_PROJECTION_FIELDS.values():
+                require(rejects(lambda name=name: ci_push_projection({key: value for key, value in
+                    projected_env.items() if key != name})) if name != PUSH_PROJECTION_FIELDS["before"]
+                    else ci_push_projection({key: value for key, value in projected_env.items()
+                        if key != name}) is None, "offline_projection_env_missing")
+            for raw in ("{", "false false", '{"a": 1, "a": 2}', " " * (PUSH_EVENT_CAP + 1)):
+                require(rejects(lambda: ci_push_projection({**projected_env,
+                    PUSH_PROJECTION_FIELDS["after"]: raw})), "offline_projection_env_malformed")
+            for change in ({"candidate_sha": "d" * 40}, {"run_id": "2"},
+                    {"attempt": "2"}, {"repository": "other/repo"},
+                    {"ref": "refs/heads/other"}, {"event_name": "workflow_dispatch"}):
+                require(rejects(lambda change=change: observe(observation={**base, **change},
+                    data=b" " * (PUSH_EVENT_CAP + 1), commit=integration_identity,
+                    projection=projected)), "offline_projection_context_mismatch")
+            require(rejects(lambda: observe(data=b" " * (PUSH_EVENT_CAP + 1),
+                    commit={**integration_identity, "candidate_parents": [INTEGRATION_MAIN, INTEGRATION_BEFORE]},
+                    projection=projected)), "offline_projection_graph_order")
+            require(len(opens) == before_projection[2], "offline_projection_refusals_unread")
+            linear_from_pin = {**identity, "candidate_parents": [INTEGRATION_BEFORE]}
+            require(selected_grant_id(observe(data=encode({**event, "before": INTEGRATION_BEFORE}),
+                    commit=linear_from_pin, projection=projected)) == LAUNCHCTL_GRANT_ID
+                    and len(opens) == before_projection[2] + 1
+                    and rejects(lambda: observe(data=b" " * (PUSH_EVENT_CAP + 1),
+                        commit=linear_from_pin, projection=projected))
+                    and len(opens) == before_projection[2] + 1, "offline_legacy_raw_only")
+            integration_packet = grant_packet(INTEGRATION_GRANT_ID)
+            require(integration_policy(integrated) and selected_grant_id(integrated) == INTEGRATION_GRANT_ID
+                    and launchctl_authorized(integration_packet, integrated)
+                    and not launchctl_authorized(valid_packet, integrated), "offline_integration_positive")
+            integration_gate = EffectGate(True, launchctl_grant=integration_packet,
+                launchctl_context=integrated, launchctl_observe=lambda: integrated)
+            integration_gate.effect("launchctl")
+            integration_gate.effect("launchctl")
+            require(integration_gate.launchctl_queries == 2
+                    and rejects(lambda: integration_gate.effect("launchctl"))
+                    and not launchctl_authorized(integration_packet, context)
+                    and not launchctl_authorized("", integrated)
+                    and not launchctl_authorized(None, integrated), "offline_integration_query_cap")
+            for change in ({"event_before": LAUNCHCTL_PINNED_PARENT},
+                    {"candidate_parents": [INTEGRATION_MAIN, INTEGRATION_BEFORE]},
+                    {"candidate_parents": [INTEGRATION_BEFORE]},
+                    {"candidate_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN, "b" * 40]},
+                    {"candidate_parents": [INTEGRATION_BEFORE, "b" * 40]},
+                    {"event_forced": True}, {"event_created": True}, {"event_deleted": True},
+                    {"event_ref": "refs/heads/other"}, {"ref": "refs/heads/other"},
+                    {"repository": "other/repo"}, {"attempt": "2"},
+                    {"event_name": "workflow_dispatch"}, {"runner_environment": "self-hosted"},
+                    {"system": "Linux"}, {"scope_base_precedes_before": False},
+                    {"before_precedes_candidate": False}, {"checked_out_sha": "d" * 40}):
+                require(selected_grant_id({**integrated, **change}) is None
+                        and not launchctl_authorized(integration_packet, {**integrated, **change}),
+                        "offline_integration_near_miss")
+            require(not launchctl_authorized(valid_packet, integrated)
+                    and not launchctl_authorized(integration_packet, context)
+                    and not launchctl_packet_allowed(grant_packet(INTEGRATION_GRANT_ID).replace(
+                        INTEGRATION_MAIN, "b" * 40))
+                    and rejects(lambda: observe(commit={**identity,
+                        "candidate_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN]}))
+                    and rejects(lambda: observe(data=encode({**event, "before": INTEGRATION_BEFORE}),
+                        commit={**identity, "candidate_parents": [INTEGRATION_MAIN, INTEGRATION_BEFORE]})),
+                    "offline_integration_wrong_source")
             for spent_grant, spent_parent in spent_grants:
                 spent_packet = encode({"grantId": spent_grant, "authorized": True, "pinnedParent": spent_parent,
                     "scope": {**LAUNCHCTL_SCOPE, "when": "attempt 1 of the first fast-forward push from " + spent_parent}}).decode()
@@ -5662,10 +6389,10 @@ def offline_check(group):
             invalid.extend([path for path in minimal if path != required] for required in REQUIRED)
             # An extra path outside ALLOWED next to every REQUIRED combination.
             invalid.extend([*minimal[:index], *minimal[index + 1:], "extra.txt"] for index in range(len(minimal)))
-            # The two receipt-hashed runner files this gate does not change are NOT
-            # allowed: a later commit that edits them must extend ALLOWED in that commit.
-            require(FILES[2] not in ALLOWED and FILES[3] not in ALLOWED, "offline_unchanged_runner_files_not_allowed")
+            require(FILES[2] not in ALLOWED and ALLOWED.count(FILES[3]) == 1
+                    and candidate_scope_allowed([*minimal, FILES[3]]), "offline_runner_file_scope")
             invalid.append([*minimal, FILES[2]])
+            invalid.append([*minimal, FILES[3], FILES[3]])
             require(all(not candidate_scope_allowed(item) for item in invalid), "offline_candidate_scope_refusals")
             return True
 
@@ -5910,8 +6637,8 @@ def offline_check(group):
     && ['--use-mock-keychain', '--enable-automation', '--remote-debugging-pipe'].every((flag) => args.includes(flag))
     && args.some((argument) => argument === '--headless' || argument.startsWith('--headless='));
 }'''
-            # Full expected Playwright 1.62.1 macOS headless persistent argv from
-            # the frozen 9393fa79... bundle facts, with chromiumSandbox:true and
+            # Full expected Playwright 1.63.0 macOS headless persistent argv from
+            # the locked 1.63.0 bundle facts, with chromiumSandbox:true and
             # our sole extra --enable-automation. Not a copied runtime allowlist.
             profile = "/owned-policy-profile"
             expected_argv = ["chromium", "--disable-field-trial-config", "--disable-background-networking",
@@ -5920,7 +6647,7 @@ def offline_check(group):
                 "--disable-component-extensions-with-background-pages", "--disable-component-update",
                 "--no-default-browser-check", "--disable-default-apps", "--disable-dev-shm-usage",
                 "--disable-edgeupdater", "--disable-extensions",
-                "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion",
+                "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion",
                 "--enable-features=CDPScreenshotNewSurface", "--allow-pre-commit-input", "--disable-hang-monitor",
                 "--disable-ipc-flooding-protection", "--disable-popup-blocking", "--disable-prompt-on-repost",
                 "--disable-renderer-backgrounding", "--disable-updater-scheduler", "--force-color-profile=srgb",
@@ -6932,7 +7659,7 @@ def offline_check(group):
             return True
         def go_tls_controls_end_to_end():
             # tls_controls itself with inert Python/curl/Go/Node operations and listener counters: no socket, process or TLS.
-            browser = {"ok": True, "contexts_closed": True, "argv_ok": True, "version": "151.0.7922.34",
+            browser = {"ok": True, "contexts_closed": True, "argv_ok": True, "version": "153.0.8010.12",
                        "observations": ["empty_profile_refuses_ca", "trusted_profile_accepts_ip",
                                         "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"]}
             @contextmanager

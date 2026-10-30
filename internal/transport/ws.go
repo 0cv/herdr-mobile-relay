@@ -86,7 +86,7 @@ type Hub struct {
 	register         registrationLock
 	mu               sync.RWMutex
 	clients          map[string]*ClientConn
-	pending          map[FrameConn]struct{}
+	pending          map[FrameConn]*ClientConn
 	blocked          map[string]uint64
 	authResolver     E2EEAuthResolver
 	nextID           int
@@ -118,7 +118,7 @@ func NewHub(cfg *config.Config, logger *slog.Logger) *Hub {
 		cfg:            cfg,
 		logger:         logger,
 		clients:        make(map[string]*ClientConn),
-		pending:        make(map[FrameConn]struct{}),
+		pending:        make(map[FrameConn]*ClientConn),
 		accepting:      true,
 		blocked:        make(map[string]uint64),
 		orderedIngress: make(chan inboundMessage, orderedIngressCapacity),
@@ -185,7 +185,7 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 		conn.CloseNow()
 		return
 	}
-	h.pending[conn] = struct{}{}
+	h.pending[conn] = nil
 	h.connectionWG.Add(1)
 	h.mu.Unlock()
 	defer h.connectionWG.Done()
@@ -241,6 +241,7 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 		cancel:    cancel,
 		done:      make(chan struct{}),
 	}
+	h.pending[conn] = client
 	go h.writePump(client)
 	h.mu.Unlock()
 	if h.onConnect != nil {
@@ -252,6 +253,7 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 		h.mu.Unlock()
 		h.register.Unlock()
 		cancel()
+		h.removeClient(client)
 		conn.CloseNow()
 		<-client.done
 		return
@@ -299,6 +301,10 @@ func (h *Hub) readPump(client *ClientConn) {
 				client.logger.Debug("invalid encrypted message rejected")
 				return
 			}
+			continue
+		}
+		if len(message) == 1 && message["type"] == "ping" {
+			h.Send(client, map[string]any{"type": "pong"})
 			continue
 		}
 		h.receiptMu.Lock()
@@ -592,6 +598,9 @@ func encodeMessage(message any) ([]byte, string, bool, error) {
 	if err != nil {
 		return nil, "", false, err
 	}
+	if len(data) > clientOutboundMaxBytes {
+		return data, "", false, nil
+	}
 	kind := messageType(data)
 	replaceable := kind == "agents" || kind == "inventory_status" || kind == "update_status" ||
 		kind == "app_deploy_status" || kind == "herdr_status"
@@ -793,14 +802,12 @@ func (h *Hub) DropConnections() {
 	for _, client := range h.clients {
 		clients = append(clients, client)
 	}
-	pending := make([]FrameConn, 0, len(h.pending))
-	for conn := range h.pending {
-		pending = append(pending, conn)
+	pending := make(map[FrameConn]*ClientConn, len(h.pending))
+	for conn, client := range h.pending {
+		pending[conn] = client
 	}
 	h.mu.RUnlock()
-	for _, conn := range pending {
-		conn.CloseNow()
-	}
+	closePendingConnections(pending)
 	for _, client := range clients {
 		client.conn.Close(CloseGoingAway, "connection dropped")
 	}
@@ -813,7 +820,6 @@ func (h *Hub) CloseAll() {
 }
 
 func (h *Hub) Shutdown(ctx context.Context) error {
-	h.register.Lock()
 	h.mu.Lock()
 	h.closing = true
 	clients := make([]*ClientConn, 0, len(h.clients))
@@ -821,16 +827,10 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 		clients = append(clients, client)
 		delete(h.clients, client.id)
 	}
-	pending := make([]FrameConn, 0, len(h.pending))
-	for conn := range h.pending {
-		pending = append(pending, conn)
-		delete(h.pending, conn)
-	}
+	pending := h.pending
+	h.pending = make(map[FrameConn]*ClientConn)
 	h.mu.Unlock()
-	h.register.Unlock()
-	for _, conn := range pending {
-		conn.CloseNow()
-	}
+	closePendingConnections(pending)
 
 	for _, client := range clients {
 		go func(c *ClientConn) {
@@ -852,6 +852,16 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 		return ctx.Err()
 	}
 	return waitGroup(ctx, &h.handlerWG)
+}
+
+func closePendingConnections(pending map[FrameConn]*ClientConn) {
+	for conn, client := range pending {
+		if client != nil {
+			client.cancel()
+			client.buf.Close()
+		}
+		conn.CloseNow()
+	}
 }
 
 func waitGroup(ctx context.Context, group *sync.WaitGroup) error {
