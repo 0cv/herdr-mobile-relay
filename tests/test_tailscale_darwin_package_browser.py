@@ -257,6 +257,7 @@ ALLOWED = (
     "frontend/tests/browser/mobile-journeys.spec.ts",
     "frontend/tests/unit/resize-session-preferences.test.ts",
     "frontend/tests/unit/settings.test.ts",
+    "frontend/tests/unit/store-last-known.test.ts",
     "frontend/tests/unit/store.test.ts",
     "frontend/tests/unit/terminal-layout.test.ts",
     "images/native_mobile_resolution.jpeg",

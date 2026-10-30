@@ -27,7 +27,8 @@ class CandidateScopeIntegrationTest(unittest.TestCase):
         self.assertEqual(len(installed), 275)
         self.assertEqual(hashlib.sha256(("\n".join(sorted(installed)) + "\n").encode()).hexdigest(),
                          RUNNER.INSTALLED_PATH_SET_SHA256)
-        changed = paths(RUNNER.SCOPE_BASE)
+        # Review the index that will be committed, not a worktree or previous HEAD.
+        changed = paths("--cached", RUNNER.SCOPE_BASE)
         integrated = set(changed) - allowed - installed
         self.assertEqual(len(changed), len(set(changed)))
         self.assertFalse(integrated)
@@ -39,6 +40,9 @@ class CandidateScopeIntegrationTest(unittest.TestCase):
         self.assertFalse(RUNNER.candidate_scope_allowed([p for p in changed if p != RUNNER.REQUIRED[0]]))
         self.assertFalse(RUNNER.candidate_scope_allowed([p for p in changed if p != sorted(installed)[0]]))
         self.assertFalse(RUNNER.candidate_scope_allowed([*changed, "unlisted/integration-path.txt"]))
+        self.assertEqual(RUNNER.ALLOWED.count("frontend/tests/unit/store-last-known.test.ts"), 1)
+        self.assertFalse(RUNNER.candidate_scope_allowed(
+            [*changed, "frontend/tests/unit/store-last-known-extra.test.ts"]))
         self.assertFalse(RUNNER.candidate_scope_allowed([*changed, changed[0]]))
 
 
