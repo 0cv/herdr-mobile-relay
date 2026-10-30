@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,79 +25,46 @@ func recordingHerdr(t *testing.T, dir, record, stdout string) string {
 		"printf '"+stdout+"\\n'\n")
 }
 
-// §9.6 / §16.9: two Agent Start requests with the same identity (client +
-// request_id + action) must create at most one pane. There is no relay-level
-// pre-pane scheduler ledger, so both callers observe the same pane creation.
+// §9.6 / §16.9: the relay-level pre-pane ledger shares one launch between
+// concurrent requests with the same identity.
 func TestDuplicateAgentStartCreatesOnePane(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "starts.log")
-	bin := recordingHerdr(t, dir, record, `{"result":{"pane_id":"pane-new"}}`)
-
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
-
-	start := func() {
-		d.Handle(context.Background(), map[string]any{
-			"action":     "agent_start",
-			"request_id": "same-req",
-			"profile_id": "claude",
-			"name":       "proj",
-			"cwd":        "/tmp",
-		})
-	}
-
+	f := newLaunchFixture(t)
+	results := make([]*CommandResult, 2)
+	start := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); start() }()
-	go func() { defer wg.Done(); start() }()
-	wg.Wait()
-
-	data, _ := os.ReadFile(record)
-	starts := strings.Count(string(data), "--kind")
-	if starts != 1 {
-		t.Fatalf("duplicate agent_start created %d panes, want 1\nrecord:\n%s", starts, data)
+	for i := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i] = f.dispatcher.Handle(f.ctx, map[string]any{
+				"action": "agent_start", "request_id": "same-req",
+				"profile_id": "claude", "name": "proj", "cwd": f.cwd,
+			})
+		}()
 	}
+	close(start)
+	wg.Wait()
+	for _, result := range results {
+		f.assertLaunch(t, result)
+	}
+	f.assertCalls(t, 0)
 }
 
 func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "starts.log")
-	bin := recordingHerdr(t, dir, record, `{"result":{"pane_id":"pane-new"}}`)
-
-	// Pre-check: verify the script produces valid JSON output directly.
-	preDir := filepath.Join(dir, "pre")
-	os.MkdirAll(preDir, 0o755)
-	preRecord := filepath.Join(preDir, "pre.log")
-	preBin := recordingHerdr(t, preDir, preRecord, `{"result":{"pane_id":"pane-new"}}`)
-	preCmd := exec.Command(preBin, "agent", "start", "pre", "--kind", "claude", "--pane", "p", "--timeout", "30000")
-	preOut, preErr := preCmd.CombinedOutput()
-	if preErr != nil {
-		t.Fatalf("script pre-check failed: %v\noutput: %q", preErr, preOut)
-	}
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-	}
-	if err := json.Unmarshal(preOut, &envelope); err != nil {
-		t.Fatalf("script pre-check produced invalid JSON: %v\nraw output: %q", err, preOut)
-	}
-
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	f := newLaunchFixture(t)
 	message := map[string]any{
 		"action": "agent_start", "request_id": "same-req",
-		"profile_id": "claude", "name": "proj", "cwd": "/tmp", "prompt": "hello",
+		"profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello",
 	}
-	first := d.Handle(context.Background(), message)
-	second := d.Handle(context.Background(), message)
-	if !first.OK || !second.OK {
-		data, _ := os.ReadFile(record)
-		t.Fatalf("start results = %+v, %+v\nrecord:\n%s", first, second, data)
+	first := f.dispatcher.Handle(f.ctx, message)
+	second := f.dispatcher.Handle(f.ctx, message)
+	f.assertLaunch(t, first)
+	f.assertLaunch(t, second)
+	if !second.replayed {
+		t.Fatal("duplicate launch did not replay the stored result")
 	}
-	data, _ := os.ReadFile(record)
-	if starts := strings.Count(string(data), "--kind"); starts != 1 {
-		t.Fatalf("start invocations = %d, want 1\n%s", starts, data)
-	}
-	if prompts := strings.Count(string(data), "agent prompt"); prompts != 1 {
-		t.Fatalf("initial prompt invocations = %d, want 1\n%s", prompts, data)
-	}
+	f.assertCalls(t, 1)
 }
 
 func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {

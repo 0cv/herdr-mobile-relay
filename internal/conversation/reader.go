@@ -684,46 +684,19 @@ func parseTranscript(agent, text string) []Entry {
 			if !ok || location.entry >= len(entries) || location.tool >= len(entries[location.entry].Tools) {
 				continue
 			}
-			output := sanitizeText(result.output)
-			output, truncated := clampText(output, maxEntryBytes)
 			tool := &entries[location.entry].Tools[location.tool]
-			tool.Output = output
-			tool.Error = result.failed
-			tool.Truncated = tool.Truncated || truncated
+			applyProjectedToolResult(tool, result)
 			delete(pendingTools, toolAssociationKey(normalized, result.id))
 		}
 
-		role, timestamp, body := "", stringValue(record["timestamp"]), ""
-		switch normalized {
-		case "claude", "claudecode", "qoder", "qodercli":
-			role, body = parseClaudeRecord(record)
-		case "codex", "openaicodex":
-			role, body = parseCodexRecord(record)
-		case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
-			role, body = parsePiRecord(record)
-		case "cursor", "cursoragent":
-			role, body = parseCursorRecord(record)
-			if timestamp == "" {
-				timestamp = cursorTimestampFromRecord(record)
-			}
-		}
-		body = sanitizeText(body)
-		if role == "" && len(calls) > 0 {
-			role = "assistant"
-		}
-		if role == "" || (body == "" && len(calls) == 0) {
+		entry := prepareJSONLEntry(agent, record, calls)
+		if entry == nil {
 			continue
 		}
-		body, truncated := clampText(body, maxEntryBytes)
-		kind := ""
-		if role == "notice" {
-			kind, role = "notice", "assistant"
-		}
-		entry := Entry{Kind: kind, Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
-		normalizeEntryTools(&entry)
+		normalizeEntryTools(entry)
 		entry.ID = stableRowID(line, seenIDs)
 		entryIndex := len(entries)
-		entries = append(entries, entry)
+		entries = append(entries, *entry)
 		for toolIndex := range calls {
 			if id := toolAssociationID(calls[toolIndex]); id != "" {
 				pendingTools[toolAssociationKey(normalized, id)] = toolLocation{entry: entryIndex, tool: toolIndex}
