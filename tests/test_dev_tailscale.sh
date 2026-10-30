@@ -3,7 +3,20 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-dev-tailscale.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'dev Tailscale test failed (exit %s)\n' "$status" >&2
+        for file in dev-output start-output actions; do
+            if [ -f "$WORK_DIR/$file" ]; then
+                printf '%s:\n' "$file" >&2
+                tail -30 "$WORK_DIR/$file" >&2
+            fi
+        done
+    fi
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
 export HOME="$WORK_DIR/home"
 mkdir -p "$WORK_DIR/bin" "$WORK_DIR/state" "$HOME/.local/bin"
 export FAKE_LOG="$WORK_DIR/actions" FAKE_ENV="$WORK_DIR/state/relay.env"
@@ -26,6 +39,7 @@ case "$1" in
         fi ;;
     address) echo 'https://sheep.example.ts.net:9443' ;;
     serve)
+        printf '%s\n' "$$" > "${FAKE_ENV%/*}/tailscale.pid"
         if [ "${FAKE_SERVE_FAIL:-}" = 1 ]; then
             echo 'Tailscale HTTPS port 9443 is already in use' >&2
             exit 9
@@ -39,7 +53,7 @@ cat > "$HERDR_RELAY_BIN" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1 ${2:-}" in
-    'tailscale '*) "$FAKE_TAILSCALE_BIN" "${@:2}" ;;
+    'tailscale '*) exec "$FAKE_TAILSCALE_BIN" "${@:2}" ;;
     'setup-fragment '*) printf 'token=%s&relay=%s\n' "$2" "$4" ;;
     'normalize-origin '*)
         if [ "${FAKE_ORIGIN_FAIL:-}" = 1 ]; then exit 1; fi
@@ -149,6 +163,10 @@ grep -q '\[fake QR\]' "$WORK_DIR/start-output"
 kill -TERM "$START_PID"
 wait "$START_PID" || :
 grep -q "tailscale off --port 9443 --relay-port $HERDR_RELAY_PORT" "$FAKE_LOG"
+if kill -0 "$(<"$WORK_DIR/state/tailscale.pid")" 2>/dev/null; then
+    echo 'Fake Tailscale Serve survived stopping the dev tunnel' >&2
+    exit 1
+fi
 
 : > "$FAKE_LOG"
 if (FAKE_ORIGIN_FAIL=1 run_start; wait "$START_PID"); then
