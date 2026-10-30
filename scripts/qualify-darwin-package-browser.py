@@ -87,7 +87,7 @@ ASSERT_ENROLL = ("controller_enrolled", "controller_read", "controller_command",
 ASSERT_PRESERVE = ("controller_enrolled", "controller_read", "reader_enrolled", "reader_read",
                    "credentials_preserved") + ASSERT_COMMON
 SOCKET_ORDINARY = frozenset({"ping", "agent.list", "pane.list", "workspace.list", "tab.list",
-                             "session.snapshot", "events.subscribe", "pane.read"})
+                             "session.snapshot", "events.subscribe", "pane.read", "pane.get", "pane.process_info"})
 SOCKET_PROBES = frozenset({"workspace.move_block", "tab.move", "pane.read"})
 SOCKET_PAIRS = frozenset(
     {(m, o) for m in SOCKET_ORDINARY - {"pane.read"} for o in ("succeeded", "failed")}
@@ -257,7 +257,7 @@ def socket_pair_guard(counts):
 
 
 def socket_rows(rows):
-    require(type(rows) is list and len(rows) <= 26, "receipt_socket_rows")
+    require(type(rows) is list and len(rows) <= len(SOCKET_PAIRS), "receipt_socket_rows")
     counts, order = {}, []
     for row in rows:
         require(is_exact(row, ("method", "outcome", "count")) and type(row["method"]) is str

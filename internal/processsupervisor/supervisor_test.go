@@ -236,9 +236,9 @@ func TestRunPropagatesExitOnlyAfterGroupRetirement(t *testing.T) {
 			directory := t.TempDir()
 			pidFile := filepath.Join(directory, "descendant.pid")
 			readyFile := filepath.Join(directory, "descendant.ready")
+			started := time.Now()
 			cmd := startSupervisor(t, 180*time.Millisecond, helperCommand("target", "spawn-exit", pidFile, readyFile, "stubborn", "exit", strconv.Itoa(code))...)
 			pid := waitPIDFile(t, pidFile)
-			started := time.Now()
 			err := waitCommand(t, cmd, 4*time.Second)
 			if got := exitStatus(err); got != code {
 				t.Fatalf("supervisor exit = %d (err %v), want %d", got, err, code)

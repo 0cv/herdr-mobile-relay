@@ -847,7 +847,7 @@ ALLOWED = (
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
 # SCOPE_BASE to the candidate. Adding or removing a path must update this pin
 # explicitly; the BYO receipt still asserts BYO only.
-INSTALLED_PATH_SET_SHA256 = "f7ff8f2b9b363d093aa910f6a43d8c425d0031556e41f11a72019a8bce03faac"
+INSTALLED_PATH_SET_SHA256 = "21b29e8efc32a4cefecf396853300546834a5631fd50b912b0536a07c6ef44ed"
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")
 LIMITS = MappingProxyType({
@@ -862,7 +862,7 @@ GUARDS = frozenset({"proxy", "herdr_socket", "fake_herdr", "pipe_drain"})
 PROBE_CAP = 64  # Deliberate finite refusal bound, not an observed refresh count.
 COUNT_MAX = 65535
 SOCKET_ORDINARY = frozenset({"ping", "agent.list", "pane.list", "workspace.list", "tab.list",
-    "session.snapshot", "events.subscribe", "pane.read"})
+    "session.snapshot", "events.subscribe", "pane.read", "pane.get", "pane.process_info"})
 SOCKET_PROBES = frozenset({"workspace.move_block", "tab.move", "pane.read"})
 SOCKET_PAIRS = frozenset(
     {(method, outcome) for method in SOCKET_ORDINARY - {"pane.read"} for outcome in ("succeeded", "failed")}
@@ -2423,7 +2423,7 @@ def socket_counter_map_safe(item, keys):
 
 
 def socket_row_counts(rows):
-    require(type(rows) is list and len(rows) <= 26, "receipt_schema")
+    require(type(rows) is list and len(rows) <= len(SOCKET_PAIRS), "receipt_schema")
     counts = {}
     order = []
     for row in rows:
@@ -5590,7 +5590,10 @@ def offline_check(group):
                 "session.snapshot": {"type": "session_snapshot", "snapshot": {"version": "0.9.0", "protocol": 1,
                     "workspaces": scenario["workspaces"], "tabs": scenario["tabs"], "panes": scenario["panes"], "agents": scenario["panes"]}},
                 "events.subscribe": {"type": "subscription_started"},
-                "pane.read": {"type": "pane_read", "read": {"text": "Harmless fixture output", "truncated": False}}}
+                "pane.read": {"type": "pane_read", "read": {"text": "Harmless fixture output", "truncated": False}},
+                "pane.get": {"type": "pane_info", "pane": scenario["panes"][0]},
+                "pane.process_info": {"type": "pane_process_info", "process_info": {"pane_id": "fixture:pane",
+                    "shell_pid": 0, "foreground_process_group_id": 0, "foreground_processes": []}}}
             compact = lambda value: json.dumps(value, separators=(",", ":")).encode()
             counters = helper.SocketCounters()
             for method, result in expected.items():
@@ -5626,7 +5629,7 @@ def offline_check(group):
                     and helper.INERT_PROBES == expected and helper.InertProbe._fields == ("method", "params", "code", "message")
                     and helper.PROBE_MATCHERS == {"empty_list", "empty_str", "int:0", "int:1", "false", "str:ansi", "str:visible"}
                     and helper.PROBE_CAP == PROBE_CAP == 64 and helper.COUNT_MAX == COUNT_MAX == 65535
-                    and helper.SOCKET_PAIRS == SOCKET_PAIRS and len(SOCKET_PAIRS) == 26
+                    and helper.SOCKET_PAIRS == SOCKET_PAIRS and len(SOCKET_PAIRS) == 30
                     and helper.SOCKET_REASONS == SOCKET_REASONS and len(SOCKET_REASONS) == 14
                     and helper.SOCKET_EXCEPTION_CATEGORIES == SOCKET_EXCEPTION_CATEGORIES, "offline_probe_contract")
             require(helper.SOCKET_EXCEPTION_BUCKETS == SOCKET_EXCEPTION_BUCKETS == (
@@ -7335,7 +7338,7 @@ def offline_check(group):
             require(not sent and counters.counts == {("other", "failed"): 1}
                     and counters.reasons == {"internal_error": 1} and counters.handler_exceptions == {"internal": 1}
                     and diagnostics["guard"] == "recorded_exception", "offline_internal_dispatch_failure")
-            # All 44 matrix cells: 26 producible and 18 impossible, never just a
+            # All 52 matrix cells: 30 producible and 22 impossible, never just a
             # positive sample. Only successful reads and bounded refusals admit.
             methods = SOCKET_ORDINARY | SOCKET_PROBES | {"other"}
             for method in methods:

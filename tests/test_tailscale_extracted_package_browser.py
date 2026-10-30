@@ -596,7 +596,7 @@ COUNT_MAX = 65535
 SOCKET_REQUEST_MAX = 1024 * 1024
 SOCKET_ORDINARY = frozenset({
     "ping", "agent.list", "pane.list", "workspace.list", "tab.list",
-    "session.snapshot", "events.subscribe", "pane.read",
+    "session.snapshot", "events.subscribe", "pane.read", "pane.get", "pane.process_info",
 })
 SOCKET_PAIRS = frozenset(
     {(method, outcome) for method in SOCKET_ORDINARY - {"pane.read"} for outcome in ("succeeded", "failed")}
@@ -665,9 +665,15 @@ def socket_ordinary_result(method: str, request: dict, scenario_view: dict) -> d
         }}
     if method == "events.subscribe":
         return {"type": "subscription_started"}
-    if method == "pane.read":
+    if method in {"pane.read", "pane.get", "pane.process_info"}:
         params = request.get("params")
         pane_id = params.get("pane_id") if isinstance(params, dict) else None
+        if method == "pane.get":
+            return {"type": "pane_info", "pane": next((pane for pane in scenario_view["panes"]
+                if pane.get("pane_id") == pane_id), None)}
+        if method == "pane.process_info":
+            return {"type": "pane_process_info", "process_info": {"pane_id": pane_id,
+                "shell_pid": 0, "foreground_process_group_id": 0, "foreground_processes": []}}
         text = scenario_view["content"].get(pane_id, "Harmless package fixture output")
         return {"type": "pane_read", "read": {"text": text, "truncated": False}}
     raise ValueError("unsupported fixture method")
