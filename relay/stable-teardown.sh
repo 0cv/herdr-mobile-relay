@@ -9,6 +9,7 @@ export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin:/home/linux
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
+refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}"
 
 state_command() {
@@ -99,11 +100,6 @@ recover_state_from_config() {
 
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"
-if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
-    echo "✗ Cloudflare teardown is unavailable while Always on Tailscale uses the shared relay service and environment." >&2
-    echo "  Turn off Tailscale first, then rerun Cloudflare teardown." >&2
-    exit 1
-fi
 
 if [ ! -f "$STATE_FILE" ]; then
     if ! recover_state_from_config; then

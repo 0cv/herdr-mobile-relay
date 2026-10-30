@@ -15,8 +15,24 @@ if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" != 8443 ]; then
     echo "Always on Tailscale is not selected; nothing changed."
     exit 0
 fi
-switch_off_tailscale "$ENV_FILE"
+PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
+status=0
+"$(relay_binary)" tailscale off --port 8443 --relay-port "${PORT:-8375}" || status=$?
+if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    if [ "${HERDR_TAILSCALE_ABANDON:-}" != 1 ]; then
+        echo "✗ Tailscale Serve could not be removed (exit $status); selection kept. Run: tailscale serve --https=8443 off" >&2
+        exit 1
+    fi
+    echo "⚠ Clearing the selection without removing Tailscale Serve (exit $status). Run: tailscale serve --https=8443 off" >&2
+fi
+remove_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT
+unset HERDR_TAILSCALE_PORT
 if [ -n "$(installed_service_env_file)" ]; then
-    "$SCRIPT_DIR/service.sh" uninstall
+    if [ -n "$(env_file_value "$ENV_FILE" CLOUDFLARED_CONFIG)" ] ||
+        [ -n "$(gateway_urls "$ENV_FILE")" ]; then
+        "$SCRIPT_DIR/service.sh" install
+    else
+        "$SCRIPT_DIR/service.sh" uninstall
+    fi
 fi
 echo "Always on Tailscale is off. Other Serve ports were not changed."

@@ -19,6 +19,7 @@ require_supported_platform
 case "${1:-}" in
     "") ;;
     --install-missing) INSTALL_MISSING=1 ;;
+    --tailscale-prerequisites) INSTALL_MISSING=1 ;;
     --pi-install) exec bash "$SCRIPT_DIR/pi-commands.sh" install "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
     --pi-remove) exec bash "$SCRIPT_DIR/pi-commands.sh" remove "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
     *)
@@ -33,6 +34,9 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+if [ "${1:-}" != --tailscale-prerequisites ]; then
+    refuse_if_tailscale_selected "$ENV_FILE" || exit 1
+fi
 
 install_cloudflared() {
     local system

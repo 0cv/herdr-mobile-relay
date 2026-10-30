@@ -23,10 +23,16 @@ case "$*" in
     printf '%s\n' "$TS_STATUS" ;;
   'serve status --json')
     if [ "$TS_FAIL" = permission ]; then echo 'Access denied: permission denied' >&2; exit 1; fi
-    printf '%s\n' "$TS_SERVE_STATUS" ;;
+    if [ -n "$TS_APPLIED" ] && [ -f "$TS_APPLIED" ]; then
+      printf '%s\n' "$TS_APPLIED_STATUS"
+    else
+      printf '%s\n' "$TS_SERVE_STATUS"
+    fi ;;
   serve*off)
-    if [ "$TS_FAIL" = https ]; then echo 'error enabling https feature' >&2; exit 1; fi ;;
+    if [ "$TS_FAIL" = https ]; then echo 'error enabling https feature' >&2; exit 1; fi
+    if [ -n "$TS_APPLIED" ]; then /bin/rm -f "$TS_APPLIED"; fi ;;
   serve*)
+    if [ "$TS_FAIL" = applied ]; then : > "$TS_APPLIED"; echo 'serve failed after applying mapping' >&2; exit 1; fi
     if [ "$TS_FAIL" = https ]; then echo 'error enabling https feature' >&2; exit 1; fi
     if [ "$TS_FAIL" = permission ]; then echo 'Access denied' >&2; exit 1; fi
     if [ "$TS_FAIL" = foreground ]; then echo 'HTTPS cert support is not enabled/configured for your tailnet.' >&2; exit 1; fi
@@ -226,6 +232,26 @@ func TestPublishAndOff(t *testing.T) {
 	before = logLines(t)
 	if code, _, _ := invoke("off"); code != 0 || strings.Contains(strings.TrimPrefix(logLines(t), before), " off\n") {
 		t.Fatal("off removed absent mapping")
+	}
+}
+
+func TestFailedPublishRemovesOnlyOwnedMapping(t *testing.T) {
+	root, _ := setup(t)
+	t.Setenv("TS_APPLIED", filepath.Join(root, "applied"))
+	t.Setenv("TS_APPLIED_STATUS", own)
+	t.Setenv("TS_SERVE_STATUS", `{"TCP":{"9443":{"HTTPS":true}},"Web":{"node.tail.ts.net:9443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:1234"}}}}}`)
+	t.Setenv("TS_FAIL", "applied")
+	if code, message, _ := invoke("serve", "--bg"); code != 1 || !strings.Contains(message, "serve failed after applying mapping") {
+		t.Fatalf("failed publish: %d %s", code, message)
+	}
+	if _, err := os.Stat(filepath.Join(root, "applied")); !os.IsNotExist(err) {
+		t.Fatalf("mapping was not cleared: %v; calls: %s", err, logLines(t))
+	}
+	if used, owned, err := (client{binary: filepath.Join(root, "tailscale"), env: append(os.Environ(), "TAILSCALE_BE_CLI=1")}).mapping(9443, "http://127.0.0.1:1234"); err != nil || !used || !owned {
+		t.Fatalf("unrelated mapping was changed: %v", err)
+	}
+	if got := logLines(t); !strings.Contains(got, "1|serve status --json\n1|serve --https=8443 off\n") || strings.Contains(got, "--https=9443 off") {
+		t.Fatalf("cleanup touched another port or missed ours: %s", got)
 	}
 }
 

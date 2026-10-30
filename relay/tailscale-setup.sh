@@ -15,6 +15,10 @@ fi
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"
+if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
+    echo "A gateway is selected. Switch to a Cloudflare tunnel first, then choose Always on Tailscale." >&2
+    exit 1
+fi
 RELAY_BIN="$(relay_binary)"
 "$RELAY_BIN" tailscale check --port 8443 || exit $?
 ADDRESS="$("$RELAY_BIN" tailscale address --port 8443)" || exit $?
@@ -34,63 +38,46 @@ case "$answer" in
     *) echo "Cancelled; nothing changed."; exit 1 ;;
 esac
 
-OLD_GATEWAY_URL="$(env_file_value "$ENV_FILE" HERDR_GATEWAY_URL)"
-OLD_GATEWAY_SELECTION="$(env_file_value "$ENV_FILE" HERDR_GATEWAY_SELECTION)"
-OLD_TAILSCALE_PORT="$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
+ENV_BACKUP="$(mktemp "${TMPDIR:-/tmp}/herdr-tailscale-env.XXXXXX")"
 ENV_WAS_PRESENT=false
-[ ! -f "$ENV_FILE" ] || ENV_WAS_PRESENT=true
-OLD_GATEWAY_URL_PRESENT=false
-OLD_GATEWAY_SELECTION_PRESENT=false
-OLD_TAILSCALE_PORT_PRESENT=false
-[ ! -f "$ENV_FILE" ] || {
-    grep -q '^HERDR_GATEWAY_URL=' "$ENV_FILE" && OLD_GATEWAY_URL_PRESENT=true
-    grep -q '^HERDR_GATEWAY_SELECTION=' "$ENV_FILE" && OLD_GATEWAY_SELECTION_PRESENT=true
-    grep -q '^HERDR_TAILSCALE_PORT=' "$ENV_FILE" && OLD_TAILSCALE_PORT_PRESENT=true
-    true
-}
+if [ -f "$ENV_FILE" ]; then
+    ENV_WAS_PRESENT=true
+    cp -p "$ENV_FILE" "$ENV_BACKUP"
+fi
 OLD_SERVICE_INSTALLED=false
 SERVICE_CHANGED=false
+PUBLISHED=false
 [ -z "$(installed_service_env_file)" ] || OLD_SERVICE_INSTALLED=true
-restore_selection() {
-    if [ "$OLD_GATEWAY_URL_PRESENT" = true ]; then
-        set_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL "$OLD_GATEWAY_URL"
-    else
-        remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL
-    fi
-    if [ "$OLD_GATEWAY_SELECTION_PRESENT" = true ]; then
-        set_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION "$OLD_GATEWAY_SELECTION"
-    else
-        remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION
-    fi
-    if [ "$OLD_TAILSCALE_PORT_PRESENT" = true ]; then
-        set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT "$OLD_TAILSCALE_PORT"
-    else
-        remove_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT
-    fi
-    if [ "$ENV_WAS_PRESENT" = false ]; then
-        rm -f "$ENV_FILE"
-    fi
-    if [ "$OLD_SERVICE_INSTALLED" = true ] && [ "$SERVICE_CHANGED" = true ]; then
-        if ! "$SCRIPT_DIR/service.sh" install; then
-            echo "✗ Previous service could not be restored; run relay/service.sh install after checking its logs." >&2
-        fi
-    fi
-}
 rollback() {
     local status=$?
     trap - EXIT
     if [ "$status" -ne 0 ]; then
-        restore_selection
+        if [ "$PUBLISHED" = true ]; then
+            "$RELAY_BIN" tailscale off --port 8443 --relay-port "$PORT" ||
+                echo "✗ Remove the published mapping manually: tailscale serve --https=8443 off" >&2
+        fi
+        if [ "$ENV_WAS_PRESENT" = true ]; then
+            cp -p "$ENV_BACKUP" "$ENV_FILE"
+        else
+            rm -f "$ENV_FILE"
+        fi
+        if [ "$SERVICE_CHANGED" = true ]; then
+            if [ "$OLD_SERVICE_INSTALLED" = true ]; then
+                "$SCRIPT_DIR/service.sh" install ||
+                    echo "✗ Previous service could not be restored; run relay/service.sh install." >&2
+            else
+                "$SCRIPT_DIR/service.sh" uninstall ||
+                    echo "✗ New service could not be removed; run relay/service.sh uninstall." >&2
+            fi
+        fi
         echo "✗ Always on Tailscale was not published; the previous selection was restored." >&2
     fi
+    rm -f "$ENV_BACKUP"
 }
 trap rollback EXIT
-remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL
-remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION
 set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT 8443
-unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
 export HERDR_RELAY_ENV="$ENV_FILE"
-if ! "$SCRIPT_DIR/setup.sh" --install-missing; then
+if ! "$SCRIPT_DIR/setup.sh" --tailscale-prerequisites; then
     echo "✗ Prerequisite setup failed." >&2
     exit 1
 fi
@@ -107,5 +94,5 @@ if ! "$RELAY_BIN" tailscale serve --bg --port 8443 --relay-port "$PORT"; then
     echo "✗ Could not publish Tailscale Serve." >&2
     exit 1
 fi
-trap - EXIT
-exec "$SCRIPT_DIR/setup-link.sh"
+PUBLISHED=true
+"$SCRIPT_DIR/setup-link.sh"

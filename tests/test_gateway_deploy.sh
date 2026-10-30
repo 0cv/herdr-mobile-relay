@@ -482,10 +482,14 @@ export HERDR_RELAY_ENV="$WORK_DIR/relay-custom-subscriptions.env"
 printf "HERDR_TAILSCALE_PORT='8443'\nHERDR_RELAY_PORT='8375'\n" > "$HERDR_RELAY_ENV"
 export HERDR_GATEWAY_SUBSCRIPTIONS="wss://gw.example.test"
 run_deploy
+[ "$STATUS" -ne 0 ] || fail "gateway deployment accepted Tailscale selection"
+grep -Fq "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first." "$OUTPUT" || fail "missing refusal"
+if grep -q . "$SSH_LOG"; then fail "refused deployment contacted server"; fi
+if [ -e "$STUB_STATE/tailscale.log" ] && grep -q . "$STUB_STATE/tailscale.log"; then fail "refused deployment called Tailscale"; fi
+grep -Fxq "HERDR_TAILSCALE_PORT='8443'" "$HERDR_RELAY_ENV" || fail "selection changed"
+rm -f "$HERDR_RELAY_ENV"
+run_deploy
 [ "$STATUS" -eq 0 ] || fail "custom-subscription run exited $STATUS"
-grep -Fxq 'tailscale off --port 8443 --relay-port 8375' "$STUB_STATE/tailscale.log" ||
-    fail "direct gateway deployment did not remove only port 8443"
-! grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV" || fail "gateway kept Tailscale selected"
 grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test'" "$HERDR_RELAY_ENV" ||
     fail "the explicit subscription list did not leave the deployed gateway alone"
 if grep -Fq 'community-a.example.test' "$HERDR_RELAY_ENV"; then

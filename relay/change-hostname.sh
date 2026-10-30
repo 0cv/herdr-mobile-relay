@@ -22,12 +22,8 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
+refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 assert_service_env_matches "$ENV_FILE"
-if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
-    echo "✗ Change Tunnel Hostname is unavailable while Always on Tailscale uses the shared relay service and environment." >&2
-    echo "  Turn off Tailscale first, then rerun Change Tunnel Hostname." >&2
-    exit 1
-fi
 load_relay_env "$ENV_FILE"
 
 CONFIG="${CLOUDFLARED_CONFIG:-}"

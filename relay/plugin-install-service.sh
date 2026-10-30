@@ -9,6 +9,7 @@ fi
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+refuse_if_tailscale_selected "$(relay_env_file "$SCRIPT_DIR")" || exit 1
 if [ -z "${HERDR_RELAY_ENV:-}" ]; then
     SERVICE_ENV="$(installed_service_env_file)"
     if [ -n "$SERVICE_ENV" ]; then

@@ -292,6 +292,15 @@ func Run(args []string, stdout, stderr io.Writer) (int, error) {
 	} else {
 		err = c.foreground(serveArgs, stderr)
 	}
+	if err != nil {
+		if _, owned, statusErr := c.mapping(*port, target); statusErr == nil && owned {
+			if _, offErr := c.output("serve", "--https="+strconv.Itoa(*port), "off"); offErr != nil {
+				err = fmt.Errorf("%w; could not remove published mapping: %v", err, offErr)
+			}
+		} else if statusErr != nil {
+			err = fmt.Errorf("%w; could not check published mapping: %v", err, statusErr)
+		}
+	}
 	return result(err)
 }
 

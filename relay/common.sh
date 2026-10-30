@@ -1293,25 +1293,12 @@ prompt_gateway_selection() {
     gateway_selection_choice "$default_selection" "$answer"
 }
 
-switch_off_tailscale() {
-    local env_file="$1"
-    local relay_port
-    local status
-    [ "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" = 8443 ] || return 0
-    relay_port="$(env_file_value "$env_file" HERDR_RELAY_PORT)"
-    status=0
-    "$(relay_binary)" tailscale off --port 8443 --relay-port "${relay_port:-8375}" || status=$?
-    if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
-        if [ "${HERDR_TAILSCALE_ABANDON:-}" != 1 ]; then
-            echo "✗ Could not remove Tailscale Serve (exit $status); Tailscale may be stopped or the mapping may still exist. Switch aborted." >&2
-            echo "  Run: tailscale serve --https=8443 off" >&2
-            echo "  To clear the selection without removing the mapping: HERDR_TAILSCALE_ABANDON=1" >&2
-            return 1
-        fi
-        echo "⚠ Clearing the selection without removing the Tailscale Serve mapping (exit $status)." >&2
+refuse_if_tailscale_selected() {
+    if [ ! -f "$1" ] || ! grep -q '^HERDR_TAILSCALE_PORT=' "$1"; then
+        return 0
     fi
-    remove_env_value_atomic "$env_file" HERDR_TAILSCALE_PORT
-    unset HERDR_TAILSCALE_PORT
+    echo "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first." >&2
+    return 1
 }
 
 # Persists the transport choice. An empty URL removes the key, which returns
@@ -1322,12 +1309,12 @@ set_gateway_url() {
     local env_file="$1"
     local url="$2"
 
+    refuse_if_tailscale_selected "$env_file" || return 1
     if [ -z "$url" ]; then
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
         return 0
     fi
-    switch_off_tailscale "$env_file" || return 1
     set_env_value_atomic "$env_file" HERDR_GATEWAY_URL "$url"
 }
 

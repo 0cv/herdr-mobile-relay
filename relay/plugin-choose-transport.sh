@@ -20,6 +20,7 @@ case "$MODE" in
 esac
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 CURRENT="$(gateway_urls "$ENV_FILE")"
 COMMUNITY="$(community_gateway_url)"
 
@@ -76,7 +77,7 @@ use_gateways() {
     if [ "$count" -gt 1 ]; then
         selection="$(prompt_gateway_selection "$selection")"
     fi
-    set_gateway_url "$ENV_FILE" "$urls" || return 1
+    set_gateway_url "$ENV_FILE" "$urls"
     set_gateway_selection "$ENV_FILE" "$selection"
     echo ""
     if [ "$count" -eq 1 ]; then
@@ -160,7 +161,6 @@ choose_own_gateway() {
 
 case "$MODE" in
     temporary)
-        switch_off_tailscale "$ENV_FILE"
         set_gateway_url "$ENV_FILE" ""
         unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
         echo "✓ Temporary Cloudflare tunnel selected."
