@@ -15,10 +15,8 @@ if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" != 8443 ]; then
     echo "Always on Tailscale is not selected; nothing changed."
     exit 0
 fi
-PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
-"$(relay_binary)" tailscale off --port 8443 --relay-port "${PORT:-8375}" || exit $?
+switch_off_tailscale "$ENV_FILE"
 if [ -n "$(installed_service_env_file)" ]; then
     "$SCRIPT_DIR/service.sh" uninstall
 fi
-remove_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT
 echo "Always on Tailscale is off. Other Serve ports were not changed."

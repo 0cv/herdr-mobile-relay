@@ -277,7 +277,7 @@ new_case() {
     unset STUB_APP_ORIGIN STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE
     unset STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL STUB_ROUTE_NAME
-    unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME HERDR_TAILSCALE_BIN
+    unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME HERDR_TAILSCALE_BIN STUB_OFF_FAIL
 }
 
 run_setup() {
@@ -351,19 +351,43 @@ case "$*" in
     version) echo '1.80.0' ;;
     'status --json') echo '{"BackendState":"Running","Self":{"DNSName":"sheep.ts.net."}}' ;;
     'serve status --json') echo '{"TCP":{"8443":{"HTTPS":true}},"Web":{"sheep.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8375"}}}}}' ;;
-    'serve --https=8443 off') ;;
+    'serve --https=8443 off') [ "${STUB_OFF_FAIL:-0}" != 1 ] ;;
     *) exit 1 ;;
 esac
 EOF
     chmod 700 "$BIN/tailscale"
     export HERDR_TAILSCALE_BIN="$BIN/tailscale"
     printf "HERDR_RELAY_TOKEN='fake-token'\nHERDR_TAILSCALE_PORT='8443'\n" > "$HERDR_RELAY_ENV"
+    export STUB_CREATE_FAIL=1
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "failed Cloudflare creation switched Tailscale off"
+    assert_not_contains "$STUB_LOG" 'tailscale serve --https=8443 off'
+    assert_contains "$STUB_LOG" 'cloudflared tunnel create'
+    assert_contains "$HERDR_RELAY_ENV" 'HERDR_TAILSCALE_PORT='
+    unset STUB_CREATE_FAIL
+    export STUB_HTTP_MODE=fail
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "unready Cloudflare endpoint switched Tailscale off"
+    assert_not_contains "$STUB_LOG" 'tailscale serve --https=8443 off'
+    assert_contains "$HERDR_RELAY_ENV" 'HERDR_TAILSCALE_PORT='
+    assert_not_contains "$HERDR_RELAY_ENV" 'HERDR_CLOUDFLARE_SWITCHING='
+    unset STUB_HTTP_MODE
+    export STUB_OFF_FAIL=1
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "failed Tailscale off completed Cloudflare switch"
+    assert_contains "$HERDR_RELAY_ENV" 'HERDR_TAILSCALE_PORT='
+    assert_not_contains "$HERDR_RELAY_ENV" 'HERDR_CLOUDFLARE_SWITCHING='
+    assert_contains "$OUTPUT" 'tailscale serve --https=8443 off'
+    unset STUB_OFF_FAIL
+    : > "$STUB_LOG"
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "direct stable setup after Tailscale"; }
-    assert_contains "$STUB_LOG" 'tailscale serve --https=8443 off'
+    [ "$(grep -c 'tailscale serve --https=8443 off' "$STUB_LOG")" -eq 1 ] || fail "Tailscale removed more than once"
+    off_line="$(grep -n 'tailscale serve --https=8443 off' "$STUB_LOG" | cut -d: -f1)"
+    ready_line="$(grep -n 'https://relay-workstation.example.test/readyz' "$STUB_LOG" | tail -1 | cut -d: -f1)"
+    [ "$off_line" -gt "$ready_line" ] || fail "Tailscale removed before public Cloudflare readiness"
     assert_not_contains "$HERDR_RELAY_ENV" 'HERDR_TAILSCALE_PORT='
     assert_contains "$OUTPUT" 'relay=wss%3A%2F%2Frelay-workstation.example.test'
-    assert_contains "$STUB_LOG" 'cloudflared tunnel create'
     pass "direct stable setup removes only the owned Tailscale mapping and serves Cloudflare"
 }
 

@@ -34,26 +34,78 @@ case "$answer" in
     *) echo "Cancelled; nothing changed."; exit 1 ;;
 esac
 
-"$RELAY_BIN" tailscale serve --bg --port 8443 --relay-port "$PORT" || exit $?
-set_gateway_url "$ENV_FILE" ""
-unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
+OLD_GATEWAY_URL="$(env_file_value "$ENV_FILE" HERDR_GATEWAY_URL)"
+OLD_GATEWAY_SELECTION="$(env_file_value "$ENV_FILE" HERDR_GATEWAY_SELECTION)"
+OLD_TAILSCALE_PORT="$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
+ENV_WAS_PRESENT=false
+[ ! -f "$ENV_FILE" ] || ENV_WAS_PRESENT=true
+OLD_GATEWAY_URL_PRESENT=false
+OLD_GATEWAY_SELECTION_PRESENT=false
+OLD_TAILSCALE_PORT_PRESENT=false
+[ ! -f "$ENV_FILE" ] || {
+    grep -q '^HERDR_GATEWAY_URL=' "$ENV_FILE" && OLD_GATEWAY_URL_PRESENT=true
+    grep -q '^HERDR_GATEWAY_SELECTION=' "$ENV_FILE" && OLD_GATEWAY_SELECTION_PRESENT=true
+    grep -q '^HERDR_TAILSCALE_PORT=' "$ENV_FILE" && OLD_TAILSCALE_PORT_PRESENT=true
+    true
+}
+OLD_SERVICE_INSTALLED=false
+SERVICE_CHANGED=false
+[ -z "$(installed_service_env_file)" ] || OLD_SERVICE_INSTALLED=true
+restore_selection() {
+    if [ "$OLD_GATEWAY_URL_PRESENT" = true ]; then
+        set_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL "$OLD_GATEWAY_URL"
+    else
+        remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL
+    fi
+    if [ "$OLD_GATEWAY_SELECTION_PRESENT" = true ]; then
+        set_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION "$OLD_GATEWAY_SELECTION"
+    else
+        remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION
+    fi
+    if [ "$OLD_TAILSCALE_PORT_PRESENT" = true ]; then
+        set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT "$OLD_TAILSCALE_PORT"
+    else
+        remove_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT
+    fi
+    if [ "$ENV_WAS_PRESENT" = false ]; then
+        rm -f "$ENV_FILE"
+    fi
+    if [ "$OLD_SERVICE_INSTALLED" = true ] && [ "$SERVICE_CHANGED" = true ]; then
+        if ! "$SCRIPT_DIR/service.sh" install; then
+            echo "✗ Previous service could not be restored; run relay/service.sh install after checking its logs." >&2
+        fi
+    fi
+}
+rollback() {
+    local status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+        restore_selection
+        echo "✗ Always on Tailscale was not published; the previous selection was restored." >&2
+    fi
+}
+trap rollback EXIT
+remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL
+remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION
 set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT 8443
+unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
 export HERDR_RELAY_ENV="$ENV_FILE"
 if ! "$SCRIPT_DIR/setup.sh" --install-missing; then
-    echo "✗ Prerequisite setup failed; Tailscale Serve remains configured. Rerun setup or turn it off in the menu." >&2
+    echo "✗ Prerequisite setup failed." >&2
     exit 1
 fi
-if installed_relay_service_active; then
-    if ! restart_installed_relay_service; then
-        echo "✗ Could not restart the background relay; Tailscale Serve remains configured." >&2
-        exit 1
-    fi
-elif ! "$SCRIPT_DIR/service.sh" install; then
-    echo "✗ Background service failed; Tailscale Serve remains configured." >&2
+SERVICE_CHANGED=true
+if ! "$SCRIPT_DIR/service.sh" install; then
+    echo "✗ Background service failed." >&2
     exit 1
 fi
 if ! wait_for_relay_health "$PORT" 15 1 "$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"; then
-    echo "✗ The background relay did not become healthy. Check service logs; Tailscale Serve remains configured." >&2
+    echo "✗ The background relay did not become healthy. Check service logs." >&2
     exit 1
 fi
+if ! "$RELAY_BIN" tailscale serve --bg --port 8443 --relay-port "$PORT"; then
+    echo "✗ Could not publish Tailscale Serve." >&2
+    exit 1
+fi
+trap - EXIT
 exec "$SCRIPT_DIR/setup-link.sh"

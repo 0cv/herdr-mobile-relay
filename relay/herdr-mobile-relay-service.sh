@@ -38,12 +38,12 @@ CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile
 RELAY_BIN="$(relay_binary)"
 GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 
-if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "$GATEWAY_URL" ] && [ -z "$CLOUDFLARED_BIN" ]; then
+if { [ -z "${HERDR_TAILSCALE_PORT:-}" ] || [ "${HERDR_CLOUDFLARE_SWITCHING:-}" = 1 ]; } && [ -z "$GATEWAY_URL" ] && [ -z "$CLOUDFLARED_BIN" ]; then
     echo "cloudflared not found in PATH"
     exit 78
 fi
 
-if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "$GATEWAY_URL" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
+if { [ -z "${HERDR_TAILSCALE_PORT:-}" ] || [ "${HERDR_CLOUDFLARE_SWITCHING:-}" = 1 ]; } && [ -z "$GATEWAY_URL" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
     echo "Cloudflare tunnel config not readable: $CLOUDFLARED_CONFIG"
     exit 78
 fi
@@ -86,7 +86,7 @@ echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
 HERDR_GITHUB_TOKEN_FILE="$RELAY_UPDATER_TOKEN_FILE" "$RELAY_BIN" serve &
 RELAY_PID=$!
 
-if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "$GATEWAY_URL" ]; then
+if { [ -z "${HERDR_TAILSCALE_PORT:-}" ] || [ "${HERDR_CLOUDFLARE_SWITCHING:-}" = 1 ]; } && [ -z "$GATEWAY_URL" ]; then
     echo "Starting cloudflared with $CLOUDFLARED_CONFIG"
     (unset HERDR_GITHUB_TOKEN_FILE; exec "$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run) &
     TUNNEL_PID=$!

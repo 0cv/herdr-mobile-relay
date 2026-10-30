@@ -1192,8 +1192,7 @@ case "$START_OUTPUT" in
     *) echo "Quick Start did not reuse the installed background service" >&2; exit 1 ;;
 esac
 
-# The top-level Stable Tunnel action clears a gateway before stable setup, so
-# the service and QR cannot accidentally retain the previous transport.
+# The wrapper leaves the gateway selected until stable setup verifies Cloudflare.
 STABLE_SWITCH_DIR="$WORK_DIR/stable-switch"
 STABLE_SWITCH_ENV="$WORK_DIR/config/stable-switch.env"
 STABLE_SWITCH_MARKER="$WORK_DIR/stable-switch-called"
@@ -1202,9 +1201,8 @@ cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-install-service.sh" \
     "$STABLE_SWITCH_DIR/"
 cat > "$STABLE_SWITCH_DIR/stable-setup.sh" <<'EOF'
 #!/usr/bin/env bash
-if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$HERDR_RELAY_ENV" ||
-    [ -n "${HERDR_GATEWAY_URL:-}" ]; then
-    echo "stable setup still inherited the gateway" >&2
+if ! grep -q '^HERDR_GATEWAY_URL=' "$HERDR_RELAY_ENV"; then
+    echo "stable setup lost the gateway before Cloudflare was ready" >&2
     exit 1
 fi
 if [ "${HERDR_STABLE_SETUP_WRAPPED:-}" != 1 ]; then
@@ -1222,14 +1220,8 @@ STABLE_SWITCH_OUTPUT="$(
 )"
 [ -f "$STABLE_SWITCH_MARKER" ] ||
     { echo "the stable tunnel action did not run stable setup" >&2; exit 1; }
-if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$STABLE_SWITCH_ENV"; then
-    echo "the direct stable tunnel action left the gateway configured" >&2
-    exit 1
-fi
-case "$STABLE_SWITCH_OUTPUT" in
-    *"Switching this relay from the WebRTC gateway to Cloudflare."*) ;;
-    *) echo "the stable tunnel action did not explain the transport switch" >&2; exit 1 ;;
-esac
+grep -q '^HERDR_GATEWAY_URL=' "$STABLE_SWITCH_ENV" ||
+    { echo "the stable tunnel action removed the gateway before readiness" >&2; exit 1; }
 test "$(printf '%s\n' "$STABLE_SWITCH_OUTPUT" |
     grep -c 'Herdr Mobile Relay stable tunnel setup')" -eq 1 ||
     { echo "stable tunnel action printed its heading more than once" >&2; exit 1; }

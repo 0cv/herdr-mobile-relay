@@ -1296,11 +1296,19 @@ prompt_gateway_selection() {
 switch_off_tailscale() {
     local env_file="$1"
     local relay_port
+    local status
     [ "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" = 8443 ] || return 0
     relay_port="$(env_file_value "$env_file" HERDR_RELAY_PORT)"
-    if ! "$(relay_binary)" tailscale off --port 8443 --relay-port "${relay_port:-8375}"; then
-        echo "⚠ Could not remove Tailscale Serve; switching anyway. The mapping may remain." >&2
-        echo "  When Tailscale is available, run: tailscale serve --https=8443 off" >&2
+    status=0
+    "$(relay_binary)" tailscale off --port 8443 --relay-port "${relay_port:-8375}" || status=$?
+    if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+        if [ "${HERDR_TAILSCALE_ABANDON:-}" != 1 ]; then
+            echo "✗ Could not remove Tailscale Serve (exit $status); Tailscale may be stopped or the mapping may still exist. Switch aborted." >&2
+            echo "  Run: tailscale serve --https=8443 off" >&2
+            echo "  To clear the selection without removing the mapping: HERDR_TAILSCALE_ABANDON=1" >&2
+            return 1
+        fi
+        echo "⚠ Clearing the selection without removing the Tailscale Serve mapping (exit $status)." >&2
     fi
     remove_env_value_atomic "$env_file" HERDR_TAILSCALE_PORT
     unset HERDR_TAILSCALE_PORT
@@ -1319,7 +1327,7 @@ set_gateway_url() {
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
         return 0
     fi
-    switch_off_tailscale "$env_file"
+    switch_off_tailscale "$env_file" || return 1
     set_env_value_atomic "$env_file" HERDR_GATEWAY_URL "$url"
 }
 

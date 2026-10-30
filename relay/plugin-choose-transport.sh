@@ -76,7 +76,7 @@ use_gateways() {
     if [ "$count" -gt 1 ]; then
         selection="$(prompt_gateway_selection "$selection")"
     fi
-    set_gateway_url "$ENV_FILE" "$urls"
+    set_gateway_url "$ENV_FILE" "$urls" || return 1
     set_gateway_selection "$ENV_FILE" "$selection"
     echo ""
     if [ "$count" -eq 1 ]; then

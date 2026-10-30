@@ -577,11 +577,6 @@ fi
 
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"
-switch_off_tailscale "$ENV_FILE"
-if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
-    set_gateway_url "$ENV_FILE" ""
-    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
-fi
 export HERDR_RELAY_ENV="$ENV_FILE"
 
 if ! "$SCRIPT_DIR/setup.sh" --install-missing; then
@@ -881,6 +876,49 @@ else
     fi
 fi
 
+OLD_GATEWAY_URL="$(env_file_value "$ENV_FILE" HERDR_GATEWAY_URL)"
+OLD_GATEWAY_SELECTION="$(env_file_value "$ENV_FILE" HERDR_GATEWAY_SELECTION)"
+OLD_TAILSCALE_PORT="$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
+OLD_GATEWAY_URL_PRESENT=false
+OLD_GATEWAY_SELECTION_PRESENT=false
+[ ! -f "$ENV_FILE" ] || {
+    grep -q '^HERDR_GATEWAY_URL=' "$ENV_FILE" && OLD_GATEWAY_URL_PRESENT=true
+    grep -q '^HERDR_GATEWAY_SELECTION=' "$ENV_FILE" && OLD_GATEWAY_SELECTION_PRESENT=true
+    true
+}
+restore_cloudflare_switch() {
+    if [ "$OLD_GATEWAY_URL_PRESENT" = true ]; then
+        set_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL "$OLD_GATEWAY_URL"
+    else
+        remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL
+    fi
+    if [ "$OLD_GATEWAY_SELECTION_PRESENT" = true ]; then
+        set_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION "$OLD_GATEWAY_SELECTION"
+    else
+        remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION
+    fi
+    remove_env_value_atomic "$ENV_FILE" HERDR_CLOUDFLARE_SWITCHING
+    if [ "$SERVICE_WAS_INSTALLED" = true ]; then
+        if ! "$SCRIPT_DIR/service.sh" install; then
+            echo "✗ Previous service could not be restored; run relay/service.sh install after checking its logs." >&2
+        fi
+    fi
+}
+rollback_cloudflare_switch() {
+    local status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+        restore_cloudflare_switch
+        echo "✗ Cloudflare switch failed; the previous transport selection was restored." >&2
+    fi
+    cleanup
+}
+trap rollback_cloudflare_switch EXIT
+remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL
+remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION
+if [ "$OLD_TAILSCALE_PORT" = 8443 ]; then
+    set_env_value_atomic "$ENV_FILE" HERDR_CLOUDFLARE_SWITCHING 1
+fi
 if ! install_service; then
     fail_resumable
     exit 1
@@ -911,6 +949,12 @@ fi
 if [ "$DNS_ROUTE_NEEDS_IDENTITY_PROOF" = true ]; then
     state_update "created_dns=true"
 fi
+if ! switch_off_tailscale "$ENV_FILE"; then
+    fail_resumable
+    exit 1
+fi
+remove_env_value_atomic "$ENV_FILE" HERDR_CLOUDFLARE_SWITCHING
+trap cleanup EXIT
 state_update "stage=complete" "dns_cleanup_required=false"
 
 echo ""

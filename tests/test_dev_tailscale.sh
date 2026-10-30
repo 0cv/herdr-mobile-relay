@@ -80,7 +80,7 @@ if (unset HERDR_DEV_TRANSPORT; run_dev); then
     exit 1
 fi
 grep -q 'Select a transport' "$WORK_DIR/dev-output"
-! grep -q 'tailscale serve' "$FAKE_LOG" 2>/dev/null
+if grep -q 'tailscale serve' "$FAKE_LOG" 2>/dev/null; then echo 'Tailscale was published' >&2; exit 1; fi
 if (FAKE_CHECK_FAIL=1 run_dev); then
     echo 'unusable Tailscale was accepted' >&2
     exit 1
@@ -112,7 +112,7 @@ if command -v script >/dev/null 2>&1; then
     : > "$FAKE_LOG"
     (unset HERDR_DEV_TRANSPORT; { printf 'q\n'; sleep 1; } | tty_dev) > "$WORK_DIR/dev-output" 2>&1 || true
     grep -q 'nothing published' "$WORK_DIR/dev-output"
-    ! grep -q 'bun ' "$FAKE_LOG"
+    if grep -q 'bun ' "$FAKE_LOG"; then echo 'Cancelled selection started Bun' >&2; exit 1; fi
     (unset HERDR_DEV_TRANSPORT; printf '' | tty_dev) > "$WORK_DIR/dev-output" 2>&1 || true
     grep -q 'nothing published' "$WORK_DIR/dev-output"
     (unset HERDR_DEV_TRANSPORT; FAKE_CHECK_FAIL=1; export FAKE_CHECK_FAIL; { printf '1\n'; sleep 1; } | tty_dev) > "$WORK_DIR/dev-output" 2>&1 || true
@@ -163,7 +163,7 @@ if (FAKE_SERVE_FAIL=1 run_start; wait "$START_PID"); then
     exit 1
 fi
 grep -q 'Tailscale HTTPS port 9443 is already in use' "$WORK_DIR/start-output"
-! grep -q 'tailscale off' "$FAKE_LOG"
+if grep -q 'tailscale off' "$FAKE_LOG"; then echo 'Failed Serve was turned off' >&2; exit 1; fi
 if grep -q '^unexpected ' "$FAKE_LOG"; then
     echo 'A host service tool was invoked' >&2
     exit 1
