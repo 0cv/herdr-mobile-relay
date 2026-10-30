@@ -994,6 +994,7 @@ report_inventory_failure() {
 verify_public_readiness() {
     local env_file="$1" health="$2"
     local config hostname public attempt binary
+    [ -z "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ] || return 0
     [ -z "$(gateway_urls "$env_file")" ] || return 0
     config="$(env_file_value "$env_file" CLOUDFLARED_CONFIG)"
     [ -n "$config" ] || return 0
@@ -1290,6 +1291,19 @@ prompt_gateway_selection() {
     fi
     read -r -p "Choice [1]: " answer || answer=""
     gateway_selection_choice "$default_selection" "$answer"
+}
+
+switch_off_tailscale() {
+    local env_file="$1"
+    local relay_port
+    [ "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" = 8443 ] || return 0
+    relay_port="$(env_file_value "$env_file" HERDR_RELAY_PORT)"
+    if ! "$(relay_binary)" tailscale off --port 8443 --relay-port "${relay_port:-8375}"; then
+        echo "⚠ Could not remove Tailscale Serve; switching anyway. The mapping may remain." >&2
+        echo "  When Tailscale is available, run: tailscale serve --https=8443 off" >&2
+    fi
+    remove_env_value_atomic "$env_file" HERDR_TAILSCALE_PORT
+    unset HERDR_TAILSCALE_PORT
 }
 
 # Persists the transport choice. An empty URL removes the key, which returns

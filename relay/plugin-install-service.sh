@@ -24,6 +24,7 @@ fi
 # wrapper—not only the chooser—must remove a previously selected gateway before
 # stable-setup and setup-link decide which transport to configure and encode.
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+switch_off_tailscale "$ENV_FILE"
 if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
     set_gateway_url "$ENV_FILE" ""
     unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION

@@ -82,7 +82,8 @@ fi
 # Each tunnel launch starts with an empty device list and re-arms the one-use
 # bootstrap invitation so the printed setup link pairs the phone again. A
 # gateway and Tailscale keep stable identities, so their pairings survive a restart.
-if [ -z "$GATEWAY_URL" ] && [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ]; then
+if [ -z "$GATEWAY_URL" ] && [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ] &&
+    [ -z "${HERDR_TAILSCALE_PORT:-}" ]; then
     export HERDR_RELAY_REARM_BOOTSTRAP=1
 fi
 
@@ -107,6 +108,11 @@ if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then
     echo "✓ Background relay ready: $HEALTH"
     echo ""
     exec "$SCRIPT_DIR/setup-link.sh"
+fi
+
+if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
+    echo "✗ Always on Tailscale needs its background service. Run Always on Tailscale setup from the menu." >&2
+    exit 1
 fi
 
 # 1. Start the verified packaged relay.

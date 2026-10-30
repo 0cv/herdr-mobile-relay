@@ -19,15 +19,20 @@ ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 load_relay_env "$ENV_FILE"
 unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
+GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 
-if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
+if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "$GATEWAY_URL" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
     echo "Missing Cloudflare tunnel config: $CLOUDFLARED_CONFIG"
     echo "Create it first, or set CLOUDFLARED_CONFIG before running this installer."
     exit 1
 fi
 
 native_install_begin launchd "$PLIST" "$LEGACY_PLIST" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
-ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
+if [ -n "${HERDR_TAILSCALE_PORT:-}" ] || [ -n "$GATEWAY_URL" ]; then
+    ensure_relay_env "$ENV_FILE" ""
+else
+    ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
+fi
 chmod +x "$SCRIPT_DIR/herdr-mobile-relay-service.sh"
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 

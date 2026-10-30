@@ -13,8 +13,8 @@ fi
 
 if ! "$SCRIPT_DIR/setup-link.sh"; then
     echo ""
-    echo "No stable phone setup link could be generated. Run Stable Tunnel setup"
-    echo "first, or rerun Quick Start for a new temporary link."
+    echo "No phone setup link could be generated. Check the selected transport"
+    echo "and relay service, then try again."
     pause_before_close
     exit 1
 fi
