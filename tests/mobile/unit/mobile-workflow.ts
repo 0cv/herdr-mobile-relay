@@ -837,9 +837,10 @@ if (mode === operation + '-timeout') process.exit(124);
     }
     const matrixCommand = workflow.jobs.prepare.steps.find((s: any) => s.id === 'matrix').run;
     const manifest = JSON.parse(await readFile(repositoryPath('tests/mobile/baselines.json'), 'utf8'));
-    assert.deepEqual(manifest.baselines.map((entry: any) => entry.name), ['0.23.4', '0.23.3']);
+    assert.deepEqual(manifest.baselines.map((entry: any) => entry.name), ['0.23.5', '0.23.4']);
     const newest = manifest.baselines[0], previous = manifest.baselines[1];
     const cases = [
+      { baselines: manifest.baselines, candidate: newest, expected: previous.name },
       { baselines: manifest.baselines, candidate: { ...newest, version: 'next-version' }, expected: newest.name },
       { baselines: manifest.baselines, candidate: { ...newest, script: '/changed.js' }, expected: newest.name },
       { baselines: manifest.baselines, candidate: { ...newest, style: '/changed.css' }, expected: newest.name },
