@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlEncode } from './base64url';
+import { releasePendingResources, resetPendingDeadline, registerPendingOperation } from './pending-operations';
 import { dispatchFlag } from './composer';
 import { inputContextIdentity } from './input-target-state';
 import { terminalInputDelivery } from './terminal-input-delivery.svelte';
@@ -57,6 +58,8 @@ import { reportAppAnomaly } from './crash-banner';
 import {
   parseActionReceipt,
   parseApiError,
+  parseCommandErrorDetail,
+  parseWireSafeInteger,
   relayProtocolError,
   RELAY_PROTOCOL_VERSION,
 } from './protocol';
@@ -238,10 +241,10 @@ function normalizeHerdrStatus(value: unknown): HerdrStatus {
   return {
     installed_client_version: String(status.installed_client_version || '').slice(0, 64),
     server_version: String(status.server_version || '').slice(0, 64),
-    server_protocol: Number.isSafeInteger(Number(status.server_protocol)) ? Number(status.server_protocol) : 0,
+    server_protocol: parseWireSafeInteger(status.server_protocol) ?? 0,
     server_protocol_known: status.server_protocol_known === true,
     endpoint_protocol_generation: Number.isSafeInteger(endpoint) && endpoint > 0 ? endpoint : null,
-    generation: Number.isSafeInteger(Number(status.generation)) ? Number(status.generation) : 0,
+    generation: parseWireSafeInteger(status.generation) ?? 0,
     features,
   };
 }
@@ -279,7 +282,7 @@ function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
     available: state.available === true,
     reason_code: String(state.reason_code || '').slice(0, 80) || undefined,
     session_id: String(state.session_id || '').slice(0, 160) || undefined,
-    version: Number.isSafeInteger(Number(state.version)) ? Number(state.version) : undefined,
+    version: parseWireSafeInteger(state.version),
     updated_at: String(state.updated_at || '').slice(0, 80) || undefined,
     phases,
     truncated: state.truncated === true,
@@ -404,7 +407,7 @@ export function normalizeConversationPage(value: unknown): ConversationPage {
     subscriptionId: browseString(data.subscription_id, 128),
     provisional: data.provisional ? normalizeConversationPage({ available: true, has_more: false, entries: data.provisional, mode: 'recent', state: 'ready' }).entries : undefined,
     capabilities: conversationCapabilities(data.capabilities), sequence: browseCount(data.sequence), liveState: browseString(data.live_state, 32),
-    available: data.available, reason: browseString(data.reason, 512), entries,
+    available: data.available, reason: browseString(data.reason, 512), reasonCode: browseString(data.reason_code, 64) || undefined, entries,
     nextCursor: cursor, hasMore: data.has_more, total: data.total == null ? null : browseCount(data.total),
     state: state as ConversationPage['state'], mode: mode as ConversationPage['mode'],
     sourceRevision: browseString(data.source_revision, 256), snapshotId: browseString(data.snapshot_id, 256), progress, diagnostics, error,
@@ -464,6 +467,7 @@ interface RelayConnection extends RelayConnectionView {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
+  delayedPaneReadTimers: Set<ReturnType<typeof setTimeout>>;
   closed: boolean;
   connectingSince: number;
   /**
@@ -933,6 +937,7 @@ class RelayStore {
       reconnectTimer: null,
       healthTimer: null,
       updateRestartTimer: null,
+      delayedPaneReadTimers: new Set(),
       closed: false,
       connectingSince: Date.now(),
       lastMessageAt: 0,
@@ -1034,6 +1039,7 @@ class RelayStore {
     }
     this.clearHealthTimer(connection);
     connection.status = 'disconnected';
+    this.clearDelayedPaneReads(connection);
     this.rejectPendingOperations(relay.id, detail?.reason || 'Relay disconnected');
     // The relay refuses this device's credential. Keep it until a confirmed,
     // newer invitation replaces it: gateway close reasons are not authenticated.
@@ -1138,6 +1144,7 @@ class RelayStore {
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
     connection.closed = true;
+    this.clearDelayedPaneReads(connection);
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     this.clearHealthTimer(connection);
     this.clearUpdateRestartTimer(connection);
@@ -1201,6 +1208,30 @@ class RelayStore {
 
   private isCurrentConnection(relayId: string, connection: RelayConnection): boolean {
     return this.connectionsValue.get(relayId) === connection;
+  }
+
+  private scheduleDelayedPaneRead(
+    agent: Agent, owner: RelayConnection | undefined, delay: number,
+  ): void {
+    if (!owner) return;
+    const current = () => !owner.closed
+      && owner.status !== 'disconnected'
+      && this.isCurrentConnection(agent.relay_id, owner);
+    if (!current()) return;
+    const timer = setTimeout(() => {
+      if (!owner.delayedPaneReadTimers.delete(timer) || !current()) return;
+      this.readPane(agent);
+    }, delay);
+    if (!current()) {
+      clearTimeout(timer);
+      return;
+    }
+    owner.delayedPaneReadTimers.add(timer);
+  }
+
+  private clearDelayedPaneReads(owner: RelayConnection): void {
+    for (const timer of owner.delayedPaneReadTimers) clearTimeout(timer);
+    owner.delayedPaneReadTimers.clear();
   }
 
   private clearHealthTimer(connection: RelayConnection): void {
@@ -1285,6 +1316,7 @@ class RelayStore {
   private retireConnection(relayId: string, connection: RelayConnection, reason: string): void {
     this.clearHealthTimer(connection);
     connection.closed = true;
+    this.clearDelayedPaneReads(connection);
     connection.transport?.close();
     connection.status = 'disconnected';
     this.rejectPendingOperations(relayId, reason);
@@ -1878,7 +1910,7 @@ class RelayStore {
       : commandRequestId();
     return new Promise((resolve, reject) => {
       const abort = () => {
-        clearTimeout(timer);
+        clearTimeout(this.pendingRequests.get(requestId)?.timer ?? timer);
         if (!this.pendingRequests.delete(requestId)) return;
         cleanup();
         const error = new CommandError('Conversation history request was cancelled.');
@@ -1891,19 +1923,22 @@ class RelayStore {
         this.pendingRequests.delete(requestId);
         reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, timeoutMs);
-      signal?.addEventListener('abort', abort, { once: true });
-      const actionId = payload.intent && typeof payload.intent === 'object'
-        ? String(payload.intent.action_id || '')
-        : '';
-      this.pendingRequests.set(requestId, {
-        relayId,
-        action: String(payload.action || payload.type),
-        actionId: actionId || undefined,
-        resolve,
-        reject,
-        timer,
-        cleanup,
-      });
+      registerPendingOperation<PendingRequest>(
+        this.pendingRequests, requestId, signal, abort, () => {
+          const actionId = payload.intent && typeof payload.intent === 'object'
+            ? String(payload.intent.action_id || '')
+            : '';
+          return {
+            relayId,
+            action: String(payload.action || payload.type),
+            actionId: actionId || undefined,
+            resolve,
+            reject,
+            timer,
+            cleanup,
+          };
+        },
+      );
       const command: Record<string, unknown> = {
         ...payload,
         request_id: requestId,
@@ -1913,8 +1948,7 @@ class RelayStore {
         command.client_id = pushClientId();
       }
       if (!this.sendRaw(relayId, command)) {
-        clearTimeout(timer);
-        cleanup();
+        releasePendingResources({ timer, cleanup });
         this.pendingRequests.delete(requestId);
         reject(new CommandError('Could not send command to relay'));
       }
@@ -2439,16 +2473,14 @@ class RelayStore {
     }
     if (!pending || pending.relayId !== relayId) return;
     if (receipt.phase === 'prepared' || receipt.phase === 'awaiting_evidence') {
-      clearTimeout(pending.timer);
-      pending.timer = setTimeout(() => {
+      resetPendingDeadline(pending, () => {
         pending.cleanup?.();
         this.pendingRequests.delete(requestId);
         pending?.reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, ACCEPTED_COMMAND_TIMEOUT_MS);
       return;
     }
-    clearTimeout(pending.timer);
-    pending.cleanup?.();
+    releasePendingResources(pending);
     this.pendingRequests.delete(requestId);
     if (receipt.phase === 'confirmed') {
       pending.resolve({
@@ -2461,9 +2493,7 @@ class RelayStore {
       });
       return;
     }
-    const detail = typeof message.detail === 'string' && UTF8_ENCODER.encode(message.detail).byteLength <= 512
-      ? message.detail
-      : '';
+    const detail = parseCommandErrorDetail(message.detail);
     const error = new CommandError(detail || receipt.error?.code || 'Command failed');
     error.data = {
       phase: receipt.phase,
@@ -2479,12 +2509,9 @@ class RelayStore {
     const pending = requestId ? this.pendingRequests.get(requestId) : undefined;
     const apiError = parseApiError(message.error);
     if (!pending || pending.relayId !== relayId || !apiError) return;
-    clearTimeout(pending.timer);
-    pending.cleanup?.();
+    releasePendingResources(pending);
     this.pendingRequests.delete(requestId);
-    const detail = typeof message.detail === 'string' && UTF8_ENCODER.encode(message.detail).byteLength <= 512
-      ? message.detail
-      : '';
+    const detail = parseCommandErrorDetail(message.detail);
     const error = new CommandError(detail || apiError.code);
     error.data = { phase: 'failed_before_dispatch', api_error: apiError };
     pending.reject(error);
@@ -2500,8 +2527,7 @@ class RelayStore {
       }
       // The relay already acted; give the final confirmation its own window
       // instead of counting it against the original send timeout.
-      clearTimeout(pending.timer);
-      pending.timer = setTimeout(() => {
+      resetPendingDeadline(pending, () => {
         pending.cleanup?.();
         this.pendingRequests.delete(result.request_id);
         pending.reject(dispatchedUnknownError('Relay confirmation timed out'));
@@ -2509,8 +2535,7 @@ class RelayStore {
       this.showToast('Command accepted; waiting for agent…');
       return;
     }
-    clearTimeout(pending.timer);
-    pending.cleanup?.();
+    releasePendingResources(pending);
     this.pendingRequests.delete(result.request_id);
     if (result.ok) pending.resolve(result);
     else {
@@ -2530,8 +2555,7 @@ class RelayStore {
   ): void {
     for (const [requestId, pending] of operations) {
       if (pending.relayId !== relayId) continue;
-      clearTimeout(pending.timer);
-      pending.cleanup?.();
+      releasePendingResources(pending);
       operations.delete(requestId);
       // Every entry here survived its write, so the frame is already on the
       // wire and the relay may act on it after this rejection.
@@ -2802,6 +2826,7 @@ class RelayStore {
       return false;
     }
     this.markResponding(agent.pane_id);
+    const owner = this.connectionsValue.get(agent.relay_id);
     try {
       const result = await this.sendToAgent(agent, {
         type: 'respond',
@@ -2822,12 +2847,13 @@ class RelayStore {
       this.showToast((error as Error).message, true);
       return false;
     } finally {
-      setTimeout(() => this.readPane(agent), 500);
+      this.scheduleDelayedPaneRead(agent, owner, 500);
     }
   }
 
   async answerQuestion(agent: Agent, interaction: QuestionInteraction, draft: QuestionDraft): Promise<CommandResult> {
     this.markResponding(agent.pane_id);
+    const owner = this.connectionsValue.get(agent.relay_id);
     try {
       return await this.sendToAgent(agent, {
         type: 'answer_question',
@@ -2838,12 +2864,13 @@ class RelayStore {
         source: 'App',
       }, 20_000);
     } finally {
-      setTimeout(() => this.readPane(agent), 400);
+      this.scheduleDelayedPaneRead(agent, owner, 400);
     }
   }
 
   async navigateQuestionPrevious(agent: Agent, interaction: QuestionInteraction): Promise<CommandResult> {
     this.markResponding(agent.pane_id);
+    const owner = this.connectionsValue.get(agent.relay_id);
     try {
       return await this.sendToAgent(agent, {
         type: 'navigate_question',
@@ -2852,12 +2879,13 @@ class RelayStore {
         source: 'App',
       }, 20_000);
     } finally {
-      setTimeout(() => this.readPane(agent), 400);
+      this.scheduleDelayedPaneRead(agent, owner, 400);
     }
   }
 
   async clarifyQuestion(agent: Agent, interaction: QuestionInteraction): Promise<CommandResult> {
     this.markResponding(agent.pane_id);
+    const owner = this.connectionsValue.get(agent.relay_id);
     try {
       return await this.sendToAgent(agent, {
         type: 'clarify_question',
@@ -2865,7 +2893,7 @@ class RelayStore {
         source: 'App',
       }, 20_000);
     } finally {
-      setTimeout(() => this.readPane(agent), 400);
+      this.scheduleDelayedPaneRead(agent, owner, 400);
     }
   }
 
@@ -3242,15 +3270,16 @@ class RelayStore {
         error.code = 'attachment_upload_interrupted';
         reject(error);
       };
-      signal?.addEventListener('abort', abort, { once: true });
-      this.pendingUploads.set(requestId, {
-        relayId,
-        responseType,
-        resolve: (result) => resolve(result as TResult),
-        reject,
-        timer,
-        cleanup,
-      });
+      registerPendingOperation<PendingUpload>(
+        this.pendingUploads, requestId, signal, abort, () => ({
+          relayId,
+          responseType,
+          resolve: (result) => resolve(result as TResult),
+          reject,
+          timer,
+          cleanup,
+        }),
+      );
       if (!this.sendRaw(relayId, {
         type,
         protocol: RELAY_PROTOCOL_VERSION,
@@ -3258,8 +3287,7 @@ class RelayStore {
         client_id: pushClientId(),
         ...(request as Record<string, unknown>),
       })) {
-        clearTimeout(timer);
-        cleanup();
+        releasePendingResources({ timer, cleanup });
         this.pendingUploads.delete(requestId);
         reject(new CommandError('Could not send attachment upload request.'));
       }
@@ -3270,8 +3298,7 @@ class RelayStore {
     const requestId = String(message.request_id || '');
     const pending = this.pendingUploads.get(requestId);
     if (!pending || pending.relayId !== relayId || pending.responseType !== message.type) return;
-    clearTimeout(pending.timer);
-    pending.cleanup?.();
+    releasePendingResources(pending);
     this.pendingUploads.delete(requestId);
     const apiError = parseApiError(message.error);
     if (message.error !== undefined) {

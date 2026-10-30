@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { createReorderHold } from '$lib/reorder-hold';
+  import { displacedSlot, insertionSlot, slotGap, type ReorderSlot } from '$lib/reorder-geometry';
   import { tick } from 'svelte';
+  import DirectoryPicker from '$components/DirectoryPicker.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
@@ -43,24 +46,27 @@
     workspaceIDs?: string[];
   };
   let confirming = $state<ConfirmingAction | null>(null);
-  interface WorkspaceSlot {
-    key: string;
-    top: number;
-    height: number;
-  }
   let movingWorkspace = $state('');
   let workspaceDrag = $state<{
+    owner: HTMLElement;
     sourceKey: string;
     pointerId: number;
     startY: number;
     deltaY: number;
     insertIdx: number;
-    items: WorkspaceSlot[];
+    items: ReorderSlot[];
     gap: number;
   } | null>(null);
   let pendingWorkspaceOrder = $state<{ relayId: string; order: string[] } | null>(null);
   let directoryLoadGeneration = 0;
   let worktreeLoadGeneration = 0;
+  const cancelWorkspaceReorders = new Set<() => void>();
+
+  function selectWorkspaceRelay(next: string) {
+    if (next === relayId) return;
+    for (const cancel of cancelWorkspaceReorders) cancel();
+    relayId = next;
+  }
 
   const readyRelays = $derived($relays.filter((relay) => {
     const connection = $connections.get(relay.id);
@@ -94,7 +100,7 @@
   });
 
   $effect(() => {
-    if (!readyRelays.some((relay) => relay.id === relayId)) relayId = readyRelays[0]?.id || '';
+    if (!readyRelays.some((relay) => relay.id === relayId)) selectWorkspaceRelay(readyRelays[0]?.id || '');
     if (!relayId || loadedRelay === relayId) return;
     loadedRelay = relayId;
     cwd = '';
@@ -252,116 +258,73 @@
     }
   }
 
-  const LONG_PRESS_MS = 550;
-  const PRESS_SLOP_PX = 12;
-
   function workspaceReorderPress(node: HTMLElement, params: { tree: RelayWorkspaceTree }) {
     let current = params;
-    let timer = 0;
-    let pointerId = -1;
-    let startX = 0;
-    let startY = 0;
-    let dragging = false;
+    const hold = createReorderHold(node);
 
-    function reset() {
-      if (timer) window.clearTimeout(timer);
-      timer = 0;
-      pointerId = -1;
-      dragging = false;
+    function clearOwnedDrag() {
+      if (workspaceDrag?.owner === node) workspaceDrag = null;
     }
 
+    function cancel() {
+      clearOwnedDrag();
+      hold.cancel();
+    }
+    cancelWorkspaceReorders.add(cancel);
+
     function onPointerDown(event: PointerEvent) {
-      if (!event.isPrimary || event.button !== 0 || movingWorkspace || isReadOnly(current.tree.workspace.relay_id)) return;
+      if (current.tree.workspace.relay_id !== relayId || !event.isPrimary || event.button !== 0 || movingWorkspace || isReadOnly(current.tree.workspace.relay_id)) return;
       if (event.target instanceof Element && event.target.closest('button, input, select, textarea, a') && !event.target.closest('.workspace-drag-handle')) return;
-      pointerId = event.pointerId;
-      startX = event.clientX;
-      startY = event.clientY;
-      timer = window.setTimeout(() => {
-        timer = 0;
+      hold.start(event, () => {
         const items = measureWorkspaceSlots(node);
         if (items.length < 2) {
-          reset();
+          hold.reset();
           return;
         }
-        const sourceIdx = items.findIndex((item) => item.key === current.tree.workspace.workspace_id);
+        const sourceIdx = items.findIndex((item) => item.id === current.tree.workspace.workspace_id);
         if (sourceIdx < 0) {
-          reset();
+          hold.reset();
           return;
         }
-        dragging = true;
-        navigator.vibrate?.(12);
-        node.setPointerCapture?.(pointerId);
+        hold.lift();
         workspaceDrag = {
+          owner: node,
           sourceKey: current.tree.workspace.workspace_id,
-          pointerId,
-          startY: startY + window.scrollY,
+          pointerId: hold.pointerId,
+          startY: hold.startY + window.scrollY,
           deltaY: 0,
           insertIdx: sourceIdx,
           items,
-          gap: items.length > 1 ? Math.max(0, items[1].top - items[0].top - items[0].height) : 12,
+          gap: slotGap(items),
         };
-      }, LONG_PRESS_MS);
+      });
     }
 
-    function onPointerMove(event: PointerEvent) {
-      if (event.pointerId !== pointerId) return;
-      if (!dragging) {
-        if (Math.hypot(event.clientX - startX, event.clientY - startY) > PRESS_SLOP_PX) reset();
-        return;
-      }
-      event.preventDefault();
-      trackWorkspaceDrag(event);
-    }
-
-    function onPointerUp(event: PointerEvent) {
-      if (event.pointerId !== pointerId) return;
-      if (dragging) finishWorkspaceDrag(event, current.tree);
-      reset();
-    }
-
-    function onPointerCancel(event: PointerEvent) {
-      if (event.pointerId !== pointerId) return;
-      if (workspaceDrag?.pointerId === event.pointerId) workspaceDrag = null;
-      reset();
-    }
-
-    function onTouchMove(event: TouchEvent) {
-      if (dragging) event.preventDefault();
-    }
-
-    function onContextMenu(event: Event) {
-      if (dragging || timer) event.preventDefault();
-    }
-
-    node.addEventListener('pointerdown', onPointerDown);
-    node.addEventListener('pointermove', onPointerMove);
-    node.addEventListener('pointerup', onPointerUp);
-    node.addEventListener('pointercancel', onPointerCancel);
-    node.addEventListener('touchmove', onTouchMove, { passive: false });
-    node.addEventListener('contextmenu', onContextMenu);
+    const stopListening = hold.listen(onPointerDown, {
+      move: trackWorkspaceDrag,
+      finish: (event) => finishWorkspaceDrag(event, current.tree),
+      cancel: clearOwnedDrag,
+    });
     return {
       update(next: { tree: RelayWorkspaceTree }) {
         current = next;
       },
       destroy() {
-        node.removeEventListener('pointerdown', onPointerDown);
-        node.removeEventListener('pointermove', onPointerMove);
-        node.removeEventListener('pointerup', onPointerUp);
-        node.removeEventListener('pointercancel', onPointerCancel);
-        node.removeEventListener('touchmove', onTouchMove);
-        node.removeEventListener('contextmenu', onContextMenu);
-        reset();
+        cancelWorkspaceReorders.delete(cancel);
+        stopListening();
+        clearOwnedDrag();
+        hold.destroy();
       },
     };
   }
 
-  function measureWorkspaceSlots(node: HTMLElement): WorkspaceSlot[] {
+  function measureWorkspaceSlots(node: HTMLElement): ReorderSlot[] {
     const container = node.closest('.workspace-management-list');
     if (!container) return [];
     return [...container.querySelectorAll<HTMLElement>('.workspace-management-slot')].map((slot) => {
       const bounds = slot.getBoundingClientRect();
       return {
-        key: slot.dataset.workspaceKey || '',
+        id: slot.dataset.workspaceKey || '',
         top: bounds.top + window.scrollY,
         height: bounds.height,
       };
@@ -373,11 +336,7 @@
     if (event.clientY < 72) window.scrollBy(0, -12);
     else if (event.clientY > window.innerHeight - 72) window.scrollBy(0, 12);
     const pointerY = event.clientY + window.scrollY;
-    let insertIdx = 0;
-    for (const item of workspaceDrag.items) {
-      if (item.key === workspaceDrag.sourceKey) continue;
-      if (pointerY > item.top + item.height / 2) insertIdx += 1;
-    }
+    const insertIdx = insertionSlot(workspaceDrag.items, workspaceDrag.sourceKey, pointerY);
     workspaceDrag = { ...workspaceDrag, deltaY: pointerY - workspaceDrag.startY, insertIdx };
   }
 
@@ -385,20 +344,14 @@
     if (!workspaceDrag) return '';
     if (workspaceID === workspaceDrag.sourceKey) return `translateY(${workspaceDrag.deltaY}px)`;
     const { items, sourceKey, insertIdx, gap } = workspaceDrag;
-    const sourceIdx = items.findIndex((item) => item.key === sourceKey);
-    const itemIdx = items.findIndex((item) => item.key === workspaceID);
-    if (sourceIdx < 0 || itemIdx < 0) return '';
-    const span = items[sourceIdx].height + gap;
-    const othersIdx = itemIdx > sourceIdx ? itemIdx - 1 : itemIdx;
-    const shift = (itemIdx > sourceIdx ? -span : 0) + (othersIdx >= insertIdx ? span : 0);
-    return shift ? `translateY(${shift}px)` : '';
+    return displacedSlot(items, sourceKey, workspaceID, insertIdx, gap);
   }
 
   function finishWorkspaceDrag(event: PointerEvent, tree: RelayWorkspaceTree) {
     if (!workspaceDrag || workspaceDrag.pointerId !== event.pointerId) return;
     const completed = workspaceDrag;
     workspaceDrag = null;
-    const sourceIdx = completed.items.findIndex((item) => item.key === completed.sourceKey);
+    const sourceIdx = completed.items.findIndex((item) => item.id === completed.sourceKey);
     if (sourceIdx < 0 || completed.insertIdx === sourceIdx) return;
     void commitWorkspaceReorder(tree, completed.insertIdx);
   }
@@ -416,7 +369,7 @@
   }
 
   async function commitWorkspaceReorder(tree: RelayWorkspaceTree, insertIdx: number) {
-    if (isReadOnly(tree.workspace.relay_id)) return;
+    if (movingWorkspace || isReadOnly(tree.workspace.relay_id)) return;
     const sourceID = tree.workspace.workspace_id;
     const others = displayWorkspaceTrees.filter((item) => item.workspace.workspace_id !== sourceID);
     const beforeWorkspaceID = others[insertIdx]?.workspace.workspace_id || '';
@@ -445,6 +398,14 @@
       movingWorkspace = '';
     }
   }
+
+  // Wait for showModal and for Cancel to be enabled after a refusal.
+  $effect(() => {
+    if (!confirmOpen || !confirming || busy) return;
+    void tick().then(() => {
+      if (confirmOpen && !busy) document.getElementById('workspace-confirm-cancel')?.focus();
+    });
+  });
 
   function beginConfirm(kind: 'close' | 'remove', workspace: RelayWorkspace, force = false) {
     if (isReadOnly(workspace.relay_id)) return;
@@ -732,7 +693,7 @@
   <Card>
     <div class="form-stack">
       <label for="workspace-relay">Computer</label>
-      <select id="workspace-relay" bind:value={relayId}>
+      <select id="workspace-relay" value={relayId} onchange={(event) => selectWorkspaceRelay(event.currentTarget.value)}>
         {#if !readyRelays.length}<option value="">No compatible relays</option>{/if}
         {#each readyRelays as relay (relay.id)}<option value={relay.id}>{relay.label}</option>{/each}
       </select>
@@ -787,41 +748,13 @@
   <form class="form-stack" onsubmit={createWorkspace}>
     <span id="workspace-cwd-label" class="field-label">Working Directory</span>
     <div class:open={directoryOpen} class="directory-browser" aria-labelledby="workspace-cwd-label">
-      <div class="directory-toolbar">
-        <Button
-          size="icon"
-          variant="secondary"
-          aria-label="Open parent directory"
-          disabled={!connection?.directoryBrowser?.parent}
-          onclick={() => connection?.directoryBrowser?.parent && loadDirectory(connection.directoryBrowser.parent)}
-        >↑</Button>
-        <button
-          class="directory-current"
-          type="button"
-          aria-expanded={directoryOpen}
-          aria-controls="workspace-directory-list"
-          onclick={() => { directoryOpen = !directoryOpen; }}
-        >
-          <span>{connection?.directoryBrowser?.current.label || cwd || (connection?.directoryLoading ? 'Loading…' : 'Unavailable')}</span>
-          <span aria-hidden="true">⌄</span>
-        </button>
-      </div>
-      {#if directoryOpen}
-        <div id="workspace-directory-list" class="directory-list" aria-label="Subdirectories">
-          {#if connection?.directoryLoading}
-            <p>Loading folders…</p>
-          {:else if connection?.directoryError}
-            <p role="alert">{connection.directoryError}</p>
-          {:else}
-            {#if connection?.directoryBrowser?.parent}
-              <button type="button" onclick={() => loadDirectory(connection.directoryBrowser?.parent || '')}>↰ Parent folder</button>
-            {/if}
-            {#each connection?.directoryBrowser?.directories || [] as directory (directory.path)}
-              <button type="button" onclick={() => loadDirectory(directory.path)}>📁 {directory.name}</button>
-            {/each}
-          {/if}
-        </div>
-      {/if}
+      <DirectoryPicker
+        {connection}
+        {cwd}
+        listId="workspace-directory-list"
+        bind:open={directoryOpen}
+        onselect={loadDirectory}
+      />
     </div>
     <label for="workspace-label">Label</label>
     <input id="workspace-label" bind:value={label} maxlength="128" required autocomplete="off" />
@@ -914,6 +847,6 @@
           ? confirming.force ? 'Force Remove' : 'Remove Worktree'
           : 'Close Workspace'}
     </Button>
-    <Button variant="ghost" disabled={busy} onclick={cancelConfirm}>Cancel</Button>
+    <Button id="workspace-confirm-cancel" variant="ghost" disabled={busy} onclick={cancelConfirm}>Cancel</Button>
   </div>
 </AppDialog>
