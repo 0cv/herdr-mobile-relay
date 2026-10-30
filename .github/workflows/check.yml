@@ -2,7 +2,7 @@ name: check
 
 on:
   push:
-    branches: [main, dev, ci/tailscale-native-preflight-ef9f843]
+    branches: [main, dev]
   pull_request:
 
 permissions:

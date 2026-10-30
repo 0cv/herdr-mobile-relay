@@ -657,18 +657,16 @@ class Wiring(unittest.TestCase):
             for forbidden in ("continue-on-error", "retry", "rerun"):
                 self.assertNotIn(forbidden, code)
         self.assertIn("workflow_dispatch", self.text(".github/workflows/service-full-qualification.yml"))
-        self.assertIn("pull_request", self.text(".github/workflows/service-full-qualification.yml"))
         self.assertIn("schedule", self.text(".github/workflows/service-full-qualification.yml"))
 
     @staticmethod
     def blocks(text, indent):  # {key: its text} for the mapping entries at exactly this indent (comments before the first entry are dropped)
         return {re.match(r"\s*([\w-]+):", b).group(1): b for b in re.split(r"(?m)^(?=%s[\w-]+:)" % (" " * indent), text) if b.lstrip()[:1] not in ("#", "")}
 
-    def test_full_triggers_are_the_three_existing_ones_plus_a_push_to_the_ci_branch_only(self):
+    def test_full_triggers_are_dispatch_schedule_and_a_push_to_the_ci_branch_only(self):
         triggers = self.blocks(self.text(".github/workflows/service-full-qualification.yml").split("\non:\n", 1)[1].split("\npermissions:", 1)[0], 2)
-        self.assertEqual(sorted(triggers), ["pull_request", "push", "schedule", "workflow_dispatch"])
+        self.assertEqual(sorted(triggers), ["push", "schedule", "workflow_dispatch"])
         self.assertEqual(triggers["push"], "  push:\n    branches: [ci/tailscale-native-preflight-ef9f843]\n")  # no other branch, tag, path or filter
-        self.assertEqual(triggers["pull_request"], "  pull_request:\n")
         self.assertEqual(triggers["schedule"], '  schedule:\n    - cron: "17 3 * * *"\n')
         self.assertEqual(triggers["workflow_dispatch"], "  workflow_dispatch:\n    inputs:\n      candidate_sha:\n        description: Optional full commit SHA the selected ref "
                          "must be at (the run fails otherwise)\n        required: false\n        type: string\n")
@@ -701,7 +699,7 @@ class Wiring(unittest.TestCase):
                                   env={"PATH": "/usr/bin:/bin", "EVENT_NAME": event, "HEAD_MESSAGE": message})
             self.assertEqual(done.returncode, 0, done.stderr)  # the skip path exits 0: never a red run
             return [line for line in done.stdout.splitlines() if line.startswith("run=")]
-        for event in ("workflow_dispatch", "pull_request", "schedule"):  # these ignore the marker and always run
+        for event in ("workflow_dispatch", "schedule"):  # these ignore the marker and always run
             for message in ("", "no marker", marker):
                 self.assertEqual(decided(event, message), ["run=true"], (event, message))
         self.assertEqual(decided("push", "ci: x\n\nbody\n%s trailing\n" % marker), ["run=true"])
@@ -713,7 +711,15 @@ class Wiring(unittest.TestCase):
         for text in (marker, "A skipped push run is not qualification"):
             self.assertIn(text, " ".join(docs.split()))
 
-    def test_check_release_and_makefile_keep_every_event_covered(self):
+    def test_check_and_mount_controls_keep_only_their_intended_triggers(self):
+        check = self.text(".github/workflows/check.yml")
+        triggers = self.blocks(check.split("\non:\n", 1)[1].split("\npermissions:", 1)[0], 2)
+        self.assertEqual(triggers, {"push": "  push:\n    branches: [main, dev]\n", "pull_request": "  pull_request:\n"})
+        mount = self.text(".github/workflows/uninstall-mount-controls.yml")
+        triggers = self.blocks(mount.split("\non:\n", 1)[1].split("\npermissions:", 1)[0], 2)
+        self.assertEqual(triggers, {"pull_request": "  pull_request:\n", "workflow_dispatch": "  workflow_dispatch:\n"})
+
+    def test_check_release_and_makefile_keep_shell_suite_split(self):
         check, release, make = (self.text(p) for p in (".github/workflows/check.yml", ".github/workflows/release.yml", "Makefile"))
         self.assertIn("shell-check-ci-complement production-path-audit", check)
         self.assertIn(".github/workflows/service-full-qualification.yml", check)

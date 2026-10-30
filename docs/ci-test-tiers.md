@@ -11,9 +11,9 @@ way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is nev
 | Workflow (required check) | Events | Sharded suites' cells | Shards per OS (macos-15, ubuntu-24.04) |
 | --- | --- | --- | --- |
 | `service-qualification.yml` (**Service qualification gate (fast)**) | push to `main`, `dev`, the CI branch | native: the explicit fast subset, 592 cells (353 installer runs + 8 cancellations); uninstall CLI: the explicit fast subset, 345 cells (550 invocations + 3 controls) | native 5, uninstall CLI 1 |
-| `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch, push to the CI branch **only with `[full-qualification]` in the head commit message** (below) | native: all 2339 cells; uninstall CLI: all 1040 cells (1665 invocations + 3 controls) | native 29, uninstall CLI 3 |
-| `check.yml` (Shell job) | push to `main`, `dev`, the CI branch; `pull_request` | none: runs `make shell-check-ci-complement` | - |
-| `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes, and a push run is never accepted); none found fails closed; the existing 1800 s window | - |
+| `service-full-qualification.yml` (**Full service qualification gate**) | `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch, push to the CI branch **only with `[full-qualification]` in the head commit message** (below) | native: all 2339 cells; uninstall CLI: all 1040 cells (1665 invocations + 3 controls) | native 29, uninstall CLI 3 |
+| `check.yml` (Shell job) | push to `main`, `dev`; `pull_request` | none: runs `make shell-check-ci-complement` | - |
+| `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a push run is never accepted); none found fails closed; the existing 1800 s window | - |
 
 Both service workflows also run the nine unsharded suites on both runners: common, credentials, **install** (the
 hosted macOS run of `install.sh`'s Darwin-specific `stat -f` branch), supervision, dispatch,
@@ -22,15 +22,15 @@ required runs with their own exit status and bounds (900 s, 180 s). The uninstal
 sequential suites job (its macOS run hit the 900 s bound); it is now its own `uninstall_cli` shard job in both workflows.
 `make shell-check` is unchanged and complete (no environment variable selects everything: it still nests them and runs the
 whole uninstall CLI suite, unsharded); `make shell-check-ci-complement` is it minus the native, full-uninstall and
-uninstall-CLI suites, which the service workflows cover on every event `check.yml` runs on.
+uninstall-CLI suites. The fast service workflow covers these on `main`, `dev` and CI-branch pushes; `check.yml` also runs its complement on `main`/`dev` pushes and pull requests.
 `common`, `credentials`, `install` and `release` are intentionally still run by both `check.yml` and the service workflows.
 
-Branch rules must name the two gate jobs above (and `check`); that hosting configuration is a separate administrative
-prerequisite that no YAML here establishes.
+Branch rules must name applicable gate jobs (and `check`); Full is qualified on a final candidate, not on pull requests.
+That hosting configuration is a separate administrative prerequisite that no YAML here establishes.
 
 ### Running the full tier on the CI branch
 
-Pull requests, `workflow_dispatch` and the nightly cron always run the full tier and ignore the marker. A push to the CI branch
+`workflow_dispatch` and the nightly cron always run the full tier and ignore the marker. A push to the CI branch
 (`ci/tailscale-native-preflight-ef9f843`, the only branch the `push` trigger names) runs it **only when the head commit message of
 the push contains the exact, case-sensitive text `[full-qualification]`**: put it in that commit's message, push, and the run
 qualifies exactly that commit (`github.sha`), with the same SHA/run/attempt-bound evidence and exact-once gate as a dispatch run.
@@ -149,7 +149,7 @@ Jobs per event (each also runs on Ubuntu; the gate job is Ubuntu only): **a push
 CLI shard; it ran 4 with 2 native shards) and **a full run 33** (suites, 29 native shards, 3 uninstall CLI shards; it ran 12 with 8).
 GitHub caps how many macOS jobs a plan runs at once on standard hosted runners (its documentation lists 5 for the Free, Pro and Team
 plans and 50 for Enterprise Cloud; this repository's plan was not inspected, so verify it): with 5, a full run needs at least seven
-successive groups of macOS jobs and a push at least two, and pushes, pull requests and the nightly run queue behind each other. That
+successive groups of macOS jobs and a push at least two, and marked pushes, dispatches and the nightly run queue behind each other. That
 is a constraint, not a prediction: no wall-clock, queue or 15-minute figure is promised. `release.yml` (unchanged) waits at most 1800 s
 for a still-running Full run, so dispatch it and let it finish before tagging.
 
@@ -171,7 +171,7 @@ unchanged, never calls the guard, and stays an open obligation.
 | --- | --- | --- |
 | Guard unit tests (synthetic inventories; absent, symlink and single-root kinds on the real filesystem) | `go test ./...` and the race job of `check.yml` (Linux only) | the autofs scope, parser strictness, per-root recheck |
 | `tests/test_uninstall.sh` (both Service suites jobs, now given `NATIVE_HELPER`) | Linux host: the real compiled relay is the guard and refusals use a real FIFO; macOS host: a recording **model** guard checks call order and arguments | wiring and ordering, no effects on refusal; Darwin never calls the guard |
-| `uninstall-mount-controls.yml` (ubuntu-24.04: push to the CI branch, `pull_request`, `workflow_dispatch`) | `scripts/ci/run-uninstall-mount-controls.sh` (sudo only for `mount --bind` and `umount` inside a private work directory, always unmounted) running `tests/test_uninstall_mounts.py` | real bind mounts at, beneath and aliasing each root (and as the temp directory) refuse before any effect or write; a mount after the native step is refused by the per-step recheck; absent and link-only roots; a sanitized census of mount filesystem types |
+| `uninstall-mount-controls.yml` (ubuntu-24.04: `pull_request`, `workflow_dispatch`) | `scripts/ci/run-uninstall-mount-controls.sh` (sudo only for `mount --bind` and `umount` inside a private work directory, always unmounted) running `tests/test_uninstall_mounts.py` | real bind mounts at, beneath and aliasing each root (and as the temp directory) refuse before any effect or write; a mount after the native step is refused by the per-step recheck; absent and link-only roots; a sanitized census of mount filesystem types |
 
 The full-uninstall suite gains about ten invocations and one binary copy per Linux-model invocation; its 900 s bound is unchanged. The
 mount controls are a separate workflow, so the service gates, shard counts and their matrix are unchanged.

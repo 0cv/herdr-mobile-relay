@@ -4,7 +4,7 @@ name: Full service qualification
 # invocations and 8 cancellation cells; 29 shards per OS) and EVERY uninstall CLI cell (all 1665 Fixture.run invocations and
 # the 3 controls; 3 shards per OS). It is the only workflow whose success release.yml accepts as
 # service qualification. It runs on demand for an exact candidate (workflow_dispatch; set candidate_sha to assert the
-# commit), on every pull request before merge, and nightly on the default branch after merge. A push to the CI branch (the
+# commit), and nightly on the default branch after merge. A push to the CI branch (the
 # only branch named below) runs it ONLY when the head commit message contains [full-qualification]: the decide job turns that
 # into the output every other job, the gate included, is gated on. Without the marker every other job is skipped, which is NOT
 # qualification (release.yml accepts only dispatch and schedule runs). The required check to
@@ -24,7 +24,6 @@ on:
         description: Optional full commit SHA the selected ref must be at (the run fails otherwise)
         required: false
         type: string
-  pull_request:
   schedule:
     - cron: "17 3 * * *"
 
@@ -37,7 +36,7 @@ env:
 # Thin wrappers over scripts/ci/run-service-qualification.sh, exactly as in service-qualification.yml. No retries, no
 # secrets, no continue-on-error, unchanged 900s suite / 40s invocation / 180s helper-build bounds and 60-minute job caps.
 jobs:
-  # The only job that always runs. Dispatch, pull_request and schedule ignore the marker and always qualify; a push qualifies
+  # The only job that always runs. Dispatch and schedule ignore the marker and always qualify; a push qualifies
   # only with the marker in its head commit message (an exact, case-sensitive substring). The message reaches the script only
   # through the environment. Anything but a marker-less push yields run=true: the only way to skip is the explicit run=false.
   decide:

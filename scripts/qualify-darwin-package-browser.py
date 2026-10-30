@@ -2,7 +2,7 @@
 """Offline qualification gate for one exact Darwin extracted-package browser candidate.
 
 Qualified ONLY when the supplied `gh run list` projection contains exactly one
-successful first-attempt push run for each of the four required workflows on
+successful first-attempt run for each of the three required workflows on
 the exact SHA/branch AND the supplied Darwin receipt is a complete PASS under
 the runner's own receipt contract (tests/test_tailscale_darwin_package_browser.py
 receipt_values_safe/receipt_policy/publish_receipt), bound to that Darwin run,
@@ -22,6 +22,7 @@ usage:
   qualify-darwin-package-browser.py --self-test
 RUNS.json is: gh run list --branch ci/tailscale-native-preflight-ef9f843 --commit SHA \\
   --json databaseId,workflowName,headSha,headBranch,event,status,conclusion,attempt
+The check run must have event pull_request; native preflight and Darwin must have event push.
 """
 from __future__ import annotations
 
@@ -43,7 +44,6 @@ BRANCH = "ci/tailscale-native-preflight-ef9f843"
 WORKFLOWS = (
     ("check", "check"),
     ("native_preflight", "Tailscale native preflight"),
-    ("b2", "B2 source verification and generated assets"),
     ("darwin", "Darwin extracted-package browser subcell"),
 )
 RUN_FIELDS = frozenset({"databaseId", "workflowName", "headSha", "headBranch", "event", "status",
@@ -212,7 +212,8 @@ def check_runs(sha, runs):
         row = matching[0]
         valid_id = is_int(row["databaseId"], 1, RUN_ID_MAX)
         for ok, reason in ((valid_id, "id"), (row["headSha"] == sha, "sha"), (row["headBranch"] == BRANCH, "branch"),
-                           (row["event"] == "push", "event"), (row["status"] == "completed", "status"),
+                           (row["event"] == ("pull_request" if key == "check" else "push"), "event"),
+                           (row["status"] == "completed", "status"),
                            (row["conclusion"] == "success", "conclusion"), (is_int(row["attempt"], 1, 1), "attempt")):
             if not ok:
                 failures.append(f"run_{reason}_{key}")
@@ -632,14 +633,15 @@ def evaluate(sha, load_runs, load_receipt, read_blob, load_reviewed=None):
 # --------------------------------------------------------------------- self-test
 
 SELF_SHA = "c0ffee" + "0" * 34
-SELF_RUNS = {"check": 1001, "native_preflight": 1002, "b2": 1003, "darwin": 1004}
+SELF_RUNS = {"check": 1001, "native_preflight": 1002, "darwin": 1003}
 SELF_BLOBS = {path: ("synthetic blob for " + path).encode() for path in FILES}
 SELF_HASHES = {path: hashlib.sha256(blob).hexdigest() for path, blob in SELF_BLOBS.items()}
 
 
 def fixture_runs(sha=SELF_SHA):
     return [{"databaseId": SELF_RUNS[key], "workflowName": name, "headSha": sha, "headBranch": BRANCH,
-             "event": "push", "status": "completed", "conclusion": "success", "attempt": 1}
+             "event": "pull_request" if key == "check" else "push", "status": "completed",
+             "conclusion": "success", "attempt": 1}
             for key, name in WORKFLOWS]
 
 
@@ -821,8 +823,9 @@ def self_test():
                fixture_receipt()), "run_sha_" + key)
         expect("reject_wrong_branch_" + key, run(SELF_SHA, bad_run(lambda r, i=index: r[i].update(headBranch="main")),
                fixture_receipt()), "run_branch_" + key)
-        expect("reject_wrong_event_" + key, run(SELF_SHA, bad_run(lambda r, i=index: r[i].update(event="workflow_dispatch")),
-               fixture_receipt()), "run_event_" + key)
+        expect("reject_wrong_event_" + key, run(SELF_SHA, bad_run(
+            lambda r, i=index, k=key: r[i].update(event="push" if k == "check" else "pull_request")),
+            fixture_receipt()), "run_event_" + key)
         expect("reject_bool_id_" + key, run(SELF_SHA, bad_run(lambda r, i=index: r[i].update(databaseId=True)),
                fixture_receipt()), "run_id_" + key)
         expect("reject_bool_attempt_" + key, run(SELF_SHA, bad_run(lambda r, i=index: r[i].update(attempt=True)),

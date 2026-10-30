@@ -7,8 +7,6 @@ name: Uninstall mount controls
 # which unmounts when it exits (EXIT, INT, TERM) and deletes nothing unless the mount table was read and shows no mount
 # beneath its work directory. No secrets, no retries, no continue-on-error.
 on:
-  push:
-    branches: [ci/tailscale-native-preflight-ef9f843]
   pull_request:
   workflow_dispatch:
 
