@@ -2871,9 +2871,11 @@ func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) 
 	if b.installed != nil {
 		job.terminalErr = errors.Join(job.terminalErr, indexErr)
 	}
-	job.state = BrowseFailed
-	job.phase = "failed"
 	job.err = failure
+	if !job.running {
+		job.state = BrowseFailed
+		job.phase = "failed"
+	}
 	job.index = nil
 	job.source.file = nil
 	job.mu.Unlock()
@@ -3011,8 +3013,8 @@ func nativeOpenCodeRevision(metadata openCodeRow) string {
 	return nativeDatabaseRevision(metadata.Database, metadata.SchemaVersion, fmt.Sprint(metadata.V2))
 }
 
-func nativeHermesRevision(path string, _ hermesRow) string {
-	return nativeSourceIdentityRevision(path)
+func nativeHermesRevision(path string, metadata hermesRow) string {
+	return nativeDatabaseRevision(path, metadata.SchemaVersion, "hermes")
 }
 
 func nativeSourceIdentityRevision(path string) string {

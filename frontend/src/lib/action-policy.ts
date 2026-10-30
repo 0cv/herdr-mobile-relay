@@ -1,14 +1,14 @@
 export type ActionPolicy = { controller: boolean; target: boolean; workspace: boolean };
 const reads = [
   'cancel_speech', 'check_update', 'device_list', 'get_activity', 'get_conversation_history',
-  'get_conversation_updates', 'list_directories', 'list_slash_commands', 'pane_applied', 'push_open_ref', 'push_policy_get',
-  'qr_code', 'read_pane', 'speech_voices_list', 'speak_text', 'unwatch_pane', 'watch_pane',
+  'get_conversation_updates', 'get_pi_integration', 'list_directories', 'list_slash_commands', 'pane_applied', 'push_open_ref', 'push_policy_get',
+  'qr_code', 'read_pane', 'speech_voices_list', 'speak_text', 'unwatch_conversation', 'unwatch_pane', 'watch_pane',
   'workspace_file', 'workspace_git_diff', 'workspace_git_status', 'workspace_tree', 'worktree_list',
 ];
 const writes = [
   'acknowledge_pane', 'agent_clear', 'agent_rename', 'agent_restart', 'agent_start', 'agent_stop',
   'answer_question', 'clarify_question', 'clear_activities', 'copy_agent_response', 'deploy_app_update',
-  'create_device_invitation', 'get_pi_prompt_capability', 'install_update', 'lease_pane_size', 'navigate_question',
+  'create_device_invitation', 'get_pi_prompt_capability', 'set_pi_integration', 'install_update', 'lease_pane_size', 'navigate_question',
   'register_app_origin', 'release_pane_size', 'rename_device', 'respond', 'send_keys', 'send_input',
   'send_filter_text', 'send_pi_prompt_unconfirmed', 'send_secret', 'send_terminal_text', 'reset_devices', 'revoke_device', 'send_text',
   'speech_voice_install', 'speech_voice_remove', 'submit_prompt', 'tab_reorder',
@@ -28,7 +28,7 @@ const targets = new Set([
   'list_slash_commands', 'navigate_question', 'pane_applied', 'read_pane', 'release_pane_size', 'respond',
   'send_keys', 'send_input', 'send_filter_text', 'send_pi_prompt_unconfirmed', 'send_secret',
   'send_terminal_text', 'send_text', 'speak_text',
-  'submit_prompt', 'tab_reorder', 'unwatch_pane', 'watch_pane', 'upload_begin',
+  'submit_prompt', 'tab_reorder', 'unwatch_conversation', 'unwatch_pane', 'watch_pane', 'upload_begin',
 ]);
 const policies = new Map<string, ActionPolicy>();
 for (const action of [...reads, ...writes, ...ownDevice]) policies.set(action, {

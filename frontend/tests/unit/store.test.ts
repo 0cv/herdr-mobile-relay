@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { securityState } from '$lib/security';
 import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
+import PiIntegration from '$components/PiIntegration.svelte';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -121,6 +122,35 @@ function seedAgent(socket: MockWebSocket, agent: Agent): void {
   socket.message({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
 }
 
+function connectedRole(role: 'controller' | 'reader') {
+  relayStore.destroy();
+  relayStore.relayConfigs.set([]);
+  const relay = { label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' };
+  const relayId = makeRelayId(relay.label, relay.url);
+  localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: {
+    [relayId]: { kind: 'credential', id: 'credential-test', version: 1, secret: 'C'.repeat(43),
+      deviceId: 'device-test', role, locale: 'en', issuedAt: Date.now(), invitationId: 'invitation-test' },
+  } }));
+  const sent: Record<string, any>[] = [];
+  let deliver!: (message: Record<string, unknown>) => void;
+  transportHijack.current = (_relay, handlers) => {
+    const peer = upgradedPeer(handlers);
+    deliver = handlers.onMessage;
+    return {
+      kind: 'websocket',
+      connect: () => {
+        handlers.onStatus('connected');
+        deliver({ type: 'push_config', protocol: 3, capabilities: ['pi_integration', 'conversation_activity'], inventory: { state: 'ready' } });
+        deliver({ type: 'agents', agents: [{ pane_id: 'w1:p1', agent: 'pi', ...exactAgentFields(), agent_session_id: 'session-1' }] });
+      },
+      send: (payload) => { sent.push(payload); peer.client(JSON.stringify(payload)); return true; },
+      close: () => {},
+    };
+  };
+  relayStore.addRelay(relay);
+  return { relayId, sent, deliver };
+}
+
 describe('relay command store', () => {
   beforeEach(() => {
     transportHijack.current = null;
@@ -151,6 +181,127 @@ describe('relay command store', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('loads and toggles Pi Integration through the real command gate for its controller', async () => {
+    const { relayId, sent, deliver } = connectedRole('controller');
+    render(PiIntegration, { relayId, label: 'Fedora', connection: relayStore.connection(relayId)! });
+    await vi.waitFor(() => expect(sent.some(command => command.type === 'get_pi_integration')).toBe(true));
+    const read = sent.find(command => command.type === 'get_pi_integration')!;
+    expect(read).not.toHaveProperty('target');
+    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
+      data: { instance: 'relay-instance', enabled: false, profiles: [] } });
+    const toggle = screen.getByRole('switch', { name: 'Pi Integration' });
+    await vi.waitFor(() => expect(toggle).toBeEnabled());
+    await fireEvent.click(toggle);
+    const change = sent.find(command => command.type === 'set_pi_integration')!;
+    expect(change).toMatchObject({ instance: 'relay-instance', enabled: true, protocol: 3 });
+    expect(change).not.toHaveProperty('target');
+    deliver({ type: 'command_result', request_id: change.request_id, action: change.type, ok: true,
+      data: { instance: 'relay-instance', enabled: true, profiles: [] } });
+    await vi.waitFor(() => expect(toggle).toBeChecked());
+  });
+
+  it('allows a reader to load Pi Integration but refuses toggles, unknown commands and stale authority', async () => {
+    const { relayId, sent, deliver } = connectedRole('reader');
+    render(PiIntegration, { relayId, label: 'Fedora', connection: relayStore.connection(relayId)!, readOnly: true });
+    await vi.waitFor(() => expect(sent.some(command => command.type === 'get_pi_integration')).toBe(true));
+    const read = sent.find(command => command.type === 'get_pi_integration')!;
+    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
+      data: { instance: 'relay-instance', enabled: true, profiles: [] } });
+    const toggle = screen.getByRole('switch', { name: 'Pi Integration' });
+    await vi.waitFor(() => expect(toggle).toBeChecked());
+    expect(toggle).toBeDisabled();
+    const before = sent.length;
+    await expect(relayStore.sendCommand(relayId, { type: 'set_pi_integration', instance: 'relay-instance', enabled: false })).rejects.toThrow();
+    await expect(relayStore.sendCommand(relayId, { type: 'unknown_command' })).rejects.toThrow();
+    expect(sent).toHaveLength(before);
+  });
+
+  it('refuses Pi Integration writes without current correlated inventory or connection', async () => {
+    const { relayId, sent } = connectedRole('controller');
+    const mutation = { type: 'set_pi_integration', instance: 'relay-instance', enabled: true };
+    const before = sent.length;
+    await expect(relayStore.sendCommand(relayId, { ...mutation, target: targetRefForAgent(get(relayStore.agents)[0]) })).rejects.toThrow();
+    await expect(relayStore.sendCommand(relayId, { type: 'get_pi_integration', pane_id: 'w1:p1' })).rejects.toThrow();
+    expect(sent).toHaveLength(before);
+    relayStore.setHidden(true);
+    await expect(relayStore.sendCommand(relayId, mutation)).rejects.toThrow();
+    await expect(relayStore.sendCommand(relayId, { type: 'get_pi_integration' })).rejects.toThrow();
+    expect(sent).toHaveLength(before);
+    relayStore.disconnectRelay(relayId);
+    await expect(relayStore.sendCommand(relayId, mutation)).rejects.toThrow('not connected');
+    expect(sent).toHaveLength(before);
+  });
+
+  it.each(['controller', 'reader'] as const)('stops only its own scoped conversation feed after pause or view switch, once as %s', async role => {
+    const { relayId, sent, deliver } = connectedRole(role);
+    const agent = get(relayStore.agents)[0];
+    const history = relayStore.getConversationHistory(agent);
+    const read = sent.findLast(command => command.type === 'get_conversation_history')!;
+    expect(read).toMatchObject({ pane_id: 'w1:p1', target: targetRefForAgent(agent), observe: true });
+    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
+      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot',
+        subscription_id: 'owned-subscription', source_revision: 'source:1', capabilities: { source: 'pi_events', active_branch: true } } });
+    await expect(history).resolves.toMatchObject({ subscriptionId: 'owned-subscription' });
+    const modified = { ...agent, terminal_id: 'other-terminal' };
+    const before = sent.length;
+    await expect(relayStore.sendCommand(relayId, { type: 'unwatch_conversation', subscription_id: 'owned-subscription' })).rejects.toThrow();
+    await expect(relayStore.sendToAgent(modified, { type: 'unwatch_conversation', subscription_id: 'owned-subscription' })).rejects.toThrow();
+    await expect(relayStore.sendToAgent(agent, { type: 'unwatch_conversation', subscription_id: 'other-subscription' })).rejects.toThrow();
+    expect(sent).toHaveLength(before);
+    relayStore.setHidden(true);
+    await expect(relayStore.sendToAgent(agent, { type: 'agent_stop' })).rejects.toThrow();
+    expect(sent).toHaveLength(before);
+    relayStore.stopConversationUpdates(agent, 'owned-subscription');
+    const stop = sent.findLast(command => command.type === 'unwatch_conversation')!;
+    expect(stop).toMatchObject({ pane_id: 'w1:p1', target: targetRefForAgent(agent),
+      server_session_id: 'primary', subscription_id: 'owned-subscription', protocol: 3 });
+    relayStore.stopConversationUpdates(agent, 'owned-subscription');
+    expect(sent.filter(command => command.type === 'unwatch_conversation')).toHaveLength(1);
+    deliver({ type: 'command_result', request_id: stop.request_id, action: stop.type, ok: true });
+  });
+
+  it('does not stop another view’s replacement feed', async () => {
+    const { sent, deliver } = connectedRole('controller');
+    const agent = get(relayStore.agents)[0];
+    const history = relayStore.getConversationHistory(agent);
+    const first = sent.findLast(command => command.type === 'get_conversation_history')!;
+    deliver({ type: 'command_result', request_id: first.request_id, action: first.type, ok: true,
+      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot', subscription_id: 'first-subscription' } });
+    await history;
+    deliver({ type: 'agents', agents: [
+      { pane_id: 'w1:p1', agent: 'pi', ...exactAgentFields(), agent_session_id: 'session-1' },
+      { pane_id: 'w1:p2', agent: 'pi', ...exactAgentFields('w1:p2'), agent_session_id: 'session-2' },
+    ] });
+    const next = get(relayStore.agents).find(row => row.raw_pane_id === 'w1:p2')!;
+    const nextHistory = relayStore.getConversationHistory(next);
+    const second = sent.findLast(command => command.type === 'get_conversation_history')!;
+    deliver({ type: 'command_result', request_id: second.request_id, action: second.type, ok: true,
+      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot', subscription_id: 'next-subscription' } });
+    await nextHistory;
+    const before = sent.length;
+    relayStore.stopConversationUpdates(agent, 'first-subscription');
+    expect(sent).toHaveLength(before);
+    relayStore.stopConversationUpdates(next, 'next-subscription');
+    expect(sent.findLast(command => command.type === 'unwatch_conversation')).toMatchObject({
+      target: targetRefForAgent(next), pane_id: 'w1:p2', subscription_id: 'next-subscription',
+    });
+  });
+
+  it('does not stop a feed owned by a superseded connection', async () => {
+    const { sent, deliver } = connectedRole('controller');
+    const agent = get(relayStore.agents)[0];
+    const history = relayStore.getConversationHistory(agent);
+    const read = sent.findLast(command => command.type === 'get_conversation_history')!;
+    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
+      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot',
+        subscription_id: 'old-subscription', source_revision: 'source:1' } });
+    await history;
+    relayStore.connectRelay(get(relayStore.relayConfigs)[0]);
+    const before = sent.length;
+    relayStore.stopConversationUpdates(agent, 'old-subscription');
+    expect(sent).toHaveLength(before);
   });
 
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {

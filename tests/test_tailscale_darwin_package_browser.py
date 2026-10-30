@@ -938,6 +938,24 @@ ALLOWED = (
     "web/builds/0.23.5-484-e2cd66df5f1cff84/index.html.br",
     "web/manifest-loader.js",
     "web/manifest-loader.js.br",
+    "web/assets/Card-485.js",
+    "web/assets/Card-485.js.br",
+    "web/assets/ConversationHistory-485.js",
+    "web/assets/ConversationHistory-485.js.br",
+    "web/assets/ManualTerminalInput-485.js",
+    "web/assets/ManualTerminalInput-485.js.br",
+    "web/assets/QuestionForm-485.js",
+    "web/assets/QuestionForm-485.js.br",
+    "web/assets/ResumeTimingSettings-485.js",
+    "web/assets/ResumeTimingSettings-485.js.br",
+    "web/assets/SettingsView-485.js",
+    "web/assets/SettingsView-485.js.br",
+    "web/assets/app-4e674950de3617ea330789d5b5655cbc668aac47f6d28094c24a2363e559b1f8.js",
+    "web/assets/app-4e674950de3617ea330789d5b5655cbc668aac47f6d28094c24a2363e559b1f8.js.br",
+    "web/assets/workspace-tools-485.js",
+    "web/assets/workspace-tools-485.js.br",
+    "web/builds/0.23.5-485-6064d1318317d710/index.html",
+    "web/builds/0.23.5-485-6064d1318317d710/index.html.br",
 )
 # SHA256 of UTF-8 newline-terminated, sorted (changed paths minus ALLOWED) from
 # SCOPE_BASE to 59eda0d83a785822696da03461601eca906231c6. A future new path
@@ -2350,10 +2368,10 @@ def projection_allowed(projection, observation):
             and projection.get("context_repository") == observation["repository"]
             and projection.get("context_ref") == observation["ref"]
             and projection.get("context_sha") == observation["candidate_sha"]
-            and type(projection.get("context_run_id")) is int
-            and str(projection["context_run_id"]) == observation["run_id"]
-            and type(projection.get("context_run_attempt")) is int
-            and str(projection["context_run_attempt"]) == observation["attempt"]
+            and type(projection.get("context_run_id")) is str
+            and projection["context_run_id"] == observation["run_id"]
+            and type(projection.get("context_run_attempt")) is str
+            and projection["context_run_attempt"] == observation["attempt"]
             and projection.get("context_event_name") == observation["event_name"])
 
 
@@ -5939,7 +5957,7 @@ def offline_check(group):
             # policy source is read below. Exercise the actual bounded reader
             # using in-memory metadata/streams, not a permissive substitute.
             base = {"system": "Darwin", "machine": "arm64", "enabled": "1", "repository": REPOSITORY,
-                "ref": REF, "attempt": "1", "event_name": "push", "candidate_sha": "c" * 40, "run_id": "1",
+                "ref": REF, "attempt": "1", "event_name": "push", "candidate_sha": "c" * 40, "run_id": "12345678901",
                 "runner_environment": "github-hosted", "image_os": "macos15"}
             event = {"before": LAUNCHCTL_PINNED_PARENT, "after": base["candidate_sha"], "ref": REF,
                 "forced": False, "created": False, "deleted": False}
@@ -6049,7 +6067,7 @@ def offline_check(group):
                 ("q2-owner-launchctl-print-push-dd608845-20261013", "dd608845b73c0323f5cbcfa140ad52affb28ec7f"))
             projected = {**event, "before": INTEGRATION_BEFORE, "repository": REPOSITORY,
                 "context_repository": REPOSITORY, "context_ref": REF, "context_sha": base["candidate_sha"],
-                "context_run_id": 1, "context_run_attempt": 1, "context_event_name": "push"}
+                "context_run_id": base["run_id"], "context_run_attempt": base["attempt"], "context_event_name": "push"}
             integration_identity = {**identity, "candidate_parents": [INTEGRATION_BEFORE, INTEGRATION_MAIN],
                                     "pushed_range_linear": False}
             projected_env = {name: json.dumps(projected[key]) for key, name in PUSH_PROJECTION_FIELDS.items()}
@@ -6063,10 +6081,16 @@ def offline_check(group):
             for field, value in (("before", "b" * 40), ("after", "d" * 40),
                     ("ref", "refs/heads/other"), ("repository", "other/repo"),
                     ("context_repository", "other/repo"), ("context_ref", "refs/heads/other"),
-                    ("context_sha", "d" * 40), ("context_run_id", 2),
-                    ("context_run_attempt", 2), ("context_event_name", "workflow_dispatch"),
+                    ("context_sha", "d" * 40), ("context_run_id", "2"),
+                    ("context_run_attempt", "2"), ("context_event_name", "workflow_dispatch"),
                     ("forced", True), ("created", True), ("deleted", True),
-                    ("forced", 0), ("context_run_id", "1"), ("context_run_attempt", True)):
+                    ("forced", 0), ("context_run_id", 12345678901), ("context_run_id", True),
+                    ("context_run_id", None), ("context_run_id", "0"),
+                    ("context_run_id", "012345678901"), ("context_run_id", "1" * 16),
+                    ("context_run_id", " 12345678901"), ("context_run_id", "12345678901 "),
+                    ("context_run_attempt", 1), ("context_run_attempt", True),
+                    ("context_run_attempt", None), ("context_run_attempt", "01"),
+                    ("context_run_attempt", " 1"), ("context_run_attempt", "1 ")):
                 before = len(opens)
                 require(rejects(lambda: observe(data=b" " * (PUSH_EVENT_CAP + 1),
                         commit=integration_identity, projection={**projected, field: value}))
@@ -6086,6 +6110,13 @@ def offline_check(group):
             for raw in ("{", "false false", '{"a": 1, "a": 2}', " " * (PUSH_EVENT_CAP + 1)):
                 require(rejects(lambda: ci_push_projection({**projected_env,
                     PUSH_PROJECTION_FIELDS["after"]: raw})), "offline_projection_env_malformed")
+            for field in ("context_run_id", "context_run_attempt"):
+                for raw in ("1", "true", "null", '"01"', '" 1"'):
+                    before = len(opens)
+                    from_env = ci_push_projection({**projected_env, PUSH_PROJECTION_FIELDS[field]: raw})
+                    require(rejects(lambda: observe(data=b" " * (PUSH_EVENT_CAP + 1),
+                        commit=integration_identity, projection=from_env)) and len(opens) == before,
+                        "offline_projection_env_type_refused")
             for change in ({"candidate_sha": "d" * 40}, {"run_id": "2"},
                     {"attempt": "2"}, {"repository": "other/repo"},
                     {"ref": "refs/heads/other"}, {"event_name": "workflow_dispatch"}):
@@ -6096,13 +6127,22 @@ def offline_check(group):
                     commit={**integration_identity, "candidate_parents": [INTEGRATION_MAIN, INTEGRATION_BEFORE]},
                     projection=projected)), "offline_projection_graph_order")
             require(len(opens) == before_projection[2], "offline_projection_refusals_unread")
+            fix_before = "d93c704096da6b44176d6daead1fb75c056862fb"
+            fix_identity = {**identity, "candidate_parents": [fix_before]}
+            fix_context = observe(data=encode({**event, "before": fix_before}), commit=fix_identity,
+                                  projection=projected)
+            require(selected_grant_id(fix_context) == LAUNCHCTL_GRANT_ID
+                    and not integration_policy(fix_context)
+                    and rejects(lambda: observe(data=encode({**event, "before": fix_before}),
+                        commit={**fix_identity, "pushed_range_linear": False}, projection=projected)),
+                    "offline_post_integration_linear_fix_raw_only")
             linear_from_pin = {**identity, "candidate_parents": [INTEGRATION_BEFORE]}
             require(selected_grant_id(observe(data=encode({**event, "before": INTEGRATION_BEFORE}),
                     commit=linear_from_pin, projection=projected)) == LAUNCHCTL_GRANT_ID
-                    and len(opens) == before_projection[2] + 1
+                    and len(opens) == before_projection[2] + 3
                     and rejects(lambda: observe(data=b" " * (PUSH_EVENT_CAP + 1),
                         commit=linear_from_pin, projection=projected))
-                    and len(opens) == before_projection[2] + 1, "offline_legacy_raw_only")
+                    and len(opens) == before_projection[2] + 3, "offline_legacy_raw_only")
             integration_packet = grant_packet(INTEGRATION_GRANT_ID)
             require(integration_policy(integrated) and selected_grant_id(integrated) == INTEGRATION_GRANT_ID
                     and launchctl_authorized(integration_packet, integrated)

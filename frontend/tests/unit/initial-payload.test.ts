@@ -61,7 +61,7 @@ describe('complete eager shell payload', () => {
     expect(rows.map((line) => line.split(/\s+raw /)[0].trim())).toEqual(charged);
     // Recount the measuring runtime's gzip values, not Node-vs-Bun compression.
     const total = rows.reduce((sum, line) => sum + Number(line.match(/gzip\s+(\d+) B/)?.[1]), 0);
-    expect(result.stdout).toMatch(new RegExp(`TOTAL.*gzip\\s+${total} B / 170240 B`));
+    expect(result.stdout).toMatch(new RegExp(`TOTAL.*gzip\\s+${total} B / 172032 B`));
   });
 
   it('charges setup metadata instead when its gzip representation is larger', () => {
@@ -74,13 +74,13 @@ describe('complete eager shell payload', () => {
     expect(result.stdout).not.toMatch(/manifest\.webmanifest\s+raw /);
   });
 
-  it('rejects an oversized loader with the existing 170240-byte ceiling', () => {
+  it('rejects an oversized loader with the existing 172032-byte ceiling', () => {
     const f = fixture();
-    f.write('manifest-loader.js', randomBytes(180_000));
+    f.write('manifest-loader.js', randomBytes(190_000));
     const result = f.run();
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('Initial payload exceeds the 166 KiB gzip ceiling');
-    expect(result.stdout).toContain('/ 170240 B');
+    expect(result.stderr).toContain('Initial payload exceeds the 168 KiB gzip ceiling');
+    expect(result.stdout).toContain('/ 172032 B');
   });
 
   it.each([

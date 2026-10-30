@@ -5257,7 +5257,8 @@ func (s *Server) enrichActivityResponses(ctx context.Context, entries []activity
 			}
 		} else {
 			cacheKey := agentName + "\x00" + project.CWD + "\x00" + project.ForegroundCWD + "\x00" + sessionID
-			page, loaded := pages[cacheKey]
+			var loaded bool
+			page, loaded = pages[cacheKey]
 			if !loaded {
 				if s.conversationOwner != nil {
 					var err error

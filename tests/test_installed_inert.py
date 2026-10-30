@@ -1,5 +1,7 @@
 """Offline policy tests with fake executors; never launch Go or set hosted markers."""
 import importlib.util
+import contextlib
+import io
 import json
 from pathlib import Path
 import re
@@ -250,6 +252,23 @@ class EvidenceTests(unittest.TestCase):
                 self.assertFalse(ci.validate(encoded(rows).splitlines(), 0, group))
         for status in (1, -9):
             self.assertFalse(ci.validate(encoded(good).splitlines(), status, group))
+
+    def test_promotion_failure_log_uses_only_frozen_identities(self):
+        group = ci.selection("Linux")[-1]
+        rows = events(group)
+        leaf = group["tests"][1]
+        rows = [row for row in rows if row.get("Test") != leaf]
+        rows.insert(1, {"Package": group["package"], "Action": "output", "Output": CANARIES[0], "Test": CANARIES[1]})
+        output = io.StringIO()
+        def failing(_):
+            return encoded(rows), 1
+        with patch.object(ci.platform, "system", return_value="Linux"), contextlib.redirect_stderr(output):
+            results = ci.run_suite("normal", failing)
+        self.assertEqual(results[-1]["result"], "fail")
+        self.assertIn(leaf + " missing", output.getvalue())
+        for canary in CANARIES:
+            self.assertNotIn(canary, output.getvalue())
+        self.assertEqual({name for name, _ in ci.promotion_failure_classes(rows, 1)}, set(group["tests"]))
 
     def test_promotion_missing_leaf_zero_exit_failed_receipt(self):
         missing = "TestInstalledProductionPromotionInert/consented_missing_route_removal"

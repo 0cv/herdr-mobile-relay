@@ -95,7 +95,7 @@ func (reader *catalogReader) walkDirBudget(dir, namespace, source string, out *[
 			continue
 		}
 		*budget--
-		data, ok := readCommandFile(fullPath)
+		data, ok := reader.readCommandFile(fullPath)
 		if !ok {
 			continue
 		}

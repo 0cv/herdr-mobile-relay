@@ -5,9 +5,12 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ConversationHistory from '$components/ConversationHistory.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
+import { BrowserDeviceCredentialStore } from '$lib/device-auth';
+import { base64UrlEncode } from '$lib/base64url';
 import { securityState } from '$lib/security';
 import { clearConversationPreviews } from '$lib/conversation-cache';
 import { piPromptDelivery } from '$lib/pi-prompt.svelte';
+import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import { readTerminalResizeSession, terminalHeightLease } from '$lib/preferences';
 import type { TransportHandlers } from '$lib/transports';
 import type { Agent, TerminalFrame } from '$lib/types';
@@ -48,8 +51,9 @@ function history(request: Record<string, unknown>, start = 24, end = 48, cursor 
   complete(request, { available: true, reason: '', entries: rows(start, end), has_more: Boolean(cursor), next_cursor: cursor, total: null, source_revision: 'revision', state: 'ready', mode: 'recent' }, attempt);
 }
 function admit(generation = 1) {
-  current().handlers.onMessage({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input', 'conversation_history'], inventory: { state: 'ready' } });
-  current().handlers.onMessage({ type: 'agents', agents: [wireAgent(generation)] });
+  current().handlers.onMessage({ type: 'push_config', protocol: 3, capabilities: ['inventory_snapshot_v1', 'manual_terminal_input', 'conversation_history'], inventory: { state: 'ready' } });
+  current().handlers.onMessage({ type: 'inventory_snapshot', snapshot_request_id: requests('refresh_agents').at(-1)!.snapshot_request_id,
+    inventory: { state: 'ready', stale: false }, agents: [wireAgent(generation)], workspaces: [] });
   return get(relayStore.agents)[0];
 }
 function frame(): TerminalFrame {
@@ -76,7 +80,13 @@ beforeEach(() => {
   localStorage.clear();
   securityState.set({ locked: false } as never);
   clearConversationPreviews();
-  relayStore.addRelay({ label: 'Integrated', url: 'wss://synthetic.invalid', token: '' });
+  const credentials = new BrowserDeviceCredentialStore(localStorage);
+  credentials.saveInvitation('integrated', { id: 'fixture-invitation', version: 1,
+    secret: base64UrlEncode(new Uint8Array(32).fill(7)), expiresAt: Date.now() + 60_000 });
+  credentials.replaceInvitation('integrated', 'fixture-invitation', { deviceId: 'fixture-device',
+    credentialId: 'fixture-credential', credentialVersion: 1, credentialSecret: base64UrlEncode(new Uint8Array(32).fill(8)),
+    role: 'controller', locale: 'en' });
+  relayStore.addRelay({ id: 'integrated', label: 'Integrated', url: 'wss://synthetic.invalid', token: '' });
   agent = admit();
 });
 afterEach(() => {
@@ -118,6 +128,8 @@ it('keeps pending and uncertain literal delivery fenced while paging and switchi
   await vi.advanceTimersByTimeAsync(2_001);
   expect(attempts).toHaveLength(1);
   expect(requests('ping')).toHaveLength(1);
+  current().handlers.onMessage({ type: 'inventory_snapshot', snapshot_request_id: requests('refresh_agents').at(-1)!.snapshot_request_id,
+    inventory: { state: 'ready', stale: false }, agents: [wireAgent()], workspaces: [] });
   current().handlers.onMessage({ type: 'command_result', request_id: literal.request_id, ok: false, phase: 'dispatched_unknown', error: 'unknown outcome' });
   history(older, 0, 24, '');
   await flush();
@@ -134,7 +146,13 @@ it('keeps pending and uncertain literal delivery fenced while paging and switchi
   await vi.waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
   expect(screen.getByLabelText('Terminal text')).toHaveValue('');
   expect(screen.getByRole('button', { name: 'Enter' })).toBeDisabled();
-  await restored.rerender({ frame: frame() });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(relayStore.relayActionsFresh(agent.relay_id)).toBe(true);
+  const readsBefore = requests('read_pane').length;
+  const inspected = frame();
+  expect(requests('read_pane').length).toBe(readsBefore + 1);
+  expect(inspected.readStartedAt).toBeGreaterThan(terminalInputDelivery(agent).uncertainAt!);
+  await restored.rerender({ frame: inspected });
   expect(screen.getByRole('button', { name: 'I checked the terminal' })).toBeEnabled();
   expect(requests('send_terminal_text')).toHaveLength(1);
   expect(requests('send_keys')).toHaveLength(0);

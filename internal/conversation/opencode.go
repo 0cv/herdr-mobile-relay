@@ -410,11 +410,10 @@ func openCodeV2SQL(sessionID, before string, limit int) string {
 		`WITH %s,selected AS (`+
 			`SELECT m.id,m.type,m.seq,m.time_created,m.data FROM session_message AS m `+
 			`WHERE m.session_id=CAST(X'%s' AS TEXT) AND m.%s%s ORDER BY m.seq DESC LIMIT %d`+
-			`) SELECT s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,`+
+			`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,`+
 			`COALESCE(s.time_updated,0) AS time_updated,COALESCE(s.agent,'') AS agent,`+
 			`COALESCE(sm.id,'') AS message_id,COALESCE(sm.type,'') AS message_type,COALESCE(sm.time_created,0) AS time_created,`+
 			`COALESCE(sm.data,'null') AS message_data,`+
-			`(SELECT COUNT(*) FROM session_message WHERE session_id=s.id AND %s) AS message_total,`+
 			`EXISTS(SELECT 1 FROM session_message WHERE session_id=s.id) AS has_messages,%s AS cursor_found `+
 			`FROM session_v2 AS s LEFT JOIN selected AS sm ON 1=1 `+
 			`WHERE s.id=CAST(X'%s' AS TEXT) ORDER BY sm.seq DESC;`,
@@ -423,7 +422,6 @@ func openCodeV2SQL(sessionID, before string, limit int) string {
 		visible,
 		cursorFilter,
 		limit+1,
-		visible,
 		cursorFound,
 		sessionHex,
 	)

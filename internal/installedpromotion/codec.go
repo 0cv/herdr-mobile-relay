@@ -31,7 +31,7 @@ func (Reference) String() string     { return "installed selection reference [re
 func (r Reference) GoString() string { return r.String() }
 
 // Schema additions require explicit review; reflection cannot silently drop fields.
-const fields = "Host Port PluginPort Token InstanceID AllowedOrigins WebRoot HerdrBin SocketPath PollInterval RuntimeDir LogFormat LogLevel ReleaseRoot ServiceName Transport TailscaleOrigin ExternalHTTPSOrigin PhoneAppOrigin TailscaleBin TailscaleCLIOrigin TailscaleCLIStateRoot TailscaleCLICoordinationRoot TailscaleCLIDevelopmentRoot TailscaleCLIScope TailscaleCLIBin PairingSocketPath ManagedRunID ControlRunID GatewayURL GatewayURLs GatewaySelection WebRTCUDPPort ForceRelayTransport PortMappingEnabled RearmBootstrap CacheDir ConfigHome DataHome"
+const fields = "Host Port PluginPort Token InstanceID AllowedOrigins WebRoot HerdrBin SocketPath PollInterval RuntimeDir LogFormat LogLevel ReleaseRoot ServiceName Transport TailscaleOrigin ExternalHTTPSOrigin PhoneAppOrigin TailscaleBin TailscaleCLIOrigin TailscaleCLIStateRoot TailscaleCLICoordinationRoot TailscaleCLIDevelopmentRoot TailscaleCLIScope TailscaleCLIBin PairingSocketPath ManagedRunID ControlRunID GatewayURL GatewayURLs GatewayRegistrationToken GatewaySelection WebRTCUDPPort ForceRelayTransport PortMappingEnabled RearmBootstrap CacheDir ConfigHome DataHome"
 
 type capsule struct {
 	Version      int

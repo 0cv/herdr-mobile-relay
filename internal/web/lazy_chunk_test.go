@@ -17,13 +17,6 @@ func TestServesShippedConversationHistoryLazyChunk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunks, err := filepath.Glob(filepath.Join(root, "assets", fmt.Sprintf("*-%d.js", descriptor.Assets)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(chunks) == 0 {
-		t.Fatalf("no lazy chunk for shipped asset version %d", descriptor.Assets)
-	}
 
 	h, err := NewHandler(root)
 	if err != nil {
@@ -31,7 +24,15 @@ func TestServesShippedConversationHistoryLazyChunk(t *testing.T) {
 	}
 	defer h.Close()
 
-	requestPath := "/assets/" + filepath.Base(chunks[0])
+	for _, name := range []string{"SettingsView", "Card"} {
+		requestPath := fmt.Sprintf("/assets/%s-%d.js", name, descriptor.Assets)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want %d", requestPath, response.Code, http.StatusOK)
+		}
+	}
+	requestPath := fmt.Sprintf("/assets/Card-%d.js", descriptor.Assets)
 	plain := httptest.NewRecorder()
 	h.ServeHTTP(plain, httptest.NewRequest(http.MethodGet, requestPath, nil))
 	if plain.Code != http.StatusOK {
@@ -62,6 +63,56 @@ func TestServesShippedConversationHistoryLazyChunk(t *testing.T) {
 	}
 	if compressed.Header().Get("ETag") == plain.Header().Get("ETag") {
 		t.Fatal("compressed and uncompressed representations share an ETag")
+	}
+	for _, requestPath := range []string{
+		fmt.Sprintf("/assets/Unreferenced-%d.js", descriptor.Assets),
+		fmt.Sprintf("/assets/Card-%d.js", descriptor.Assets-1),
+		"/assets/../release.json",
+	} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("GET %s = %d, want 404", requestPath, response.Code)
+		}
+	}
+}
+
+func TestLazyModuleClosureOnlyAdmitsReferencedCurrentModules(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"entry.js":         "import(`./Settings-363.js`);",
+		"Settings-363.js":  `import{t as card}from"./Card-363.js";import"./Card-362.js";import"../foreign.js";`,
+		"Card-363.js":      `import{t as settings}from"./Settings-363.js";`,
+		"Unrelated-363.js": "export default {};",
+	} {
+		if err := os.WriteFile(filepath.Join(root, "assets", name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opened, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	h := &Handler{files: opened.FS(), bundleAssets: 363, webFiles: map[string]bool{}, lazyAssets: map[string]bool{}}
+	if err := h.loadLazyAssets("assets/entry.js"); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"Settings-363.js": true, "Card-363.js": true, "Card-362.js": false, "Unrelated-363.js": false, "foreign.js": false,
+	} {
+		if got := h.lazyAssets["assets/"+name]; got != want {
+			t.Fatalf("admission for %s = %t, want %t", name, got, want)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "assets", "entry.js"), make([]byte, 1024*1024+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.loadLazyAssets("assets/entry.js"); err == nil {
+		t.Fatal("oversized release module was accepted")
 	}
 }
 

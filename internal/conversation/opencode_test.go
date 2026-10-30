@@ -354,7 +354,7 @@ func TestOpenCodeV2FreshStoreReadsVisibleTurns(t *testing.T) {
 	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, sqlite, root)
 	page, err := reader.readOpenCode("ses_fresh", "", defaultPageSize)
-	if err != nil || !page.Available || page.SourceCorrupt || page.HasMore || page.Total != 2 || len(page.Entries) != 2 {
+	if err != nil || !page.Available || page.SourceCorrupt || page.HasMore || page.Total != UnknownTotal || len(page.Entries) != 2 {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
 	user, assistantEntry := page.Entries[0], page.Entries[1]
@@ -465,7 +465,7 @@ func TestOpenCodeV2PagingOrdersBySeqAndSkipsHiddenTurns(t *testing.T) {
 		return strings.Join(parts, ",")
 	}
 	first, err := reader.readOpenCode("ses_pages", "", 2)
-	if err != nil || !first.Available || !first.HasMore || first.Total != 5 || texts(first) != "four,five" {
+	if err != nil || !first.Available || !first.HasMore || first.Total != UnknownTotal || texts(first) != "four,five" {
 		t.Fatalf("first page = %#v, err = %v", first, err)
 	}
 	second, err := reader.readOpenCode("ses_pages", first.Entries[0].ID, 2)
@@ -516,7 +516,7 @@ INSERT INTO session_v2(id,directory,title,agent) VALUES('ses_hidden','/work','D'
 		t.Fatalf("unmigrated page = %#v, err = %v", page, err)
 	}
 	page, err = reader.readOpenCode("ses_emptyv2", "", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 0 || page.Total != 0 || page.ReasonCode != "" {
+	if err != nil || !page.Available || len(page.Entries) != 0 || page.Total != UnknownTotal || page.ReasonCode != "" {
 		t.Fatalf("empty page = %#v, err = %v", page, err)
 	}
 	page, err = reader.readOpenCode("ses_hidden", "", defaultPageSize)

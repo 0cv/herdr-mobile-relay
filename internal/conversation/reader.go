@@ -976,6 +976,23 @@ func parsePiRecordContext(ctx context.Context, record map[string]any) (role stri
 	if err = readerParseContextErr(ctx); err != nil {
 		return "", "", err
 	}
+	if typeName == "custom_message" {
+		if record["display"] != true {
+			return "", "", nil
+		}
+		text, err = textBlocksContext(ctx, record["content"])
+		if err != nil {
+			return "", "", err
+		}
+		visible, sanitizeErr := sanitizeTextContext(ctx, text)
+		if sanitizeErr != nil {
+			return "", "", sanitizeErr
+		}
+		if strings.TrimSpace(visible) == "" {
+			text = "Extension message has no displayable text."
+		}
+		return "notice", text, nil
+	}
 	if typeName != "message" {
 		return "", "", nil
 	}
@@ -1110,7 +1127,11 @@ func parseTranscriptContext(ctx context.Context, agent, text string) (entries []
 		if clampErr != nil {
 			return nil, clampErr
 		}
-		entry := Entry{Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
+		kind := ""
+		if role == "notice" {
+			kind, role = "notice", "assistant"
+		}
+		entry := Entry{Kind: kind, Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
 		if _, _, err = normalizeEntryToolsContext(ctx, &entry); err != nil {
 			return nil, err
 		}

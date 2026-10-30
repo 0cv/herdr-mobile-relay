@@ -163,6 +163,23 @@ def validate(stream, status, group):
     return status == 0 and started and ended and required == states.keys() and all(s == "pass" for s in states.values())
 
 
+def promotion_failure_classes(lines, status):
+    states = {}
+    try:
+        for line in lines:
+            event = json.loads(line, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+            if not isinstance(event, dict) or event.get("Package") != PROMOTION["package"]:
+                return [(name, "invalid_events") for name in PROMOTION["tests"]]
+            name = event.get("Test")
+            action = event.get("Action")
+            if name in PROMOTION["tests"] and action in {"run", "pass", "fail", "skip"}:
+                states[name] = action
+    except (ValueError, TypeError, UnicodeError):
+        return [(name, "invalid_events") for name in PROMOTION["tests"]]
+    return [(name, {"fail": "fail", "skip": "skip", "pass": "nonzero_exit" if status else "incomplete_stream"}.get(states.get(name), "missing"))
+            for name in PROMOTION["tests"]]
+
+
 def execute(args):
     # Anonymous private temporary streams, never printed or uploaded.
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
@@ -180,9 +197,16 @@ def run_suite(mode, execute_command=execute):
     for group in groups:
         try:
             events, status = execute_command(command(group, mode))
-            passed = validate(events.splitlines(), status, group)
+            lines = events.splitlines()
+            passed = validate(lines, status, group)
+            if not passed and group["package"] == PROMOTION["package"] and group["tests"] == PROMOTION["tests"]:
+                for name, reason in promotion_failure_classes(lines, status):
+                    print("installed inert promotion:", name, reason, file=sys.stderr)
         except (OSError, UnicodeError):
             passed = False
+            if group["package"] == PROMOTION["package"] and group["tests"] == PROMOTION["tests"]:
+                for name in PROMOTION["tests"]:
+                    print("installed inert promotion:", name, "execution_error", file=sys.stderr)
         results.append({"package": group["package"], "tagged": group["tagged"],
                         "required_tests": group["tests"], "result": "pass" if passed else "fail"})
     return results

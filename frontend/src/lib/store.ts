@@ -477,6 +477,7 @@ interface RelayConnection extends RelayConnectionView {
   summaryGeneration: number;
   snapshotTimer: ReturnType<typeof setTimeout> | null;
   cleanupGrants: Set<string>;
+  conversationSubscription: { targetKey: string; id: string } | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
@@ -1075,6 +1076,7 @@ class RelayStore {
       ),
       pathIdentity: {}, wakeGeneration: 0, snapshotPending: false, snapshotNonce: '', summaryGeneration: 0, snapshotTimer: null,
       cleanupGrants: new Set(recoverable ? [...cleanup.grants].map((key) => `cancel:${key}`) : []),
+      conversationSubscription: null,
       actionsFresh: false, workspacesFresh: false,
       status: 'connecting',
       path: '',
@@ -1307,6 +1309,7 @@ class RelayStore {
     this.invalidateFreshness(id, connection);
     resumeMetrics.end(id, connection.metricsGeneration, 'superseded');
     connection.closed = true;
+    connection.conversationSubscription = null;
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     this.clearHealthTimer(connection);
     this.clearUpdateRestartTimer(connection);
@@ -2146,6 +2149,7 @@ class RelayStore {
     }
     for (const [relayId, connection] of this.connectionsValue) {
       if (!this.credentialMatchesSession(relayId, connection)) {
+        connection.conversationSubscription = null;
         this.invalidateUploadCleanup(relayId);
         for (const key of connection.cleanupGrants) {
           if (key.startsWith('upload') || key.startsWith('cancel:upload:')) connection.cleanupGrants.delete(key);
@@ -2325,6 +2329,18 @@ class RelayStore {
       && !(type === 'revoke_device' && payload.device_id === credential.deviceId)) return false;
     const cleanup = CLEANUP_FOR.get(type);
     const cleanupKey = this.cleanupKey(payload, relayId);
+    if (type === 'get_pi_integration' || type === 'set_pi_integration') {
+      if (payload.target !== undefined || payload.pane_id !== undefined || payload.workspace_id !== undefined) return false;
+      if (!credential || (type === 'set_pi_integration' && credential.role !== 'controller')) return false;
+    }
+    if (type === 'unwatch_conversation') {
+      const target = payload.target as Record<string, unknown> | undefined;
+      return this.credentialMatchesSession(relayId, connection) && cleanupKey !== null
+        && payload.pane_id === target?.pane_id && payload.server_session_id === target?.server_session_id
+        && typeof payload.subscription_id === 'string' && payload.subscription_id !== ''
+        && connection.conversationSubscription?.targetKey === cleanupKey
+        && connection.conversationSubscription.id === payload.subscription_id;
+    }
     if (type === 'upload_cancel' && !this.credentialMatchesSession(relayId, connection)) return false;
     if (cleanup && cleanupKey && (connection.cleanupGrants.has(`${cleanup}:${cleanupKey}`)
       || (type === 'upload_cancel' && connection.cleanupGrants.has(`cancel:${cleanup}:${cleanupKey}`)))) return true;
@@ -2379,6 +2395,7 @@ class RelayStore {
         else connection.cleanupGrants.delete('viewing');
       }
       if (key && ['watch_pane', 'lease_pane_size'].includes(type)) connection.cleanupGrants.add(`${type}:${key}`);
+      if (type === 'unwatch_conversation') connection.conversationSubscription = null;
       const grant = CLEANUP_FOR.get(type);
       // Upload cancellation is acknowledged cleanup: transport admission is
       // not proof that the relay released its staged resource.
@@ -3179,14 +3196,23 @@ class RelayStore {
   async getConversationHistory(agent: Agent, request: ConversationHistoryRequest = {}): Promise<ConversationPage> {
     const limit = Math.max(1, Math.min(200, Math.trunc(request.limit || 80)));
     const cursor = request.cursor || '';
+    const connection = this.connectionsValue.get(agent.relay_id);
+    const observe = connection?.capabilities.includes('conversation_activity') === true;
+    const target = targetRefForAgent(agent);
     const result = await this.sendToAgent(agent, {
       type: 'get_conversation_history',
       cursor,
       limit,
       retry: request.retry,
-      observe: this.connectionsValue.get(agent.relay_id)?.capabilities.includes('conversation_activity') === true,
+      observe,
     }, 20_000, request.signal);
-    return normalizeConversationPage(result.data);
+    const page = normalizeConversationPage(result.data);
+    const targetKey = target && targetStoreKey(target);
+    if (observe && page.subscriptionId && targetKey && connection === this.connectionsValue.get(agent.relay_id)
+      && connection.status === 'connected' && this.credentialMatchesSession(agent.relay_id, connection)) {
+      connection.conversationSubscription = { targetKey, id: page.subscriptionId };
+    }
+    return page;
   }
 
   async getConversationUpdates(agent: Agent, sourceRevision: string, after: number, signal: AbortSignal, subscriptionId: string): Promise<import('./types').ConversationBatch> {

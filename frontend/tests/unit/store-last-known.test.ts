@@ -141,8 +141,10 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(relayStore.sendRaw(f.id, { type: 'refresh_agents' })).toBe(true);
     expect(relayStore.sendRaw(f.id, { type: 'push_subscribe', subscription: {} })).toBe(true);
     expect(relayStore.relayActionsFresh(f.id)).toBe(false);
-    f.reply();
     expect(f.session.sent.some((message) => ['read_pane', 'watch_pane', 'install_update'].includes(String(message.type)))).toBe(false);
+    f.reply();
+    expect(f.session.sent.some((message) => message.type === 'read_pane')).toBe(true);
+    expect(f.session.sent.some((message) => ['watch_pane', 'install_update'].includes(String(message.type)))).toBe(false);
     expect(relayStore.sendRaw(f.id, { type: 'unknown_future_write' })).toBe(false);
   });
 

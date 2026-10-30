@@ -722,7 +722,11 @@ func TestInstalledOpenCodeActualFlows(t *testing.T) {
 			if code != wantCode || f.unplanned != 0 {
 				t.Fatalf("code=%q want=%q unplanned=%d", code, wantCode, f.unplanned)
 			}
-			if code == "" && (len(entries) != 2 || entries[0].ID != "middle" || entries[1].ID != "new" || !more || corrupt || metadata.Total != 3 || metadata.Database != openCodeFixtureDB) {
+			wantTotal := 3
+			if name == "v2" || name == "mixed-v2" {
+				wantTotal = UnknownTotal
+			}
+			if code == "" && (len(entries) != 2 || entries[0].ID != "middle" || entries[1].ID != "new" || !more || corrupt || metadata.Total != wantTotal || metadata.Database != openCodeFixtureDB) {
 				t.Fatalf("entries=%+v more=%v corrupt=%v metadata=%+v", entries, more, corrupt, metadata)
 			}
 			if name == "mixed-v2" && f.counts["query"] != 2 {
@@ -1919,7 +1923,7 @@ func TestInstalledOpenCodePageQueryBudgets(t *testing.T) {
 								retiredBeforeFence = retiredBeforeFence && errors.Is(observation.ctx.Err(), context.Canceled)
 							}
 							f.owner.Join()
-							if !returned || recovered != nil || got != nil || parentErr != nil || code != "" || more || corrupt || len(entries) != 1 || entries[0].ID != "one" || entries[0].Text != "hello" || metadata.Database != openCodeFixtureDB || metadata.Total != 1 {
+							if !returned || recovered != nil || got != nil || parentErr != nil || code != "" || more || corrupt || len(entries) != 1 || entries[0].ID != "one" || entries[0].Text != "hello" || metadata.Database != openCodeFixtureDB || metadata.Total != map[bool]int{true: UnknownTotal, false: 1}[v2] {
 								t.Fatalf("returned=%v panic=%v err=%v parent=%v code=%q entries=%+v metadata=%+v", returned, recovered, got, parentErr, code, entries, metadata)
 							}
 							wantCounts := map[string]int{"ready": 3, "query": 2, "roots": 1, "databases": 1, "eval": 2, "stat": 7}
@@ -2603,7 +2607,7 @@ func TestInstalledOpenCodeDatabaseWALStampOutcomes(t *testing.T) {
 // key below. These logical rows do not execute or qualify SQLite semantics.
 const openCodeSQLOracleV1 = `WITH cursor AS (SELECT NULL AS time_created,NULL AS id WHERE 0),selected AS (` +
 	`SELECT m.id,m.time_created,m.data FROM message AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) ORDER BY m.time_created DESC,m.id DESC LIMIT 3` +
-	`) SELECT s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,` +
+	`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,` +
 	`COALESCE(sm.id,'') AS message_id,COALESCE(sm.time_created,0) AS time_created,COALESCE(sm.data,'null') AS message_data,` +
 	`COALESCE(p.id,'') AS part_id,COALESCE(p.data,'null') AS part_data,` +
 	`(SELECT COUNT(*) FROM message WHERE session_id=s.id) AS message_total,1 AS cursor_found ` +
@@ -2611,7 +2615,7 @@ const openCodeSQLOracleV1 = `WITH cursor AS (SELECT NULL AS time_created,NULL AS
 
 const openCodeSQLOracleV1Cursor = `WITH cursor AS (SELECT time_created,id FROM message WHERE session_id=CAST(X'7365735f74657374' AS TEXT) AND id=CAST(X'6c61746572' AS TEXT)),selected AS (` +
 	`SELECT m.id,m.time_created,m.data FROM message AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND EXISTS(SELECT 1 FROM cursor) AND (m.time_created < (SELECT time_created FROM cursor) OR (m.time_created = (SELECT time_created FROM cursor) AND m.id < (SELECT id FROM cursor))) ORDER BY m.time_created DESC,m.id DESC LIMIT 3` +
-	`) SELECT s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,` +
+	`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,s.directory,s.title,s.time_updated,COALESCE(s.agent,'') AS agent,` +
 	`COALESCE(sm.id,'') AS message_id,COALESCE(sm.time_created,0) AS time_created,COALESCE(sm.data,'null') AS message_data,` +
 	`COALESCE(p.id,'') AS part_id,COALESCE(p.data,'null') AS part_data,` +
 	`(SELECT COUNT(*) FROM message WHERE session_id=s.id) AS message_total,EXISTS(SELECT 1 FROM cursor) AS cursor_found ` +
@@ -2619,16 +2623,16 @@ const openCodeSQLOracleV1Cursor = `WITH cursor AS (SELECT time_created,id FROM m
 
 const openCodeSQLOracleV2 = `WITH cursor AS (SELECT NULL AS seq WHERE 0),selected AS (` +
 	`SELECT m.id,m.type,m.seq,m.time_created,m.data FROM session_message AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND m.type IN ('user','assistant') ORDER BY m.seq DESC LIMIT 3` +
-	`) SELECT s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,COALESCE(s.time_updated,0) AS time_updated,COALESCE(s.agent,'') AS agent,` +
+	`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,COALESCE(s.time_updated,0) AS time_updated,COALESCE(s.agent,'') AS agent,` +
 	`COALESCE(sm.id,'') AS message_id,COALESCE(sm.type,'') AS message_type,COALESCE(sm.time_created,0) AS time_created,COALESCE(sm.data,'null') AS message_data,` +
-	`(SELECT COUNT(*) FROM session_message WHERE session_id=s.id AND type IN ('user','assistant')) AS message_total,EXISTS(SELECT 1 FROM session_message WHERE session_id=s.id) AS has_messages,1 AS cursor_found ` +
+	`EXISTS(SELECT 1 FROM session_message WHERE session_id=s.id) AS has_messages,1 AS cursor_found ` +
 	`FROM session_v2 AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.seq DESC;`
 
 const openCodeSQLOracleV2Cursor = `WITH cursor AS (SELECT seq FROM session_message WHERE session_id=CAST(X'7365735f74657374' AS TEXT) AND id=CAST(X'6c61746572' AS TEXT) AND type IN ('user','assistant')),selected AS (` +
 	`SELECT m.id,m.type,m.seq,m.time_created,m.data FROM session_message AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND m.type IN ('user','assistant') AND EXISTS(SELECT 1 FROM cursor) AND m.seq < (SELECT seq FROM cursor) ORDER BY m.seq DESC LIMIT 3` +
-	`) SELECT s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,COALESCE(s.time_updated,0) AS time_updated,COALESCE(s.agent,'') AS agent,` +
+	`) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.directory,'') AS directory,COALESCE(s.title,'') AS title,COALESCE(s.time_updated,0) AS time_updated,COALESCE(s.agent,'') AS agent,` +
 	`COALESCE(sm.id,'') AS message_id,COALESCE(sm.type,'') AS message_type,COALESCE(sm.time_created,0) AS time_created,COALESCE(sm.data,'null') AS message_data,` +
-	`(SELECT COUNT(*) FROM session_message WHERE session_id=s.id AND type IN ('user','assistant')) AS message_total,EXISTS(SELECT 1 FROM session_message WHERE session_id=s.id) AS has_messages,EXISTS(SELECT 1 FROM cursor) AS cursor_found ` +
+	`EXISTS(SELECT 1 FROM session_message WHERE session_id=s.id) AS has_messages,EXISTS(SELECT 1 FROM cursor) AS cursor_found ` +
 	`FROM session_v2 AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.seq DESC;`
 
 const openCodeSQLOracleV1Rows = `[
@@ -2641,16 +2645,16 @@ const openCodeSQLOracleV1Rows = `[
 // Logical descending seq order is new,middle,old; timestamps intentionally run
 // the other way. seq is selected/ordered in SQL, NOT projected into openCodeRow.
 const openCodeSQLOracleV2Rows = `[
-{"session_id":"ses_test","title":"oracle","directory":"/planned/project","time_updated":9000,"agent":"fixture","message_id":"new","time_created":1000,"message_type":"user","message_data":"{\"text\":\"newest\"}","message_total":4,"cursor_found":1,"has_messages":1},
-{"session_id":"ses_test","title":"oracle","directory":"/planned/project","time_updated":9000,"agent":"fixture","message_id":"middle","time_created":2000,"message_type":"user","message_data":"{\"text\":\"middle turn\"}","message_total":4,"cursor_found":1,"has_messages":1},
-{"session_id":"ses_test","message_id":"old","time_created":3000,"message_type":"user","message_data":"{\"text\":\"discard\"}","message_total":4,"cursor_found":1,"has_messages":1}]`
+{"session_id":"ses_test","title":"oracle","directory":"/planned/project","time_updated":9000,"agent":"fixture","message_id":"new","time_created":1000,"message_type":"user","message_data":"{\"text\":\"newest\"}","cursor_found":1,"has_messages":1},
+{"session_id":"ses_test","title":"oracle","directory":"/planned/project","time_updated":9000,"agent":"fixture","message_id":"middle","time_created":2000,"message_type":"user","message_data":"{\"text\":\"middle turn\"}","cursor_found":1,"has_messages":1},
+{"session_id":"ses_test","message_id":"old","time_created":3000,"message_type":"user","message_data":"{\"text\":\"discard\"}","cursor_found":1,"has_messages":1}]`
 
 func openCodeSQLOracleRows(v2 bool) []openCodeRow {
 	// Fresh independent literals on every call, never decode/copy cache storage.
 	if v2 {
 		return []openCodeRow{
-			{SessionID: "ses_test", Title: "oracle", Directory: "/planned/project", Updated: 9000, Agent: "fixture", MessageID: "middle", Created: 2000, MessageType: "user", MessageData: `{"text":"middle turn"}`, Total: 4, CursorFound: 1, HasMessages: 1, V2: true},
-			{SessionID: "ses_test", Title: "oracle", Directory: "/planned/project", Updated: 9000, Agent: "fixture", MessageID: "new", Created: 1000, MessageType: "user", MessageData: `{"text":"newest"}`, Total: 4, CursorFound: 1, HasMessages: 1, V2: true},
+			{SessionID: "ses_test", Title: "oracle", Directory: "/planned/project", Updated: 9000, Agent: "fixture", MessageID: "middle", Created: 2000, MessageType: "user", MessageData: `{"text":"middle turn"}`, Total: UnknownTotal, CursorFound: 1, HasMessages: 1, V2: true},
+			{SessionID: "ses_test", Title: "oracle", Directory: "/planned/project", Updated: 9000, Agent: "fixture", MessageID: "new", Created: 1000, MessageType: "user", MessageData: `{"text":"newest"}`, Total: UnknownTotal, CursorFound: 1, HasMessages: 1, V2: true},
 		}
 	}
 	return []openCodeRow{
@@ -2752,10 +2756,10 @@ func TestInstalledOpenCodeIndependentSQLPages(t *testing.T) {
 }
 
 const openCodeByteBoundaryLayout = `[{"name":"session"},{"name":"message"},{"name":"part"},{"name":"session_v2"},{"name":"session_message"}]`
-const openCodeByteBoundaryRow = `[{"session_id":"ses_test","title":"bounded","directory":"/planned/project","time_updated":7000,"agent":"fixture","message_id":"one","message_type":"user","message_data":"{\"text\":\"hello\"}","message_total":1,"cursor_found":1,"has_messages":1}]`
+const openCodeByteBoundaryRow = `[{"session_id":"ses_test","title":"bounded","directory":"/planned/project","time_updated":7000,"agent":"fixture","message_id":"one","message_type":"user","message_data":"{\"text\":\"hello\"}","cursor_found":1,"has_messages":1}]`
 
 func openCodeByteBoundaryExpectedRows() []openCodeRow {
-	return []openCodeRow{{SessionID: "ses_test", Title: "bounded", Directory: "/planned/project", Updated: 7000, Agent: "fixture", MessageID: "one", MessageType: "user", MessageData: `{"text":"hello"}`, Total: 1, CursorFound: 1, HasMessages: 1, V2: true}}
+	return []openCodeRow{{SessionID: "ses_test", Title: "bounded", Directory: "/planned/project", Updated: 7000, Agent: "fixture", MessageID: "one", MessageType: "user", MessageData: `{"text":"hello"}`, Total: UnknownTotal, CursorFound: 1, HasMessages: 1, V2: true}}
 }
 
 type openCodeByteBoundaryReceipt struct {
@@ -3369,7 +3373,11 @@ func openCodeSemanticRead(t *testing.T, v2 bool, rows []openCodeRow, want []Entr
 }
 
 func openCodeSemanticRow(v2 bool, message, part string) openCodeRow {
-	return openCodeRow{SessionID: "ses_test", Title: "semantics", Directory: "/planned/project", Updated: 9000, Agent: "fixture", MessageID: "m", Created: 1000, MessageType: "assistant", MessageData: message, PartID: "p", PartData: part, Total: 1, CursorFound: 1, HasMessages: 1, V2: v2}
+	total := 1
+	if v2 {
+		total = UnknownTotal
+	}
+	return openCodeRow{SessionID: "ses_test", Title: "semantics", Directory: "/planned/project", Updated: 9000, Agent: "fixture", MessageID: "m", Created: 1000, MessageType: "assistant", MessageData: message, PartID: "p", PartData: part, Total: total, CursorFound: 1, HasMessages: 1, V2: v2}
 }
 
 func TestInstalledOpenCodeFullToolValues(t *testing.T) {
@@ -4166,11 +4174,11 @@ const hermesFlowDB2 = "/planned/second/state.db"
 
 // Complete independently written literal callback keys. No production builder
 // or parser creates these expectations. Logical replies do not execute SQLite.
-const hermesLocateSQLOracle = `WITH raw AS (SELECT m.id,m.role,m.active,m.compacted,COALESCE(m.content,'') AS content,COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,COALESCE(m.timestamp,0) AS logical_timestamp FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden'), visible AS (SELECT raw.*,MIN(id) OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp) AS logical_id,ROW_NUMBER() OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp ORDER BY active DESC,id DESC) AS generation FROM raw), displayed AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM visible WHERE generation=1 AND role IN ('user','assistant')), cursor AS (SELECT NULL AS logical_id WHERE 0), selected AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM displayed AS d WHERE 1=1 ORDER BY logical_id DESC LIMIT 2) SELECT s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,(SELECT COUNT(*) FROM displayed) AS message_total,1 AS cursor_found FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.logical_id DESC;`
+const hermesLocateSQLOracle = `WITH raw AS (SELECT m.id,m.role,m.active,m.compacted,COALESCE(m.content,'') AS content,COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,COALESCE(m.timestamp,0) AS logical_timestamp FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden'), visible AS (SELECT raw.*,MIN(id) OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp) AS logical_id,ROW_NUMBER() OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp ORDER BY active DESC,id DESC) AS generation FROM raw), displayed AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM visible WHERE generation=1 AND role IN ('user','assistant')), cursor AS (SELECT NULL AS logical_id WHERE 0), selected AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM displayed AS d WHERE 1=1 ORDER BY logical_id DESC LIMIT 2) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,(SELECT COUNT(*) FROM displayed) AS message_total,1 AS cursor_found FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.logical_id DESC;`
 
-const hermesReadSQLOracle = `WITH raw AS (SELECT m.id,m.role,m.active,m.compacted,COALESCE(m.content,'') AS content,COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,COALESCE(m.timestamp,0) AS logical_timestamp FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden'), visible AS (SELECT raw.*,MIN(id) OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp) AS logical_id,ROW_NUMBER() OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp ORDER BY active DESC,id DESC) AS generation FROM raw), displayed AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM visible WHERE generation=1 AND role IN ('user','assistant')), cursor AS (SELECT NULL AS logical_id WHERE 0), selected AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM displayed AS d WHERE 1=1 ORDER BY logical_id DESC LIMIT 3) SELECT s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,(SELECT COUNT(*) FROM displayed) AS message_total,1 AS cursor_found FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.logical_id DESC;`
+const hermesReadSQLOracle = `WITH raw AS (SELECT m.id,m.role,m.active,m.compacted,COALESCE(m.content,'') AS content,COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,COALESCE(m.timestamp,0) AS logical_timestamp FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden'), visible AS (SELECT raw.*,MIN(id) OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp) AS logical_id,ROW_NUMBER() OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp ORDER BY active DESC,id DESC) AS generation FROM raw), displayed AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM visible WHERE generation=1 AND role IN ('user','assistant')), cursor AS (SELECT NULL AS logical_id WHERE 0), selected AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM displayed AS d WHERE 1=1 ORDER BY logical_id DESC LIMIT 3) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,(SELECT COUNT(*) FROM displayed) AS message_total,1 AS cursor_found FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.logical_id DESC;`
 
-const hermesCursorSQLOracle = `WITH raw AS (SELECT m.id,m.role,m.active,m.compacted,COALESCE(m.content,'') AS content,COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,COALESCE(m.timestamp,0) AS logical_timestamp FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden'), visible AS (SELECT raw.*,MIN(id) OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp) AS logical_id,ROW_NUMBER() OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp ORDER BY active DESC,id DESC) AS generation FROM raw), displayed AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM visible WHERE generation=1 AND role IN ('user','assistant')), cursor AS (SELECT logical_id FROM visible WHERE id=9 AND role IN ('user','assistant') LIMIT 1), selected AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM displayed AS d WHERE 1=1 AND EXISTS(SELECT 1 FROM cursor) AND d.logical_id < (SELECT logical_id FROM cursor) ORDER BY logical_id DESC LIMIT 3) SELECT s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,(SELECT COUNT(*) FROM displayed) AS message_total,EXISTS(SELECT 1 FROM cursor) AS cursor_found FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.logical_id DESC;`
+const hermesCursorSQLOracle = `WITH raw AS (SELECT m.id,m.role,m.active,m.compacted,COALESCE(m.content,'') AS content,COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,COALESCE(m.timestamp,0) AS logical_timestamp FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden'), visible AS (SELECT raw.*,MIN(id) OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp) AS logical_id,ROW_NUMBER() OVER (PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp ORDER BY active DESC,id DESC) AS generation FROM raw), displayed AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM visible WHERE generation=1 AND role IN ('user','assistant')), cursor AS (SELECT logical_id FROM visible WHERE id=9 AND role IN ('user','assistant') LIMIT 1), selected AS (SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp FROM displayed AS d WHERE 1=1 AND EXISTS(SELECT 1 FROM cursor) AND d.logical_id < (SELECT logical_id FROM cursor) ORDER BY logical_id DESC LIMIT 3) SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,(SELECT COUNT(*) FROM displayed) AS message_total,EXISTS(SELECT 1 FROM cursor) AS cursor_found FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 WHERE s.id=CAST(X'7365735f74657374' AS TEXT) ORDER BY sm.logical_id DESC;`
 
 const hermesToolSingleOracle = `SELECT COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_name,'') AS tool_name,hex(COALESCE(m.content,'')) AS content_hex FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND m.role='tool' AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden' AND m.tool_call_id IN (CAST(X'63616c6c5f62' AS TEXT)) ORDER BY m.id;`
 const hermesToolSortedOracle = `SELECT COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_name,'') AS tool_name,hex(COALESCE(m.content,'')) AS content_hex FROM messages AS m WHERE m.session_id=CAST(X'7365735f74657374' AS TEXT) AND m.role='tool' AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden' AND m.tool_call_id IN (CAST(X'63616c6c5f61' AS TEXT),CAST(X'63616c6c5f62' AS TEXT)) ORDER BY m.id;`
