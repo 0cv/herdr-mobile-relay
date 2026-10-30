@@ -155,10 +155,7 @@ export function replaceView(state: ViewState): void {
   showView(state);
 }
 
-export function followInitialAgentSession(
-  agents: Readable<Agent[]>,
-  isRevalidating: (relayId: string) => boolean = () => false,
-): () => void {
+export function followInitialAgentSession(agents: Readable<Agent[]>): () => void {
   let previous = new Map<string, Agent>();
   return agents.subscribe((incoming) => {
     const view = get(currentView);
@@ -166,13 +163,6 @@ export function followInitialAgentSession(
     previous = new Map(incoming.map((agent) => [agent.pane_id, agent]));
     if ((view.view !== 'terminal' && view.view !== 'history') || !view.target || !before) return;
     const after = previous.get(view.paneId);
-    // Retain only this already-open route's prior live proof during authority
-    // withdrawal. It is not republished or actionable. An authoritative absence
-    // still clears it; only a subsequent live snapshot can complete discovery.
-    if (!after && targetRefMatchesAgent(view.target, before) && isRevalidating(before.relay_id)) {
-      previous.set(view.paneId, before);
-      return;
-    }
     if (!after) return;
     const kimi = ['kimi', 'kimicode'].includes((before.agent || '').toLowerCase().replace(/[ _-]/gu, ''));
     const initialDiscovery = !kimi && !before.agent_session_id && Boolean(after.agent_session_id)

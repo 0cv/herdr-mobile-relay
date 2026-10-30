@@ -188,7 +188,6 @@ type Inbound struct {
 	Type                 string          `json:"type"`
 	Protocol             int             `json:"protocol"`
 	RequestID            string          `json:"request_id,omitempty"`
-	SnapshotRequestID    string          `json:"snapshot_request_id,omitempty"`
 	Target               *TargetRef      `json:"target,omitempty"`
 	ActionID             string          `json:"action_id,omitempty"`
 	ServerSessionID      string          `json:"server_session_id,omitempty"`
@@ -498,23 +497,7 @@ type PushConfig struct {
 	// connected over the legacy WSS URL, so the bridge window needs no QR
 	// re-scan. Omitted entirely when the relay has no gateway configured.
 	Hybrid map[string]any `json:"hybrid,omitempty"`
-	// Ingress names the relay's configured ingress mode. It is additive and
-	// optional: it travels inside the authenticated session so the phone can
-	// label its local resume timings without guessing from a hostname, and an
-	// app that predates it simply ignores it. It is a coarse operating mode,
-	// never a hostname, address or account identifier.
-	Ingress string `json:"ingress,omitempty"`
 }
-
-// Ingress descriptors carried by PushConfig.Ingress. They describe the mode
-// the relay was configured with, not proof of the route bytes actually took.
-const (
-	IngressCloudflare        = "cloudflare"
-	IngressGateway           = "gateway"
-	IngressTailscaleManaged  = "tailscale-managed"
-	IngressTailscaleExternal = "tailscale-byo"
-	IngressTailscaleCLI      = "tailscale-cli"
-)
 
 const AgentResponseCopyCapability = "agent_response_copy"
 
@@ -528,11 +511,7 @@ const PaneSizeOptInCapability = "pane_size_opt_in"
 const PaneSizeOptInRowsCapability = "pane_size_opt_in_rows"
 const SpeechVoiceManagementCapability = "speech_voice_management"
 
-// InventorySnapshotCapability binds one atomic snapshot to a post-request poll.
-const InventorySnapshotCapability = "inventory_snapshot_v1"
-
 var Capabilities = []string{
-	InventorySnapshotCapability,
 	"pi_integration",
 	"attention_classification",
 	"clear_activities",

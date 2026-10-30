@@ -400,8 +400,6 @@ export class AttachmentBatchController {
     this.notify();
   }
 
-  hasPendingCleanup(): boolean { return Boolean(this.active || this.pendingBegin); }
-
   orderedAttachments(): AttachmentRef[] {
     return this.items
       .filter((item): item is InternalItem & { attachment: AttachmentRef } => item.state === 'ready' && Boolean(item.attachment))
@@ -421,12 +419,12 @@ export class AttachmentBatchController {
     const uploadItems = this.items.filter((item) => item.state === 'interrupted' && item.file);
     if (!uploadItems.length) throw new Error('attachment_batch_not_restartable');
     const old = this.active;
+    this.active = undefined;
     if (old) {
       old.abort.abort();
       old.cancelHashing?.();
       try {
         await this.callbacks.cancel({ target: this.target, upload_id: old.uploadId });
-        if (this.active === old) this.active = undefined;
       } catch {
         this.markInterrupted(uploadItems, { code: 'attachment_cancel_failed' });
         throw { code: 'attachment_cancel_failed' } satisfies AttachmentIssue;
@@ -446,26 +444,20 @@ export class AttachmentBatchController {
     const active = this.active;
     const pendingBegin = this.pendingBegin;
     this.epoch += 1;
-    // Keep only the owned cleanup identity until cancellation is confirmed.
-    // An error/timeout must remain retryable and cannot unlock a new upload.
+    this.active = undefined;
     this.uploading = false;
     this.items = [];
     this.batchIssue = undefined;
     active?.abort.abort();
     active?.cancelHashing?.();
     this.notify();
-    let owned = active;
-    let uploadId = owned?.uploadId;
+    let uploadId = active?.uploadId;
     if (!uploadId && pendingBegin) {
       try {
         const result = await pendingBegin;
         if (this.pendingBegin !== pendingBegin) return;
         this.pendingBegin = undefined;
         uploadId = result.upload_id;
-        if (uploadId) {
-          owned = { uploadId, expiresAt: Date.parse(result.expires_at), abort: new AbortController() };
-          this.active = owned;
-        }
       } catch {
         return;
       }
@@ -473,11 +465,7 @@ export class AttachmentBatchController {
     if (!uploadId) return;
     try {
       await this.callbacks.cancel({ target: this.target, upload_id: uploadId });
-      if (this.active === owned) this.active = undefined;
-      this.notify();
     } catch {
-      this.batchIssue = { code: 'attachment_cancel_failed' };
-      this.notify();
       throw { code: 'attachment_cancel_failed' } satisfies AttachmentIssue;
     }
   }

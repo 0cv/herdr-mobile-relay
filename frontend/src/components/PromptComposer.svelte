@@ -95,7 +95,6 @@
   let attachmentController = $state.raw<AttachmentBatchController | null>(null);
   let attachmentSnapshot = $state<AttachmentBatchSnapshot | null>(null);
   let attachmentTarget: Agent | null = null;
-  let attachmentScope: object | null = null;
   let attachmentUnsubscribe: (() => void) | null = null;
   let attachmentCancelRequested = false;
   let slashCatalog = $state<SlashCommandCatalog>({ commands: [], truncated: false });
@@ -396,29 +395,11 @@
     if (!rejected.length) attachmentSnapshot = null;
   }
 
-  function bindAttachmentController(controller: AttachmentBatchController, target: Agent): void {
-    attachmentController = controller;
-    attachmentTarget = target;
-    attachmentScope = relayStore.attachmentCleanupScope(target.relay_id);
-    attachmentUnsubscribe?.();
-    attachmentUnsubscribe = controller.subscribe((snapshot) => { attachmentSnapshot = snapshot; });
-  }
-
-  onMount(() => {
-    const target = agent;
-    const retained = relayStore.recoverAttachmentController(target);
-    if (retained) bindAttachmentController(retained, target);
-  });
-
   function releaseAttachmentController(controller: AttachmentBatchController, force = false): void {
-    if (!force && (controller.hasPendingCleanup() || attachmentSnapshot?.items.some((item) => item.state === 'interrupted'))) return;
+    if (!force && attachmentSnapshot?.items.some((item) => item.state === 'interrupted')) return;
     attachmentUnsubscribe?.();
     attachmentUnsubscribe = null;
-    if (attachmentController === controller) {
-      attachmentController = null;
-      attachmentTarget = null;
-      attachmentScope = null;
-    }
+    if (attachmentController === controller) attachmentController = null;
   }
 
   async function filesSelected(files: FileList | File[]) {
@@ -434,19 +415,25 @@
     try {
       const previous = attachmentController;
       if (previous) {
-        await previous.cancel();
-        releaseAttachmentController(previous, true);
+        try {
+          await previous.cancel();
+        } finally {
+          releaseAttachmentController(previous, true);
+        }
       }
       controller = relayStore.attachmentController(target);
-      bindAttachmentController(controller, target);
+      attachmentTarget = target;
+      attachmentController = controller;
+      attachmentUnsubscribe?.();
+      attachmentUnsubscribe = controller.subscribe((snapshot) => {
+        attachmentSnapshot = snapshot;
+      });
       controller.select(selected);
       const attachments = await controller.upload();
       if (mounted && targetRefMatchesAgent(identity, agent) && !readOnly) appendUploadedAttachments(attachments);
     } catch (error) {
       uploadStatus = attachmentCancelRequested
-        ? attachmentController?.hasPendingCleanup()
-          ? 'Attachment cancellation is pending or unconfirmed.'
-          : 'Attachment upload canceled.'
+        ? 'Attachment upload canceled.'
         : error instanceof Error && error.message
           ? error.message
           : 'Attachments could not be uploaded.';
@@ -489,17 +476,14 @@
       uploadStatus = 'The relay could not confirm attachment cancellation.';
       uploadError = true;
     } finally {
-      releaseAttachmentController(controller);
+      releaseAttachmentController(controller, true);
     }
   }
 
   onDestroy(() => {
     mounted = false;
-    if (attachmentController && attachmentTarget && attachmentScope) {
-      relayStore.retainAttachmentController(attachmentTarget, attachmentController, attachmentScope);
-    }
     attachmentUnsubscribe?.();
-    void attachmentController?.cancel().catch(() => {});
+    void attachmentController?.cancel().catch(() => relayStore.showToast('The relay could not confirm attachment cancellation.', true));
   });
 
   function paste(event: ClipboardEvent) {
@@ -656,9 +640,6 @@
     </form>
     {#if !readOnly && attachmentSnapshot?.items.length}
       <AttachmentProgress snapshot={attachmentSnapshot} restartDisabled={attachmentsLocked || sending} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
-    {/if}
-    {#if !readOnly && attachmentSnapshot?.issue?.code === 'attachment_cancel_failed'}
-      <Button onclick={cancelAttachmentUpload}>Retry attachment cancellation</Button>
     {/if}
     {#if !readOnly && piDelivery.uncertain}
       <div class="hint" role="status">

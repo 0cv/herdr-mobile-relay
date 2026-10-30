@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -20,7 +19,6 @@ import (
 )
 
 var lazyAssetReferencePattern = regexp.MustCompile("import\\(\\s*[`\\\"']\\./([A-Za-z0-9_.-]+-[0-9]+\\.js)[`\\\"']\\s*\\)")
-var staticAssetReferencePattern = regexp.MustCompile(`(?:import|export)(?:[^;'"\n]*?from\s*|\s*)["']\./([A-Za-z0-9_.-]+-[0-9]+\.js)["']`)
 
 var allowedAssets = map[string]bool{
 	"index.html":            true,
@@ -187,63 +185,38 @@ func (h *Handler) isAllowedAsset(asset string) bool {
 		strings.HasPrefix(asset, "fonts/")
 }
 
-// Lazy chunks are not listed in the release descriptor. Admit only current-version
-// modules reachable from its verified application script.
+func (h *Handler) immutableAsset(asset string) bool {
+	return h.webFiles[asset] || h.isVersionedLazyAsset(asset)
+}
+
+// Lazy chunks are not entry assets, so they are not repeated in the small
+// release descriptor file map. Only chunks referenced by the verified
+// application module, with the exact release asset version, are executable.
 func (h *Handler) isVersionedLazyAsset(asset string) bool {
 	return h.descriptorLoaded && h.lazyAssets[asset]
 }
 
-func (h *Handler) loadLazyAssets(scriptPath string) error {
-	const maxModules = 64
-	const maxModuleBytes = 1024 * 1024
-	visited := map[string]bool{}
-	queue := []string{scriptPath}
-	for len(queue) > 0 {
-		if len(visited) >= maxModules {
-			return fmt.Errorf("too many release modules")
-		}
-		asset := queue[0]
-		queue = queue[1:]
-		if visited[asset] {
+func (h *Handler) loadLazyAssets(scriptPath string) {
+	source, err := fs.ReadFile(h.files, scriptPath)
+	if err != nil {
+		return
+	}
+	for _, match := range lazyAssetReferencePattern.FindAllSubmatch(source, -1) {
+		if len(match) != 2 {
 			continue
 		}
-		visited[asset] = true
-		file, err := h.files.Open(asset)
-		if err != nil {
-			return err
+		name := string(match[1])
+		stem := strings.TrimSuffix(name, ".js")
+		dash := strings.LastIndexByte(stem, '-')
+		if dash <= 0 || dash == len(stem)-1 {
+			continue
 		}
-		source, readErr := io.ReadAll(io.LimitReader(file, maxModuleBytes+1))
-		closeErr := file.Close()
-		if readErr != nil {
-			return readErr
+		version, err := strconv.Atoi(stem[dash+1:])
+		if err != nil || version != h.bundleAssets {
+			continue
 		}
-		if closeErr != nil {
-			return closeErr
-		}
-		if len(source) > maxModuleBytes {
-			return fmt.Errorf("release module too large")
-		}
-		for _, pattern := range []*regexp.Regexp{lazyAssetReferencePattern, staticAssetReferencePattern} {
-			for _, match := range pattern.FindAllSubmatch(source, -1) {
-				name := string(match[1])
-				stem := strings.TrimSuffix(name, ".js")
-				dash := strings.LastIndexByte(stem, '-')
-				if dash <= 0 || dash == len(stem)-1 {
-					continue
-				}
-				version, err := strconv.Atoi(stem[dash+1:])
-				if err != nil || version != h.bundleAssets {
-					continue
-				}
-				dependency := "assets/" + name
-				if !h.webFiles[dependency] && !h.lazyAssets[dependency] {
-					h.lazyAssets[dependency] = true
-					queue = append(queue, dependency)
-				}
-			}
-		}
+		h.lazyAssets["assets/"+name] = true
 	}
-	return nil
 }
 
 func isAttachmentHashWorker(asset string) bool {
@@ -333,15 +306,6 @@ func setErrorHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 }
 
-// Release assets (the descriptor-listed entry, JavaScript and stylesheet, and
-// the versioned lazy chunks) are content-addressed but are deliberately served
-// for revalidation (no-cache with an ETag) rather than marked immutable or given
-// a long max-age. That keeps the relay-served app admissible to main's
-// canonical public verifier (appdeploy.VerifyPublic), which refuses `immutable`
-// and an asset max-age of 24 hours or more and which the relay applies to the
-// phone bundle it serves, and consistent with main's generated Pages headers
-// (frontend/scripts/pages-policy.ts). Stable bootstrap and metadata names stay
-// non-storing.
 func setCacheHeaders(w http.ResponseWriter, asset string) {
 	switch asset {
 	case "index.html", "herdr-bootstrap.js", "manifest-loader.js", "manifest.webmanifest",
@@ -399,9 +363,7 @@ func (h *Handler) loadWebDescriptor() error {
 		h.webFiles[file.Path] = true
 	}
 	h.descriptorLoaded = true
-	if err := h.loadLazyAssets(descriptor.Files["javascript"].Path); err != nil {
-		return err
-	}
+	h.loadLazyAssets(descriptor.Files["javascript"].Path)
 	if h.bundleBuild == "" {
 		h.bundleBuild = descriptor.Build
 	}

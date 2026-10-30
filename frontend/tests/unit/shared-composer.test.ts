@@ -24,7 +24,6 @@ function uploadFixture(interrupted = false) {
   const restart = vi.fn().mockResolvedValue([]);
   const controller = {
     subscribe: (listener: (value: AttachmentBatchSnapshot) => void) => { listener(snapshot); return () => {}; },
-    snapshot: () => snapshot, hasPendingCleanup: () => false,
     select: vi.fn(), cancel: vi.fn().mockResolvedValue(undefined), restart,
     upload: vi.fn(() => interrupted ? Promise.resolve([]) : new Promise((resolve) => { finish = resolve; })),
   } as unknown as AttachmentBatchController;

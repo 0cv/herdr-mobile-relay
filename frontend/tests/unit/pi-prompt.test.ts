@@ -4,28 +4,11 @@ import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import PromptComposer from '$components/PromptComposer.svelte';
 import { relayStore } from '$lib/store';
-import { BrowserDeviceCredentialStore } from '$lib/device-auth';
-import { base64UrlEncode } from '$lib/base64url';
 import { securityState } from '$lib/security';
 import { PiPromptDelivery, piPromptDelivery, piPromptTarget, validPiPromptText } from '$lib/pi-prompt.svelte';
 import { promptDispatchRestriction } from '$lib/terminal-input';
 import { targetRefForAgent, targetStoreKey } from '$lib/resource-id';
 import type { Agent } from '$lib/types';
-import type { TransportHandlers } from '$lib/transports';
-
-vi.mock('$lib/transports', async (original) => ({
-  ...await original<typeof import('$lib/transports')>(),
-  createRelayTransport: (_relay: unknown, handlers: TransportHandlers) => {
-    const socket = new Socket();
-    socket.onopen = () => handlers.onStatus('connected');
-    socket.onclose = () => handlers.onStatus('closed');
-    socket.onmessage = ({ data }) => handlers.onMessage(JSON.parse(data));
-    return {
-      kind: 'websocket', connect: () => socket.open(), close: () => socket.close(),
-      send: (payload: Record<string, unknown>) => { socket.send(JSON.stringify(payload)); return socket.readyState === Socket.OPEN; },
-    };
-  },
-}));
 
 class Socket {
   static instances: Socket[] = [];
@@ -82,23 +65,18 @@ beforeEach(() => {
   vi.spyOn(performance, 'now').mockImplementation(() => now);
   localStorage.clear(); sessionStorage.clear();
   Socket.instances = [];
+  vi.stubGlobal('WebSocket', Socket);
   relayStore.destroy(); relayStore.setHidden(false); relayStore.relayConfigs.set([]);
   securityState.set({ locked: false, busy: false, reason: 'open', status: '', hint: '' });
+  vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role: 'controller' } as never);
   vi.spyOn(relayStore, 'showToast');
-  const credentials = new BrowserDeviceCredentialStore(localStorage);
-  credentials.saveInvitation('pi-prompt', { id: 'fixture-invitation', version: 1,
-    secret: base64UrlEncode(new Uint8Array(32).fill(7)), expiresAt: Date.now() + 60_000 });
-  credentials.replaceInvitation('pi-prompt', 'fixture-invitation', { deviceId: 'fixture-device',
-    credentialId: 'fixture-credential', credentialVersion: 1, credentialSecret: base64UrlEncode(new Uint8Array(32).fill(8)),
-    role: 'controller', locale: 'en' });
   relayStore.addRelay({ id: 'pi-prompt', label: 'Synthetic', url: 'ws://127.0.0.1:8871', token: '' });
-  socket = Socket.instances.at(-1)!;
-  socket.message({ type: 'push_config', protocol: 3, capabilities: ['inventory_snapshot_v1', 'pi_prompt_unconfirmed', 'secret_input', 'conversation_activity'], inventory: { state: 'ready' } });
+  socket = Socket.instances.at(-1)!; socket.open();
+  socket.message({ type: 'push_config', protocol: 3, capabilities: ['pi_prompt_unconfirmed', 'secret_input', 'conversation_activity'], inventory: { state: 'ready' } });
   const relay = get(relayStore.relayConfigs)[0];
   agent = { relay_id: relay.id, relay_label: relay.label, pane_id: `${relay.id}::pane`, raw_pane_id: 'pane', server_session_id: 'primary', terminal_id: 'terminal',
     generation: ++generation, agent_session_id: `session-${generation}`, agent: 'pi', status: 'blocked', attention_kind: 'unknown' };
-  socket.message({ type: 'inventory_snapshot', snapshot_request_id: commands('refresh_agents').at(-1)!.snapshot_request_id,
-    inventory: { state: 'ready', stale: false }, agents: [{ ...agent, pane_id: 'pane' }], workspaces: [] });
+  socket.message({ type: 'agents', agents: [{ ...agent, pane_id: 'pane' }] });
 });
 afterEach(() => { cleanup(); relayStore.destroy(); relayStore.setHidden(false); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -177,11 +155,10 @@ it('excludes attachments, hidden/tainted drafts, reader devices and expired capa
   for (const text of ['Attachment: ref', 'x'.repeat(100001)]) {
     await fireEvent.input(input(), { target: { value: text } }); await submit();
   }
-  const credential = relayStore.deviceCredential(agent.relay_id)!;
-  const reader = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ ...credential, role: 'reader' });
+  vi.mocked(relayStore.deviceCredential).mockReturnValue({ role: 'reader' } as never);
   await view.rerender({ frame: { ...frame } });
   await fireEvent.input(input(), { target: { value: 'secret-marker' } }); await submit();
-  reader.mockRestore();
+  vi.mocked(relayStore.deviceCredential).mockReturnValue({ role: 'controller' } as never);
   await view.rerender({ draftPersistenceAllowed: false });
   await fireEvent.input(input(), { target: { value: 'tainted-marker' } });
   await view.rerender({ draftPersistenceAllowed: true, frame }); await submit();

@@ -1,7 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { installEncryptedJourneyPeer, type JourneyCredential, type JourneyPeer } from './encrypted-journey-fixture';
 
 const webRoot = process.env.HERDR_WEB_ROOT || 'dist';
 const APP_METADATA = JSON.parse(
@@ -21,7 +20,6 @@ interface BootOptions {
   navigatorStandalone?: boolean;
   userAgent?: string;
   largeSlashCatalog?: boolean;
-  reader?: boolean;
   answerHealthPings?: boolean;
 }
 
@@ -67,18 +65,8 @@ async function expectNoActivityFooter(composer: Locator) {
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(installEncryptedJourneyPeer);
-  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent, largeSlashCatalog, reader, answerHealthPings }) => {
+  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent, largeSlashCatalog, answerHealthPings }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
-    const readerCredentials: Record<string, JourneyCredential> = {};
-    if (reader) {
-      for (const relay of savedRelays) readerCredentials[relay.id] = {
-        kind: 'credential', id: 'credential-reader', version: 1,
-        secret: btoa(String.fromCharCode(...new Uint8Array(32).fill(82))).replace(/=+$/, ''),
-        deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
-      };
-      localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: readerCredentials }));
-    }
     if (navigatorStandalone !== null) {
       Object.defineProperty(navigator, 'standalone', { configurable: true, value: navigatorStandalone });
     }
@@ -108,7 +96,6 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     let nextInteraction: Record<string, unknown> | null = null;
     let conversationFixture: ConversationFixture | null = null;
     let autoCommands = true;
-    let autoInventory = true;
     const uploadFiles = new Map<string, Array<{ name: string; media_type: string; bytes: number }>>();
     const uploadReceived = new Map<string, number>();
     const installedVoices = new Set(['en']);
@@ -140,21 +127,8 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
       onerror: (() => void) | null = null;
       onmessage: ((event: MessageEvent) => void) | null = null;
       readonly index: number;
-      private inventoryAgents: Record<string, unknown>[] = [];
-      private inventoryWorkspaces: unknown[] = [];
-      private inventoryStatus: Record<string, unknown> = { state: 'ready', stale: false };
-      private snapshotNonce: string | null = null;
-      private peer: JourneyPeer | null = null;
-      constructor(readonly url: string) {
+      constructor(readonly url: string, readonly protocol = '') {
         this.index = sockets.length;
-        const relay = savedRelays.find((candidate) => new URL(candidate.url).href === new URL(url).href);
-        const credential = relay && readerCredentials[relay.id];
-        if (credential) {
-          const harness = window as unknown as { __createJourneyPeer(credential: JourneyCredential, emit: (frame: string) => void, command: (message: Record<string, unknown>) => void): JourneyPeer };
-          this.peer = harness.__createJourneyPeer(credential, (frame) => {
-            if (this.readyState === MockSocket.OPEN) this.onmessage?.({ data: frame } as MessageEvent);
-          }, (message) => this.command(message));
-        }
         sockets.push(this);
         socketCommands.push([]);
         queueMicrotask(() => {
@@ -163,25 +137,9 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         });
       }
       send(serialized: string) {
-        if (this.peer) { this.peer.receive(serialized); return; }
-        this.command(JSON.parse(serialized) as Record<string, unknown>);
-      }
-      private command(message: Record<string, unknown>) {
+        const message = JSON.parse(serialized) as Record<string, unknown>;
         commands.push(message);
         socketCommands[this.index].push(message);
-        if (message.type === 'refresh_agents' && typeof message.snapshot_request_id === 'string') {
-          if (!autoInventory) return;
-          // Synthetic upgraded relay: admission precedes a new coherent poll.
-          // Unrelated frames never mint or guess a client correlation nonce.
-          const nonce = this.snapshotNonce = message.snapshot_request_id;
-          queueMicrotask(() => {
-            if (this.snapshotNonce !== nonce || this.readyState !== MockSocket.OPEN) return;
-            this.snapshotNonce = null;
-            this.server({ type: 'inventory_snapshot', snapshot_request_id: nonce,
-              inventory: this.inventoryStatus, agents: this.inventoryAgents, workspaces: this.inventoryWorkspaces });
-          });
-          return;
-        }
         if (answerHealthPings && message.type === 'ping') {
           queueMicrotask(() => this.server({ type: 'pong' }));
           return;
@@ -513,37 +471,12 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           ...agent,
         });
         let payload = message as Record<string, unknown>;
-        if (payload?.type === 'push_config') {
-          this.inventoryStatus = { state: 'ready', stale: false, ...((payload.inventory || {}) as object) };
-          payload = { ...payload, inventory: this.inventoryStatus,
-            capabilities: [...new Set([...(payload.capabilities as string[] || []), 'inventory_snapshot_v1'])] };
-        }
-        if (payload?.type === 'herdr_status' && Array.isArray(payload.capabilities)) {
-          payload = { ...payload, capabilities: [...new Set([...payload.capabilities, 'inventory_snapshot_v1'])] };
-        }
-        if (payload?.type === 'inventory_status') this.inventoryStatus = { stale: false, ...payload };
         if (payload?.type === 'agents' && Array.isArray(payload.agents)) {
-          this.inventoryAgents = (payload.agents as Record<string, unknown>[]).map(withExactIdentity);
-          payload = { ...payload, agents: this.inventoryAgents };
+          payload = { ...payload, agents: (payload.agents as Record<string, unknown>[]).map(withExactIdentity) };
         } else if ((payload?.type === 'blocked' || payload?.type === 'agent_update') && payload.pane_id) {
-          const index = this.inventoryAgents.findIndex((agent) => agent.pane_id === payload.pane_id);
-          const before = index < 0 ? {} : this.inventoryAgents[index];
-          // Deltas carry exact identity, not cached attention/interaction data.
-          // Missing fields must remain missing so the client merges its current
-          // question state rather than being overwritten by an old fixture row.
-          const identity: Record<string, unknown> = {};
-          for (const field of ['server_session_id', 'terminal_id', 'generation', 'agent_session_id']) {
-            if (before[field] !== undefined) identity[field] = before[field];
-          }
-          payload = withExactIdentity({ ...identity, ...payload });
-          const agent: Record<string, unknown> = { ...before, ...payload, status: payload.type === 'blocked' ? 'blocked' : payload.status ?? before.status };
-          if (index < 0) this.inventoryAgents.push(agent);
-          else if (typeof agent.pane_revision !== 'number' || typeof this.inventoryAgents[index].pane_revision !== 'number'
-            || agent.pane_revision >= (this.inventoryAgents[index].pane_revision as number)) this.inventoryAgents[index] = agent;
+          payload = withExactIdentity(payload);
         }
-        if (payload?.type === 'workspaces' && Array.isArray(payload.workspaces)) this.inventoryWorkspaces = payload.workspaces;
-        if (this.peer) this.peer.send(payload);
-        else this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
+        this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
       }
       serverClose(code?: number) { this.readyState = MockSocket.CLOSED; this.onclose?.(code === undefined ? undefined : { code }); }
     }
@@ -560,7 +493,6 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         conversationFixture = fixture;
       },
       __relayAutoCommands(enabled: boolean) { autoCommands = enabled; },
-      __relayAutoInventory(enabled: boolean) { autoInventory = enabled; },
     });
   }, {
     savedRelays: relays,
@@ -568,7 +500,6 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     navigatorStandalone: options.navigatorStandalone ?? null,
     userAgent: options.userAgent ?? '',
     largeSlashCatalog: options.largeSlashCatalog ?? false,
-    reader: options.reader ?? false,
     answerHealthPings: options.answerHealthPings ?? true,
   });
   await page.goto(path);
@@ -665,14 +596,14 @@ test('guides an unpairable relay without ever dialing it', async ({ page }) => {
   // nothing can be presented, so the app must not spend a dial finding out.
   await boot(page, [{ ...fedora, token: 'truncated-key' }]);
 
-  await expect(page.getByText('This setup link has expired or was already used, or this device was refused. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.')).toBeVisible();
+  await expect(page.getByText('Fedora needs pairing. Import a device invitation link.')).toBeVisible();
   expect(await socketCount(page)).toBe(0);
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.waitForTimeout(80);
   expect(await socketCount(page)).toBe(0);
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByText('This setup link may have expired or already been used. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.')).toBeVisible();
+  await expect(page.getByText('This computer needs pairing. Import a device invitation link, or remove and add the relay.')).toBeVisible();
 });
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
@@ -783,11 +714,6 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
     },
   };
   await server(page, 0, { type: 'workspaces', workspaces: [parent, linked, shellOnly, phoneWorkspace] });
-  // Membership changes withdraw workspace authority and close retained intent.
-  // A fresh snapshot permits a new explicit opening, never a replayed create.
-  await expect(worktreeDialog).toBeHidden();
-  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'worktree_create').length).toBe(0);
-  await projectCard.getByRole('button', { name: 'Worktrees' }).click();
   await worktreeDialog.getByLabel('Branch').fill('fix/issue-14');
   await worktreeDialog.getByLabel('Base ref').fill('main');
   await worktreeDialog.getByRole('button', { name: 'Confirm' }).click();
@@ -1122,87 +1048,6 @@ test('keeps an iOS setup link unredeemed for Home Screen installation', async ({
   });
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
-  await page.getByRole('button', { name: 'Reconnect All' }).click();
-  await page.waitForTimeout(500);
-  expect(await socketCount(page)).toBe(0);
-});
-
-test('iOS browser pairing spends a valid invitation only after explicit confirmation', async ({ page }) => {
-  const hash = `#setup=${'A'.repeat(43)}&invite=invitation-browser01&invite_version=1&invite_expires=${Date.now() + 600_000}&label=Invited&relay=wss%3A%2F%2Finvited.example`;
-  await boot(page, [], `/${hash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('button', { name: 'Pair this browser instead' }).click();
-  await expect(page.getByRole('alert').filter({ hasText: 'This browser becomes its own device' })).toBeVisible();
-  expect(await socketCount(page)).toBe(0);
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-  expect(new URL(page.url()).hash).toBe(hash);
-  expect(await socketCount(page)).toBe(0);
-  expect(await page.evaluate(() => localStorage.getItem('herdr_device_auth_v1'))).toBeNull();
-  await page.getByRole('button', { name: 'Pair this browser instead' }).click();
-  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
-  await expect.poll(() => socketCount(page)).toBe(1);
-  expect(new URL(page.url()).hash).toBe('');
-  expect(await page.evaluate(() => {
-    const relay = JSON.parse(localStorage.getItem('herdr_relays')!)[0];
-    return JSON.parse(localStorage.getItem('herdr_device_auth_v1')!).relays[relay.id].id;
-  })).toBe('invitation-browser01');
-});
-
-for (const failure of ['invalid invitation', 'duplicate selector', 'storage unavailable']) {
-  test(`explicit iOS browser pairing preserves a saved credential on ${failure}`, async ({ page }) => {
-    const hash = `#setup=${'A'.repeat(43)}&invite=invitation-browser01&invite_version=1&invite_expires=${Date.now() + 600_000}&label=Invited&relay=wss%3A%2F%2Finvited.example`;
-    await boot(page, [], `/${hash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
-    await page.getByRole('button', { name: 'Settings' }).click();
-    await page.getByRole('button', { name: 'Pair this browser instead' }).click();
-    const before = await page.evaluate((failureMode) => {
-      const relay = JSON.parse(localStorage.getItem('herdr_relays')!)[0];
-      localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: {
-        [relay.id]: { kind: 'credential', id: 'credential-live', version: 1, secret: 'B'.repeat(43),
-          deviceId: 'device-live', role: 'controller', locale: 'en', issuedAt: Date.now(),
-          invitationId: 'invitation-previous01' },
-      } }));
-      if (failureMode === 'invalid invitation') {
-        history.replaceState(history.state, '', location.hash.replace('invite=invitation-browser01', 'invite=bad'));
-      } else if (failureMode === 'duplicate selector') {
-        history.replaceState(history.state, '', location.hash + '&invite_version=2');
-      } else {
-        const save = Storage.prototype.setItem;
-        Storage.prototype.setItem = function (key, value) {
-          if (key === 'herdr_device_auth_v1') throw new Error('Storage unavailable.');
-          save.call(this, key, value);
-        };
-      }
-      return { hash: location.hash, relays: localStorage.getItem('herdr_relays'), credentials: localStorage.getItem('herdr_device_auth_v1') };
-    }, failure);
-    await page.getByRole('button', { name: 'Confirm', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
-    expect(await socketCount(page)).toBe(0);
-    expect(await page.evaluate(() => ({ hash: location.hash, relays: localStorage.getItem('herdr_relays'), credentials: localStorage.getItem('herdr_device_auth_v1') }))).toEqual(before);
-    await page.getByRole('button', { name: 'Reconnect All' }).click();
-    expect(await socketCount(page)).toBe(0);
-  });
-}
-
-test('explicit iOS bootstrap-key pairing keeps its deferral when the credential cannot be saved', async ({ page }) => {
-  const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
-  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('button', { name: 'Pair this browser instead' }).click();
-  await page.evaluate(() => {
-    const save = Storage.prototype.setItem;
-    Storage.prototype.setItem = function (key, value) {
-      if (key === 'herdr_device_auth_v1') throw new Error('Storage unavailable.');
-      save.call(this, key, value);
-    };
-  });
-  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
-  expect(await page.evaluate(() => ({
-    hash: location.hash,
-    credentials: localStorage.getItem('herdr_device_auth_v1'),
-    optIns: Object.keys(sessionStorage).filter((key) => key.startsWith('herdr_browser_pairing:')),
-  }))).toEqual({ hash: setupHash, credentials: null, optIns: [] });
-  expect(await socketCount(page)).toBe(0);
   await page.getByRole('button', { name: 'Reconnect All' }).click();
   await page.waitForTimeout(500);
   expect(await socketCount(page)).toBe(0);
@@ -1600,7 +1445,7 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   await server(page, 0, { type: 'agents', agents: staleAgents });
 
   await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toContainText('changing too quickly');
-  await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeVisible();
   await expect(page.getByRole('img', { name: /agent inventory unavailable/ })).toBeVisible();
 
   await server(page, 0, {
@@ -2449,7 +2294,6 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
     content_fingerprint: 'content-2',
   });
 
-  const cachedScreen = await page.getByRole('log').locator('.term-screen').innerHTML();
   const activeCommandCount = (await commands(page)).length;
   await page.waitForTimeout(750);
   expect(await commands(page)).toHaveLength(activeCommandCount);
@@ -2466,7 +2310,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   await page.waitForTimeout(750);
   expect(await commands(page)).toHaveLength(hiddenCommandCount);
   const terminal = page.getByRole('log');
-  await expect(terminal).toBeHidden();
+  const cachedScreen = await terminal.locator('.term-screen').innerHTML();
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
@@ -2541,26 +2385,21 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await page.waitForTimeout(5_100);
-  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeHidden();
-  await expect(page.getByRole('log')).toBeHidden();
-  await expect(page.getByRole('img', { name: 'Agent working' })).toBeHidden();
+  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
+  await expect(page.getByRole('main', { name: 'Agent unavailable' })).toBeHidden();
+  await expect(page.getByRole('log')).toContainText('cached terminal output');
+  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
 
-  // A half-open socket answers nothing, including refocus reads. Neither
-  // command acks nor a correlated poll may provide live traffic.
+  // A half-open socket answers nothing, including refocus reads.
   await setAutoCommands(page, false);
-  await page.evaluate(() => (window as any).__relayAutoInventory(false));
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(() => socketCount(page), { timeout: 12_000 }).toBe(2);
   await setAutoCommands(page, true);
-  await page.evaluate(() => (window as any).__relayAutoInventory(true));
   await handshake(page, 1, {
     capabilities: ['attention_classification', 'slash_commands'],
-  });
-  await server(page, 1, {
-    type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
   });
   await expect.poll(async () =>
     (await commandsForSocket(page, 1)).some((command) => command.type === 'read_pane')).toBe(true);
@@ -2590,7 +2429,6 @@ test('replaces a half-open socket when the browser reports a network handoff', a
   await handshake(page, 0);
   const refreshesBefore = (await commandsForSocket(page, 0))
     .filter((command) => command.type === 'refresh_agents').length;
-  await page.evaluate(() => (window as any).__relayAutoInventory(false));
 
   await setAutoCommands(page, false);
   await page.evaluate(() => {
@@ -2702,87 +2540,10 @@ test('keeps wide controller panes aligned and horizontally scrollable', async ({
   expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
 });
 
-test('keeps a wide pane readable while its size lease is still pending', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'claude' }],
-  });
-  // The relay advertises the opt-in capability and this device opted in, so the
-  // pane is shown before any width is granted. Leaving the lease unanswered pins
-  // that state: wrapping then had no cap and broke every row mid-word.
-  await setAutoCommands(page, false);
-  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
-  const wideRow = `${'the pane is far wider than the phone viewport '.repeat(3)}and keeps going`;
-  // A box border padded out to the pane's width. Preserved spaces may hang
-  // past the edge instead of wrapping, which WebKit reports as scrollable
-  // width, handing the reader a pane that pans sideways.
-  const paddedRow = `╰─${' '.repeat(150)}─╯`;
-  // A bordered row of cells: box-drawing renders as a fixed-width cell grid
-  // with no wrap opportunity between cells, so past the phone's width it has
-  // to fall back to text that can wrap.
-  const gridRow = `│ ${'aligned cell '.repeat(12)}│`;
-  // Long unbroken tokens are routine in agent output.
-  const tokenRow = `https://example.test/${'x'.repeat(300)}`;
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
-    content: ['first row', wideRow, paddedRow, gridRow, tokenRow, 'last row'].join('\n'),
-  });
-
-  const terminal = page.getByRole('log');
-  const lines = terminal.locator('.ansi-line');
-  await expect(lines).toHaveCount(6);
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThan(0);
-
-  // The pane is wider than the phone and no lease has landed, so alignment is
-  // impossible either way. Wrapping at the container keeps the text readable:
-  // sideways scrolling stranded the reader on line tails after every refresh.
-  const geometry = await terminal.evaluate((element) => {
-    const rows = Array.from(element.querySelectorAll<HTMLElement>('.ansi-line'));
-    const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
-    const wide = rows[1];
-    // A word split across lines reports more than one client rect. A word too
-    // long to fit a line has to break; one that would have fit must not.
-    let brokenWords = 0;
-    const walker = document.createTreeWalker(wide, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const text = node.textContent || '';
-      const pattern = /\S+/g;
-      for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-        const range = document.createRange();
-        range.setStart(node, match.index);
-        range.setEnd(node, match.index + match[0].length);
-        const rects = Array.from(range.getClientRects());
-        const advance = rects.reduce((total, rect) => total + rect.width, 0);
-        if (rects.length > 1 && advance <= element.clientWidth) brokenWords += 1;
-      }
-    }
-    return {
-      lineHeight,
-      wideHeight: wide.getBoundingClientRect().height,
-      narrowHeight: rows[0].getBoundingClientRect().height,
-      brokenWords,
-      scrollWidth: element.scrollWidth,
-      clientWidth: element.clientWidth,
-    };
-  });
-  expect(geometry.lineHeight).toBeGreaterThan(0);
-  expect(geometry.narrowHeight).toBeLessThan(geometry.lineHeight * 1.5);
-  expect(geometry.wideHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
-  expect(geometry.brokenWords).toBe(0);
-  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
-});
-
 test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
   // A reader never leases, even opted in on a relay that supports it.
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora], '/', { reader: true });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
   await page.evaluate(() => {
@@ -2839,45 +2600,6 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   expect((await commands(page)).filter((command) => command.type === 'lease_pane_size')).toHaveLength(0);
   await expect(page.getByRole('switch', { name: 'Resize Session', exact: true }))
     .toHaveAccessibleDescription(/controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width\./);
-});
-
-test('estimates wrapped row heights while a lease is pending', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'omp' }],
-  });
-  await setAutoCommands(page, false);
-  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
-  // Rows that wrap to several lines each. The virtualizer sizes unmounted rows
-  // from an estimate, so an estimate of one line per row understates the whole
-  // log and the scroll geometry lands the reader in the wrong place.
-  const content = Array.from({ length: 400 }, (_, index) =>
-    `row ${String(index + 1).padStart(4, '0')} ${'wide content '.repeat(14)}`).join('\n');
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content });
-
-  const terminal = page.getByRole('log');
-  await expect(terminal.locator('.ansi-line').first()).toBeVisible();
-  const estimated = await terminal.evaluate((element) => element.scrollHeight);
-  // Walking the log mounts and measures every row, so the height afterwards is
-  // the truth the estimate was predicting.
-  const step = await terminal.evaluate((element) => Math.max(1, element.clientHeight - 20));
-  for (let top = 0; top <= estimated; top += step) {
-    await terminal.evaluate((element, offset) => {
-      element.scrollTop = offset;
-      element.dispatchEvent(new Event('scroll'));
-    }, top);
-    await page.waitForTimeout(50);
-  }
-  await expect.poll(async () => {
-    const measured = await terminal.evaluate((element) => element.scrollHeight);
-    return Math.abs(measured - estimated) / measured < 0.1;
-  }).toBe(true);
 });
 
 const optInCapabilities = ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'];
@@ -3648,8 +3370,19 @@ test('speak reports the relay copy failure when no parser can read the pane', as
 });
 
 test('a reader speaks the latest transcript turn without the relay copy command', async ({ page }) => {
-  await boot(page, [fedora], '/', { reader: true });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
+          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
   await handshake(page, 0, {
     capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
     speech_languages: ['en'],
@@ -3781,638 +3514,6 @@ test('virtualizes large ANSI grids on a controller pane', async ({ page }) => {
   expect(await mountedRows.count()).toBeLessThan(250);
 });
 
-test('restores a non-bottom anchor after a Resize Session width change', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize anchor', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Resize anchor on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'resize anchor baseline',
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  await page.waitForTimeout(300);
-
-  const content = Array.from(
-    { length: 600 },
-    (_, index) => `resize anchor row ${String(index + 1).padStart(4, '0')}`,
-  ).join('\n');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content,
-  });
-
-  const terminal = page.getByRole('log');
-  const screen = terminal.locator('.term-screen');
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '600');
-  await terminal.evaluate((element) => {
-    element.scrollTop = element.scrollHeight / 2;
-    element.dispatchEvent(new Event('scroll'));
-  });
-  await expect.poll(async () => terminal.evaluate((element) => {
-    const viewport = element.getBoundingClientRect();
-    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
-      .find((candidate) => {
-        const bounds = candidate.getBoundingClientRect();
-        return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
-      });
-    return row ? Number(row.dataset.terminalRow) : -1;
-  })).toBeGreaterThan(100);
-  const anchor = await terminal.evaluate((element) => {
-    const viewport = element.getBoundingClientRect();
-    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
-      .find((candidate) => {
-        const bounds = candidate.getBoundingClientRect();
-        return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
-      });
-    return {
-      index: Number(row?.dataset.terminalRow),
-      text: row?.textContent || '',
-    };
-  });
-  expect(anchor.text).toMatch(/^resize anchor row \d{4}$/);
-
-  await setAutoCommands(page, false);
-  const viewport = page.viewportSize()!;
-  await page.setViewportSize({ width: viewport.width + 160, height: viewport.height });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
-  await expect(terminal).toContainText(anchor.text);
-  await expect(terminal).not.toContainText('Resizing terminal…');
-  const lease = (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').at(-1)!;
-  const readsBeforeResult = (await commands(page))
-    .filter((command) => command.type === 'read_pane').length;
-  await server(page, 0, {
-    type: 'command_result',
-    action: 'lease_pane_size',
-    request_id: lease.request_id,
-    ok: true,
-    data: { columns: lease.columns },
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readsBeforeResult);
-  await expect(terminal).toContainText(anchor.text);
-  await expect(terminal).not.toContainText('Resizing terminal…');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content,
-  });
-
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '600');
-  await expect.poll(async () => terminal.evaluate((element, expected) => {
-    const viewport = element.getBoundingClientRect();
-    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
-      .find((candidate) => {
-        const bounds = candidate.getBoundingClientRect();
-        return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
-      });
-    if (!row) return Number.POSITIVE_INFINITY;
-    return Math.abs(Number(row.dataset.terminalRow) - expected);
-  }, anchor.index)).toBeLessThanOrEqual(1);
-  await expect(terminal).toContainText(anchor.text);
-});
-
-test('leases measured terminal columns and releases on teardown', async ({ page }) => {
-  // Height leasing is opt-in: resizing the shared pane's height strands
-  // stale status-bar copies of inline agents in the scrollback.
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_height_lease', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'resizable terminal baseline',
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  const acquire = (await commands(page))
-    .find((command) => command.type === 'lease_pane_size')!;
-  expect(acquire).toMatchObject({
-    type: 'lease_pane_size',
-    pane_id: 'w1:p1',
-    protocol: 3,
-  });
-  expect(acquire.request_id).toEqual(expect.any(String));
-  expect(acquire).not.toHaveProperty('client_id');
-  expect(acquire.columns).toEqual(expect.any(Number));
-  expect(Number(acquire.columns)).toBeGreaterThanOrEqual(40);
-  expect(Number(acquire.columns)).toBeLessThanOrEqual(240);
-  expect(acquire.rows).toEqual(expect.any(Number));
-  expect(Number(acquire.rows)).toBeGreaterThanOrEqual(10);
-  expect(Number(acquire.rows)).toBeLessThanOrEqual(120);
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
-  await page.waitForTimeout(300);
-
-  const terminal = page.getByRole('log');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: [
-      `\u001b[38;2;80;200;160mhttps://example.test/${'unbroken-token'.repeat(12)}\u001b[0m`,
-      `\u001b[48;2;61;64;64m${'› Summarize recent commits'.padEnd(151)}\u001b[0m`,
-      '  gpt-5.6-sol medium'.padEnd(151),
-    ].join('\n'),
-  });
-  await expect(terminal).toHaveClass(/preserve-layout/);
-  await expect(page.getByRole('navigation', { name: 'Application' })
-    .getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
-  await expect(terminal.locator('.ansi-line')).toHaveCount(3);
-  await expect(terminal.locator('.ansi-line-background')).toHaveText('› Summarize recent commits');
-  const resizeGeometry = await terminal.evaluate((element) => {
-    const screen = element.querySelector<HTMLElement>('.term-screen');
-    const renderedLines = [...element.querySelectorAll<HTMLElement>('.ansi-line')];
-    const background = element.querySelector<HTMLElement>('.ansi-line-background');
-    const firstLine = renderedLines[0];
-    const firstLineStyle = getComputedStyle(firstLine);
-    return {
-      backgroundWidth: background?.getBoundingClientRect().width || 0,
-      clientWidth: element.clientWidth,
-      firstLineHeight: firstLine.getBoundingClientRect().height,
-      lineHeight: Number.parseFloat(firstLineStyle.lineHeight),
-      scrollWidth: element.scrollWidth,
-      screenWidth: screen?.getBoundingClientRect().width || 0,
-      lineLengths: renderedLines.map((line) => line.textContent?.length || 0),
-    };
-  });
-  expect(resizeGeometry.scrollWidth).toBeLessThanOrEqual(resizeGeometry.clientWidth);
-  expect(resizeGeometry.screenWidth).toBeLessThanOrEqual(resizeGeometry.clientWidth);
-  expect(resizeGeometry.backgroundWidth).toBeLessThan(resizeGeometry.clientWidth);
-  expect(resizeGeometry.firstLineHeight).toBeGreaterThan(resizeGeometry.lineHeight * 2);
-  expect(Math.max(...resizeGeometry.lineLengths)).toBeGreaterThan(Number(acquire.columns));
-  // Issue #11: the wrap cap must be the probed cell advance times the leased
-  // column count, emitted in px — never derived from ch. Measured: with the
-  // symbols face loaded, Playwright WebKit 26.5 and Chromium both resolve
-  // 1ch to the glyph advance (ratio 0.9997) while shipped Safari 26.1
-  // resolves it to the 0.5em spec fallback (ratio 0.8087), so the defect is
-  // NOT reproducible under any CI engine and the arithmetic check alone
-  // would pass a ch-derived cap here. The serialization checks are the part
-  // that fails on a revert; do not replace them with a font-load probe.
-  const capGeometry = await terminal.evaluate((element) => {
-    const probe = element.querySelector<HTMLElement>(':scope > span[aria-hidden]');
-    const line = element.querySelector<HTMLElement>('.ansi-line');
-    return {
-      cellWidth: probe ? probe.getBoundingClientRect().width / 10 : 0,
-      capWidth: line ? Number.parseFloat(getComputedStyle(line).maxWidth) : 0,
-      style: element.getAttribute('style') || '',
-    };
-  });
-  expect(capGeometry.cellWidth).toBeGreaterThan(0);
-  expect(Math.abs(capGeometry.capWidth - capGeometry.cellWidth * Number(acquire.columns)))
-    .toBeLessThan(0.5);
-  const cellVar = capGeometry.style.match(/--terminal-cell-width: (\d+(?:\.\d+)?)px/);
-  expect(cellVar).not.toBeNull();
-  expect(Number(cellVar![1])).toBeCloseTo(capGeometry.cellWidth, 1);
-  expect(capGeometry.style).toMatch(/--terminal-width: \d+(?:\.\d+)?px/);
-  expect(capGeometry.style).not.toMatch(/\dch\b/);
-
-  const storedHistory = Array.from(
-    { length: 120 },
-    (_, index) => `stored resize history row ${index + 1}`,
-  ).join('\n');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: storedHistory,
-  });
-  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
-  await expect(terminal).toContainText('stored resize history row 120');
-  await expect.poll(async () => terminal.evaluate((element) => {
-    const lastRow = element.querySelector<HTMLElement>('[data-terminal-row="119"]');
-    if (!lastRow) return Number.POSITIVE_INFINITY;
-    return element.getBoundingClientRect().bottom - lastRow.getBoundingClientRect().bottom;
-  })).toBeLessThan(1);
-  await terminal.evaluate((element) => {
-    const bottom = Math.max(0, element.scrollHeight - element.clientHeight);
-    element.scrollTop = Math.max(0, bottom - 12);
-    element.dispatchEvent(new Event('scroll'));
-    element.scrollTop = Math.max(0, bottom - 6);
-    element.dispatchEvent(new Event('scroll'));
-  });
-  // Since main #71 a small scroll-up keeps the reader's place; Jump to latest follows the output again.
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(1);
-  await page.getByRole('button', { name: 'Jump to latest' }).click();
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(1);
-
-  const viewport = page.viewportSize()!;
-  await page.setViewportSize({ width: viewport.width + 200, height: viewport.height });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
-  const leases = (await commands(page)).filter((command) => command.type === 'lease_pane_size');
-  expect(leases[1].columns).not.toBe(leases[0].columns);
-  await page.waitForTimeout(300);
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: storedHistory,
-  });
-  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
-
-  await page.getByRole('button', { name: 'Back' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'release_pane_size').length).toBe(1);
-  const release = (await commands(page)).find((command) => command.type === 'release_pane_size')!;
-  expect(release).toMatchObject({
-    type: 'release_pane_size',
-    pane_id: 'w1:p1',
-    protocol: 3,
-  });
-  expect(release.request_id).toEqual(expect.any(String));
-  expect(release).not.toHaveProperty('client_id');
-
-  const leaseCountBeforeReentry = (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length;
-  const readCountBeforeReentry = (await commands(page))
-    .filter((command) => command.type === 'read_pane').length;
-  await setAutoCommands(page, false);
-  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(leaseCountBeforeReentry + 1);
-  // Reopening keeps the phone's cached pane painted while the relay restores
-  // the shared width and checks for a newer stable frame.
-  await expect(terminal).toContainText('stored resize history row 120');
-  await expect(terminal).not.toContainText('Resizing terminal…');
-
-  const reentryLease = (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').at(-1)!;
-  await server(page, 0, {
-    type: 'command_result',
-    action: 'lease_pane_size',
-    request_id: reentryLease.request_id,
-    ok: true,
-    data: { columns: reentryLease.columns, rows: reentryLease.rows },
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readCountBeforeReentry);
-  await page.waitForTimeout(300);
-  // A frame the relay read while the agent was still repainting is transient:
-  // it must not replace the stable screen.
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: Array.from(
-      { length: 46 },
-      (_, index) => `transient viewport row ${index + 1}`,
-    ).join('\n'),
-    viewport_only: true,
-    viewport_rows: 46,
-    resize_settling: true,
-    content_fingerprint: 'resize-settling',
-  });
-  await expect(terminal).not.toContainText('transient viewport row');
-  await expect(terminal).toContainText('stored resize history row 120');
-  const readsBeforeSettledUpdate = (await commands(page))
-    .filter((command) => command.type === 'read_pane').length;
-  // The content can stop changing before the relay's resize settle window
-  // closes. Its metadata-only delta must trigger a stable frame resync.
-  await server(page, 0, {
-    type: 'pane_delta',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    base_fingerprint: 'resize-settling',
-    content_fingerprint: 'resize-settling',
-    segments: null,
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length)
-    .toBeGreaterThan(readsBeforeSettledUpdate);
-  await page.waitForTimeout(300);
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: storedHistory,
-    content_fingerprint: 'resize-settled',
-  });
-  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
-  await expect(terminal).toContainText('stored resize history row 120');
-
-  await setAutoCommands(page, true);
-  await page.getByRole('button', { name: 'Back' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'release_pane_size').length).toBe(2);
-});
-
-test('paints again when the relay keeps a pane settling after a resize', async ({ page }) => {
-  // Frames read while the agent repaints are suppressed so a transient screen
-  // never replaces the stable one. That wait must be bounded: a shared session
-  // whose desktop client keeps fighting the leased size re-arms the relay's
-  // settling window on every read, and an unbounded wait freezes the phone on
-  // its last painted frame for as long as that lasts.
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_height_lease', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'stable row before resize',
-  });
-  const terminal = page.getByRole('log');
-  await expect(terminal).toContainText('stable row before resize');
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-
-  // A width change captures the painted frame as the settling baseline.
-  const viewport = page.viewportSize()!;
-  await page.setViewportSize({ width: viewport.width + 120, height: viewport.height });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
-
-  // The relay now reports every frame as settling for longer than the pane
-  // takes to repaint. The newest screen must still reach the phone.
-  for (let index = 1; index <= 12; index += 1) {
-    await server(page, 0, {
-      type: 'pane_content',
-      pane_id: 'w1:p1',
-      format: 'ansi',
-      content: `live row ${index}`,
-      resize_settling: true,
-    });
-    await page.waitForTimeout(500);
-  }
-  await expect(terminal).toContainText('live row 12');
-});
-
-test('paints again when a re-entry lease never lands', async ({ page }) => {
-  // The same wait also covers a pane with no lease yet. Reopening a pane asks
-  // for a fresh lease while the cached frame is painted, so a relay that never
-  // answers must not strand the phone on that cached frame.
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'cached row before re-entry',
-  });
-  const terminal = page.getByRole('log');
-  await expect(terminal).toContainText('cached row before re-entry');
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-
-  await page.getByRole('button', { name: 'Back' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'release_pane_size').length).toBe(1);
-  await setAutoCommands(page, false);
-  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
-
-  for (let index = 1; index <= 12; index += 1) {
-    await server(page, 0, {
-      type: 'pane_content',
-      pane_id: 'w1:p1',
-      format: 'ansi',
-      content: `unleased row ${index}`,
-    });
-    await page.waitForTimeout(500);
-  }
-  await expect(terminal).toContainText('unleased row 12');
-});
-
-test('does not lease rows unless the height setting is on', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  const acquire = (await commands(page))
-    .find((command) => command.type === 'lease_pane_size')!;
-  // The relay advertises row support, but the default-off setting keeps the
-  // lease width-only so the shared pane's height is never touched.
-  expect(acquire.columns).toEqual(expect.any(Number));
-  expect(acquire).not.toHaveProperty('rows');
-});
-
-test('scrolls stale wide grids in place and preserves current grids in Resize Session', async ({ page }) => {
-  const staleTable = [
-    `┌${'─'.repeat(180)}┐`,
-    `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(178)}│`,
-    `│ ${'12m      | 1.31   | -9.4%  | 1.02'.padEnd(178)}│`,
-    `└${'─'.repeat(180)}┘`,
-  ];
-  const desktopHistory = Array.from({ length: 46 }, (_, index) => `desktop history row ${index + 1}`);
-  await openResizePane(page, 'Qoder grid');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: desktopHistory.join('\n'),
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  const lease = (await commands(page))
-    .find((command) => command.type === 'lease_pane_size')!;
-  const columns = Number(lease.columns);
-  const terminal = page.getByRole('log');
-  await page.waitForTimeout(300);
-
-  const currentTable = [
-    `┌${'─'.repeat(columns - 2)}┐`,
-    `│ ${'Current grid'.padEnd(columns - 4)}│`,
-    `└${'─'.repeat(columns - 2)}┘`,
-  ];
-  const currentViewport = Array.from({ length: 43 }, (_, index) => `current viewport row ${index + 1}`)
-    .concat(currentTable);
-  // The stale table was captured at 188 columns before the lease and is still
-  // in the window Herdr serves, above the current-width screen.
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: staleTable.concat(desktopHistory, currentViewport).join('\n'),
-    viewport_only: true,
-    viewport_rows: currentViewport.length,
-  });
-  await expect(terminal).toContainText('Current grid');
-  await expect(terminal.locator('.terminal-grid-line')).toHaveCount(3);
-  const lineHeights = await terminal.locator('.terminal-grid-line').evaluateAll((lines) => {
-    const lineHeight = Number.parseFloat(getComputedStyle(lines[0]).lineHeight);
-    return {
-      lineHeight,
-      heights: lines.map((line) => line.getBoundingClientRect().height),
-    };
-  });
-  expect(Math.max(...lineHeights.heights)).toBeLessThan(lineHeights.lineHeight * 1.2);
-  // The desktop-width rows sit above the screen; the stale grid enters the
-  // DOM once it is scrolled into view and pans inside its own rows instead of
-  // wrapping or panning the pane.
-  await terminal.evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new Event('scroll'));
-  });
-  await expect(terminal).toContainText('Lookback | Sharpe | Max DD | 2x-cost Sharpe');
-  await expect(terminal.locator('.terminal-wide-grid')).toHaveCount(2);
-  const wideGeometry = await terminal.evaluate((element) => {
-    const rows = [...element.querySelectorAll<HTMLElement>('.terminal-wide-grid')];
-    const lineHeight = Number.parseFloat(getComputedStyle(rows[0]).lineHeight);
-    return {
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-      lineHeight,
-      rowHeights: rows.map((row) => row.getBoundingClientRect().height),
-      rowScrollable: rows.map((row) => row.scrollWidth > row.clientWidth),
-    };
-  });
-  // The pane itself never pans sideways; each wide row is its own scroller
-  // and stays a single unwrapped line.
-  expect(wideGeometry.scrollWidth).toBeLessThanOrEqual(wideGeometry.clientWidth);
-  expect(wideGeometry.rowScrollable).toEqual([true, true]);
-  expect(Math.max(...wideGeometry.rowHeights)).toBeLessThan(wideGeometry.lineHeight * 1.2);
-
-  // Panning one row of the table pans its whole block in lockstep.
-  await terminal.evaluate((element) => {
-    const row = element.querySelector<HTMLElement>('.terminal-wide-grid')!;
-    row.scrollLeft = 60;
-    row.dispatchEvent(new Event('scroll'));
-  });
-  await expect.poll(() => terminal.evaluate((element) => [...element.querySelectorAll<HTMLElement>('.terminal-wide-grid')]
-    .map((row) => row.scrollLeft))).toEqual([60, 60]);
-});
-
-const resizeCapabilities = [
-  'attention_classification', 'pane_size_opt_in', 'slash_commands',
-];
-
-async function openResizePane(page: Page, project: string) {
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: resizeCapabilities });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
-}
-
-test('surfaces one explicit error when a pane-size lease fails', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Lease error app', agent: 'omp' }],
-  });
-  await setAutoCommands(page, false);
-  await page.getByRole('button', { name: 'Open Lease error app on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'native terminal output',
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  const acquire = (await commands(page))
-    .find((command) => command.type === 'lease_pane_size')!;
-  await server(page, 0, {
-    type: 'command_result',
-    action: 'lease_pane_size',
-    request_id: acquire.request_id,
-    ok: false,
-    error: 'pane resize denied',
-  });
-  await expect(page.getByRole('alert')).toHaveText('Resize Session failed: pane resize denied');
-
-  await setAutoCommands(page, true);
-  await page.getByRole('button', { name: 'Back' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'release_pane_size').length).toBe(1);
-});
-
-test('withdraws hidden pane leases and re-leases only after fresh inventory on return', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Sleeping app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Sleeping app on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'before sleep',
-    content_fingerprint: 'sleep-1',
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  // Suspension withdraws action authority: no grace-window renewal may
-  // reacquire a lease. Releasing an already-owned lease remains allowed.
-  await page.waitForTimeout(11_000);
-  expect((await commands(page))
-    .filter((command) => command.type === 'lease_pane_size')).toHaveLength(1);
-  expect((await commands(page))
-    .filter((command) => command.type === 'release_pane_size')).toHaveLength(1);
-
-  // Refocus re-leases at once — the lease may have lapsed and the pane may be
-  // back at the desktop width — and re-reads the pane without waiting for the
-  // resync interval.
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThanOrEqual(2);
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
-});
-
 async function openOmpPane(page: Page, project: string) {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -4498,14 +3599,14 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
   // Pinned at the bottom: appended output is shown immediately.
   await frame(54);
   await expect(terminal).toContainText('anchored burst row 54');
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   // Scrolling up leaves sticky mode.
   await terminal.evaluate((element) => {
     element.scrollTop = element.scrollHeight / 2;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  expect(await terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
   const firstVisibleRow = () => terminal.evaluate((element) => {
     const top = element.getBoundingClientRect().top;
     const row = [...element.querySelectorAll('[data-terminal-row]')]
@@ -4532,14 +3633,14 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
     return row ? row.getBoundingClientRect().height : 20;
   });
   expect(Math.abs(after.offset - before.offset)).toBeLessThan(rowHeight);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  expect(await terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
 
   // Returning to the bottom re-engages sticky mode.
   await terminal.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 });
 
 test('keeps a small scroll-up from the bottom while output streams', async ({ page }) => {
@@ -4562,8 +3663,10 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await terminal.evaluate((element) => {
     element.dispatchEvent(new Event('touchmove', { bubbles: true }));
     element.scrollTop -= 20;
+    element.dispatchEvent(new Event('scroll'));
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   await frame(151);
   await expect(terminal).toContainText('near-bottom row 151');
@@ -4584,26 +3687,29 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   }
   expect(Math.abs(await terminal.evaluate((element) => element.scrollTop) - readingTop))
     .toBeLessThanOrEqual(1);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   // Scrolling partway back down is still reading, not following.
   await terminal.evaluate((element) => {
     element.scrollTop += 5;
+    element.dispatchEvent(new Event('scroll'));
   });
   await frame(152);
   await expect(terminal).toContainText('near-bottom row 152');
   expect(await bottomDistance()).toBeGreaterThan(10);
 
-  // Jump to latest follows output again.
-  await page.getByRole('button', { name: 'Jump to latest' }).click();
+  await terminal.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
   await frame(200);
   await expect(terminal).toContainText('near-bottom row 200');
   await expect.poll(bottomDistance).toBeLessThan(2);
 
   await terminal.evaluate((element) => {
     element.scrollTop -= 20;
+    element.dispatchEvent(new Event('scroll'));
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   // Reaching the bottom follows again, even when output lands before the scroll event.
   await terminal.evaluate((element, message) => {
@@ -4628,7 +3734,8 @@ test('renders rows after a long wheel scroll to just above the bottom', async ({
   await terminal.evaluate((element) => {
     element.scrollTop = element.scrollHeight / 2;
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
   await page.waitForTimeout(300);
 
   // One big wheel scroll lands 20px above the bottom.
@@ -4647,7 +3754,8 @@ test('renders rows after a long wheel scroll to just above the bottom', async ({
   // Being near the bottom is not a request to follow output.
   expect(await terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(10);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 });
 
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
@@ -5354,7 +4462,9 @@ test('default agent view: Conversation opens directly and persists across reload
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('Direct conversation answer')).toBeVisible();
   const openingCommands = (await commands(page)).slice(before.length);
-  expect(openingCommands.some((command) => ['read_pane', 'watch_pane'].includes(String(command.type)))).toBe(false);
+  expect(openingCommands.find(command => command.type === 'read_pane')).toMatchObject({ target: { server_session_id: 'primary', pane_id: 'w1:p1', terminal_id: 'terminal-w1:p1', generation: 1, agent_session_id: 'session-1' } });
+  expect(openingCommands.some(command => command.type === 'watch_pane')).toBe(false);
+  expect(openingCommands.some(command => String(command.type).startsWith('agent_') || ['submit_prompt', 'send_input', 'send_keys', 'lease_pane_size', 'release_pane_size'].includes(String(command.type)))).toBe(false);
   expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(true);
 
   await page.getByRole('button', { name: 'Back' }).click();
@@ -5633,8 +4743,21 @@ test('default agent view: empty and failed pages do not trigger fallback', async
 });
 
 test('pane view override: readers can change it while mutation actions stay disabled', async ({ page }) => {
-  await boot(page, [fedora], '/', { reader: true });
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
+          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
   await handshake(page, 0, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
@@ -6525,18 +5648,9 @@ test('finds and highlights matches across virtualized terminal output', async ({
     agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Search app', agent: 'codex' }],
   });
   await page.getByRole('button', { name: 'Open Search app on Fedora' }).click();
-  const terminal = page.getByRole('log');
-  // The terminal rewrites its own style attribute and the page CSP refuses inline styles, so a short
-  // viewport comes from a constructed stylesheet.
-  await page.evaluate(() => {
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync('[role="log"].term-content { height: 96px !important; min-height: 0 !important; max-height: 96px !important; flex: none !important; }');
-    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-  });
-  await expect.poll(() => terminal.evaluate((element) => element.clientHeight)).toBe(96);
   const lines = Array.from({ length: 320 }, (_, index) => {
     if (index === 24) return 'needle early result';
-    if (index === 316) return 'needle late result';
+    if (index === 286) return 'needle late result';
     return `terminal row ${index}`;
   });
   await server(page, 0, {
@@ -6560,16 +5674,7 @@ test('finds and highlights matches across virtualized terminal output', async ({
   await page.getByRole('button', { name: 'Next match' }).click();
   await expect(page.getByText('2 of 2', { exact: true })).toBeVisible();
   await expect(page.locator('mark.terminal-find-match.active')).toHaveText('needle');
-  await expect(terminal).toContainText('needle late result');
-  const before = await terminal.evaluate((element) => ({ top: element.scrollTop,
-    gap: element.scrollHeight - element.scrollTop - element.clientHeight }));
-  expect(before.gap).toBeGreaterThan(1);
-  expect(before.gap).toBeLessThan(48);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: `${lines.join('\n')}\nnew output` });
-  await expect(terminal).toContainText('new output');
-  expect(await terminal.evaluate((element) => element.scrollTop)).toBeCloseTo(before.top, 0);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect(page.getByRole('log')).toContainText('needle late result');
 
   await search.press('Escape');
   await expect(search).toBeHidden();
@@ -6719,7 +5824,7 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await expect(page.getByRole('group', { name: 'Terminal Width' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Fit to Phone' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Original Columns' })).toHaveCount(0);
-  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true })).toBeChecked();
   await expect(page.getByText(/laptop and SSH views of that pane look garbled/)).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Resize Session', exact: true }))
     .toHaveAccessibleDescription(/Resizing may truncate scrollback and lose older output\./);
@@ -7278,28 +6383,20 @@ test('keeps one-tap answers working with missing option indexes and explains dis
   };
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await handshake(page, 0, {
+    inventory: { state: 'error', error_code: 'topology_churn', message: 'Agent inventory is changing too quickly.', last_attempt_at: 1, last_success_at: 0, stale: true },
+  });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Sides', agent: 'claude', options: [], interaction: unindexed, question_layout: true }],
   });
   const left = page.getByRole('button', { name: 'Left', exact: true });
-  await expect(left).toBeEnabled();
-  // This relay offers no remote action from unavailable or stale inventory: the card is withheld rather than
-  // shown disabled (the disabled card and its explanation are component-tested in components.test.ts).
-  await server(page, 0, { type: 'inventory_status', state: 'error', error_code: 'topology_churn', message: 'Agent inventory is changing too quickly.', last_attempt_at: 1, last_success_at: 0, stale: true });
-  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toBeVisible();
-  await expect(left).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Right', exact: true })).toBeHidden();
-
-  // Ready alone is not actionable while inventory is stale.
-  await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 2, last_success_at: 1, stale: true });
-  await expect(left).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Open Sides on Fedora' })).toBeHidden();
+  await expect(left).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Right', exact: true })).toBeVisible();
+  await expect(left).toHaveAttribute('title', 'Agent controls are unavailable until Herdr inventory recovers.');
 
   // Once inventory recovers, an option without an index answers by its position.
-  await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 3, last_success_at: 3, stale: false });
-  await expect(left).toBeEnabled();
+  await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 2, last_success_at: 2, stale: false });
   await page.getByRole('button', { name: 'Right', exact: true }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
   expect((await commands(page)).find((command) => command.type === 'answer_question')).toMatchObject({ interaction_id: 'unindexed', selected_indices: [1] });

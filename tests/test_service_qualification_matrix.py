@@ -716,9 +716,7 @@ class Wiring(unittest.TestCase):
     def test_check_release_and_makefile_keep_every_event_covered(self):
         check, release, make = (self.text(p) for p in (".github/workflows/check.yml", ".github/workflows/release.yml", "Makefile"))
         self.assertIn("shell-check-ci-complement production-path-audit", check)
-        self.assertNotIn("resume-benchmark-pilot:", check)
-        for name in ("service-full-qualification.yml", "resume-benchmark.yml"):
-            self.assertIn(".github/workflows/" + name, check)
+        self.assertIn(".github/workflows/service-full-qualification.yml", check)
         self.assertIn("--workflow service-full-qualification.yml", release)
         self.assertIn("--workflow check.yml", release)
         self.assertIn("deadline=$((SECONDS + 1800))", release)

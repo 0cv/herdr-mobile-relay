@@ -98,23 +98,6 @@
   } from '$lib/updates';
   import type { AppUpdateStatus, RelayConfig, RelayConnectionView, RelaySpeechVoice } from '$lib/types';
 
-  const lastKnownState = relayStore.lastKnownControl.state;
-  const lastKnownAvailability = relayStore.lastKnownAvailability;
-  let lastKnownBusy = $state(false);
-  async function changeLastKnown(enabled: boolean) {
-    lastKnownBusy = true;
-    const ok = await relayStore.lastKnownControl.setEnabled(enabled);
-    lastKnownBusy = false;
-    if (!ok) relayStore.showToast('Last-known storage or coordination is unavailable; no plaintext fallback is used.', true);
-    else if (enabled) relayStore.requestAgents(true);
-  }
-  async function forgetLastKnown() {
-    lastKnownBusy = true;
-    const ok = await relayStore.lastKnownControl.forget();
-    lastKnownBusy = false;
-    if (!ok) relayStore.showToast('Current summaries were cleared, but persistent deletion could not be confirmed.', true);
-  }
-
   function herdrWarnings(features: Record<string, { state: string; reason: string }> | undefined): string {
     const labels: Record<string, string> = {
       ordinary_json: 'Herdr API',
@@ -202,17 +185,6 @@
   });
 
   onMount(refreshPushPreferences);
-
-  // Resume timing is local diagnostics; its summary code loads on demand so it
-  // never weighs on the app's startup payload.
-  let ResumeTimingSettings = $state<typeof import('$components/ResumeTimingSettings.svelte')['default'] | null>(null);
-  onMount(() => {
-    let active = true;
-    void import('$components/ResumeTimingSettings.svelte')
-      .then((module) => { if (active) ResumeTimingSettings = module.default; })
-      .catch(() => {});
-    return () => { active = false; };
-  });
 
   let relayLabel = $state('');
   let relayUrl = $state('');
@@ -729,12 +701,12 @@
             <small>Push: {pushStatusLabel(connection)}</small>
             {#if connection?.authRejected}
               <small class="error" role="alert">
-                This setup link has expired or was already used, or this device was refused. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.
+                This computer refused this device. Import a new invitation link, or remove and add the relay.
               </small>
             {/if}
             {#if connection?.pairingRequired}
               <small class="error" role="alert">
-                This setup link may have expired or already been used. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.
+                This computer needs pairing. Import a device invitation link, or remove and add the relay.
               </small>
             {/if}
             {#if connection?.pairingDeferred}
@@ -990,25 +962,10 @@
   />
 
   <Card>
-    <h3>Last-known Summary</h3>
-    <AppSwitch checked={$lastKnownState.enabled} disabled={lastKnownBusy || $securityState.locked}
-      label="Keep an Encrypted Last-known Summary" descriptionId="last-known-consent" onchange={changeLastKnown} />
-    <p class="hint" id="last-known-consent">Off by default. Retains agent/workspace display labels, coarse type/status and the time last seen for up to 60 minutes in this tab's encrypted session storage. Labels may be sensitive. No terminal, conversation, prompt, approval, path or attachment content is retained. Tab restoration may retain it; a new Home Screen launch, tab closure or browser eviction may not. This is read-only information, never permission to act.</p>
-    <p class="hint">At most 200 rows and 50 groups per relay, 64 KiB plaintext per relay, 10 relays and 512 KiB encrypted entries; older entries are evicted. Forget invalidates all relays and tabs. Repopulation requires a later fresh snapshot.</p>
-    <Button disabled={lastKnownBusy} onclick={forgetLastKnown}>Forget last-known data</Button>
-    {#if $lastKnownState.unavailable || $lastKnownAvailability.unavailable}<p role="status">Last-known storage is unavailable.</p>{/if}
-    {#if $lastKnownAvailability.persistenceUncertain}<p role="status">Current summaries were cleared. Browser storage refused deletion; durable erasure across reloads cannot be promised.</p>{/if}
-  </Card>
-
-  <Card>
     <h3>Security</h3>
     <AppSwitch checked={deviceLock} disabled={$securityState.busy} label="Require Fingerprint / Device Unlock" onchange={changeDeviceLock} />
     <p class="hint">{deviceVerificationSupported() ? $securityState.hint : 'Device verification needs HTTPS and WebAuthn support.'}</p>
   </Card>
-
-  {#if ResumeTimingSettings}
-    <ResumeTimingSettings />
-  {/if}
 
   <Card>
     <h3>Status</h3>

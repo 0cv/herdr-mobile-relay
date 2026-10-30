@@ -13,13 +13,10 @@ import LaunchView from '$components/LaunchView.svelte';
 import { CommandError, relayStore } from '$lib/store';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
-import { hiddenServers, setHomeLayout, setServerHidden } from '$lib/preferences';
-import { targetRefForAgent } from '$lib/resource-id';
 import { reloadRisk } from '$lib/reload-guard';
+import { targetRefForAgent } from '$lib/resource-id';
+import { hiddenServers, setHomeLayout, setServerHidden } from '$lib/preferences';
 import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
-
-import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
-import TerminalWithdrawalHarness from './TerminalWithdrawalHarness.svelte';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
 
@@ -37,14 +34,10 @@ class SlashCommandWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   constructor(readonly url: string) { SlashCommandWebSocket.instances.push(this); }
-  private inventory = new CorrelatedInventoryFixture((message) => this.onmessage?.({ data: JSON.stringify(message) }));
-  send(payload: string) { this.sent.push(payload); this.inventory.client(payload); }
+  send(payload: string) { this.sent.push(payload); }
   close() { this.readyState = SlashCommandWebSocket.CLOSED; }
   open() { this.readyState = SlashCommandWebSocket.OPEN; this.onopen?.(); }
-  message(payload: unknown) {
-    this.onmessage?.({ data: JSON.stringify(this.inventory.server(payload)) });
-    this.inventory.flush();
-  }
+  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
 }
 
 const blockedAgent: Agent = {
@@ -68,27 +61,6 @@ function launchConnection(agentProfiles: AgentProfile[], hermesProfiles: string[
 }
 
 describe('accessible Svelte interactions', () => {
-  it.each(['withdrawal', 'replacement'] as const)('cleans up the mount-owned watch on %s, not the reactive prop', async (change) => {
-    const owned: Agent = { ...blockedAgent, status: 'working', attention_kind: undefined, options: undefined,
-      server_session_id: 'primary', terminal_id: 'terminal-owned', generation: 1, agent_session_id: '' };
-    const watch = vi.spyOn(relayStore, 'watchPane').mockClear().mockImplementation(() => undefined);
-    const unwatch = vi.spyOn(relayStore, 'unwatchPane').mockClear().mockImplementation(() => undefined);
-    const read = vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    const view = render(TerminalWithdrawalHarness, { agent: owned });
-    try {
-      await waitFor(() => expect(watch).toHaveBeenCalledWith(owned));
-      const replacement: Agent = { ...owned, pane_id: 'fedora::replacement', raw_pane_id: 'replacement', terminal_id: 'terminal-replacement' };
-      await view.rerender({ agent: change === 'withdrawal' ? null : replacement });
-      expect(unwatch).toHaveBeenCalledExactlyOnceWith(owned);
-      expect(unwatch).not.toHaveBeenCalledWith(null);
-      expect(unwatch).not.toHaveBeenCalledWith(replacement);
-    } finally {
-      view.unmount();
-      watch.mockRestore();
-      unwatch.mockRestore();
-      read.mockRestore();
-    }
-  });
   it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
     const user = userEvent.setup();
     const relay = { id: 'invited', label: 'Invited', url: 'wss://invited.example', token: '' };
@@ -266,7 +238,6 @@ describe('accessible Svelte interactions', () => {
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
       server_session_id: 'primary', terminal_id: 'terminal-w1:late', generation: 1, agent_session_id: '',
     };
-    socket.message({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     const first = render(TerminalView, {
       agent,
@@ -788,149 +759,7 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
-  it('restores teardown cancellation identity on remount, without replacing or replaying the upload', async () => {
-    const user = userEvent.setup();
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
-    const cancel = vi.fn().mockRejectedValueOnce(new Error('unknown teardown cancellation')).mockResolvedValue(undefined);
-    const begin = vi.fn().mockResolvedValue({ upload_id: 'remount-cleanup', chunk_bytes: 1024,
-      expires_at: new Date(Date.now() + 60_000).toISOString(),
-      limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 } });
-    const controller = new AttachmentBatchController({
-      server_session_id: 'server-session', pane_id: 'w1:p1', terminal_id: 'terminal', generation: 1,
-    }, { begin, chunk: async () => { throw new Error('unknown chunk'); },
-      finish: async () => { throw new Error('Unexpected finish'); }, cancel },
-    { maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 1024 });
-    const create = vi.spyOn(relayStore, 'attachmentController').mockReturnValue(controller);
-    const agent: Agent = { ...blockedAgent, status: 'done', attention_kind: 'unknown', options: undefined };
-    const props = { agent, allAgents: [agent], responding: new Set<string>(),
-      frame: { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' } };
-    const first = render(TerminalView, props);
-    let second: { unmount: () => void } | undefined;
-    try {
-      await fireEvent.change(first.container.querySelector('input[type="file"]')!, {
-        target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
-      });
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Discard upload' })).toBeEnabled());
-      first.unmount();
-      await waitFor(() => expect(controller.snapshot().issue?.code).toBe('attachment_cancel_failed'));
-      expect(relayStore.recoverAttachmentController(agent)).toBe(controller);
-      // Even if a new live generation occupies this pane, cleanup retains its old target.
-      const current = { ...agent, generation: 2 };
-      second = render(TerminalView, { ...props, agent: current, allAgents: [current] });
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Retry attachment cancellation' })).toBeEnabled());
-      expect(create).toHaveBeenCalledTimes(1);
-      expect(begin).toHaveBeenCalledTimes(1);
-      await user.click(screen.getByRole('button', { name: 'Retry attachment cancellation' }));
-      await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry attachment cancellation' })).not.toBeInTheDocument());
-      expect(cancel).toHaveBeenCalledTimes(2);
-      expect(cancel).toHaveBeenNthCalledWith(2, expect.objectContaining({ upload_id: 'remount-cleanup',
-        target: expect.objectContaining({ generation: 1 }) }));
-      expect(relayStore.recoverAttachmentController(current)).toBeNull();
-      expect(begin).toHaveBeenCalledTimes(1);
-    } finally {
-      second?.unmount();
-      vi.restoreAllMocks();
-    }
-  });
-
-  it.each([true, false])('remounts a changed cleanup scope with a fresh upload (teardown first %s)', async (teardownFirst) => {
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
-    const target = { server_session_id: 'server-session', pane_id: 'w1:p1', terminal_id: 'terminal', generation: 1 };
-    const result = (uploadId: string) => ({ upload_id: uploadId, chunk_bytes: 1024,
-      expires_at: new Date(Date.now() + 60_000).toISOString(),
-      limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 } });
-    const limits = { maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 1024 };
-    const cancel = vi.fn().mockRejectedValue(new Error('uncertain old cleanup'));
-    const old = new AttachmentBatchController(target, {
-      begin: async () => result('revoked-cleanup'), chunk: async () => { throw new Error('unknown chunk'); },
-      finish: async () => { throw new Error('Unexpected finish'); }, cancel,
-    }, limits);
-    const begin = vi.fn().mockResolvedValue(result('new-scope-upload'));
-    const fresh = new AttachmentBatchController({ ...target, generation: 2 }, {
-      begin, chunk: async () => ({ file_index: 0, next_sequence: 1, received_bytes: 3 }),
-      finish: async (request) => ({ attachments: [{ ref: 'attachment:new-scope', name: 'shot.png', media_type: 'image/png', bytes: 3,
-        sha256: request.files[0].sha256, expires_at: new Date(Date.now() + 60_000).toISOString() }] }),
-      cancel: async () => undefined,
-    }, limits);
-    const create = vi.spyOn(relayStore, 'attachmentController').mockReturnValueOnce(old).mockReturnValue(fresh);
-    const agent: Agent = { ...blockedAgent, status: 'done', attention_kind: 'unknown', options: undefined };
-    const props = { agent, allAgents: [agent], responding: new Set<string>(),
-      frame: { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' } };
-    const first = render(TerminalView, props);
-    let second: { unmount: () => void } | undefined;
-    try {
-      await fireEvent.change(first.container.querySelector('input[type="file"]')!, {
-        target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
-      });
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Discard upload' })).toBeEnabled());
-      if (!teardownFirst) relayStore.removeRelay(agent.relay_id);
-      first.unmount();
-      await waitFor(() => expect(old.snapshot().issue?.code).toBe('attachment_cancel_failed'));
-      if (teardownFirst) {
-        expect(relayStore.recoverAttachmentController(agent)).toBe(old);
-        relayStore.removeRelay(agent.relay_id);
-      }
-      expect(relayStore.recoverAttachmentController(agent)).toBeNull();
-      const current = { ...agent, generation: 2 };
-      const mounted = render(TerminalView, { ...props, agent: current, allAgents: [current] });
-      second = mounted;
-      expect(screen.queryByRole('button', { name: 'Retry attachment cancellation' })).not.toBeInTheDocument();
-      await fireEvent.change(mounted.container.querySelector('input[type="file"]')!, {
-        target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
-      });
-      await waitFor(() => expect(begin).toHaveBeenCalledTimes(1));
-      await waitFor(() => expect(fresh.snapshot().items[0]?.state).toBe('ready'));
-      expect(create).toHaveBeenCalledTimes(2);
-      expect(cancel).toHaveBeenCalledTimes(1);
-      expect(old.hasPendingCleanup()).toBe(true);
-      expect(fresh.hasPendingCleanup()).toBe(false);
-    } finally {
-      second?.unmount();
-      vi.restoreAllMocks();
-    }
-  });
-
-  it('keeps a failed attachment cancellation available for explicit retry', async () => {
-    const user = userEvent.setup();
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
-    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
-    const cancel = vi.fn().mockRejectedValueOnce(new Error('unknown cancellation')).mockResolvedValue(undefined);
-    const controller = new AttachmentBatchController({
-      server_session_id: 'server-session', pane_id: 'w1:p1', terminal_id: 'terminal', generation: 1,
-    }, {
-      begin: async () => ({ upload_id: 'retry-cleanup', chunk_bytes: 1024,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-        limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 } }),
-      chunk: async () => { throw new Error('unknown chunk'); },
-      finish: async () => { throw new Error('Unexpected finish'); }, cancel,
-    }, { maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 1024 });
-    vi.spyOn(relayStore, 'attachmentController').mockReturnValue(controller);
-    const agent: Agent = { ...blockedAgent, status: 'done', attention_kind: 'unknown', options: undefined };
-    const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>(),
-      frame: { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' } });
-    try {
-      await fireEvent.change(view.container.querySelector('input[type="file"]')!, {
-        target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
-      });
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Discard upload' })).toBeEnabled());
-      await user.click(screen.getByRole('button', { name: 'Discard upload' }));
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Retry attachment cancellation' })).toBeEnabled());
-      expect(controller.hasPendingCleanup()).toBe(true);
-      await user.click(screen.getByRole('button', { name: 'Retry attachment cancellation' }));
-      await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry attachment cancellation' })).not.toBeInTheDocument());
-      expect(cancel).toHaveBeenCalledTimes(2);
-      expect(cancel).toHaveBeenNthCalledWith(2, expect.objectContaining({ upload_id: 'retry-cleanup' }));
-      expect(controller.hasPendingCleanup()).toBe(false);
-    } finally {
-      view.unmount();
-      clearPromptDraft(agent);
-      vi.restoreAllMocks();
-    }
-  });
-
-  it('enables blocked terminal text only while its editor is active', async () => {
+  it('keeps blocked terminal drafts editable and offers explicit manual input for custom controls', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
@@ -1024,43 +853,10 @@ describe('accessible Svelte interactions', () => {
     expect(screen.queryByText('No chat agents are running.')).not.toBeInTheDocument();
   });
 
-  it('disables stale question navigation like the card it opens, and restores it when inventory is fresh', async () => {
-    const relay = { id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' };
-    const question = (id: string, options: QuestionInteraction['options']): Agent => ({
-      ...blockedAgent, pane_id: `fedora::${id}`, raw_pane_id: id, project: id, attention_kind: 'question', options: undefined,
-      interaction: { id, kind: 'single_select', question: `Pick ${id}?`, options },
-    });
-    const quick = question('quick', [{ index: 0, label: 'Yes' }, { index: 1, label: 'No' }]);
-    const full = question('full', [{ index: 0, label: 'Domain port', description: 'Transport agnostic.' }]);
-    const user = userEvent.setup();
-    const onopen = vi.fn();
-    const stale = new Map([['fedora', {
-      status: 'connected', actionsFresh: true,
-      inventory: { state: 'ready', errorCode: '', message: '', lastAttemptAt: 2, lastSuccessAt: 1, stale: true },
-    } as any]]);
-    const view = render(AgentList, { agents: [quick, full, blockedAgent], relays: [relay], connections: stale, responding: new Set<string>(), onopen });
-    for (const name of ['Yes', 'More…', /Choose answer/, 'Approve once']) {
-      expect(screen.getByRole('button', { name })).toBeDisabled();
-      expect(screen.getByRole('button', { name })).toHaveAttribute('title', 'Agent controls are unavailable until Herdr inventory recovers.');
-    }
-    await user.click(screen.getByRole('button', { name: 'More…' }));
-    await user.click(screen.getByRole('button', { name: /Choose answer/ }));
-    expect(onopen).not.toHaveBeenCalled();
-
-    const fresh = new Map([['fedora', { status: 'connected', actionsFresh: true, inventory: { state: 'ready', stale: false } } as any]]);
-    await view.rerender({ agents: [quick, full, blockedAgent], relays: [relay], connections: fresh, responding: new Set<string>(), onopen });
-    for (const name of ['Yes', 'More…', /Choose answer/, 'Approve once']) {
-      expect(screen.getByRole('button', { name })).toBeEnabled();
-    }
-    await user.click(screen.getByRole('button', { name: 'More…' }));
-    await user.click(screen.getByRole('button', { name: /Choose answer/ }));
-    expect(onopen.mock.calls).toEqual([[quick], [full]]);
-  });
-
   it('distinguishes successful empty inventory from loading inventory', () => {
     const relay = { id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' };
     const readyConnections = new Map([['fedora', {
-      status: 'connected', actionsFresh: true, inventory: { state: 'ready' },
+      status: 'connected', inventory: { state: 'ready' },
     } as any]]);
     const { unmount } = render(AgentList, {
       agents: [], relays: [relay], connections: readyConnections,

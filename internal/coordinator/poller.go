@@ -29,7 +29,6 @@ type Poller struct {
 	wakeup             chan struct{}
 	eventReconnectWait func(context.Context) bool
 	onInventoryChange  func() error
-	onPollStart        func() func([]*AgentState, []herdr.Workspace, bool)
 	enrich             func(context.Context, []*AgentState)
 	hostname           string
 	topologyRetries    int
@@ -61,13 +60,6 @@ func NewPoller(client *herdr.Client, state *State, interval time.Duration, logge
 // after the operation that caused the signal has completed.
 func (p *Poller) SetOnInventoryChange(fn func() error) {
 	p.onInventoryChange = fn
-}
-
-// SetOnPollStart captures refresh requests before any inventory query starts.
-// Its completion receives only this poll's rows, never the presentation merge.
-// Install it before Run; event publications deliberately do not invoke it.
-func (p *Poller) SetOnPollStart(fn func() func([]*AgentState, []herdr.Workspace, bool)) {
-	p.onPollStart = fn
 }
 
 func (p *Poller) SetEnrich(fn func(context.Context, []*AgentState)) {
@@ -136,18 +128,6 @@ func (p *Poller) poll(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	var complete func([]*AgentState, []herdr.Workspace, bool)
-	if p.onPollStart != nil {
-		complete = p.onPollStart()
-	}
-	var freshAgents []*AgentState
-	var freshWorkspaces []herdr.Workspace
-	ready := false
-	defer func() {
-		if complete != nil {
-			complete(freshAgents, freshWorkspaces, ready && ctx.Err() == nil)
-		}
-	}()
 	token := p.state.BeginPoll()
 
 	inv, err := p.client.GetInventory(ctx)
@@ -198,9 +178,6 @@ func (p *Poller) poll(ctx context.Context) {
 		return
 	}
 	p.topologyRetries = 0
-	freshAgents = agents
-	freshWorkspaces = workspaces
-	ready = true
 	p.notifyInventoryChange()
 	p.logger.Debug("inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
 }

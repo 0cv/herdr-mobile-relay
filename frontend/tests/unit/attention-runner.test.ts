@@ -25,7 +25,7 @@ appendFileSync(process.env.RUNNER_LOG, JSON.stringify({
 `;
   executable('bun', `${record}
 if (args[0] === '-e') {
-  if (args[1].includes('devDependencies')) console.log(process.env.FAKE_VERSION || '1.63.0');
+  if (args[1].includes('devDependencies')) console.log(process.env.FAKE_VERSION || '1.62.1');
   else process.exit(Number(process.env.FAKE_READY_EXIT || 0));
 } else process.exit(Number(process.env.FAKE_TEST_EXIT || 0));
 `);
@@ -62,7 +62,7 @@ describe('attention browser runner', () => {
     const result = run({}, ['--project=webkit-attention', '--grep', 'full conversation']);
     expect(result.status, result.stderr).toBe(0);
     const launched = result.calls.find((call) => call.command === 'docker' && call.args[0] === 'run')!;
-    expect(launched.args).toContain('mcr.microsoft.com/playwright:v1.63.0-noble');
+    expect(launched.args).toContain('mcr.microsoft.com/playwright:v1.62.1-noble');
     expect(launched.args).toContain('127.0.0.1::3000');
     expect(launched.args.some((arg) => arg.endsWith(':/work/frontend:ro'))).toBe(true);
     expect(launched.args).toContain('node_modules/playwright/cli.js');
@@ -113,7 +113,7 @@ describe('attention browser runner', () => {
   });
 
   it('does not launch an unpinned browser image', () => {
-    const result = run({ FAKE_VERSION: '^1.63.0' });
+    const result = run({ FAKE_VERSION: '^1.62.1' });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('exact Playwright version');
     expect(result.calls.some((call) => call.command === 'docker')).toBe(false);

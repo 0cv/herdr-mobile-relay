@@ -84,10 +84,9 @@
     return $plan.relayIds.map((relayId) => {
       const relay = $relays.find((candidate) => candidate.id === relayId);
       const row = relayProgress($plan, relayId, relay, $connections.get(relayId), now);
-      if (readOnlyRelayIds.has(relayId)) {
-        return { ...row, canStart: false, detail: 'This paired device has read-only access to this relay.' };
-      }
-      return { ...row, canStart: row.canStart && $connections.get(relayId)?.actionsFresh === true };
+      return readOnlyRelayIds.has(relayId)
+        ? { ...row, canStart: false, detail: 'This paired device has read-only access to this relay.' }
+        : row;
     });
   });
   const phoneApp = $derived(appProgress($plan, $connections, $appUpdate));
@@ -318,7 +317,7 @@
   }
 
   async function startRelayUpdate(row: RelayProgressRow): Promise<void> {
-    if (!$plan || !row.relay || busyRelayId || readOnlyRelayIds.has(row.id) || !relayStore.relayActionsFresh(row.id)) return;
+    if (!$plan || !row.relay || busyRelayId || readOnlyRelayIds.has(row.id)) return;
     const relayId = row.id;
     busyRelayId = relayId;
     markUpdateProgressRelayStarted(relayId);

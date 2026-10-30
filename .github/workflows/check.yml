@@ -62,7 +62,6 @@ jobs:
           .github/workflows/mobile-ci.yml .github/workflows/release.yml
           .github/workflows/service-qualification.yml
           .github/workflows/service-full-qualification.yml
-          .github/workflows/resume-benchmark.yml
           .github/workflows/tailscale-native-preflight.yml
           .github/workflows/native-manager-lifecycle.yml
       - run: go vet ./...
@@ -511,11 +510,6 @@ jobs:
           printf 'Dir::Cache::Archives "%s";\nAPT::Keep-Downloaded-Packages "true";\n' "$HOME/.cache/playwright-apt" \
             | sudo tee /etc/apt/apt.conf.d/90-playwright-archives >/dev/null
       - run: cd frontend && bun x playwright install --with-deps chromium webkit
-      - name: Preflight supported resume paint composition (both engines)
-        run: >-
-          cd frontend && HERDR_WEB_ROOT="$GITHUB_WORKSPACE/web"
-          bun x playwright test tests/browser/resume.spec.ts
-          --grep 'paint composition preflight$' --retries=0 --workers=1
       - name: Let the cache read the browser system packages
         run: sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
       - if: steps.playwright-apt.outputs.cache-hit != 'true'

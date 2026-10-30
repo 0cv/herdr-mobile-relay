@@ -12,14 +12,12 @@ import type {
   RelayInvitation,
 } from '../device-auth';
 import {
-  observePhase,
   DEVICE_UNAUTHORIZED_CODE,
   type FrameChannel,
   type FrameChannelFactory,
   type RelayTransport,
   type TransportHandlers,
   type TransportKind,
-  type TransportObserver,
   type TransportStatusDetail,
 } from './types';
 
@@ -46,13 +44,11 @@ export interface EncryptedTransportOptions {
   createChannel: FrameChannelFactory;
   handlers: TransportHandlers;
   handshakeTimeoutMs?: number;
-  /** Receives handshake milestones for local resume timing only. */
-  observe?: TransportObserver;
 }
 
 export type TransportAuthentication = Pick<
   EncryptedTransportOptions,
-  'getAuthentication' | 'onAuthenticated' | 'observe'
+  'getAuthentication' | 'onAuthenticated'
 >;
 
 /**
@@ -104,7 +100,6 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
     if (finished || ready) return;
     ready = true;
     clearHandshakeTimer();
-    if (encrypted) observePhase(options.observe, 'authenticated', kind);
     handlers.onStatus('connected', { path: kind });
   }
 
@@ -136,15 +131,12 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
           markReady();
           return;
         }
-        if (!handshake) throw new Error('Encrypted server hello arrived before the client hello.');
-        observePhase(options.observe, 'e2ee-server-hello', kind);
+        if (!handshake) throw new Error('Unexpected server hello');
         const completed = await handshake.complete(JSON.parse(String(frame)));
-        observePhase(options.observe, 'e2ee-server-hello', kind);
         if (finished) return;
         challenge = completed;
         handshake = null;
         channel?.sendFrame(challenge.finish);
-        observePhase(options.observe, 'e2ee-confirm', kind);
         return;
       }
       const plaintext = await session.decrypt(frame);
@@ -181,16 +173,12 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
             return;
           }
           handshakeTimer = setTimeout(() => {
-            observePhase(options.observe, 'timeout', kind);
-            finish({ reason: 'Encrypted relay handshake timed out' });
+            finish({ reason: 'Relay handshake timed out' });
           }, handshakeTimeoutMs);
           void createE2EEClientHandshake(presentedAuthentication, undefined, codec).then((created) => {
-            // The attempt may have closed while the keys were generated; its
-            // channel already drops frames, so no hello is sent or observed.
             if (finished) return;
             handshake = created;
             channel?.sendFrame(JSON.stringify(created.hello));
-            observePhase(options.observe, 'e2ee-hello', kind);
           }).catch(() => {
             finish({ reason: 'Relay handshake failed' });
           });

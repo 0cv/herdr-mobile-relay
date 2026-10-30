@@ -176,9 +176,8 @@ type Server struct {
 	workspaceView []herdr.Workspace
 	inventoryView map[string]any
 
-	refreshMu        sync.Mutex
-	refreshClients   map[string]bool
-	snapshotRequests map[string]inventorySnapshotRequest
+	refreshMu      sync.Mutex
+	refreshClients map[string]bool
 	// Optional deterministic publication observer; installed before serving.
 	inventoryPublicationObserver func(string)
 	// Optional test hook between history loading and tuple revalidation.
@@ -1071,9 +1070,6 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 	s.hub.SetOnConnect(s.sendConnectionSnapshot)
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
-		s.refreshMu.Lock()
-		delete(s.snapshotRequests, client.ID())
-		s.refreshMu.Unlock()
 		s.stopConversationFeed(client.ID(), "")
 		s.stopPaneWatch(client.ID(), "")
 		if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
@@ -1682,11 +1678,7 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 				s.logger.Warn("phone app origin was not stored", "error", err)
 			}
 		case "refresh_agents":
-			if inbound.SnapshotRequestID != "" {
-				s.requestInventorySnapshot(client, inbound.SnapshotRequestID)
-			} else {
-				s.requestAgentRefresh(client)
-			}
+			s.requestAgentRefresh(client)
 		case "webrtc_offer", "webrtc_ice", "webrtc_close":
 			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
 		default:
@@ -3781,7 +3773,6 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		AgentProfiles:   s.profiles.Profiles(),
 		HermesProfiles:  hermesprofiles.List(s.home),
 		Hybrid:          s.hybridDescriptor(),
-		Ingress:         s.ingressDescriptor(),
 	})
 	s.hub.Send(client, map[string]any{
 		"type":   "agents",
@@ -3800,35 +3791,6 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		"activities": activities,
 	})
 	s.hub.Send(client, inventoryStatusMessage(inventory))
-}
-
-// ingressDescriptor reports the configured ingress mode inside the
-// authenticated connection snapshot. The phone uses it only to label local,
-// in-memory resume timings; it grants nothing and changes no behaviour.
-func (s *Server) ingressDescriptor() string {
-	if s.cfg == nil {
-		return ""
-	}
-	return ingressForTransport(s.cfg.Transport)
-}
-
-// ingressForTransport maps a resolved relay transport to its public ingress
-// descriptor. Unknown or empty transports are omitted rather than guessed.
-func ingressForTransport(transport string) string {
-	switch transport {
-	case config.TransportCloudflare:
-		return protocol.IngressCloudflare
-	case config.TransportGateway:
-		return protocol.IngressGateway
-	case config.TransportTailscale:
-		return protocol.IngressTailscaleManaged
-	case config.TransportTailscaleExternal:
-		return protocol.IngressTailscaleExternal
-	case config.TransportTailscaleCLI:
-		return protocol.IngressTailscaleCLI
-	default:
-		return ""
-	}
 }
 
 func (s *Server) requestAgentRefresh(client *transport.ClientConn) {
@@ -4677,7 +4639,6 @@ func (s *Server) setInventoryPublisher(ctx context.Context) {
 	s.poller.SetOnInventoryChange(func() error {
 		return s.publishCurrentInventory(ctx)
 	})
-	s.poller.SetOnPollStart(s.beginRequestedInventorySnapshots)
 }
 
 func (s *Server) publishCurrentInventory(ctx context.Context) error {

@@ -14,7 +14,6 @@ way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is nev
 | `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch, push to the CI branch **only with `[full-qualification]` in the head commit message** (below) | native: all 2339 cells; uninstall CLI: all 1040 cells (1665 invocations + 3 controls) | native 29, uninstall CLI 3 |
 | `check.yml` (Shell job) | push to `main`, `dev`, the CI branch; `pull_request` | none: runs `make shell-check-ci-complement` | - |
 | `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes, and a push run is never accepted); none found fails closed; the existing 1800 s window | - |
-| `resume-benchmark.yml` | `workflow_dispatch` only (was a per-push `check.yml` job) | - | - |
 
 Both service workflows also run the nine unsharded suites on both runners: common, credentials, **install** (the
 hosted macOS run of `install.sh`'s Darwin-specific `stat -f` branch), supervision, dispatch,

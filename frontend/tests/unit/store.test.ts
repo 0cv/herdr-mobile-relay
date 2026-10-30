@@ -3,7 +3,6 @@ import { fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { securityState } from '$lib/security';
 import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
-import PiIntegration from '$components/PiIntegration.svelte';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,7 +25,6 @@ import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
-import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
 
@@ -58,15 +56,11 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
-  private inventory = new CorrelatedInventoryFixture((message) => this.onmessage?.({ data: JSON.stringify(message) }));
-  send(payload: string) { this.sent.push(payload); this.inventory.client(payload); }
+  get protocol() { return typeof this.protocols === 'string' ? this.protocols : ''; }
+  send(payload: string) { this.sent.push(payload); }
   close() { this.readyState = MockWebSocket.CLOSED; }
   open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
-  message(payload: unknown) {
-    this.onmessage?.({ data: JSON.stringify(this.inventory.server(payload)) });
-    if (payload && typeof payload === 'object' && 'type' in payload
-      && ['push_config', 'agents', 'workspaces', 'inventory_status', 'blocked', 'agent_update'].includes(String(payload.type))) this.inventory.flush();
-  }
+  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
   serverClose(code?: number) {
     this.readyState = MockWebSocket.CLOSED;
     this.onclose?.(code === undefined ? undefined : { code });
@@ -107,50 +101,6 @@ function exactWireScope(paneId: string, relayId: string) {
   };
 }
 
-function upgradedPeer(handlers: TransportHandlers): CorrelatedInventoryFixture {
-  const receive = handlers.onMessage;
-  const peer = new CorrelatedInventoryFixture(receive);
-  handlers.onMessage = (message) => { receive(peer.server(message) as Record<string, any>); peer.flush(); };
-  return peer;
-}
-
-function seedUploadAgent(socket: MockWebSocket): void {
-  socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 }] });
-}
-
-function seedAgent(socket: MockWebSocket, agent: Agent): void {
-  socket.message({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
-}
-
-function connectedRole(role: 'controller' | 'reader') {
-  relayStore.destroy();
-  relayStore.relayConfigs.set([]);
-  const relay = { label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' };
-  const relayId = makeRelayId(relay.label, relay.url);
-  localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: {
-    [relayId]: { kind: 'credential', id: 'credential-test', version: 1, secret: 'C'.repeat(43),
-      deviceId: 'device-test', role, locale: 'en', issuedAt: Date.now(), invitationId: 'invitation-test' },
-  } }));
-  const sent: Record<string, any>[] = [];
-  let deliver!: (message: Record<string, unknown>) => void;
-  transportHijack.current = (_relay, handlers) => {
-    const peer = upgradedPeer(handlers);
-    deliver = handlers.onMessage;
-    return {
-      kind: 'websocket',
-      connect: () => {
-        handlers.onStatus('connected');
-        deliver({ type: 'push_config', protocol: 3, capabilities: ['pi_integration', 'conversation_activity'], inventory: { state: 'ready' } });
-        deliver({ type: 'agents', agents: [{ pane_id: 'w1:p1', agent: 'pi', ...exactAgentFields(), agent_session_id: 'session-1' }] });
-      },
-      send: (payload) => { sent.push(payload); peer.client(JSON.stringify(payload)); return true; },
-      close: () => {},
-    };
-  };
-  relayStore.addRelay(relay);
-  return { relayId, sent, deliver };
-}
-
 describe('relay command store', () => {
   beforeEach(() => {
     transportHijack.current = null;
@@ -161,10 +111,7 @@ describe('relay command store', () => {
     paneAgentViewOverrides.set({});
     vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
-    relayStore.setHidden(false);
-    securityState.update((state) => ({ ...state, locked: false }));
     relayStore.toast.set(null);
-    setTerminalHistoryLines(1_000);
     setTerminalRefreshInterval(250);
     relayStore.relayConfigs.set([]);
     relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
@@ -175,133 +122,13 @@ describe('relay command store', () => {
     relayStore.destroy();
     setTerminalResizeSession(false);
     setTerminalHeightLease(false);
+    setTerminalHistoryLines(1_000);
     relayStore.relayConfigs.set([]);
     defaultAgentView.set('terminal');
     paneAgentViewOverrides.set({});
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
-  });
-
-  it('loads and toggles Pi Integration through the real command gate for its controller', async () => {
-    const { relayId, sent, deliver } = connectedRole('controller');
-    render(PiIntegration, { relayId, label: 'Fedora', connection: relayStore.connection(relayId)! });
-    await vi.waitFor(() => expect(sent.some(command => command.type === 'get_pi_integration')).toBe(true));
-    const read = sent.find(command => command.type === 'get_pi_integration')!;
-    expect(read).not.toHaveProperty('target');
-    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
-      data: { instance: 'relay-instance', enabled: false, profiles: [] } });
-    const toggle = screen.getByRole('switch', { name: 'Pi Integration' });
-    await vi.waitFor(() => expect(toggle).toBeEnabled());
-    await fireEvent.click(toggle);
-    const change = sent.find(command => command.type === 'set_pi_integration')!;
-    expect(change).toMatchObject({ instance: 'relay-instance', enabled: true, protocol: 3 });
-    expect(change).not.toHaveProperty('target');
-    deliver({ type: 'command_result', request_id: change.request_id, action: change.type, ok: true,
-      data: { instance: 'relay-instance', enabled: true, profiles: [] } });
-    await vi.waitFor(() => expect(toggle).toBeChecked());
-  });
-
-  it('allows a reader to load Pi Integration but refuses toggles, unknown commands and stale authority', async () => {
-    const { relayId, sent, deliver } = connectedRole('reader');
-    render(PiIntegration, { relayId, label: 'Fedora', connection: relayStore.connection(relayId)!, readOnly: true });
-    await vi.waitFor(() => expect(sent.some(command => command.type === 'get_pi_integration')).toBe(true));
-    const read = sent.find(command => command.type === 'get_pi_integration')!;
-    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
-      data: { instance: 'relay-instance', enabled: true, profiles: [] } });
-    const toggle = screen.getByRole('switch', { name: 'Pi Integration' });
-    await vi.waitFor(() => expect(toggle).toBeChecked());
-    expect(toggle).toBeDisabled();
-    const before = sent.length;
-    await expect(relayStore.sendCommand(relayId, { type: 'set_pi_integration', instance: 'relay-instance', enabled: false })).rejects.toThrow();
-    await expect(relayStore.sendCommand(relayId, { type: 'unknown_command' })).rejects.toThrow();
-    expect(sent).toHaveLength(before);
-  });
-
-  it('refuses Pi Integration writes without current correlated inventory or connection', async () => {
-    const { relayId, sent } = connectedRole('controller');
-    const mutation = { type: 'set_pi_integration', instance: 'relay-instance', enabled: true };
-    const before = sent.length;
-    await expect(relayStore.sendCommand(relayId, { ...mutation, target: targetRefForAgent(get(relayStore.agents)[0]) })).rejects.toThrow();
-    await expect(relayStore.sendCommand(relayId, { type: 'get_pi_integration', pane_id: 'w1:p1' })).rejects.toThrow();
-    expect(sent).toHaveLength(before);
-    relayStore.setHidden(true);
-    await expect(relayStore.sendCommand(relayId, mutation)).rejects.toThrow();
-    await expect(relayStore.sendCommand(relayId, { type: 'get_pi_integration' })).rejects.toThrow();
-    expect(sent).toHaveLength(before);
-    relayStore.disconnectRelay(relayId);
-    await expect(relayStore.sendCommand(relayId, mutation)).rejects.toThrow('not connected');
-    expect(sent).toHaveLength(before);
-  });
-
-  it.each(['controller', 'reader'] as const)('stops only its own scoped conversation feed after pause or view switch, once as %s', async role => {
-    const { relayId, sent, deliver } = connectedRole(role);
-    const agent = get(relayStore.agents)[0];
-    const history = relayStore.getConversationHistory(agent);
-    const read = sent.findLast(command => command.type === 'get_conversation_history')!;
-    expect(read).toMatchObject({ pane_id: 'w1:p1', target: targetRefForAgent(agent), observe: true });
-    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
-      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot',
-        subscription_id: 'owned-subscription', source_revision: 'source:1', capabilities: { source: 'pi_events', active_branch: true } } });
-    await expect(history).resolves.toMatchObject({ subscriptionId: 'owned-subscription' });
-    const modified = { ...agent, terminal_id: 'other-terminal' };
-    const before = sent.length;
-    await expect(relayStore.sendCommand(relayId, { type: 'unwatch_conversation', subscription_id: 'owned-subscription' })).rejects.toThrow();
-    await expect(relayStore.sendToAgent(modified, { type: 'unwatch_conversation', subscription_id: 'owned-subscription' })).rejects.toThrow();
-    await expect(relayStore.sendToAgent(agent, { type: 'unwatch_conversation', subscription_id: 'other-subscription' })).rejects.toThrow();
-    expect(sent).toHaveLength(before);
-    relayStore.setHidden(true);
-    await expect(relayStore.sendToAgent(agent, { type: 'agent_stop' })).rejects.toThrow();
-    expect(sent).toHaveLength(before);
-    relayStore.stopConversationUpdates(agent, 'owned-subscription');
-    const stop = sent.findLast(command => command.type === 'unwatch_conversation')!;
-    expect(stop).toMatchObject({ pane_id: 'w1:p1', target: targetRefForAgent(agent),
-      server_session_id: 'primary', subscription_id: 'owned-subscription', protocol: 3 });
-    relayStore.stopConversationUpdates(agent, 'owned-subscription');
-    expect(sent.filter(command => command.type === 'unwatch_conversation')).toHaveLength(1);
-    deliver({ type: 'command_result', request_id: stop.request_id, action: stop.type, ok: true });
-  });
-
-  it('does not stop another view’s replacement feed', async () => {
-    const { sent, deliver } = connectedRole('controller');
-    const agent = get(relayStore.agents)[0];
-    const history = relayStore.getConversationHistory(agent);
-    const first = sent.findLast(command => command.type === 'get_conversation_history')!;
-    deliver({ type: 'command_result', request_id: first.request_id, action: first.type, ok: true,
-      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot', subscription_id: 'first-subscription' } });
-    await history;
-    deliver({ type: 'agents', agents: [
-      { pane_id: 'w1:p1', agent: 'pi', ...exactAgentFields(), agent_session_id: 'session-1' },
-      { pane_id: 'w1:p2', agent: 'pi', ...exactAgentFields('w1:p2'), agent_session_id: 'session-2' },
-    ] });
-    const next = get(relayStore.agents).find(row => row.raw_pane_id === 'w1:p2')!;
-    const nextHistory = relayStore.getConversationHistory(next);
-    const second = sent.findLast(command => command.type === 'get_conversation_history')!;
-    deliver({ type: 'command_result', request_id: second.request_id, action: second.type, ok: true,
-      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot', subscription_id: 'next-subscription' } });
-    await nextHistory;
-    const before = sent.length;
-    relayStore.stopConversationUpdates(agent, 'first-subscription');
-    expect(sent).toHaveLength(before);
-    relayStore.stopConversationUpdates(next, 'next-subscription');
-    expect(sent.findLast(command => command.type === 'unwatch_conversation')).toMatchObject({
-      target: targetRefForAgent(next), pane_id: 'w1:p2', subscription_id: 'next-subscription',
-    });
-  });
-
-  it('does not stop a feed owned by a superseded connection', async () => {
-    const { sent, deliver } = connectedRole('controller');
-    const agent = get(relayStore.agents)[0];
-    const history = relayStore.getConversationHistory(agent);
-    const read = sent.findLast(command => command.type === 'get_conversation_history')!;
-    deliver({ type: 'command_result', request_id: read.request_id, action: read.type, ok: true,
-      data: { available: true, has_more: false, entries: [], state: 'ready', mode: 'snapshot',
-        subscription_id: 'old-subscription', source_revision: 'source:1' } });
-    await history;
-    relayStore.connectRelay(get(relayStore.relayConfigs)[0]);
-    const before = sent.length;
-    relayStore.stopConversationUpdates(agent, 'old-subscription');
-    expect(sent).toHaveLength(before);
   });
 
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {
@@ -340,7 +167,6 @@ describe('relay command store', () => {
     expect(targetRefForAgent(agent)).toEqual(target);
     expect(decodeTargetRoute(encodeTargetRoute(target)!)).toEqual(target);
     expect(targetStoreKey(target)).not.toBe(targetStoreKey({ ...target, agent_session_id: session + 'different' }));
-    expect(relayStore.relayActionsFresh(agent.relay_id)).toBe(true);
     relayStore.readPane(agent, true);
     const read = JSON.parse(socket.sent.at(-1)!);
     expect(read).toMatchObject({ type: 'read_pane', target });
@@ -350,7 +176,6 @@ describe('relay command store', () => {
     expect(frame()).toBe(beforeResponse);
     socket.message({ type: 'pane_content', request_id: read.request_id, pane_id: 'w1:p1', target, content: 'exact session', format: 'ansi', no_echo: false });
     expect(frame()).toMatchObject({ inputTarget: target, target, content: 'exact session', readStartedAt: expect.any(Number) });
-    expect(relayStore.relayActionsFresh(agent.relay_id)).toBe(true);
     const pending = relayStore.sendToAgent(agent, { type: 'send_terminal_text', text: '  /literal 界  ' });
     const command = JSON.parse(socket.sent.at(-1)!);
     expect(command).toMatchObject({ type: 'send_terminal_text', pane_id: 'w1:p1', target, text: '  /literal 界  ' });
@@ -364,8 +189,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
     socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', agent_session_id: session }] });
-    expect(get(relayStore.agents)).toHaveLength(0);
-    const agent = { ...preferenceAgent(get(relayStore.relayConfigs)[0].id, 'w1:p1', 'terminal-w1:p1'), agent_session_id: session };
+    const agent = get(relayStore.agents)[0];
     expect(targetRefForAgent(agent)).toBeNull();
     const before = socket.sent.length;
     await expect(relayStore.sendToAgent(agent, { type: 'send_terminal_text', text: 'not sent' })).rejects.toThrow('exact terminal identity');
@@ -378,10 +202,9 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', agent: 'codex' }] });
-    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_rename', name: '123' });
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: '123' });
     const command = JSON.parse(socket.sent.at(-1)!);
-    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 3, ...exactWireScope('w1:p1', relayId) });
+    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 3 });
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
@@ -500,7 +323,6 @@ describe('relay command store', () => {
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const controller = new AbortController();
     const relayId = get(relayStore.relayConfigs)[0].id;
-    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', agent: 'codex', agent_session_id: 'session-1' }] });
     const current = preferenceAgent(relayId, 'w1:p1', 'terminal-w1:p1');
     const pending = relayStore.getConversationHistory(current, { signal: controller.signal });
     expect(socket.sent.some((payload) => JSON.parse(payload).type === 'get_conversation_history')).toBe(true);
@@ -978,42 +800,6 @@ describe('relay command store', () => {
       expect(get(relayStore.toast)).toMatchObject({ message: 'Session storage unavailable.', error: true });
     });
 
-    it('keeps bootstrap pairing deferred when its bootstrap credential cannot be saved', async () => {
-      const hash = deferBrowserPairing(false);
-      const bootstrapOptIns = () => Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
-        .filter((key) => key?.startsWith('herdr_browser_pairing:'));
-      const nativeSetItem = localStorage.setItem.bind(localStorage);
-      const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
-        if (key === 'herdr_device_auth_v1') throw new Error('Browser storage is full.');
-        nativeSetItem(key, value);
-      });
-      const replace = vi.spyOn(history, 'replaceState');
-      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
-      expect(setItem).toHaveBeenCalledWith('herdr_device_auth_v1', expect.any(String));
-      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
-      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
-      expect(bootstrapOptIns()).toEqual([]);
-      expect(MockWebSocket.instances).toHaveLength(0);
-      expect(location.hash).toBe(hash);
-      expect(replace).not.toHaveBeenCalled();
-      expect(get(relayStore.toast)).toMatchObject({ message: 'Browser storage is full.', error: true });
-      relayStore.connectAll();
-      expect(MockWebSocket.instances).toHaveLength(0);
-
-      // Once storage recovers, the same explicit opt-in presents the bootstrap key.
-      setItem.mockRestore();
-      replace.mockRestore();
-      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
-      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toMatchObject({ kind: 'invitation', id: 'bootstrap' });
-      expect(bootstrapOptIns()).toHaveLength(1);
-      expect(MockWebSocket.instances).toHaveLength(1);
-      const socket = MockWebSocket.instances[0];
-      socket.open();
-      await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
-      expect(JSON.parse(socket.sent[0])).toMatchObject({ auth_kind: 'invitation', auth_id: 'bootstrap' });
-      expect(location.hash).toBe('');
-    });
-
     it.each([false, true])('still defers a new invitation after accepting an earlier one: enrolled=%s', (enrolled) => {
       const hash = deferBrowserPairing();
       expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
@@ -1068,41 +854,6 @@ describe('relay command store', () => {
       expect(MockWebSocket.instances).toHaveLength(0);
       save.mockRestore();
       expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
-    });
-
-    it.each([
-      '&invite=', '&invite=bad', '&invite_version=2', '&invite_expires=not-a-time',
-      '&setup=duplicate', '&relay_id=duplicate&relay_id=duplicate',
-    ])('rejects invalid metadata atomically during explicit pairing: %s', (suffix) => {
-      const hash = deferBrowserPairing();
-      const credentials = new BrowserDeviceCredentialStore(localStorage);
-      // A working enrolled credential must survive a damaged link even when
-      // the user has already opened the explicit browser-pairing flow.
-      localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-        version: 1,
-        relays: {
-          [relayId]: {
-            kind: 'credential', id: 'credential-live', version: 1, secret: 'B'.repeat(43),
-            deviceId: 'device-live', role: 'controller', locale: 'en',
-            issuedAt: Date.now(), invitationId: 'invitation-previous01',
-          },
-        },
-      }));
-      const authentication = credentials.get(relayId);
-      const savedRelays = localStorage.getItem('herdr_relays');
-      const savedCredentials = localStorage.getItem('herdr_device_auth_v1');
-      const invalidHash = hash + suffix;
-      history.replaceState(history.state, '', `/pair?source=test${invalidHash}`);
-      expect(relayStore.importSetupLink()).toBe(false);
-      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
-      expect(localStorage.getItem('herdr_relays')).toBe(savedRelays);
-      expect(localStorage.getItem('herdr_device_auth_v1')).toBe(savedCredentials);
-      expect(credentials.get(relayId)).toEqual(authentication);
-      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
-      expect(location.hash).toBe(invalidHash);
-      expect(MockWebSocket.instances).toHaveLength(0);
-      relayStore.connectAll();
-      expect(MockWebSocket.instances).toHaveLength(0);
     });
 
     it('does not pair a relay that is not deferred', () => {
@@ -1165,46 +916,6 @@ describe('relay command store', () => {
     expect(store.get(relayId)).toMatchObject({ kind: 'credential', id: 'credential-issued' });
   });
 
-  it('shows an actionable error instead of deferring an expired invitation in an iOS browser tab', () => {
-    relayStore.destroy();
-    relayStore.relayConfigs.set([]);
-    MockWebSocket.instances = [];
-    vi.stubGlobal('navigator', { standalone: undefined, userAgent: 'Mozilla/5.0 (iPhone)', maxTouchPoints: 5 });
-    const relayUrl = 'wss://expired.example';
-    const expiredLink = {
-      hash: `#setup=${'D'.repeat(43)}&invite=invitation-expired01&invite_version=1`
-        + `&invite_expires=${Date.now() - 1_000}&label=Expired&relay=${encodeURIComponent(relayUrl)}`,
-      protocol: 'https:',
-      host: 'app.example',
-      pathname: '/',
-      search: '',
-    };
-
-    expect(relayStore.importSetupLink(expiredLink, true)).toBe(false);
-    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
-    expect(get(relayStore.toast)?.message).toContain('retry the original bootstrap link while the same relay is running');
-    expect(get(relayStore.relayConfigs)).toEqual([]);
-    expect(MockWebSocket.instances).toHaveLength(0);
-  });
-
-  it('explains why a setup link with an invalid relay path was not imported', () => {
-    relayStore.destroy();
-    relayStore.relayConfigs.set([]);
-    MockWebSocket.instances = [];
-    const invalidLink = {
-      hash: `#setup=${'D'.repeat(32)}&label=Development&relay=${encodeURIComponent('wss://relay.example/ws')}`,
-      protocol: 'https:',
-      host: 'app.example',
-      pathname: '/',
-      search: '',
-    };
-
-    expect(relayStore.importSetupLink(invalidLink, true)).toBe(false);
-    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
-    expect(get(relayStore.relayConfigs)).toEqual([]);
-    expect(MockWebSocket.instances).toHaveLength(0);
-  });
-
   it.each([
     ['invite', '&invite=short'],
     ['invite_version', '&invite_version=invalid'],
@@ -1245,7 +956,6 @@ describe('relay command store', () => {
     };
 
     expect(relayStore.importSetupLink(malformedLink, true)).toBe(false);
-    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
     expect(get(relayStore.relayConfigs)).toEqual(relaySnapshot);
     expect(get(relayStore.relayConfigs)[0]).toMatchObject({ url: relayUrl, token: relay.token });
     expect(localStorage.getItem('herdr_relays')).toBe(storedRelays);
@@ -1329,26 +1039,20 @@ describe('relay command store', () => {
     let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
     let deliver: (message: Record<string, unknown>) => void = () => {};
     const sent: Record<string, string>[] = [];
-    let authentication: TransportAuthentication | undefined;
-    transportHijack.current = (_relay, handlers, options) => {
-      authentication = options;
-      const peer = upgradedPeer(handlers);
-      return {
-        kind: 'websocket',
-        connect: () => {
-          dials += 1;
-          report = handlers.onStatus;
-          deliver = handlers.onMessage;
-          handlers.onStatus('connecting');
-        },
-        send: (payload) => {
-          sent.push(payload as unknown as Record<string, string>);
-          peer.client(JSON.stringify(payload));
-          return true;
-        },
-        close: () => {},
-      };
-    };
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'websocket',
+      connect: () => {
+        dials += 1;
+        report = handlers.onStatus;
+        deliver = handlers.onMessage;
+        handlers.onStatus('connecting');
+      },
+      send: (payload) => {
+        sent.push(payload as unknown as Record<string, string>);
+        return true;
+      },
+      close: () => {},
+    });
     expect(relayStore.importSetupLink({
       hash: `#setup=${'G'.repeat(43)}&invite=invitation-forget01&invite_version=1`
         + `&invite_expires=${Date.now() + 60_000}&label=Forgotten&relay=${encodeURIComponent(relayUrl)}`,
@@ -1364,15 +1068,19 @@ describe('relay command store', () => {
     expect(stored.find((relay) => relay.id === relayId)).toMatchObject({ token: '', paired: true });
     expect(dials).toBe(1);
 
-    const options = authentication as TransportAuthentication | undefined;
-    const presented = options?.getAuthentication?.();
-    expect(presented?.kind).toBe('invitation');
-    await options?.onAuthenticated?.(presented!, {
-      credentialId: 'credential-forget', credentialVersion: 1, credentialSecret: 'H'.repeat(43),
-      deviceId: 'device-forget', role: 'controller', locale: 'en',
-    });
     report('connected', { path: 'websocket' });
     deliver({ type: 'push_config', protocol: 3, host: 'forgotten', capabilities: [], agent_profiles: [] });
+    // Pairing turned the invitation into a credential.
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        [relayId]: {
+          kind: 'credential', id: 'credential-forget', version: 1, secret: 'H'.repeat(43),
+          deviceId: 'device-forget', role: 'controller', locale: 'en',
+          issuedAt: Date.now(), invitationId: 'invitation-forget01',
+        },
+      },
+    }));
 
     const forgotten = relayStore.forgetCurrentDevice(relayId);
     const revoke = await vi.waitFor(() => {
@@ -1387,7 +1095,7 @@ describe('relay command store', () => {
     expect(sent.some((entry) => entry.type === 'device_list')).toBe(false);
 
     expect(store.get(relayId)).toBeNull();
-    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
+    expect(get(relayStore.toast)?.message).toContain('Forgotten needs pairing');
     expect(get(relayStore.connections).get(relayId)?.pairingRequired).toBe(true);
 
     // The bug this guards: a plaintext ladder against an encrypted relay, with
@@ -1471,39 +1179,6 @@ describe('relay command store', () => {
     setTerminalResizeSession(true);
     setTerminalResizeSession(false);
     expect(sent().filter((message) => message.type === 'release_pane_size')).toHaveLength(2);
-  });
-
-  it('validates pane-size lease ranges and keeps the height the relay applied', async () => {
-    setTerminalResizeSession(true);
-    const { socket, agent, sent } = openPaneSizeRelay(['pane_size_opt_in', 'pane_size_opt_in_rows']);
-    await expect(relayStore.leasePaneSize(agent, 39)).rejects.toThrow(/between 40 and 240/);
-    await expect(relayStore.leasePaneSize(agent, 80, 9)).rejects.toThrow(/between 10 and 120/);
-    expect(sent().filter((message) => message.type === 'lease_pane_size')).toHaveLength(0);
-
-    const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const leaseCommand = sent().findLast((message) => message.type === 'lease_pane_size');
-    expect(leaseCommand).toMatchObject({ columns: 83, rows: 32, opt_in: true });
-    socket.message({
-      type: 'command_result', action: 'lease_pane_size', request_id: leaseCommand.request_id,
-      // Another client holds a shorter lease: the applied height wins.
-      ok: true, data: { columns: 83, rows: 30 },
-    });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 30 });
-  });
-
-  it('believes no height when the relay does not advertise row support', async () => {
-    setTerminalResizeSession(true);
-    const { socket, agent, sent } = openPaneSizeRelay(['pane_size_opt_in']);
-    const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const leaseCommand = sent().findLast((message) => message.type === 'lease_pane_size');
-    // Rows must not be sent, and no applied height may be believed.
-    expect(leaseCommand).toMatchObject({ columns: 83, opt_in: true });
-    expect(leaseCommand).not.toHaveProperty('rows');
-    socket.message({
-      type: 'command_result', action: 'lease_pane_size', request_id: leaseCommand.request_id,
-      ok: true, data: { columns: 83 },
-    });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 0 });
   });
 
   it('ignores a lease reply that arrives after Resize Session was turned off', async () => {
@@ -1679,7 +1354,7 @@ describe('relay command store', () => {
     await expect(relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' })).rejects.toThrow(/protocol v1/);
   });
 
-  it('withholds stale targets, blocks mutations, and recovers when inventory becomes ready', async () => {
+  it('retains agents, blocks mutations, and recovers when inventory becomes ready', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -1710,7 +1385,7 @@ describe('relay command store', () => {
       relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' }),
     ).rejects.toThrow(/live-handoff/);
     expect(socket.sent).toHaveLength(before);
-    expect(get(relayStore.agents)).toHaveLength(0);
+    expect(get(relayStore.agents)).toHaveLength(1);
     expect(get(relayStore.connections).get(relayId)?.inventory).toMatchObject({
       state: 'error',
       errorCode: 'protocol_mismatch',
@@ -1727,7 +1402,7 @@ describe('relay command store', () => {
       stale: false,
     });
     socket.message({ type: 'agents', agents: [] });
-    expect(get(relayStore.agents)).toHaveLength(0);
+    expect(get(relayStore.agents)).toHaveLength(1);
 
     socket.message({
       type: 'inventory_status',
@@ -1740,8 +1415,7 @@ describe('relay command store', () => {
     });
     socket.message({ type: 'agents', agents: [] });
     expect(get(relayStore.agents)).toHaveLength(0);
-    await expect(relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' })).rejects.toThrow('Waiting for current');
-    const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'codex' });
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
     const command = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true });
     await expect(pending).resolves.toMatchObject({ ok: true });
@@ -1879,14 +1553,7 @@ describe('relay command store', () => {
     })));
     const relay = { label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' };
     const relayId = makeRelayId(relay.label, relay.url);
-    const sent: Record<string, unknown>[] = [];
-    let deliver: TransportHandlers['onMessage'] = () => {};
-    transportHijack.current = (_relay, handlers) => {
-      const peer = upgradedPeer(handlers);
-      deliver = handlers.onMessage;
-      return { kind: 'websocket', connect: () => handlers.onStatus('connected'), close: () => {},
-        send: (payload) => { sent.push(payload); peer.client(JSON.stringify(payload)); return true; } };
-    };
+    relayStore.addRelay(relay);
     localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
       version: 1,
       relays: {
@@ -1904,15 +1571,18 @@ describe('relay command store', () => {
       },
     }));
 
-    relayStore.addRelay(relay);
-    expect(sent.filter((message) => message.type === 'register_app_origin')).toEqual([]);
-    deliver({ type: 'push_config', protocol: 3, capabilities: [] });
-    expect(sent.filter((message) => message.type === 'register_app_origin')).toEqual([
-      { type: 'register_app_origin', origin: location.origin, protocol: 3 },
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    const sent = socket.sent.map((payload) => JSON.parse(payload));
+
+    expect(sent).toEqual([
+      {
+        type: 'register_app_origin',
+        origin: location.origin,
+        protocol: 3,
+      },
+      { type: 'refresh_agents' },
     ]);
-    relayStore.requestAgents(true);
-    deliver({ type: 'agents', agents: [] });
-    expect(sent.filter((message) => message.type === 'register_app_origin')).toHaveLength(1);
   });
 
   it('does not let an installed reader credential register an app origin', () => {
@@ -1967,8 +1637,6 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
-    socket.message({ type: 'push_config', protocol: 3 });
-    seedAgent(socket, agent);
 
     relayStore.readPane(agent);
     expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
@@ -2235,7 +1903,6 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
-    seedAgent(socket, agent);
     relayStore.watchPane(agent);
     socket.message({
       type: 'pane_content',
@@ -2356,14 +2023,13 @@ describe('relay command store', () => {
     expect(agents.map((agent) => agent.project).sort()).toEqual(['Fedora app', 'Mac app']);
   });
 
-  it('rejects a corrupted correlated snapshot that repeats a pane and reports it without crashing', () => {
+  it('survives a corrupted snapshot that repeats a pane and reports it', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
     // The home view keys agent cards by pane_id: a duplicate from a corrupted
     // relay snapshot previously crashed Svelte's flush and every control in
-    // the app silently died. The anomaly stays visible, but cannot establish
-    // authority by silently selecting one of the conflicting target identities.
+    // the app silently died. The newest copy wins and the anomaly is visible.
     socket.message({
       type: 'agents',
       agents: [
@@ -2372,8 +2038,8 @@ describe('relay command store', () => {
       ],
     });
     const agents = get(relayStore.agents);
-    expect(agents).toHaveLength(0);
-    expect(relayStore.relayActionsFresh(get(relayStore.relayConfigs)[0].id)).toBe(false);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].project).toBe('Second copy');
     const banner = document.querySelector('[role=alert]');
     expect(banner?.textContent).toContain('Duplicate agent identity');
     expect(banner?.textContent).toContain('w1:p1');
@@ -2575,7 +2241,6 @@ describe('relay command store', () => {
 
     socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: ['secret_input'], agent_profiles: [] });
     await expect(relayStore.sendSecret(agent, '', undefined!)).rejects.toThrow(/Enter the password/);
-    seedAgent(socket, agent);
 
     socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1' }] });
     relayStore.readPane(agent, true);
@@ -2601,9 +2266,8 @@ describe('relay command store', () => {
     currentSocket.open();
     currentSocket.message({ type: 'push_config', protocol: 3, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
     currentSocket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Current agent', ...exactAgentFields() }] });
-    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_stop' });
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
     const command = JSON.parse(currentSocket.sent.at(-1)!);
-    expect(command.target.relay_id).toBe(relayId);
 
     oldSocket.message({ type: 'agents', agents: [] });
     oldSocket.serverClose();
@@ -2613,7 +2277,7 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true });
   });
 
-  it('withholds retained live targets on disconnect and accepts authoritative empty after reconnect', async () => {
+  it('keeps the last agent snapshot until a reconnected relay sends a fresh one', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -2621,13 +2285,13 @@ describe('relay command store', () => {
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume safely', ...exactAgentFields() }] });
 
     socket.serverClose();
-    expect(get(relayStore.agents)).toEqual([]);
+    expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
 
     await vi.advanceTimersByTimeAsync(3_000);
     const replacement = MockWebSocket.instances.at(-1)!;
     replacement.open();
     replacement.message({ type: 'push_config', protocol: 3, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
-    expect(get(relayStore.agents)).toEqual([]);
+    expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
 
     replacement.message({ type: 'agents', agents: [] });
     expect(get(relayStore.agents)).toEqual([]);
@@ -2990,7 +2654,7 @@ describe('relay command store', () => {
     relayStore.addRelay({ label: 'Truncated', url: 'wss://truncated.example', token: 'short-key' });
 
     expect(MockWebSocket.instances).toHaveLength(0);
-    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
+    expect(get(relayStore.toast)?.message).toContain('Truncated needs pairing');
     const connection = get(relayStore.connections).get(makeRelayId('Truncated', 'wss://truncated.example'));
     expect(connection?.pairingRequired).toBe(true);
     expect(connection?.status).toBe('disconnected');
@@ -3080,7 +2744,7 @@ describe('relay command store', () => {
     expect(localStorage.getItem('herdr_device_auth_v1')).toBe(before);
     vi.useFakeTimers();
     if (refused) {
-      expect(get(relayStore.toast)?.message).toContain('this device was refused');
+      expect(get(relayStore.toast)?.message).toContain('refused this device. Import a new invitation');
       await vi.advanceTimersByTimeAsync(120_000);
       relayStore.resetReconnectBackoff();
       relayStore.revalidateConnections();
@@ -3219,80 +2883,6 @@ describe('relay command store', () => {
     expect(attempts).toBe(2);
   });
 
-  it('restores a hidden terminal watch only after a matching fresh snapshot', () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, capabilities: ['pane_realtime_delta'], inventory: { state: 'ready' } });
-    const relayId = get(relayStore.relayConfigs)[0].id;
-    const agent = preferenceAgent(relayId, 'w1:p1', 'terminal-w1:p1');
-    seedAgent(socket, agent);
-    relayStore.watchPane(agent);
-    socket.message({ type: 'pane_content', pane_id: 'w1:p1', content: 'before sleep', content_fingerprint: 'content-1' });
-    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({ type: 'watch_pane', pane_id: 'w1:p1' });
-    relayStore.readPane(agent, true);
-    const abandonedRead = JSON.parse(socket.sent.at(-1)!);
-
-    relayStore.setHidden(true);
-    relayStore.unwatchPane(agent);
-    relayStore.watchPane(agent);
-    relayStore.setHidden(false);
-    relayStore.revalidateConnections();
-    const snapshots = () => socket.sent.map((payload) => JSON.parse(payload))
-      .filter((payload) => payload.type === 'refresh_agents' && payload.snapshot_request_id);
-    const afterResume = socket.sent.length;
-    relayStore.watchPane(agent);
-    relayStore.readPane(agent);
-    expect(socket.sent).toHaveLength(afterResume);
-    socket.message({ type: 'inventory_snapshot', snapshot_request_id: 'wrong', inventory: { state: 'ready', stale: false }, agents: [{ ...agent, pane_id: 'w1:p1' }], workspaces: [] });
-    expect(socket.sent).toHaveLength(afterResume);
-    socket.message({ type: 'inventory_snapshot', snapshot_request_id: snapshots().at(-1).snapshot_request_id, inventory: { state: 'ready', stale: true }, agents: [{ ...agent, pane_id: 'w1:p1' }], workspaces: [] });
-    expect(socket.sent).toHaveLength(afterResume);
-
-    relayStore.revalidateConnections();
-    const beforeWrongTarget = socket.sent.length;
-    socket.message({ type: 'inventory_snapshot', snapshot_request_id: snapshots().at(-1).snapshot_request_id, inventory: { state: 'ready', stale: false }, agents: [{ ...agent, pane_id: 'w1:p1', generation: 2 }], workspaces: [] });
-    expect(socket.sent).toHaveLength(beforeWrongTarget);
-    relayStore.revalidateConnections();
-    socket.message({ type: 'inventory_snapshot', snapshot_request_id: snapshots().at(-1).snapshot_request_id, inventory: { state: 'ready', stale: false }, agents: [{ ...agent, pane_id: 'w1:p1' }], workspaces: [] });
-    const read = socket.sent.map((payload) => JSON.parse(payload)).findLast((payload) => payload.type === 'read_pane');
-    expect(read).toMatchObject({ pane_id: 'w1:p1', target: exactWireScope('w1:p1', relayId).target });
-    expect(read.request_id).not.toBe(abandonedRead.request_id);
-    socket.message({ type: 'pane_content', request_id: abandonedRead.request_id, pane_id: 'w1:p1', target: read.target, content: 'late stale read', content_fingerprint: 'stale-content' });
-    expect(socket.sent.map((payload) => JSON.parse(payload).type).at(-1)).toBe('read_pane');
-    socket.message({ type: 'pane_content', request_id: read.request_id, pane_id: 'w1:p1', target: read.target, content: 'after sleep', content_fingerprint: 'content-2' });
-    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({ type: 'watch_pane', pane_id: 'w1:p1', content_fingerprint: 'content-2' });
-    expect(socket.sent.map((payload) => JSON.parse(payload).type).filter((type) => ['send_keys', 'upload_begin', 'lease_pane_size'].includes(type))).toEqual([]);
-    relayStore.unwatchPane(agent);
-    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({ type: 'unwatch_pane', pane_id: 'w1:p1' });
-  });
-
-  it('does not restore a watch from a superseded connection snapshot', () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, capabilities: ['pane_realtime_delta'], inventory: { state: 'ready' } });
-    const relayId = get(relayStore.relayConfigs)[0].id;
-    const agent = preferenceAgent(relayId, 'w1:p1', 'terminal-w1:p1');
-    seedAgent(socket, agent);
-    relayStore.setHidden(true);
-    relayStore.unwatchPane(agent);
-    relayStore.setHidden(false);
-    relayStore.watchPane(agent);
-    relayStore.connectAll(true);
-    const replacement = MockWebSocket.instances.at(-1)!;
-    replacement.open();
-    replacement.message({ type: 'push_config', protocol: 3, capabilities: ['pane_realtime_delta'], inventory: { state: 'ready' } });
-    const pending = replacement.sent.map((payload) => JSON.parse(payload)).findLast((payload) => payload.snapshot_request_id);
-    const oldCount = socket.sent.length;
-    const newCount = replacement.sent.length;
-    socket.onmessage?.({ data: JSON.stringify({ type: 'inventory_snapshot', snapshot_request_id: pending.snapshot_request_id,
-      inventory: { state: 'ready', stale: false }, agents: [{ ...agent, pane_id: 'w1:p1' }], workspaces: [] }) });
-    expect(socket.sent).toHaveLength(oldCount);
-    expect(replacement.sent).toHaveLength(newCount);
-    expect(replacement.sent.every((payload) => !['read_pane', 'watch_pane'].includes(JSON.parse(payload).type))).toBe(true);
-    seedAgent(replacement, agent);
-    expect(replacement.sent.map((payload) => JSON.parse(payload).type)).toContain('read_pane');
-  });
-
   it('rereads watched panes as soon as the relay reconnects', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
@@ -3306,7 +2896,6 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
-    seedAgent(socket, agent);
     relayStore.watchPane(agent as never);
     socket.message({
       type: 'pane_content',
@@ -3325,8 +2914,6 @@ describe('relay command store', () => {
     const replacement = MockWebSocket.instances.at(-1)!;
     expect(replacement).not.toBe(socket);
     replacement.open();
-    replacement.message({ type: 'push_config', protocol: 3, capabilities: ['pane_realtime_delta'] });
-    seedAgent(replacement, agent);
     const sent = replacement.sent.map((payload) => JSON.parse(payload) as Record<string, unknown>);
     expect(sent.some((message) => message.type === 'read_pane' && message.pane_id === 'w1:p1')).toBe(true);
   });
@@ -3338,19 +2925,19 @@ describe('relay command store', () => {
     let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
     let deliver: (message: Record<string, any>) => void = () => {};
     const sent: Record<string, unknown>[] = [];
-    transportHijack.current = (_relay, handlers) => {
-      const peer = upgradedPeer(handlers);
-      return {
-        kind: 'gateway',
-        connect: () => {
-          report = handlers.onStatus;
-          deliver = handlers.onMessage;
-          handlers.onStatus('connecting');
-        },
-        send: (payload) => { sent.push(payload); peer.client(JSON.stringify(payload)); return true; },
-        close: () => {},
-      };
-    };
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'gateway',
+      connect: () => {
+        report = handlers.onStatus;
+        deliver = handlers.onMessage;
+        handlers.onStatus('connecting');
+      },
+      send: (payload) => {
+        sent.push(payload);
+        return true;
+      },
+      close: () => {},
+    });
     relayStore.addRelay({ label: 'Gateway', url: '', token: '', transport: 'hybrid', gatewayUrl: 'wss://gw.example' });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
@@ -3365,7 +2952,6 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
-    deliver({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
     relayStore.watchPane(agent as never);
     deliver({
       type: 'pane_content',
@@ -3376,14 +2962,12 @@ describe('relay command store', () => {
     });
     // Acknowledged deltas make the selected cadence affordable on the metered
     // path; only scrollback remains capped.
-    expect(sent.findLast((payload) => payload.type === 'watch_pane')).toMatchObject({ type: 'watch_pane', interval_ms: 100, lines: 1_000 });
+    expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 100, lines: 1_000 });
 
     // Promotion to the direct path keeps the same user-selected cadence.
     report('connected', { path: 'webrtc' });
-    deliver({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
-    deliver({ type: 'pane_content', pane_id: 'w1:p1', content: 'one\n', format: 'ansi', content_fingerprint: 'content-2' });
     expect(get(relayStore.connections).get(relayId)?.path).toBe('webrtc');
-    expect(sent.findLast((payload) => payload.type === 'watch_pane')).toMatchObject({ type: 'watch_pane', interval_ms: 100 });
+    expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 100 });
   });
 
   it('records the gateway that answered and drops it on the relay URL path', () => {
@@ -3506,7 +3090,6 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    seedUploadAgent(socket);
     const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
@@ -3528,7 +3111,6 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    seedUploadAgent(socket);
     const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
@@ -3552,7 +3134,6 @@ describe('relay command store', () => {
     fedoraSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     macSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'mac', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Fedora')!.id;
-    seedUploadAgent(fedoraSocket);
     const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
@@ -3608,12 +3189,6 @@ describe('relay command store', () => {
     });
     await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_finish')).toBe(true));
     const finish = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_finish');
-    const grants = relayStore.connection(relayId)!.cleanupGrants;
-    expect(grants.size).toBe(1);
-    macSocket.message({ type: 'upload_finish_result', request_id: finish.request_id, result: { attachments: [] } });
-    fedoraSocket.message({ type: 'upload_finish_result', request_id: 'unmatched-finish', result: { attachments: [] } });
-    fedoraSocket.message({ type: 'upload_chunk_result', request_id: finish.request_id, result: { attachments: [] } });
-    expect(grants.size).toBe(1);
     fedoraSocket.message({
       type: 'upload_finish_result',
       request_id: finish.request_id,
@@ -3629,7 +3204,6 @@ describe('relay command store', () => {
       },
     });
     await expect(upload).resolves.toMatchObject([{ ref: 'attachment:opaque-1', name: 'shot.png' }]);
-    expect(grants.size).toBe(0);
   });
 
   it('does not apply a directory result to a replacement connection', async () => {
@@ -3707,10 +3281,7 @@ describe('relay command store', () => {
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
-    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
-    const pending = relayStore.sendCommand(relayId, {
-      type: 'respond', pane_id: 'w1:p1', ...exactWireScope('w1:p1', relayId), index: 0, total: 2,
-    }, 12_000);
+    const pending = relayStore.sendCommand(relayId, { type: 'respond', pane_id: 'w1:p1', index: 0, total: 2 }, 12_000);
     const command = JSON.parse(socket.sent.at(-1)!);
     await vi.advanceTimersByTimeAsync(9_000);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'accepted' });
@@ -3730,7 +3301,6 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'opencode', cwd: '/fixture', ...exactAgentFields(),
     };
-    seedAgent(socket, agent);
     const pending = relayStore.loadSlashCommands(agent);
     const request = JSON.parse(socket.sent.at(-1)!);
     socket.message({
@@ -3753,7 +3323,6 @@ describe('relay command store', () => {
       agent: 'codex', cwd: '/home/test/project',
       ...exactAgentFields(),
     };
-    seedAgent(socket, agent);
 
     const first = relayStore.loadSlashCommands(agent);
     const duplicate = relayStore.loadSlashCommands(agent);
@@ -3803,11 +3372,9 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
     };
-    seedAgent(socket, agent);
     const older = relayStore.loadSlashCommands(agent);
     const olderRequest = JSON.parse(socket.sent.at(-1)!);
     const currentAgent = { ...agent, ...replacement };
-    seedAgent(socket, currentAgent);
     const current = relayStore.loadSlashCommands(currentAgent);
     const currentRequest = JSON.parse(socket.sent.at(-1)!);
     expect(currentRequest.request_id).not.toBe(olderRequest.request_id);
@@ -3837,7 +3404,6 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
     };
-    seedAgent(socket, agent);
     const initial = relayStore.loadSlashCommands(agent);
     const initialRequest = JSON.parse(socket.sent.at(-1)!);
     socket.message({
@@ -3881,7 +3447,6 @@ describe('relay command store', () => {
       agent: 'codex', cwd: '/home/test/project',
       ...exactAgentFields(),
     };
-    seedAgent(socket, agent);
     const rawCommands = Array.from({ length: SLASH_COMMAND_MAX_ENTRIES + 1 }, (_, index) => ({
       command: `/bulk-${String(index).padStart(4, '0')}`,
       description: `Bulk command ${index}`,
@@ -3917,7 +3482,6 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'pi', cwd: '/fixture/project', ...exactAgentFields(),
     };
-    seedAgent(socket, agent);
     const pending = relayStore.loadSlashCommands(agent);
     const request = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: request.request_id, ok: true, data: piCatalogFixture });
@@ -3944,7 +3508,6 @@ describe('relay command store', () => {
       agent: 'codex', cwd: '/home/test/project',
       ...exactAgentFields(),
     };
-    seedAgent(socket, agent);
 
     const pending = relayStore.loadSlashCommands(agent);
     const request = JSON.parse(socket.sent.at(-1)!);
@@ -3964,7 +3527,6 @@ describe('relay command store', () => {
       ...exactAgentFields(),
     };
     await expect(relayStore.loadSlashCommands(agent)).rejects.toThrow(/does not provide/);
-    seedAgent(socket, agent);
 
     socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
     const pending = relayStore.loadSlashCommands(agent);
@@ -3979,7 +3541,6 @@ describe('relay command store', () => {
     const replacement = MockWebSocket.instances.at(-1)!;
     replacement.open();
     replacement.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
-    seedAgent(replacement, agent);
     const refreshed = relayStore.loadSlashCommands(agent);
     const refreshedRequest = JSON.parse(replacement.sent.at(-1)!);
     expect(refreshedRequest.type).toBe('list_slash_commands');
@@ -4004,7 +3565,6 @@ describe('relay command store', () => {
       ...exactAgentFields(),
     };
     const agentNew = { ...agentOld, cwd: '/home/test/new' };
-    seedAgent(socket, agentOld);
 
     const olderPromise = relayStore.loadSlashCommands(agentOld);
     const olderRequest = socket.sent.map((p) => JSON.parse(p)).at(-1)!;
@@ -4051,8 +3611,8 @@ describe('relay command store', () => {
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
-    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
-    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'submit_prompt', text: 'ship it' });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pending = relayStore.sendCommand(relayId, { type: 'submit_prompt', pane_id: 'w1:p1', text: 'ship it' });
     expect(JSON.parse(socket.sent.at(-1)!).type).toBe('submit_prompt');
 
     socket.serverClose();
@@ -4069,8 +3629,8 @@ describe('relay command store', () => {
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
-    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
-    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'submit_prompt', text: 'ship it' });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pending = relayStore.sendCommand(relayId, { type: 'submit_prompt', pane_id: 'w1:p1', text: 'ship it' });
     const command = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'accepted' });
     const outcome = pending.then(() => null, (caught) => caught as CommandError);
@@ -4089,8 +3649,8 @@ describe('relay command store', () => {
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
-    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
-    const outcome = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_rename', name: 'renamed' })
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const outcome = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: 'renamed' })
       .then(() => null, (caught) => caught as CommandError);
 
     await vi.advanceTimersByTimeAsync(15_000);

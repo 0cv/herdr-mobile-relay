@@ -32,9 +32,9 @@ class CandidateScopeIntegrationTest(unittest.TestCase):
         self.assertFalse(RUNNER.candidate_scope_allowed([p for p in changed if p != RUNNER.REQUIRED[0]]))
         self.assertFalse(RUNNER.candidate_scope_allowed([p for p in changed if p != extra[0]]))
         self.assertFalse(RUNNER.candidate_scope_allowed([*changed, "unlisted/integration-path.txt"]))
-        self.assertEqual(RUNNER.ALLOWED.count("frontend/tests/unit/store-last-known.test.ts"), 1)
+        self.assertEqual(RUNNER.ALLOWED.count("frontend/build-versions.json"), 1)
         self.assertFalse(RUNNER.candidate_scope_allowed(
-            [*changed, "frontend/tests/unit/store-last-known-extra.test.ts"]))
+            [*changed, "frontend/build-versions-extra.json"]))
         self.assertFalse(RUNNER.candidate_scope_allowed([*changed, changed[0]]))
 
 

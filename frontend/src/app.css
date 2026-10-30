@@ -677,7 +677,6 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .term-content mark.terminal-find-match { background: #f2d66d; border-radius: .08rem; color: #17120a; }
 .term-content mark.terminal-find-match.active { background: #ff8a4c; box-shadow: 0 0 0 1px #fff6; color: #160a04; }
 .term-wrap { display: flex; flex: 1 1 auto; min-height: 0; position: relative; }
-.jump-bottom { background: var(--card); border: 1px solid var(--border); border-radius: 50%; bottom: .75rem; color: var(--foreground); cursor: pointer; height: 2.75rem; position: absolute; right: .75rem; width: 2.75rem; z-index: 2; }
 .terminal-bottom { background: var(--background); border-top: 1px solid var(--border); flex: 0 0 auto; padding-bottom: env(safe-area-inset-bottom); position: relative; }
 .term-input { align-items: flex-end; display: flex; gap: .45rem; padding: .55rem; }
 .composer-field { background: var(--input); border: 1px solid var(--border); border-radius: .68rem; display: flex; flex: 1; min-width: 0; position: relative; }

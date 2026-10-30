@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -74,33 +73,6 @@ it.each([false, true])('restores terminal geometry after hidden scroll and resiz
   await tick();
   expect(top).toBe(before);
   expect(transcript.value).toContain('new output while hidden');
-  view.unmount();
-});
-
-it('keeps Jump to latest over the scrollable terminal without taking flex width', async () => {
-  const css = readFileSync('src/app.css', 'utf8');
-  expect(css).toMatch(/\.term-wrap\s*\{[^}]*position:\s*relative/);
-  expect(css).toMatch(/\.jump-bottom\s*\{[^}]*position:\s*absolute/);
-  const agent: Agent = {
-    relay_id: 'jump', relay_label: 'Jump', raw_pane_id: 'pane', pane_id: 'jump::pane',
-    server_session_id: 'primary', terminal_id: 'terminal', generation: 1, agent: 'codex',
-  };
-  const frame: TerminalFrame = { paneId: agent.pane_id, format: 'plain', content: Array.from({ length: 140 }, (_, index) => `line ${index}`).join('\n') };
-  const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>(), frame });
-  await tick();
-  const terminal = screen.getByRole('log', { name: 'Agent terminal output' });
-  Object.defineProperties(terminal, {
-    scrollHeight: { value: 2000 }, clientHeight: { value: 500 }, clientWidth: { value: 300 },
-    scrollTop: { writable: true, value: 1500 },
-  });
-  await fireEvent.scroll(terminal);
-  terminal.scrollTop = 1400;
-  await fireEvent.scroll(terminal);
-  const button = screen.getByRole('button', { name: 'Jump to latest' });
-  expect(button.parentElement).toBe(terminal.parentElement);
-  expect(button).not.toBeDisabled();
-  await fireEvent.click(button);
-  expect(terminal.scrollTop).toBe(terminal.scrollHeight);
   view.unmount();
 });
 

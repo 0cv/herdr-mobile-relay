@@ -13,14 +13,10 @@ project follows [Semantic Versioning](https://semver.org/).
   cannot be confirmed. BYO leaves the operator's route unchanged. The installed
   CLI selector remains disabled pending runtime and physical-phone qualification;
   isolated checkout tools support only the documented development profiles.
-- Add an opt-in encrypted last-known
-  phone summary. Resume timing remains local to the phone with redacted export.
 
 ### Changed
 
-- Group Cloudflare, gateway and Tailscale choices in the setup menu. Require a
-  fresh authenticated inventory snapshot before phone actions after reconnect,
-  path change or wake; older relays need upgrading with the phone app.
+- Group Cloudflare, gateway and Tailscale choices in the setup menu.
 - Refuse service installation and phone-managed updates for foreground Tailscale
   selections, and verify the selected app bundle before gateway installation.
 

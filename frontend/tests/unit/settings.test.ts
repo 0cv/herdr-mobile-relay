@@ -3,7 +3,6 @@ import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SettingsView from '$components/SettingsView.svelte';
-import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
 import {
   APP_ASSET_VERSION,
   APP_VERSION,
@@ -13,16 +12,12 @@ import {
   TERMINAL_RESIZE_SESSION_KEY,
 } from '$lib/config';
 import { currentView, navigate } from '$lib/router';
-import { guardReload } from '$lib/reload-guard';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
-import { appUpdateStatus, beginUpdateProgress, clearUpdateProgress, MANAGED_UPDATE_COMMAND, updateProgressPlan } from '$lib/updates';
-import { defaultAgentView, paneAgentViewOverrides, setTerminalResizeSession } from '$lib/preferences';
-import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
-import { BrowserDeviceCredentialStore } from '$lib/device-auth';
-import { base64UrlEncode } from '$lib/base64url';
-import { defaultDevicePushPolicy } from '$lib/push-policy';
+import { appUpdateStatus, clearUpdateProgress, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { guardReload } from '$lib/reload-guard';
+import { defaultAgentView, paneAgentViewOverrides, readTerminalResizeSession, setTerminalResizeSession } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -52,16 +47,14 @@ class MockWebSocket {
     MockWebSocket.instances.push(this);
   }
 
-  private inventory = new CorrelatedInventoryFixture((message) => this.onmessage?.({ data: JSON.stringify(message) }));
-  send(payload: string) { this.sent.push(payload); this.inventory.client(payload); }
+  send(payload: string) { this.sent.push(payload); }
   close() { this.readyState = 3; }
   open() {
     this.readyState = MockWebSocket.OPEN;
     this.onopen?.();
   }
   server(message: unknown) {
-    this.onmessage?.({ data: JSON.stringify(this.inventory.server(message)) });
-    this.inventory.flush();
+    this.onmessage?.({ data: JSON.stringify(message) });
   }
 }
 
@@ -419,37 +412,6 @@ describe('settings relay status', () => {
     expect(await screen.findByText('Gateway: 0.17.0 · Latest: 0.17.0')).toBeInTheDocument();
   });
 
-  it('waits for correlated authority before continuing a pending fleet update', async () => {
-    const socket = MockWebSocket.instances[0];
-    socket.open();
-    socket.server({
-      type: 'push_config', protocol: 3, release_version: '0.15.0',
-      capabilities: ['self_update'],
-      update: { state: 'available', current_version: '0.15.0', available_version: APP_VERSION,
-        target_revision: 'f'.repeat(40), can_install: true },
-    });
-    const relayId = get(relayStore.relayConfigs)[0].id;
-    expect(relayStore.relayActionsFresh(relayId)).toBe(true);
-    relayStore.requestAgents(true);
-    expect(relayStore.relayActionsFresh(relayId)).toBe(false);
-    const install = vi.spyOn(relayStore, 'installRelayUpdate').mockResolvedValue(undefined);
-    let mounted: ReturnType<typeof render> | undefined;
-    try {
-      beginUpdateProgress(APP_VERSION, [relayId], '');
-      mounted = render(UpdateProgressDialog);
-      await waitFor(() => expect(screen.getByRole('dialog', { name: 'Continue update' })).toBeInTheDocument());
-      expect(install).not.toHaveBeenCalled();
-      expect(get(updateProgressPlan)?.startedRelayIds).toEqual([]);
-      socket.server({ type: 'inventory_status', state: 'ready', stale: false });
-      await waitFor(() => expect(install).toHaveBeenCalledExactlyOnceWith(relayId));
-      expect(get(updateProgressPlan)?.errors).toEqual({});
-    } finally {
-      mounted?.unmount();
-      clearUpdateProgress();
-      install.mockRestore();
-    }
-  });
-
   it('shows the complete one-time update command for an older relay', async () => {
     const user = userEvent.setup();
     render(SettingsView);
@@ -603,7 +565,8 @@ describe('settings relay status', () => {
     await user.click(refresh.getByRole('button', { name: '250 ms' }));
   });
 
-  it('offers Resize Session as a disclosed opt-in with a subordinate height switch', async () => {
+  it('offers Resize Session on by default with a subordinate height switch', async () => {
+    setTerminalResizeSession(readTerminalResizeSession());
     const user = userEvent.setup();
     render(SettingsView);
 
@@ -611,8 +574,9 @@ describe('settings relay status', () => {
     expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
     const resize = screen.getByRole('switch', { name: 'Resize Session' });
-    expect(resize).not.toBeChecked();
+    expect(resize).toBeChecked();
     for (const disclosure of [
+      /On by default, saved on this device\./,
       /Resizes the shared terminal to fit this phone while the phone has it open\./,
       /the laptop and SSH views of that pane look garbled/,
       /agents may leave narrow copies of their output in the scrollback/,
@@ -623,7 +587,11 @@ describe('settings relay status', () => {
     ]) expect(resize).toHaveAccessibleDescription(disclosure);
     const height = screen.getByRole('switch', { name: 'Lease Terminal Height' });
     expect(height).toBeDisabled();
+    expect(height).not.toBeChecked();
 
+    await user.click(resize);
+    expect(resize).not.toBeChecked();
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('false');
     await user.click(resize);
     expect(resize).toBeChecked();
     expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('true');
@@ -652,54 +620,6 @@ describe('settings relay status', () => {
     // Leave the shared preferences at their defaults for subsequent tests.
     await user.click(height);
     await user.click(resize);
-  });
-
-  it('fetches and displays the saved device policy only after correlated freshness', async () => {
-    const user = userEvent.setup();
-    const relay = get(relayStore.relayConfigs)[0];
-    const credentials = new BrowserDeviceCredentialStore(localStorage);
-    credentials.saveInvitation(relay.id, { id: 'policy-invitation', version: 1,
-      secret: base64UrlEncode(new Uint8Array(32).fill(7)), expiresAt: Date.now() + 60_000 });
-    credentials.replaceInvitation(relay.id, 'policy-invitation', { deviceId: 'policy-device', credentialId: 'policy-credential',
-      credentialVersion: 1, credentialSecret: base64UrlEncode(new Uint8Array(32).fill(8)), role: 'controller', locale: 'en' });
-    const sent: Record<string, unknown>[] = [];
-    let handlers!: TransportHandlers;
-    transportHijack.current = (_relay, incoming) => {
-      handlers = incoming;
-      return { kind: 'websocket', connect: () => handlers.onStatus('connected', { path: 'websocket' }),
-        close: () => {}, send: (payload) => { sent.push(payload); return true; } };
-    };
-    relayStore.connectRelay(relay);
-    localStorage.setItem(PUSH_ENABLED_KEY, 'true');
-    render(SettingsView);
-    handlers.onMessage({ type: 'push_config', protocol: 3, capabilities: ['inventory_snapshot_v1', 'push_policy'],
-      inventory: { state: 'ready', stale: false } });
-    const snapshot = sent.findLast((message) => message.snapshot_request_id)!;
-    expect(sent.filter((message) => message.type === 'push_policy_get')).toHaveLength(0);
-    handlers.onMessage({ type: 'agents', agents: [] });
-    handlers.onMessage({ type: 'inventory_snapshot', snapshot_request_id: 'unmatched',
-      inventory: { state: 'ready', stale: false }, agents: [], workspaces: [] });
-    expect(sent.filter((message) => message.type === 'push_policy_get')).toHaveLength(0);
-    handlers.onMessage({ type: 'inventory_snapshot', snapshot_request_id: snapshot.snapshot_request_id,
-      inventory: { state: 'ready', stale: false }, agents: [], workspaces: [] });
-    expect(sent.filter((message) => message.type === 'push_policy_get')).toEqual([{ type: 'push_policy_get', protocol: 3 }]);
-    const policy = defaultDevicePushPolicy('policy-device');
-    policy.categories = { ...policy.categories, attention: false, question: false, finished: true };
-    policy.settle_ms = 5000;
-    policy.cooldown_ms = 60000;
-    policy.snoozed = true;
-    handlers.onMessage({ type: 'push_policy', policy });
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Approval needed' })).not.toBeChecked());
-    expect(screen.getByRole('switch', { name: 'Questions' })).not.toBeChecked();
-    expect(screen.getByRole('switch', { name: 'Finished' })).toBeChecked();
-    expect(screen.getByLabelText('Settle delay')).toHaveValue('5000');
-    expect(screen.getByLabelText('Cooldown')).toHaveValue('60000');
-    expect(screen.getByLabelText('Snooze')).toHaveValue('global');
-    await user.click(screen.getByRole('switch', { name: 'Finished' }));
-    const save = sent.findLast((message) => message.type === 'push_policy_set')!;
-    expect(save.policy).toMatchObject({ categories: { ...policy.categories, finished: false },
-      settle_ms: 5000, cooldown_ms: 60000, snoozed: true, update_once: true });
-    handlers.onMessage({ type: 'command_result', request_id: save.request_id, action: 'push_policy_set', ok: true, phase: 'confirmed' });
   });
 
   it('keeps notification controls out of the way until push delivery is enabled', async () => {

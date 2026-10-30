@@ -10,7 +10,6 @@
   "update": {"state": "current"},
   "app_deploy": {"state": "idle", "configured": false},
   "capabilities": [
-    "inventory_snapshot_v1",
     "pi_integration",
     "attention_classification",
     "clear_activities",

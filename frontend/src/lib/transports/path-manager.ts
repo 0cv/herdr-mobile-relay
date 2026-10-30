@@ -5,7 +5,6 @@ import { createWebRTCTransport, type DirectTransportOptions, type SignalingChann
 import type { TransportAuthentication } from './encrypted';
 import {
   DEVICE_UNAUTHORIZED_CODE,
-  observePhase,
   type RelayTransport,
   type TransportHandlers,
   type TransportStatusDetail,
@@ -55,7 +54,6 @@ export type DirectFactory = (
   signal: SignalingChannel,
   handlers: TransportHandlers,
   options: DirectTransportOptions,
-  authentication?: TransportAuthentication,
 ) => RelayTransport;
 
 /**
@@ -95,9 +93,9 @@ function gatewayTargets(relay: RelayConfig): string[] {
 
 /** Seams for tests; production uses the real gateway and WebRTC transports. */
 export interface HybridTransportOverrides {
-  createGateway?(relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication): RelayTransport;
+  createGateway?(relay: RelayConfig, handlers: TransportHandlers): RelayTransport;
   createDirect?: DirectFactory;
-  createLegacy?(relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication): RelayTransport;
+  createLegacy?(relay: RelayConfig, handlers: TransportHandlers): RelayTransport;
 }
 
 function forcedRelay(): boolean {
@@ -124,23 +122,11 @@ export function createHybridTransport(
   authentication: TransportAuthentication = {},
 ): RelayTransport {
   const makeGateway = overrides.createGateway
-    ?? ((target, targetHandlers, scoped) => createGatewayTransport(target, targetHandlers, scoped));
+    ?? ((target, targetHandlers) => createGatewayTransport(target, targetHandlers, authentication));
   const makeDirect = overrides.createDirect
-    ?? ((target, signal, targetHandlers, options, scoped) => createWebRTCTransport(target, signal, targetHandlers, options, scoped));
+    ?? ((target, signal, targetHandlers, options) => createWebRTCTransport(target, signal, targetHandlers, options, authentication));
   const makeLegacy = overrides.createLegacy
-    ?? ((target, targetHandlers, scoped) => createWebSocketTransport(target, targetHandlers, scoped));
-  /**
-   * Each path attempt reports resume-timing milestones only while it is the
-   * live attempt, so a replaced gateway or direct dial can never write into
-   * the sample of the one that superseded it.
-   */
-  const scopedAuthentication = (current: () => boolean): TransportAuthentication => ({
-    ...authentication,
-    observe: (phase, path) => {
-      if (!closed && current()) authentication.observe?.(phase, path);
-    },
-  });
-  let gatewayAttempt = 0;
+    ?? ((target, targetHandlers) => createWebSocketTransport(target, targetHandlers, authentication));
   const forceRelay = forcedRelay();
   const signalHandlers = new Set<(message: Record<string, any>) => void>();
 
@@ -160,6 +146,7 @@ export function createHybridTransport(
    */
   let dialed: RelayConfig = relay;
   let gateway: RelayTransport | null = null;
+  let gatewayAttempt = 0;
   let gatewayReady = false;
   /** Port the live relayed session advertised; 0 disables address discovery. */
   let stunPort = 0;
@@ -227,7 +214,7 @@ export function createHybridTransport(
     }, DIRECT_ATTEMPT_TIMEOUT_MS);
     direct = makeDirect(dialed, signal, directHandlers(attempt), {
       iceServers: stunServers(String(dialed.gatewayUrl || ''), stunPort),
-    }, scopedAuthentication(() => attempt === directAttempt));
+    });
     direct.connect();
   }
 
@@ -256,7 +243,6 @@ export function createHybridTransport(
   }
 
   function promoteDirect(): void {
-    observePhase(authentication.observe, 'promoted', 'webrtc');
     active = 'direct';
     directFailures = 0;
     clearTimeout(attemptTimer ?? undefined);
@@ -273,7 +259,6 @@ export function createHybridTransport(
 
   function failDirect(detail?: TransportStatusDetail): void {
     if (closed || !direct) return;
-    observePhase(authentication.observe, 'failed', 'webrtc');
     const wasActive = active === 'direct';
     clearTimeout(attemptTimer ?? undefined);
     attemptTimer = null;
@@ -295,10 +280,9 @@ export function createHybridTransport(
   }
 
   function openGateway(): void {
+    const attempt = ++gatewayAttempt;
     gatewaysTried += 1;
     dialed = targets.length ? { ...relay, gatewayUrl: targets[gatewayIndex] } : relay;
-    const attempt = ++gatewayAttempt;
-    const scoped = scopedAuthentication(() => attempt === gatewayAttempt);
     gateway = makeGateway(dialed, {
       onMessage(message: Record<string, any>): void {
         if (closed || attempt !== gatewayAttempt) return;
@@ -313,10 +297,6 @@ export function createHybridTransport(
       onStatus(status, detail): void {
         if (closed || attempt !== gatewayAttempt) return;
         if (status === 'closed') {
-          // Resume timing records how this gateway dial ended before the list
-          // moves on, so a later gateway's success cannot erase it. A device
-          // refusal is reported by the store as an authorization outcome.
-          if (detail?.code !== DEVICE_UNAUTHORIZED_CODE) observePhase(scoped.observe, 'failed', 'gateway');
           gatewayAttempt += 1;
           gatewayReady = false;
           gateway = null;
@@ -363,7 +343,7 @@ export function createHybridTransport(
         );
         if (status === 'connected') startDirect();
       },
-    }, scoped);
+    });
     gateway.connect();
   }
 
@@ -378,7 +358,6 @@ export function createHybridTransport(
     legacyTried = true;
     active = 'legacy';
     handlers.onStatus('connecting', { reason: detail?.reason });
-    const scoped = scopedAuthentication(() => active === 'legacy');
     legacy = makeLegacy(relay, {
       onMessage(message: Record<string, any>): void {
         if (closed || active !== 'legacy') return;
@@ -387,14 +366,13 @@ export function createHybridTransport(
       onStatus(status, legacyDetail): void {
         if (closed || active !== 'legacy') return;
         if (status === 'closed') {
-          if (legacyDetail?.code !== DEVICE_UNAUTHORIZED_CODE) observePhase(scoped.observe, 'failed', 'websocket');
           legacy = null;
           closed = true;
           stop();
         }
         handlers.onStatus(status, legacyDetail);
       },
-    }, scoped);
+    });
     legacy.connect();
     return true;
   }

@@ -1,9 +1,5 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlEncode } from './base64url';
-import { actionPolicy, CLEANUP_FOR, RECOVERY_ACTIONS, SUBSCRIPTION_ACTIONS } from './action-policy';
-import { InventoryFreshness, INVENTORY_SNAPSHOT_CAPABILITY, type InventoryBinding } from './inventory-freshness';
-import { LastKnownSessionCache, projectLastKnown } from './last-known';
-import { LastKnownControl } from './last-known-control';
 import { dispatchFlag } from './composer';
 import { inputContextIdentity } from './input-target-state';
 import { terminalInputDelivery } from './terminal-input-delivery.svelte';
@@ -36,7 +32,6 @@ import { gatewayRendezvous } from './gateway-credentials';
 import { SLASH_COMMAND_MAX_ENTRIES } from './slash-command-limits';
 import {
   BrowserDeviceCredentialStore,
-  DEVICE_AUTH_STORAGE_KEY,
   commitDeviceEnrollment,
   type RelayDeviceCredential,
   type RelayInvitation,
@@ -67,12 +62,10 @@ import {
 } from './protocol';
 import {
   normalizeFrontendTargetRef,
-  isResourceId,
   targetRefForAgent,
   targetRefMatchesAgent,
   targetStoreKey,
 } from './resource-id';
-import { resumeMetrics } from './resume-metrics';
 import { adoptRelaySpeech, isSpeechLanguage, type SpeechRequest } from './speech';
 import {
   PUSH_CATEGORIES,
@@ -133,7 +126,6 @@ const COMMAND_TIMEOUT_MS = 15_000;
 const BOOTSTRAP_PAIRING_SESSION_PREFIX = 'herdr_browser_pairing:';
 const AGENT_START_TIMEOUT_MS = 60_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
-const SETUP_LINK_FAILURE_MESSAGE = 'This setup link has expired or was already used, or this device was refused. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.';
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
 const BACKGROUND_HEALTH_TIMEOUT_MS = 10_000;
 const FOREGROUND_HEALTH_TIMEOUT_MS = 2_000;
@@ -469,15 +461,6 @@ function normalizeWorkspace(
 
 interface RelayConnection extends RelayConnectionView {
   transport: RelayTransport | null;
-  freshness: InventoryFreshness<Agent, RelayWorkspace>;
-  pathIdentity: object;
-  wakeGeneration: number;
-  snapshotPending: boolean;
-  snapshotNonce: string;
-  summaryGeneration: number;
-  snapshotTimer: ReturnType<typeof setTimeout> | null;
-  cleanupGrants: Set<string>;
-  conversationSubscription: { targetKey: string; id: string } | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
@@ -490,8 +473,6 @@ interface RelayConnection extends RelayConnectionView {
    */
   lastMessageAt: number;
   directoryGeneration: number;
-  /** Scopes local resume-timing callbacks to this connection attempt. */
-  metricsGeneration: number;
 }
 
 interface PendingOperation {
@@ -508,8 +489,6 @@ interface PendingRequest extends PendingOperation {
 }
 
 interface PendingUpload extends PendingOperation {
-  targetKey: string;
-  uploadId: string;
   responseType: string;
   resolve: (result: Record<string, any>) => void;
 }
@@ -567,10 +546,6 @@ function normalizePushPolicy(value: unknown): DevicePushPolicy | null {
   return policy;
 }
 
-function hasSetupParameter(locationValue: Pick<Location, 'hash'>): boolean {
-  return new URLSearchParams(String(locationValue.hash || '').replace(/^#/, '')).has('setup');
-}
-
 class RelayStore {
   readonly relayConfigs = writable<RelayConfig[]>([]);
   readonly connections = writable<Map<string, RelayConnection>>(new Map());
@@ -586,14 +561,6 @@ class RelayStore {
   readonly pushTests = writable<Map<string, PushTestState>>(new Map());
 
   private connectionsValue = new Map<string, RelayConnection>();
-  private sessionCredentials = new WeakMap<RelayConnection, RelayDeviceCredential | null>();
-  // Retain only cancellation across replacement authenticated connections,
-  // bound to the original credential, relay configuration and exact target.
-  private uploadCleanup = new Map<string, { relay: RelayConfig; credential: RelayDeviceCredential | null; grants: Set<string> }>();
-  private attachmentCleanupScopes = new Map<string, { credential: RelayDeviceCredential | null }>();
-  private retainedAttachments = new Map<string, { relayId: string; scope: object; controller: AttachmentBatchController }>();
-  private deferredUiGeneration = 0;
-  private readonly registeredAppOrigins = new WeakSet<RelayConnection>();
   private agentsValue: Agent[] = [];
   private workspacesValue: RelayWorkspace[] = [];
   private activitiesValue: Activity[] = [];
@@ -627,28 +594,9 @@ class RelayStore {
   private hiddenSince = 0;
   private toastId = 0;
   private pushConfigHandler: ((relayId: string) => void) | null = null;
-  private readonly deviceCredentials = new BrowserDeviceCredentialStore(localStorage, Date.now, () => {
-    this.credentialsChanged();
-    void this.lastKnownControl.forget();
-  });
-  private actionLocked = false;
-  private stopLastKnown: (() => void) | null = null;
-  private stopCredentials: (() => void) | null = null;
-  private readonly lastKnownCache: LastKnownSessionCache = new LastKnownSessionCache({
-    storage: browserStorage(() => sessionStorage), origin: location.origin,
-    epoch: () => this.lastKnownControl.epoch(), credential: (id) => this.deviceCredential(id),
-    association: (id) => {
-      const relay = get(this.relayConfigs).find((relay) => relay.id === id);
-      if (!relay) throw new Error('Last-known cache is unavailable.');
-      return JSON.stringify([relay.id, relay.url, relay.gatewayRelayId ?? '']);
-    },
-  });
-  readonly lastKnownControl: LastKnownControl = new LastKnownControl(browserStorage(() => localStorage), this.lastKnownCache);
-  readonly lastKnown = this.lastKnownCache.summaries;
-  readonly lastKnownAvailability = this.lastKnownCache.availability;
+  private readonly deviceCredentials = new BrowserDeviceCredentialStore(localStorage);
 
   constructor() {
-    resumeMetrics.setParticipants(() => this.resumeParticipants());
     let previousRefreshInterval = get(terminalRefreshInterval);
     terminalRefreshInterval.subscribe((value) => {
       if (value === previousRefreshInterval) return;
@@ -661,33 +609,12 @@ class RelayStore {
   }
 
   initialize(connect = true): void {
-    this.stopLastKnown?.();
-    this.stopLastKnown = this.lastKnownControl.initialize();
-    this.stopCredentials?.();
-    const credentialChanged = (event: StorageEvent) => {
-      if (event.key === DEVICE_AUTH_STORAGE_KEY || event.key === null) this.credentialsChanged();
-    };
-    window.addEventListener('storage', credentialChanged);
-    this.stopCredentials = () => window.removeEventListener('storage', credentialChanged);
-    this.lastKnownCache.setLocked(this.actionLocked);
     let relays = loadRelayConfigs();
     this.deferredPairingRelays.clear();
     const setup = quickSetupConfig(location);
     const invitation = quickSetupInvitation(location);
     const imported = importQuickSetup(relays, location);
-    if (!imported && hasSetupParameter(location)) {
-      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
-    }
     if (imported) {
-      const setupRelay = setup ? this.relayForSetup(imported, setup) : undefined;
-      if (invitation && invitation.expiresAt <= Date.now() && setupRelay
-        && this.shouldSaveInvitation(setupRelay.id, invitation)) {
-        this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
-        this.relayConfigs.set(relays);
-        history.replaceState(history.state, '', location.pathname + location.search);
-        if (connect) this.connectAll();
-        return;
-      }
       clearChangedRelayPreviews(relays, imported);
       relays = imported;
       const relay = setup ? this.relayForSetup(relays, setup) : undefined;
@@ -700,7 +627,6 @@ class RelayStore {
             this.deviceCredentials.saveInvitation(relay.id, invitation);
           } catch {
             // A malformed or expired link must not remove a working credential.
-            if (invitation.expiresAt <= Date.now()) this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
           }
         }
       }
@@ -741,7 +667,6 @@ class RelayStore {
   /** A deferred relay shows as a disconnected row that explains why it never dials. */
   private markPairingDeferred(relay: RelayConfig): void {
     this.disconnectRelay(relay.id);
-    resumeMetrics.withdraw(relay.id);
     const connection = this.newConnection(relay);
     connection.status = 'disconnected';
     connection.closed = true;
@@ -789,31 +714,15 @@ class RelayStore {
     }
     this.deferredPairingRelays.delete(relayId);
     const invitation = quickSetupInvitation(location);
-    let bootstrapOptIn = '';
-    let previousBootstrapOptIn: string | null = null;
     try {
       if (invitation && this.shouldSaveInvitation(relayId, invitation)) {
         this.deviceCredentials.saveInvitation(relayId, invitation);
       } else if (!invitation) {
         const flow = history.state?.bootstrapPairingFlow;
         if (typeof flow !== 'string') throw new Error('Open the invitation link again.');
-        bootstrapOptIn = BOOTSTRAP_PAIRING_SESSION_PREFIX + flow;
-        previousBootstrapOptIn = sessionStorage.getItem(bootstrapOptIn);
-        sessionStorage.setItem(bootstrapOptIn, relayId);
+        sessionStorage.setItem(BOOTSTRAP_PAIRING_SESSION_PREFIX + flow, relayId);
       }
-      // Persist the authentication this dial presents inside the guarded
-      // transaction. A bootstrap key otherwise saves its one-use invitation
-      // during connectRelay, after the fragment and deferral are gone.
-      this.relayAuthentication(relay);
     } catch (error) {
-      if (bootstrapOptIn) {
-        try {
-          if (previousBootstrapOptIn === null) sessionStorage.removeItem(bootstrapOptIn);
-          else sessionStorage.setItem(bootstrapOptIn, previousBootstrapOptIn);
-        } catch {
-          // A leftover opt-in cannot accept pairing: that also requires the stored credential this failure did not save.
-        }
-      }
       this.deferredPairingRelays.add(relayId);
       this.showToast(error instanceof Error ? error.message : 'Could not save browser pairing.', true);
       return false;
@@ -829,24 +738,14 @@ class RelayStore {
     const invitation = quickSetupInvitation(locationValue);
     const currentRelays = get(this.relayConfigs);
     const imported = importQuickSetup(currentRelays, locationValue);
-    if (!imported || !setup) {
-      if (hasSetupParameter(locationValue)) this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
-      return false;
-    }
+    if (!imported || !setup) return false;
+    clearChangedRelayPreviews(currentRelays, imported);
     const relay = this.relayForSetup(imported, setup);
-    if (!relay) {
-      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
-      return false;
-    }
-    if (invitation && invitation.expiresAt <= Date.now() && this.shouldSaveInvitation(relay.id, invitation)) {
-      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
-      return false;
-    }
+    if (!relay) return false;
     const pairingAccepted = this.setupPairingAccepted(relay, locationValue);
     const connection = this.connectionsValue.get(relay.id);
     const preserveConnection = pairingAccepted && connection && !connection.closed
       && !relayConnectionIdentityChanged(connection.relay, relay);
-    clearChangedRelayPreviews(currentRelays, imported);
     // Persist the entry before deciding, so a deferred relay row exists for
     // the connection state and the installed copy finds the same relay id.
     this.relayConfigs.set(imported);
@@ -856,7 +755,6 @@ class RelayStore {
       try {
         this.deviceCredentials.saveInvitation(relay.id, invitation);
       } catch {
-        if (invitation.expiresAt <= Date.now()) this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
         return false;
       }
     }
@@ -873,15 +771,6 @@ class RelayStore {
   }
 
   destroy(): void {
-    this.stopLastKnown?.();
-    this.stopLastKnown = null;
-    this.stopCredentials?.();
-    this.stopCredentials = null;
-    this.lastKnownCache.dispose();
-    this.uploadCleanup.clear();
-    this.retainedAttachments.clear();
-    this.attachmentCleanupScopes.clear();
-    this.actionLocked = false;
     this.reconnectEnabled = false;
     this.stopKeepalive();
     for (const id of [...this.connectionsValue.keys()]) this.disconnectRelay(id);
@@ -898,27 +787,6 @@ class RelayStore {
     this.watchedPanes.clear();
     this.paneWatchesStarted.clear();
     this.ownedPaneLeases.clear();
-    resumeMetrics.reset();
-  }
-
-  /**
-   * Relays a wake can resume: configured, not waiting for Home Screen pairing,
-   * and holding something to authenticate with. Each one is enrolled in a
-   * resume-timing epoch even if its dial waits for device verification.
-   */
-  resumeParticipants(): Array<{ id: string; hybrid: boolean }> {
-    if (!this.reconnectEnabled) return [];
-    return get(this.relayConfigs).flatMap((relay) => {
-      if (this.deferredPairingRelays.has(relay.id)) return [];
-      const connection = this.connectionsValue.get(relay.id);
-      if (connection?.authRejected || connection?.pairingRequired || connection?.pairingDeferred) return [];
-      try {
-        if (this.pairingRequired(relay)) return [];
-      } catch {
-        return [];
-      }
-      return [{ id: relay.id, hybrid: relay.transport === 'hybrid' }];
-    });
   }
 
   setPushConfigHandler(handler: ((relayId: string) => void) | null): void {
@@ -948,10 +816,7 @@ class RelayStore {
   }
 
   removeRelay(id: string): void {
-    void this.lastKnownControl.forget();
-    resumeMetrics.removed(id);
     this.disconnectRelay(id);
-    this.invalidateUploadCleanup(id);
     this.reconnectAttempts.delete(id);
     this.deferredPairingRelays.delete(id);
     this.deviceCredentials.remove(id);
@@ -1049,35 +914,19 @@ class RelayStore {
   private markPairingRequired(relay: RelayConfig): void {
     if (this.connectionsValue.get(relay.id)?.pairingRequired) return;
     this.disconnectRelay(relay.id);
-    resumeMetrics.withdraw(relay.id);
     const connection = this.newConnection(relay);
     connection.status = 'disconnected';
     connection.closed = true;
     connection.pairingRequired = true;
     this.connectionsValue.set(relay.id, connection);
     this.emitConnections();
-    this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
+    this.showToast(`${relay.label} needs pairing. Import a device invitation link.`, true);
   }
 
   private newConnection(relay: RelayConfig): RelayConnection {
-    const cleanup = this.uploadCleanup.get(relay.id);
-    const credential = this.deviceCredential(relay.id);
-    const owner = cleanup?.credential;
-    const recoverable = cleanup && owner && credential
-      && sameDeviceCredential(owner, credential)
-      && !relayConnectionIdentityChanged(cleanup.relay, relay);
-    if (!recoverable) this.invalidateUploadCleanup(relay.id);
     return {
       relay,
       transport: null,
-      freshness: new InventoryFreshness(
-        (value) => this.parseFreshAgents(relay, value),
-        (value) => this.parseFreshWorkspaces(relay, value),
-      ),
-      pathIdentity: {}, wakeGeneration: 0, snapshotPending: false, snapshotNonce: '', summaryGeneration: 0, snapshotTimer: null,
-      cleanupGrants: new Set(recoverable ? [...cleanup.grants].map((key) => `cancel:${key}`) : []),
-      conversationSubscription: null,
-      actionsFresh: false, workspacesFresh: false,
       status: 'connecting',
       path: '',
       activeGatewayUrl: '',
@@ -1087,7 +936,6 @@ class RelayStore {
       closed: false,
       connectingSince: Date.now(),
       lastMessageAt: 0,
-      metricsGeneration: 0,
       agentProfiles: [],
       hermesProfiles: [],
       capabilities: [],
@@ -1126,14 +974,10 @@ class RelayStore {
     }
     this.disconnectRelay(relay.id);
     const connection = this.newConnection(relay);
-    connection.metricsGeneration = resumeMetrics.attempt(relay.id, relay.transport === 'hybrid');
     this.connectionsValue.set(relay.id, connection);
-    this.sessionCredentials.set(connection, this.deviceCredential(relay.id));
     this.emitConnections();
     connection.transport = createRelayTransport(relay, {
       onMessage: (message) => {
-        if (!this.isCurrentConnection(relay.id, connection)) return;
-        resumeMetrics.frame(relay.id, connection.metricsGeneration);
         if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
         connection.lastMessageAt = Date.now();
         this.clearHealthTimer(connection);
@@ -1147,25 +991,8 @@ class RelayStore {
       getAuthentication: () => this.relayAuthentication(relay),
       onAuthenticated: (presented, enrollment) => {
         if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
-        const current = this.deviceCredentials.get(relay.id);
-        if (!current || current.kind !== presented.kind || current.id !== presented.id
-          || current.version !== presented.version || current.secret !== presented.secret
-          || (current.kind === 'credential' && presented.kind === 'credential'
-            && (current.deviceId !== presented.deviceId || current.role !== presented.role))
-          || (current.kind === 'invitation' && presented.kind === 'invitation'
-            && current.expiresAt !== presented.expiresAt)) {
-          throw new Error('Authentication changed; reconnect with the current credential.');
-        }
-        if (presented.kind !== 'credential' || presented.id !== enrollment.credentialId
-          || presented.version !== enrollment.credentialVersion) void this.lastKnownControl.forget();
         commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
-        this.sessionCredentials.set(connection, this.deviceCredential(relay.id));
         this.markRelayPaired(relay.id);
-      },
-      observe: (phase, path) => {
-        if (this.isCurrentConnection(relay.id, connection)) {
-          resumeMetrics.phase(relay.id, connection.metricsGeneration, phase, path);
-        }
       },
     });
     connection.transport.connect();
@@ -1180,50 +1007,44 @@ class RelayStore {
     if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
     if (status === 'connected') {
       const previousPath = connection.path;
-      this.invalidateFreshness(relay.id, connection);
-      connection.pathIdentity = {};
       connection.path = detail?.path || connection.transport?.kind || 'websocket';
       // Which candidate answered matters with a list: the app names it rather
       // than the configured head, which may be a gateway that was skipped.
       connection.activeGatewayUrl = connection.path === 'websocket' ? '' : detail?.gatewayUrl || '';
-      resumeMetrics.connected(relay.id, connection.metricsGeneration, connection.path);
       this.markConnectionReady(relay.id, connection);
-      // Existing watches resume only after correlated inventory revalidates
-      // their complete target identity, never merely on handshake completion.
+      if (!previousPath) {
+        // First ready of a fresh session: the relay dropped its watches with
+        // the old one, and reads sent while the transport was down were lost
+        // silently. Re-read every watched pane so an open terminal streams
+        // again within one round trip, not at the next resync interval.
+        for (const watched of this.watchedPanes.values()) {
+          if (watched.relay_id === relay.id) this.readPane(watched);
+        }
+      }
       // A path switch changes the relayed-fidelity budget, so panes have to be
       // rewatched at the interval the new path can afford.
       if (previousPath && previousPath !== connection.path) this.restartPaneWatches();
       return;
     }
     if (status === 'connecting') {
-      resumeMetrics.connecting(relay.id, connection.metricsGeneration);
       if (connection.status === 'connecting') return;
-      this.invalidateFreshness(relay.id, connection);
       connection.status = 'connecting';
       this.emitConnections();
       return;
     }
     this.clearHealthTimer(connection);
-    this.invalidateFreshness(relay.id, connection);
     connection.status = 'disconnected';
-    resumeMetrics.end(
-      relay.id,
-      connection.metricsGeneration,
-      detail?.code === 'device_unauthorized' ? 'auth-rejected' : 'failed',
-    );
     this.rejectPendingOperations(relay.id, detail?.reason || 'Relay disconnected');
     // The relay refuses this device's credential. Keep it until a confirmed,
     // newer invitation replaces it: gateway close reasons are not authenticated.
     if (detail?.code === 'device_unauthorized') {
-      void this.lastKnownControl.forget();
       clearConversationPreviewsForRelay(relay.id);
       connection.authRejected = true;
-      this.invalidateUploadCleanup(relay.id);
       connection.closed = true;
       clearTimeout(connection.reconnectTimer ?? undefined);
       connection.reconnectTimer = null;
       this.emitConnections();
-      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
+      this.showToast(`${relay.label} refused this device. Import a new invitation link.`, true);
       return;
     }
     this.emitConnections();
@@ -1242,7 +1063,17 @@ class RelayStore {
     connection.lastMessageAt = Date.now();
     connection.status = 'connected';
     this.emitConnections();
-    this.requestFreshSnapshot(relayId, connection);
+    const authentication = this.deviceCredentials.get(relayId);
+    if (runningAsInstalledApp()
+      && authentication?.kind === 'credential'
+      && authentication.role === 'controller') {
+      this.sendRaw(relayId, {
+        type: 'register_app_origin',
+        origin: location.origin,
+        protocol: RELAY_PROTOCOL_VERSION,
+      });
+    }
+    this.sendRaw(relayId, { type: 'refresh_agents' });
   }
 
   /**
@@ -1306,10 +1137,7 @@ class RelayStore {
     }
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
-    this.invalidateFreshness(id, connection);
-    resumeMetrics.end(id, connection.metricsGeneration, 'superseded');
     connection.closed = true;
-    connection.conversationSubscription = null;
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     this.clearHealthTimer(connection);
     this.clearUpdateRestartTimer(connection);
@@ -1327,7 +1155,6 @@ class RelayStore {
     if (this.hidden === hidden) return;
     this.hidden = hidden;
     this.hiddenSince = hidden ? Date.now() : 0;
-    if (hidden) this.suspendAuthority();
     if (hidden) {
       for (const connection of this.connectionsValue.values()) {
         clearTimeout(connection.reconnectTimer ?? undefined);
@@ -1338,25 +1165,12 @@ class RelayStore {
     this.syncKeepalive();
   }
 
-  /** No dial or reconnect tuning: suspension/offline only withdraws authority. */
-  suspendAuthority(): void {
-    for (const [relayId, connection] of this.connectionsValue) this.invalidateFreshness(relayId, connection);
-  }
-
   revalidateConnections(timeoutMs = healthTimeoutMs()): void {
-    this.lastKnownControl.sync();
-    this.lastKnownCache.revalidate();
-    for (const [relayId, connection] of this.connectionsValue) this.invalidateFreshness(relayId, connection);
-    this.emitConnections();
-    if (!this.reconnectEnabled || this.actionLocked || this.hidden) return;
+    if (!this.reconnectEnabled || this.hidden) return;
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
       if (connection?.authRejected || connection?.pairingRequired) continue;
-      if (connection && !this.credentialMatchesSession(relay.id, connection)) {
-        this.connectRelay(relay);
-        continue;
-      }
       if (connection?.status === 'connecting') {
         // Replace a dial that predates the event this revalidation reacts to:
         // it likely started before the network came back and is blackholed.
@@ -1375,11 +1189,10 @@ class RelayStore {
       connection.healthTimer = setTimeout(() => {
         if (!this.isCurrentConnection(relay.id, connection)) return;
         connection.healthTimer = null;
-        resumeMetrics.end(relay.id, connection.metricsGeneration, 'timeout');
         this.connectRelay(relay);
       }, timeoutMs);
-      resumeMetrics.probe(relay.id, connection.metricsGeneration);
-      if (!this.requestFreshSnapshot(relay.id, connection) || !this.sendRaw(relay.id, { type: 'ping' })) {
+      this.sendRaw(relay.id, { type: 'refresh_agents' });
+      if (!this.sendRaw(relay.id, { type: 'ping' })) {
         this.clearHealthTimer(connection);
         this.connectRelay(relay);
       }
@@ -1456,7 +1269,6 @@ class RelayStore {
    * revalidation dials anything not connected the moment the app comes back.
    */
   private failKeepalive(relayId: string, connection: RelayConnection): void {
-    resumeMetrics.end(relayId, connection.metricsGeneration, 'timeout');
     if (!this.hidden) {
       this.connectRelay(connection.relay);
       return;
@@ -1472,7 +1284,6 @@ class RelayStore {
    */
   private retireConnection(relayId: string, connection: RelayConnection, reason: string): void {
     this.clearHealthTimer(connection);
-    this.invalidateFreshness(relayId, connection);
     connection.closed = true;
     connection.transport?.close();
     connection.status = 'disconnected';
@@ -1521,50 +1332,8 @@ class RelayStore {
 
   private handleMessage(relayId: string, message: Record<string, any>): void {
     const connection = this.connectionsValue.get(relayId);
-    if (message.type === 'inventory_snapshot' && connection) {
-      if (message.snapshot_request_id !== connection.snapshotNonce) return;
-      connection.snapshotPending = false;
-      if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
-      connection.snapshotTimer = null;
-      if (this.actionLocked || !this.credentialMatchesSession(relayId, connection)
-        || !connection.freshness.accept(this.inventoryBinding(connection), message)) return;
-      const fresh = connection.freshness.current(this.inventoryBinding(connection));
-      if (!fresh) return;
-      connection.actionsFresh = true;
-      connection.workspacesFresh = fresh.workspaces !== null;
-      connection.inventory = normalizeAgentInventory(message.inventory);
-      this.agentsValue = mergeAgentList(this.agentsValue, relayId, [...fresh.agents], this.blockedSnapshotMisses, this.respondingValue);
-      this.reconcileResponding();
-      if (fresh.workspaces) this.workspacesValue = [...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId), ...fresh.workspaces];
-      // Persist only this validated correlated frame, never the presentation merge.
-      if (fresh.workspaces && this.credentialMatchesSession(relayId, connection)
-        && connection.summaryGeneration === this.lastKnownControl.generation) {
-        try { this.lastKnownCache.write(projectLastKnown(relayId, message.agents, message.workspaces, Date.now())); } catch { /* Cache misses never affect live rendering. */ }
-      }
-      this.publishAgents('correlated snapshot');
-      this.publishWorkspaces();
-      this.emitConnections();
-      resumeMetrics.inventory(relayId, connection.metricsGeneration, true);
-      for (const watched of this.watchedPanes.values()) {
-        const target = targetRefForAgent(watched);
-        if (watched.relay_id === relayId && target && fresh.agents.some((agent) => targetRefMatchesAgent(target, agent))) {
-          this.readPane(watched, true);
-          this.startPaneWatch(watched.pane_id);
-        }
-      }
-      this.registerAppOrigin(relayId, connection);
-      if (connection.capabilities.includes('push_policy')) {
-        this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
-      }
-      this.pushConfigHandler?.(relayId);
-      if (connection.capabilities.includes('device_management')) {
-        void this.refreshDevices(relayId).catch(() => this.showToast('Could not refresh paired devices.', true));
-      }
-      return;
-    }
     if (message.type === 'push_config') {
       if (!connection) return;
-      this.invalidateFreshness(relayId, connection);
       // Pane revisions are monotonic only for one relay process. A new socket
       // handshake may follow a relay restart, so discard the retained
       // process-local baseline before its fresh snapshot arrives.
@@ -1592,13 +1361,11 @@ class RelayStore {
       connection.herdrStatus = normalizeHerdrStatus(message.herdr_status);
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
-      this.reportUnready(relayId, connection);
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
       connection.speechLanguages = (Array.isArray(message.speech_languages) ? message.speech_languages : [])
         .filter(isSpeechLanguage);
       adoptRelaySpeech(connection.speechLanguages);
       this.adoptHybridDescriptor(connection, message.hybrid);
-      resumeMetrics.ingress(relayId, connection.metricsGeneration, message.ingress);
       const attentionCapable = connection.capabilities.includes('attention_classification');
       this.agentsValue = this.agentsValue.map((agent) =>
         agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
@@ -1626,9 +1393,13 @@ class RelayStore {
         ? message.hermes_profiles.filter((name): name is string => typeof name === 'string' && name.length > 0)
         : [];
       this.emitConnections();
-      if (!connection.actionsFresh && !connection.snapshotPending) this.requestFreshSnapshot(relayId, connection);
       this.pushConfigHandler?.(relayId);
-      // Policy and device administration reads wait for correlated freshness.
+      if (connection.capabilities.includes('push_policy')) {
+        this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
+      }
+      if (connection.capabilities.includes('device_management')) {
+        void this.refreshDevices(relayId);
+      }
       return;
     }
     if (message.type === 'herdr_status' && connection) {
@@ -1637,16 +1408,12 @@ class RelayStore {
       connection.herdrStatus = status;
       if (Array.isArray(message.capabilities)) {
         connection.capabilities = message.capabilities.filter(Boolean);
-        if (!connection.capabilities.includes(INVENTORY_SNAPSHOT_CAPABILITY)) this.invalidateFreshness(relayId, connection);
       }
       this.emitConnections();
       return;
     }
     if (message.type === 'inventory_status' && connection) {
       connection.inventory = normalizeAgentInventory(message);
-      this.reportUnready(relayId, connection);
-      if (connection.inventory.state === 'ready' && !connection.inventory.stale
-        && !connection.actionsFresh && !connection.snapshotPending) this.requestFreshSnapshot(relayId, connection);
       this.emitConnections();
       return;
     }
@@ -1751,14 +1518,7 @@ class RelayStore {
         ...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId),
         ...incoming,
       ];
-      if (connection?.actionsFresh && !connection.snapshotPending) {
-        const fresh = connection.freshness.current(this.inventoryBinding(connection));
-        if (!fresh?.workspaces || incoming.length !== fresh.workspaces.length
-          || incoming.some((workspace: RelayWorkspace) => !fresh.workspaces!.some((old) => old.workspace_id === workspace.workspace_id))) {
-          this.requestFreshSnapshot(relayId, connection);
-        }
-      }
-      this.publishWorkspaces();
+      this.workspaces.set(this.workspacesValue);
       return;
     }
     if (message.type === 'agents') {
@@ -1788,23 +1548,8 @@ class RelayStore {
         this.blockedSnapshotMisses,
         this.respondingValue,
       );
-      if (connection?.actionsFresh && !connection.snapshotPending) {
-        const fresh = connection.freshness.current(this.inventoryBinding(connection));
-        if (!fresh || incoming.length !== fresh.agents.length
-          || incoming.some((agent: Agent) => {
-            const target = targetRefForAgent(agent);
-            return !target || !fresh.agents.some((old) => targetRefMatchesAgent(target, old));
-          })) this.requestFreshSnapshot(relayId, connection);
-      }
       this.reconcileResponding();
       this.publishAgents('agents snapshot');
-      if (connection) {
-        resumeMetrics.inventory(
-          relayId,
-          connection.metricsGeneration,
-          this.relayActionsFresh(relayId),
-        );
-      }
       return;
     }
     if (message.type === 'blocked') {
@@ -1827,7 +1572,6 @@ class RelayStore {
       } else this.agentsValue = [...this.agentsValue, next];
       this.respondingValue.delete(next.pane_id);
       this.responding.set(new Set(this.respondingValue));
-      if (connection) this.revalidateNewTarget(relayId, connection, next);
       this.publishAgents('blocked event');
       return;
     }
@@ -1850,7 +1594,6 @@ class RelayStore {
         this.agentsValue = copy;
       } else this.agentsValue = [...this.agentsValue, stabilized];
       this.reconcileResponding();
-      if (connection) this.revalidateNewTarget(relayId, connection, next);
       this.publishAgents('agent update');
       return;
     }
@@ -1984,18 +1727,6 @@ class RelayStore {
     }
   }
 
-  /**
-   * Tells local resume timing that this relay's inventory is not
-   * authoritative right now, so a fresh snapshot still waiting for its frame
-   * cannot complete a sample.
-   */
-  private reportUnready(relayId: string, connection: RelayConnection): void {
-    if (connection.inventory.state !== 'ready' || connection.inventory.stale) {
-      this.invalidateFreshness(relayId, connection);
-      resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
-    }
-  }
-
   private acknowledgePaneFrame(agent: Agent, contentFingerprint: string): void {
     const identity = this.agentTargetPayload(agent);
     if (!identity) return;
@@ -2025,12 +1756,7 @@ class RelayStore {
       reportAppAnomaly(`Duplicate agent identity from ${source}: ${duplicate}`);
       this.agentsValue = [...byPane.values()];
     }
-    this.agents.set(this.agentsValue.filter((agent) => {
-      const connection = this.connectionsValue.get(agent.relay_id);
-      const target = targetRefForAgent(agent);
-      return Boolean(target && connection && this.relayActionsFresh(agent.relay_id)
-        && connection.freshness.current(this.inventoryBinding(connection))?.agents.some((current) => targetRefMatchesAgent(target, current)));
-    }));
+    this.agents.set(this.agentsValue);
   }
   private mergePaneInteraction(paneId: string, message: Record<string, any>): void {
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
@@ -2058,7 +1784,7 @@ class RelayStore {
 
   private removeWorkspacesForRelay(relayId: string): void {
     this.workspacesValue = this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId);
-    this.publishWorkspaces();
+    this.workspaces.set(this.workspacesValue);
   }
 
   private clearSlashCommandCacheForRelay(relayId: string): void {
@@ -2118,290 +1844,10 @@ class RelayStore {
     this.pushTests.set(new Map(this.pushTestsValue));
   }
 
-  private inventoryBinding(connection: RelayConnection): InventoryBinding {
-    return { connection, path: connection.pathIdentity, wake: connection.wakeGeneration };
-  }
-
-  private registerAppOrigin(relayId: string, connection: RelayConnection): void {
-    if (this.registeredAppOrigins.has(connection) || !runningAsInstalledApp() || !this.relayActionsFresh(relayId)) return;
-    if (this.deviceCredential(relayId)?.role !== 'controller') return;
-    if (this.sendRaw(relayId, { type: 'register_app_origin', origin: location.origin, protocol: RELAY_PROTOCOL_VERSION })) {
-      this.registeredAppOrigins.add(connection);
-    }
-  }
-
-  /** Opaque UI-load fence, not an action grant or a serialized credential. */
-  deferredUiContext(): string | null {
-    try {
-      return JSON.stringify([this.deferredUiGeneration, ...get(this.relayConfigs).map((relay) => {
-        const connection = this.connectionsValue.get(relay.id);
-        const credential = this.deviceCredential(relay.id);
-        return [relay.id, connection?.status, connection?.actionsFresh, connection?.workspacesFresh,
-          credential?.id, credential?.version, credential?.deviceId, credential?.role];
-      })]);
-    } catch { return null; }
-  }
-
-  private credentialsChanged(): void {
-    // Include detached scopes: credentials can change while no connection exists.
-    for (const [relayId, scope] of this.attachmentCleanupScopes) {
-      if (!this.attachmentCleanupScopeCurrent(relayId, scope)) this.invalidateUploadCleanup(relayId);
-    }
-    for (const [relayId, connection] of this.connectionsValue) {
-      if (!this.credentialMatchesSession(relayId, connection)) {
-        connection.conversationSubscription = null;
-        this.invalidateUploadCleanup(relayId);
-        for (const key of connection.cleanupGrants) {
-          if (key.startsWith('upload') || key.startsWith('cancel:upload:')) connection.cleanupGrants.delete(key);
-        }
-        this.invalidateFreshness(relayId, connection);
-      }
-    }
-    this.lastKnownCache.revalidate();
-    this.publishAgents('credential changed');
-    this.publishWorkspaces();
-    this.emitConnections();
-  }
-
-  private credentialMatchesSession(relayId: string, connection: RelayConnection): boolean {
-    try {
-      if (!this.sessionCredentials.has(connection)) return false;
-      const enrolled = this.sessionCredentials.get(connection);
-      const current = this.deviceCredential(relayId);
-      return sameDeviceCredential(enrolled, current);
-    } catch { return false; }
-  }
-
-  relayActionsFresh(relayId: string): boolean {
-    const connection = this.connectionsValue.get(relayId);
-    return !this.actionLocked && !this.hidden && connection?.status === 'connected' && connection.actionsFresh === true
-      && connection.inventory.state === 'ready' && !connection.inventory.stale
-      && this.credentialMatchesSession(relayId, connection)
-      && connection.freshness.current(this.inventoryBinding(connection)) !== null;
-  }
-
-  setActionLocked(locked: boolean): void {
-    this.actionLocked = locked;
-    this.lastKnownControl.sync();
-    this.lastKnownCache.setLocked(locked);
-    for (const [relayId, connection] of this.connectionsValue) this.invalidateFreshness(relayId, connection);
-    if (!locked) this.restoreLastKnown();
-  }
-
-  restoreLastKnown(): void {
-    if (this.actionLocked) return;
-    this.lastKnownControl.sync();
-    for (const relay of get(this.relayConfigs)) {
-      if (!this.relayActionsFresh(relay.id)) this.restoreCacheLater(relay.id);
-    }
-  }
-
-  private restoreCacheLater(relayId: string): void {
-    // Dial/correlated refresh dispatch must not wait on bounded cache parsing.
-    queueMicrotask(() => { void this.lastKnownCache.restore(relayId); });
-  }
-
-  private invalidateFreshness(relayId: string, connection: RelayConnection): void {
-    this.deferredUiGeneration++;
-    connection.freshness.invalidate();
-    this.lastKnownCache.invalidateScope(relayId);
-    resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
-    connection.wakeGeneration++;
-    connection.actionsFresh = false;
-    connection.workspacesFresh = false;
-    connection.snapshotPending = false;
-    connection.snapshotNonce = '';
-    if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
-    connection.snapshotTimer = null;
-    this.emitConnections();
-    if (!this.actionLocked) this.restoreCacheLater(relayId);
-  }
-
-  private requestFreshSnapshot(relayId: string, connection: RelayConnection): boolean {
-    if (this.actionLocked || this.hidden || connection.status !== 'connected') return false;
-    connection.actionsFresh = false;
-    connection.workspacesFresh = false;
-    connection.snapshotPending = false;
-    connection.snapshotNonce = '';
-    resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
-    if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
-    connection.snapshotTimer = null;
-    const request = connection.freshness.request(this.inventoryBinding(connection),
-      connection.capabilities.includes(INVENTORY_SNAPSHOT_CAPABILITY));
-    if (!request) {
-      this.emitConnections();
-      return this.sendRaw(relayId, { type: 'refresh_agents' });
-    }
-    connection.snapshotPending = true;
-    connection.snapshotNonce = String(request.snapshot_request_id);
-    connection.summaryGeneration = this.lastKnownControl.generation;
-    if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
-    connection.snapshotTimer = setTimeout(() => {
-      if (!this.isCurrentConnection(relayId, connection)) return;
-      this.invalidateFreshness(relayId, connection);
-      this.emitConnections();
-    }, 15_000);
-    this.emitConnections();
-    if (!this.actionLocked) this.restoreCacheLater(relayId);
-    return this.sendRaw(relayId, request);
-  }
-
-  private revalidateNewTarget(relayId: string, connection: RelayConnection, agent: Agent): void {
-    if (!connection.actionsFresh || connection.snapshotPending) return;
-    const target = targetRefForAgent(agent);
-    const fresh = connection.freshness.current(this.inventoryBinding(connection));
-    if (target && !fresh?.agents.some((old) => targetRefMatchesAgent(target, old))) {
-      this.requestFreshSnapshot(relayId, connection);
-    }
-  }
-
-  private parseFreshAgents(relay: RelayConfig, value: unknown): Agent[] | null {
-    if (!Array.isArray(value) || value.length > 10_000) return null;
-    const seen = new Set<string>();
-    const agents: Agent[] = [];
-    for (const row of value) {
-      if (!row || typeof row !== 'object' || Array.isArray(row) || !isResourceId(row.pane_id)) return null;
-      const agent = normalizeAgent(relay.id, relay.label, normalizeAgentTargetFields(row),
-        Boolean(this.connectionsValue.get(relay.id)?.capabilities.includes('attention_classification')));
-      if (!targetRefForAgent(agent) || seen.has(agent.raw_pane_id)) return null;
-      seen.add(agent.raw_pane_id);
-      agents.push(agent);
-    }
-    return agents;
-  }
-
-  private parseFreshWorkspaces(relay: RelayConfig, value: unknown): RelayWorkspace[] | null {
-    if (!Array.isArray(value) || value.length > 1_000) return null;
-    const seen = new Set<string>();
-    const workspaces: RelayWorkspace[] = [];
-    for (const row of value) {
-      if (!row || typeof row !== 'object' || Array.isArray(row) || !isResourceId(row.workspace_id)
-        || seen.has(row.workspace_id)) return null;
-      const workspace = normalizeWorkspace(relay.id, relay.label, row);
-      if (!workspace) return null;
-      seen.add(row.workspace_id);
-      workspaces.push(workspace);
-    }
-    return workspaces;
-  }
-
-  private publishWorkspaces(): void {
-    this.workspaces.set(this.workspacesValue.filter((workspace) => {
-      const connection = this.connectionsValue.get(workspace.relay_id);
-      return this.relayActionsFresh(workspace.relay_id) && connection?.workspacesFresh
-        && connection.freshness.current(this.inventoryBinding(connection))?.workspaces?.some((current) => current.workspace_id === workspace.workspace_id);
-    }));
-  }
-
-  private targetKey(relayId: string, value: unknown): string | null {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const row = value as Record<string, unknown>;
-    if (row.relay_id !== undefined && row.relay_id !== relayId) return null;
-    const target = normalizeFrontendTargetRef({ ...row, relay_id: relayId });
-    return target ? targetStoreKey(target) : null;
-  }
-
-  private cleanupKey(payload: Record<string, unknown>, relayId?: string): string | null {
-    const id = relayId ?? (payload.target as Record<string, unknown> | undefined)?.relay_id;
-    if (typeof id !== 'string') return null;
-    const key = this.targetKey(id, payload.target);
-    if (!key) return null;
-    return typeof payload.upload_id === 'string' ? `${key}:${payload.upload_id}` : key;
-  }
-
-  private canDispatch(relayId: string, payload: Record<string, unknown>): boolean {
-    try { return this.dispatchEligible(relayId, payload); } catch { return false; }
-  }
-
-  private dispatchEligible(relayId: string, payload: Record<string, unknown>): boolean {
-    const connection = this.connectionsValue.get(relayId);
-    if (!connection || connection.closed) return false;
-    const type = String(payload.type === 'command' ? payload.action : payload.type);
-    if (RECOVERY_ACTIONS.has(type)) return true;
-    if (SUBSCRIPTION_ACTIONS.has(type)) return this.credentialMatchesSession(relayId, connection)
-      && payload.target === undefined && payload.pane_id === undefined && payload.workspace_id === undefined;
-    if (type === 'push_viewed_pane' && payload.visible === false && payload.target === undefined
-      && payload.pane_id === undefined && connection.cleanupGrants.has('viewing')) return true;
-    const policy = actionPolicy(type);
-    if (!policy) return false;
-    const credential = this.deviceCredential(relayId);
-    if (policy.controller && credential?.role === 'reader'
-      && !(type === 'revoke_device' && payload.device_id === credential.deviceId)) return false;
-    const cleanup = CLEANUP_FOR.get(type);
-    const cleanupKey = this.cleanupKey(payload, relayId);
-    if (type === 'get_pi_integration' || type === 'set_pi_integration') {
-      if (payload.target !== undefined || payload.pane_id !== undefined || payload.workspace_id !== undefined) return false;
-      if (!credential || (type === 'set_pi_integration' && credential.role !== 'controller')) return false;
-    }
-    if (type === 'unwatch_conversation') {
-      const target = payload.target as Record<string, unknown> | undefined;
-      return this.credentialMatchesSession(relayId, connection) && cleanupKey !== null
-        && payload.pane_id === target?.pane_id && payload.server_session_id === target?.server_session_id
-        && typeof payload.subscription_id === 'string' && payload.subscription_id !== ''
-        && connection.conversationSubscription?.targetKey === cleanupKey
-        && connection.conversationSubscription.id === payload.subscription_id;
-    }
-    if (type === 'upload_cancel' && !this.credentialMatchesSession(relayId, connection)) return false;
-    if (cleanup && cleanupKey && (connection.cleanupGrants.has(`${cleanup}:${cleanupKey}`)
-      || (type === 'upload_cancel' && connection.cleanupGrants.has(`cancel:${cleanup}:${cleanupKey}`)))) return true;
-    if (!this.relayActionsFresh(relayId)) return false;
-    if (['watch_pane', 'lease_pane_size', 'upload_begin'].includes(type)
-      && connection.cleanupGrants.size >= 512
-      && !connection.cleanupGrants.has(`${type}:${cleanupKey}`)) return false;
-    const fresh = connection.freshness.current(this.inventoryBinding(connection));
-    if (!fresh) return false;
-    if (type === 'push_viewed_pane' && payload.visible === true && payload.unlocked === true
-      && connection.cleanupGrants.size >= 512 && !connection.cleanupGrants.has('viewing')) return false;
-    if (policy.target || payload.target) {
-      const key = this.targetKey(relayId, payload.target);
-      const target = payload.target as Record<string, unknown> | undefined;
-      if (payload.pane_id !== undefined && payload.pane_id !== target?.pane_id) return false;
-      if (!key || !fresh.agents.some((agent) => targetStoreKey(targetRefForAgent(agent)!) === key
-        && this.agentsValue.some((current) => current.relay_id === relayId
-          && targetRefMatchesAgent(targetRefForAgent(agent)!, current)))) return false;
-    }
-    if (policy.workspace) {
-      if (!fresh.workspaces || !connection.workspacesFresh) return false;
-      if (payload.workspace_id && (!fresh.workspaces.some((workspace) => workspace.workspace_id === payload.workspace_id)
-        || !this.workspacesValue.some((workspace) => workspace.relay_id === relayId && workspace.workspace_id === payload.workspace_id))) return false;
-      for (const field of ['workspace_ids', 'expected_workspace_ids']) {
-        if (payload[field] !== undefined && (!Array.isArray(payload[field])
-          || !(payload[field] as unknown[]).every((id) => fresh.workspaces!.some((workspace) => workspace.workspace_id === id)))) return false;
-      }
-    }
-    if (['upload_chunk', 'upload_finish', 'upload_cancel'].includes(type)
-      && (!cleanupKey || !connection.cleanupGrants.has(`upload:${cleanupKey}`))) return false;
-    return true;
-  }
-
   sendRaw(relayId: string, payload: Record<string, unknown>): boolean {
     const connection = this.connectionsValue.get(relayId);
-    if (!connection || connection.status !== 'connected' || !this.canDispatch(relayId, payload)) return false;
-    const reservation = payload.type === 'upload_begin' ? `upload_pending:${String(payload.request_id || '')}` : '';
-    if (reservation) {
-      const pending = this.pendingUploads.get(String(payload.request_id || ''));
-      if (!pending || pending.relayId !== relayId || pending.responseType !== 'upload_begin_result'
-        || pending.targetKey !== this.targetKey(relayId, payload.target)
-        || connection.cleanupGrants.has(reservation)) return false;
-      connection.cleanupGrants.add(reservation);
-    }
-    const sent = connection.transport?.send(payload) ?? false;
-    if (!sent && reservation) connection.cleanupGrants.delete(reservation);
-    if (sent) {
-      const type = String(payload.type === 'command' ? payload.action : payload.type);
-      const key = this.cleanupKey(payload, relayId);
-      if (type === 'push_viewed_pane') {
-        if (payload.visible === true && payload.unlocked === true && payload.target) connection.cleanupGrants.add('viewing');
-        else connection.cleanupGrants.delete('viewing');
-      }
-      if (key && ['watch_pane', 'lease_pane_size'].includes(type)) connection.cleanupGrants.add(`${type}:${key}`);
-      if (type === 'unwatch_conversation') connection.conversationSubscription = null;
-      const grant = CLEANUP_FOR.get(type);
-      // Upload cancellation is acknowledged cleanup: transport admission is
-      // not proof that the relay released its staged resource.
-      if (key && grant && type !== 'upload_cancel') connection.cleanupGrants.delete(`${grant}:${key}`);
-    }
-    return sent;
+    if (!connection || connection.status !== 'connected') return false;
+    return connection.transport?.send(payload) ?? false;
   }
 
   sendCommand(
@@ -2415,10 +1861,9 @@ class RelayStore {
     if (!connection || connection.status !== 'connected') {
       return Promise.reject(new CommandError('Relay is not connected'));
     }
-    const cleanup = CLEANUP_FOR.has(String(payload.type));
     const protocolError = relayProtocolError(connection);
     if (protocolError && !allowProtocolMismatch) return Promise.reject(new CommandError(protocolError));
-    if (INVENTORY_REQUIRED_COMMANDS[String(payload.type)] && !cleanup && connection.inventory.state !== 'ready') {
+    if (INVENTORY_REQUIRED_COMMANDS[String(payload.type)] && connection.inventory.state !== 'ready') {
       return Promise.reject(new CommandError(
         connection.inventory.message || 'Herdr agent inventory is not ready on this computer',
       ));
@@ -2428,7 +1873,6 @@ class RelayStore {
       error.code = 'request_cancelled';
       return Promise.reject(error);
     }
-    if (!this.canDispatch(relayId, payload)) return Promise.reject(new CommandError('Waiting for current authenticated inventory; actions are unavailable.'));
     const requestId = payload.type === 'send_pi_prompt_unconfirmed'
       ? `${String(payload.pi_prompt_lease?.incarnation || '')}_${commandRequestId()}`
       : commandRequestId();
@@ -3196,23 +2640,14 @@ class RelayStore {
   async getConversationHistory(agent: Agent, request: ConversationHistoryRequest = {}): Promise<ConversationPage> {
     const limit = Math.max(1, Math.min(200, Math.trunc(request.limit || 80)));
     const cursor = request.cursor || '';
-    const connection = this.connectionsValue.get(agent.relay_id);
-    const observe = connection?.capabilities.includes('conversation_activity') === true;
-    const target = targetRefForAgent(agent);
     const result = await this.sendToAgent(agent, {
       type: 'get_conversation_history',
       cursor,
       limit,
       retry: request.retry,
-      observe,
+      observe: this.connectionsValue.get(agent.relay_id)?.capabilities.includes('conversation_activity') === true,
     }, 20_000, request.signal);
-    const page = normalizeConversationPage(result.data);
-    const targetKey = target && targetStoreKey(target);
-    if (observe && page.subscriptionId && targetKey && connection === this.connectionsValue.get(agent.relay_id)
-      && connection.status === 'connected' && this.credentialMatchesSession(agent.relay_id, connection)) {
-      connection.conversationSubscription = { targetKey, id: page.subscriptionId };
-    }
-    return page;
+    return normalizeConversationPage(result.data);
   }
 
   async getConversationUpdates(agent: Agent, sourceRevision: string, after: number, signal: AbortSignal, subscriptionId: string): Promise<import('./types').ConversationBatch> {
@@ -3260,8 +2695,6 @@ class RelayStore {
   }
 
   watchPane(agent: Agent): void {
-    const target = targetRefForAgent(agent);
-    if (!target || this.hidden || this.actionLocked) return;
     this.watchedPanes.set(agent.pane_id, agent);
     this.startPaneWatch(agent.pane_id);
   }
@@ -3308,13 +2741,9 @@ class RelayStore {
     if (sent) this.paneWatchesStarted.add(paneId);
   }
 
-  requestAgents(forceFresh = false): void {
+  requestAgents(): void {
     for (const relayId of this.connectionsValue.keys()) {
-      const connection = this.connectionsValue.get(relayId)!;
-      if (forceFresh || (!this.relayActionsFresh(relayId) && !connection.snapshotPending)) {
-        this.invalidateFreshness(relayId, connection);
-        this.requestFreshSnapshot(relayId, connection);
-      } else this.sendRaw(relayId, { type: 'refresh_agents' });
+      this.sendRaw(relayId, { type: 'refresh_agents' });
     }
   }
   waitForAgent(
@@ -3328,7 +2757,7 @@ class RelayStore {
       if (!identity.name || ![agent.name, agent.tab_label].includes(identity.name)) return false;
       return !identity.cwd || !agent.cwd || agent.cwd === identity.cwd;
     };
-    const current = get(this.agents).find(match);
+    const current = this.agentsValue.find(match);
     if (current) return Promise.resolve(current);
 
     this.requestAgents();
@@ -3738,56 +3167,7 @@ class RelayStore {
     }
   }
 
-  private invalidateUploadCleanup(relayId: string): void {
-    this.uploadCleanup.delete(relayId);
-    this.attachmentCleanupScopes.delete(relayId);
-    for (const [key, entry] of this.retainedAttachments) {
-      if (entry.relayId === relayId) this.retainedAttachments.delete(key);
-    }
-  }
-
-  private attachmentCleanupScopeCurrent(relayId: string, scope: object): boolean {
-    const current = this.attachmentCleanupScopes.get(relayId);
-    if (!current || scope !== current) return false;
-    try { return sameDeviceCredential(current.credential, this.deviceCredential(relayId)); } catch { return false; }
-  }
-
-  attachmentCleanupScope(relayId: string): object {
-    let scope = this.attachmentCleanupScopes.get(relayId);
-    if (!scope) {
-      const credential = this.deviceCredential(relayId);
-      scope = { credential: credential ? { ...credential } : null };
-      this.attachmentCleanupScopes.set(relayId, scope);
-    }
-    return scope;
-  }
-
-  retainAttachmentController(agent: Agent, controller: AttachmentBatchController, scope: object): void {
-    // Capture the scope when binding, not during teardown after invalidation.
-    if (!this.attachmentCleanupScopeCurrent(agent.relay_id, scope)
-      || (!controller.hasPendingCleanup() && !controller.snapshot().uploading)) return;
-    const key = `${agent.relay_id}:${agent.pane_id}`;
-    const entry = { relayId: agent.relay_id, scope, controller };
-    this.retainedAttachments.set(key, entry);
-    const stop = controller.subscribe((state) => {
-      if (controller.hasPendingCleanup() || state.uploading) return;
-      if (this.retainedAttachments.get(key) === entry) this.retainedAttachments.delete(key);
-      // subscribe immediately delivers its first state.
-      queueMicrotask(() => stop());
-    });
-  }
-
-  recoverAttachmentController(agent: Agent): AttachmentBatchController | null {
-    const key = `${agent.relay_id}:${agent.pane_id}`;
-    const entry = this.retainedAttachments.get(key);
-    if (entry && this.attachmentCleanupScopeCurrent(agent.relay_id, entry.scope)) return entry.controller;
-    this.retainedAttachments.delete(key);
-    return null;
-  }
-
   attachmentController(agent: Agent): AttachmentBatchController {
-    const retained = this.recoverAttachmentController(agent);
-    if (retained) return retained;
     const target = targetRefForAgent(agent);
     if (!target) throw new CommandError('This terminal does not have a stable attachment target.');
     const backendTarget: TargetRef = {
@@ -3797,15 +3177,7 @@ class RelayStore {
       generation: target.generation,
       ...(target.agent_session_id ? { agent_session_id: target.agent_session_id } : {}),
     };
-    const connection = this.connectionsValue.get(agent.relay_id);
-    const binding = connection && this.inventoryBinding(connection);
-    const nonce = connection?.snapshotNonce;
-    const eligibleAtCreation = this.canDispatch(agent.relay_id, { type: 'upload_begin', target });
-    const eligible = () => Boolean(eligibleAtCreation && connection && binding
-      && this.isCurrentConnection(agent.relay_id, connection)
-      && connection.pathIdentity === binding.path && connection.wakeGeneration === binding.wake
-      && connection.snapshotNonce === nonce && this.relayActionsFresh(agent.relay_id));
-    return new AttachmentBatchController(backendTarget, this.attachmentUploadCallbacks(agent.relay_id, eligible), {
+    return new AttachmentBatchController(backendTarget, this.attachmentUploadCallbacks(agent.relay_id), {
       maxFiles: 8,
       maxFileBytes: 20 * 1024 * 1024,
       maxBatchBytes: 50 * 1024 * 1024,
@@ -3814,31 +3186,25 @@ class RelayStore {
   }
 
   async uploadAttachments(agent: Agent, files: FileList | readonly File[]) {
-    const target = targetRefForAgent(agent);
-    if (!target || !this.canDispatch(agent.relay_id, { type: 'upload_begin', target })) {
-      throw new CommandError('Waiting for current authenticated inventory; attachments are unavailable.');
-    }
     const controller = this.attachmentController(agent);
     controller.select(files);
     return controller.upload();
   }
 
-  private attachmentUploadCallbacks(relayId: string, eligible: () => boolean): AttachmentUploadCallbacks {
-    const send = <T extends Record<string, any>>(type: string, responseType: string, request: unknown, signal?: AbortSignal): Promise<T> =>
-      eligible() ? this.sendUploadRequest<T>(relayId, type, responseType, request, signal)
-        : Promise.reject(new CommandError('Attachment session changed; start a new upload after fresh inventory.'));
+  private attachmentUploadCallbacks(relayId: string): AttachmentUploadCallbacks {
     return {
-      begin: (request, signal) => send<UploadBeginResult>(
-        'upload_begin', 'upload_begin_result', request, signal,
+      begin: (request, signal) => this.sendUploadRequest<UploadBeginResult>(
+        relayId, 'upload_begin', 'upload_begin_result', request, signal,
       ),
-      chunk: (request, signal) => send<UploadChunkResult>(
+      chunk: (request, signal) => this.sendUploadRequest<UploadChunkResult>(
+        relayId,
         'upload_chunk',
         'upload_chunk_result',
         { ...request, data: standardBase64Encode(request.data) },
         signal,
       ),
-      finish: (request, signal) => send<UploadFinishResult>(
-        'upload_finish', 'upload_finish_result', request, signal,
+      finish: (request, signal) => this.sendUploadRequest<UploadFinishResult>(
+        relayId, 'upload_finish', 'upload_finish_result', request, signal,
       ),
       cancel: (request) => this.sendUploadRequest<Record<string, any>>(
         relayId, 'upload_cancel', 'upload_cancel_result', request,
@@ -3862,10 +3228,7 @@ class RelayStore {
     if (signal?.aborted) return Promise.reject(new CommandError('Attachment upload was cancelled.'));
     const requestId = commandRequestId();
     return new Promise<TResult>((resolve, reject) => {
-      const cleanup = () => {
-        connection.cleanupGrants.delete(`upload_pending:${requestId}`);
-        signal?.removeEventListener('abort', abort);
-      };
+      const cleanup = () => signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
         cleanup();
         this.pendingUploads.delete(requestId);
@@ -3882,9 +3245,6 @@ class RelayStore {
       signal?.addEventListener('abort', abort, { once: true });
       this.pendingUploads.set(requestId, {
         relayId,
-        targetKey: this.targetKey(relayId, (request as Record<string, unknown>).target) || '',
-        uploadId: typeof (request as Record<string, unknown>).upload_id === 'string'
-          ? String((request as Record<string, unknown>).upload_id) : '',
         responseType,
         resolve: (result) => resolve(result as TResult),
         reject,
@@ -3910,8 +3270,6 @@ class RelayStore {
     const requestId = String(message.request_id || '');
     const pending = this.pendingUploads.get(requestId);
     if (!pending || pending.relayId !== relayId || pending.responseType !== message.type) return;
-    const connection = this.connectionsValue.get(relayId);
-    const reserved = connection?.cleanupGrants.has(`upload_pending:${requestId}`);
     clearTimeout(pending.timer);
     pending.cleanup?.();
     this.pendingUploads.delete(requestId);
@@ -3928,32 +3286,6 @@ class RelayStore {
       error.code = 'attachment_invalid_response';
       pending.reject(error);
       return;
-    }
-    if (message.type === 'upload_begin_result' && typeof message.result.upload_id === 'string'
-      && pending.targetKey && message.result.upload_id.length <= 256) {
-      if (connection && reserved && message.result.upload_id) {
-        const key = `upload:${pending.targetKey}:${message.result.upload_id}`;
-        connection.cleanupGrants.add(key);
-        let cleanup = this.uploadCleanup.get(relayId);
-        if (!cleanup) {
-          const owner = this.sessionCredentials.get(connection);
-          cleanup = { relay: { ...connection.relay, gatewayUrls: connection.relay.gatewayUrls?.slice() },
-            credential: owner ? { ...owner } : null, grants: new Set() };
-          this.uploadCleanup.set(relayId, cleanup);
-        }
-        cleanup.grants.add(key);
-      }
-    }
-    if (['upload_finish_result', 'upload_cancel_result'].includes(message.type) && pending.targetKey && pending.uploadId) {
-      // Only a matched successful finish/cancel releases its owned grant.
-      // Errors/unknown outcomes retain cancellation authority; finish itself
-      // still requires fresh action authority and is not a cleanup exception.
-      const key = `upload:${pending.targetKey}:${pending.uploadId}`;
-      connection?.cleanupGrants.delete(key);
-      connection?.cleanupGrants.delete(`cancel:${key}`);
-      const cleanup = this.uploadCleanup.get(relayId);
-      cleanup?.grants.delete(key);
-      if (!cleanup?.grants.size) this.uploadCleanup.delete(relayId);
     }
     pending.resolve(message.result);
   }
@@ -3974,22 +3306,13 @@ class RelayStore {
   }
 
   private emitConnections(): void {
-    this.publishAgents('freshness lifecycle');
-    this.publishWorkspaces();
     this.connections.set(new Map(
-      [...this.connectionsValue].map(([relayId, connection]) => [relayId, {
-        ...connection, actionsFresh: this.relayActionsFresh(relayId),
-        workspacesFresh: this.relayActionsFresh(relayId) && connection.workspacesFresh,
-      }]),
+      [...this.connectionsValue].map(([relayId, connection]) => [relayId, { ...connection }]),
     ));
     // Every status change funnels through here, so this is the one place the
     // keepalive has to be told that a relay came up or went away.
     this.syncKeepalive();
   }
-}
-
-function browserStorage(read: () => Storage): Storage | null {
-  try { return read(); } catch { return null; }
 }
 
 function clearChangedRelayPreviews(before: RelayConfig[], after: RelayConfig[]): void {
@@ -3998,12 +3321,6 @@ function clearChangedRelayPreviews(before: RelayConfig[], after: RelayConfig[]):
     const old = previous.get(relay.id);
     if (old && relayConnectionIdentityChanged(old, relay)) clearConversationPreviewsForRelay(relay.id);
   }
-}
-
-function sameDeviceCredential(before: RelayDeviceCredential | null | undefined, after: RelayDeviceCredential | null): boolean {
-  return before === null ? after === null : Boolean(before && after
-    && before.id === after.id && before.version === after.version && before.secret === after.secret
-    && before.deviceId === after.deviceId && before.role === after.role);
 }
 
 function relayConnectionIdentityChanged(before: RelayConfig, after: RelayConfig): boolean {

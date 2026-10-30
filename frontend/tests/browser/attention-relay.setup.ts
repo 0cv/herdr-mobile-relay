@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { access, appendFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const repoRoot = resolve(import.meta.dirname, '../../..');
 const captureRoot = join(repoRoot, 'internal/question/testdata/attention');
@@ -76,11 +76,6 @@ export default async function setup() {
   const conversationSession = '123e4567-e89b-12d3-a456-426614174000';
   const conversationPath = join(conversationRoot, 'projects', '-tmp-conversation', `${conversationSession}.jsonl`);
   await Promise.all([mkdir(cache, { recursive: true }), mkdir(webRoot), mkdir(barrierDir), mkdir(join(conversationRoot, 'projects', '-tmp-conversation'), { recursive: true })]);
-  // The relay removes finished worker jobs from launchd when it starts; shadow
-  // launchctl so this browser run cannot touch the jobs of the machine running it.
-  const stubBin = join(runtime, 'stub-bin');
-  await mkdir(stubBin);
-  await writeFile(join(stubBin, 'launchctl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   await writeFile(join(webRoot, 'index.html'), '<html>test</html>\n');
   await writeFile(conversationPath, [
     JSON.stringify({ type: 'user', uuid: 'history-user-1', timestamp: '2026-09-02T10:00:00Z', message: { content: 'history question' } }),
@@ -445,7 +440,6 @@ export default async function setup() {
     cwd: repoRoot,
     env: {
       ...process.env,
-      PATH: [stubBin, process.env.PATH ?? ''].join(delimiter),
       HERDR_RELAY_PORT: String(port),
       HERDR_RELAY_PLUGIN_PORT: String(pluginPort),
       HERDR_RELAY_HOST: '127.0.0.1',

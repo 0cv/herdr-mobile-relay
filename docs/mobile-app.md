@@ -4,31 +4,6 @@ What the phone app does once a relay is connected: the agent list, read-only
 workspace inspection, and the mobile terminal. Read this if you have finished
 setup and want to know what every screen and control is for.
 
-## Last-known summary (candidate, opt-in)
-
-Settings offers **Keep an Encrypted Last-known Summary**, off by default, and
-**Forget last-known data**. The dated local list appears after unlock while a
-relay reconnects; it contains no terminal-opening links, remote reads or action
-buttons. It is not live inventory and is replaced, never merged, when that relay
-has usable authoritative data (including an empty list).
-
-Only bounded agent/workspace display labels, coarse type/status and time last seen
-are retained. Labels may be sensitive. Limits: 120 characters/480 UTF-8 bytes per
-label, 200 rows and 50 groups per relay, 64 KiB plaintext per relay, 10 relays and
-512 KiB encrypted entries, oldest-first eviction and a maximum 60-minute age.
-No terminal, conversation, prompt, approval, attachment or path content is saved.
-This is encrypted sessionStorage only: tab restoration may retain it; a new Home
-Screen launch, closed tab or browser eviction may not. There is no plaintext or
-durable-storage fallback.
-
-Lock removes the summary, and Forget/opt-out/removal/credential changes or observed
-refusal invalidate all summary scopes, including other tabs. Browser-denied deletion
-reports uncertainty rather than promising durable erasure. Forget does not remove
-credentials or pairing; a later eligible fresh snapshot is needed to repopulate it.
-Remote operations remain unavailable until current authenticated inventory is bound
-to the active connection/path and wake. Old relays cannot satisfy that stronger
-freshness check. This is not physical-phone performance qualification.
-
 ## What it does
 
 - Monitor and control agents across several computers, with new, closed, and
@@ -155,19 +130,6 @@ computer: every print arms the relay's bootstrap for one more phone.
 | Invite a device | Paired devices |
 | --- | --- |
 | <img src="../images/devices-invite.jpeg" alt="Invite Device dialog choosing a name and the reader role" width="392"> | <img src="../images/devices.jpeg" alt="Paired devices with rename, revoke, forget, and reset controls" width="392"> |
-
-**Settings → Resume Timing** shows how long the app took to display fresh
-agents after each recent wake, grouped by connection path (Cloudflare WSS,
-Tailscale WSS, gateway relayed or direct) and by kind of wake (warm, reconnect,
-back/forward cache, discarded page or cold launch). The timings stay in this
-tab's memory only — at most 100 wakes from the last 24 hours — and are never
-uploaded or sent to a relay. Turn **Measure Resume Timing** off to stop and
-clear them, or use **Clear Resume Timings**. **Export Redacted Summary** shows
-and offers to download aggregates and sample counts only, with no computer
-names, addresses, identifiers or content. A web app cannot see the phone's
-wake-up before its code runs, or DNS, TCP and TLS inside a connection; those
-are reported as unavailable. See [resume.md](resume.md) for exactly what is
-measured.
 
 An uncaught phone-side error appears in a bottom **App error** banner because
 mobile browsers often provide no useful console. Copy or photograph its text

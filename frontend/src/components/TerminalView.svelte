@@ -115,7 +115,6 @@
   let virtualEnd = 0;
   let virtualLayoutSignature = '';
   let virtualStickToBottom = true;
-  let jumpVisible = $state(false);
   let virtualScrollResetPending = false;
   let terminalLayoutSuspended = $state(false);
   let questionScrollState: { top: number; left: number; stick: boolean } | null = null;
@@ -471,7 +470,6 @@
       void tick().then(async () => {
         if (questionMode || questionScrollState !== saved || terminalElement !== element) return;
         virtualStickToBottom = saved.stick;
-        jumpVisible = !saved.stick;
         renderVirtualWindow(saved.stick ? Number.POSITIVE_INFINITY : saved.top, true);
         await tick();
         if (questionMode || questionScrollState !== saved || terminalElement !== element) return;
@@ -508,7 +506,6 @@
       element.scrollTop = stick ? element.scrollHeight : nextTop;
       rememberVirtualScrollGeometry(element);
       if (stick) virtualStickToBottom = true;
-      jumpVisible = !stick;
       virtualScrollResetPending = false;
     });
   }
@@ -548,7 +545,6 @@
   });
 
   onMount(() => {
-    const mountedAgent = agent;
     componentMounted = true;
     relayStore.readPane(agent, true);
     const stopWakeLock = mountTerminalWakeLock();
@@ -559,10 +555,15 @@
     let lastRefreshAt = Date.now();
     const visibilityChanged = () => {
       if (!paneVisible()) {
-        // Suspension withdraws authority. Only scoped cleanup is allowed;
-        // the store independently rejects hidden lease/watch acquisition.
+        // Traffic stops while hidden, but lease renewals keep going for a
+        // bounded grace: desktop Safari reports an occluded window as hidden,
+        // so treating every app switch as departure lapsed the lease and
+        // resized the shared pane twice per glance, stranding stale copies of
+        // inline agents' status bars in the scrollback. Once the grace runs
+        // out the renewals stop and the relay's TTL hands the size back — a
+        // page hidden overnight cannot keep the pane narrow.
         hiddenAt = Date.now();
-        relayStore.unwatchPane(mountedAgent);
+        relayStore.unwatchPane(agent);
         return;
       }
       hiddenAt = 0;
@@ -610,7 +611,7 @@
       window.removeEventListener('keydown', findShortcut);
       clearInterval(refresh);
       clearInterval(refreshPaneSizeLease);
-      relayStore.unwatchPane(mountedAgent);
+      relayStore.unwatchPane(agent);
       releasePaneSizeLease(false);
       virtualRowObserver?.disconnect();
       if (virtualWindowFrame) cancelAnimationFrame(virtualWindowFrame);
@@ -691,10 +692,8 @@
     if (stick) {
       terminalElement.scrollTop = terminalElement.scrollHeight;
       virtualStickToBottom = true;
-      jumpVisible = false;
     } else {
       terminalElement.scrollTop = nextTop;
-      jumpVisible = true;
       if (previousAnchor) {
         const row = terminalElement.querySelector<HTMLElement>(`[data-terminal-row="${matchingAnchorIndex(previousAnchor)}"]`);
         if (row) terminalElement.scrollTop += row.getBoundingClientRect().top
@@ -1099,12 +1098,9 @@
       if (!terminalElement) return;
       terminalElement.scrollTop = nextTop;
       rememberVirtualScrollGeometry(terminalElement);
-      // A find match just above the bottom is still reading history, not
-      // permission to follow the next frame.
       virtualStickToBottom = terminalElement.scrollHeight
         - terminalElement.scrollTop
-        - terminalElement.clientHeight <= 1;
-      jumpVisible = !virtualStickToBottom;
+        - terminalElement.clientHeight < 48;
       virtualScrollResetPending = false;
       applyTerminalFindHighlights();
     });
@@ -1273,7 +1269,6 @@
       terminalElement.scrollTop = terminalElement.scrollHeight;
       rememberVirtualScrollGeometry(terminalElement);
       virtualScrollResetPending = false;
-      jumpVisible = false;
     });
   }
 
@@ -1306,21 +1301,16 @@
     rememberVirtualScrollGeometry(terminalElement);
     if (movedTowardHistory) {
       virtualStickToBottom = false;
-      jumpVisible = true;
     } else if (bottomDistance <= 1) {
       virtualStickToBottom = true;
-      jumpVisible = false;
     } else if (virtualStickToBottom) {
       jumpToBottom();
       return;
-    } else {
-      jumpVisible = true;
     }
     scheduleVirtualWindow();
   }
 
-  function paneSizeLeaseSupported(target: Agent | null): boolean {
-    if (!componentMounted || !target || readOnly || questionMode) return false;
+  function paneSizeLeaseSupported(target: Agent): boolean {
     const connection = $connections.get(target.relay_id);
     return resizeSessionActive
       && componentMounted
@@ -1417,8 +1407,6 @@
   }
 
   function requestPaneSizeLease(force: boolean) {
-    // A scheduled tick may complete after the parent withdrew this branch.
-    if (!componentMounted || !agent) return;
     const target = agent;
     // A hidden page renews only within the grace window: after it, the
     // relay's lease TTL returns the desktop size, and the refocus handler
@@ -1629,9 +1617,6 @@
       {/if}
     </div>
   </div>
-    {#if jumpVisible}
-      <button class="jump-bottom" aria-label="Jump to latest" onclick={jumpToBottom}>↓</button>
-    {/if}
   </div>
   <textarea
     class="sr-only"
