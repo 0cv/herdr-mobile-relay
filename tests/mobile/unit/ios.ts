@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnOwnedProcess } from '../support/owned-process';
 import { setTimeout as wait } from 'node:timers/promises';
 import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
-import { AppiumClient, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
+import { AppiumClient, WebDriverError, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
 import { PhaseBudget, timingScale } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
@@ -69,10 +69,10 @@ async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
 
 async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, nativeDefaults = true,
   enforcementClock?: RequestEnforcementClock, onRequest?: (request: Request) => void, fixtureSignal?: AbortSignal,
-  beforeNativeDispatch?: (phase: PhaseBudget) => void) {
+  beforeNativeDispatch?: (phase: PhaseBudget) => void, timeoutMs = 120_000) {
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
-  const budget = new PhaseBudget(name, { timeoutMs: 120_000, recoveryLimit: 0, now });
+  const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now });
   const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
   const requests: Request[] = [];
   const nativeAdmissions: Array<{ phase: string; phaseRemainingMs: number; rootRemainingMs: number }> = [];
@@ -1172,7 +1172,19 @@ for (const mode of ['ready', 'unchanged', 'no-target', 'ambiguous', 'hidden', 'd
     const operation = () => (platform as any).findNativeScrollable([{ using: 'xpath', value: "//*[@name='ActivityListView']//*[@name='activityCollectionView']//*[@name='actionGroupCell' and contains(@label, 'Add to Home Screen')]" }], 'Add to Home Screen', 84_000);
     if (mode === 'ready') assert.equal(await operation(), 'target');
     else if (mode.startsWith('malformed-')) await assert.rejects(operation, /APPIUM_ELEMENT: malformed element list response/u);
-    else await assert.rejects(operation, mode.startsWith('context-') ? /APPIUM_SESSION: original native request context is unavailable/u : /IOS_SHARE|APPIUM_TIMEOUT/u);
+    else if (mode.startsWith('context-')) {
+      await assert.rejects(operation, (error: unknown) => {
+        assert.ok(error instanceof WebDriverError);
+        assert.equal(error.code, 'APPIUM_COMMAND_NOT_ADMITTED');
+        assert.match(error.message, /original native request ownership changed or overlapped/u);
+        return true;
+      });
+      const refused = driver.snapshot().lastCommand;
+      assert.equal(refused?.timing?.outcome, 'not-admitted');
+      assert.equal(refused?.timing?.admitted, false);
+      assert.equal(refused?.timing?.sent, false);
+      assert.equal(refused?.timing?.dispatchedOrdinal, undefined);
+    } else await assert.rejects(operation, /IOS_SHARE|APPIUM_TIMEOUT/u);
     assert.deepEqual(clicks, ['ready', 'unchanged', 'no-target', 'click-timeout'].includes(mode) ? ['expand'] : []);
     if (mode === 'budget' || mode === 'context-lookup') assert.equal(expansionLookups, 0);
     if (clicks.length) assert.equal(expansionLookups, 1, 'an unchanged sheet must not reissue View More');
@@ -1715,7 +1727,9 @@ test('confirmation original native ownership generation and context are fenced a
     assert.equal(capture.status, 'not-requested-product-first');
     assert.equal(capture.source, undefined);
     const subsequent = a.requests.filter(request => request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal);
-    assert.match(String(a.error), /original (?:native request context|usable session owner) is unavailable/u);
+    assert.ok(a.error instanceof WebDriverError);
+    assert.equal(a.error.code, 'APPIUM_COMMAND_NOT_ADMITTED');
+    assert.match(a.error.message, /original native request ownership changed or overlapped/u);
     assert.deepEqual(a.clicks, ['share', 'target-1']);
     assert.equal(a.lookups, 0);
     assert.deepEqual(subsequent, []);
@@ -1723,7 +1737,9 @@ test('confirmation original native ownership generation and context are fenced a
     assert.equal(refused.length, 1);
     assert.equal(refused[0].timing?.sent, false);
     assert.equal(refused[0].timing?.admitted, false);
-    assert.equal(refused[0].timing?.outcome, 'transport-error');
+    assert.equal(refused[0].timing?.outcome, 'not-admitted');
+    assert.equal(refused[0].timing?.completed, false);
+    assert.equal(refused[0].timing?.dispatchedOrdinal, undefined);
   }
 });
 
@@ -2595,7 +2611,12 @@ const lifecycleError = recordedIteration13.safariAUTFailure.response;
 type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' | 'loading' | 'timeout' | 'readiness-transition' | 'not-ready' | 'malformed-reference'
   | 'page-settling' | 'icon-settling' | 'today-view';
 
-async function lifecycleReplay(name: string, options: { foreground?: string; home?: HomeLaunchMode; page?: string } = {}) {
+async function lifecycleReplay(name: string, options: {
+  foreground?: string; home?: HomeLaunchMode; page?: string;
+  now?: () => number; timeoutMs?: number;
+  reply?: (request: Request) => Response | undefined;
+  beforeNativeDispatch?: (phase: PhaseBudget) => void;
+} = {}) {
   const homeMode = options.home || 'ready';
   const state = {
     safariRunning: true, foreground: options.foreground ?? 'com.apple.mobilesafari', installed: false, pid: 16089 as unknown,
@@ -2623,7 +2644,10 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
     if (!state.safariRunning) return '';
     return state.overlay ? 'com.apple.springboard' : state.foreground;
   };
-  const replay = await adapter(`lifecycle-${name}`, async ({ path, body, method, signal }) => {
+  const replay = await adapter(`lifecycle-${name}`, async (request) => {
+    const { path, body, method, signal } = request;
+    const override = options.reply?.(request);
+    if (override) return override;
     if (method === 'DELETE' && /\/session\/[^/]+$/u.test(path)) return value(null);
     if (path.endsWith('/appium/settings')) {
       if (method === 'GET') return value(state.settingsFault === 'readback' ? { ...settings, defaultActiveApplication: 'auto' } : state.settingsFault === 'malformed-readback' ? [] : settings);
@@ -2727,7 +2751,7 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
     if (path.endsWith('/url')) return value(state.url);
     if (body.script?.startsWith('return {')) return value({ origin: state.documentOrigin, standalone: state.standalone, applicationInitialized: true });
     throw new Error(`unexpected lifecycle request ${path} ${JSON.stringify(body)}`);
-  }, undefined, false);
+  }, options.now, false, undefined, undefined, undefined, options.beforeNativeDispatch, options.timeoutMs);
   (replay.platform as any).installedBundleId = '';
   (replay.platform as any).springBoardRoot = '';
   const marker = join(replay.outputDir, 'ios-ownership');
@@ -3065,6 +3089,366 @@ test('Home observation timeout quarantines failure evidence and blocks owned DEL
   assert.equal((a.driver as any).sessionOwner, owner);
   assert.deepEqual(a.driver.snapshot().firstFatal, first);
   assert.equal(a.requests.filter(request => request.path === '/session' && request.method === 'POST').length, 1);
+});
+
+type HomeBoundaryMode = 'missing' | 'pending' | 'not-ready' | 'invalid-page' | 'partial-ready'
+  | 'query-gap' | 'attribute-gap' | 'minimum-gap' | 'owner' | 'context' | 'generation' | 'overlap'
+  | 'parent' | 'generic' | 'forged' | 'network-timeout' | 'headers' | 'body' | 'parse' | 'timely'
+  | 'malformed' | 'unclassified' | 'containers' | 'pages' | 'icons'
+  | 'guard-poison' | 'policy-poison' | 'guard-clean' | 'policy-clean';
+
+async function homeBoundaryReplay(mode: HomeBoundaryMode) {
+  let now = 0;
+  let cold = false;
+  let queries = 0;
+  let right = 0;
+  let left = 0;
+  let parsePending = false;
+  let gapApplied = false;
+  let launchCount = 0;
+  const boundary: { shortfall?: unknown; propagated?: unknown; inner?: unknown; attempt?: number; wireCount?: number; remaining?: number } = {};
+  const followups: Promise<void>[] = [];
+  const phases = new Map<string, PhaseBudget>();
+  const originalWait = PhaseBudget.prototype.wait;
+  const originalParse = JSON.parse;
+  const deadline = () => now + phases.get('ios-home-readiness')!.remainingMs;
+  const a = await lifecycleReplay(`Home-boundary-${mode}`, {
+    now: () => now, timeoutMs: 45 * 60_000,
+    reply: ({ path, body }) => {
+      if (!cold) return undefined;
+      if (body.script === 'mobile: swipe') {
+        if (body.args.direction === 'right') right++;
+        else left++;
+      }
+      if (path.endsWith('/elements') && body.value?.includes('XCUIElementTypePageIndicator')) {
+        queries++;
+        if (queries === 2) {
+          if (mode === 'malformed') return value([element('home-container'), {}]);
+          if (mode === 'unclassified') return value([element('foreign-canary')]);
+          if (mode === 'containers') return value([element('home-container'), element('home-container-2'), element('home-page')]);
+          if (mode === 'pages') return value([element('home-container'), element('home-page'), element('home-page-2')]);
+          if (mode === 'icons') return value([element('home-container'), element('home-page'), element('home-icon'), element('home-icon-2')]);
+          if (mode !== 'query-gap') now += 7_000 * timingScale;
+        }
+        if (queries === 1 && mode === 'pending') return value([]);
+        const hasIcon = (queries === 1 && mode === 'not-ready') || (queries === 2 && (mode === 'partial-ready' || mode === 'timely'))
+          || (left > 0 && mode !== 'partial-ready');
+        return value([element('home-container'), ...(hasIcon ? [element('home-icon')] : []), element('home-page')]);
+      }
+      if (path.includes('/foreign-canary/attribute/')) return value('private-unclassified-canary');
+      if (/\/home-(container|page)-2\/attribute\//u.test(path)) {
+        const name = path.split('/attribute/')[1];
+        const container = path.includes('container-2');
+        return value(name === 'type' ? container ? 'XCUIElementTypeOther' : 'XCUIElementTypePageIndicator'
+          : name === 'name' ? container ? 'Home screen icons' : 'Page control' : null);
+      }
+      if (path.endsWith('/home-page/attribute/value')) return value(queries === 1 && mode === 'invalid-page' ? 'private-page-canary' : `Page ${left ? 2 : 1} of 2`);
+      if (path.endsWith('/home-icon/attribute/enabled') && queries === 1 && mode === 'not-ready') return value('false');
+      if (queries === 2 && right === 0) {
+        if ((mode === 'partial-ready' || mode === 'timely') && path.includes('/attribute/')) {
+          if (mode === 'partial-ready' && path.endsWith('/home-icon/attribute/visible')) now = deadline() - 118;
+          else if (mode === 'timely' && path.endsWith('/home-icon/attribute/hittable')) now = deadline() - 1;
+          else now += Math.min(3_000 * timingScale, Math.max(0, phases.get('ios-home-readiness')!.remainingMs - 750));
+        } else if (mode === 'attribute-gap') {
+          if (path.includes('/attribute/')) now += Math.min(4_000 * timingScale, Math.max(0, phases.get('ios-home-readiness')!.remainingMs - 5_000));
+        } else if (!['query-gap', 'malformed', 'unclassified', 'containers', 'pages', 'icons'].includes(mode)) {
+          if (path.endsWith('/home-container/attribute/type')) now += 4_000 * timingScale;
+          if (path.endsWith('/home-container/attribute/name')) {
+            if (mode === 'network-timeout') throw new DOMException('private-timeout-canary', 'TimeoutError');
+            if (mode === 'headers') now = deadline() + 1;
+            else if (mode === 'body') {
+              const response = value('Home screen icons');
+              response.text = async () => { now = deadline() + 1; return JSON.stringify({ value: 'Home screen icons' }); };
+              return response;
+            } else if (mode === 'parse') parsePending = true;
+            else now = deadline() - (mode === 'minimum-gap' ? 751 : 118);
+          }
+        }
+      }
+      return undefined;
+    },
+    beforeNativeDispatch: phase => {
+      if (!cold || phase.phase !== 'ios-home-readiness' || gapApplied || !(a.driver as any).guardedCommandActive) return;
+      const remaining = phase.remainingMs;
+      if (mode === 'query-gap' || (mode === 'attribute-gap' && remaining === 5_000) || (mode === 'minimum-gap' && remaining === 751)) {
+        const cap = mode === 'query-gap' ? 8_000 : 5_000;
+        const target = mode === 'minimum-gap' ? 749 : Math.min(cap, Math.floor(remaining / timingScale)) - 1;
+        now += remaining - target;
+        gapApplied = true;
+      } else if (remaining === 118) {
+        gapApplied = true;
+        if (mode === 'owner') (a.driver as any).sessionOwner = {};
+        if (mode === 'generation') (a.driver as any).sessionGeneration++;
+        if (mode === 'context') (a.driver as any).selectedContext = 'WEBVIEW_changed';
+        if (mode === 'parent') now += phases.get('ios-launch')!.remainingMs + 1;
+        if (mode === 'generic') throw new Error('APPIUM_COMMAND_NOT_ADMITTED private-generic-canary');
+        if (mode === 'forged') throw new WebDriverError({ code: 'APPIUM_COMMAND_NOT_ADMITTED', message: 'private-forged-canary', path: '', method: 'LOCAL', durationMs: 0, selectedContext: '', selectedWindow: '' });
+      }
+    },
+  });
+  const view = a.budget.phaseView.bind(a.budget);
+  a.budget.phaseView = (name, timeout, reserve) => {
+    const phase = view(name, timeout, reserve);
+    if (name === 'ios-launch') {
+      launchCount++;
+      assert.equal(timeout, 180_000);
+      assert.equal(phase.remainingMs, 180_000 * timingScale);
+    }
+    phases.set(name, phase);
+    const childView = phase.phaseView.bind(phase);
+    phase.phaseView = (childName, childTimeout, childReserve) => {
+      const child = childView(childName, childTimeout, childReserve);
+      phases.set(childName, child);
+      return child;
+    };
+    return phase;
+  };
+  const launch = async () => {
+    PhaseBudget.prototype.wait = async function (ms, operation = 'wait') {
+      this.assertAvailable(operation);
+      now += Math.min(ms, this.remainingMs);
+      if (cold && this.phase === 'ios-home-readiness' && mode === 'query-gap') now += this.remainingMs - 8_000;
+      this.assertAvailable(operation);
+    };
+    JSON.parse = ((text: string, ...args: any[]) => {
+      const result = originalParse(text, ...args);
+      if (parsePending && text === JSON.stringify({ value: 'Home screen icons' })) {
+        parsePending = false;
+        now = deadline() + 1;
+      }
+      return result;
+    }) as typeof JSON.parse;
+    try {
+      await a.owned(() => a.platform.launchInstalledApp());
+      await a.owned(() => a.platform.terminateInstalledApp());
+      a.state.pid = 17001;
+      cold = true;
+      if (['guard-poison', 'policy-poison', 'guard-clean', 'policy-clean'].includes(mode)) {
+        const command = a.driver.command.bind(a.driver);
+        const overlap = () => {
+          followups.push(a.driver.command('/status', 'GET').then(() => assert.fail('inner overlap must be refused'), error => { boundary.inner = error; }));
+        };
+        a.driver.setCommandGuard({
+          before: () => {
+            if (mode === 'guard-poison' && boundary.attempt !== undefined && boundary.inner === undefined && !followups.length) overlap();
+          },
+          failure: () => {},
+        });
+        a.driver.command = async (...args) => {
+          const [path, method, body, timeout, policy] = args;
+          const phase = phases.get('ios-home-readiness');
+          if (!policy || phase?.remainingMs !== 118 || boundary.attempt !== undefined) return command(...args);
+          boundary.attempt = a.driver.snapshot().lastCommand!.timing!.attemptId + 1;
+          boundary.wireCount = a.requests.length;
+          boundary.remaining = phase.remainingMs;
+          try {
+            return await command(path, method, body, timeout, {
+              ...policy,
+              beforeDispatch: () => {
+                if (mode === 'policy-poison') overlap();
+                try { policy.beforeDispatch(); } catch (error) { boundary.shortfall = error; throw error; }
+              },
+            });
+          } catch (error) {
+            boundary.propagated = error;
+            throw error;
+          }
+        };
+      }
+      if (mode === 'overlap') {
+        const attribute = a.driver.attribute.bind(a.driver);
+        a.driver.attribute = async (...args) => {
+          if (queries === 2) {
+            const first = attribute(...args);
+            try { return await attribute(...args); } finally { await first; }
+          }
+          return attribute(...args);
+        };
+      }
+      await a.owned(() => a.platform.relaunchInstalledApp());
+    } finally {
+      PhaseBudget.prototype.wait = originalWait;
+      JSON.parse = originalParse;
+      await Promise.all(followups);
+    }
+  };
+  return { ...a, launch, phases, boundary, launchCount: () => launchCount, queries: () => queries, right: () => right, left: () => left,
+    terminal: () => (a.platform.evidenceSnapshot().events as any[]).filter(event => event.operation === 'terminal-observation').map(event => event.detail) };
+}
+
+for (const mode of ['guard-poison', 'policy-poison'] as const) {
+  test(`Home boundary ${mode} supersedes the actual caller shortfall without dispatch or retained success`, async () => {
+    const a = await homeBoundaryReplay(mode);
+    let failure: unknown;
+    try { await a.launch(); } catch (error) { failure = error; }
+    assert.equal(a.requests.filter(request => request.path.endsWith('/home-icon/click')).length, 1, 'overlap must propagate, not retain missing and authorize a cold click');
+    assert.match(String(failure), /original native request ownership changed or overlapped/u);
+    assert.equal(failure, a.boundary.propagated);
+    assert.match(String(a.boundary.inner), /overlapping native request/u);
+    assert.equal(a.boundary.remaining, 118);
+    if (mode === 'policy-poison') {
+      assert.ok(a.boundary.shortfall instanceof WebDriverError);
+      assert.equal(a.boundary.shortfall.code, 'IOS_HOME_OBSERVATION_SHORTFALL');
+      assert.notEqual(a.boundary.propagated, a.boundary.shortfall);
+    } else assert.equal(a.boundary.shortfall, undefined, 'poison is rejected before the caller policy');
+    assert.equal(a.requests.length, a.boundary.wireCount);
+    const commands = a.driver.snapshot().commands.filter(command => command.timing?.attemptId === a.boundary.attempt);
+    assert.equal(commands.length, 1);
+    const timing = commands[0].timing!;
+    assert.equal(timing.outcome, 'not-admitted');
+    assert.equal(timing.admitted, false);
+    assert.equal(timing.sent, false);
+    assert.equal(timing.completed, false);
+    assert.equal(timing.dispatchedOrdinal, undefined);
+    assert.equal(timing.dispatchMs, undefined);
+    assert.equal(Object.isFrozen(timing), true);
+    assert.equal(a.terminal().at(-1)!.outcome, 'error');
+    assert.equal(a.right(), 0);
+    assert.equal(a.left(), 0);
+    assert.equal(a.driver.snapshot().firstFatal, undefined);
+    await a.driver.settings(2_000);
+    assert.equal(a.requests.length, a.boundary.wireCount! + 1, 'unsent overlap does not quarantine the healthy client');
+  });
+}
+
+for (const mode of ['missing', 'query-gap', 'attribute-gap', 'minimum-gap', 'guard-clean', 'policy-clean'] as const) {
+  test(`Home boundary ${mode} resumes bounded page search with full cold provider and document proof`, async () => {
+    const a = await homeBoundaryReplay(mode);
+    let failure: unknown;
+    try { await a.launch(); } catch (error) { failure = error; }
+    assert.equal(a.right(), 8, `a complete missing observation must reach the existing page search, not stop at ${String(failure)}`);
+    assert.equal(failure, undefined);
+    assert.equal(a.left(), 1);
+    assert.equal(a.launchCount(), 2, 'initial and cold launches only, with no replacement launch phase');
+    assert.ok(a.phases.get('ios-launch')!.remainingMs > 0);
+    assert.equal(a.budget.recoveryCount, 0);
+    const evidence = a.platform.evidenceSnapshot();
+    assert.equal(evidence.installedDocumentBound, true);
+    assert.equal(evidence.nativePid, '17001');
+    const click = a.requests.findLastIndex(request => request.path.endsWith('/home-icon/click'));
+    const after = a.requests.slice(click + 1);
+    assert.ok(after.some(request => request.body.script === 'mobile: queryAppState' && request.body.args.bundleId === 'com.apple.webapp'));
+    assert.ok(after.some(request => request.body.script === 'mobile: activeAppInfo'));
+    assert.ok(after.some(request => request.body.script === 'mobile: getInstalledContexts' && request.body.args.targetApp.nativePid === 17001));
+    assert.ok(after.some(request => request.path.endsWith('/url')));
+    assert.ok(after.some(request => request.body.script?.startsWith('return {')));
+    const before = a.requests.slice(0, click);
+    for (const name of ['enabled', 'visible', 'hittable']) assert.ok(before.some(request => request.path.endsWith(`/home-icon/attribute/${name}`)));
+    const terminals = a.terminal();
+    const short = terminals.find(event => event.outcome === 'local-shortfall');
+    assert.ok(short);
+    assert.equal(short.state, 'missing');
+    assert.deepEqual(short.classificationCounts, { container: 1, page: 1, icon: 0 });
+    assert.equal(short.pageCurrent, 1);
+    assert.equal(short.pageTotal, 2);
+    assert.equal(short.completedRounds, 1);
+    assert.equal(short.attemptedRounds, 2);
+    assert.equal(short.attemptOrdinal, null);
+    assert.ok(Number.isInteger(short.lastCompleteAttemptOrdinal));
+    assert.ok(short.localRemainingMs >= 0 && short.parentRemainingMs > short.localRemainingMs);
+    assert.equal(terminals.length, 4, 'one terminal per readiness invocation, including immediately ready and missing pages');
+    assert.equal(JSON.stringify(terminals).includes('private-'), false);
+    assert.deepEqual(Object.keys(short).sort(), ['outcome', 'state', 'pageCurrent', 'pageTotal', 'classificationCounts', 'attemptedRounds', 'completedRounds', 'localRemainingMs', 'parentRemainingMs', 'lastCompleteAttemptOrdinal', 'attemptOrdinal'].sort());
+    assert.equal(a.driver.snapshot().firstFatal, undefined);
+    assert.equal(a.requests.filter(request => request.path === '/session').length, 1);
+    if (mode === 'guard-clean' || mode === 'policy-clean') {
+      assert.ok(a.boundary.shortfall instanceof WebDriverError);
+      assert.equal(a.boundary.shortfall.code, 'IOS_HOME_OBSERVATION_SHORTFALL');
+      assert.equal(a.boundary.propagated, a.boundary.shortfall, 'valid scope preserves the original private caller error instance');
+      assert.equal(a.boundary.inner, undefined);
+    }
+  });
+}
+
+test('Home boundary SDK poison precedes nominal minimum admission with one unsent receipt', async () => {
+  for (const poisoned of [true, false]) {
+    const a = await adapter(`minimum-poison-${poisoned}`, () => value(null), () => 0);
+    const policy = a.driver.nativeRequestPolicy(a.budget);
+    const followups: Promise<void>[] = [];
+    a.driver.setCommandGuard({
+      before: () => {
+        if (poisoned && !followups.length) followups.push(assert.rejects(() => a.driver.command('/status', 'GET'), /overlapping native request/u));
+      },
+      failure: () => {},
+    });
+    const before = a.driver.snapshot().commands.length;
+    await assert.rejects(() => a.driver.attribute('native', 'label', Math.floor(749 / timingScale), policy),
+      poisoned ? /original native request ownership changed or overlapped/u : /required to complete the command/u);
+    await Promise.all(followups);
+    const commands = a.driver.snapshot().commands;
+    assert.equal(commands.length, before + 1);
+    const timing = commands.at(-1)!.timing!;
+    assert.equal(timing.attemptId, commands[before - 1].timing!.attemptId + 1);
+    assert.equal(timing.outcome, 'not-admitted');
+    assert.equal(timing.admitted, false);
+    assert.equal(timing.sent, false);
+    assert.equal(timing.dispatchedOrdinal, undefined);
+    assert.equal(timing.dispatchMs, undefined);
+    assert.equal(a.requests.length, 1);
+    assert.equal(a.driver.snapshot().firstFatal, undefined);
+    assert.equal(a.driver.snapshot().unusable, false);
+    await a.driver.command('/status', 'GET');
+    assert.equal(a.requests.length, 2);
+  }
+});
+
+for (const mode of ['pending', 'not-ready', 'invalid-page', 'partial-ready', 'malformed', 'unclassified', 'containers', 'pages', 'icons', 'owner', 'context', 'generation', 'overlap', 'parent', 'generic', 'forged'] as const) {
+  test(`Home boundary ${mode} cannot turn incomplete or invalid evidence into a cold click`, async () => {
+    const a = await homeBoundaryReplay(mode);
+    await assert.rejects(() => a.launch(), mode === 'overlap' ? /overlapping native request/u : mode === 'parent' ? /PHASE_BUDGET_EXHAUSTED/u
+      : mode === 'generic' || mode === 'forged' ? /APPIUM_COMMAND_NOT_ADMITTED/u
+        : mode === 'owner' || mode === 'context' || mode === 'generation' ? /APPIUM_COMMAND_NOT_ADMITTED: original native request ownership changed or overlapped/u : /IOS_CONTEXT/u);
+    assert.equal(a.requests.filter(request => request.path.endsWith('/home-icon/click')).length, 1, 'only the initial launch clicks');
+    assert.equal(a.launchCount(), 2);
+    if (['pending', 'not-ready', 'invalid-page'].includes(mode)) {
+      assert.equal(a.right(), 0);
+      assert.equal(a.left(), 0);
+      const terminal = a.terminal().at(-1)!;
+      assert.equal(terminal.state, mode === 'not-ready' ? 'not-ready' : 'pending');
+      assert.equal(terminal.completedRounds, 1);
+      assert.equal(terminal.outcome, 'local-shortfall');
+    }
+    if (mode === 'partial-ready') {
+      assert.equal(a.right(), 8);
+      assert.equal(a.left(), 7);
+      const short = a.terminal().find(event => event.outcome === 'local-shortfall');
+      assert.equal(short.state, 'missing');
+      assert.deepEqual(short.classificationCounts, { container: 1, page: 1, icon: 0 });
+    }
+    assert.equal(JSON.stringify(a.terminal()).includes('private-'), false);
+  });
+}
+
+for (const mode of ['network-timeout', 'headers', 'body', 'parse'] as const) {
+  test(`Home boundary ${mode} preserves first fatal and zero post-fatal HTTP`, async () => {
+    const a = await homeBoundaryReplay(mode);
+    await assert.rejects(() => a.launch(), /APPIUM_TIMEOUT/u);
+    const frozen = structuredClone(a.driver.snapshot());
+    assert.equal(frozen.firstFatal?.code, 'APPIUM_TIMEOUT');
+    const count = a.requests.length;
+    for (const operation of [() => a.driver.close(), () => a.driver.command('/status', 'GET'), () => a.driver.create({ capabilities: {} }), () => a.driver.command('/arbitrary', 'POST'), () => a.owned(() => a.platform.launchInstalledApp())]) {
+      await assert.rejects(operation, /APPIUM_SESSION_UNUSABLE/u);
+    }
+    assert.equal(a.requests.length, count);
+    assert.deepEqual(a.driver.snapshot(), frozen);
+    assert.equal(a.requests.filter(request => request.path.endsWith('/home-icon/click')).length, 1);
+    assert.equal(a.terminal().at(-1)!.state, 'missing');
+    assert.equal(a.terminal().at(-1)!.completedRounds, 1);
+    assert.equal(a.terminal().at(-1)!.outcome, 'error');
+  });
+}
+
+test('Home boundary timely complete readiness is accepted inside the original policy deadline', async () => {
+  const a = await homeBoundaryReplay('timely');
+  await a.launch();
+  assert.equal(a.right(), 0);
+  assert.equal(a.left(), 0);
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  const terminal = a.terminal().at(-1)!;
+  assert.equal(terminal.state, 'ready');
+  assert.equal(terminal.outcome, 'complete');
+  assert.equal(terminal.completedRounds, 2);
+  assert.equal(terminal.localRemainingMs, 1);
 });
 
 test('Plan13 lifecycle supported handoff survives obsolete Safari through background cold termination and relaunch', async () => {
