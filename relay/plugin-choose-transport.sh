@@ -20,6 +20,7 @@ case "$MODE" in
 esac
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 CURRENT="$(gateway_urls "$ENV_FILE")"
 COMMUNITY="$(community_gateway_url)"
 

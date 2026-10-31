@@ -186,12 +186,21 @@ esac
 
 echo ""
 
+ENV_FILE="${HERDR_RELAY_ENV:-$CONFIG_DIR/relay.env}"
+if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
+    PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
+    if ! "$(relay_binary)" tailscale off --port 8443 --relay-port "${PORT:-8375}"; then
+        echo "✗ Tailscale Serve may remain. Run: tailscale serve --https=8443 off" >&2
+    fi
+fi
+export HERDR_TAILSCALE_FULL_UNINSTALL=1
+
 # Stop and remove the service — must succeed before deleting files.
 service_stopped=false
 case "$(uname -s)" in
     Darwin)
         if [ -f "$SCRIPT_DIR/uninstall-service.sh" ]; then
-            if sh "$SCRIPT_DIR/uninstall-service.sh"; then
+            if bash "$SCRIPT_DIR/uninstall-service.sh"; then
                 service_stopped=true
             fi
         else

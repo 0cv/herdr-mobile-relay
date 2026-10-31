@@ -8,8 +8,13 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-gateway-deploy-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
+export HOME="$WORK_DIR/home"
 STUB_DIR="$WORK_DIR/bin"
-mkdir -p "$STUB_DIR"
+mkdir -p "$STUB_DIR" "$HOME/.local/bin"
+for tool in launchctl systemctl cloudflared tailscale; do
+    printf '#!/bin/sh\necho "unexpected %s" >&2\nexit 1\n' "$tool" > "$HOME/.local/bin/$tool"
+    chmod +x "$HOME/.local/bin/$tool"
+done
 
 SSH_LOG="$WORK_DIR/ssh.log"
 export SSH_LOG
@@ -121,6 +126,10 @@ cat > "$NORMALIZE_BIN" <<'EOF'
 # Isolates this shell test from any relay binary in the developer's data dir.
 # Callers pass either a bare host or the https:// form the wss:// entries are
 # rewritten to, exactly as the compiled normalizer sees them.
+if [ "$1" = tailscale ] && [ "$2" = off ]; then
+    printf '%s\n' "$*" >> "$STUB_STATE/tailscale.log"
+    exit 0
+fi
 test "$1" = "normalize-origin" || exit 2
 test "$2" = "--allow-loopback-http" || exit 2
 host="${3#https://}"
@@ -470,8 +479,15 @@ grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test,wss://community-a.example.tes
 : > "$SSH_LOG"
 rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
 export HERDR_RELAY_ENV="$WORK_DIR/relay-custom-subscriptions.env"
-: > "$HERDR_RELAY_ENV"
+printf "HERDR_TAILSCALE_PORT='8443'\nHERDR_RELAY_PORT='8375'\n" > "$HERDR_RELAY_ENV"
 export HERDR_GATEWAY_SUBSCRIPTIONS="wss://gw.example.test"
+run_deploy
+[ "$STATUS" -ne 0 ] || fail "gateway deployment accepted Tailscale selection"
+grep -Fq "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first." "$OUTPUT" || fail "missing refusal"
+if grep -q . "$SSH_LOG"; then fail "refused deployment contacted server"; fi
+if [ -e "$STUB_STATE/tailscale.log" ] && grep -q . "$STUB_STATE/tailscale.log"; then fail "refused deployment called Tailscale"; fi
+grep -Fxq "HERDR_TAILSCALE_PORT='8443'" "$HERDR_RELAY_ENV" || fail "selection changed"
+rm -f "$HERDR_RELAY_ENV"
 run_deploy
 [ "$STATUS" -eq 0 ] || fail "custom-subscription run exited $STATUS"
 grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test'" "$HERDR_RELAY_ENV" ||

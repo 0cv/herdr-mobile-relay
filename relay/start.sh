@@ -11,6 +11,7 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELAY_PID=""
 TUNNEL_PID=""
+TAILSCALE_ACTIVE=""
 LOG_FILE=""
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
@@ -19,12 +20,17 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 . "$SCRIPT_DIR/common.sh"
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 export HERDR_RELAY_ENV="$ENV_FILE"
 
 cleanup() {
     if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
         kill "$TUNNEL_PID" 2>/dev/null || true
         wait_for_exit "$TUNNEL_PID" 5
+    fi
+    if [ -n "$TAILSCALE_ACTIVE" ]; then
+        "$RELAY_BIN" tailscale off --port 9443 --relay-port "$PORT" || true
+        TAILSCALE_ACTIVE=""
     fi
     if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
         kill "$RELAY_PID" 2>/dev/null || true
@@ -51,7 +57,7 @@ wait_for_exit() {
     for ((attempt = 0; attempt < attempts; attempt++)); do
         if ! kill -0 "$pid" 2>/dev/null; then
             wait "$pid" 2>/dev/null || true
-            return
+            return 0
         fi
         sleep 1
     done
@@ -76,9 +82,18 @@ fi
 # launch, so every device enrolled under the previous hostname is stranded.
 # Each tunnel launch starts with an empty device list and re-arms the one-use
 # bootstrap invitation so the printed setup link pairs the phone again. A
-# gateway keeps a stable identity, so its pairings survive a restart.
-if [ -z "$GATEWAY_URL" ]; then
+# gateway and Tailscale keep stable identities, so their pairings survive a restart.
+if [ -z "$GATEWAY_URL" ] && [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ] &&
+    [ -z "${HERDR_TAILSCALE_PORT:-}" ]; then
     export HERDR_RELAY_REARM_BOOTSTRAP=1
+fi
+
+if [ "${HERDR_DEV_TRANSPORT:-}" = tailscale ]; then
+    if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] || [ -n "$GATEWAY_URL" ]; then
+        echo "✗ Tailscale dev tunnel requires isolated dev state without a configured gateway." >&2
+        exit 1
+    fi
+    URL="$("$RELAY_BIN" tailscale address --port 9443)" || exit $?
 fi
 
 if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then
@@ -94,6 +109,11 @@ if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then
     echo "✓ Background relay ready: $HEALTH"
     echo ""
     exec "$SCRIPT_DIR/setup-link.sh"
+fi
+
+if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
+    echo "✗ Always on Tailscale needs its background service. Run Always on Tailscale setup from the menu." >&2
+    exit 1
 fi
 
 # 1. Start the verified packaged relay.
@@ -146,6 +166,57 @@ if [ -n "$GATEWAY_URL" ]; then
     echo ""
 
     wait "$RELAY_PID"
+elif [ "${HERDR_DEV_TRANSPORT:-}" = tailscale ]; then
+    echo "▸ Publishing $URL via Tailscale Serve: only HTTPS port 9443 is added and removed on exit."
+    "$RELAY_BIN" tailscale serve --port 9443 --relay-port "$PORT" &
+    TUNNEL_PID=$!
+    sleep 2
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+        wait "$TUNNEL_PID" || exit $?
+        echo "✗ Tailscale Serve stopped before the relay was ready." >&2
+        exit 1
+    fi
+    TAILSCALE_ACTIVE=1
+
+    HOST_LABEL="$(host_label)"
+    RELAY_URL="wss://${URL#https://}"
+    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
+    PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE")"
+    if [ "$PHONE_APP_BASE" != "$URL" ]; then
+        record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
+    fi
+    PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+    DIRECT_URL="$URL/#$SETUP_FRAGMENT"
+
+    ARMED=0
+    arm_setup_link "$ENV_FILE" || ARMED=$?
+    echo ""
+    echo "✓ Relay ready!"
+    echo ""
+    print_phone_setup "$PHONE_URL"
+    if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
+        echo ""
+        echo "  Direct browser fallback:"
+        print_phone_setup_url "$DIRECT_URL"
+    fi
+    echo ""
+    print_setup_link_arming "$ARMED"
+    echo "  The phone app and relay are both served through Tailscale."
+    echo "  Keep this terminal open; press Ctrl-C to stop the dev tunnel."
+    echo ""
+    echo "  Tailscale URL: $URL"
+    echo "  WebSocket:     $RELAY_URL"
+    echo ""
+
+    while kill -0 "$RELAY_PID" 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; do
+        sleep 2
+    done
+    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+        echo "✗ The relay process stopped." >&2
+    else
+        echo "✗ Tailscale Serve stopped." >&2
+    fi
+    exit 1
 elif command -v cloudflared >/dev/null 2>&1; then
     echo "▸ Starting Cloudflare tunnel..."
     LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/herdr-cloudflared.XXXXXX")"

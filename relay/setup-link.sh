@@ -21,6 +21,29 @@ fi
 
 # A gateway-configured relay has no tunnel hostname and no cloudflared config:
 # the phone finds it through the gateway, so the link only needs the app origin.
+if [ "${HERDR_TAILSCALE_PORT:-}" = 8443 ]; then
+    ADDRESS="$("$(relay_binary)" tailscale address --port 8443)" || exit $?
+    HOST_LABEL="$(host_label)"
+    RELAY_URL="wss://${ADDRESS#https://}"
+    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
+    PHONE_APP_BASE="$(choose_phone_app_base_url "$ADDRESS" "$ENV_FILE" stable)"
+    record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
+    ARMED=0
+    arm_setup_link "$ENV_FILE" || ARMED=$?
+    echo "🐑 Herdr Mobile Relay phone setup"
+    echo ""
+    print_phone_setup "$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+    if [ "$PHONE_APP_BASE" != "$ADDRESS" ]; then
+        echo ""
+        echo "  Direct browser fallback:"
+        print_phone_setup_url "$ADDRESS/#$SETUP_FRAGMENT"
+    fi
+    echo ""
+    print_setup_link_arming "$ARMED"
+    echo "  Tailscale Serve: $ADDRESS"
+    exit 0
+fi
+
 GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 if [ -n "$GATEWAY_URL" ]; then
     HOST_LABEL="$(host_label)"

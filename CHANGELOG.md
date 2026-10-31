@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Connect through Tailscale Serve on your own tailnet, with an isolated dev
+  tunnel or a persistent background service and setup QR.
+
 ### Changed
 
 - Read Oh My Pi settings with a standard YAML parser. A settings file that is
