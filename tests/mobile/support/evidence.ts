@@ -151,7 +151,7 @@ export async function validateAndroidProducer(path: string): Promise<void> {
     const parent = expected.parent ? entries[expected.parent] : new URL(`file://${data.home}/package.json`).href;
     if (!actual || actual.entry !== entry || actual.parent !== parent || actual.realpath !== root || actual.condition !== expected.condition
       || actual.version !== expected.version || !isDeepStrictEqual(actual.engines || {}, expected.engines || {})) fail('producer selected resolver identity mismatch');
-    const hashes = Object.fromEntries(Object.entries(expected.files).map(([file, original]) => [file, id === 'android' && manifest.files[file] ? manifest.files[file].after : original]));
+    const hashes = Object.fromEntries(Object.entries(expected.files).map(([file, original]) => [file, manifest.files[file]?.package === id ? manifest.files[file].after : original]));
     if (!isDeepStrictEqual(actual.files, hashes)) fail('producer runtime/source/compiled/declaration hashes mismatch');
     entries[id] = entry;
   }
