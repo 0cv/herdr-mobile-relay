@@ -731,6 +731,28 @@ export class AppiumClient {
         && 'script' in body && body.script === 'mobile: inspectRetainedChromeTargets';
       const allowance = driverCommandAllowance(commandPath, method, body);
       const startedAt = Date.now();
+      let identityFailure: WebDriverError | undefined;
+      const assertNativeIdentity = () => {
+        this.assertUsable(path);
+        if (identityFailure) throw identityFailure;
+        if (identity && (!identity.session || this.sessionId !== identity.session || this.sessionOwner !== identity.owner
+          || this.sessionGeneration !== identity.generation || identity.context !== 'NATIVE_APP' || this.selectedContext !== identity.context
+          || this.unusable || this.firstFatal || this.scopedRequestFailed || !identity.scope || identity.scope.overlapped
+          || this.scopedCommand !== identity.scope)) {
+          identityFailure = new WebDriverError({
+            code: 'APPIUM_COMMAND_NOT_ADMITTED', message: 'original native request ownership changed or overlapped',
+            path, method, durationMs: 0, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow,
+          });
+          timing.admitted = false;
+          timing.dispatchMs = undefined;
+          timing.priorSettlementToDispatchMs = undefined;
+          timing.phaseRemainingAtDispatchMs = null;
+          timing.outcome = 'not-admitted';
+          this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, identityFailure.message, timing);
+          throw identityFailure;
+        }
+      };
+      assertNativeIdentity();
       if (enforceBudget && this.budget && requestTimeoutMs < allowance) {
         const error = new WebDriverError({
           code: 'APPIUM_COMMAND_NOT_ADMITTED',
@@ -815,23 +837,7 @@ export class AppiumClient {
           }
           requestDeadline = dispatchTime + Math.min(operationTimeoutMs, remaining);
         }
-        this.assertUsable(path);
-        if (identity && (!identity.session || this.sessionId !== identity.session || this.sessionOwner !== identity.owner
-          || this.sessionGeneration !== identity.generation || identity.context !== 'NATIVE_APP' || this.selectedContext !== identity.context
-          || this.unusable || this.firstFatal || this.scopedRequestFailed || !identity.scope || identity.scope.overlapped
-          || this.scopedCommand !== identity.scope)) {
-          const error = new WebDriverError({
-            code: 'APPIUM_COMMAND_NOT_ADMITTED', message: 'original native request ownership changed or overlapped',
-            path, method, durationMs: 0, selectedContext: this.selectedContext, selectedWindow: this.selectedWindow,
-          });
-          timing.admitted = false;
-          timing.dispatchMs = undefined;
-          timing.priorSettlementToDispatchMs = undefined;
-          timing.phaseRemainingAtDispatchMs = null;
-          timing.outcome = 'not-admitted';
-          this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, error.message, timing);
-          throw error;
-        }
+        assertNativeIdentity();
         this.assertUsable(path);
         timing.dispatchedOrdinal = ++this.dispatchedOrdinal;
         if (timing.operation === 'create') this.sessionGeneration += 1;
@@ -860,6 +866,7 @@ export class AppiumClient {
           throw error;
         }
         if (policy && !timing.sent) {
+          assertNativeIdentity();
           timing.admitted = false;
           timing.dispatchMs = undefined;
           timing.priorSettlementToDispatchMs = undefined;

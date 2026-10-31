@@ -118,10 +118,20 @@ runs:
         echo no | avdmanager create avd --force --name "$avd_name" --package "$android_system_image" --device "$android_device_profile"
         avdmanager list avd
         printf 'ANDROID_AVD_NAME=%s\n' "$avd_name" >> "$GITHUB_ENV"
-        emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 &
-        emulator_pid=$!
-        printf 'ANDROID_EMULATOR_PID=%s\n' "$emulator_pid" >> "$GITHUB_ENV"
+        (umask 077; : >"$MOBILE_PRIVATE/android-emulator-observer.log") 2>/dev/null || { printf 'EMULATOR_OBSERVER_LOG_UNAVAILABLE\n' >&2; exit 1; }
+        lifetime_file="$MOBILE_OUTPUT/android-emulator-lifetime.json"
+        printf 'ANDROID_EMULATOR_LIFETIME_FILE=%s\n' "$lifetime_file" >> "$GITHUB_ENV"
+        node tests/mobile/support/android-emulator-lifetime.ts "$lifetime_file" "$RUNNER_TEMP/emulator.log" emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect < /dev/null >"$MOBILE_PRIVATE/android-emulator-observer.log" 2>&1 &
+        emulator_pid=""
         for attempt in $(seq 1 180); do
+          if [ -z "$emulator_pid" ] && [ -f "$lifetime_file" ]; then
+            emulator_pid="$(jq -er 'select(.schema == 1) | .binding.childPid | select(type == "number" and . > 0 and . <= 2147483647 and . == floor)' "$lifetime_file" 2>/dev/null)" || emulator_pid=""
+            if [ -n "$emulator_pid" ]; then
+              printf 'ANDROID_EMULATOR_PID=%s\n' "$emulator_pid" >> "$GITHUB_ENV"
+            else
+              printf 'EMULATOR_CHILD_PID_UNAVAILABLE\n' >&2
+            fi
+          fi
           serial=""
           while IFS= read -r candidate_serial; do
             [ -n "$candidate_serial" ] || continue
@@ -137,7 +147,7 @@ runs:
           if [ -n "$serial" ]; then
             adb -s "$serial" wait-for-device
             boot="$(adb -s "$serial" shell getprop sys.boot_completed | tr -d '\r')"
-            if [ "$boot" = 1 ]; then
+            if [ "$boot" = 1 ] && [ -n "$emulator_pid" ]; then
               printf 'ANDROID_SERIAL=%s\n' "$serial" >> "$GITHUB_ENV"
               printf 'android:%s\n' "$serial" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
               adb -s "$serial" shell settings put global window_animation_scale 0
@@ -147,7 +157,7 @@ runs:
               break
             fi
           fi
-          if ! kill -0 "$emulator_pid" 2>/dev/null; then
+          if [ -n "$emulator_pid" ] && ! kill -0 "$emulator_pid" 2>/dev/null; then
             sed -n '1,160p' "$RUNNER_TEMP/emulator.log" >&2 || true
             exit 1
           fi

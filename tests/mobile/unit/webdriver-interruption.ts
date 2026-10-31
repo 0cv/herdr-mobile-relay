@@ -258,8 +258,10 @@ webdriverInterruptionTests.push(['Appium request timing SM57 dispatch gap preser
       if (provider === 'enforcement') a.observeNow(attempt);
       const retained = a.client.nativeRequestPolicy(budget);
       const policy = { ...retained, finalAction: true, beforeDispatch: () => { retained.beforeDispatch(); armed = true; } };
+      const commandCount = a.client.snapshot().commands.length;
       await assert.rejects(() => a.client.click('add', 12_000, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
       await Promise.all(followups);
+      assert.equal(a.client.snapshot().commands.length, commandCount + 1, 'late identity refusal is recorded once despite the unsent catch recheck');
       assert.equal(attempts, 1);
       assert.equal(followups.length, 1);
       assert.equal(a.wire.length, 1);

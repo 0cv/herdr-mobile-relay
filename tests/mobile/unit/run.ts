@@ -56,6 +56,7 @@ import { androidEventTests } from './android-events';
 import { androidGmsSettleTests } from './android-gms-settle';
 import { androidEnvironmentTests, validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnosticEvent, type FakeAdbDiagnosticStage, type FakeAdbExitCategory, type FakeAdbFixturePathCategory } from './android-environment';
 import { androidTransportTests } from './android-transport';
+import { androidEmulatorLifetimeTests } from './android-emulator-lifetime';
 import { nativeStartupTests } from './native-startup';
 import { xctestOwnerTests } from './xctest-owner';
 import { xctestOutputTests } from './xctest-output';
@@ -2458,7 +2459,7 @@ for (const [name, body] of webdriverFatalTests) test(name, body);
 for (const [name, body] of iosInstalledClientTests) test(name, body);
 for (const [name, body] of [...iosProducerPrivacyTests, ...iosIntegrityEvidenceTests]) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
-for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests, ...ownedInputTests]) test(name, body);
+for (const [name, body] of [...androidEmulatorLifetimeTests, ...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests, ...ownedInputTests]) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', async () =>
   runIOSRegressions(selectedIOSIds, !explicitSelection));
 test('Android CI gates the shared local Appium launch path', async () => {
