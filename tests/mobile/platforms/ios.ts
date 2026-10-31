@@ -1132,13 +1132,16 @@ export class IOSPlatform implements MobilePlatform {
         this.launchObservation.enter('provider');
         const providerTimeout = Math.min(30_000, phase.remainingMs);
         if (providerTimeout <= 1) break;
-        if (await this.waitForInstalledProvider(providerTimeout)) {
+        if (await this.waitForInstalledProvider(providerTimeout, phase)) {
           const foregroundTimeout = phase.remainingMs;
           if (foregroundTimeout <= 1) break;
           this.launchObservation.enter('foreground');
-          await this.requireInstalledProviderForeground(foregroundTimeout);
+          phase.assertAvailable('verify installed provider foreground');
+          await this.requireInstalledProviderForeground(foregroundTimeout, phase);
+          phase.assertAvailable('attach installed provider');
           this.launchObservation.enter('attachment');
           await delay(Math.min(750, phase.remainingMs), phase);
+          phase.assertAvailable('attach installed provider');
           await this.attachToInstalledView(Math.min(IOS_LAUNCH_ATTACHMENT_MS, Math.floor(phase.remainingMs / timingScale)));
           this.launchObservation.enter('complete');
           return;
@@ -2248,19 +2251,26 @@ export class IOSPlatform implements MobilePlatform {
     };
   }
 
-  private async waitForInstalledProvider(timeoutMs: number): Promise<boolean> {
-    const phase = this.budget.phaseView('ios-provider', timeoutMs);
+  private async waitForInstalledProvider(timeoutMs: number, parent = this.budget): Promise<boolean> {
+    const phase = parent.phaseView('ios-provider', timeoutMs);
+    const policy = this.driver.nativeRequestPolicy(phase);
     while (!phase.exhausted) {
       phase.assertAvailable('discover installed provider');
-      await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
-      const state = await this.driver.mobile('queryAppState', { bundleId: IOS_INSTALLED_BUNDLE_ID }, phase.remainingMs);
+      if (phase.remainingMs < driverRequestAllowanceMs.generic) break;
+      await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
+      const requestTimeout = phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS * timingScale
+        ? IOS_NATIVE_LOOKUP_ROUND_MS : Math.min(driverRequestAllowanceMs.lookup, Math.floor(phase.remainingMs / timingScale));
+      const state = await this.driver.mobile('queryAppState', { bundleId: IOS_INSTALLED_BUNDLE_ID }, requestTimeout, policy);
+      policy.beforeDispatch();
       if (state === 4) {
-        await this.observeNativeForeground(IOS_INSTALLED_BUNDLE_ID, phase);
         this.installedBundleId = IOS_INSTALLED_BUNDLE_ID;
         return true;
       }
       if (state !== 1 && state !== 2 && state !== 3) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider state is missing or invalid');
-      const homeState = await this.driver.mobile('queryAppState', { bundleId: IOS_SPRINGBOARD_BUNDLE_ID }, phase.remainingMs);
+      if (phase.remainingMs < requestTimeout) break;
+      const homeTimeout = Math.min(requestTimeout, Math.floor(phase.remainingMs / timingScale));
+      const homeState = await this.driver.mobile('queryAppState', { bundleId: IOS_SPRINGBOARD_BUNDLE_ID }, homeTimeout, policy);
+      policy.beforeDispatch();
       if (homeState !== 4) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'neither the launch screen nor installed provider is foreground');
       if (phase.exhausted) {
         this.budget.assertAvailable('discover installed provider');
@@ -2385,10 +2395,10 @@ export class IOSPlatform implements MobilePlatform {
     }
   }
 
-  private async requireInstalledProviderForeground(timeoutMs = 30_000): Promise<void> {
+  private async requireInstalledProviderForeground(timeoutMs = 30_000, parent = this.budget): Promise<void> {
     if (!this.installedBundleId) throw new Error('IOS_CONTEXT: installed provider identity is unavailable');
     if (this.installedBundleId !== IOS_INSTALLED_BUNDLE_ID) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `installed provider ${this.installedBundleId} is not ${IOS_INSTALLED_BUNDLE_ID}`);
-    await this.observeNativeForeground(this.installedBundleId, this.budget.phaseView('ios-native-foreground', Math.min(30_000, timeoutMs)));
+    await this.observeNativeForeground(this.installedBundleId, parent.phaseView('ios-native-foreground', Math.min(30_000, timeoutMs)));
   }
 
   private async validateInstalledDocument(timeoutMs?: number): Promise<void> {
