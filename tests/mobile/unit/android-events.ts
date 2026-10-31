@@ -695,7 +695,7 @@ androidEventTests.push(['hosted 40445020397 helper that leaves while bound retir
     ['a death label that names a cause', log.replace('has died: vis BTOP', 'has died: crashed')],
     ['no own exit message', log.replace(`${selfExit}\n`, '')],
     ['no browser observation', log.replace(`${browserDeath}\n`, '')],
-    ['a browser observation before the death record', log.replace(`${browserDeath}\n`, '').replace(death, `${browserDeath.replace('1793078340.796', '1793078340.795')}\n${death}`)],
+    ['a browser observation before the self-exit', log.replace(`${browserDeath}\n`, '').replace(selfExit, `${browserDeath.replace('1793078340.796', '1793078340.790')}\n${selfExit}`)],
     ['a low-memory kill naming the helper', log.replace(death, `${at('1793078340.793', '  300   300 I lowmemorykiller: Kill \'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:9\' (6048), uid 90009, oom_score_adj 100')}\n${death}`)],
     ['a native crash in the helper', log.replace(selfExit, `${at('1793078340.790', ' 6048  6058 F libc    : Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0 in tid 6058')}\n${selfExit}`)],
     ['a crash report from another process naming the helper', log.replace(death, `${at('1793078340.794', ' 6100  6100 F DEBUG   : pid: 6048, tid: 6058, name: ThreadPoolForeg')}\n${death}`)],
@@ -710,6 +710,63 @@ androidEventTests.push(['hosted 40445020397 helper that leaves while bound retir
     assert.deepEqual(rejected.issues, [], name);
     assert.deepEqual(rejected.normalRetirements, [], name);
     assert.ok(rejected.fatalEvents.some((event) => event.includes('(pid 6048)')), name);
+  }
+}]);
+
+androidEventTests.push(['hosted 41131823277 helper notice before system death requires an independent clean exit and matching browser', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-41131823277-helper-notice-before-death.log', import.meta.url), 'utf8');
+  assert.equal(createHash('sha256').update(log).digest('hex'), '4901ca7ac7f9f499e1466273f503459933be7fda2bcadb1e5b2bb816b63a95b0');
+  const id = '6d891bc8-5ea7-46d0-8e7f-b88213d87dd2';
+  const processes = { '555': 'system_server', '5349': 'com.android.chrome', '5389': 'com.android.chrome_zygote' };
+  const measureDeparture = (value: string, beforeProcesses: Record<string, string> = processes) => {
+    const before = snapshot('start', beforeProcesses);
+    const after = snapshot('end', processes);
+    before.measurement!.id = id;
+    after.measurement!.id = id;
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const entry = (pattern: string) => log.split('\n').find((record) => record.includes(pattern))!;
+  const selfExit = entry('ChildProcessService: Exiting child process.');
+  const notices = log.split('\n').filter((record) => record.includes('Child process died (type=6) pid=8791)'));
+  const death = entry('(pid 8791) has died: vis BTOP');
+  assert.equal(notices.length, 2);
+  const result = measureDeparture(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => [retirement.pid, retirement.uid]), [['8791', 90015]]);
+  assert.deepEqual(result.normalRetirements[0].events, [death]);
+  for (const expected of [selfExit, ...notices, death]) {
+    assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === expected), expected);
+  }
+  const at = (time: string, rest: string) => `          ${time} ${rest}`;
+  const beforeNotice = log.replace(notices[0], notices[0].replace('1793397302.044', '1793397302.032'));
+  assert.deepEqual(measureDeparture(log.replace(`${death}\n`, '')).normalRetirements, []);
+  const rejected: [string, string, Record<string, string>?][] = [
+    ['no fork', log.replace(`${entry('Forked child process 8791')}\n`, '')],
+    ['no helper start', log.replace(`${entry('Start proc 8791:')}\n`, '')],
+    ['no helper self-exit', log.replace(`${selfExit}\n`, '')],
+    ['no browser notices', log.replace(`${notices[0]}\n${notices[1]}\n`, '')],
+    ['browser notice before self-exit despite later delivery', beforeNotice],
+    ['wrong browser producer', log.replaceAll(' 5349  5349 W chromium:', ' 5389  5389 W chromium:')],
+    ['browser PID reused before notice', log.replace(notices[0], `${at('1793397302.040', '  555  1673 I ActivityManager: Start proc 5349:com.example.app/u0a123 for service')}\n${notices[0]}`)],
+    ['browser PID reused with earlier stamp but later delivery', log.replace(notices[1], `${notices[1]}\n${at('1793397302.043', '  555  1673 I ActivityManager: Start proc 5349:com.example.app/u0a123 for service')}`)],
+    ['browser identity absent at START', log, { '555': 'system_server', '5389': 'com.android.chrome_zygote' }],
+    ['helper PID reused', log.replace(death, `${at('1793397302.041', '  555  1673 I ActivityManager: Start proc 8791:com.example.app/u0a123 for service')}\n${death}`)],
+    ['helper name mismatch', log.replace(death, death.replace('Service0:15', 'Service0:16'))],
+    ['helper UID mismatch', log.replace('UID 90015', 'UID 90016')],
+    ['native crash', log.replace(selfExit, `${at('1793397302.032', ' 8791  8807 F libc    : Fatal signal 11 (SIGSEGV) in tid 8807')}\n${selfExit}`)],
+    ['signal exit', log.replace(death, `${at('1793397302.045', ' 5389  5389 I Zygote  : Process 8791 exited due to signal 9 (Killed)')}\n${death}`)],
+    ['low-memory kill', log.replace(death, `${at('1793397302.044', '  555  1673 I lowmemorykiller: Kill com.android.chrome (8791) oom_score_adj 0')}\n${death}`)],
+    ['force stop', log.replace(death, `${at('1793397302.044', '  555  1673 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 50')}\n${death}`)],
+    ['package replacement', log.replace(death, `${at('1793397302.044', '  555  1673 I PackageManager: Replacing package com.android.chrome')}\n${death}`)],
+    ['late helper activity', log.replace(death, `${death}\n${at('1793397302.046', ' 8791  8807 I chromium: unexpected activity')}`)],
+  ];
+  for (const [name, value, beforeProcesses] of rejected) {
+    if (beforeProcesses) assert.notDeepEqual(beforeProcesses, processes, name);
+    else assert.notEqual(value, log, name);
+    const rejectedResult = measureDeparture(value, beforeProcesses);
+    assert.deepEqual(rejectedResult.normalRetirements, [], name);
+    assert.ok(rejectedResult.fatalEvents.some((event) => event.includes('(pid 8791)')), name);
   }
 }]);
 
