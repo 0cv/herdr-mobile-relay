@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import ts from 'typescript';
+import { basename, dirname, relative } from 'node:path';
 
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 type Segment = number[];
@@ -79,9 +80,24 @@ function surface(text: string): string[] {
 }
 
 export function relocateDeclarationMap(
-  name: string, before: string, after: string, declaration: string, mapText: string,
+  sourcePath: string, before: string, after: string, declaration: string, mapText: string,
   edits: Array<[string, string]>,
 ): string {
+  const name = basename(sourcePath, '.ts');
+  if (sourcePath === 'lib/driver.ts') {
+    const outsideCatch = (text: string): string => {
+      const source = ts.createSourceFile(sourcePath, text, ts.ScriptTarget.Latest, true);
+      const driver = source.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'AndroidUiautomator2Driver');
+      assert.ok(driver && ts.isClassDeclaration(driver));
+      const create = driver.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === 'createSession');
+      assert.ok(create && ts.isMethodDeclaration(create) && create.body);
+      assert.equal(create.body.statements.length, 1);
+      const statement = create.body.statements[0];
+      assert.ok(ts.isTryStatement(statement) && statement.catchClause && !statement.finallyBlock);
+      return text.slice(0, statement.catchClause.getStart(source)) + text.slice(statement.catchClause.end);
+    };
+    assert.deepEqual(outsideCatch(before), outsideCatch(after), 'Only the createSession catch may change; class and member signatures must be identical');
+  }
   let current = before;
   const identities: Array<number | null> = Array.from({ length: before.length }, (_, index) => index);
   for (const [from, to] of edits) {
@@ -102,7 +118,7 @@ export function relocateDeclarationMap(
   inverse.set(before.length, after.length);
   const map = JSON.parse(mapText);
   assert.equal(map.file, `${name}.d.ts`);
-  assert.deepEqual(map.sources, [`../../../../lib/commands/context/${name}.ts`]);
+  assert.deepEqual(map.sources, [relative(dirname(`build/${sourcePath}`), sourcePath)]);
   assert.ok(!map.sourceRoot);
   if (map.sourcesContent) assert.deepEqual(map.sourcesContent, [before]);
   const rows = decode(map.mappings);
