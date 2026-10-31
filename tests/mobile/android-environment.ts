@@ -94,6 +94,7 @@ export interface AndroidPlannedTermination {
   processes: Record<string, string>;
   command: string[];
   succeeded: boolean;
+  hostEmulatorAtSettlement?: import('./support/android-emulator-lifetime').HostEmulatorAtSettlement;
   commandReceipt?: {
     operation: 'am-force-stop-user-0';
     source: 'command-result' | 'command-error' | 'unknown-error';

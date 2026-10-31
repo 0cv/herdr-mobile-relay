@@ -9,6 +9,7 @@ import type { Writable } from 'node:stream';
 import { ANDROID_GMS_OBSERVATION_FILE, checkedTemporaryFile } from './android-measurement-cleanup';
 import { ANDROID_LOG_LIMIT, androidMeasurementMarker, parseAndroidProcesses, assessAndroidEnvironment, readEnvironmentInputs, type AndroidEnvironmentCheck, type AndroidPlannedTermination, type AndroidGmsComponentState } from './android-environment';
 import { CommandError, command, type CommandResult } from './support/process';
+import { sampleHostEmulator } from './support/android-emulator-lifetime';
 import { BoundedCommandError, boundedCommand, type BoundedCommandResult } from './support/bounded-process';
 import { spawnOwnedProcess, type OwnedProcess, type RetirementEvidence } from './support/owned-process';
 import { PhaseBudget } from './support/budget';
@@ -1030,17 +1031,32 @@ export class AndroidEnvironmentMeasurement {
     const operationStarted = this.io.monotonicNow();
     await androidMeasurementMarker(this.serial, `${this.id} OP_BEGIN ${operation.id} ${packageName} ${pid}`);
     const hostStartedAtMs = Date.now();
+    const observeHost = async (hostSettledAtMs: number) => {
+      const file = process.env.ANDROID_EMULATOR_LIFETIME_FILE;
+      if (!file) return;
+      const sampleStartedAtMs = Date.now();
+      try {
+        operation.hostEmulatorAtSettlement = await sampleHostEmulator(file, process.env.ANDROID_EMULATOR_PID,
+          hostSettledAtMs, Math.min(250, operationStarted + ANDROID_PLANNED_TERMINATION_OPERATION_MS - this.io.monotonicNow()));
+      } catch {
+        operation.hostEmulatorAtSettlement = { hostSettledAtMs, sampleStartedAtMs, sampleEndedAtMs: Date.now(),
+          state: 'unknown', reason: 'io-error', nativeExitCoverage: 'unknown' };
+      }
+    };
     let stopped: CommandResult;
     try {
       stopped = await this.io.command('adb', ['-s', this.serial, ...operation.command], ANDROID_TERMINATION_COMMAND_TIMEOUT_MS);
     } catch (error) {
-      operation.commandReceipt = terminationCommandReceipt(error instanceof CommandError ? error : undefined, hostStartedAtMs, Date.now());
+      const hostSettledAtMs = Date.now();
+      operation.commandReceipt = terminationCommandReceipt(error instanceof CommandError ? error : undefined, hostStartedAtMs, hostSettledAtMs);
+      await observeHost(hostSettledAtMs);
       await this.attempt(() => this.io.writeJson(this.path('operations'), this.operations));
       throw error;
     }
     const hostSettledAtMs = Date.now();
     const stoppedAt = this.io.monotonicNow();
     operation.commandReceipt = terminationCommandReceipt(stopped, hostStartedAtMs, hostSettledAtMs);
+    await observeHost(hostSettledAtMs);
     await this.io.writeJson(this.path('operations'), this.operations);
     if (stopped.stdout.trim() || stopped.stderr.trim()) throw new Error('ANDROID_ENVIRONMENT: force-stop returned unexpected output');
     // force-stop returns once it has signalled the processes; a large process can take a moment to exit.

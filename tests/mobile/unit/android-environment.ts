@@ -21,6 +21,7 @@ import { FailureLedger, qualified } from '../support/mobile-result';
 import { QualificationFailureLatch, QualificationFatalError } from '../support/oracle';
 import { checkCLI, measurementIdentity, rehashPackage } from './android-product-environment';
 import { androidTransportNormalRecords } from './android-transport';
+import { bindEmulatorChild, emulatorBindingSha256 } from '../support/android-emulator-lifetime';
 
 class AndroidEnvironmentMeasurement extends Measurement {
   constructor(serial: string, output: string, toolchains: string, io: Partial<AndroidMeasurementIO> = {},
@@ -4629,7 +4630,16 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await state(fixture, { absent: true });
       const saved = { ...process.env };
       Object.assign(process.env, fixture.environment);
+      const lifetime = join(fixture.root, 'android-emulator-lifetime.json');
+      const binding = await bindEmulatorChild(process.pid);
+      await writeFile(lifetime, JSON.stringify({ schema: 1, binding, bindingSha256: emulatorBindingSha256(binding) }));
+      if (variant === 'unknown error') delete process.env.ANDROID_EMULATOR_LIFETIME_FILE;
+      else process.env.ANDROID_EMULATOR_LIFETIME_FILE = variant === 'typed exit failure' ? fixture.root : lifetime;
+      process.env.ANDROID_EMULATOR_PID = String(process.pid);
       const canary = 'RECEIPT_CANARY_args_output_error_session_device_secret';
+      if (variant === 'typed timeout') await writeFile(lifetime, `{${canary}`);
+      if (variant === 'invalid fields') await writeFile(lifetime, canary.repeat(100));
+      const originalAbortController = globalThis.AbortController;
       const secondary = new Error('receipt evidence write failed');
       const synthetic = !['unexpected output', 'exit inventory failure', 'OP_END failure', 'complete'].includes(variant);
       const helperResult: CommandResult = { code: variant === 'typed exit failure' ? 7 : 1, durationMs: 20_073,
@@ -4647,6 +4657,16 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           commandCalls++;
           assert.deepEqual([binary, args, timeoutMs], ['adb', ['-s', 'emulator-5554', 'shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'], 20_000]);
           assert.equal(options, undefined);
+          if (variant === 'unknown signal' || variant === 'receipt write failure') {
+            globalThis.AbortController = class extends originalAbortController {
+              constructor() {
+                super();
+                globalThis.AbortController = originalAbortController;
+                if (variant === 'receipt write failure') throw new Error(canary);
+                this.abort();
+              }
+            };
+          }
           if (synthetic) throw primary;
           successfulResult = await command(binary, args, timeoutMs, options);
           if (variant === 'exit inventory failure') await state(fixture, { absent: true, processListFail: true });
@@ -4676,6 +4696,23 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         const retained = measurement.plannedOperations()[0];
         assert.ok(retained.commandReceipt, 'planned termination is missing its command receipt');
         const receipt = retained.commandReceipt;
+        if (variant === 'unknown error') assert.equal(retained.hostEmulatorAtSettlement, undefined);
+        else {
+          assert.ok(retained.hostEmulatorAtSettlement, 'planned termination is missing host settlement evidence');
+          const host = retained.hostEmulatorAtSettlement;
+          assert.equal(host.hostSettledAtMs, receipt.hostSettledAtMs);
+          assert.ok(host.sampleStartedAtMs >= host.hostSettledAtMs && host.sampleEndedAtMs <= hostAfter);
+          const unknownReason = { 'typed exit failure': 'io-error', 'typed timeout': 'invalid-receipt',
+            'invalid fields': 'byte-limit', 'unknown signal': 'probe-timeout', 'receipt write failure': 'io-error' }[variant];
+          assert.equal(host.state, unknownReason || process.platform !== 'linux' ? 'unknown' : 'alive');
+          assert.equal(host.reason, unknownReason ?? (process.platform === 'linux' ? 'same-birth' : 'unsupported-os'));
+          if (!unknownReason) assert.equal(host.bindingSha256, emulatorBindingSha256(binding));
+          assert.equal(host.nativeExitCoverage, 'unknown');
+          assert.equal(host.nativeExit, undefined);
+          assert.doesNotMatch(JSON.stringify(host), /RECEIPT_CANARY|errorBody|stack/u);
+          assert.deepEqual(publications[1][0].hostEmulatorAtSettlement, host);
+          if (variant !== 'receipt write failure') assert.deepEqual(operations[0].hostEmulatorAtSettlement, host);
+        }
         assert.deepEqual(Object.keys(receipt).sort(), ['operation', 'source', 'timeoutMs', 'hostStartedAtMs', 'hostSettledAtMs',
           'durationMs', 'helperExitCode', 'signal', 'timedOut'].sort());
         assert.equal(receipt.operation, 'am-force-stop-user-0');
@@ -4729,6 +4766,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           assert.equal((latch.snapshot() as any).durationMs, undefined);
           assert.deepEqual(measurement.plannedOperations()[0].commandReceipt, receipt);
         }
+        assert.deepEqual(measurement.failureOutcome().errors, variant === 'receipt write failure' ? [secondary] : []);
         const requests = await readFile(fixture.log, 'utf8');
         assert.doesNotMatch(requests, /shell am start|KEYCODE_HOME|disable-user/u);
         if (variant !== 'complete' && variant !== 'OP_END failure') assert.doesNotMatch(requests, /OP_END/u);
@@ -4743,12 +4781,165 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
             collection: outcome.assessment?.collection.status ?? 'UNKNOWN', assessmentSha256: outcome.assessmentSha256 ?? '', measurementId: measurement.id } }), variant === 'complete');
         assert.equal(measurement.plannedOperations()[0].succeeded, variant === 'complete');
       } finally {
+        globalThis.AbortController = originalAbortController;
         await measurement.finish().catch(() => undefined);
         for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
         Object.assign(process.env, saved);
       }
     });
   }
+  for (const hostConfigured of [true, false]) test(`termination command receipt: required write failure with host ${hostConfigured ? 'configured' : 'unconfigured'}`, async () => {
+    const fixture = await harness.createFixture();
+    await state(fixture, { absent: true });
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment);
+    if (hostConfigured) {
+      const lifetime = join(fixture.root, 'android-emulator-lifetime.json');
+      const binding = await bindEmulatorChild(process.pid);
+      await writeFile(lifetime, JSON.stringify({ schema: 1, binding, bindingSha256: emulatorBindingSha256(binding) }));
+      process.env.ANDROID_EMULATOR_LIFETIME_FILE = lifetime;
+      process.env.ANDROID_EMULATOR_PID = String(process.pid);
+    } else delete process.env.ANDROID_EMULATOR_LIFETIME_FILE;
+    const primary = new Error('required command receipt write failed');
+    const publications: AndroidPlannedTermination[][] = [];
+    let receiptPublications = 0;
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
+      writeJson: async (path, value) => {
+        if (path === join(fixture.root, 'android-environment-operations.json')) {
+          const operations = JSON.parse(JSON.stringify(value)) as AndroidPlannedTermination[];
+          publications.push(operations);
+          if (operations[0]?.commandReceipt && receiptPublications++ === 0) throw primary;
+        }
+        await writeSanitizedJson(path, value);
+      },
+    });
+    try {
+      await measurement.begin();
+      await assert.rejects(measurement.terminate('com.android.chrome', '6538'), error => error === primary);
+      const operation = measurement.plannedOperations()[0];
+      assert.equal(operation.succeeded, false);
+      assert.equal(operation.commandReceipt?.source, 'command-result');
+      assert.equal(operation.commandReceipt?.helperExitCode, 0);
+      assert.equal(operation.commandReceipt?.timedOut, false);
+      assert.equal(Boolean(operation.hostEmulatorAtSettlement), hostConfigured);
+      assert.deepEqual(measurement.failureOutcome().errors, []);
+      assert.equal(publications.length, 2);
+      assert.equal(publications[1][0].succeeded, false);
+      assert.deepEqual(publications[1][0].commandReceipt, operation.commandReceipt);
+      const persisted = JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8'));
+      assert.equal(persisted[0].succeeded, false);
+      assert.equal(persisted[0].commandReceipt, undefined);
+      const requests = (await readFile(fixture.log, 'utf8')).trim().split('\n');
+      const stop = requests.findIndex(line => line.includes('shell am force-stop --user 0 com.android.chrome'));
+      assert.ok(stop >= 0);
+      assert.deepEqual(requests.slice(stop + 1), []);
+      assert.doesNotMatch(requests.join('\n'), /OP_END|shell am start|KEYCODE_HOME|disable-user/u);
+    } finally {
+      await measurement.finish().catch(() => undefined);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
+  for (const variant of ['read failure', 'invalid receipt', 'byte limit', 'probe timeout', 'probe rejection', 'required collection failure']) test(`termination command receipt: successful command keeps inventory and OP_END after host probe ${variant}`, async () => {
+    const fixture = await harness.createFixture();
+    await state(fixture, { absent: true });
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment, { ANDROID_EMULATOR_LIFETIME_FILE: fixture.root, ANDROID_EMULATOR_PID: '71' });
+    const canary = 'HOST_PROBE_PRIVATE_CANARY';
+    if (variant === 'invalid receipt' || variant === 'byte limit') {
+      const lifetime = join(fixture.root, 'android-emulator-lifetime.json');
+      await writeFile(lifetime, variant === 'invalid receipt' ? `{${canary}` : canary.repeat(100));
+      process.env.ANDROID_EMULATOR_LIFETIME_FILE = lifetime;
+    }
+    const originalAbortController = globalThis.AbortController;
+    const requiredError = new Error('required collector write failed');
+    const publications: AndroidPlannedTermination[][] = [];
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
+      command: async (...args) => {
+        const result = await command(...args);
+        if (variant === 'probe timeout' || variant === 'probe rejection') {
+          globalThis.AbortController = class extends originalAbortController {
+            constructor() {
+              super();
+              globalThis.AbortController = originalAbortController;
+              if (variant === 'probe rejection') throw new Error(canary);
+              this.abort();
+            }
+          };
+        }
+        return result;
+      },
+      writeFile: async (...args) => {
+        if (variant === 'required collection failure' && args[0] === join(fixture.root, 'android-qualification-logcat.log')) throw requiredError;
+        return writeFile(...args);
+      },
+      writeJson: async (path, value) => {
+        if (path === join(fixture.root, 'android-environment-operations.json')) {
+          const operations = JSON.parse(JSON.stringify(value)) as AndroidPlannedTermination[];
+          publications.push(operations);
+          const requests = await readFile(fixture.log, 'utf8');
+          if (operations[0]?.succeeded) assert.match(requests, / OP_END /u);
+          else assert.doesNotMatch(requests, / OP_END /u);
+        }
+        await writeSanitizedJson(path, value);
+      },
+    });
+    try {
+      await measurement.begin();
+      await measurement.terminate('com.android.chrome', '6538');
+      const operation = measurement.plannedOperations()[0];
+      assert.equal(operation.succeeded, true);
+      assert.equal(operation.hostEmulatorAtSettlement?.state, 'unknown');
+      const reason = variant === 'invalid receipt' ? 'invalid-receipt' : variant === 'byte limit' ? 'byte-limit'
+        : variant === 'probe timeout' ? 'probe-timeout' : 'io-error';
+      assert.equal(operation.hostEmulatorAtSettlement?.reason, reason);
+      assert.equal(operation.hostEmulatorAtSettlement?.nativeExitCoverage, 'unknown');
+      assert.equal(operation.hostEmulatorAtSettlement?.nativeExit, undefined);
+      assert.equal(operation.commandReceipt?.helperExitCode, 0);
+      assert.equal(operation.commandReceipt?.source, 'command-result');
+      assert.equal(operation.commandReceipt?.timeoutMs, 20_000);
+      assert.equal(operation.commandReceipt?.timedOut, false);
+      assert.deepEqual(Object.keys(operation.commandReceipt!).sort(), ['operation', 'source', 'timeoutMs', 'hostStartedAtMs', 'hostSettledAtMs',
+        'durationMs', 'helperExitCode', 'signal', 'timedOut'].sort());
+      assert.ok(Buffer.byteLength(JSON.stringify(operation.commandReceipt)) < 512);
+      assert.deepEqual(publications.map(operations => operations[0].succeeded), [false, false, true]);
+      assert.deepEqual(publications[1][0].commandReceipt, operation.commandReceipt);
+      assert.deepEqual(publications[1][0].hostEmulatorAtSettlement, operation.hostEmulatorAtSettlement);
+      const requests = await readFile(fixture.log, 'utf8');
+      const stop = requests.indexOf('shell am force-stop --user 0 com.android.chrome');
+      const end = requests.indexOf(' OP_END ');
+      assert.ok(stop >= 0 && end > stop);
+      assert.match(requests.slice(stop, end), /shell ps -A -o PID,NAME/u);
+      assert.doesNotMatch(requests, /shell am start|KEYCODE_HOME|disable-user/u);
+      const persisted = JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8'));
+      assert.deepEqual(persisted[0], operation);
+      const host = operation.hostEmulatorAtSettlement!;
+      assert.deepEqual(Object.keys(host).sort(), ['hostSettledAtMs', 'sampleStartedAtMs', 'sampleEndedAtMs', 'state', 'reason', 'nativeExitCoverage'].sort());
+      assert.equal(host.hostSettledAtMs, operation.commandReceipt!.hostSettledAtMs);
+      assert.ok(host.sampleStartedAtMs >= host.hostSettledAtMs && host.sampleEndedAtMs >= host.sampleStartedAtMs);
+      assert.ok(Buffer.byteLength(JSON.stringify(host)) < 512);
+      assert.doesNotMatch(JSON.stringify(host), /HOST_PROBE_PRIVATE_CANARY|\/private|\/proc|EISDIR|EACCES|errorBody|stack/u);
+      const outcome = await measurement.finish();
+      const requiredFailure = variant === 'required collection failure';
+      assert.equal(outcome.assessment?.collection.status, requiredFailure ? 'UNKNOWN' : 'PASS');
+      assert.equal(outcome.assessment?.status, requiredFailure ? 'UNKNOWN' : 'PASS');
+      assert.equal(outcome.assessment?.passed, !requiredFailure);
+      if (requiredFailure) assert.ok(outcome.errors.includes(requiredError));
+      else {
+        assert.deepEqual(outcome.errors, []);
+        assert.deepEqual(measurement.failureOutcome().errors, []);
+      }
+      assert.equal(qualified({ product: { status: 'PASS', categories: [] },
+        finalization: { status: outcome.errors.length ? 'FAIL' : 'PASS', failures: [] },
+        environment_qualification: { platform: 'android', status: outcome.assessment?.status ?? 'UNKNOWN',
+          collection: outcome.assessment?.collection.status ?? 'UNKNOWN', assessmentSha256: outcome.assessmentSha256 ?? '', measurementId: measurement.id } }), !requiredFailure);
+    } finally {
+      globalThis.AbortController = originalAbortController;
+      await measurement.finish().catch(() => undefined);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
   test('review: measured termination waits for force-stopped processes to exit before ending the operation', async () => {
     const fixture = await harness.createFixture();
     const children = { '6700': 'com.android.chrome:renderer' };

@@ -678,6 +678,47 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
       }
     }
   }],
+  ['mobile Android emulator lifetime keeps launch arguments, child readiness and upload-before-cleanup', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun;
+    const action = runtime.YAML.parse(await readFile(repositoryPath('.github/actions/mobile-device-run/action.yml'), 'utf8'));
+    const steps = action.runs.steps;
+    const boot = steps.find((step: any) => step.name === 'Create and boot Android emulator');
+    const source = boot.run as string;
+    const launch = source.split('\n').find(line => line.startsWith('node tests/mobile/support/android-emulator-lifetime.ts '));
+    assert.equal(launch, 'node tests/mobile/support/android-emulator-lifetime.ts "$lifetime_file" "$RUNNER_TEMP/emulator.log" emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect < /dev/null >"$MOBILE_PRIVATE/android-emulator-observer.log" 2>&1 &');
+    assert.ok(source.includes('avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'));
+    assert.ok(source.includes('lifetime_file="$MOBILE_OUTPUT/android-emulator-lifetime.json"'));
+    assert.ok(source.includes("printf 'ANDROID_EMULATOR_LIFETIME_FILE=%s\\n' \"$lifetime_file\" >> \"$GITHUB_ENV\""));
+    assert.doesNotMatch(source, /\$!|wait |trap |detached|nohup/u);
+    assert.equal(source.match(/for attempt in \$\(seq 1 180\); do/gu)?.length, 1);
+    assert.equal(source.match(/sleep 2/gu)?.length, 1);
+    const read = source.indexOf('emulator_pid="$(jq -er');
+    assert.ok(read > source.indexOf('for attempt in $(seq 1 180); do'));
+    assert.ok(source.includes('select(.schema == 1) | .binding.childPid | select(type == "number" and . > 0 and . <= 2147483647 and . == floor)'));
+    const filter = /jq -er '([^']+)'/u.exec(source)![1];
+    for (const birth of [null, { startTicks: '123', bootIdSha256: '0'.repeat(64) }]) {
+      const receipt = { schema: 1, binding: { childPid: 71, birth }, observerPid: 99 };
+      const result = await command('jq', ['-en', '--argjson', 'receipt', JSON.stringify(receipt), '$receipt | ' + filter]);
+      assert.equal(result.stdout.trim(), '71');
+    }
+    for (const childPid of [null, 0, -1, 1.5, 2147483648, '71']) {
+      await assert.rejects(command('jq', ['-en', '--argjson', 'receipt', JSON.stringify({ schema: 1, binding: { childPid } }), '$receipt | ' + filter]));
+    }
+    const exported = source.indexOf("printf 'ANDROID_EMULATOR_PID=%s\\n' \"$emulator_pid\" >> \"$GITHUB_ENV\"");
+    const booted = source.indexOf('if [ "$boot" = 1 ] && [ -n "$emulator_pid" ]; then');
+    assert.ok(read < exported && exported < booted && booted < source.indexOf('break', booted));
+    assert.ok(source.includes('if [ -n "$emulator_pid" ] && ! kill -0 "$emulator_pid" 2>/dev/null; then'));
+    assert.ok(steps.findIndex((step: any) => step.name === 'Assert shell Node runtime') < steps.indexOf(boot));
+    const uploads = steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@'));
+    assert.equal(uploads.length, 1);
+    assert.equal(uploads[0].with.path, '${{ runner.temp }}/herdr-mobile-output');
+    assert.equal(uploads[0].with['retention-days'], 1);
+    assert.equal(uploads[0].if, 'always()');
+    const cleanup = steps.find((step: any) => step.name === 'Stop owned mobile processes and devices');
+    assert.ok(steps.indexOf(uploads[0]) < steps.indexOf(cleanup));
+    assert.ok(cleanup.run.includes('adb -s "$ANDROID_SERIAL" emu kill'));
+    assert.doesNotMatch(cleanup.run, /observer|lifetime|ANDROID_EMULATOR_PID/u);
+  }],
   ['mobile Android SDK install retries three times and fails after the last attempt', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun;
     const action = runtime.YAML.parse(await readFile(repositoryPath('.github/actions/mobile-device-run/action.yml'), 'utf8'));
