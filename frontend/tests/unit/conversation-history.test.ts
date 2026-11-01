@@ -408,6 +408,49 @@ describe('ConversationHistoryController', () => {
     expect(states.length).toBeGreaterThan(1);
   });
 
+  it.each([
+    { code: 'memory_limit', retryable: true },
+    { code: 'stalled', retryable: true },
+    { code: 'work_limit', retryable: true },
+    { code: 'source_changed', retryable: true },
+    { code: 'access_denied', retryable: false },
+    { code: 'transport_disconnected', retryable: false },
+  ])('does not recover $code with retryable=$retryable on reconnect', async ({ code, retryable }) => {
+    const request = vi.fn().mockRejectedValue({ error: { code, message: 'History needs attention', retryable } });
+    const controller = new ConversationHistoryController(agent(), { request });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.error?.code).toBe(code));
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    expect(request).toHaveBeenCalledOnce();
+    controller.cancel();
+  });
+
+  it('recovers transport failures only for the active current target and without parallel requests', async () => {
+    let active = true;
+    let finish!: (value: ConversationPage) => void;
+    const pending = new Promise<ConversationPage>((resolve) => { finish = resolve; });
+    const request = vi.fn().mockRejectedValueOnce({ error: { code: 'transport_disconnected', message: 'Relay is not connected', retryable: true } }).mockReturnValue(pending);
+    const controller = new ConversationHistoryController(agent(), { request, isActive: () => active });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.error?.code).toBe('transport_disconnected'));
+    expect(controller.recoverAfterReconnect({ ...agent(), generation: 2 })).toBe(false);
+    active = false;
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    active = true;
+    controller.pause();
+    expect(controller.state.pausedReason).toBeTruthy();
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    controller.resume();
+    expect(controller.recoverAfterReconnect(agent())).toBe(true);
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1][1]).toMatchObject({ retry: true, limit: HISTORY_WIRE_PAGE_SIZE });
+    expect(request.mock.calls[1][1].cursor).toBeUndefined();
+    finish(page({ entries: [entry('latest', 'assistant')], sourceRevision: 'r1' }));
+    await vi.waitFor(() => expect(controller.state.error).toBeNull());
+    controller.cancel();
+  });
+
   it('clears a recovered continuation warning on a cursorless latest refresh', async () => {
     let calls = 0;
     const request = vi.fn(async () => {
