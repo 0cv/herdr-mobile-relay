@@ -5,7 +5,7 @@ import ConversationHistory from '$components/ConversationHistory.svelte';
 import { clearConversationPreviews } from '$lib/conversation-cache';
 import { conversationIdentity } from '$lib/conversation-history';
 import { targetRefForAgent } from '$lib/resource-id';
-import { relayStore } from '$lib/store';
+import { CommandError, relayStore } from '$lib/store';
 import type { Agent, ConversationBatch, ConversationPage } from '$lib/types';
 
 const agent: Agent = { relay_id: 'live-fixture', relay_label: 'Fixture', raw_pane_id: 'pane', pane_id: 'live-fixture::pane', server_session_id: 'primary', terminal_id: 'terminal', generation: 1, agent_session_id: 'session', agent: 'pi', cwd: '/fixture', status: 'working' };
@@ -32,7 +32,41 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  relayStore.connections.set(new Map());
   clearConversationPreviews();
+});
+
+it('recovers a mounted conversation after the reset history request fails during disconnect', async () => {
+  const connection = (status: 'connected' | 'disconnected') =>
+    relayStore.connections.set(new Map([[agent.relay_id, { status, capabilities: [] }]] as never));
+  connection('connected');
+  const firstUpdate = deferred<ConversationBatch>();
+  const nextUpdate = deferred<ConversationBatch>();
+  const history = vi.spyOn(relayStore, 'getConversationHistory')
+    .mockResolvedValueOnce(structuredClone(livePage))
+    .mockRejectedValueOnce(new CommandError('Relay is not connected'))
+    .mockResolvedValueOnce({ ...structuredClone(livePage), entries: [entry('pi:latest', 'Latest recorded reply')], provisional: [], subscriptionId: 'sub-2' });
+  const updates = vi.spyOn(relayStore, 'getConversationUpdates')
+    .mockReturnValueOnce(firstUpdate.promise)
+    .mockReturnValue(nextUpdate.promise);
+  render(ConversationHistory, { agent });
+  await waitFor(() => expect(updates).toHaveBeenCalledOnce());
+  connection('disconnected');
+  firstUpdate.reject(new Error('Relay disconnected'));
+  await firstUpdate.promise.catch(() => {});
+  await waitFor(() => expect(history).toHaveBeenCalledTimes(2), { timeout: 2500 });
+  await waitFor(() => expect(screen.getByText('Relay is not connected')).toBeVisible());
+
+  connection('connected');
+  await waitFor(() => expect(history).toHaveBeenCalledTimes(3));
+  await screen.findByText('Latest recorded reply');
+  await waitFor(() => expect(updates).toHaveBeenCalledTimes(2));
+  expect(updates).toHaveBeenLastCalledWith(agent, 'source:1', 0, expect.any(AbortSignal), 'sub-2');
+  nextUpdate.resolve({ subscriptionId: 'sub-2', kind: 'batch', sourceRevision: 'source:1', sequence: 1, entries: [entry('live:new', 'New live reply')], remove: [], state: 'generating', capabilities });
+  await screen.findByText('New live reply');
+  connection('connected');
+  await tick();
+  expect(history).toHaveBeenCalledTimes(3);
 });
 
 describe.each([
