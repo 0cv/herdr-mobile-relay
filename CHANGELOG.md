@@ -10,7 +10,8 @@ project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Connect through Tailscale Serve on your own tailnet, with an isolated dev
-  tunnel or a persistent background service and setup QR.
+  tunnel or a persistent background service and setup QR. Always on Tailscale
+  replaces a selected WebRTC gateway after confirmation.
 
 ### Changed
 

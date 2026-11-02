@@ -49,10 +49,11 @@ Setup does not enable lingering or make other automatic admin changes.
 Reinstalling, restarting, or updating the existing service remains permitted
 while Tailscale is selected.
 
-If a gateway is selected, choose a Cloudflare option first to deselect it.
-Before selecting another transport, choose **Tailscale → Turn Always on
-Tailscale Off**; transport switching is not automatic. If already configured,
-choose **Tailscale → Choose Phone App and Show QR** rather than repeating setup.
+If a WebRTC gateway is selected, **Always on Tailscale** replaces its selection
+after you confirm. Before selecting another transport, choose **Tailscale → Turn
+Always on Tailscale Off**; switching away from Tailscale is not automatic. If
+already configured, choose **Tailscale → Choose Phone App and Show QR** rather
+than repeating setup.
 Setup refuses a conflicting Serve port and reuses a matching background route; removal touches only this
 relay's mapped HTTPS port, never other Serve ports or Funnel. If Serve removal
 fails (including when the CLI is missing), the selection stays and the mapping

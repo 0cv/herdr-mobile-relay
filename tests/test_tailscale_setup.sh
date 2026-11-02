@@ -3,7 +3,9 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/herdr-always-ts.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-export HOME="$WORK/home" HERDR_PLUGIN_CONFIG_DIR="$WORK/plugin" HERDR_RELEASE_ROOT="$WORK/release"
+mkdir -p "$WORK/tmp"
+export TMPDIR="$WORK/tmp" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg/config" XDG_DATA_HOME="$WORK/xdg/data" XDG_CACHE_HOME="$WORK/xdg/cache"
+export HERDR_PLUGIN_CONFIG_DIR="$WORK/plugin" HERDR_RELEASE_ROOT="$WORK/release"
 export HERDR_RELAY_ENV="$HOME/config/relay.env" HERDR_RELAY_BIN="$WORK/bin/herdr-mobile-relay"
 export HERDR_BIN="$WORK/bin/herdr" HERDR_PHONE_APP_URL=relay FAKE_LOG="$WORK/log"
 mkdir -p "$WORK/bin" "$HOME/config" "$WORK/release/current" "$HOME/.config/systemd/user" "$HOME/Library/LaunchAgents" "$WORK/plugin"
@@ -34,6 +36,11 @@ case "$1" in
     serve) printf 'rearm=%s\n' "${HERDR_RELAY_REARM_BOOTSTRAP:-}" >> "$FAKE_LOG" ;;
 esac
 EOF
+cat > "$WORK/bin/tailscale" <<'EOF'
+#!/bin/sh
+printf 'unexpected tailscale %s\n' "$*" >&2
+exit 1
+EOF
 cat > "$WORK/bin/curl" <<'EOF'
 #!/bin/sh
 printf 'curl %s\n' "$*" >> "$FAKE_LOG"
@@ -54,7 +61,16 @@ EOF
 cat > "$WORK/bin/systemctl" <<'EOF'
 #!/bin/sh
 printf 'systemctl %s\n' "$*" >> "$FAKE_LOG"
-case "$*" in *is-active*) exit 3 ;; *restart*) [ "${FAIL_SERVICE:-}" != 1 ] || exit 8 ;; esac
+case "$*" in
+    *is-active*) exit 3 ;;
+    *restart*)
+        if grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV" &&
+            grep -Eq '^HERDR_GATEWAY_URL=|^HERDR_GATEWAY_SELECTION=' "$HERDR_RELAY_ENV"; then
+            echo 'service restarted with both transports selected' >&2
+            exit 8
+        fi
+        [ "${FAIL_SERVICE:-}" != 1 ] || exit 8 ;;
+esac
 EOF
 cat > "$WORK/bin/launchctl" <<'EOF'
 #!/bin/sh
@@ -65,6 +81,10 @@ cat > "$WORK/bin/cloudflared" <<'EOF'
 #!/bin/sh
 printf 'cloudflared %s\n' "$*" >> "$FAKE_LOG"
 exit 1
+EOF
+cat > "$WORK/bin/systemd-analyze" <<'EOF'
+#!/bin/sh
+exit 0
 EOF
 cat > "$WORK/bin/plutil" <<'EOF'
 #!/bin/sh
@@ -85,7 +105,7 @@ if [ "$1" = -s ]; then echo "${FAKE_PLATFORM:-Linux}"; else /usr/bin/uname "$@";
 EOF
 chmod +x "$WORK/bin/"*
 mkdir -p "$HOME/.local/bin"
-for fake in curl systemctl launchctl cloudflared uname id sleep; do
+for fake in tailscale curl systemctl systemd-analyze launchctl cloudflared herdr herdr-mobile-relay uname id sleep; do
     ln -s "$WORK/bin/$fake" "$HOME/.local/bin/$fake"
 done
 export PATH="$WORK/bin:$PATH"
@@ -109,12 +129,44 @@ test ! -e "$HERDR_RELAY_ENV"
 assert_absent 'tailscale serve' "$FAKE_LOG"
 if (FAIL_CHECK=1 run tailscale-setup.sh); then echo 'failed check accepted' >&2; exit 1; fi
 grep -q 'needs HTTPS certificates' "$WORK/out"
-printf "HERDR_GATEWAY_URL='wss://gw.example.test'\n" > "$HERDR_RELAY_ENV"
+printf "HERDR_GATEWAY_URL='wss://gw.example.test,wss://gw2.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" > "$HERDR_RELAY_ENV"
+printf "HERDR_GATEWAY_DEPLOY_HOST='gw.example.test'\n" > "$HOME/config/gateway-deploy"
+cp "$HERDR_RELAY_ENV" "$WORK/gateway-prior"
 : > "$FAKE_LOG"
-if run tailscale-setup.sh; then echo 'gateway selected setup accepted' >&2; exit 1; fi
-grep -q 'Switch to a Cloudflare tunnel first' "$WORK/out"
-assert_absent . "$FAKE_LOG"
-grep -q '^HERDR_GATEWAY_URL=' "$HERDR_RELAY_ENV"
+if run tailscale-setup.sh; then echo 'unattended gateway setup accepted' >&2; exit 1; fi
+cmp "$HERDR_RELAY_ENV" "$WORK/gateway-prior"
+assert_absent 'tailscale serve|systemctl' "$FAKE_LOG"
+if command -v script >/dev/null 2>&1; then
+    : > "$FAKE_LOG"
+    ({ printf 'n\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1 || :
+    grep -q 'replaces the selected WebRTC gateway list: wss://gw.example.test,wss://gw2.example.test' "$WORK/out" ||
+        { echo 'gateway replacement confirmation missing' >&2; exit 1; }
+    cmp "$HERDR_RELAY_ENV" "$WORK/gateway-prior"
+    assert_absent 'tailscale serve|systemctl' "$FAKE_LOG"
+    : > "$FAKE_LOG"
+    ({ printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1
+    assert_absent '^HERDR_GATEWAY_URL=|^HERDR_GATEWAY_SELECTION=' "$HERDR_RELAY_ENV"
+    grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
+    grep -q 'serve --bg --port 8443 --relay-port 8375' "$FAKE_LOG"
+    grep -q "HERDR_GATEWAY_DEPLOY_HOST='gw.example.test'" "$HOME/config/gateway-deploy"
+    run tailscale-off.sh
+    assert_absent '^HERDR_GATEWAY_URL=|^HERDR_GATEWAY_SELECTION=|^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
+    printf "HERDR_GATEWAY_URL='wss://gw.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" >> "$HERDR_RELAY_ENV"
+    cp "$HERDR_RELAY_ENV" "$WORK/gateway-prior"
+    : > "$FAKE_LOG"
+    (export FAIL_HEALTH=1; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1 || :
+    cmp "$HERDR_RELAY_ENV" "$WORK/gateway-prior"
+    grep -q 'previous relay configuration and service form were restored' "$WORK/out"
+    : > "$FAKE_LOG"
+    if (export FAIL_CONFLICT=1 FAIL_OFF=1; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1; then
+        echo 'failed gateway publish cleanup accepted' >&2; exit 1
+    fi
+    grep -q 'Tailscale selection kept and gateway selection cleared' "$WORK/out"
+    grep -q '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
+    assert_absent '^HERDR_GATEWAY_URL=|^HERDR_GATEWAY_SELECTION=' "$HERDR_RELAY_ENV"
+    run tailscale-off.sh
+    printf "HERDR_GATEWAY_URL='wss://gw.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" >> "$HERDR_RELAY_ENV"
+fi
 mkdir -p "$WORK/stable-wrapper"
 cp "$REPO_DIR/relay/plugin-install-service.sh" "$REPO_DIR/relay/common.sh" "$WORK/stable-wrapper/"
 printf '#!/bin/sh\nexit 1\n' > "$WORK/stable-wrapper/stable-setup.sh"
