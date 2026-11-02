@@ -607,7 +607,7 @@ proxied because raw UDP cannot travel through Caddy's TLS.
 
 ## Bring it up
 
-Setup-menu action 3 (**Deploy or Upgrade Your Own WebRTC Gateway**) copies this
+Setup menu **WebRTC → Deploy or Upgrade Your Own WebRTC Gateway** copies this
 directory to the server over SSH, brings it up, and verifies it. These are the
 same steps by hand:
 
@@ -940,7 +940,7 @@ report_public_health_failure() {
     echo "  Watch the certificate attempt with:"
     echo "    $SSH_CMD_HINT \"cd $REMOTE_DIR && docker compose logs -f caddy\""
     echo ""
-    echo "  Once it answers, run setup-menu action 3 again. It reuses the remembered"
+    echo "  Once it answers, choose WebRTC → Deploy or Upgrade Your Own WebRTC Gateway again. It reuses the remembered"
     echo "  answers, verifies $GATEWAY_HOST, and connects this relay."
 }
 
@@ -1262,7 +1262,7 @@ if [ -z "$SSH_TARGET" ]; then
     echo "computers behind NAT stay on the relayed path."
     echo ""
     echo "▸ Once it answers, set HERDR_GATEWAY_URL=$GATEWAY_WSS in the relay"
-    echo "  environment, or rerun setup-menu action 3 to deploy and connect over SSH."
+    echo "  environment, or choose WebRTC → Deploy or Upgrade Your Own WebRTC Gateway to deploy and connect over SSH."
     exit 0
 fi
 

@@ -1257,10 +1257,10 @@ esac
 EOF
 chmod 700 "$MENU_BIN_DIR/curl"
 # Entering an action and finishing it has to come back here, not end the pane:
-# 9 shows the status, then the menu is redrawn and q leaves. Without a terminal
+# WebRTC → Show Full Status shows the status, then the submenu is redrawn and q leaves. Without a terminal
 # the return prompt is skipped, so the input carries no extra newline.
 MENU_OUTPUT="$(
-    printf '9\nq\n' |
+    printf '2\n4\nq\n' |
         PATH="$MENU_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELEASE_ROOT="$MENU_ROOT" \
@@ -1284,11 +1284,11 @@ case "$MENU_OUTPUT" in
     *) echo "setup menu did not report the active gateway, version, and selection rule" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
-    *"serves 9.9.8, this relay ships 9.9.9"*) ;;
+    *"serves 9.9.8, this relay ships 9.9.9 - Cloudflare → Configure App Deployment"*) ;;
     *) echo "setup menu did not report the stale phone app" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
-    *"Own gateway: gw-owned.example.test runs 9.9.8; plugin offers 9.9.10 - run herdr plugin install 0cv/herdr-mobile-relay, then redeploy with 3"*) ;;
+    *"Own gateway: gw-owned.example.test runs 9.9.8; plugin offers 9.9.10 - run herdr plugin install 0cv/herdr-mobile-relay, then redeploy with WebRTC → Deploy or Upgrade Your Own WebRTC Gateway"*) ;;
     *) echo "setup menu did not report how to update the stale self-hosted gateway" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
@@ -1300,14 +1300,8 @@ case "$MENU_OUTPUT" in
     *) echo "setup menu did not expose the phone app origin chooser" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
-    *"Temporary Cloudflare Tunnel"*"Community WebRTC Gateway"*"Your Own WebRTC Gateway"*"Stable Tunnel"*) ;;
-    *) echo "setup menu did not flatten every connection action" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Choose Connection Method"*)
-        echo "setup menu retained the redundant connection submenu" >&2
-        exit 1
-        ;;
+    *"  1. Cloudflare"*"  2. WebRTC (active)"*"  3. Tailscale"*"  1. Community WebRTC Gateway"*"  2. Deploy or Upgrade Your Own WebRTC Gateway"*) ;;
+    *) echo "setup menu did not group WebRTC actions or mark it active" >&2; exit 1 ;;
 esac
 
 # The menu process itself is long-lived. After a transport action removes a
@@ -1336,7 +1330,7 @@ EOF
 chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" \
     "$REFRESH_MENU_DIR/plugin-status.sh"
 export REFRESH_MENU_MARKER
-printf '1\n9\nq\n' |
+printf '2\n1\n4\nq\n' |
     HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
     bash "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
 test "$(cat "$REFRESH_MENU_MARKER")" = "unset"
@@ -1383,7 +1377,7 @@ cat > "$STALE_MENU_DIR/plugin-status.sh" <<'EOF'
 printf 'action ran\n' > "$STALE_MENU_MARKER"
 EOF
 chmod 700 "$STALE_MENU_DIR/plugin-status.sh"
-printf '9\nq\n' >&7
+printf '2\n4\nq\n' >&7
 wait "$STALE_MENU_PID"
 exec 7>&-
 test -f "$STALE_MENU_MARKER"

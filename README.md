@@ -42,13 +42,13 @@ herdr plugin pane open \
   --focus
 ```
 
-Start with **Community WebRTC Gateway**. It is the recommended path: as fast
+Open **WebRTC → Community WebRTC Gateway**. It is the recommended path: as fast
 to set up as the temporary tunnel, with stable relay connectivity and no
 Cloudflare account, domain, `cloudflared`, or tunnel configuration. If prompted,
 choose the installed Herdr app that should host the phone UI. The relay starts
 and prints a QR code.
 
-**Temporary Cloudflare Tunnel** is the fastest getting-started option for a
+**Cloudflare → Temporary Cloudflare Tunnel** is the fastest getting-started option for a
 one-computer trial. It installs any missing user-level tools with confirmation,
 starts the relay and bundled app, and prints a QR code.
 
@@ -104,7 +104,7 @@ terminal controls, and notification settings.
 
 ## Choosing how your phone connects
 
-The setup menu exposes each complete connection path directly:
+The setup menu starts with **Cloudflare**, **WebRTC**, and **Tailscale**. Select a path to see only its actions; use **Back** to choose another path.
 
 | Choice | Needs | Best for |
 | --- | --- | --- |

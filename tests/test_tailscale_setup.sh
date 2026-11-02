@@ -176,7 +176,7 @@ if command -v script >/dev/null 2>&1; then
         assert_absent 'tailscale off' "$FAKE_LOG"
         : > "$FAKE_LOG"
         if run tailscale-setup.sh; then echo 'selected setup accepted' >&2; exit 1; fi
-        grep -q "Always on Tailscale is already set up. Use 'Show setup QR', or 'Turn off Tailscale' first." "$WORK/out"
+        grep -q "Always on Tailscale is already set up. Use Tailscale → Choose Phone App and Show QR, or Tailscale → Turn Always on Tailscale Off first." "$WORK/out"
         assert_absent . "$FAKE_LOG"
         run tailscale-off.sh
         cmp "$HERDR_RELAY_ENV" "$WORK/prior" || { echo 'turn-off did not restore service form' >&2; exit 1; }
@@ -218,7 +218,7 @@ run service.sh install
 cmp "$HERDR_RELAY_ENV" "$WORK/selected"
 grep -q 'systemctl --user restart' "$FAKE_LOG"
 
-refusal="Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first."
+refusal="Always on Tailscale is selected. Choose Tailscale → Turn Always on Tailscale Off first."
 for entry in 'stable-setup.sh' 'gateway-deploy.sh' 'plugin-choose-transport.sh temporary' 'plugin-choose-transport.sh community' 'plugin-choose-transport.sh own' 'plugin-choose-transport.sh stable' 'plugin-install-service.sh' 'plugin-quick-start.sh' 'setup.sh' 'setup.sh --install-missing' 'start.sh' 'stable-teardown.sh' 'change-hostname.sh' 'service.sh uninstall' 'uninstall-systemd-user-service.sh' 'uninstall-service.sh'; do
     : > "$FAKE_LOG"
     cp "$HERDR_RELAY_ENV" "$WORK/before"
@@ -264,7 +264,7 @@ assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 grep -q 'mapping may remain' "$WORK/out"
 
 printf "HERDR_TAILSCALE_PORT='8443'\n" >> "$HERDR_RELAY_ENV"
-printf '11\nq\n' | run plugin-setup-menu.sh
+printf '3\n2\nq\n' | run plugin-setup-menu.sh
 assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 grep -q 'systemctl .* restart' "$FAKE_LOG" || grep -q 'systemctl .* start' "$FAKE_LOG"
 . "$REPO_DIR/relay/common.sh"

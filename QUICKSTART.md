@@ -17,8 +17,8 @@ rather than treating the whole connection as unavailable.
 herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-Choose **Temporary Cloudflare Tunnel** when the setup menu opens. If it does
-not:
+Choose **Cloudflare → Temporary Cloudflare Tunnel** when the setup menu opens.
+If it does not:
 
 ```bash
 herdr plugin action invoke setup --plugin herdr-mobile-relay.events
@@ -34,13 +34,14 @@ Both paths print the QR once they know which origin serves the phone app.
 
 On the tunnel path, wait for the temporary tunnel, then choose:
 
-- **This temporary relay** for a simple one-computer trial.
-- **An existing installed Herdr app** to add this computer to an app you already
-  use.
+- **Use the app served by this temporary tunnel** for a quick one-computer trial.
+- **Use another Herdr app** to add this computer to an app you already use.
 
-On the gateway path the QR follows registration, and the app origin has to be an
-installed Herdr app — a gateway carries relay traffic only. It reuses a recorded
-or `HERDR_PHONE_APP_URL` origin, and asks for one when neither exists.
+Choosing the phone app does not change how your phone connects to this computer.
+WebRTC does not offer this chooser: the gateway serves no app. On that path the
+QR follows registration, and the app origin has to be an installed Herdr app.
+It reuses a recorded or `HERDR_PHONE_APP_URL` origin, and asks for one when
+neither exists.
 
 Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
 the one-use bootstrap invitation in the URL fragment, which is never sent in
@@ -78,8 +79,8 @@ downloaded voices remain in place.
 
 ## Skip Cloudflare
 
-Choose **Community WebRTC Gateway** in the setup menu. It checks the project's
-published gateways, saves the ordered list, then starts the relay and prints its
+Choose **WebRTC → Community WebRTC Gateway** in the setup menu. It checks the
+project's published gateways, saves the ordered list, then starts the relay and prints its
 QR. No account, no domain, no `cloudflared`. The gateways are run by the
 project: free, shared, best-effort.
 
@@ -100,15 +101,16 @@ own gateway.
 Install Tailscale on your phone; the computer's Tailscale CLI must be 1.52 or
 newer. Sign in to the same tailnet and enable MagicDNS and HTTPS certificates in
 the tailnet DNS settings. On Linux or macOS with standalone or App Store
-Tailscale, open the plugin setup menu and choose **Always on Tailscale**; confirm the HTTPS port 8443 publication and
-background relay service. Scan the printed QR on your phone. The setup pane may
+Tailscale, open the plugin setup menu and choose **Tailscale → Always on
+Tailscale**; confirm the HTTPS port 8443 publication and background relay service. Scan the printed QR on your phone. The setup pane may
 close after setup; the service stays installed. To pair another phone, reopen
-setup and choose **Choose Phone App and Show QR**. If already configured, use
-that QR action rather than running setup again.
+setup and choose **Tailscale → Choose Phone App and Show QR**. If already
+configured, use that QR action rather than running setup again.
 
 If you previously selected a gateway, select a Cloudflare choice first to clear
-it. Before choosing another transport later, choose **Turn Always on Tailscale
-Off**. Service reinstall, restart, and update do not require turning it off.
+it. Before choosing another transport later, choose **Tailscale → Turn Always
+on Tailscale Off**. Service reinstall, restart, and update do not require
+turning it off.
 See [Tailscale requirements and cleanup](docs/transports.md#tailscale-serve).
 
 ## Make the Cloudflare Tunnel Permanent

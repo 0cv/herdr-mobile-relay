@@ -483,7 +483,7 @@ printf "HERDR_TAILSCALE_PORT='8443'\nHERDR_RELAY_PORT='8375'\n" > "$HERDR_RELAY_
 export HERDR_GATEWAY_SUBSCRIPTIONS="wss://gw.example.test"
 run_deploy
 [ "$STATUS" -ne 0 ] || fail "gateway deployment accepted Tailscale selection"
-grep -Fq "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first." "$OUTPUT" || fail "missing refusal"
+grep -Fq "Always on Tailscale is selected. Choose Tailscale → Turn Always on Tailscale Off first." "$OUTPUT" || fail "missing refusal"
 if grep -q . "$SSH_LOG"; then fail "refused deployment contacted server"; fi
 if [ -e "$STUB_STATE/tailscale.log" ] && grep -q . "$STUB_STATE/tailscale.log"; then fail "refused deployment called Tailscale"; fi
 grep -Fxq "HERDR_TAILSCALE_PORT='8443'" "$HERDR_RELAY_ENV" || fail "selection changed"

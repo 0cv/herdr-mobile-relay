@@ -348,7 +348,7 @@ test_refuses_tailscale() {
     : > "$STUB_LOG"
     run_setup
     [ "$STATUS" -ne 0 ] || fail "stable setup accepted Tailscale"
-    assert_contains "$OUTPUT" "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first."
+    assert_contains "$OUTPUT" "Always on Tailscale is selected. Choose Tailscale → Turn Always on Tailscale Off first."
     assert_not_contains "$STUB_LOG" 'cloudflared'
     assert_not_contains "$STUB_LOG" 'systemctl'
     assert_contains "$HERDR_RELAY_ENV" "HERDR_TAILSCALE_PORT='8443'"
