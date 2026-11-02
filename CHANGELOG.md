@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-02
+
 ### Added
 
 - Connect through Tailscale Serve on your own tailnet, with an isolated dev
@@ -1971,7 +1973,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...v0.24.0
 [0.23.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...v0.23.5
 [0.23.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...v0.23.4
 [0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3
