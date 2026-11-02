@@ -1,3 +1,6 @@
+import { escapeHtml, safeExternalUrl, trimUrlPunctuation } from './rich-output';
+export { safeExternalUrl } from './rich-output';
+
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
 const INLINE_PATTERN = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>"']+)/giu;
 // Markdown does not treat a number longer than nine digits as a list number.
@@ -27,39 +30,6 @@ function listItem(line: string): ListItem | null {
   const spaces = columnAfter(gap, markerEnd) - markerEnd;
   // Text five or more columns after the marker is indented code, so the item's content starts one column after it.
   return { type: bullet ? 'ul' : 'ol', indent, content: markerEnd + (spaces > 4 ? 1 : spaces), start: bullet ? 1 : Number(number), text };
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  })[character] || character);
-}
-
-function trimUrlPunctuation(value: string): [string, string] {
-  let url = value;
-  let suffix = '';
-  while (url && /[.,;:!?\])]/u.test(url.at(-1) || '')) {
-    const character = url.at(-1) || '';
-    if (character === ')' && (url.match(/\(/g)?.length || 0) >= (url.match(/\)/g)?.length || 0)) break;
-    if (character === ']' && (url.match(/\[/g)?.length || 0) >= (url.match(/\]/g)?.length || 0)) break;
-    suffix = character + suffix;
-    url = url.slice(0, -1);
-  }
-  return [url, suffix];
-}
-
-export function safeExternalUrl(value: string): string {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
-    return parsed.href;
-  } catch {
-    return '';
-  }
 }
 
 function escapedWithHighlight(value: string, highlight: string): string {
@@ -173,7 +143,7 @@ export function fencedCodeText(value: string): string | null {
   const blocks: string[] = [];
   let current: string[] | null = null;
   for (const line of value.replace(/\r\n?/g, '\n').split('\n')) {
-    if (/^\s*```\s*[A-Za-z0-9_+.-]*\s*$/u.test(line)) {
+    if (CODE_FENCE.test(line)) {
       if (current === null) {
         current = [];
       } else {

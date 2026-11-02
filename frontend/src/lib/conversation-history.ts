@@ -1,3 +1,4 @@
+import { cloneEntries, clonePlan } from './conversation-values';
 import { conversationEntries } from './conversation';
 import type { ConversationPreview } from './conversation-cache';
 import { targetRefForAgent, targetStoreKey } from './resource-id';
@@ -271,10 +272,7 @@ export class ConversationHistoryController {
     this.rawEntries = [];
     this.networkEntries = [];
     this.previewEntries = [];
-    this.bridgeEntries = [];
-    this.bridgeActive = false;
-    this.bridgeRestore = null;
-    this.bridgePlan = null;
+    this.clearBridge();
     this.headCursor = '';
     this.networkSourceRevision = '';
     this.networkSnapshotId = '';
@@ -345,15 +343,20 @@ export class ConversationHistoryController {
     else this.enqueue(this.rawEntries.length ? 'refresh' : 'initial', true);
   }
 
+  recoverAfterReconnect(agent: Agent): boolean {
+    if (!this.matchesRequestTarget(agent) || !this.started || this.paused || !this.options.isActive()
+      || this.demandRunning || this.stateValue.pausedReason
+      || this.stateValue.error?.code !== 'transport_disconnected' || !this.stateValue.error.retryable) return false;
+    this.retry();
+    return true;
+  }
+
   returnToLatest(): void {
     if (!this.started || !this.options.isActive()) return;
     this.advanceEpoch(false);
     this.previewEntries = [];
     this.networkEntries = [];
-    this.bridgeEntries = [];
-    this.bridgeActive = false;
-    this.bridgeRestore = null;
-    this.bridgePlan = null;
+    this.clearBridge();
     this.headCursor = '';
     this.networkSourceRevision = '';
     this.networkSnapshotId = '';
@@ -445,10 +448,7 @@ export class ConversationHistoryController {
     const preview = identity ? this.getPreview?.(identity) : null;
     this.previewEntries = preview ? cloneEntries(preview.entries.slice(-HISTORY_WIRE_PAGE_SIZE)) : [];
     this.networkEntries = [];
-    this.bridgeEntries = [];
-    this.bridgeActive = false;
-    this.bridgeRestore = null;
-    this.bridgePlan = null;
+    this.clearBridge();
     this.headCursor = '';
     this.networkSourceRevision = '';
     this.networkSnapshotId = '';
@@ -752,10 +752,7 @@ export class ConversationHistoryController {
       this.rawEntries = [];
       this.networkEntries = [];
       this.previewEntries = [];
-      this.bridgeEntries = [];
-      this.bridgeActive = false;
-      this.bridgeRestore = null;
-      this.bridgePlan = null;
+      this.clearBridge();
       this.headCursor = '';
       this.networkSourceRevision = '';
       this.networkSnapshotId = '';
@@ -1094,6 +1091,13 @@ export class ConversationHistoryController {
     });
   }
 
+  private clearBridge(): void {
+    this.bridgeEntries = [];
+    this.bridgeActive = false;
+    this.bridgeRestore = null;
+    this.bridgePlan = null;
+  }
+
   private advanceEpoch(retainPaused = false): void {
     this.stateValue.epoch++;
     this.activeAbort?.abort();
@@ -1232,20 +1236,6 @@ function mergeBridgedEntries(existing: ConversationEntry[], bridge: Conversation
 function sharedEntryId(first: ConversationEntry[], second: ConversationEntry[]): boolean {
   const ids = new Set(first.map((entry) => entry.id));
   return second.some((entry) => ids.has(entry.id));
-}
-
-function cloneEntries(entries: ConversationEntry[]): ConversationEntry[] {
-  return entries.map((entry) => ({
-    ...entry,
-    ...(entry.tools ? { tools: entry.tools.map((tool) => ({ ...tool })) } : {}),
-  }));
-}
-
-function clonePlan(plan: OmoTodoState): OmoTodoState {
-  return {
-    ...plan,
-    phases: plan.phases.map((phase) => ({ ...phase, tasks: phase.tasks.map((task) => ({ ...task })) })),
-  };
 }
 
 function cloneDiagnostics(value: ConversationBrowseDiagnostics | undefined): ConversationBrowseDiagnostics | undefined {

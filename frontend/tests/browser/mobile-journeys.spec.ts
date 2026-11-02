@@ -7968,6 +7968,14 @@ for (const mode of ['Conversation', 'Full history']) {
       await document.fonts.ready;
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     });
+    // The composer can still settle a few pixels after fonts and frames are ready.
+    let settledY = Number.NaN;
+    await expect.poll(async () => {
+      const y = (await prompt.boundingBox())!.y;
+      const stable = y === settledY;
+      settledY = y;
+      return stable;
+    }, { intervals: [100] }).toBe(true);
     const initialPrompt = (await prompt.boundingBox())!;
     const requests = (await commands(page)).filter(command => command.type !== 'read_pane');
     for (const status of ['working', 'unknown', 'done', 'idle']) {
@@ -8588,3 +8596,628 @@ test('hidden secret requires correlated observation and never retries uncertain 
   expect((await commands(page)).filter(command => command.type === 'send_secret')).toHaveLength(1);
   expect(await page.evaluate(() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage))).not.toContain('synthetic-browser-value');
 });
+
+test('directory picker in Launch keeps internal focus open and closes after selection', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await page.getByLabel('Agent', { exact: true }).selectOption('codex');
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(1);
+  const initial = (await commands(page)).find(command => command.type === 'list_directories')!;
+  await server(page, 0, {
+    type: 'command_result', request_id: initial.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/test/work', label: '~/work' }, parent: '/home/test',
+      directories: [{ name: 'project', path: '/home/test/work/project' }],
+    },
+  });
+  const current = page.locator('.launch-page .directory-current');
+  await expect(current).toHaveText('~/work ⌄');
+  await expect(current).toHaveAttribute('aria-controls', 'launch-directory-list');
+  await current.click();
+  await expect(current).toHaveAttribute('aria-expanded', 'true');
+  const list = page.locator('#launch-directory-list');
+  const parent = list.getByRole('button', { name: '↰ Parent folder' });
+  await parent.focus();
+  await expect(parent).toBeFocused();
+  await expect(current).toHaveAttribute('aria-expanded', 'true');
+  await list.getByRole('button', { name: '📁 project' }).click();
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(2);
+  const child = (await commands(page)).findLast(command => command.type === 'list_directories')!;
+  expect(child).toMatchObject({ path: '/home/test/work/project' });
+  await expect(list.getByText('Loading folders…')).toBeVisible();
+  await server(page, 0, {
+    type: 'command_result', request_id: child.request_id, ok: true, phase: 'completed',
+    data: { current: { path: '/home/test/work/project', label: '~/work/project' }, parent: '/home/test/work', directories: [] },
+  });
+  await expect(current).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByLabel('Name')).toHaveValue('project-codex');
+  await current.click();
+  await expect(list.getByText('This folder has no subdirectories. It remains selected.')).toBeVisible();
+  await page.getByLabel('Name').focus();
+  await expect(current).toHaveAttribute('aria-expanded', 'false');
+  await current.click();
+  await list.getByRole('button', { name: '↰ Parent folder' }).click();
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(3);
+  const back = (await commands(page)).findLast(command => command.type === 'list_directories')!;
+  expect(back).toMatchObject({ path: '/home/test/work' });
+  await server(page, 0, {
+    type: 'command_result', request_id: back.request_id, ok: true, phase: 'completed',
+    data: { current: { path: '/home/test/work', label: '~/work' }, parent: '/home/test', directories: [] },
+  });
+  await expect(current).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByLabel('Name')).toHaveValue('work-codex');
+});
+
+test('directory picker in Workspace stays open across navigation and label focus', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['directory_browser', 'workspace_management'] });
+  await server(page, 0, { type: 'workspaces', workspaces: [] });
+  await server(page, 0, { type: 'agents', agents: [] });
+  await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(1);
+  const initial = (await commands(page)).find(command => command.type === 'list_directories')!;
+  await server(page, 0, {
+    type: 'command_result', request_id: initial.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/test/work', label: '~/work' }, parent: '/home/test',
+      directories: [{ name: 'project', path: '/home/test/work/project' }],
+    },
+  });
+  await page.getByRole('button', { name: 'Create Workspace' }).click();
+  const dialog = page.locator('#workspace-create-dialog');
+  const current = dialog.locator('.directory-current');
+  const label = dialog.getByLabel('Label');
+  await expect(label).toHaveValue('work');
+  await expect(current).toHaveAttribute('aria-controls', 'workspace-directory-list');
+  await current.click();
+  await expect(current).toHaveAttribute('aria-expanded', 'true');
+  await label.focus();
+  await expect(current).toHaveAttribute('aria-expanded', 'true');
+  const list = dialog.locator('#workspace-directory-list');
+  await list.getByRole('button', { name: '📁 project' }).click();
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(2);
+  const child = (await commands(page)).findLast(command => command.type === 'list_directories')!;
+  expect(child).toMatchObject({ path: '/home/test/work/project' });
+  await expect(list.getByText('Loading folders…')).toBeVisible();
+  await server(page, 0, {
+    type: 'command_result', request_id: child.request_id, ok: true, phase: 'completed',
+    data: { current: { path: '/home/test/work/project', label: '~/work/project' }, parent: '/home/test/work', directories: [] },
+  });
+  await expect(current).toHaveText('~/work/project ⌄');
+  await expect(current).toHaveAttribute('aria-expanded', 'true');
+  await expect(label).toHaveValue('work');
+  await expect(list.getByText('This folder has no subdirectories. It remains selected.')).toHaveCount(0);
+  await list.getByRole('button', { name: '↰ Parent folder' }).click();
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(3);
+  const back = (await commands(page)).findLast(command => command.type === 'list_directories')!;
+  expect(back).toMatchObject({ path: '/home/test/work' });
+  await server(page, 0, {
+    type: 'command_result', request_id: back.request_id, ok: true, phase: 'completed',
+    data: { current: { path: '/home/test/work', label: '~/work' }, parent: '/home/test', directories: [] },
+  });
+  await expect(current).toHaveText('~/work ⌄');
+  await expect(current).toHaveAttribute('aria-expanded', 'true');
+  await label.fill('Phone workspace');
+  await dialog.getByRole('button', { name: 'Confirm' }).click();
+  await expect.poll(async () => (await commands(page)).find(command => command.type === 'workspace_create')).toMatchObject({
+    cwd: '/home/test/work', label: 'Phone workspace',
+  });
+});
+
+for (const mode of ['Conversation', 'Full history']) {
+  test(`shared composer ${mode}: incremental fallback hashes uploads for the exact target`, async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'Worker', { configurable: true, value: undefined });
+      const slices: Array<{ name: string; start: number | undefined; end: number | undefined }> = [];
+      Object.defineProperty(window, '__fallbackSlices', { value: slices });
+      const original = Blob.prototype.slice;
+      Blob.prototype.slice = function (start, end, type) {
+        if (this instanceof File) slices.push({ name: this.name, start, end });
+        return original.call(this, start, end, type);
+      };
+    });
+    const prompt = await openSharedComposer(page, mode);
+    expect(await page.evaluate(() => typeof Worker)).toBe('undefined');
+    expect(await page.evaluate(() => typeof crypto.subtle.digest)).toBe('function');
+    await prompt.fill('Review fallback');
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([
+      { name: 'fallback-one.png', mimeType: 'image/png', buffer: Buffer.from('png') },
+      { name: 'fallback-two.png', mimeType: 'image/png', buffer: Buffer.from('abc') },
+    ]);
+    await expect(prompt).toHaveValue('Review fallback\nAttachment: attachment:test-1\nAttachment: attachment:test-2\n');
+    const upload = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+    expect(upload.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk', 'upload_finish']);
+    for (const command of upload) expect(command.target).toEqual(composerTarget);
+    expect(upload[0]).toMatchObject({ files: [
+      { name: 'fallback-one.png', media_type: 'image/png', bytes: 3 },
+      { name: 'fallback-two.png', media_type: 'image/png', bytes: 3 },
+    ] });
+    const uploadId = `upload-${String(upload[0].request_id)}`;
+    const png = '8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c';
+    const abc = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
+    expect(upload[1]).toMatchObject({ upload_id: uploadId, file_index: 0, sequence: 0, data: 'cG5n', sha256: png });
+    expect(upload[2]).toMatchObject({ upload_id: uploadId, file_index: 1, sequence: 1, data: 'YWJj', sha256: abc });
+    expect(upload[3]).toMatchObject({ upload_id: uploadId, files: [
+      { file_index: 0, sha256: png }, { file_index: 1, sha256: abc },
+    ] });
+    expect(await page.evaluate(() => (window as unknown as { __fallbackSlices: unknown[] }).__fallbackSlices)).toEqual([
+      { name: 'fallback-one.png', start: 0, end: 262144 },
+      { name: 'fallback-one.png', start: 0, end: 262144 },
+      { name: 'fallback-two.png', start: 0, end: 262144 },
+      { name: 'fallback-two.png', start: 0, end: 262144 },
+    ]);
+    await prompt.press('Meta+Enter');
+    await expect.poll(async () => (await commands(page)).find(command => command.type === 'submit_prompt')).toMatchObject({
+      target: composerTarget, text: 'Review fallback\nAttachment: attachment:test-1\nAttachment: attachment:test-2',
+    });
+    await expect(prompt).toHaveValue('');
+  });
+}
+
+type FallbackReadProbe = {
+  slices: Array<{ start: number | undefined; end: number | undefined }>;
+  reads: number;
+  waiting: boolean;
+  nativeFinished: boolean;
+  settled: boolean;
+  settlement?: Promise<void>;
+  release(): void;
+  restore(): void;
+};
+
+async function instrumentFallbackRead(page: Page, behavior: 'fail' | 'hold') {
+  await page.addInitScript((behavior) => {
+    Object.defineProperty(window, 'Worker', { configurable: false, value: undefined });
+    const slice = Blob.prototype.slice;
+    const read = Blob.prototype.arrayBuffer;
+    let armed = true;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const probe: FallbackReadProbe = {
+      slices: [], reads: 0, waiting: false, nativeFinished: false, settled: false,
+      release: () => release(),
+      restore: () => { armed = false; Blob.prototype.slice = slice; },
+    };
+    Object.defineProperty(window, '__fallbackReadProbe', { value: probe });
+    Blob.prototype.slice = function (start, end, type) {
+      const part = slice.call(this, start, end, type);
+      if (!(this instanceof File) || this.name !== 'fallback-old.png') return part;
+      probe.slices.push({ start, end });
+      // Two transport slices precede the first real whole-file fallback slice.
+      if (probe.slices.length === 3 && armed) {
+        Object.defineProperty(part, 'arrayBuffer', { value: () => {
+          probe.reads += 1;
+          if (behavior === 'fail') {
+            armed = false;
+            return Promise.reject(new Error('injected fallback read failure'));
+          }
+          const nativeRead = read.call(part);
+          probe.waiting = true;
+          const result = (async () => {
+            const bytes = await nativeRead;
+            probe.nativeFinished = true;
+            await gate;
+            return bytes;
+          })();
+          probe.settlement = result.then(() => { probe.settled = true; });
+          return result;
+        } });
+      }
+      return part;
+    };
+  }, behavior);
+}
+
+const fallbackOldBytes = Buffer.concat([Buffer.alloc(262144, 97), Buffer.from('bc')]);
+const fallbackOldDigest = 'cc485ca6b1916f3751159b548835893e6b1651a4008ded0ed73e0d13513a5a20';
+const fallbackFirstDigest = 'dd3dde87623d9a6b354c68c943d189c89c63652d945e7bbdf0986cae91a49521';
+const fallbackLastDigest = '1e0bbd6c686ba050b8eb03ffeedc64fdc9d80947fce821abbe5d6dc8d252c5ac';
+const fallbackNewDigest = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
+
+function assertFallbackOldChunks(chunks: Record<string, unknown>[], uploadId: string) {
+  expect(chunks).toHaveLength(2);
+  expect(chunks[0]).toMatchObject({ type: 'upload_chunk', target: composerTarget, upload_id: uploadId, file_index: 0, sequence: 0, sha256: fallbackFirstDigest });
+  expect(chunks[1]).toMatchObject({ type: 'upload_chunk', target: composerTarget, upload_id: uploadId, file_index: 0, sequence: 1, sha256: fallbackLastDigest });
+  expect(Buffer.from(String(chunks[0].data), 'base64')).toEqual(fallbackOldBytes.subarray(0, 262144));
+  expect(Buffer.from(String(chunks[1].data), 'base64')).toEqual(fallbackOldBytes.subarray(262144));
+}
+
+for (const mode of ['Conversation', 'Full history']) {
+  test(`shared composer ${mode}: incremental fallback restarts the retained file after a slice read failure`, async ({ page }) => {
+    await instrumentFallbackRead(page, 'fail');
+    const prompt = await openSharedComposer(page, mode);
+    const laterScripts: string[] = [];
+    page.on('request', request => { if (request.resourceType() === 'script') laterScripts.push(request.url()); });
+    expect(await page.evaluate(() => typeof Worker)).toBe('undefined');
+    expect(await page.evaluate(() => typeof crypto.subtle.digest)).toBe('function');
+    await prompt.fill('Keep recovery draft');
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'fallback-old.png', mimeType: 'image/png', buffer: fallbackOldBytes });
+    const restart = page.getByRole('button', { name: 'Restart interrupted files' });
+    await expect(restart).toBeEnabled();
+    await expect(page.getByRole('alert').filter({ hasText: 'Upload progress is uncertain.' })).toBeVisible();
+    await expect(prompt).toHaveValue('Keep recovery draft');
+    const before = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+    expect(before.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk']);
+    expect(before[0]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-old.png', media_type: 'image/png', bytes: fallbackOldBytes.length }] });
+    const oldId = `upload-${String(before[0].request_id)}`;
+    assertFallbackOldChunks(before.slice(1), oldId);
+    expect(await page.evaluate(() => {
+      const probe = (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe;
+      return { reads: probe.reads, slices: probe.slices };
+    })).toEqual({ reads: 1, slices: [
+      { start: 0, end: 262144 }, { start: 262144, end: 524288 }, { start: 0, end: 262144 },
+    ] });
+
+    // Restore the injected reader, then use Restart without selecting or reloading the file.
+    await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.restore());
+    await restart.click();
+    await expect(prompt).toHaveValue('Keep recovery draft\nAttachment: attachment:test-1\n');
+    await expect(page.getByText('Attached fallback-old.png')).toBeVisible();
+    const after = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+    expect(after.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk', 'upload_cancel', 'upload_begin', 'upload_chunk', 'upload_chunk', 'upload_finish']);
+    expect(after[3]).toMatchObject({ target: composerTarget, upload_id: oldId });
+    expect(after[4]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-old.png', media_type: 'image/png', bytes: fallbackOldBytes.length }] });
+    const newId = `upload-${String(after[4].request_id)}`;
+    expect(newId).not.toBe(oldId);
+    assertFallbackOldChunks(after.slice(5, 7), newId);
+    expect(after[7]).toMatchObject({ target: composerTarget, upload_id: newId, files: [{ file_index: 0, sha256: fallbackOldDigest }] });
+    expect(after.filter(command => command.type === 'upload_finish' && command.upload_id === oldId)).toHaveLength(0);
+    expect((await prompt.inputValue()).match(/Attachment: attachment:test-1/g)).toHaveLength(1);
+    expect(await page.evaluate(() => typeof Worker)).toBe('undefined');
+    expect(laterScripts).toEqual([]);
+  });
+
+  test(`shared composer ${mode}: incremental fallback cancellation fences a held read while a new upload succeeds`, async ({ page }) => {
+    await instrumentFallbackRead(page, 'hold');
+    const prompt = await openSharedComposer(page, mode);
+    const laterScripts: string[] = [];
+    page.on('request', request => { if (request.resourceType() === 'script') laterScripts.push(request.url()); });
+    await prompt.fill('Keep canceled draft');
+    try {
+      await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'fallback-old.png', mimeType: 'image/png', buffer: fallbackOldBytes });
+      await expect.poll(() => page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.waiting)).toBe(true);
+      const before = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+      expect(before.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk']);
+      expect(before[0]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-old.png', media_type: 'image/png', bytes: fallbackOldBytes.length }] });
+      const oldId = `upload-${String(before[0].request_id)}`;
+      assertFallbackOldChunks(before.slice(1), oldId);
+      await page.getByRole('button', { name: 'Cancel upload' }).click();
+      await expect.poll(async () => (await commands(page)).find(command => command.type === 'upload_cancel')).toMatchObject({ target: composerTarget, upload_id: oldId });
+      await expect(page.getByText('Attachment upload canceled.')).toBeVisible();
+      const input = page.locator('input[type=file][accept="image/*"]');
+      await expect(input).toBeEnabled();
+      expect(await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.settled)).toBe(false);
+
+      await input.setInputFiles({ name: 'fallback-new.png', mimeType: 'image/png', buffer: Buffer.from('abc') });
+      await expect(prompt).toHaveValue('Keep canceled draft\nAttachment: attachment:test-1\n');
+      await expect(page.getByText('Attached fallback-new.png')).toBeVisible();
+      const after = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+      expect(after.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk', 'upload_cancel', 'upload_begin', 'upload_chunk', 'upload_finish']);
+      expect(after[4]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-new.png', media_type: 'image/png', bytes: 3 }] });
+      const newId = `upload-${String(after[4].request_id)}`;
+      expect(newId).not.toBe(oldId);
+      expect(after[5]).toMatchObject({ target: composerTarget, upload_id: newId, file_index: 0, sequence: 0, data: 'YWJj', sha256: fallbackNewDigest });
+      expect(after[6]).toMatchObject({ target: composerTarget, upload_id: newId, files: [{ file_index: 0, sha256: fallbackNewDigest }] });
+      expect(await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.settled)).toBe(false);
+
+      await page.evaluate(async () => {
+        const probe = (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe;
+        probe.release();
+        await probe.settlement;
+        await Promise.resolve();
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+      expect(await page.evaluate(() => {
+        const probe = (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe;
+        return { reads: probe.reads, nativeFinished: probe.nativeFinished, settled: probe.settled, slices: probe.slices };
+      })).toEqual({ reads: 1, nativeFinished: true, settled: true, slices: [
+        { start: 0, end: 262144 }, { start: 262144, end: 524288 }, { start: 0, end: 262144 },
+      ] });
+      expect((await commands(page)).filter(command => String(command.type).startsWith('upload_'))).toEqual(after);
+      expect(after.filter(command => command.type === 'upload_finish' && command.upload_id === oldId)).toHaveLength(0);
+      await expect(prompt).toHaveValue('Keep canceled draft\nAttachment: attachment:test-1\n');
+      await expect(page.getByText('Attached fallback-new.png')).toBeVisible();
+      expect((await prompt.inputValue()).match(/Attachment: attachment:test-1/g)).toHaveLength(1);
+      expect(await page.evaluate(() => typeof Worker)).toBe('undefined');
+      expect(laterScripts).toEqual([]);
+    } finally {
+      await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.release()).catch(() => {});
+    }
+  });
+}
+
+test('incremental fallback distributes the complete pinned upstream license', async ({ page }) => {
+  const { readFile } = await import('node:fs/promises');
+  const upstream = await readFile(resolve('node_modules/@noble/hashes/LICENSE'));
+  const metadata = JSON.parse(await readFile(resolve('node_modules/@noble/hashes/package.json'), 'utf8')) as { name: string; version: string };
+  expect(metadata).toMatchObject({ name: '@noble/hashes', version: '2.4.0' });
+  expect(upstream.length).toBeGreaterThan(1000);
+  const notice = upstream.toString('utf8');
+  expect(notice).toContain('Copyright (c) 2022 Paul Miller');
+  expect(notice).toContain('Permission is hereby granted');
+  expect(notice).toContain('WITHOUT WARRANTY OF ANY KIND');
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const response = await fetch('/licenses/noble-hashes.txt');
+    return { ok: response.ok, status: response.status, bytes: Array.from(new Uint8Array(await response.arrayBuffer())) };
+  });
+  expect(result.status).toBe(200);
+  expect(result.ok).toBe(true);
+  expect(Buffer.from(result.bytes)).toEqual(upstream);
+});
+
+// Hold selected actual mock-wire replies, without changing the shared mock or its defaults.
+type OverlapReplyGate = {
+  cancel: Record<string, unknown> | null;
+  chunk: Record<string, unknown> | null;
+  holdChunk: boolean;
+  deliver(kind: 'cancel' | 'chunk', fail: boolean): void;
+};
+
+async function installOverlapReplyGate(page: Page) {
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __relaySockets: object[] }).__relaySockets[0];
+    const prototype = Object.getPrototypeOf(socket) as { server(message: Record<string, unknown>): void };
+    const original = prototype.server;
+    let heldCancel = false;
+    const gate: OverlapReplyGate = {
+      cancel: null, chunk: null, holdChunk: false,
+      deliver(kind, fail) {
+        const response = gate[kind];
+        if (!response) throw new Error(`No held ${kind} response`);
+        gate[kind] = null;
+        original.call(socket, fail ? { ...response, error: { code: 'attachment_upload_state_unknown' } } : response);
+      },
+    };
+    prototype.server = function (message) {
+      if (message.type === 'upload_cancel_result' && !heldCancel) {
+        heldCancel = true;
+        gate.cancel = message;
+        return;
+      }
+      if (message.type === 'upload_chunk_result' && gate.holdChunk) {
+        gate.holdChunk = false;
+        gate.chunk = message;
+        return;
+      }
+      original.call(this, message);
+    };
+    Object.defineProperty(window, '__overlapReplyGate', { value: gate });
+  });
+}
+
+async function deliverOverlapReply(page: Page, kind: 'cancel' | 'chunk', fail: boolean) {
+  await page.evaluate(async ({ kind, fail }) => {
+    (window as unknown as { __overlapReplyGate: OverlapReplyGate }).__overlapReplyGate.deliver(kind, fail);
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  }, { kind, fail });
+}
+
+async function startHeldOldCancellation(page: Page, mode: string) {
+  await instrumentFallbackRead(page, 'hold');
+  const prompt = await openSharedComposer(page, mode);
+  await installOverlapReplyGate(page);
+  await prompt.fill('Keep overlap draft');
+  const input = page.locator('input[type=file][accept="image/*"]');
+  await input.setInputFiles({ name: 'fallback-old.png', mimeType: 'image/png', buffer: fallbackOldBytes });
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.waiting)).toBe(true);
+  const before = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+  expect(before.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk']);
+  expect(before[0]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-old.png', media_type: 'image/png', bytes: fallbackOldBytes.length }] });
+  const oldId = `upload-${String(before[0].request_id)}`;
+  assertFallbackOldChunks(before.slice(1), oldId);
+  await page.getByRole('button', { name: 'Cancel upload' }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __overlapReplyGate: OverlapReplyGate }).__overlapReplyGate.cancel !== null)).toBe(true);
+  await expect.poll(async () => (await commands(page)).find(command => command.type === 'upload_cancel')).toMatchObject({ target: composerTarget, upload_id: oldId });
+  await expect(input).toBeEnabled();
+  await expect(page.locator('.upload-status')).toHaveText('Attachment upload canceled.');
+  expect(await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.settled)).toBe(false);
+  return { prompt, input, oldId };
+}
+
+async function settleOverlapOldRead(page: Page) {
+  await page.evaluate(async () => {
+    const probe = (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe;
+    probe.release();
+    await probe.settlement;
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
+  expect(await page.evaluate(() => {
+    const probe = (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe;
+    return { reads: probe.reads, nativeFinished: probe.nativeFinished, settled: probe.settled, slices: probe.slices };
+  })).toEqual({ reads: 1, nativeFinished: true, settled: true, slices: [
+    { start: 0, end: 262144 }, { start: 262144, end: 524288 }, { start: 0, end: 262144 },
+  ] });
+}
+
+for (const mode of ['Conversation', 'Full history']) {
+  for (const oldReply of ['success', 'error'] as const) {
+    test(`shared composer ${mode}: incremental fallback old cancel ${oldReply} preserves a pending new upload and restart`, async ({ page }) => {
+      const { prompt, input, oldId } = await startHeldOldCancellation(page, mode);
+      try {
+        await page.evaluate(() => { (window as unknown as { __overlapReplyGate: OverlapReplyGate }).__overlapReplyGate.holdChunk = true; });
+        await input.setInputFiles({ name: 'fallback-new.png', mimeType: 'image/png', buffer: Buffer.from('abc') });
+        await expect.poll(() => page.evaluate(() => (window as unknown as { __overlapReplyGate: OverlapReplyGate }).__overlapReplyGate.chunk !== null)).toBe(true);
+        await expect(page.getByRole('progressbar', { name: 'fallback-new.png upload progress' })).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Cancel upload' })).toBeEnabled();
+        await expect(page.locator('.upload-status')).toHaveText('Uploading 1 attachment…');
+        const pending = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+        expect(pending.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk', 'upload_cancel', 'upload_begin', 'upload_chunk']);
+        expect(pending[4]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-new.png', media_type: 'image/png', bytes: 3 }] });
+        const newId = `upload-${String(pending[4].request_id)}`;
+        expect(newId).not.toBe(oldId);
+        expect(pending[5]).toMatchObject({ target: composerTarget, upload_id: newId, file_index: 0, sequence: 0, data: 'YWJj', sha256: fallbackNewDigest });
+        expect(await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.settled)).toBe(false);
+
+        await deliverOverlapReply(page, 'cancel', oldReply === 'error');
+        await expect(page.getByRole('progressbar', { name: 'fallback-new.png upload progress' })).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Cancel upload' })).toBeEnabled();
+        await expect(page.locator('.upload-status')).toHaveText('Uploading 1 attachment…');
+        await deliverOverlapReply(page, 'chunk', true);
+        await expect(page.getByRole('alert').filter({ hasText: 'Upload progress is uncertain.' })).toBeVisible();
+        const restart = page.getByRole('button', { name: 'Restart interrupted files' });
+        await expect(restart).toBeEnabled();
+        await expect(prompt).toHaveValue('Keep overlap draft');
+        await restart.click();
+        await expect(prompt).toHaveValue('Keep overlap draft\nAttachment: attachment:test-1\n');
+        await expect(page.locator('.upload-status')).toHaveText('Attached fallback-new.png');
+        const after = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+        expect(after.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk', 'upload_cancel', 'upload_begin', 'upload_chunk', 'upload_cancel', 'upload_begin', 'upload_chunk', 'upload_finish']);
+        expect(after[6]).toMatchObject({ target: composerTarget, upload_id: newId });
+        expect(after[7]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-new.png', media_type: 'image/png', bytes: 3 }] });
+        const restartId = `upload-${String(after[7].request_id)}`;
+        expect(new Set([oldId, newId, restartId]).size).toBe(3);
+        expect(after[8]).toMatchObject({ target: composerTarget, upload_id: restartId, file_index: 0, sequence: 0, data: 'YWJj', sha256: fallbackNewDigest });
+        expect(after[9]).toMatchObject({ target: composerTarget, upload_id: restartId, files: [{ file_index: 0, sha256: fallbackNewDigest }] });
+        expect(after.filter(command => command.type === 'upload_finish')).toHaveLength(1);
+        await settleOverlapOldRead(page);
+        expect((await commands(page)).filter(command => String(command.type).startsWith('upload_'))).toEqual(after);
+        await expect(prompt).toHaveValue('Keep overlap draft\nAttachment: attachment:test-1\n');
+        await expect(page.locator('.upload-status')).toHaveText('Attached fallback-new.png');
+        expect((await prompt.inputValue()).match(/Attachment: attachment:test-1/g)).toHaveLength(1);
+      } finally {
+        await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.release()).catch(() => {});
+      }
+    });
+
+    test(`shared composer ${mode}: incremental fallback old cancel ${oldReply} cannot overwrite a completed newer upload`, async ({ page }) => {
+      const { prompt, input, oldId } = await startHeldOldCancellation(page, mode);
+      try {
+        await input.setInputFiles({ name: 'fallback-new.png', mimeType: 'image/png', buffer: Buffer.from('abc') });
+        await expect(prompt).toHaveValue('Keep overlap draft\nAttachment: attachment:test-1\n');
+        await expect(page.locator('.upload-status')).toHaveText('Attached fallback-new.png');
+        await expect(input).toBeEnabled();
+        const after = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+        expect(after.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk', 'upload_cancel', 'upload_begin', 'upload_chunk', 'upload_finish']);
+        expect(after[4]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-new.png', media_type: 'image/png', bytes: 3 }] });
+        const newId = `upload-${String(after[4].request_id)}`;
+        expect(newId).not.toBe(oldId);
+        expect(after[5]).toMatchObject({ target: composerTarget, upload_id: newId, file_index: 0, sequence: 0, data: 'YWJj', sha256: fallbackNewDigest });
+        expect(after[6]).toMatchObject({ target: composerTarget, upload_id: newId, files: [{ file_index: 0, sha256: fallbackNewDigest }] });
+        await deliverOverlapReply(page, 'cancel', oldReply === 'error');
+        await expect(page.locator('.upload-status')).toHaveText('Attached fallback-new.png');
+        await settleOverlapOldRead(page);
+        expect((await commands(page)).filter(command => String(command.type).startsWith('upload_'))).toEqual(after);
+        await expect(prompt).toHaveValue('Keep overlap draft\nAttachment: attachment:test-1\n');
+        await expect(page.locator('.upload-status')).toHaveText('Attached fallback-new.png');
+      } finally {
+        await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.release()).catch(() => {});
+      }
+    });
+  }
+
+  test(`shared composer ${mode}: incremental fallback current cancel error remains visible after local release`, async ({ page }) => {
+    const { prompt } = await startHeldOldCancellation(page, mode);
+    try {
+      await deliverOverlapReply(page, 'cancel', true);
+      await expect(page.locator('.upload-status')).toHaveText('The relay could not confirm attachment cancellation.');
+      await expect(page.locator('.upload-status')).toHaveClass(/error/);
+      await settleOverlapOldRead(page);
+      await expect(prompt).toHaveValue('Keep overlap draft');
+      await expect(page.locator('.upload-status')).toHaveText('The relay could not confirm attachment cancellation.');
+      expect((await commands(page)).filter(command => command.type === 'upload_finish')).toHaveLength(0);
+    } finally {
+      await page.evaluate(() => (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.release()).catch(() => {});
+    }
+  });
+}
+
+// Fail the actual mock socket send before its server receives a cancellation.
+type ImmediateCancelSendFault = {
+  attempts: Record<string, unknown>[];
+  restore(): void;
+};
+
+for (const mode of ['Conversation', 'Full history']) {
+  test(`shared composer ${mode}: incremental fallback immediate cancel send failure retains uncertainty`, async ({ page }) => {
+    await instrumentFallbackRead(page, 'hold');
+    const prompt = await openSharedComposer(page, mode);
+    await page.evaluate(() => {
+      const socket = (window as unknown as { __relaySockets: Array<{ send(message: string): void }> }).__relaySockets[0];
+      const original = socket.send;
+      const fault: ImmediateCancelSendFault = {
+        attempts: [],
+        restore: () => { socket.send = original; },
+      };
+      socket.send = function (serialized) {
+        const packet = JSON.parse(serialized) as Record<string, unknown>;
+        if (packet.type === 'upload_cancel') {
+          fault.attempts.push(packet);
+          throw new Error('injected immediate upload_cancel send failure');
+        }
+        original.call(this, serialized);
+      };
+      Object.defineProperty(window, '__immediateCancelSendFault', { value: fault });
+    });
+    await prompt.fill('Keep immediate cancel draft');
+    const input = page.locator('input[type=file][accept="image/*"]');
+    const form = page.getByRole('form', { name: 'Send a prompt' });
+    const status = page.locator('.upload-status');
+    try {
+      await input.setInputFiles({ name: 'fallback-old.png', mimeType: 'image/png', buffer: fallbackOldBytes });
+      await expect.poll(() => page.evaluate(() => {
+        const probe = (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe;
+        return probe.waiting && probe.nativeFinished && !probe.settled;
+      })).toBe(true);
+      await expect(form).toHaveAttribute('aria-busy', 'true');
+      const before = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+      expect(before.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk']);
+      expect(before[0]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-old.png', media_type: 'image/png', bytes: fallbackOldBytes.length }] });
+      expect(typeof before[0].request_id).toBe('string');
+      const oldId = `upload-${String(before[0].request_id)}`;
+      assertFallbackOldChunks(before.slice(1), oldId);
+      await page.getByRole('button', { name: 'Cancel upload' }).click();
+      await expect(form).toHaveAttribute('aria-busy', 'false');
+      await expect(page.getByRole('button', { name: 'Attach photos' })).toBeEnabled();
+      await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
+      const attempts = await page.evaluate(() => (window as unknown as { __immediateCancelSendFault: ImmediateCancelSendFault }).__immediateCancelSendFault.attempts);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({ type: 'upload_cancel', target: composerTarget, upload_id: oldId });
+      expect(typeof attempts[0].request_id).toBe('string');
+      expect(attempts[0].request_id).not.toBe(before[0].request_id);
+      expect((await commands(page)).filter(command => String(command.type).startsWith('upload_'))).toEqual(before);
+      const held = await page.evaluate(() => {
+        const probe = (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe;
+        return { waiting: probe.waiting, nativeFinished: probe.nativeFinished, settled: probe.settled, reads: probe.reads, slices: probe.slices };
+      });
+      expect(held).toEqual({ waiting: true, nativeFinished: true, settled: false, reads: 1, slices: [
+        { start: 0, end: 262144 }, { start: 262144, end: 524288 }, { start: 0, end: 262144 },
+      ] });
+      console.log('immediate-cancel observation', JSON.stringify({ mode, oldId, attemptedCancel: attempts[0], held, status: await status.textContent(), statusClass: await status.getAttribute('class') }));
+      await expect(status).toHaveText('The relay could not confirm attachment cancellation.');
+      await expect(status).toHaveClass(/error/);
+      await expect(prompt).toHaveValue('Keep immediate cancel draft');
+
+      await settleOverlapOldRead(page);
+      await expect(status).toHaveText('The relay could not confirm attachment cancellation.');
+      await expect(status).toHaveClass(/error/);
+      expect((await commands(page)).filter(command => String(command.type).startsWith('upload_'))).toEqual(before);
+      await expect(prompt).toHaveValue('Keep immediate cancel draft');
+
+      await page.evaluate(() => (window as unknown as { __immediateCancelSendFault: ImmediateCancelSendFault }).__immediateCancelSendFault.restore());
+      await input.setInputFiles({ name: 'fallback-new.png', mimeType: 'image/png', buffer: Buffer.from('abc') });
+      await expect(prompt).toHaveValue('Keep immediate cancel draft\nAttachment: attachment:test-1\n');
+      await expect(status).toHaveText('Attached fallback-new.png');
+      await expect(status).not.toHaveClass(/error/);
+      await expect(form).toHaveAttribute('aria-busy', 'false');
+      const after = (await commands(page)).filter(command => String(command.type).startsWith('upload_'));
+      expect(after.map(command => command.type)).toEqual(['upload_begin', 'upload_chunk', 'upload_chunk', 'upload_begin', 'upload_chunk', 'upload_finish']);
+      expect(after.slice(0, 3)).toEqual(before);
+      expect(after[3]).toMatchObject({ target: composerTarget, files: [{ name: 'fallback-new.png', media_type: 'image/png', bytes: 3 }] });
+      const newId = `upload-${String(after[3].request_id)}`;
+      expect(newId).not.toBe(oldId);
+      expect(after[4]).toMatchObject({ target: composerTarget, upload_id: newId, file_index: 0, sequence: 0, data: 'YWJj', sha256: fallbackNewDigest });
+      expect(after[5]).toMatchObject({ target: composerTarget, upload_id: newId, files: [{ file_index: 0, sha256: fallbackNewDigest }] });
+      expect(after.filter(command => command.type === 'upload_finish')).toHaveLength(1);
+      expect((await prompt.inputValue()).match(/Attachment: attachment:test-1/g)).toHaveLength(1);
+    } finally {
+      await page.evaluate(() => {
+        (window as unknown as { __immediateCancelSendFault: ImmediateCancelSendFault }).__immediateCancelSendFault.restore();
+        (window as unknown as { __fallbackReadProbe: FallbackReadProbe }).__fallbackReadProbe.release();
+      });
+    }
+  });
+}

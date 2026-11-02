@@ -54,8 +54,12 @@ can still observe connection metadata such as endpoints, timing, and encrypted
 frame sizes, but not relay commands, terminal output, uploads, or
 push-subscription details. Once the direct WebRTC path takes over, application
 frames and their metadata leave the gateway entirely; it still saw the
-rendezvous and the encrypted signaling that set the path up. Tokenless
-loopback development connections do not add application-layer encryption.
+rendezvous and the encrypted signaling that set the path up. With Tailscale
+Serve, HTTPS ends on your own computer; when Tailscale relays traffic it
+carries only WireGuard-encrypted packets, and the relay's end-to-end encryption
+still applies. Enabling Tailscale HTTPS certificates publishes your machine's
+`*.ts.net` name in public Certificate Transparency logs. Tokenless loopback
+development connections do not add application-layer encryption.
 
 As with any browser E2EE app, this assumes the phone is running trusted app
 code. A provider that actively replaces the JavaScript before it reaches the

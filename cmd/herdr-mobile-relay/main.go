@@ -24,6 +24,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/stablestate"
 	"github.com/0cv/herdr-mobile-relay/internal/support"
+	"github.com/0cv/herdr-mobile-relay/internal/tailscaleserve"
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
 )
 
@@ -158,6 +159,8 @@ func run(args []string) (int, error) {
 			return 2, errors.New("unknown pages-projects operation")
 		}
 		return 0, nil
+	case "tailscale":
+		return tailscaleserve.Run(args, os.Stdout, os.Stderr)
 	case "stable-state":
 		if len(args) == 0 {
 			return 2, errors.New("stable-state requires an operation")

@@ -1,10 +1,10 @@
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 import versions from './build-versions.json' with { type: 'json' };
+import { assetIdentity as digest } from './scripts/asset-identity.mjs';
 import { pagesHeaders } from './scripts/pages-policy.ts';
 
 const manifest = readFileSync(fileURLToPath(new URL('../herdr-plugin.toml', import.meta.url)), 'utf8');
@@ -25,14 +25,6 @@ type BundleAsset = {
 };
 type BundleItem = BundleChunk | BundleAsset;
 type Bundle = Record<string, BundleItem>;
-
-function digest(source: string | Uint8Array): { sha256: string; integrity: string } {
-  const hash = createHash('sha256').update(source).digest();
-  return {
-    sha256: hash.toString('hex'),
-    integrity: `sha256-${hash.toString('base64')}`,
-  };
-}
 
 function releaseBootstrap(): string {
   return '<!doctype html><script src="/herdr-bootstrap.js"></script>\n';

@@ -37,12 +37,12 @@ CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile
 
 RELAY_BIN="$(relay_binary)"
 
-if [ -z "$CLOUDFLARED_BIN" ]; then
+if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "$CLOUDFLARED_BIN" ]; then
     echo "cloudflared not found in PATH"
     exit 78
 fi
 
-if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
+if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
     echo "Cloudflare tunnel config not readable: $CLOUDFLARED_CONFIG"
     exit 78
 fi
@@ -85,9 +85,11 @@ echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
 HERDR_GITHUB_TOKEN_FILE="$RELAY_UPDATER_TOKEN_FILE" "$RELAY_BIN" serve &
 RELAY_PID=$!
 
-echo "Starting cloudflared with $CLOUDFLARED_CONFIG"
-(unset HERDR_GITHUB_TOKEN_FILE; exec "$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run) &
-TUNNEL_PID=$!
+if [ -z "${HERDR_TAILSCALE_PORT:-}" ]; then
+    echo "Starting cloudflared with $CLOUDFLARED_CONFIG"
+    (unset HERDR_GITHUB_TOKEN_FILE; exec "$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run) &
+    TUNNEL_PID=$!
+fi
 
 while true; do
     if ! kill -0 "$RELAY_PID" 2>/dev/null; then
@@ -96,7 +98,7 @@ while true; do
         exit "${status:-1}"
     fi
 
-    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    if [ -n "$TUNNEL_PID" ] && ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
         wait "$TUNNEL_PID" || status=$?
         echo "cloudflared exited with status ${status:-0}"
         exit "${status:-1}"

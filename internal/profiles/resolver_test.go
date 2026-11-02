@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -245,6 +247,55 @@ func TestCommandConfig(t *testing.T) {
 	dirs, format, suppressed := resolver.CommandDiscovery("off-profile")
 	if !suppressed || format != "" || len(dirs) != 0 {
 		t.Fatalf("suppressed command discovery = %q, %q, %v", dirs, format, suppressed)
+	}
+}
+
+func TestConfiguredSkillPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	absolute := filepath.Join(t.TempDir(), "skills")
+	separator := string(os.PathListSeparator)
+	for _, tt := range []struct {
+		name, raw, format string
+		want              []string
+		suppressed        bool
+	}{
+		{name: "bare home", raw: "~", format: "skill:{name}", want: []string{home}},
+		{name: "home child", raw: "~/skills", format: "skill:{name}", want: []string{filepath.Join(home, "skills")}},
+		{name: "absolute override", raw: absolute, format: "skill:{name}", want: []string{absolute}},
+		{name: "list whitespace and empty entries", raw: strings.Join([]string{"", " ~ ", "", " ~/skills ", " " + absolute + " ", ""}, separator), format: "skill:{name}", want: []string{home, filepath.Join(home, "skills"), absolute}},
+		{name: "empty list", raw: separator + " " + separator, format: "skill:{name}"},
+		{name: "off", raw: "~", format: "OFF", suppressed: true},
+		{name: "invalid format", raw: "~", format: "{name}:{other}"},
+		{name: "absent format", raw: "~"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			configHome := t.TempDir()
+			herdrDir := filepath.Join(configHome, "herdr")
+			if err := os.MkdirAll(herdrDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			ini := "[skills]\nPi = " + tt.raw + "\n[commands]\npi = " + tt.format + "\n"
+			if err := os.WriteFile(filepath.Join(herdrDir, "agent-profiles.ini"), []byte(ini), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			resolver := NewResolver(configHome, nil)
+			wantFormat := tt.format
+			if tt.suppressed || !validCommandFormat(wantFormat) {
+				wantFormat = ""
+			}
+			// Repeated discovery must not mutate cached paths or append defaults.
+			for range 2 {
+				dirs, format, suppressed := resolver.CommandDiscovery(" PI ")
+				if !reflect.DeepEqual(dirs, tt.want) || format != wantFormat || suppressed != tt.suppressed {
+					t.Fatalf("discovery = %q, %q, %v; want %q, %q, %v (home is %q, not %q)", dirs, format, suppressed, tt.want, wantFormat, tt.suppressed, home, filepath.Join(home, "~"))
+				}
+			}
+			if dirs, format, suppressed := resolver.CommandDiscovery("claude"); len(dirs) != 0 || format != "" || suppressed {
+				t.Fatalf("unconfigured profile inherited override: %q, %q, %v", dirs, format, suppressed)
+			}
+		})
 	}
 }
 

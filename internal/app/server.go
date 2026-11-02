@@ -3215,6 +3215,9 @@ func (s *Server) recordWriteAudit(
 		return
 	}
 	action := auditAction(message)
+	if action == "" {
+		return
+	}
 	requestID, _ := message["request_id"].(string)
 	paneID, _ := message["pane_id"].(string)
 	if paneID == "" {
@@ -3267,15 +3270,19 @@ func (s *Server) recordWriteAudit(
 }
 
 func auditAction(message map[string]any) string {
-	action, _ := message["type"].(string)
-	if action == "" || action == "command" {
-		action, _ = message["action"].(string)
-	}
-	return action
+	messageType, _ := message["type"].(string)
+	action, _ := message["action"].(string)
+	operation, _ := protocol.ResolveOperation(messageType, action)
+	return operation
 }
 
 func auditWriteDetails(message map[string]any) map[string]any {
-	if auditAction(message) == "set_pi_integration" {
+	action := auditAction(message)
+	// Invalid/ambiguous identities must never reach payload hashing or logging.
+	if action == "" {
+		return nil
+	}
+	if action == "set_pi_integration" {
 		details := make(map[string]any)
 		if enabled, ok := message["enabled"].(bool); ok {
 			details["enabled"] = enabled
@@ -3285,7 +3292,7 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	// A secret answering a noecho prompt gets no payload digest and no keys: the
 	// digest of a low-entropy secret is crackable offline and the keys spell the
 	// secret out. Only its shape is auditable.
-	if action := auditAction(message); action == "send_secret" || action == "send_terminal_text" || action == "send_pi_prompt_unconfirmed" {
+	if action == "send_secret" || action == "send_terminal_text" || action == "send_pi_prompt_unconfirmed" {
 		details := make(map[string]any, 1)
 		if text, ok := message["text"].(string); ok {
 			details["text_bytes"] = len(text)

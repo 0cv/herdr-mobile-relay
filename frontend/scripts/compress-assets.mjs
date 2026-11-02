@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { brotliCompressSync, constants } from 'node:zlib';
+import { assetIdentity } from './asset-identity.mjs';
 import { releaseCompressedAssets } from './compressed-assets.mjs';
 
 const root = resolve(process.argv[2] || 'dist');
@@ -14,14 +14,6 @@ function compress(source) {
       [constants.BROTLI_PARAM_SIZE_HINT]: source.length,
     },
   });
-}
-
-function sha256(source) {
-  return createHash('sha256').update(source).digest('hex');
-}
-
-function integrity(hex) {
-  return `sha256-${Buffer.from(hex, 'hex').toString('base64')}`;
 }
 
 const compressedAssets = await releaseCompressedAssets(root);
@@ -43,9 +35,9 @@ for (const file of Object.values(descriptor.files || {})) {
   const relative = typeof file.path === 'string' ? file.path.replace(/^\//, '') : '';
   const output = compressed.get(relative);
   if (!output) throw new Error(`No Brotli representation was created for ${relative}`);
-  const digest = sha256(output);
-  file.brotli_sha256 = digest;
-  file.brotli_integrity = integrity(digest);
+  const identity = assetIdentity(output);
+  file.brotli_sha256 = identity.sha256;
+  file.brotli_integrity = identity.integrity;
 }
 const serializedDescriptor = `${JSON.stringify(descriptor, null, 2)}\n`;
 await writeFile(descriptorPath, serializedDescriptor);

@@ -16,6 +16,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const (
@@ -257,15 +258,15 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	if sequence := uint64Value(message["_server_sequence"]); sequence != 0 {
 		ctx = context.WithValue(ctx, receiptContextKey{}, CommandID(sequence))
 	}
-	action := stringValue(message, "action")
-	if action == "" {
-		action = stringValue(message, "type")
-	}
+	action, operationErr := protocol.ResolveOperation(stringValue(message, "type"), stringValue(message, "action"))
 	requestID := stringValue(message, "request_id")
 	if requestID == "" {
 		requestID = fmt.Sprintf("req-%d", receivedAt.UnixNano())
 	}
 	paneID := stringValue(message, "pane_id")
+	if operationErr != nil {
+		return d.fail(requestID, "", paneID, operationErr.Error())
+	}
 	if paneID != "" {
 		generation, active := d.state.PaneSession(paneID)
 		ctx = context.WithValue(ctx, paneSessionContextKey{}, paneSessionAdmission{
@@ -690,13 +691,12 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 	}
 	ledgerKey := "start\x00" + requestID
 	payloadHash := hashPayload(request)
-	var profile profiles.Profile
-	if d.lifecycle != nil {
-		var err error
-		profile, request, err = d.lifecycle.ValidateStart(request)
-		if err != nil {
-			return d.fail(requestID, "agent_start", "", err.Error())
-		}
+	if d.lifecycle == nil || d.profiles == nil || d.lifecycle.profiles == nil {
+		return d.fail(requestID, "agent_start", "", "Agent launch is unavailable: profile lifecycle is not configured")
+	}
+	profile, request, err := d.lifecycle.ValidateStart(request)
+	if err != nil {
+		return d.fail(requestID, "agent_start", "", err.Error())
 	}
 
 	budget := agentStartDeadline
@@ -711,23 +711,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
 		startupCtx, cancel := context.WithDeadline(effectCtx, receivedAt.Add(agentStartDeadline))
 		defer cancel()
-		var started StartResult
-		var err error
-		if d.lifecycle != nil {
-			started, err = d.lifecycle.Start(startupCtx, profile, request)
-		} else {
-			// Compatibility for direct unit construction. The production server
-			// always installs a profile resolver and uses the full workflow.
-			var agentArgs []string
-			agentArgs, err = hermesProfileArgs(request.HermesProfile)
-			snapshot := d.state.beginLaunch()
-			paneID := "pane-" + request.Name
-			var returned string
-			if err == nil {
-				returned, err = d.herdr.StartAgent(startupCtx, request.Name, request.ProfileID, paneID, agentStartProcessTimeoutMS, agentArgs...)
-			}
-			started = StartResult{PaneID: returned, Name: request.Name, Cwd: request.Cwd, Identity: d.state.finishLaunch(snapshot, returned)}
-		}
+		started, err := d.lifecycle.Start(startupCtx, profile, request)
 		if err != nil {
 			// started.PaneID is set when Herdr created the target before the
 			// start failed. The pane is kept, so it must travel with the
@@ -812,19 +796,8 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	if !ok {
 		return d.fail(requestID, "agent_clear", paneID, "Agent is no longer available")
 	}
-	if d.lifecycle == nil || d.profiles == nil {
-		// Direct unit-test fallback still preserves serialization.
-		return d.schedule(ctx, ScheduleOptions{
-			Command: d.command(ctx, receivedAt, requestID, CommandClear, paneID, agentStartDeadline, nil),
-		}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-			if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
-				return EffectResult{Result: stale}
-			}
-			if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
-				return EffectResult{Result: d.failErr(requestID, "agent_clear", paneID, err)}
-			}
-			return EffectResult{Result: completed(requestID, "agent_clear", paneID, nil), BumpGeneration: true}
-		}))
+	if d.lifecycle == nil || d.profiles == nil || d.lifecycle.profiles == nil {
+		return d.fail(requestID, "agent_clear", paneID, "Agent lifecycle is unavailable")
 	}
 
 	profileID := d.profiles.ResolveOwnedPane(paneID)

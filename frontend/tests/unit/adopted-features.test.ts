@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AttachmentBatchController } from '$lib/attachments';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
-import { fencedCodeText, safeMarkdownHtml, speakableText } from '$lib/markdown';
+import { fencedCodeText, linkifyPlainText, safeExternalUrl, safeMarkdownHtml, speakableText } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
-import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
+import { escapeHtml, linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
 import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
 
@@ -654,5 +654,75 @@ describe('attachment batches', () => {
     await expect(clearing).resolves.toBeUndefined();
     expect(cancel).toHaveBeenCalledOnce();
     expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ upload_id: 'pending-upload' }));
+  });
+});
+
+describe('rich output public-consumer characterization', () => {
+  it('preserves all five entities and double escaping through public consumers', () => {
+    expect(escapeHtml('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
+    expect(linkifyPlainText('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
+    expect(safeMarkdownHtml('&<>"\' &amp;')).toBe('<p>&amp;&lt;&gt;&quot;&#39; &amp;amp;</p>');
+  });
+
+  it.each([
+    [null, ''], [undefined, ''], [0, '0'], [false, 'false'],
+    [{ toString: () => '<value>' }, '&lt;value&gt;'],
+  ])('retains terminal coercion for %s', (value, expected) => {
+    expect(escapeHtml(value)).toBe(expected);
+  });
+
+  it('propagates terminal string-conversion exceptions', () => {
+    const error = new Error('conversion failed');
+    expect(() => escapeHtml({ toString: () => { throw error; } })).toThrow(error);
+  });
+
+  it.each([
+    ['HTTPS://ExAmPlE.COM:443/café/%2F?q=é&x=%20#été', 'https://example.com/caf%C3%A9/%2F?q=%C3%A9&x=%20#%C3%A9t%C3%A9'],
+    ['http://[2001:DB8::1]:80/a%20b#x', 'http://[2001:db8::1]/a%20b#x'],
+    ['http://user:p%40ss@ExAmPlE.COM:80/a', 'http://user:p%40ss@example.com/a'],
+    ['http://localhost:8375/a', 'http://localhost:8375/a'],
+    ['https:example.com/a', 'https://example.com/a'],
+  ])('retains native HTTP(S) serialization of %s', (value, expected) => {
+    expect(safeExternalUrl(value)).toBe(expected);
+  });
+
+  it.each(['javascript:alert(1)', 'data:text/plain,x', 'ftp://example.com/a', '/relative', '//example.com/a', 'https://', 'http://[::1', 'https://%'])('rejects %s at the public URL boundary', (value) => {
+    expect(safeExternalUrl(value)).toBe('');
+  });
+
+  it('does not extend link recognition to every native URL-accepted form', () => {
+    expect(linkifyPlainText('https:example.com/a')).toBe('https:example.com/a');
+    expect(linkifyTerminalText('https:example.com/a')).toBe('https:example.com/a');
+    expect(safeMarkdownHtml('https:example.com/a')).toBe('<p>https:example.com/a</p>');
+  });
+
+  // Counts, not nesting order; a balanced final closer also stops trimming punctuation inside it.
+  it.each([
+    ['https://example.com/a(b.)', '<a href="https://example.com/a(b.)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b.)</a>', '<a class="terminal-link" href="https://example.com/a(b.)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b.)</a>'],
+    ['https://example.com/a[b]', '<a href="https://example.com/a[b]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a[b]</a>', '<a class="terminal-link" href="https://example.com/a[b]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a[b]</a>'],
+    ['https://example.com/a([)]', '<a href="https://example.com/a([)]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a([)]</a>', '<a class="terminal-link" href="https://example.com/a([)]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a([)]</a>'],
+    ['https://example.com/a(b))].,;:!?', '<a href="https://example.com/a(b)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b)</a>)].,;:!?', '<a class="terminal-link" href="https://example.com/a(b)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b)</a>)].,;:!?'],
+  ])('preserves punctuation bytes for %s across consumers', (value, markdown, terminal) => {
+    expect(linkifyPlainText(value)).toBe(markdown);
+    expect(safeMarkdownHtml(value)).toBe(`<p>${markdown}</p>`);
+    expect(linkifyTerminalText(value)).toBe(terminal);
+  });
+
+  it('separates canonical encoded hrefs from escaped original display text', () => {
+    const value = 'HTTPS://ExAmPlE.COM:443/café/%2F?q=é&x=%20#été';
+    expect(linkifyPlainText(value)).toBe('<a href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a>');
+    expect(safeMarkdownHtml(value)).toBe('<p><a href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a></p>');
+    expect(linkifyTerminalText(value)).toBe('<a class="terminal-link" href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a>');
+  });
+
+  it('escapes href attributes and preserves explicit labels and suffix highlighting', () => {
+    expect(safeMarkdownHtml('[<&label>](HTTPS://EXAMPLE.COM:443/a?x=1&y=2)', 'label')).toBe('<p><a href="https://example.com/a?x=1&amp;y=2" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">&lt;&amp;<mark>label</mark>&gt;</a></p>');
+    expect(safeMarkdownHtml('https://example.com/a).', ').')).toBe('<p><a href="https://example.com/a" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a</a><mark>).</mark></p>');
+    expect(linkifyTerminalText('http://user:p%40ss@ExAmPlE.COM:80/a')).toBe('<a class="terminal-link" href="http://user:p%40ss@example.com/a" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">http://user:p%40ss@ExAmPlE.COM:80/a</a>');
+  });
+
+  it('retains exact plain and ANSI renderer markup around terminal links', () => {
+    expect(renderTerminalContent('https://example.com/a). &', 'text').html).toBe('<a class="terminal-link" href="https://example.com/a" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a</a>). &amp;');
+    expect(renderTerminalContent('\x1b[1mhttps://example.com/a). &\x1b[0m', 'ansi').html).toBe('<span class="ansi-line"><span style="font-weight:700"><a class="terminal-link" href="https://example.com/a" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a</a>). &amp;</span></span>');
   });
 });

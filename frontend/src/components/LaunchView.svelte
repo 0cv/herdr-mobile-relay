@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import DirectoryPicker from '$components/DirectoryPicker.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import { suggestedLaunchName } from '$lib/launch';
@@ -244,46 +245,15 @@
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>
       <div bind:this={directoryBrowser} class:open={directoryOpen} class="directory-browser" aria-labelledby="launch-cwd-label">
-        <div class="directory-toolbar">
-          <Button
-            size="icon"
-            variant="secondary"
-            aria-label="Open parent directory"
-            disabled={!connection?.directoryBrowser?.parent}
-            onclick={() => connection?.directoryBrowser?.parent && loadDirectory(connection.directoryBrowser.parent)}
-          >↑</Button>
-          <button
-            class="directory-current"
-            type="button"
-            aria-expanded={directoryOpen}
-            aria-controls="launch-directory-list"
-            onclick={() => { directoryOpen = !directoryOpen; }}
-          >
-            <span>{connection?.directoryBrowser?.current.label || cwd || (connection?.directoryLoading ? 'Loading…' : 'Unavailable')}</span>
-            <span aria-hidden="true">⌄</span>
-          </button>
-        </div>
-        {#if directoryOpen}
-          <div id="launch-directory-list" class="directory-list" aria-label="Subdirectories">
-            {#if !connection?.capabilities.includes('directory_browser')}
-              <p>Update and restart this computer’s relay to browse directories.</p>
-            {:else if connection.directoryLoading}
-              <p>Loading folders…</p>
-            {:else if connection.directoryError}
-              <p role="alert">{connection.directoryError}</p>
-            {:else}
-              {#if connection?.directoryBrowser?.parent}
-                <button type="button" onclick={() => loadDirectory(connection.directoryBrowser?.parent || '')}>↰ Parent folder</button>
-              {/if}
-              {#each connection?.directoryBrowser?.directories || [] as directory (directory.path)}
-                <button type="button" onclick={() => loadDirectory(directory.path)}>📁 {directory.name}</button>
-              {/each}
-              {#if connection?.directoryBrowser && !connection.directoryBrowser.directories.length}
-                <p>This folder has no subdirectories. It remains selected.</p>
-              {/if}
-            {/if}
-          </div>
-        {/if}
+        <DirectoryPicker
+          {connection}
+          {cwd}
+          listId="launch-directory-list"
+          bind:open={directoryOpen}
+          onselect={loadDirectory}
+          notice={!connection?.capabilities.includes('directory_browser') ? 'Update and restart this computer’s relay to browse directories.' : ''}
+          emptyNotice="This folder has no subdirectories. It remains selected."
+        />
       </div>
       {#if atHome}
         <p id="launch-cwd-hint" class="hint" role="status">Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.</p>

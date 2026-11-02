@@ -1,9 +1,11 @@
 import { get } from 'svelte/store';
+
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { securityState } from '$lib/security';
 import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
+import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
 import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
@@ -21,7 +23,7 @@ import {
 import { paneViewPreferenceKey } from '$lib/agent-view';
 import { closeCurrentView, currentView, initializeRouter, navigate } from '$lib/router';
 import { SLASH_COMMAND_MAX_ENTRIES } from '$lib/slash-command-limits';
-import { relayStore, type CommandError } from '$lib/store';
+import { normalizeConversationPage, relayStore, CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
@@ -100,6 +102,25 @@ function exactWireScope(paneId: string, relayId: string) {
     },
   };
 }
+
+describe('conversation reason code wire decoding', () => {
+  it('consumes the shared Go wire shape and ignores unknown fields', () => {
+    expect(normalizeConversationPage({ ...unavailablePage, future_field: { arbitrary: true } }))
+      .toMatchObject({ available: false, reasonCode: 'source_missing', reason: unavailablePage.reason });
+  });
+
+  it.each([undefined, null, ''])('keeps optional code %s absent', (reason_code) => {
+    expect(normalizeConversationPage({ ...unavailablePage, reason_code }).reasonCode).toBeUndefined();
+  });
+
+  it('accepts the same 64-character bound as error codes without an enum restriction', () => {
+    expect(normalizeConversationPage({ ...unavailablePage, reason_code: 'x'.repeat(64) }).reasonCode).toBe('x'.repeat(64));
+  });
+
+  it.each([42, false, {}, [], 'x'.repeat(65)].map(value => [value]))('rejects malformed or oversized code %j', (reason_code) => {
+    expect(() => normalizeConversationPage({ ...unavailablePage, reason_code })).toThrow('invalid conversation history');
+  });
+});
 
 describe('relay command store', () => {
   beforeEach(() => {
@@ -1170,6 +1191,7 @@ describe('relay command store', () => {
   });
 
   it('binds approvals to their blocked event and coalesces pane polling', async () => {
+    vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -1206,6 +1228,8 @@ describe('relay command store', () => {
     });
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(approval).resolves.toBe(true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(2);
   });
 
   it('does not let an old pane generation suppress a replacement read', () => {
@@ -3854,5 +3878,2362 @@ describe('hidden reconnect retirement', () => {
     relayStore.revalidateConnections(2_000);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(MockWebSocket.instances).toHaveLength(2);
+  });
+});
+
+describe('command error detail through public transport ingress', () => {
+  const actionId = 'detail_action_001';
+  const apiError = { code: 'command_refused', args: { reason: 'wire', retryable: false, count: 2 } };
+  const details: { name: string; fields: Record<string, unknown>; accepted: string }[] = [
+    { name: 'missing', fields: {}, accepted: '' },
+    { name: 'undefined omitted by JSON', fields: { detail: undefined }, accepted: '' },
+    { name: 'null', fields: { detail: null }, accepted: '' },
+    { name: 'number', fields: { detail: 42 }, accepted: '' },
+    { name: 'boolean', fields: { detail: false }, accepted: '' },
+    { name: 'array', fields: { detail: ['wire'] }, accepted: '' },
+    { name: 'record', fields: { detail: { text: 'wire' } }, accepted: '' },
+    { name: 'nonempty', fields: { detail: '  exact wire detail  ' }, accepted: '  exact wire detail  ' },
+    { name: 'whitespace', fields: { detail: ' \t\n' }, accepted: ' \t\n' },
+    { name: 'empty', fields: { detail: '' }, accepted: '' },
+    { name: 'ASCII 512 bytes', fields: { detail: 'a'.repeat(512) }, accepted: 'a'.repeat(512) },
+    { name: 'ASCII 513 bytes', fields: { detail: 'a'.repeat(513) }, accepted: '' },
+    { name: 'two-byte 512 bytes', fields: { detail: 'é'.repeat(256) }, accepted: 'é'.repeat(256) },
+    { name: 'two-byte 513 bytes', fields: { detail: 'é'.repeat(256) + 'a' }, accepted: '' },
+    { name: 'three-byte 512 bytes', fields: { detail: '界'.repeat(170) + 'ab' }, accepted: '界'.repeat(170) + 'ab' },
+    { name: 'three-byte 513 bytes', fields: { detail: '界'.repeat(171) }, accepted: '' },
+    { name: 'emoji 512 bytes', fields: { detail: '😀'.repeat(128) }, accepted: '😀'.repeat(128) },
+    { name: 'emoji 516 bytes', fields: { detail: '😀'.repeat(129) }, accepted: '' },
+    { name: 'lone high surrogate 512 replacement bytes', fields: { detail: 'a'.repeat(509) + '\ud800' }, accepted: 'a'.repeat(509) + '\ud800' },
+    { name: 'lone high surrogate 513 replacement bytes', fields: { detail: 'a'.repeat(510) + '\ud800' }, accepted: '' },
+    { name: 'lone low surrogate 512 replacement bytes', fields: { detail: 'a'.repeat(509) + '\udc00' }, accepted: 'a'.repeat(509) + '\udc00' },
+    { name: 'lone low surrogate 513 replacement bytes', fields: { detail: 'a'.repeat(510) + '\udc00' }, accepted: '' },
+    { name: 'decomposed Unicode preserved', fields: { detail: 'e\u0301' }, accepted: 'e\u0301' },
+  ];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    transportHijack.current = null;
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    localStorage.clear();
+    sessionStorage.clear();
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Detail relay', url: 'ws://127.0.0.1:8871', token: '' });
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+  });
+
+  afterEach(() => {
+    transportHijack.current = null;
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function command() {
+    const socket = MockWebSocket.instances.filter(socket => new URL(socket.url).port === '8871').at(-1)!;
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    const before = socket.sent.length;
+    const payload = {
+      type: 'tab_reorder', pane_id: 'w1:p1', ...exactWireScope('w1:p1', relayId),
+      insert_index: 2, intent: { action_id: actionId },
+    };
+    const resolved = vi.fn();
+    const rejected = vi.fn();
+    const promise = relayStore.sendCommand(relayId, payload, 1_000, false, controller.signal)
+      .then(result => { resolved(result); return result; }, error => { rejected(error); return error; });
+    const frames = socket.sent.slice(before).map(frame => JSON.parse(frame));
+    expect(frames).toEqual([{ ...payload, request_id: expect.any(String), protocol: 3, client_id: expect.any(String) }]);
+    const requestId = frames[0].request_id as string;
+    expect(requestId.length).toBeGreaterThan(0);
+    expect(frames[0].client_id.length).toBeGreaterThan(0);
+    expect(add).toHaveBeenCalledExactlyOnceWith('abort', expect.any(Function), { once: true });
+    return { socket, relayId, controller, remove, add, requestId, resolved, rejected, promise };
+  }
+
+  function cleaned(pending: ReturnType<typeof command>) {
+    expect(pending.remove).toHaveBeenCalledExactlyOnceWith('abort', pending.add.mock.calls[0][1]);
+  }
+
+  function failure(error: unknown, message: string, data: Record<string, unknown>) {
+    expect(error).toBeInstanceOf(CommandError);
+    expect((error as Error).constructor).toBe(CommandError);
+    expect((error as Error).message).toBe(message);
+    expect((error as CommandError).data).toStrictEqual(data);
+    expect((error as CommandError).code).toBeUndefined();
+    expect((error as CommandError).args).toBeUndefined();
+    expect(Object.keys((error as CommandError).data!).sort()).toEqual(Object.keys(data).sort());
+  }
+
+  async function noLaterOwnership(pending: ReturnType<typeof command>) {
+    cleaned(pending);
+    pending.socket.message({ type: 'action_receipt', request_id: pending.requestId,
+      receipt: { action_id: actionId, phase: 'confirmed' }, detail: 'late receipt' });
+    pending.socket.message({ type: 'error', request_id: pending.requestId, error: apiError, detail: 'late API error' });
+    await vi.advanceTimersByTimeAsync(1_001);
+    pending.controller.abort();
+    await Promise.resolve();
+    cleaned(pending);
+    expect(pending.resolved.mock.calls.length + pending.rejected.mock.calls.length).toBe(1);
+  }
+
+  for (const phase of ['failed_before_dispatch', 'dispatched_unknown'] as const) {
+    for (const withCode of [true, false]) {
+      it.each(details)(`receipt ${phase} code=${withCode}: $name`, async ({ fields, accepted }) => {
+        const pending = command();
+        const receipt = { action_id: actionId, phase, ...(withCode ? { error: apiError } : {}) };
+        pending.socket.message({ type: 'action_receipt', request_id: pending.requestId, receipt, ...fields });
+        cleaned(pending); // Terminal cleanup is synchronous, before promise rejection observers.
+        const error = await pending.promise;
+        failure(error, accepted || (withCode ? apiError.code : 'Command failed'), {
+          phase, ...(phase === 'failed_before_dispatch' ? { not_started: true } : {}),
+          ...(withCode ? { api_error: apiError } : {}),
+          ...(phase === 'dispatched_unknown' ? { dispatched_unknown: true } : {}),
+        });
+        expect(pending.rejected).toHaveBeenCalledExactlyOnceWith(error);
+        expect(pending.resolved).not.toHaveBeenCalled();
+        await noLaterOwnership(pending);
+      });
+    }
+  }
+
+  it.each(details)('API error: $name', async ({ fields, accepted }) => {
+    const pending = command();
+    pending.socket.message({ type: 'error', request_id: pending.requestId, error: apiError, ...fields });
+    cleaned(pending);
+    const error = await pending.promise;
+    failure(error, accepted || apiError.code, { phase: 'failed_before_dispatch', api_error: apiError });
+    expect(pending.rejected).toHaveBeenCalledExactlyOnceWith(error);
+    expect(pending.resolved).not.toHaveBeenCalled();
+    await noLaterOwnership(pending);
+  });
+
+  it('confirmed receipts resolve despite malformed detail and ignore duplicate failures', async () => {
+    const pending = command();
+    const receipt = { action_id: actionId, phase: 'confirmed', error: apiError };
+    pending.socket.message({ type: 'action_receipt', request_id: pending.requestId, receipt, detail: { invalid: true } });
+    cleaned(pending);
+    const result = await pending.promise;
+    expect(result).toStrictEqual({ type: 'command_result', request_id: pending.requestId,
+      action: 'tab_reorder', ok: true, phase: 'confirmed', data: { receipt } });
+    expect(pending.resolved).toHaveBeenCalledExactlyOnceWith(result);
+    expect(pending.rejected).not.toHaveBeenCalled();
+    await noLaterOwnership(pending);
+  });
+
+  it.each(['prepared', 'awaiting_evidence'])('%s with malformed detail replaces the original deadline and waits for a terminal receipt', async phase => {
+    const pending = command();
+    await vi.advanceTimersByTimeAsync(500);
+    pending.socket.message({ type: 'action_receipt', request_id: pending.requestId,
+      receipt: { action_id: actionId, phase }, detail: ['invalid'] });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(pending.resolved).not.toHaveBeenCalled();
+    expect(pending.rejected).not.toHaveBeenCalled();
+    expect(pending.remove).not.toHaveBeenCalled();
+    const receipt = { action_id: actionId, phase: 'confirmed' };
+    pending.socket.message({ type: 'action_receipt', request_id: pending.requestId, receipt, detail: 'a'.repeat(513) });
+    expect(await pending.promise).toStrictEqual({ type: 'command_result', request_id: pending.requestId,
+      action: 'tab_reorder', ok: true, phase: 'confirmed', data: { receipt } });
+    await noLaterOwnership(pending);
+  });
+
+  it.each(['prepared', 'awaiting_evidence'])('%s times out at its own ten-second deadline, then releases abort and terminal ownership', async phase => {
+    const pending = command();
+    await vi.advanceTimersByTimeAsync(500);
+    pending.socket.message({ type: 'action_receipt', request_id: pending.requestId,
+      receipt: { action_id: actionId, phase }, detail: null });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(pending.rejected).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await pending.promise;
+    failure(error, 'Relay confirmation timed out', { dispatched_unknown: true });
+    expect(pending.rejected).toHaveBeenCalledExactlyOnceWith(error);
+    await noLaterOwnership(pending);
+  });
+
+  it.each(['action_receipt', 'error'])('%s rejects neither malformed envelopes nor wrong request/relay controls before a valid failure', async type => {
+    // addRelay reconnects all configured relays; establish both before sending.
+    relayStore.addRelay({ label: 'Other detail relay', url: 'ws://127.0.0.1:8872', token: '' });
+    const owner = MockWebSocket.instances.filter(socket => new URL(socket.url).port === '8871').at(-1)!;
+    owner.open();
+    owner.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    const other = MockWebSocket.instances.at(-1)!;
+    other.open();
+    other.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    const pending = command();
+    const valid = type === 'action_receipt'
+      ? { type, receipt: { action_id: actionId, phase: 'failed_before_dispatch', error: apiError }, detail: 'first valid failure' }
+      : { type, error: apiError, detail: 'first valid failure' };
+    other.message({ ...valid, request_id: pending.requestId });
+    other.message({ ...valid });
+    const malformed = type === 'action_receipt' ? [
+      { receipt: null }, { receipt: [] }, { receipt: { action_id: 'bad', phase: 'confirmed' } },
+      { receipt: { action_id: actionId, phase: 'invalid' } },
+      { receipt: { action_id: actionId, phase: 'confirmed', error: { code: 'BAD CODE' } } },
+    ] : [
+      { error: null }, { error: [] }, { error: { code: 'BAD CODE' } },
+      { error: { code: 'valid_code', args: [] } }, { error: { code: 'valid_code', args: { nested: {} } } },
+    ];
+    for (const envelope of malformed) pending.socket.message({ type, request_id: pending.requestId, ...envelope });
+    // An unrelated receipt action cannot fall back from an unmatched/malformed request ID.
+    const unrelated = type === 'action_receipt'
+      ? { ...valid, receipt: { action_id: 'unrelated_action', phase: 'confirmed' } }
+      : valid;
+    for (const request_id of [undefined, null, 42, 'wrong_request']) pending.socket.message({ ...unrelated, request_id });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pending.resolved).not.toHaveBeenCalled();
+    expect(pending.rejected).not.toHaveBeenCalled();
+    expect(pending.remove).not.toHaveBeenCalled();
+    pending.socket.message({ ...valid, request_id: pending.requestId });
+    const error = await pending.promise;
+    failure(error, 'first valid failure', { phase: 'failed_before_dispatch',
+      ...(type === 'action_receipt' ? { not_started: true } : {}), api_error: apiError });
+    expect(pending.rejected).toHaveBeenCalledExactlyOnceWith(error);
+    await noLaterOwnership(pending);
+  });
+
+  it.each([undefined, 42, 'unknown_request'])('correlates receipt action-ID fallback for request %s on the owning relay only', async request_id => {
+    const pending = command();
+    pending.socket.message({ type: 'action_receipt', request_id,
+      receipt: { action_id: actionId, phase: 'dispatched_unknown', error: apiError }, detail: 'fallback matched' });
+    const error = await pending.promise;
+    failure(error, 'fallback matched', { phase: 'dispatched_unknown', api_error: apiError, dispatched_unknown: true });
+    expect(pending.rejected).toHaveBeenCalledExactlyOnceWith(error);
+    await noLaterOwnership(pending);
+    const next = command();
+    expect(next.requestId).not.toBe(pending.requestId);
+    // A late request ID must not steal a new command unless its action also matches.
+    next.socket.message({ type: 'error', request_id: pending.requestId, error: apiError, detail: 'late prior API' });
+    await Promise.resolve();
+    expect(next.rejected).not.toHaveBeenCalled();
+    next.socket.message({ type: 'error', request_id: next.requestId, error: apiError, detail: 'next command' });
+    failure(await next.promise, 'next command', { phase: 'failed_before_dispatch', api_error: apiError });
+    await noLaterOwnership(next);
+  });
+});
+
+
+describe('pending resource release through public consumers', () => {
+  type Pending = {
+    timer: ReturnType<typeof setTimeout>;
+    cleanup?: () => void;
+    resolve: (value: any) => void;
+    reject: (error: CommandError) => void;
+  };
+  const registries = relayStore as unknown as {
+    pendingRequests: Map<string, Pending>;
+    pendingUploads: Map<string, Pending>;
+  };
+  const digest = '8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c';
+  const actionId = 'release_action_001';
+  function instrumentation() {
+    return {
+      clear: vi.spyOn(globalThis, 'clearTimeout'),
+      add: vi.spyOn(AbortSignal.prototype, 'addEventListener'),
+      remove: vi.spyOn(AbortSignal.prototype, 'removeEventListener'),
+    };
+  }
+  let clear: ReturnType<typeof instrumentation>['clear'];
+  let add: ReturnType<typeof instrumentation>['add'];
+  let remove: ReturnType<typeof instrumentation>['remove'];
+  const cleanupOrder: string[] = [];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    transportHijack.current = null;
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    localStorage.clear();
+    sessionStorage.clear();
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    // Adding a relay reconnects all: both must exist before any pending work.
+    relayStore.addRelay({ label: 'Release owner', url: 'ws://127.0.0.1:8871', token: '' });
+    relayStore.addRelay({ label: 'Release other', url: 'ws://127.0.0.1:8872', token: '' });
+    for (const socket of MockWebSocket.instances.slice(-2)) {
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    }
+    cleanupOrder.length = 0;
+    ({ clear, add, remove } = instrumentation());
+  });
+
+  afterEach(() => {
+    // Restore call-through instrumentation before store teardown drains leftovers.
+    vi.restoreAllMocks();
+    transportHijack.current = null;
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function endpoint(port = '8871') {
+    const relay = get(relayStore.relayConfigs).find(relay => new URL(relay.url).port === port)!;
+    const socket = MockWebSocket.instances.filter(socket => new URL(socket.url).port === port).at(-1)!;
+    return { relay, socket };
+  }
+
+  function observe(map: Map<string, Pending>, key: string, registered = true) {
+    const entry = map.get(key)!;
+    expect(entry).toBeDefined();
+    const timer = entry.timer;
+    const registration = registered ? add.mock.calls.findLastIndex(call => call[0] === 'abort') : -1;
+    expect(registration >= 0).toBe(registered);
+    const listener = registration < 0 ? undefined : add.mock.calls[registration][1];
+    const signal = registration < 0 ? undefined : add.mock.contexts[registration] as AbortSignal;
+    if (signal) expect(signal).toBeInstanceOf(AbortSignal);
+    const originalCleanup = entry.cleanup!;
+    const cleanup = vi.spyOn(entry, 'cleanup').mockImplementation(function (this: Pending) {
+      expect(this).toBe(entry);
+      expect(map.get(key)).toBe(entry); // Deletion/key evaluation remains caller-local, after cleanup.
+      expect(clear).toHaveBeenCalledWith(entry.timer);
+      cleanupOrder.push(key);
+      return originalCleanup.call(this);
+    });
+    const resolve = vi.spyOn(entry, 'resolve'); // Actual registered callbacks, not Promise-only counters.
+    const reject = vi.spyOn(entry, 'reject');
+    const deletion = vi.spyOn(map, 'delete');
+    return { map, key, entry, timer, signal, listener, originalCleanup, cleanup, resolve, reject, deletion };
+  }
+  type Observation = ReturnType<typeof observe>;
+
+  function released(pending: Observation, outcome: 'resolve' | 'reject', timer = pending.timer) {
+    expect(pending.map.has(pending.key)).toBe(false);
+    expect(pending.cleanup).toHaveBeenCalledTimes(1);
+    expect(clear.mock.calls.filter(call => call[0] === timer)).toHaveLength(1);
+    const clearIndex = clear.mock.calls.findIndex(call => call[0] === timer);
+    const deleteIndex = pending.deletion.mock.calls.findLastIndex(call => call[0] === pending.key);
+    const callback = pending[outcome];
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(pending[outcome === 'resolve' ? 'reject' : 'resolve']).not.toHaveBeenCalled();
+    expect(clear.mock.invocationCallOrder[clearIndex]).toBeLessThan(pending.cleanup.mock.invocationCallOrder[0]);
+    expect(pending.cleanup.mock.invocationCallOrder[0]).toBeLessThan(pending.deletion.mock.invocationCallOrder[deleteIndex]);
+    expect(pending.deletion.mock.invocationCallOrder[deleteIndex]).toBeLessThan(callback.mock.invocationCallOrder[0]);
+    if (pending.signal) {
+      const removals = remove.mock.calls.filter((call, index) => remove.mock.contexts[index] === pending.signal && call[1] === pending.listener);
+      expect(removals).toEqual([['abort', pending.listener]]);
+    }
+  }
+
+  function command(port = '8871', type = 'tab_reorder', timeout = 60_000) {
+    const { relay, socket } = endpoint(port);
+    const controller = new AbortController();
+    const payload = { type, pane_id: 'w1:p1', ...exactWireScope('w1:p1', relay.id),
+      insert_index: 2, intent: { action_id: actionId } };
+    const promise = relayStore.sendCommand(relay.id, payload, timeout, false, controller.signal)
+      .then(result => result, error => error);
+    const frame = JSON.parse(socket.sent.at(-1)!);
+    expect(frame).toEqual({ ...payload, request_id: expect.any(String), protocol: 3, client_id: expect.any(String) });
+    expect(frame.request_id).not.toBe('');
+    return { ...observe(registries.pendingRequests, frame.request_id), frame, promise, socket, relay, controller };
+  }
+
+  function legacy(pending: ReturnType<typeof command>, fields: Record<string, unknown> = { ok: true }) {
+    return { type: 'command_result', request_id: pending.key, action: pending.frame.type, ...fields };
+  }
+
+  async function noLateCommandOwnership(pending: ReturnType<typeof command>) {
+    const calls = [pending.cleanup.mock.calls.length, pending.resolve.mock.calls.length, pending.reject.mock.calls.length];
+    pending.socket.message(legacy(pending, { ok: false, error: 'duplicate' }));
+    pending.socket.message({ type: 'error', request_id: pending.key, error: { code: 'late_error' } });
+    pending.controller.abort();
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect([pending.cleanup.mock.calls.length, pending.resolve.mock.calls.length, pending.reject.mock.calls.length]).toEqual(calls);
+  }
+
+  it.each([
+    { ok: true, phase: undefined, data: { exact: 1 } },
+    { ok: false, phase: undefined, error: 'legacy failure', data: { exact: 2 } },
+    { ok: false, phase: 'not_started', error: 'not started', data: { exact: 3 } },
+    { ok: false, phase: 'dispatched_unknown', error: 'uncertain', data: { exact: 4 } },
+  ])('legacy terminal $ok/$phase releases actual resources before the unchanged outcome', async fields => {
+    const pending = command();
+    const frame = legacy(pending, fields);
+    pending.socket.message(frame);
+    released(pending, fields.ok ? 'resolve' : 'reject');
+    const outcome = await pending.promise;
+    if (fields.ok) expect(outcome).toStrictEqual(JSON.parse(JSON.stringify(frame)));
+    else {
+      expect(outcome).toBeInstanceOf(CommandError);
+      expect(outcome.constructor).toBe(CommandError);
+      expect(outcome.message).toBe(fields.error);
+      expect(outcome.data).toEqual({ ...fields.data,
+        ...(fields.phase === 'not_started' ? { not_started: true } : {}),
+        ...(fields.phase === 'dispatched_unknown' ? { dispatched_unknown: true } : {}) });
+    }
+    await noLateCommandOwnership(pending);
+  });
+
+  it.each(['receipt', 'api'] as const)('%s terminal observes current timer, map, listener and raw rejection order', async kind => {
+    const pending = command();
+    const error = { code: 'release_refused', args: { count: 2 } };
+    pending.socket.message(kind === 'receipt'
+      ? { type: 'action_receipt', request_id: pending.key, receipt: { action_id: actionId, phase: 'failed_before_dispatch', error } }
+      : { type: 'error', request_id: pending.key, error });
+    released(pending, 'reject');
+    const outcome = await pending.promise;
+    expect(outcome.constructor).toBe(CommandError);
+    expect(outcome.message).toBe(error.code);
+    expect(outcome.data).toEqual({ phase: 'failed_before_dispatch', api_error: error,
+      ...(kind === 'receipt' ? { not_started: true } : {}) });
+    await noLateCommandOwnership(pending);
+  });
+
+  it('keeps conditional action-ID fallback and found-entry behavior, including wrong-relay lookup', async () => {
+    const first = command();
+    const other = command('8872');
+    const receipt = { action_id: actionId, phase: 'confirmed' };
+    // A found wrong-relay entry prevents fallback to the otherwise matching owner entry.
+    first.socket.message({ type: 'action_receipt', request_id: other.key, receipt });
+    first.socket.message({ type: 'action_receipt', request_id: 'missing', receipt: { ...receipt, action_id: 'unrelated_action' } });
+    first.socket.message({ type: 'command_result', request_id: other.key, ok: true });
+    expect(first.cleanup).not.toHaveBeenCalled();
+    expect(other.cleanup).not.toHaveBeenCalled();
+    first.socket.message({ type: 'action_receipt', request_id: 'missing', receipt });
+    released(first, 'resolve');
+    expect(await first.promise).toMatchObject({ ok: true, request_id: first.key });
+    // A found owning entry is not additionally action-ID checked.
+    other.socket.message({ type: 'action_receipt', request_id: other.key, receipt: { ...receipt, action_id: 'different_action' } });
+    released(other, 'resolve');
+    expect(await other.promise).toMatchObject({ ok: true, request_id: other.key });
+  });
+
+  it.each(['prepared', 'awaiting_evidence', 'accepted'])('%s repeatedly replaces deadlines; terminal clears the latest timer', async phase => {
+    const pending = command('8871', 'tab_reorder', 1_000);
+    let timer = pending.timer;
+    for (let index = 0; index < 2; index++) {
+      await vi.advanceTimersByTimeAsync(400);
+      pending.socket.message(phase === 'accepted' ? legacy(pending, { phase, ok: true })
+        : { type: 'action_receipt', request_id: pending.key, receipt: { action_id: actionId, phase } });
+      expect(clear).toHaveBeenCalledWith(timer);
+      expect(pending.entry.timer).not.toBe(timer);
+      timer = pending.entry.timer;
+      expect(pending.cleanup).not.toHaveBeenCalled();
+      expect(pending.resolve).not.toHaveBeenCalled();
+      expect(pending.reject).not.toHaveBeenCalled();
+    }
+    await vi.advanceTimersByTimeAsync(1_001); // Both original deadlines would have elapsed.
+    expect(pending.cleanup).not.toHaveBeenCalled();
+    pending.socket.message(legacy(pending));
+    released(pending, 'resolve', timer);
+    expect(await pending.promise).toMatchObject({ ok: true });
+    await noLateCommandOwnership(pending);
+  });
+
+  it('agent_start accepted retains its original timer and toast, then terminal releases it', async () => {
+    const pending = command('8871', 'agent_start', 1_000);
+    const toast = vi.spyOn(relayStore, 'showToast');
+    pending.socket.message(legacy(pending, { phase: 'accepted', ok: true }));
+    expect(pending.entry.timer).toBe(pending.timer);
+    expect(clear).not.toHaveBeenCalledWith(pending.timer);
+    expect(toast).toHaveBeenCalledExactlyOnceWith('Start accepted; waiting for confirmation…');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(pending.cleanup).not.toHaveBeenCalled();
+    pending.socket.message(legacy(pending));
+    released(pending, 'resolve');
+    expect(await pending.promise).toMatchObject({ ok: true });
+    await noLateCommandOwnership(pending);
+  });
+
+  it.each(['prepared', 'awaiting_evidence', 'accepted'])('cancels the active command deadline on abort after %s without claiming universal cleanup-once', async phase => {
+    const pending = command('8871', 'tab_reorder', 1_000);
+    pending.socket.message(phase === 'accepted' ? legacy(pending, { phase, ok: true })
+      : { type: 'action_receipt', request_id: pending.key, receipt: { action_id: actionId, phase } });
+    const replacement = pending.entry.timer;
+    // A surviving replacement callback would run after abort removed the entry; keep this diagnostic guard.
+    const original = pending.cleanup.getMockImplementation()!;
+    pending.cleanup.mockImplementation(function (this: Pending) {
+      expect(this).toBe(pending.entry);
+      expect(pending.map.has(pending.key)).toBe(false);
+      return pending.originalCleanup.call(this);
+    });
+    pending.controller.abort();
+    const first = await pending.promise;
+    expect(first.constructor).toBe(CommandError);
+    expect(first.message).toBe('Conversation history request was cancelled.');
+    expect(first.code).toBe('request_cancelled');
+    expect(first.data).toBeUndefined();
+    expect(pending.map.has(pending.key)).toBe(false);
+    expect(pending.cleanup).not.toHaveBeenCalled(); // Abort calls captured closures, not record methods.
+    expect(pending.reject).not.toHaveBeenCalled();
+    expect(remove.mock.calls.filter(call => call[1] === pending.listener)).toHaveLength(1);
+    expect(clear.mock.calls.filter(call => call[0] === replacement)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(pending.cleanup).not.toHaveBeenCalled();
+    expect(pending.reject).not.toHaveBeenCalled();
+    expect(remove.mock.calls.filter(call => call[1] === pending.listener)).toHaveLength(1);
+    expect(await pending.promise).toBe(first); // Promise first outcome is distinct from raw callbacks.
+    pending.cleanup.mockImplementation(original);
+  });
+
+  it('bounded reentrant terminal cleanup preserves first settlement and outer continuation', async () => {
+    const pending = command();
+    const original = pending.cleanup.getMockImplementation()!;
+    let entered = false;
+    pending.cleanup.mockImplementation(function (this: Pending) {
+      original.call(this);
+      if (entered) return;
+      entered = true;
+      pending.socket.message(legacy(pending, { ok: true, data: { first: true } }));
+    });
+    pending.socket.message(legacy(pending, { ok: false, error: 'outer continues' }));
+    expect(pending.cleanup).toHaveBeenCalledTimes(2);
+    expect(pending.resolve).toHaveBeenCalledTimes(1);
+    expect(pending.reject).toHaveBeenCalledTimes(1);
+    expect(pending.reject.mock.calls[0][0]).toBeInstanceOf(CommandError);
+    expect(pending.reject.mock.calls[0][0].message).toBe('outer continues');
+    expect(await pending.promise).toMatchObject({ ok: true, data: { first: true } });
+    expect(pending.map.has(pending.key)).toBe(false);
+  });
+
+  function agent(port = '8871'): Agent {
+    const { relay } = endpoint(port);
+    return { relay_id: relay.id, relay_label: relay.label, raw_pane_id: 'w1:p1', pane_id: `${relay.id}::w1:p1`,
+      server_session_id: 'release-session', terminal_id: 'release-terminal', generation: 7, agent_session_id: 'release-agent' };
+  }
+  const target = { server_session_id: 'release-session', pane_id: 'w1:p1', terminal_id: 'release-terminal', generation: 7, agent_session_id: 'release-agent' };
+  function beginResult() {
+    return { upload_id: 'release-upload', chunk_bytes: 3, expires_at: new Date(Date.now() + 60_000).toISOString(),
+      limits: { max_files: 8, max_file_bytes: 20 * 1024 * 1024, max_batch_bytes: 50 * 1024 * 1024 } };
+  }
+  function finishResult() {
+    return { attachments: [{ ref: 'attachment:release-opaque', name: 'shot.png', media_type: 'image/png', bytes: 3,
+      sha256: digest, expires_at: new Date(Date.now() + 60_000).toISOString() }] };
+  }
+  function uploadedFrame(socket: MockWebSocket, type: string) {
+    return socket.sent.map(body => JSON.parse(body)).findLast(frame => frame.type === type);
+  }
+  async function uploadFrame(socket: MockWebSocket, type: string) {
+    await vi.waitFor(() => expect(uploadedFrame(socket, type)).toBeDefined());
+    const frame = uploadedFrame(socket, type);
+    const fields = type === 'upload_begin' ? { files: [{ name: 'shot.png', media_type: 'image/png', bytes: 3 }] }
+      : type === 'upload_chunk' ? { upload_id: 'release-upload', file_index: 0, sequence: 0, data: 'cG5n', sha256: digest }
+      : type === 'upload_finish' ? { upload_id: 'release-upload', files: [{ file_index: 0, sha256: digest }] }
+      : { upload_id: 'release-upload' };
+    expect(frame).toEqual({ type, target, ...fields, protocol: 3, request_id: expect.any(String), client_id: expect.any(String) });
+    expect(frame.request_id).not.toBe('');
+    return { ...observe(registries.pendingUploads, frame.request_id, type !== 'upload_cancel'), frame, socket };
+  }
+  type UploadObservation = Awaited<ReturnType<typeof uploadFrame>>;
+  function reply(pending: UploadObservation, fields: Record<string, unknown>) {
+    pending.socket.message({ type: pending.frame.type + '_result', request_id: pending.key, ...fields });
+  }
+  function ignoredUploadControls(pending: UploadObservation) {
+    endpoint('8872').socket.message({ type: pending.frame.type + '_result', request_id: pending.key, result: {} });
+    pending.socket.message({ type: pending.frame.type + '_result', request_id: 'unrelated_request', error: { code: 'attachment_upload_busy' } });
+    pending.socket.message({ type: pending.frame.type === 'upload_begin' ? 'upload_chunk_result' : 'upload_begin_result', request_id: pending.key, result: {} });
+    expect(pending.map.get(pending.key)).toBe(pending.entry);
+    expect(pending.cleanup).not.toHaveBeenCalled();
+    expect(clear).not.toHaveBeenCalledWith(pending.timer);
+    expect(pending.resolve).not.toHaveBeenCalled();
+    expect(pending.reject).not.toHaveBeenCalled();
+  }
+  async function noLateUploadOwnership(pending: UploadObservation) {
+    const counts = [pending.cleanup.mock.calls.length, pending.resolve.mock.calls.length, pending.reject.mock.calls.length];
+    reply(pending, { result: {} });
+    reply(pending, { error: { code: 'attachment_upload_busy' } });
+    if (pending.signal) {
+      // AbortSignal is native Node here, not jsdom's Event realm. Deliver a native abort event after its dispatch finishes.
+      const trigger = new AbortController();
+      let event!: Event;
+      trigger.signal.addEventListener('abort', value => { event = value; }, { once: true });
+      trigger.abort();
+      pending.signal.dispatchEvent(event);
+    }
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect([pending.cleanup.mock.calls.length, pending.resolve.mock.calls.length, pending.reject.mock.calls.length]).toEqual(counts);
+  }
+
+  it('public uploadAttachments preserves exact target/session/digests/progression and normal raw once-only release', async () => {
+    const { socket } = endpoint();
+    const upload = relayStore.uploadAttachments(agent(), [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const begin = await uploadFrame(socket, 'upload_begin');
+    ignoredUploadControls(begin);
+    reply(begin, { result: beginResult() });
+    released(begin, 'resolve');
+    const chunk = await uploadFrame(socket, 'upload_chunk');
+    ignoredUploadControls(chunk);
+    reply(chunk, { result: { file_index: 0, next_sequence: 1, received_bytes: 3 } });
+    released(chunk, 'resolve');
+    const finish = await uploadFrame(socket, 'upload_finish');
+    ignoredUploadControls(finish);
+    const result = finishResult();
+    reply(finish, { result });
+    released(finish, 'resolve');
+    expect(await upload).toEqual(result.attachments);
+    expect(new Set([begin.key, chunk.key, finish.key]).size).toBe(3);
+    for (const pending of [begin, chunk, finish]) await noLateUploadOwnership(pending);
+  });
+
+  async function atUploadStage(stage: string) {
+    const { socket } = endpoint();
+    const controller = relayStore.attachmentController(agent());
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    let promise = controller.upload().then(value => value, error => error);
+    let pending = await uploadFrame(socket, 'upload_begin');
+    if (stage === 'upload_begin') return { pending, promise, controller };
+    reply(pending, { result: beginResult() });
+    released(pending, 'resolve');
+    pending = await uploadFrame(socket, 'upload_chunk');
+    if (stage === 'upload_chunk') return { pending, promise, controller };
+    if (stage === 'upload_cancel') {
+      const upload = promise;
+      promise = controller.cancel().then(value => value, error => error);
+      expect(await upload).toEqual([]);
+      pending = await uploadFrame(socket, 'upload_cancel');
+      return { pending, promise, controller };
+    }
+    reply(pending, { result: { file_index: 0, next_sequence: 1, received_bytes: 3 } });
+    released(pending, 'resolve');
+    pending = await uploadFrame(socket, 'upload_finish');
+    return { pending, promise, controller };
+  }
+
+  const uploadFailures = [
+    { name: 'parsed error with args', fields: { error: { code: 'attachment_upload_busy', args: { count: 2, retryable: false, reason: 'wire' } } }, message: 'attachment_upload_busy', code: 'attachment_upload_busy', args: { count: 2, retryable: false, reason: 'wire' } },
+    { name: 'malformed present null error', fields: { error: null }, message: 'Attachment upload failed.', code: undefined, args: undefined },
+    { name: 'malformed present code error', fields: { error: { code: 'BAD CODE' } }, message: 'Attachment upload failed.', code: undefined, args: undefined },
+    { name: 'missing result', fields: {}, message: 'Relay returned an invalid attachment upload result.', code: 'attachment_invalid_response', args: undefined },
+    { name: 'null result', fields: { result: null }, message: 'Relay returned an invalid attachment upload result.', code: 'attachment_invalid_response', args: undefined },
+    { name: 'array result', fields: { result: [] }, message: 'Relay returned an invalid attachment upload result.', code: 'attachment_invalid_response', args: undefined },
+  ];
+  for (const stage of ['upload_begin', 'upload_chunk', 'upload_finish', 'upload_cancel']) {
+    it.each(uploadFailures)(`${stage}: $name releases actual pending entry and preserves public issue translation`, async scenario => {
+      const { pending, promise, controller } = await atUploadStage(stage);
+      ignoredUploadControls(pending);
+      reply(pending, scenario.fields);
+      released(pending, 'reject');
+      const raw = pending.reject.mock.calls[0][0];
+      expect(raw).toBeInstanceOf(CommandError);
+      expect(raw.constructor).toBe(CommandError);
+      expect(raw.message).toBe(scenario.message);
+      expect(raw.code).toBe(scenario.code);
+      expect(raw.args).toEqual(scenario.args);
+      expect(raw.data).toBeUndefined();
+      const code = stage === 'upload_cancel' ? 'attachment_cancel_failed'
+        : scenario.code || (stage === 'upload_begin' ? 'attachment_upload_failed' : 'attachment_upload_state_unknown');
+      expect(await promise).toEqual({ code, ...(stage !== 'upload_cancel' && scenario.code === 'attachment_upload_busy' ? { args: scenario.args } : {}) });
+      if (stage === 'upload_cancel') expect(controller.snapshot()).toMatchObject({ items: [], uploading: false });
+      else expect(controller.snapshot()).toMatchObject({ uploading: false, items: [{ state: 'interrupted', issue: { code } }] });
+      await noLateUploadOwnership(pending);
+    });
+  }
+
+  it('public controller cancellation settles only its matching result; absent listener cleanup remains harmless', async () => {
+    const { pending, promise, controller } = await atUploadStage('upload_cancel');
+    ignoredUploadControls(pending);
+    const removals = remove.mock.calls.length;
+    reply(pending, { result: {} });
+    released(pending, 'resolve');
+    expect(remove.mock.calls).toHaveLength(removals);
+    expect(await promise).toBeUndefined();
+    expect(controller.snapshot()).toMatchObject({ items: [], uploading: false });
+    await noLateUploadOwnership(pending);
+  });
+
+  it.each(['closed', 'disconnect', 'retire'])('%s drains only its owning relay in live command-before-upload order', async mode => {
+    const { relay, socket } = endpoint();
+    const other = endpoint('8872');
+    if (mode === 'retire') {
+      relayStore.setHidden(true);
+      await vi.advanceTimersByTimeAsync(120_000); // Establish health deadline before pending60s uploads.
+      other.socket.message({ type: 'pong' });
+    }
+    const first = command();
+    const second = command();
+    const third = command();
+    const survivor = command('8872');
+    const upload = relayStore.uploadAttachments(agent(), [new File(['png'], 'shot.png', { type: 'image/png' })]).catch(error => error);
+    const ownerUpload = await uploadFrame(socket, 'upload_begin');
+    const liveUpload = relayStore.uploadAttachments(agent('8872'), [new File(['png'], 'shot.png', { type: 'image/png' })]).catch(error => error);
+    const otherUpload = await uploadFrame(other.socket, 'upload_begin');
+    const original = first.cleanup.getMockImplementation()!;
+    first.cleanup.mockImplementation(function (this: Pending) {
+      original.call(this);
+      // Reorder an ACTUAL publicly registered record during cleanup. A snapshot iterator would retain the old order.
+      first.map.delete(second.key);
+      first.map.set(second.key, second.entry);
+    });
+    if (mode === 'closed') socket.serverClose();
+    else if (mode === 'disconnect') relayStore.disconnectRelay(relay.id);
+    else await vi.advanceTimersByTimeAsync(10_000);
+    expect(cleanupOrder).toEqual([first.key, third.key, second.key, ownerUpload.key]);
+    for (const pending of [first, second, third, ownerUpload]) released(pending, 'reject');
+    for (const pending of [first, second, third]) {
+      const error = await pending.promise;
+      expect(error.constructor).toBe(CommandError);
+      expect(error.message).toBe('Relay disconnected');
+      expect(error.data).toEqual({ dispatched_unknown: true });
+    }
+    expect(await upload).toEqual({ code: 'attachment_upload_failed' });
+    expect(ownerUpload.reject.mock.calls[0][0].data).toEqual({ dispatched_unknown: true });
+    expect(survivor.map.get(survivor.key)).toBe(survivor.entry);
+    expect(otherUpload.map.get(otherUpload.key)).toBe(otherUpload.entry);
+    expect(survivor.cleanup).not.toHaveBeenCalled();
+    expect(otherUpload.cleanup).not.toHaveBeenCalled();
+    other.socket.message(legacy(survivor));
+    reply(otherUpload, { error: { code: 'attachment_upload_busy', args: { owner: 'other' } } });
+    released(survivor, 'resolve');
+    released(otherUpload, 'reject');
+    expect(await survivor.promise).toMatchObject({ ok: true });
+    expect(await liveUpload).toEqual({ code: 'attachment_upload_busy', args: { owner: 'other' } });
+    socket.message(legacy(first));
+    reply(ownerUpload, { result: beginResult() });
+    expect(first.resolve).not.toHaveBeenCalled();
+    expect(ownerUpload.resolve).not.toHaveBeenCalled();
+  });
+
+  it('connected-path promotion keeps real pending command/upload and settles through actual transport ingress', async () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    let ingress!: TransportHandlers;
+    const sent: Record<string, unknown>[] = [];
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'gateway',
+      connect() { ingress = handlers; handlers.onStatus('connecting'); },
+      send(payload) { sent.push(JSON.parse(JSON.stringify(payload))); return true; },
+      close() {},
+    });
+    relayStore.addRelay({ label: 'Promotion', url: 'ws://127.0.0.1:8871', token: '', transport: 'hybrid', gatewayUrl: 'wss://gateway.invalid' });
+    ingress.onStatus('connected', { path: 'gateway' });
+    ingress.onMessage({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    const relay = get(relayStore.relayConfigs)[0];
+    const abort = new AbortController();
+    const commandPromise = relayStore.sendCommand(relay.id, { type: 'tab_reorder', insert_index: 2 }, 60_000, false, abort.signal);
+    const frame = sent.at(-1)!;
+    expect(frame).toEqual({ type: 'tab_reorder', insert_index: 2, request_id: expect.any(String), protocol: 3, client_id: expect.any(String) });
+    const pending = observe(registries.pendingRequests, String(frame.request_id));
+    const upload = relayStore.uploadAttachments(agent(), [new File(['png'], 'shot.png', { type: 'image/png' })]).catch(error => error);
+    const uploadFrame = sent.find(frame => frame.type === 'upload_begin')!;
+    expect(uploadFrame).toEqual({ type: 'upload_begin', target, files: [{ name: 'shot.png', media_type: 'image/png', bytes: 3 }], request_id: expect.any(String), protocol: 3, client_id: expect.any(String) });
+    const pendingUpload = observe(registries.pendingUploads, String(uploadFrame.request_id));
+    ingress.onStatus('connected', { path: 'webrtc' });
+    expect(get(relayStore.connections).get(relay.id)?.path).toBe('webrtc');
+    for (const entry of [pending, pendingUpload]) {
+      expect(entry.map.get(entry.key)).toBe(entry.entry);
+      expect(entry.cleanup).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalledWith(entry.timer);
+    }
+    ingress.onMessage({ type: 'command_result', request_id: pending.key, ok: true, data: { promoted: true } });
+    ingress.onMessage({ type: 'upload_begin_result', request_id: pendingUpload.key, error: { code: 'attachment_upload_busy', args: { promoted: true } } });
+    released(pending, 'resolve');
+    released(pendingUpload, 'reject');
+    expect(await commandPromise).toMatchObject({ ok: true, data: { promoted: true } });
+    expect(await upload).toEqual({ code: 'attachment_upload_busy', args: { promoted: true } });
+  });
+});
+
+describe('pending deadline replacement through public ingress', () => {
+  type Pending = {
+    timer: ReturnType<typeof setTimeout>;
+    cleanup?: () => void;
+    resolve: (value: any) => void;
+    reject: (error: CommandError) => void;
+  };
+  const requests = (relayStore as unknown as { pendingRequests: Map<string, Pending> }).pendingRequests;
+  const actionId = 'deadline_action_034';
+  function instrumentation() {
+    return {
+      clear: vi.spyOn(globalThis, 'clearTimeout'),
+      schedule: vi.spyOn(globalThis, 'setTimeout'),
+      add: vi.spyOn(AbortSignal.prototype, 'addEventListener'),
+      remove: vi.spyOn(AbortSignal.prototype, 'removeEventListener'),
+      toast: vi.spyOn(relayStore, 'showToast'),
+    };
+  }
+  let timers: ReturnType<typeof instrumentation>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    transportHijack.current = null;
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    localStorage.clear();
+    sessionStorage.clear();
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Deadline owner', url: 'ws://127.0.0.1:8871', token: '' });
+    relayStore.addRelay({ label: 'Deadline other', url: 'ws://127.0.0.1:8872', token: '' });
+    // addRelay reconnects all: establish both before registering any command.
+    for (const socket of MockWebSocket.instances.slice(-2)) {
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    }
+    relayStore.toast.set(null);
+    timers = instrumentation(); // All spies call through to the installed fake/native APIs.
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    transportHijack.current = null;
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function command(timeoutMs?: number, type = 'tab_reorder') {
+    const relay = get(relayStore.relayConfigs).find(relay => new URL(relay.url).port === '8871')!;
+    const socket = MockWebSocket.instances.filter(socket => new URL(socket.url).port === '8871').at(-1)!;
+    const controller = new AbortController();
+    const outcomes: string[] = [];
+    const payload = { type, pane_id: 'w1:p1', ...exactWireScope('w1:p1', relay.id),
+      insert_index: 2, intent: { action_id: actionId } };
+    const promise = relayStore.sendCommand(relay.id, payload, timeoutMs, false, controller.signal)
+      .then(value => { outcomes.push('resolved'); return value; },
+        error => { outcomes.push('rejected'); return error; });
+    const frame = JSON.parse(socket.sent.at(-1)!);
+    expect(frame).toEqual({ ...payload, request_id: expect.any(String), protocol: 3, client_id: expect.any(String) });
+    const key: string = frame.request_id;
+    const entry = requests.get(key)!;
+    expect(entry).toBeDefined();
+    const originalTimer = entry.timer;
+    const initial = timers.schedule.mock.results.findIndex(result => result.value === originalTimer);
+    expect(timers.schedule.mock.calls[initial][1]).toBe(timeoutMs ?? (type === 'agent_start' ? 60_000 : 15_000));
+    const registration = timers.add.mock.contexts.findIndex(signal => signal === controller.signal);
+    expect(timers.add.mock.calls[registration]).toEqual(['abort', expect.any(Function), { once: true }]);
+    const listener = timers.add.mock.calls[registration][1];
+    const originalCleanup = entry.cleanup!;
+    const cleanup = vi.spyOn(entry, 'cleanup').mockImplementation(function (this: Pending) {
+      expect(this).toBe(entry);
+      expect(requests.get(key)).toBe(entry);
+      return originalCleanup.call(this);
+    });
+    const deletion = vi.spyOn(requests, 'delete');
+    const resolve = vi.spyOn(entry, 'resolve');
+    const reject = vi.spyOn(entry, 'reject');
+    return { socket, controller, promise, outcomes, key, entry, originalTimer, listener,
+      cleanup, deletion, resolve, reject };
+  }
+  type Observation = ReturnType<typeof command>;
+
+  function ingress(pending: Observation, phase: string) {
+    pending.socket.message(phase === 'accepted'
+      ? { type: 'command_result', request_id: pending.key, action: 'tab_reorder', phase, ok: true }
+      : { type: 'action_receipt', request_id: pending.key, receipt: { action_id: actionId, phase } });
+  }
+
+  function renew(pending: Observation, phase: string) {
+    const old = pending.entry.timer;
+    const scheduledBefore = timers.schedule.mock.calls.length;
+    const clearedBefore = timers.clear.mock.calls.length;
+    ingress(pending, phase);
+    const schedules = timers.schedule.mock.calls.map((call, index) => ({ call, index }))
+      .filter(({ call, index }) => index >= scheduledBefore && call[1] === 10_000);
+    expect(schedules).toHaveLength(1);
+    const scheduled = schedules[0].index;
+    const cleared = timers.clear.mock.calls.findIndex((call, index) => index >= clearedBefore && call[0] === old);
+    expect(cleared).toBeGreaterThanOrEqual(clearedBefore);
+    expect(timers.clear.mock.invocationCallOrder[cleared]).toBeLessThan(timers.schedule.mock.invocationCallOrder[scheduled]);
+    expect(timers.clear.mock.calls.filter(call => call[0] === old)).toHaveLength(1);
+    expect(pending.entry.timer).toBe(timers.schedule.mock.results[scheduled].value);
+    expect(pending.entry.timer).not.toBe(old);
+    expect(requests.get(pending.key)).toBe(pending.entry);
+    expect(pending.cleanup).not.toHaveBeenCalled();
+    expect(pending.resolve).not.toHaveBeenCalled();
+    expect(pending.reject).not.toHaveBeenCalled();
+    expect(pending.outcomes).toEqual([]);
+    if (phase === 'accepted') expect(timers.toast).toHaveBeenLastCalledWith('Command accepted; waiting for agent…');
+    return pending.entry.timer;
+  }
+
+  function settled(pending: Observation, outcome: 'resolve' | 'reject') {
+    expect(pending.cleanup).toHaveBeenCalledTimes(1);
+    expect(requests.has(pending.key)).toBe(false);
+    const deletion = pending.deletion.mock.calls.findIndex(call => call[0] === pending.key);
+    expect(deletion).toBeGreaterThanOrEqual(0);
+    expect(pending.cleanup.mock.invocationCallOrder[0]).toBeLessThan(pending.deletion.mock.invocationCallOrder[deletion]);
+    expect(pending.deletion.mock.invocationCallOrder[deletion]).toBeLessThan(pending[outcome].mock.invocationCallOrder[0]);
+    expect(pending[outcome]).toHaveBeenCalledTimes(1);
+    expect(pending[outcome === 'resolve' ? 'reject' : 'resolve']).not.toHaveBeenCalled();
+    expect(timers.remove.mock.calls.filter((call, index) =>
+      timers.remove.mock.contexts[index] === pending.controller.signal && call[1] === pending.listener))
+      .toEqual([['abort', pending.listener]]);
+  }
+
+  async function timedOut(pending: Observation) {
+    const error = await pending.promise;
+    expect(error).toBeInstanceOf(CommandError);
+    expect(error.constructor).toBe(CommandError);
+    expect(error.message).toBe('Relay confirmation timed out');
+    expect(error.data).toStrictEqual({ dispatched_unknown: true });
+    expect(error.code).toBeUndefined();
+    expect(error.args).toBeUndefined();
+    expect(pending.reject).toHaveBeenCalledExactlyOnceWith(error);
+    expect(pending.outcomes).toEqual(['rejected']);
+    settled(pending, 'reject'); // Fired timeout needs no normal-terminal clear assertion.
+  }
+
+  async function noLaterOwnership(pending: Observation) {
+    const before = [pending.cleanup.mock.calls.length, pending.resolve.mock.calls.length, pending.reject.mock.calls.length];
+    ingress(pending, 'confirmed');
+    pending.socket.message({ type: 'command_result', request_id: pending.key, ok: false, error: 'late duplicate' });
+    pending.controller.abort(); // Native signal; no jsdom Event/native AbortSignal mixing.
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect([pending.cleanup.mock.calls.length, pending.resolve.mock.calls.length, pending.reject.mock.calls.length]).toEqual(before);
+    expect(pending.outcomes).toHaveLength(1);
+    expect(requests.has(pending.key)).toBe(false);
+  }
+
+  it.each(['prepared', 'awaiting_evidence', 'accepted'].flatMap(phase =>
+    [undefined, 1_000].map(timeoutMs => ({ phase, timeoutMs }))))('$phase renewals replace a $timeoutMs initial deadline until their first actual timeout', async ({ phase, timeoutMs }) => {
+    const pending = command(timeoutMs);
+    await vi.advanceTimersByTimeAsync(400);
+    renew(pending, phase);
+    await vi.advanceTimersByTimeAsync(400);
+    const latest = renew(pending, phase);
+    await vi.advanceTimersByTimeAsync(9_999); // Past original and first-renewal deadlines.
+    expect(pending.outcomes).toEqual([]);
+    expect(pending.cleanup).not.toHaveBeenCalled();
+    expect(requests.get(pending.key)).toBe(pending.entry);
+    await vi.advanceTimersByTimeAsync(1);
+    await timedOut(pending);
+    expect(timers.clear).not.toHaveBeenCalledWith(latest);
+    if (phase === 'accepted') expect(timers.toast.mock.calls).toEqual([
+      ['Command accepted; waiting for agent…'], ['Command accepted; waiting for agent…'],
+    ]);
+    else expect(timers.toast).not.toHaveBeenCalled();
+    await noLaterOwnership(pending);
+  });
+
+  it.each([true, false])('alternating receipt/legacy deadlines retain the first final outcome: success=%s', async success => {
+    const pending = command(1_000);
+    let latest = pending.originalTimer;
+    for (const phase of success ? ['prepared', 'accepted', 'awaiting_evidence'] : ['accepted', 'prepared', 'accepted']) {
+      await vi.advanceTimersByTimeAsync(400);
+      latest = renew(pending, phase);
+    }
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(pending.outcomes).toEqual([]);
+    if (success) {
+      ingress(pending, 'confirmed');
+      expect(await pending.promise).toStrictEqual({ type: 'command_result', request_id: pending.key,
+        action: 'tab_reorder', ok: true, phase: 'confirmed', data: { receipt: { action_id: actionId, phase: 'confirmed' } } });
+    } else {
+      pending.socket.message({ type: 'command_result', request_id: pending.key, ok: false,
+        phase: 'not_started', error: 'first final refusal', data: { exact: 34 } });
+      const error = await pending.promise;
+      expect(error.constructor).toBe(CommandError);
+      expect(error.message).toBe('first final refusal');
+      expect(error.data).toStrictEqual({ exact: 34, not_started: true });
+      expect(pending.reject).toHaveBeenCalledExactlyOnceWith(error);
+    }
+    settled(pending, success ? 'resolve' : 'reject');
+    const cleared = timers.clear.mock.calls.findIndex(call => call[0] === latest);
+    expect(timers.clear.mock.calls.filter(call => call[0] === latest)).toHaveLength(1);
+    expect(timers.clear.mock.invocationCallOrder[cleared]).toBeLessThan(pending.cleanup.mock.invocationCallOrder[0]);
+    expect(pending.outcomes).toEqual([success ? 'resolved' : 'rejected']);
+    expect(timers.toast.mock.calls).toEqual(Array.from({ length: success ? 1 : 2 },
+      () => ['Command accepted; waiting for agent…']));
+    await noLaterOwnership(pending);
+  });
+
+  it('agent_start legacy acceptance leaves original/replacement timers alone while a prepared receipt renews', async () => {
+    const pending = command(undefined, 'agent_start');
+    await vi.advanceTimersByTimeAsync(1_000);
+    ingress(pending, 'accepted');
+    expect(pending.entry.timer).toBe(pending.originalTimer);
+    expect(timers.clear).not.toHaveBeenCalledWith(pending.originalTimer);
+    expect(timers.schedule.mock.calls.filter(call => call[1] === 10_000)).toHaveLength(0);
+    expect(timers.toast).toHaveBeenLastCalledWith('Start accepted; waiting for confirmation…');
+    await vi.advanceTimersByTimeAsync(1_000);
+    const latest = renew(pending, 'prepared');
+    await vi.advanceTimersByTimeAsync(1_000);
+    ingress(pending, 'accepted');
+    expect(pending.entry.timer).toBe(latest);
+    expect(timers.clear).not.toHaveBeenCalledWith(latest);
+    expect(timers.schedule.mock.calls.filter(call => call[1] === 10_000)).toHaveLength(1);
+    expect(timers.toast.mock.calls).toEqual([
+      ['Start accepted; waiting for confirmation…'], ['Start accepted; waiting for confirmation…'],
+    ]);
+    await vi.advanceTimersByTimeAsync(8_999); // 9999ms from prepared, not from the second legacy acceptance.
+    expect(pending.outcomes).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await timedOut(pending);
+    expect(timers.clear).not.toHaveBeenCalledWith(latest);
+    await noLaterOwnership(pending);
+  });
+});
+
+describe('pending registration through genuine public consumers', () => {
+  type Pending = {
+    relayId: string; action?: string; actionId?: string; responseType?: string;
+    timer: ReturnType<typeof setTimeout>; cleanup: () => void;
+    resolve: (value: any) => void; reject: (error: any) => void;
+  };
+  const maps = relayStore as unknown as {
+    pendingRequests: Map<string, Pending>; pendingUploads: Map<string, Pending>;
+  };
+  function instrumentation() {
+    return {
+      schedule: vi.spyOn(globalThis, 'setTimeout'),
+      clear: vi.spyOn(globalThis, 'clearTimeout'),
+      add: vi.spyOn(AbortSignal.prototype, 'addEventListener'),
+      remove: vi.spyOn(AbortSignal.prototype, 'removeEventListener'),
+    };
+  }
+  let calls: ReturnType<typeof instrumentation>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    transportHijack.current = null;
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    localStorage.clear();
+    sessionStorage.clear();
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Registration owner', url: 'ws://127.0.0.1:8871', token: '' });
+    relayStore.addRelay({ label: 'Registration other', url: 'ws://127.0.0.1:8872', token: '' });
+    for (const socket of MockWebSocket.instances.slice(-2)) {
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    }
+    calls = instrumentation();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks(); // Remove observers before real store teardown.
+    transportHijack.current = null;
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function endpoint(port = '8871') {
+    const relay = get(relayStore.relayConfigs).find(row => new URL(row.url).port === port)!;
+    const socket = MockWebSocket.instances.filter(row => new URL(row.url).port === port).at(-1)!;
+    return { relay, socket, transport: relayStore.connection(relay.id)!.transport! };
+  }
+  function payload() {
+    return { type: 'tab_reorder', pane_id: 'w1:p1', insert_index: 2,
+      ...exactWireScope('w1:p1', endpoint().relay.id), intent: { action_id: 'registration_action_035' } };
+  }
+  function controller() {
+    const { relay } = endpoint();
+    const agent: Agent = { ...exactAgentFields(), relay_id: relay.id, relay_label: relay.label,
+      raw_pane_id: 'w1:p1', pane_id: `${relay.id}::w1:p1` };
+    const value = relayStore.attachmentController(agent);
+    value.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    return value;
+  }
+  function first<T>(promise: Promise<T>) {
+    const outcomes: string[] = [];
+    const settled = promise.then(
+      value => { outcomes.push('resolved'); return { status: 'resolved' as const, value }; },
+      error => { outcomes.push('rejected'); return { status: 'rejected' as const, error }; },
+    );
+    return { settled, outcomes };
+  }
+  function capture(map: Map<string, Pending>) {
+    function methods(entry: Pending) {
+      return { cleanup: vi.spyOn(entry, 'cleanup'), resolve: vi.spyOn(entry, 'resolve'), reject: vi.spyOn(entry, 'reject') };
+    }
+    const rows: Array<{ key: string; entry: Pending; timer: Pending['timer'] } & ReturnType<typeof methods>> = [];
+    const set = vi.spyOn(map, 'set').mockImplementation((key, entry) => {
+      // Capture the actual record before a refused send can remove it.
+      rows.push({ key, entry, timer: entry.timer, ...methods(entry) });
+      return Map.prototype.set.call(map, key, entry);
+    });
+    const deletion = vi.spyOn(map, 'delete');
+    return { rows, set, deletion, map };
+  }
+  type Capture = ReturnType<typeof capture>;
+  function registered(observed: Capture, signal?: AbortSignal, duration = 60_000) {
+    const row = observed.rows.at(-1)!;
+    expect(row).toBeDefined();
+    expect(observed.map.get(row.key)).toBe(row.entry);
+    const scheduled = calls.schedule.mock.results.findIndex(result => result.value === row.timer);
+    expect(scheduled).toBeGreaterThanOrEqual(0);
+    expect(calls.schedule.mock.calls[scheduled]).toEqual([expect.any(Function), duration]);
+    expect(row.entry.timer).toBe(row.timer);
+    const insertion = observed.set.mock.calls.findIndex(call => call[0] === row.key);
+    expect(calls.schedule.mock.invocationCallOrder[scheduled]).toBeLessThan(observed.set.mock.invocationCallOrder[insertion]);
+    if (signal) {
+      const registration = calls.add.mock.contexts.findIndex(context => context === signal);
+      expect(registration).toBeGreaterThanOrEqual(0);
+      expect(calls.add.mock.calls[registration]).toEqual(['abort', expect.any(Function), { once: true }]);
+      expect(calls.add.mock.contexts.filter(context => context === signal)).toHaveLength(1);
+      expect(calls.schedule.mock.invocationCallOrder[scheduled]).toBeLessThan(calls.add.mock.invocationCallOrder[registration]);
+      expect(calls.add.mock.invocationCallOrder[registration]).toBeLessThan(observed.set.mock.invocationCallOrder[insertion]);
+    }
+    return row;
+  }
+  function signalForLastRegistration() {
+    const index = calls.add.mock.calls.findLastIndex(call => (call[2] as AddEventListenerOptions | undefined)?.once === true);
+    const signal = calls.add.mock.contexts[index] as AbortSignal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    return signal;
+  }
+  function removal(signal: AbortSignal) {
+    const added = calls.add.mock.contexts.findIndex(context => context === signal);
+    const listener = calls.add.mock.calls[added][1];
+    const indexes = calls.remove.mock.contexts.flatMap((context, index) =>
+      context === signal && calls.remove.mock.calls[index][1] === listener ? [index] : []);
+    expect(indexes).toHaveLength(1);
+    expect(calls.remove.mock.calls[indexes[0]]).toEqual(['abort', listener]);
+    return indexes[0];
+  }
+  function reply(row: Capture['rows'][number], upload: boolean, socket = endpoint().socket) {
+    socket.message(upload
+      ? { type: 'upload_begin_result', request_id: row.key, result: beginResult() }
+      : { type: 'command_result', request_id: row.key, ok: true, phase: 'confirmed' });
+  }
+  function beginResult() {
+    return { upload_id: 'registration-upload', chunk_bytes: 3, expires_at: new Date(Date.now() + 60_000).toISOString(),
+      limits: { max_files: 8, max_file_bytes: 20 * 1024 * 1024, max_batch_bytes: 50 * 1024 * 1024 } };
+  }
+  function frames(type: string) {
+    return endpoint().socket.sent.map(body => JSON.parse(body)).filter(frame => frame.type === type);
+  }
+  async function noLaterOwnership(observed: Capture, upload: boolean) {
+    const row = observed.rows[0];
+    const before = [row.cleanup.mock.calls.length, row.resolve.mock.calls.length, row.reject.mock.calls.length];
+    reply(row, upload);
+    endpoint().socket.message({ type: upload ? 'upload_begin_result' : 'command_result', request_id: row.key,
+      ok: false, error: upload ? { code: 'attachment_upload_busy' } : 'late refusal' });
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(observed.map.has(row.key)).toBe(false);
+    expect([row.cleanup.mock.calls.length, row.resolve.mock.calls.length, row.reject.mock.calls.length]).toEqual(before);
+    if (upload) {
+      expect(frames('upload_chunk')).toEqual([]);
+      expect(frames('upload_finish')).toEqual([]);
+    }
+  }
+
+  it.each([
+    { upload: false, mode: 'false' }, { upload: false, mode: 'throw' },
+    { upload: true, mode: 'false' }, { upload: true, mode: 'throw' },
+  ])('retains lexical first settlement and registered resources for upload=$upload send=$mode', async ({ upload, mode }) => {
+    const { relay, socket, transport } = endpoint();
+    const observed = capture(upload ? maps.pendingUploads : maps.pendingRequests);
+    const type = upload ? 'upload_begin' : 'tab_reorder';
+    const sentinel = new Error('registration socket sentinel');
+    const abort = new AbortController();
+    const batch = upload ? controller() : undefined;
+    const attempted: Record<string, any>[] = [];
+    if (mode === 'false') {
+      const nativeSend = transport.send;
+      vi.spyOn(transport, 'send').mockImplementation(function (this: RelayTransport, frame) {
+        if (frame.type !== type) return nativeSend.call(this, frame);
+        attempted.push(frame);
+        return false; // Actual boolean transport boundary, not discarded socket.send return.
+      });
+    } else {
+      const nativeSend = socket.send;
+      vi.spyOn(socket, 'send').mockImplementation(function (this: MockWebSocket, body) {
+        const frame = JSON.parse(body);
+        if (frame.type !== type) return nativeSend.call(this, body);
+        attempted.push(frame);
+        throw sentinel;
+      });
+    }
+    const publicOutcome = first<unknown>(batch ? batch.upload() : relayStore.sendCommand(relay.id, payload(), 60_000, false, abort.signal));
+    const pendingBegin = batch && (batch as unknown as { pendingBegin?: Promise<Record<string, any>> }).pendingBegin;
+    if (upload) expect(pendingBegin).toBeInstanceOf(Promise);
+    const raw = pendingBegin ? first(pendingBegin) : publicOutcome;
+    const row = observed.rows[0];
+    expect(attempted).toHaveLength(1);
+    expect(attempted[0]).toMatchObject({ type, request_id: row.key, protocol: 3, client_id: expect.any(String) });
+    expect(row.entry.relayId).toBe(relay.id);
+    const signal = upload ? signalForLastRegistration() : abort.signal;
+    const outcome = await raw.settled;
+    expect(outcome.status).toBe('rejected');
+    if (outcome.status !== 'rejected') throw new Error('Expected real first rejection');
+    expect(row.reject).not.toHaveBeenCalled(); // Executor/lexical reject, not record method.
+    expect(row.resolve).not.toHaveBeenCalled();
+    expect(row.cleanup).not.toHaveBeenCalled();
+    if (mode === 'false') {
+      const error = outcome.error;
+      expect(error.constructor).toBe(CommandError);
+      expect(error.message).toBe(upload ? 'Could not send attachment upload request.' : 'Could not send command to relay');
+      expect(error.code).toBeUndefined();
+      expect(error.data).toBeUndefined();
+      expect(observed.map.has(row.key)).toBe(false);
+      const cleared = calls.clear.mock.calls.findIndex(call => call[0] === row.timer);
+      const removed = removal(signal);
+      expect(calls.clear.mock.calls.filter(call => call[0] === row.timer)).toHaveLength(1);
+      expect(calls.clear.mock.invocationCallOrder[cleared]).toBeLessThan(calls.remove.mock.invocationCallOrder[removed]);
+      expect(calls.remove.mock.invocationCallOrder[removed]).toBeLessThan(observed.deletion.mock.invocationCallOrder[0]);
+      expect(observed.deletion).toHaveBeenCalledExactlyOnceWith(row.key);
+    } else {
+      expect(outcome.error).toBe(sentinel);
+      registered(observed, signal);
+      expect(calls.clear).not.toHaveBeenCalledWith(row.timer);
+      expect(calls.remove.mock.contexts).not.toContain(signal);
+      reply(row, upload, endpoint('8872').socket);
+      socket.message({ type: upload ? 'upload_begin_result' : 'command_result', request_id: 'wrong-registration', ok: true, result: {} });
+      if (upload) socket.message({ type: 'upload_chunk_result', request_id: row.key, result: {} });
+      expect(observed.map.get(row.key)).toBe(row.entry);
+      expect(row.resolve).not.toHaveBeenCalled();
+      expect(row.reject).not.toHaveBeenCalled();
+      expect(row.cleanup).not.toHaveBeenCalled();
+      reply(row, upload); // Real matching JSON invokes the still-owned record callback.
+      expect(row.resolve).toHaveBeenCalledTimes(1);
+      expect(row.reject).not.toHaveBeenCalled();
+      expect(row.cleanup).toHaveBeenCalledTimes(1);
+      expect(calls.clear).toHaveBeenCalledWith(row.timer);
+      removal(signal);
+      expect(await raw.settled).toBe(outcome);
+    }
+    const translated = await publicOutcome.settled;
+    expect(translated.status).toBe('rejected');
+    if (upload && translated.status === 'rejected') {
+      expect(translated.error).toEqual({ code: 'attachment_upload_failed' });
+      expect(batch!.snapshot()).toMatchObject({ uploading: false, items: [{ state: 'interrupted', issue: translated.error }] });
+      await batch!.cancel();
+    } else abort.abort();
+    await noLaterOwnership(observed, upload);
+    expect(raw.outcomes).toEqual(['rejected']);
+    expect(publicOutcome.outcomes).toEqual(['rejected']);
+  });
+
+  it.each([true, false])('registers command listener then metadata then record before send: signal=%s', async withSignal => {
+    const { relay, transport } = endpoint();
+    const abort = new AbortController();
+    const observed = capture(maps.pendingRequests);
+    const metadata = vi.fn(() => ({ action_id: 'registration_action_035' }));
+    const command = { ...payload(), get intent() { return metadata(); } };
+    const send = vi.spyOn(transport, 'send');
+    const additions = calls.add.mock.calls.length;
+    const result = first(relayStore.sendCommand(relay.id, command, 60_000, false, withSignal ? abort.signal : undefined));
+    const row = registered(observed, withSignal ? abort.signal : undefined);
+    expect(row.entry).toMatchObject({ relayId: relay.id, action: 'tab_reorder', actionId: 'registration_action_035',
+      resolve: expect.any(Function), reject: expect.any(Function), cleanup: expect.any(Function), timer: row.timer });
+    expect(observed.set.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder[0]);
+    expect(metadata.mock.invocationCallOrder[0]).toBeLessThan(observed.set.mock.invocationCallOrder[0]);
+    if (withSignal) {
+      const registration = calls.add.mock.contexts.indexOf(abort.signal);
+      expect(calls.add.mock.invocationCallOrder[registration]).toBeLessThan(metadata.mock.invocationCallOrder[0]);
+      abort.abort();
+      const outcome = await result.settled;
+      expect(outcome).toMatchObject({ status: 'rejected', error: { message: 'Conversation history request was cancelled.', code: 'request_cancelled' } });
+      expect(row.reject).not.toHaveBeenCalled();
+      expect(row.cleanup).not.toHaveBeenCalled();
+      removal(abort.signal);
+    } else {
+      expect(calls.add.mock.calls).toHaveLength(additions);
+      reply(row, false);
+      expect(await result.settled).toMatchObject({ status: 'resolved', value: { ok: true, phase: 'confirmed' } });
+      expect(row.resolve).toHaveBeenCalledTimes(1);
+      expect(calls.remove).not.toHaveBeenCalled();
+    }
+    expect(calls.clear).toHaveBeenCalledWith(row.timer);
+    await noLaterOwnership(observed, false);
+  });
+
+  it('registers typed public upload begin before send and native controller abort retains real public outcome', async () => {
+    const observed = capture(maps.pendingUploads);
+    const send = vi.spyOn(endpoint().transport, 'send');
+    const batch = controller();
+    const signalRead = vi.spyOn(AbortController.prototype, 'signal', 'get');
+    const publicOutcome = first(batch.upload());
+    const raw = first((batch as unknown as { pendingBegin: Promise<Record<string, any>> }).pendingBegin);
+    const signal = signalForLastRegistration();
+    const row = registered(observed, signal);
+    expect(row.entry).toMatchObject({ relayId: endpoint().relay.id, responseType: 'upload_begin_result',
+      timer: row.timer, resolve: expect.any(Function), reject: expect.any(Function), cleanup: expect.any(Function) });
+    expect(observed.set.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder[0]);
+    // Passively recover the genuine controller from its call-through native signal getter.
+    const abort = signalRead.mock.contexts.find((_, index) => signalRead.mock.results[index].value === signal)! as AbortController;
+    expect(abort).toBeInstanceOf(AbortController);
+    abort.abort();
+    expect(signal.aborted).toBe(true);
+    expect(await raw.settled).toMatchObject({ status: 'rejected',
+      error: { message: 'Attachment upload was interrupted.', code: 'attachment_upload_interrupted' } });
+    expect(await publicOutcome.settled).toEqual({ status: 'rejected', error: { code: 'attachment_upload_interrupted' } });
+    await batch.cancel();
+    expect(row.reject).not.toHaveBeenCalled();
+    expect(row.cleanup).not.toHaveBeenCalled();
+    expect(calls.clear).toHaveBeenCalledWith(row.timer);
+    removal(signal);
+    await noLaterOwnership(observed, true);
+  });
+
+  it('public cancellation registers signal-less upload_cancel before send and waits for matching JSON', async () => {
+    const batch = controller();
+    const upload = first(batch.upload());
+    const begin = frames('upload_begin')[0];
+    endpoint().socket.message({ type: 'upload_begin_result', request_id: begin.request_id, result: beginResult() });
+    await vi.waitFor(() => expect(frames('upload_chunk')).toHaveLength(1));
+    const observed = capture(maps.pendingUploads);
+    const send = vi.spyOn(endpoint().transport, 'send');
+    const additions = calls.add.mock.calls.length;
+    const cancellation = first(batch.cancel());
+    expect(await upload.settled).toEqual({ status: 'resolved', value: [] });
+    const row = registered(observed);
+    expect(calls.add.mock.calls).toHaveLength(additions);
+    expect(row.entry.responseType).toBe('upload_cancel_result');
+    const frame = frames('upload_cancel')[0];
+    expect(frame).toMatchObject({ request_id: row.key, upload_id: 'registration-upload' });
+    expect(observed.set.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder.at(-1)!);
+    endpoint('8872').socket.message({ type: 'upload_cancel_result', request_id: row.key, result: {} });
+    endpoint().socket.message({ type: 'upload_begin_result', request_id: row.key, result: {} });
+    expect(observed.map.get(row.key)).toBe(row.entry);
+    expect(cancellation.outcomes).toEqual([]);
+    const removals = calls.remove.mock.calls.length;
+    endpoint().socket.message({ type: 'upload_cancel_result', request_id: row.key, result: {} });
+    expect(await cancellation.settled).toEqual({ status: 'resolved', value: undefined });
+    expect(row.resolve).toHaveBeenCalledExactlyOnceWith({});
+    expect(row.cleanup).toHaveBeenCalledTimes(1);
+    expect(calls.remove.mock.calls).toHaveLength(removals);
+    expect(calls.clear).toHaveBeenCalledWith(row.timer);
+    endpoint().socket.message({ type: 'upload_cancel_result', request_id: row.key, error: { code: 'attachment_upload_busy' } });
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(row.resolve).toHaveBeenCalledTimes(1);
+    expect(row.reject).not.toHaveBeenCalled();
+    expect(observed.map.has(row.key)).toBe(false);
+  });
+
+  it('pre-aborted command exits before request identity, resources, insertion and send', async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const id = vi.spyOn(crypto, 'randomUUID');
+    const random = vi.spyOn(crypto, 'getRandomValues');
+    const observed = capture(maps.pendingRequests);
+    const send = vi.spyOn(endpoint().transport, 'send');
+    const additions = calls.add.mock.calls.length; // Framework-owned test signal is outside this command.
+    const result = first(relayStore.sendCommand(endpoint().relay.id, payload(), 60_000, false, abort.signal));
+    expect(calls.add.mock.calls).toHaveLength(additions);
+    expect(await result.settled).toMatchObject({ status: 'rejected',
+      error: { message: 'Conversation history request was cancelled.', code: 'request_cancelled' } });
+    for (const spy of [id, random, calls.schedule, observed.set, send]) expect(spy).not.toHaveBeenCalled();
+    expect(calls.clear).not.toHaveBeenCalled();
+    expect(calls.remove).not.toHaveBeenCalled();
+    expect(observed.map.size).toBe(0);
+  });
+
+  it.each(['abort', 'throw'])('metadata getter %s retains post-listener pre-insertion partial progress', async mode => {
+    const abort = new AbortController();
+    const observed = capture(maps.pendingRequests);
+    const send = vi.spyOn(endpoint().transport, 'send');
+    const sentinel = new Error('registration metadata sentinel');
+    const metadata = vi.fn(() => {
+      expect(calls.add.mock.contexts).toContain(abort.signal);
+      expect(observed.rows).toEqual([]);
+      if (mode === 'throw') throw sentinel;
+      abort.abort();
+      return { action_id: 'registration_action_035' };
+    });
+    // Only the first metadata access is the pre-insertion seam; spread reads it again later.
+    const command = { ...payload(), get intent() {
+      return observed.rows.length ? { action_id: 'registration_action_035' } : metadata();
+    } };
+    const outcome = first(relayStore.sendCommand(endpoint().relay.id, command, 60_000, false, abort.signal));
+    expect(calls.add.mock.invocationCallOrder[0]).toBeLessThan(metadata.mock.invocationCallOrder[0]);
+    const timer = calls.schedule.mock.results[0].value;
+    if (mode === 'abort') {
+      const row = registered(observed, abort.signal);
+      expect(abort.signal.aborted).toBe(true);
+      expect(calls.clear).toHaveBeenCalledExactlyOnceWith(row.timer);
+      expect(observed.deletion.mock.results[0].value).toBe(false);
+      expect(calls.remove).not.toHaveBeenCalled(); // Command absent-entry abort returns before cleanup/reject.
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(outcome.outcomes).toEqual([]);
+      reply(row, false);
+      expect(await outcome.settled).toMatchObject({ status: 'resolved', value: { ok: true } });
+      expect(row.resolve).toHaveBeenCalledTimes(1);
+      expect(row.reject).not.toHaveBeenCalled();
+      removal(abort.signal);
+      await noLaterOwnership(observed, false);
+    } else {
+      expect(await outcome.settled).toEqual({ status: 'rejected', error: sentinel });
+      expect(observed.rows).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+      expect(calls.clear).not.toHaveBeenCalledWith(timer);
+      expect(calls.remove).not.toHaveBeenCalled();
+      expect(observed.map.size).toBe(0);
+      // Explicit fixture cleanup of real pre-insertion resources, not production hardening.
+      const listener = calls.add.mock.calls[0][1]!;
+      abort.signal.removeEventListener('abort', listener);
+      clearTimeout(timer);
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(outcome.outcomes).toEqual(['rejected']);
+      expect(observed.map.size).toBe(0);
+    }
+  });
+});
+
+describe('explicit false-send release through genuine public consumers', () => {
+  const nativeRemove = AbortSignal.prototype.removeEventListener;
+  type Pending = {
+    relayId: string; responseType?: string;
+    timer: ReturnType<typeof setTimeout>; cleanup: () => void;
+    resolve: (value: any) => void; reject: (error: any) => void;
+  };
+  const maps = relayStore as unknown as {
+    pendingRequests: Map<string, Pending>; pendingUploads: Map<string, Pending>;
+  };
+  function instrumentation() {
+    return {
+      schedule: vi.spyOn(globalThis, 'setTimeout'),
+      clear: vi.spyOn(globalThis, 'clearTimeout'),
+      add: vi.spyOn(AbortSignal.prototype, 'addEventListener'),
+      remove: vi.spyOn(AbortSignal.prototype, 'removeEventListener'),
+    };
+  }
+  let calls: ReturnType<typeof instrumentation>;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    transportHijack.current = null;
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    localStorage.clear();
+    sessionStorage.clear();
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'False owner', url: 'ws://127.0.0.1:8871', token: '' });
+    relayStore.addRelay({ label: 'False other', url: 'ws://127.0.0.1:8872', token: '' });
+    for (const socket of MockWebSocket.instances.slice(-2)) {
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    }
+    calls = instrumentation();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks(); // Disarm injections and observers before genuine store teardown.
+    transportHijack.current = null;
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+  function endpoint(port = '8871') {
+    const relay = get(relayStore.relayConfigs).find(row => new URL(row.url).port === port)!;
+    const socket = MockWebSocket.instances.filter(row => new URL(row.url).port === port).at(-1)!;
+    return { relay, socket, transport: relayStore.connection(relay.id)!.transport! };
+  }
+  function payload() {
+    return { type: 'tab_reorder', pane_id: 'w1:p1', insert_index: 2,
+      ...exactWireScope('w1:p1', endpoint().relay.id), intent: { action_id: 'false_release_action_036' } };
+  }
+  function controller() {
+    const { relay } = endpoint();
+    const agent: Agent = { ...exactAgentFields(), relay_id: relay.id, relay_label: relay.label,
+      raw_pane_id: 'w1:p1', pane_id: `${relay.id}::w1:p1` };
+    const batch = relayStore.attachmentController(agent);
+    batch.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    return batch;
+  }
+  function first<T>(promise: Promise<T>) {
+    const outcomes: string[] = [];
+    const settled = promise.then(
+      value => { outcomes.push('resolved'); return { status: 'resolved' as const, value }; },
+      error => { outcomes.push('rejected'); return { status: 'rejected' as const, error }; },
+    );
+    return { settled, outcomes };
+  }
+  function capture(map: Map<string, Pending>) {
+    function methods(entry: Pending) {
+      return { cleanup: vi.spyOn(entry, 'cleanup'), resolve: vi.spyOn(entry, 'resolve'), reject: vi.spyOn(entry, 'reject') };
+    }
+    const rows: Array<{ key: string; entry: Pending; timer: Pending['timer'] } & ReturnType<typeof methods>> = [];
+    const set = vi.spyOn(map, 'set').mockImplementation((key, entry) => {
+      rows.push({ key, entry, timer: entry.timer, ...methods(entry) });
+      return Map.prototype.set.call(map, key, entry);
+    });
+    return { rows, set, deletion: vi.spyOn(map, 'delete'), map };
+  }
+  type Row = ReturnType<typeof capture>['rows'][number];
+  function listenerFor(signal: AbortSignal) {
+    const index = calls.add.mock.contexts.indexOf(signal);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(calls.add.mock.calls[index]).toEqual(['abort', expect.any(Function), { once: true }]);
+    expect(calls.add.mock.contexts.filter(context => context === signal)).toHaveLength(1);
+    return calls.add.mock.calls[index][1]!;
+  }
+  function originalTimer(row: Row, duration: number) {
+    const index = calls.schedule.mock.results.findIndex(result => result.value === row.timer);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(calls.schedule.mock.calls[index]).toEqual([expect.any(Function), duration]);
+  }
+  function definitive(error: any) {
+    expect(error.constructor).toBe(CommandError);
+    expect(error.message).toBe('Could not send command to relay');
+    expect(error.code).toBeUndefined();
+    expect(error.data).toBeUndefined();
+  }
+  function beginResult() {
+    return { upload_id: 'false-release-upload', chunk_bytes: 3, expires_at: new Date(Date.now() + 60_000).toISOString(),
+      limits: { max_files: 8, max_file_bytes: 20 * 1024 * 1024, max_batch_bytes: 50 * 1024 * 1024 } };
+  }
+  function frames(type: string) {
+    return endpoint().socket.sent.map(body => JSON.parse(body)).filter(frame => frame.type === type);
+  }
+  function terminal(row: Row, upload = false, socket = endpoint().socket) {
+    socket.message(upload
+      ? { type: 'upload_begin_result', request_id: row.key, result: beginResult() }
+      : { type: 'command_result', request_id: row.key, ok: true, phase: 'confirmed' });
+  }
+  function wrongTerminals(row: Row, upload = false) {
+    terminal(row, upload, endpoint('8872').socket);
+    endpoint().socket.message({ type: upload ? 'upload_begin_result' : 'command_result', request_id: 'wrong-false-release', ok: true, result: {} });
+    endpoint().socket.message({ type: upload ? 'upload_chunk_result' : 'upload_begin_result', request_id: row.key, result: {} });
+    expect(row.cleanup).not.toHaveBeenCalled();
+    expect(row.resolve).not.toHaveBeenCalled();
+    expect(row.reject).not.toHaveBeenCalled();
+  }
+  async function late(row: Row, upload = false) {
+    const before = [row.cleanup.mock.calls.length, row.resolve.mock.calls.length, row.reject.mock.calls.length];
+    terminal(row, upload);
+    endpoint().socket.message({ type: upload ? 'upload_begin_result' : 'command_result', request_id: row.key,
+      ok: false, error: upload ? { code: 'attachment_upload_busy' } : 'late false-release refusal' });
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect([row.cleanup.mock.calls.length, row.resolve.mock.calls.length, row.reject.mock.calls.length]).toEqual(before);
+    expect((upload ? maps.pendingUploads : maps.pendingRequests).has(row.key)).toBe(false);
+  }
+
+  it('signal-less command refusal clears its original timer before deletion and rejects definitively without a phantom listener', async () => {
+    const { relay, transport } = endpoint();
+    const observed = capture(maps.pendingRequests);
+    const attempted: Record<string, any>[] = [];
+    const send = transport.send;
+    vi.spyOn(transport, 'send').mockImplementation(function (this: RelayTransport, frame) {
+      if (frame.type !== 'tab_reorder') return send.call(this, frame);
+      attempted.push(frame);
+      expect(observed.map.get(String(frame.request_id))).toBe(observed.rows[0].entry);
+      return false;
+    });
+    const additions = calls.add.mock.calls.length;
+    const outcome = first(relayStore.sendCommand(relay.id, payload()));
+    const row = observed.rows[0];
+    expect(attempted).toEqual([expect.objectContaining({ type: 'tab_reorder', request_id: row.key, protocol: 3, client_id: expect.any(String) })]);
+    originalTimer(row, 15_000);
+    expect(calls.add.mock.calls).toHaveLength(additions);
+    expect(calls.remove).not.toHaveBeenCalled();
+    expect(calls.clear).toHaveBeenCalledExactlyOnceWith(row.timer);
+    expect(observed.deletion).toHaveBeenCalledExactlyOnceWith(row.key);
+    expect(calls.clear.mock.invocationCallOrder[0]).toBeLessThan(observed.deletion.mock.invocationCallOrder[0]);
+    expect(observed.map.has(row.key)).toBe(false);
+    const firstOutcome = await outcome.settled;
+    if (firstOutcome.status !== 'rejected') throw new Error('Expected actual executor rejection');
+    definitive(firstOutcome.error);
+    wrongTerminals(row);
+    await late(row);
+    expect(outcome.outcomes).toEqual(['rejected']);
+    expect(await outcome.settled).toBe(firstOutcome);
+  });
+
+  it('signal-less public upload_cancel refusal releases the actual cancel record and translates failure without continued upload', async () => {
+    const batch = controller();
+    const observed = capture(maps.pendingUploads);
+    // Passive call-through observation of the genuine chunk Promise, never a private request invocation.
+    const callbacks = (batch as unknown as { callbacks: import('$lib/attachments').AttachmentUploadCallbacks }).callbacks;
+    const chunk = vi.spyOn(callbacks, 'chunk');
+    const upload = first(batch.upload());
+    const begin = observed.rows[0];
+    terminal(begin, true);
+    await vi.waitFor(() => expect(frames('upload_chunk')).toHaveLength(1));
+    expect(chunk).toHaveBeenCalledTimes(1);
+    const rawChunk = first(chunk.mock.results[0].value);
+    const chunkRow = observed.rows[1];
+    expect(frames('upload_chunk')[0]).toMatchObject({ request_id: chunkRow.key, upload_id: 'false-release-upload', sequence: 0, data: 'cG5n' });
+    const { transport } = endpoint();
+    const send = transport.send;
+    const attempted: Record<string, any>[] = [];
+    vi.spyOn(transport, 'send').mockImplementation(function (this: RelayTransport, frame) {
+      if (frame.type !== 'upload_cancel') return send.call(this, frame);
+      attempted.push(frame);
+      expect(observed.map.get(String(frame.request_id))).toBe(observed.rows[2].entry);
+      return false;
+    });
+    const additions = calls.add.mock.calls.length;
+    const cancellation = first(batch.cancel());
+    const row = observed.rows[2];
+    expect(attempted).toEqual([expect.objectContaining({ type: 'upload_cancel', request_id: row.key,
+      protocol: 3, client_id: expect.any(String), upload_id: 'false-release-upload' })]);
+    expect(row.entry.responseType).toBe('upload_cancel_result');
+    originalTimer(row, 60_000);
+    expect(calls.add.mock.calls).toHaveLength(additions);
+    expect(calls.clear.mock.calls.filter(call => call[0] === row.timer)).toHaveLength(1);
+    const clearIndex = calls.clear.mock.calls.findIndex(call => call[0] === row.timer);
+    const deleteIndex = observed.deletion.mock.calls.findIndex(call => call[0] === row.key);
+    expect(deleteIndex).toBeGreaterThanOrEqual(0);
+    expect(calls.clear.mock.invocationCallOrder[clearIndex]).toBeLessThan(observed.deletion.mock.invocationCallOrder[deleteIndex]);
+    expect(observed.map.has(row.key)).toBe(false);
+    expect(await cancellation.settled).toEqual({ status: 'rejected', error: { code: 'attachment_cancel_failed' } });
+    expect(await rawChunk.settled).toMatchObject({ status: 'rejected', error: { code: 'attachment_upload_interrupted' } });
+    expect(await upload.settled).toEqual({ status: 'resolved', value: [] });
+    expect(batch.snapshot()).toMatchObject({ uploading: false, items: [] });
+    expect(row.cleanup).not.toHaveBeenCalled();
+    expect(row.resolve).not.toHaveBeenCalled();
+    expect(row.reject).not.toHaveBeenCalled(); // Public cancellation does not expose the raw cancel error.
+    const removals = calls.remove.mock.calls.length;
+    for (const socket of [endpoint('8872').socket, endpoint().socket]) {
+      socket.message({ type: 'upload_cancel_result', request_id: row.key, result: {} });
+      socket.message({ type: 'upload_begin_result', request_id: row.key, result: beginResult() });
+      socket.message({ type: 'upload_cancel_result', request_id: 'wrong-cancel', result: {} });
+    }
+    endpoint().socket.message({ type: 'upload_chunk_result', request_id: chunkRow.key,
+      result: { file_index: 0, next_sequence: 1, received_bytes: 3 } });
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(observed.map.size).toBe(0);
+    expect(row.cleanup).not.toHaveBeenCalled();
+    expect(row.resolve).not.toHaveBeenCalled();
+    expect(row.reject).not.toHaveBeenCalled();
+    expect(calls.remove.mock.calls).toHaveLength(removals);
+    expect(frames('upload_chunk')).toHaveLength(1);
+    expect(frames('upload_finish')).toEqual([]);
+    expect(cancellation.outcomes).toEqual(['rejected']);
+    expect(rawChunk.outcomes).toEqual(['rejected']);
+    expect(upload.outcomes).toEqual(['resolved']);
+  });
+
+  it('controlled synchronous prepared JSON renewal preserves lexical original release and later raw replacement timeout', async () => {
+    const { relay, transport, socket } = endpoint();
+    const abort = new AbortController();
+    const observed = capture(maps.pendingRequests);
+    const send = transport.send;
+    const attempted: Record<string, any>[] = [];
+    vi.spyOn(transport, 'send').mockImplementation(function (this: RelayTransport, frame) {
+      if (frame.type !== 'tab_reorder') return send.call(this, frame);
+      attempted.push(frame);
+      const row = observed.rows[0];
+      expect(observed.map.get(row.key)).toBe(row.entry);
+      const receipt = { action_id: 'false_release_action_036', phase: 'prepared' };
+      endpoint('8872').socket.message({ type: 'action_receipt', request_id: row.key, receipt });
+      socket.message({ type: 'action_receipt', request_id: 'missing', receipt: { ...receipt, action_id: 'unrelated_action_036' } });
+      socket.message({ type: 'upload_begin_result', request_id: row.key, result: {} });
+      expect(row.entry.timer).toBe(row.timer);
+      expect(calls.clear).not.toHaveBeenCalledWith(row.timer);
+      socket.message({ type: 'action_receipt', request_id: row.key, receipt });
+      expect(row.entry.timer).not.toBe(row.timer);
+      return false; // Deliberate synchronous reentrancy, not natural WebSocket scheduling evidence.
+    });
+    const result = first(relayStore.sendCommand(relay.id, payload(), 60_000, false, abort.signal));
+    const row = observed.rows[0];
+    const replacement = row.entry.timer;
+    const listener = listenerFor(abort.signal);
+    originalTimer(row, 60_000);
+    expect(attempted).toHaveLength(1);
+    expect(attempted[0]).toMatchObject({ type: 'tab_reorder', request_id: row.key, protocol: 3, client_id: expect.any(String) });
+    expect(calls.clear.mock.calls.filter(call => call[0] === row.timer)).toHaveLength(2);
+    expect(calls.clear).not.toHaveBeenCalledWith(replacement);
+    const scheduled = calls.schedule.mock.results.findIndex(value => value.value === replacement);
+    expect(calls.schedule.mock.calls[scheduled]).toEqual([expect.any(Function), 10_000]);
+    expect(calls.remove).toHaveBeenCalledExactlyOnceWith('abort', listener);
+    const lastClear = calls.clear.mock.calls.findLastIndex(call => call[0] === row.timer);
+    expect(calls.clear.mock.invocationCallOrder[lastClear]).toBeLessThan(calls.remove.mock.invocationCallOrder[0]);
+    expect(calls.remove.mock.invocationCallOrder[0]).toBeLessThan(observed.deletion.mock.invocationCallOrder[0]);
+    expect(observed.deletion).toHaveBeenCalledExactlyOnceWith(row.key);
+    expect(observed.map.has(row.key)).toBe(false);
+    const firstOutcome = await result.settled;
+    if (firstOutcome.status !== 'rejected') throw new Error('Expected lexical rejection');
+    definitive(firstOutcome.error);
+    expect(row.cleanup).not.toHaveBeenCalled();
+    expect(row.reject).not.toHaveBeenCalled();
+    terminal(row);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(row.cleanup).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(row.cleanup).toHaveBeenCalledTimes(1);
+    expect(row.reject).toHaveBeenCalledTimes(1);
+    expect(row.resolve).not.toHaveBeenCalled();
+    const laterError = row.reject.mock.calls[0][0];
+    expect(laterError.constructor).toBe(CommandError);
+    expect(laterError.message).toBe('Relay confirmation timed out');
+    expect(laterError.data).toEqual({ dispatched_unknown: true });
+    expect(laterError).not.toBe(firstOutcome.error);
+    expect(calls.clear).not.toHaveBeenCalledWith(replacement);
+    expect(calls.remove.mock.calls).toEqual([['abort', listener], ['abort', listener]]);
+    expect(calls.remove.mock.contexts).toEqual([abort.signal, abort.signal]);
+    expect(await result.settled).toBe(firstOutcome);
+    expect(result.outcomes).toEqual(['rejected']);
+    await late(row);
+  });
+
+  it('command false cleanup removes the exact native listener then throws, retaining entry until matching terminal JSON', async () => {
+    const { relay, transport } = endpoint();
+    const abort = new AbortController();
+    const observed = capture(maps.pendingRequests);
+    const sentinel = new Error('command false cleanup acted then threw');
+    let armed = true;
+    let listener: EventListenerOrEventListenerObject;
+    calls.remove.mockImplementation(function (this: AbortSignal, type, callback, options) {
+      nativeRemove.call(this, type, callback, options);
+      if (armed && this === abort.signal && callback === listener) throw sentinel;
+    });
+    const send = transport.send;
+    const attempted: Record<string, any>[] = [];
+    vi.spyOn(transport, 'send').mockImplementation(function (this: RelayTransport, frame) {
+      if (frame.type !== 'tab_reorder') return send.call(this, frame);
+      attempted.push(frame);
+      listener = listenerFor(abort.signal);
+      return false;
+    });
+    const result = first(relayStore.sendCommand(relay.id, payload(), 60_000, false, abort.signal));
+    const row = observed.rows[0];
+    originalTimer(row, 60_000);
+    expect(attempted).toHaveLength(1);
+    expect(attempted[0]).toMatchObject({ type: 'tab_reorder', request_id: row.key, protocol: 3, client_id: expect.any(String) });
+    const firstOutcome = await result.settled;
+    expect(firstOutcome).toEqual({ status: 'rejected', error: sentinel });
+    if (firstOutcome.status !== 'rejected') throw new Error('Expected executor exception');
+    expect(firstOutcome.error).toBe(sentinel);
+    expect(calls.clear).toHaveBeenCalledExactlyOnceWith(row.timer);
+    expect(calls.remove).toHaveBeenCalledExactlyOnceWith('abort', listener!);
+    expect(calls.remove.mock.contexts[0]).toBe(abort.signal);
+    expect(calls.clear.mock.invocationCallOrder[0]).toBeLessThan(calls.remove.mock.invocationCallOrder[0]);
+    expect(observed.map.get(row.key)).toBe(row.entry);
+    expect(observed.deletion).not.toHaveBeenCalled();
+    armed = false;
+    abort.abort(); // Native removal already acted: abort no longer deletes this retained entry.
+    expect(observed.map.get(row.key)).toBe(row.entry);
+    wrongTerminals(row);
+    terminal(row);
+    expect(row.cleanup).toHaveBeenCalledTimes(1);
+    expect(row.resolve).toHaveBeenCalledTimes(1);
+    expect(row.reject).not.toHaveBeenCalled();
+    expect(observed.map.has(row.key)).toBe(false);
+    expect(calls.clear.mock.calls).toEqual([[row.timer], [row.timer]]);
+    expect(calls.remove.mock.calls).toEqual([['abort', listener!], ['abort', listener!]]);
+    expect(await result.settled).toBe(firstOutcome);
+    await late(row);
+    expect(result.outcomes).toEqual(['rejected']);
+  });
+
+  it('public upload begin false cleanup throws raw sentinel but translates public failure and later releases through matching JSON', async () => {
+    const batch = controller();
+    const observed = capture(maps.pendingUploads);
+    const signalRead = vi.spyOn(AbortController.prototype, 'signal', 'get');
+    const sentinel = new Error('upload false cleanup acted then threw');
+    let armed = true;
+    let signal: AbortSignal;
+    let listener: EventListenerOrEventListenerObject;
+    calls.remove.mockImplementation(function (this: AbortSignal, type, callback, options) {
+      nativeRemove.call(this, type, callback, options);
+      if (armed && this === signal && callback === listener) throw sentinel;
+    });
+    const { transport } = endpoint();
+    const send = transport.send;
+    const attempted: Record<string, any>[] = [];
+    vi.spyOn(transport, 'send').mockImplementation(function (this: RelayTransport, frame) {
+      if (frame.type !== 'upload_begin') return send.call(this, frame);
+      attempted.push(frame);
+      signal = calls.add.mock.contexts.at(-1)! as AbortSignal;
+      listener = listenerFor(signal);
+      expect(signal).toBeInstanceOf(AbortSignal);
+      return false;
+    });
+    const publicOutcome = first(batch.upload());
+    const pendingBegin = (batch as unknown as { pendingBegin: Promise<Record<string, any>> }).pendingBegin;
+    expect(pendingBegin).toBeInstanceOf(Promise); // Observed immediately, before the first await continuation.
+    const raw = first(pendingBegin);
+    const row = observed.rows[0];
+    const nativeController = signalRead.mock.contexts.find((_, index) => signalRead.mock.results[index].value === signal!)! as AbortController;
+    expect(nativeController).toBeInstanceOf(AbortController);
+    expect(nativeController.signal).toBe(signal!);
+    expect(attempted).toHaveLength(1);
+    expect(attempted[0]).toMatchObject({ type: 'upload_begin', request_id: row.key, protocol: 3, client_id: expect.any(String) });
+    expect(row.entry.responseType).toBe('upload_begin_result');
+    originalTimer(row, 60_000);
+    const firstOutcome = await raw.settled;
+    expect(firstOutcome).toEqual({ status: 'rejected', error: sentinel });
+    if (firstOutcome.status !== 'rejected') throw new Error('Expected raw executor exception');
+    expect(firstOutcome.error).toBe(sentinel);
+    expect(await publicOutcome.settled).toEqual({ status: 'rejected', error: { code: 'attachment_upload_failed' } });
+    expect(batch.snapshot()).toMatchObject({ uploading: false, items: [{ state: 'interrupted', issue: { code: 'attachment_upload_failed' } }] });
+    expect(calls.clear).toHaveBeenCalledExactlyOnceWith(row.timer);
+    expect(calls.remove).toHaveBeenCalledExactlyOnceWith('abort', listener!);
+    expect(calls.remove.mock.contexts[0]).toBe(signal!);
+    expect(calls.clear.mock.invocationCallOrder[0]).toBeLessThan(calls.remove.mock.invocationCallOrder[0]);
+    expect(observed.map.get(row.key)).toBe(row.entry);
+    expect(observed.deletion).not.toHaveBeenCalled();
+    armed = false;
+    wrongTerminals(row, true);
+    terminal(row, true);
+    expect(row.cleanup).toHaveBeenCalledTimes(1);
+    expect(row.resolve).toHaveBeenCalledExactlyOnceWith(beginResult());
+    expect(row.reject).not.toHaveBeenCalled();
+    expect(observed.map.has(row.key)).toBe(false);
+    expect(calls.clear.mock.calls).toEqual([[row.timer], [row.timer]]);
+    expect(calls.remove.mock.calls).toEqual([['abort', listener!], ['abort', listener!]]);
+    expect(await raw.settled).toBe(firstOutcome);
+    await batch.cancel();
+    await late(row, true);
+    expect(frames('upload_chunk')).toEqual([]);
+    expect(frames('upload_finish')).toEqual([]);
+    expect(raw.outcomes).toEqual(['rejected']);
+    expect(publicOutcome.outcomes).toEqual(['rejected']);
+  });
+});
+
+describe('three-field safe-integer wire consumers on decoded JSON', () => {
+  const wireScalars: Array<{ name: string; fields: Record<string, unknown>; expected: number | undefined }> = [
+    { name: "missing", fields: {}, expected: undefined },
+    { name: "null", fields: {"server_protocol":null,"generation":null,"version":null}, expected: 0 },
+    { name: "false", fields: {"server_protocol":false,"generation":false,"version":false}, expected: 0 },
+    { name: "true", fields: {"server_protocol":true,"generation":true,"version":true}, expected: 1 },
+    { name: "empty-string", fields: {"server_protocol":"","generation":"","version":""}, expected: 0 },
+    { name: "whitespace", fields: {"server_protocol":" \t ","generation":" \t ","version":" \t "}, expected: 0 },
+    { name: "padded-decimal", fields: {"server_protocol":" 42 ","generation":" 42 ","version":" 42 "}, expected: 42 },
+    { name: "negative-zero-string", fields: {"server_protocol":"-0","generation":"-0","version":"-0"}, expected: -0 },
+    { name: "hex-string", fields: {"server_protocol":"0x10","generation":"0x10","version":"0x10"}, expected: 16 },
+    { name: "exponent-string", fields: {"server_protocol":"1e2","generation":"1e2","version":"1e2"}, expected: 100 },
+    { name: "nan-string", fields: {"server_protocol":"NaN","generation":"NaN","version":"NaN"}, expected: undefined },
+    { name: "positive-infinity-string", fields: {"server_protocol":"Infinity","generation":"Infinity","version":"Infinity"}, expected: undefined },
+    { name: "negative-infinity-string", fields: {"server_protocol":"-Infinity","generation":"-Infinity","version":"-Infinity"}, expected: undefined },
+    { name: "negative-integer", fields: {"server_protocol":-5,"generation":-5,"version":-5}, expected: -5 },
+    { name: "zero", fields: {"server_protocol":0,"generation":0,"version":0}, expected: 0 },
+    { name: "positive-integer", fields: {"server_protocol":7,"generation":7,"version":7}, expected: 7 },
+    { name: "fraction", fields: {"server_protocol":1.5,"generation":1.5,"version":1.5}, expected: undefined },
+    { name: "max-safe", fields: {"server_protocol":9007199254740991,"generation":9007199254740991,"version":9007199254740991}, expected: 9007199254740991 },
+    { name: "min-safe", fields: {"server_protocol":-9007199254740991,"generation":-9007199254740991,"version":-9007199254740991}, expected: -9007199254740991 },
+    { name: "above-safe", fields: {"server_protocol":9007199254740992,"generation":9007199254740992,"version":9007199254740992}, expected: undefined },
+    { name: "below-safe", fields: {"server_protocol":-9007199254740992,"generation":-9007199254740992,"version":-9007199254740992}, expected: undefined },
+    { name: "empty-array", fields: {"server_protocol":[],"generation":[],"version":[]}, expected: 0 },
+    { name: "null-array", fields: {"server_protocol":[null],"generation":[null],"version":[null]}, expected: 0 },
+    { name: "numeric-array", fields: {"server_protocol":[2],"generation":[2],"version":[2]}, expected: 2 },
+    { name: "string-array", fields: {"server_protocol":["3"],"generation":["3"],"version":["3"]}, expected: 3 },
+    { name: "multiple-array", fields: {"server_protocol":[1,2],"generation":[1,2],"version":[1,2]}, expected: undefined },
+    { name: "ordinary-record", fields: {"server_protocol":{},"generation":{},"version":{}}, expected: undefined },
+  ];
+  type Page = Awaited<ReturnType<typeof relayStore.getConversationHistory>>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    transportHijack.current = null;
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    localStorage.clear();
+    sessionStorage.clear();
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    // Adding a relay reconnects all: establish both before starting pending work.
+    relayStore.addRelay({ label: 'Wire owner', url: 'ws://127.0.0.1:8871', token: '' });
+    relayStore.addRelay({ label: 'Wire other', url: 'ws://127.0.0.1:8872', token: '' });
+    for (const socket of MockWebSocket.instances.slice(-2)) {
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+      socket.message({ type: 'agents', agents: [
+        { ...exactAgentFields(), pane_id: 'w1:p1', name: 'Wire agent', agent: 'codex', status: 'idle' },
+      ] });
+    }
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    transportHijack.current = null;
+    relayStore.destroy();
+    relayStore.setHidden(false);
+    relayStore.relayConfigs.set([]);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function endpoint(port = '8871') {
+    const relay = get(relayStore.relayConfigs).find(row => new URL(row.url).port === port)!;
+    const socket = MockWebSocket.instances.filter(row => new URL(row.url).port === port).at(-1)!;
+    return { relay, socket };
+  }
+  function status(fields: Record<string, unknown>, marker: string) {
+    return {
+      installed_client_version: '0.9.0', server_version: marker, server_protocol_known: true,
+      endpoint_protocol_generation: 2,
+      features: { 'pane.read': { state: 'supported', reason: marker } },
+      ...fields,
+    };
+  }
+  function snapshot(fields: Record<string, unknown>, marker: string, port = '8871') {
+    endpoint(port).socket.message({
+      type: 'push_config', protocol: 3, capabilities: ['wire-snapshot'], inventory: { state: 'ready' },
+      herdr_status: status(fields, marker),
+    });
+  }
+  function live(fields: Record<string, unknown>, marker: string, port = '8871') {
+    endpoint(port).socket.message({
+      type: 'herdr_status', status: status(fields, marker), capabilities: ['wire-live', marker],
+    });
+  }
+  function current(port = '8871') {
+    return relayStore.connection(endpoint(port).relay.id)!;
+  }
+  function assertStatus(fields: { server_protocol: number; generation: number }, marker: string, port = '8871') {
+    expect(current(port).herdrStatus).toEqual({
+      installed_client_version: '0.9.0', server_version: marker,
+      server_protocol: fields.server_protocol, generation: fields.generation,
+      server_protocol_known: true, endpoint_protocol_generation: 2,
+      features: { 'pane.read': { state: 'supported', reason: marker } },
+    });
+    expect(Object.is(current(port).herdrStatus.server_protocol, -0)).toBe(Object.is(fields.server_protocol, -0));
+    expect(Object.is(current(port).herdrStatus.generation, -0)).toBe(Object.is(fields.generation, -0));
+  }
+  function plan(fields: Record<string, unknown> = {}) {
+    return {
+      available: true, session_id: 'wire-session', updated_at: 'wire-time',
+      phases: [{ name: 'Wire phase', tasks: [{ id: 'wire-task', content: 'Preserve this task', status: 'in_progress' }] }],
+      truncated: false, ...fields,
+    };
+  }
+  function page(marker: string, extra: Record<string, unknown> = {}) {
+    return {
+      available: true, has_more: false, state: 'ready', mode: 'recent',
+      entries: [{ id: 'wire-entry', role: 'assistant', text: marker }], ...extra,
+    };
+  }
+  function history(signal?: AbortSignal, port = '8871') {
+    const { relay, socket } = endpoint(port);
+    const agent = get(relayStore.agents).find(row => row.relay_id === relay.id)!;
+    expect(agent).toBeDefined();
+    const outcomes: string[] = [];
+    const values: Page[] = [];
+    const errors: unknown[] = [];
+    const promise = relayStore.getConversationHistory(agent, { signal });
+    void promise.then(value => { values.push(value); outcomes.push('resolved'); },
+      error => { errors.push(error); outcomes.push('rejected'); });
+    const frame = socket.sent.map(body => JSON.parse(body)).filter(row => row.type === 'get_conversation_history').at(-1)!;
+    expect(frame).toMatchObject({
+      type: 'get_conversation_history', protocol: 3, request_id: expect.any(String),
+      pane_id: 'w1:p1', target: { relay_id: relay.id, terminal_id: 'terminal-w1:p1', generation: 1 },
+    });
+    expect(frame.request_id).not.toBe('');
+    return { promise, outcomes, values, errors, frame, socket };
+  }
+  type History = ReturnType<typeof history>;
+  function result(request: History, data: Record<string, unknown>, socket = request.socket, extra: Record<string, unknown> = {}) {
+    socket.message({ type: 'command_result', request_id: request.frame.request_id, ok: true, data, ...extra });
+  }
+  function poisonedPage() {
+    return page('poison must not be interpreted', { omo_plan: plan({ version: { toString: null } }) });
+  }
+  async function subsequent() {
+    const next = history();
+    result(next, page('subsequent genuine history', { omo_plan: plan({ version: '12' }) }));
+    const value = await next.promise;
+    expect(value.entries[0].text).toBe('subsequent genuine history');
+    expect(value.omoPlan?.version).toBe(12);
+    expect(next.outcomes).toEqual(['resolved']);
+  }
+
+  it.each(wireScalars)('status $name reaches push snapshot and the live generation fence', ({ fields, expected }) => {
+    const statusFields = Object.fromEntries(Object.entries(fields).filter(([key]) => key !== 'version'));
+    const numeric = expected ?? 0;
+    snapshot(statusFields, 'scalar snapshot');
+    assertStatus({ server_protocol: numeric, generation: numeric }, 'scalar snapshot');
+    snapshot({ server_protocol: 91, generation: Number.MIN_SAFE_INTEGER }, 'minimum seed');
+    live(statusFields, 'scalar live');
+    if (numeric === Number.MIN_SAFE_INTEGER) {
+      // The minimum safe endpoint cannot be freshly admitted below a safe seed.
+      assertStatus({ server_protocol: 91, generation: Number.MIN_SAFE_INTEGER }, 'minimum seed');
+      expect(current().capabilities).toEqual(['wire-snapshot']);
+    } else {
+      assertStatus({ server_protocol: numeric, generation: numeric }, 'scalar live');
+      expect(current().capabilities).toEqual(['wire-live', 'scalar live']);
+    }
+  });
+
+  it.each(wireScalars)('history $name decodes the correlated plan without dropping its content', async ({ fields, expected }) => {
+    const versionFields = Object.hasOwn(fields, 'version') ? { version: fields.version } : {};
+    const data = page('scalar history', { omo_plan: plan(versionFields) });
+    const request = history();
+    result(request, data);
+    const value = await request.promise;
+    expect(value.entries[0].text).toBe('scalar history');
+    expect(value.omoPlan).toEqual({
+      available: true, reason_code: undefined, session_id: 'wire-session', updated_at: 'wire-time',
+      version: expected, phases: [{ name: 'Wire phase', tasks: [
+        { id: 'wire-task', content: 'Preserve this task', status: 'in_progress' },
+      ] }], truncated: false,
+    });
+    expect(Object.hasOwn(value.omoPlan!, 'version')).toBe(true);
+    expect(Object.is(value.omoPlan!.version, -0)).toBe(Object.is(expected, -0));
+    // Supplemental exported surface, after the genuine public request/JSON consumer.
+    expect(normalizeConversationPage(JSON.parse(JSON.stringify(data))).omoPlan).toEqual(value.omoPlan);
+    expect(request.outcomes).toEqual(['resolved']);
+  });
+
+  it('fresh connections and missing/null/array/nonrecord status containers retain numeric defaults', () => {
+    const { relay } = endpoint();
+    relayStore.connectRelay(relay);
+    expect(current().herdrStatus).toMatchObject({ server_protocol: 0, generation: 0, features: {} });
+    endpoint().socket.open();
+    for (const fields of [{}, { herdr_status: null }, { herdr_status: [] }, { herdr_status: 7 }, { herdr_status: 'status' }, { herdr_status: false }]) {
+      endpoint().socket.message({ type: 'push_config', protocol: 3, ...fields });
+      expect(current().herdrStatus).toEqual({
+        installed_client_version: '', server_version: '', server_protocol: 0, server_protocol_known: false,
+        endpoint_protocol_generation: null, generation: 0, features: {},
+      });
+      snapshot({ server_protocol: 9, generation: Number.MIN_SAFE_INTEGER }, 'container seed');
+      const liveFields = Object.hasOwn(fields, 'herdr_status') ? { status: fields.herdr_status } : {};
+      endpoint().socket.message({ type: 'herdr_status', ...liveFields });
+      expect(current().herdrStatus).toMatchObject({ server_protocol: 0, generation: 0, features: {} });
+    }
+  });
+
+  it('live generations reject stale/equal/duplicate/coercively-equal and invalid-zero repeats before next valid progress', () => {
+    snapshot({ server_protocol: 2, generation: -2 }, 'ordering seed');
+    live({ server_protocol: 3, generation: -1 }, 'negative next');
+    assertStatus({ server_protocol: 3, generation: -1 }, 'negative next');
+    for (const generation of [-2, -1, -1, '-1']) {
+      live({ server_protocol: 99, generation }, 'must stay ignored');
+      assertStatus({ server_protocol: 3, generation: -1 }, 'negative next');
+      expect(current().capabilities).toEqual(['wire-live', 'negative next']);
+    }
+    live({ server_protocol: 4, generation: 'NaN' }, 'invalid becomes zero');
+    assertStatus({ server_protocol: 4, generation: 0 }, 'invalid becomes zero');
+    for (const generation of ['Infinity', {}, 0, '0']) {
+      live({ server_protocol: 99, generation }, 'zero repeat ignored');
+      assertStatus({ server_protocol: 4, generation: 0 }, 'invalid becomes zero');
+    }
+    live({ server_protocol: '5', generation: '1' }, 'valid next');
+    assertStatus({ server_protocol: 5, generation: 1 }, 'valid next');
+  });
+
+  it('unsolicited status stays relay-local and a retired socket cannot affect its public replacement', () => {
+    snapshot({ server_protocol: 2, generation: 2 }, 'owner');
+    snapshot({ server_protocol: 7, generation: 7 }, 'other', '8872');
+    live({ server_protocol: '8', generation: '8' }, 'other next', '8872');
+    assertStatus({ server_protocol: 2, generation: 2 }, 'owner');
+    assertStatus({ server_protocol: 8, generation: 8 }, 'other next', '8872');
+    const retired = endpoint();
+    relayStore.connectRelay(retired.relay);
+    const replacement = endpoint().socket;
+    expect(replacement).not.toBe(retired.socket);
+    replacement.open();
+    snapshot({ server_protocol: 3, generation: 3 }, 'replacement');
+    expect(() => retired.socket.message({
+      type: 'herdr_status', status: status({ server_protocol: { toString: null }, generation: 99 }, 'retired poison'),
+    })).not.toThrow();
+    assertStatus({ server_protocol: 3, generation: 3 }, 'replacement');
+    live({ server_protocol: 4, generation: 4 }, 'replacement next');
+    assertStatus({ server_protocol: 4, generation: 4 }, 'replacement next');
+    assertStatus({ server_protocol: 8, generation: 8 }, 'other next', '8872');
+  });
+
+  it('history missing/null/array/nonrecord plan containers remain absent', async () => {
+    for (const extra of [{}, { omo_plan: null }, { omo_plan: [] }, { omo_plan: 7 }, { omo_plan: 'plan' }, { omo_plan: false }]) {
+      const request = history();
+      result(request, page('malformed container history', extra));
+      const value = await request.promise;
+      expect(value.entries[0].text).toBe('malformed container history');
+      expect(value.omoPlan).toBeUndefined();
+      expect(request.outcomes).toEqual(['resolved']);
+    }
+  });
+
+  it('history ignores wrong relay/request/type and legacy accepted remains nonterminal without action validation', async () => {
+    const request = history();
+    result(request, poisonedPage(), endpoint('8872').socket);
+    result(request, poisonedPage(), request.socket, { request_id: 'unrelated-wire-request' });
+    result(request, poisonedPage(), request.socket, { type: 'unrecognized_history_result' });
+    result(request, poisonedPage(), request.socket, { phase: 'accepted' });
+    await Promise.resolve();
+    expect(request.outcomes).toEqual([]);
+    result(request, page('matching final', { omo_plan: plan({ version: '6' }) }), request.socket, { action: 'different_legacy_action' });
+    const value = await request.promise;
+    expect(value.entries[0].text).toBe('matching final');
+    expect(value.omoPlan?.version).toBe(6);
+    expect(request.outcomes).toEqual(['resolved']);
+  });
+
+  it('history success ignores duplicate/late poisoned finals and permits a later genuine request', async () => {
+    const request = history();
+    result(request, page('first success', { omo_plan: plan({ version: 3 }) }));
+    const value = await request.promise;
+    result(request, poisonedPage());
+    await vi.advanceTimersByTimeAsync(20_001);
+    result(request, poisonedPage());
+    expect(value.entries[0].text).toBe('first success');
+    expect(value.omoPlan?.version).toBe(3);
+    expect(request.outcomes).toEqual(['resolved']);
+    await subsequent();
+  });
+
+  it('history cancellation ignores late poisoned finals and permits a later genuine request', async () => {
+    const controller = new AbortController();
+    const request = history(controller.signal);
+    controller.abort();
+    await expect(request.promise).rejects.toMatchObject({ code: 'request_cancelled' });
+    result(request, poisonedPage());
+    await vi.advanceTimersByTimeAsync(20_001);
+    result(request, poisonedPage());
+    expect(request.outcomes).toEqual(['rejected']);
+    expect(request.values).toEqual([]);
+    await subsequent();
+  });
+
+  it('history timeout ignores late poisoned finals and permits a later genuine request', async () => {
+    const request = history();
+    await vi.advanceTimersByTimeAsync(20_001);
+    await expect(request.promise).rejects.toMatchObject({
+      message: 'Relay confirmation timed out', data: { dispatched_unknown: true },
+    });
+    result(request, poisonedPage());
+    expect(request.outcomes).toEqual(['rejected']);
+    expect(request.values).toEqual([]);
+    await subsequent();
+  });
+
+  it('status native conversion errors at both fields including stale poison throw synchronously before the fence', () => {
+    for (const fields of [
+      { server_protocol: { toString: null }, generation: 4 },
+      { server_protocol: 4, generation: { toString: null } },
+      { server_protocol: { toString: null }, generation: 2 },
+    ]) {
+      snapshot({ server_protocol: 3, generation: 3 }, 'before error');
+      expect(() => live(fields, 'conversion error')).toThrow(TypeError);
+      assertStatus({ server_protocol: 3, generation: 3 }, 'before error');
+      live({ server_protocol: 4, generation: 4 }, 'after error');
+      assertStatus({ server_protocol: 4, generation: 4 }, 'after error');
+    }
+  });
+
+  it('history native conversion errors reject asynchronously only after actual command resources are released', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    const clear = vi.spyOn(globalThis, 'clearTimeout');
+    type Entry = { relayId: string; action: string; timer: ReturnType<typeof setTimeout>; cleanup: () => void };
+    let observed: { map: Map<string, Entry>; key: string; entry: Entry } | undefined;
+    const nativeSet = Map.prototype.set;
+    const capture = vi.spyOn(Map.prototype, 'set').mockImplementation(function (this: Map<string, Entry>, key: string, entry: Entry) {
+      const answer = nativeSet.call(this, key, entry);
+      if (entry?.relayId === endpoint().relay.id && entry?.action === 'get_conversation_history') {
+        observed = { map: this, key, entry }; // Passive observation of the genuine registered entry.
+      }
+      return answer;
+    });
+    const request = history(controller.signal);
+    expect(observed).toBeDefined();
+    const row = observed!;
+    expect(row.key).toBe(request.frame.request_id);
+    expect(row.map.get(row.key)).toBe(row.entry);
+    const listener = add.mock.calls.find(call => call[0] === 'abort')![1];
+    expect(() => result(request, poisonedPage())).not.toThrow();
+    expect(row.map.has(row.key)).toBe(false);
+    expect(clear.mock.calls.filter(call => call[0] === row.entry.timer)).toHaveLength(1);
+    expect(remove).toHaveBeenCalledExactlyOnceWith('abort', listener);
+    expect(request.outcomes).toEqual([]); // Command release is synchronous; plan projection resumes after await.
+    await expect(request.promise).rejects.toBeInstanceOf(TypeError);
+    expect(request.errors[0]).not.toBeInstanceOf(CommandError);
+    expect(request.outcomes).toEqual(['rejected']);
+    capture.mockRestore();
+    await subsequent();
+  });
+});
+
+describe('command assigned-deadline abort regressions', () => {
+  type Pending = {
+    timer: ReturnType<typeof setTimeout>;
+    cleanup: () => void;
+    resolve: (value: unknown) => void;
+    reject: (error: CommandError) => void;
+  };
+
+  it.each([
+    { name: 'prepared repeated renewal', phase: 'prepared', agentStart: false },
+    { name: 'awaiting_evidence repeated renewal', phase: 'awaiting_evidence', agentStart: false },
+    { name: 'legacy accepted repeated renewal', phase: 'accepted', agentStart: false },
+    { name: 'agent_start prepared then legacy accepted', phase: 'prepared', agentStart: true },
+  ] as const)('$name', async ({ name, phase, agentStart }) => {
+    vi.useFakeTimers();
+    const handles: Array<Parameters<typeof clearTimeout>[0]> = [];
+    const controllers: AbortController[] = [];
+    const promises: Array<Promise<unknown>> = [];
+    try {
+      transportHijack.current = null;
+      MockWebSocket.instances = [];
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      localStorage.clear();
+      sessionStorage.clear();
+      relayStore.destroy();
+      relayStore.setHidden(false);
+      relayStore.relayConfigs.set([]);
+      relayStore.addRelay({ label: 'Assigned A', url: 'ws://127.0.0.1:8871', token: '' });
+      relayStore.addRelay({ label: 'Assigned B', url: 'ws://127.0.0.1:8872', token: '' });
+      for (const socket of MockWebSocket.instances.slice(-2)) {
+        socket.open();
+        socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+      }
+      const map = (relayStore as unknown as { pendingRequests: Map<string, Pending> }).pendingRequests;
+      const nativeClear = globalThis.clearTimeout;
+      const nativeDelete = map.delete;
+      const nativeRemove = AbortSignal.prototype.removeEventListener;
+      const events: Array<{ kind: string; timer?: Parameters<typeof clearTimeout>[0]; key?: string; signal?: AbortSignal; mapped: boolean }> = [];
+      let ownerKey = '';
+      const clear = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(function (this: unknown, ...args) {
+        events.push({ kind: 'clear', timer: args[0], mapped: map.has(ownerKey) });
+        return nativeClear.apply(this, args);
+      });
+      const deletion = vi.spyOn(map, 'delete').mockImplementation(function (this: Map<string, Pending>, key) {
+        const answer = nativeDelete.call(this, key);
+        events.push({ kind: 'delete', key, mapped: this.has(key) });
+        return answer;
+      });
+      const add = vi.spyOn(AbortSignal.prototype, 'addEventListener');
+      const remove = vi.spyOn(AbortSignal.prototype, 'removeEventListener').mockImplementation(function (this: AbortSignal, ...args) {
+        events.push({ kind: 'remove', signal: this, mapped: map.has(ownerKey) });
+        return nativeRemove.apply(this, args);
+      });
+      const schedule = vi.spyOn(globalThis, 'setTimeout');
+      function begin(port: string, start = false) {
+        const relay = get(relayStore.relayConfigs).find(row => new URL(row.url).port === port)!;
+        const socket = MockWebSocket.instances.filter(row => new URL(row.url).port === port).at(-1)!;
+        const controller = new AbortController();
+        controllers.push(controller);
+        const outcomes: string[] = [];
+        const promise = relayStore.sendCommand(relay.id, {
+          type: start ? 'agent_start' : 'tab_reorder', pane_id: 'w1:p1',
+          ...exactWireScope('w1:p1', relay.id), insert_index: 1,
+          intent: { action_id: crypto.randomUUID() },
+        }, undefined, false, controller.signal).then(
+          value => { outcomes.push('resolved'); return { status: 'resolved' as const, value }; },
+          error => { outcomes.push('rejected'); return { status: 'rejected' as const, error }; },
+        );
+        promises.push(promise); // Handler is installed in the same turn as the genuine public call.
+        const frame = JSON.parse(socket.sent.at(-1)!);
+        const entry = map.get(frame.request_id)!;
+        expect(entry).toBeDefined();
+        const timer = entry.timer;
+        handles.push(timer);
+        const registration = add.mock.calls.findIndex((call, index) => call[0] === 'abort' && add.mock.contexts[index] === controller.signal);
+        expect(registration).toBeGreaterThanOrEqual(0);
+        const listener = add.mock.calls[registration][1];
+        const cleanup = vi.spyOn(entry, 'cleanup');
+        const resolve = vi.spyOn(entry, 'resolve');
+        const reject = vi.spyOn(entry, 'reject');
+        return { relay, socket, controller, promise, outcomes, frame, entry, timer, listener, cleanup, resolve, reject };
+      }
+      type Request = ReturnType<typeof begin>;
+      const legacy = (row: Request, fields: Record<string, unknown> = { ok: true, phase: 'completed' }) =>
+        ({ type: 'command_result', request_id: row.frame.request_id, action: row.frame.type, ...fields });
+      const receipt = (row: Request, receiptPhase: string) =>
+        ({ type: 'action_receipt', request_id: row.frame.request_id, receipt: { action_id: row.frame.intent.action_id, phase: receiptPhase } });
+      const counts = (row: Request) => ({
+        cleanup: row.cleanup.mock.calls.length, resolve: row.resolve.mock.calls.length, reject: row.reject.mock.calls.length,
+        removals: remove.mock.calls.filter((call, index) => call[1] === row.listener && remove.mock.contexts[index] === row.controller.signal).length,
+        clears: clear.mock.calls.filter(call => handles.includes(call[0]!) && (call[0] === row.timer || call[0] === row.entry.timer)).length,
+      });
+      const a = begin('8871', agentStart);
+      ownerKey = a.frame.request_id;
+      const b = begin('8872');
+      const initialSchedule = schedule.mock.results.findIndex(row => row.value === a.timer);
+      expect(schedule.mock.calls[initialSchedule][1]).toBe(agentStart ? 60_000 : 15_000);
+      const renewals: Array<{ previous: ReturnType<typeof setTimeout>; assigned: ReturnType<typeof setTimeout>; at: number }> = [];
+      for (const delay of [100, 200]) {
+        await vi.advanceTimersByTimeAsync(delay);
+        const previous = a.entry.timer;
+        a.socket.message(agentStart && renewals.length === 1 ? legacy(a, { ok: true, phase: 'accepted' })
+          : phase === 'accepted' ? legacy(a, { ok: true, phase }) : receipt(a, phase));
+        const assigned = a.entry.timer;
+        if (assigned !== previous) handles.push(assigned);
+        renewals.push({ previous, assigned, at: Date.now() });
+      }
+      const current = a.entry.timer;
+      const bBefore = counts(b);
+      const clearBefore = clear.mock.calls.length;
+      const deleteBefore = deletion.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(100);
+      const eventBefore = events.length;
+      a.controller.abort();
+      const first = await a.promise;
+      const atAbort = counts(a);
+      const bAfterAbort = counts(b);
+      const bEntryAfterAbort = map.get(b.frame.request_id);
+      const abortClears = clear.mock.calls.slice(clearBefore).map(call => call[0]);
+      const abortDeletes = deletion.mock.calls.slice(deleteBefore).map(call => call[0]);
+      const abortEvents = events.slice(eventBefore);
+      b.socket.message(legacy(b));
+      const bResult = await b.promise; // B completes by matching JSON before its 15s deadline.
+      const clock: Array<{ at: number; cleanup: number; reject: number; removals: number }> = [];
+      for (const elapsed of [9_699, 201, agentStart ? 49_701 : 4_701]) {
+        await vi.advanceTimersByTimeAsync(elapsed);
+        const observed = counts(a);
+        clock.push({ at: Date.now(), cleanup: observed.cleanup, reject: observed.reject, removals: observed.removals });
+      }
+      const afterClock = counts(a);
+      const beforeLate = counts(a);
+      for (const frame of [
+        receipt(a, 'prepared'), receipt(a, 'awaiting_evidence'), receipt(a, 'confirmed'), receipt(a, 'confirmed'),
+        legacy(a), legacy(a, { ok: false, error: 'late duplicate' }),
+        { type: 'error', request_id: a.frame.request_id, error: { code: 'late_abort_error' } },
+      ]) a.socket.message(frame);
+      const afterLate = counts(a);
+      for (const port of ['8871', '8872']) {
+        const fresh = begin(port);
+        fresh.socket.message(legacy(fresh));
+        expect(await fresh.promise).toMatchObject({ status: 'resolved', value: { ok: true, request_id: fresh.frame.request_id } });
+      }
+      // No new-policy assertion precedes ordinary clock delivery, late JSON, or fresh requests.
+      expect(renewals[0].assigned).not.toBe(a.timer);
+      expect(renewals[1].at).toBeGreaterThan(renewals[0].at);
+      expect(renewals[1].assigned === renewals[0].assigned).toBe(agentStart);
+      for (const row of renewals.filter(row => row.assigned !== row.previous)) {
+        expect(clear.mock.calls.filter(call => call[0] === row.previous).length).toBeGreaterThanOrEqual(1);
+        const scheduled = schedule.mock.results.findIndex(result => result.value === row.assigned);
+        expect(schedule.mock.calls[scheduled]).toEqual([expect.any(Function), 10_000]);
+      }
+      expect(first.status).toBe('rejected');
+      if (first.status !== 'rejected') throw new Error('Expected native command cancellation');
+      expect(first.error.constructor).toBe(CommandError);
+      expect(first.error.message).toBe('Conversation history request was cancelled.');
+      expect(first.error.code).toBe('request_cancelled');
+      expect(first.error.data).toBeUndefined();
+      expect(a.outcomes).toEqual(['rejected']);
+      expect(await a.promise).toBe(first);
+      expect([atAbort.cleanup, atAbort.resolve, atAbort.reject, atAbort.removals]).toEqual([0, 0, 0, 1]);
+      expect(map.has(a.frame.request_id)).toBe(false);
+      expect(abortDeletes).toEqual([a.frame.request_id]);
+      expect(abortEvents.map(row => row.kind)).toEqual(['clear', 'delete', 'remove']);
+      expect(abortEvents.map(row => row.mapped)).toEqual([true, false, false]);
+      expect(abortEvents[2].signal).toBe(a.controller.signal);
+      expect(bEntryAfterAbort).toBe(b.entry);
+      expect(b.entry.timer).toBe(b.timer);
+      expect(bAfterAbort).toEqual(bBefore);
+      expect(bBefore).toEqual({ cleanup: 0, resolve: 0, reject: 0, removals: 0, clears: 0 });
+      expect(bResult).toMatchObject({ status: 'resolved', value: { ok: true, request_id: b.frame.request_id } });
+      expect(b.cleanup).toHaveBeenCalledTimes(1);
+      expect(b.resolve).toHaveBeenCalledTimes(1);
+      expect(b.reject).not.toHaveBeenCalled();
+      expect(afterLate).toEqual(beforeLate);
+      expect(counts(a)).toEqual(afterLate);
+      const physical = {
+        currentClearAtAbort: abortClears.filter(timer => timer === current).length,
+        initialClearAtAbort: abortClears.filter(timer => timer === a.timer).length,
+        laterCleanup: afterClock.cleanup, laterReject: afterClock.reject, totalRemovals: afterClock.removals,
+      };
+      console.info('T038_ABORT_OBSERVATION ' + JSON.stringify({
+        name, requestId: a.frame.request_id, actionId: a.frame.intent.action_id,
+        initial: String(a.timer), assigned: String(current),
+        renewals: renewals.map(row => ({ previous: String(row.previous), assigned: String(row.assigned), at: row.at })),
+        abortClears: abortClears.map(String), physical, clock,
+        firstOutcome: first.status, bUntouchedAtAbort: JSON.stringify(bBefore) === JSON.stringify(bAfterAbort),
+      }));
+      expect(physical, 'assigned deadline physical cancellation/nonexecution').toEqual({
+        currentClearAtAbort: 1, initialClearAtAbort: 0, laterCleanup: 0, laterReject: 0, totalRemovals: 1,
+      });
+    } finally {
+      vi.restoreAllMocks();
+      for (const controller of controllers) controller.abort();
+      relayStore.destroy();
+      for (const timer of handles) clearTimeout(timer); // Every captured genuine handle, including expected-red survivors.
+      await Promise.all(promises);
+      relayStore.setHidden(false);
+      relayStore.relayConfigs.set([]);
+      transportHijack.current = null;
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });

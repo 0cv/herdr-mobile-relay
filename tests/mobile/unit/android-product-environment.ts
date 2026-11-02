@@ -139,7 +139,7 @@ export async function producerFixture(): Promise<Record<string, any>> {
   for (const [id, value] of Object.entries(packages) as Array<[string, any]>) {
     const root = posix.join(data.home, value.root), entry = new URL(`file://${posix.join(root, value.entry)}`).href;
     data[id] = { entry, parent: value.parent ? entries[value.parent] : new URL(`file://${data.home}/package.json`).href, realpath: root, condition: value.condition, version: value.version, engines: value.engines || {},
-      files: Object.fromEntries(Object.entries(value.files).map(([file, original]) => [file, id === 'android' && manifest.files[file] ? manifest.files[file].after : original])) };
+      files: Object.fromEntries(Object.entries(value.files).map(([file, original]) => [file, manifest.files[file]?.package === id ? manifest.files[file].after : original])) };
     entries[id] = entry;
   }
   const context = new URL('./commands/context/exports.js', entries.android).href;

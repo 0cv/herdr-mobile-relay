@@ -135,6 +135,7 @@ export const testOutputTests: Array<[string, () => Promise<void>]> = [
       'Android initial launch retains bootstrap and verifies readiness after signed launch',
       'Android installed attachment selects the owned standalone window instead of a browser window',
       'Android retained signed launch and explicit lifecycle regressions',
+      'Android production CLI retained initial and warm relaunch emit no fabricated close evidence or planned operations: coldHandoff',
       'Android unrelated selection',
     ]);
     const initial = selected(fixture, 'Android initial launch retains bootstrap and verifies readiness after signed launch');
@@ -150,6 +151,12 @@ export const testOutputTests: Array<[string, () => Promise<void>]> = [
     const full = createUnitTestOutputContract(fixture.inventory, [whole]);
     assert.ok(full.expectedDiagnostics.some(({ line }) => line === 'PASS retained kernel acquisition kernel-boot-acquisition'));
     assert.ok(full.expectedDiagnostics.some(({ line }) => line === exactLine));
+    const coldHandoff = selected(fixture, 'Android production CLI retained initial and warm relaunch emit no fabricated close evidence or planned operations: coldHandoff');
+    const teardownLine = 'PASS SM56 lifecycle concurrent-cold-consumers/held-unexpected-404-delete';
+    const teardown = outputFor(fixture.inventory, [coldHandoff]);
+    assert.equal(teardown.split('\n').filter((line) => line === teardownLine).length, 1);
+    assert.equal(validateUnitTestOutput(fixture.inventory, [coldHandoff], teardown, '').accepted, true);
+    assert.equal(validateUnitTestOutput(fixture.inventory, [coldHandoff], teardown.replace(teardownLine, 'PASS SM56 lifecycle concurrent-cold-consumers/held-resolved-fatal-delete'), '').accepted, false);
     assert.equal(validateUnitTestOutput(fixture.inventory, [unrelated], `${outputFor(fixture.inventory, [unrelated])}${exactLine}\n`, '').accepted, false);
   }],
   ['unit output contract requires nested iOS successes before exactly one wrapper success', async () => {

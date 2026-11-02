@@ -290,7 +290,7 @@ console.log(output);
 export const androidLifecycleCases = {
   happy: ['initial-then-final-warm-then-background-warm', 'measured-cold-then-warm', 'same-owner-same-handle-navigation-between-activations'],
   warmOwner: ['missing-owner', 'changed-driver-session', 'changed-native-pid', 'changed-native-start', 'changed-boot', 'changed-kernel-capability', 'missing-selected-handle', 'replaced-selected-handle', 'missing-shortcut', 'duplicate-shortcut', 'changed-shortcut-id', 'changed-shortcut-scope', 'changed-shortcut-url', 'changed-shortcut-mac', 'wrong-activity', 'wrong-provider', 'wrong-origin', 'document-change-within-read'],
-  coldHandoff: ['no-measurement-termination', 'termination-command-failure', 'termination-removal-readback-failure', 'home-failure-after-successful-stop', 'changed-measurement-object', 'changed-measurement-id', 'changed-target', 'changed-owner', 'replaced-old-session', 'prior-platform-fatal', 'prior-driver-fatal-after-cleanup', 'reused-consumed-handoff', 'intervening-incompatible-operation', 'premature-native-resurrection', 'concurrent-cold-consumers', 'close-transport-failure', 'close-404-resolves-with-firstFatal', 'close-malformed-2xx-resolves-with-firstFatal', 'create-refusal', 'create-timeout'],
+  coldHandoff: ['no-measurement-termination', 'termination-command-failure', 'termination-removal-readback-failure', 'home-failure-after-successful-stop', 'changed-measurement-object', 'changed-measurement-id', 'changed-target', 'changed-owner', 'replaced-old-session', 'prior-platform-fatal', 'prior-driver-fatal-after-cleanup', 'reused-consumed-handoff', 'intervening-incompatible-operation', 'premature-native-resurrection', 'concurrent-cold-consumers', 'close-transport-failure', 'close-unexpected-404', 'close-malformed-2xx', 'create-refusal', 'create-timeout'],
   readinessAndBudget: ['warm-foreground-not-ready', 'warm-devtools-not-ready', 'cold-foreground-not-ready', 'cold-devtools-not-ready', 'insufficient-shortcut-intent-tail', 'insufficient-cold-close-tail', 'insufficient-warm-attachment-tail', 'insufficient-cold-create-settings-owner-attachment-tail', 'insufficient-read-postinspection-reserve', 'late-readiness-success', 'late-transport-success-after-fatal', 'late-body-success-after-fatal', 'lifecycle-overlap-before-handoff-armed'],
 } as const;
 
@@ -457,8 +457,8 @@ else if (request === 'shell pm list packages') {
       if (method === 'DELETE') {
         if (s.fault === 'close-timeout') throw new DOMException('synthetic DELETE timeout', 'TimeoutError');
         if (s.fault === 'close-transport-failure') throw new Error('synthetic DELETE transport failure');
-        if (s.fault === 'close-404-resolves-with-firstFatal') return response({ error: 'invalid session id' }, 404);
-        if (s.fault === 'close-malformed-2xx-resolves-with-firstFatal') return new Response('{', { status: 200 });
+        if (s.fault === 'close-unexpected-404') return response({ error: 'unknown command' }, 404);
+        if (s.fault === 'close-malformed-2xx') return new Response('{', { status: 200 });
         return response(null);
       }
       if (path === '/session') {
@@ -719,11 +719,19 @@ async function runAndroidCreationTeardownControl(fixture: LifecycleFixtureInput,
       stopPromise = platform.stopOwnedResources();
       stopping = stopPromise.then(() => {
         stopSettled = true;
+        assert.equal(timeout, false, 'fatal create must reject teardown even without a session ID');
         assert.equal(client.snapshot().sessionId, '');
-        assert.equal(client.snapshot().unusable, timeout);
+        assert.equal(client.snapshot().unusable, false);
         assert.deepEqual(calls.filter(call => call.method === 'DELETE').map(call => call.requestPath), expectedDeletes);
         assert.equal((platform as any).retainedOwner, undefined);
         assert.equal(platform.evidenceSnapshot().selectedInstalledWindowValid, false);
+      }, error => {
+        stopSettled = true;
+        assert.equal(timeout, true);
+        assert.match(String(error), /APPIUM_SESSION_UNUSABLE/u);
+        assert.equal(client.snapshot().sessionId, '');
+        assert.equal(client.snapshot().unusable, true);
+        assert.deepEqual(calls.filter(call => call.method === 'DELETE').map(call => call.requestPath), expectedDeletes);
       });
       void stopping.catch(() => undefined);
     };
@@ -774,7 +782,8 @@ async function runAndroidCreationTeardownControl(fixture: LifecycleFixtureInput,
     }
     assert.equal(stopSettled, true);
     assert.equal(platform.stopOwnedResources(), stopPromise);
-    await platform.stopOwnedResources();
+    if (timeout) await assert.rejects(platform.stopOwnedResources(), /APPIUM_SESSION_UNUSABLE/u);
+    else await platform.stopOwnedResources();
     const fatal = client.snapshot().firstFatal;
     if (timeout) {
       assert.ok(fatal);
@@ -786,7 +795,8 @@ async function runAndroidCreationTeardownControl(fixture: LifecycleFixtureInput,
     const receipt = structuredClone(fatal);
     await assertTerminal(first);
     await assert.rejects(() => platform.startFreshDevice(), error => error === first);
-    await platform.stopOwnedResources();
+    if (timeout) await assert.rejects(platform.stopOwnedResources(), /APPIUM_SESSION_UNUSABLE/u);
+    else await platform.stopOwnedResources();
     assert.equal(client.snapshot().firstFatal, fatal);
     assert.deepEqual(client.snapshot().firstFatal, receipt);
     assert.ok(calls.slice(callCount).every(call => call.method === 'DELETE'));
@@ -806,7 +816,7 @@ async function runAndroidCreationTeardownControl(fixture: LifecycleFixtureInput,
 }
 
 async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promise<void> {
-  for (const variant of ['held-successful-delete', 'held-timeout-delete', 'held-resolved-fatal-delete', 'warm-inspection', 'termination-home', 'setup-settings-post', 'setup-chrome-post', 'setup-settings-timeout', 'setup-before-settings', 'setup-overlap', 'setup-synchronous-stop', 'cold-replacement-post']) {
+  for (const variant of ['held-successful-delete', 'held-timeout-delete', 'held-unexpected-404-delete', 'warm-inspection', 'termination-home', 'setup-settings-post', 'setup-chrome-post', 'setup-settings-timeout', 'setup-before-settings', 'setup-overlap', 'setup-synchronous-stop', 'cold-replacement-post']) {
     const root = await mkdtemp(join(fixture.root, 'teardown-'));
     const fixtureDirectory = join(root, 'fixture');
     const log = join(root, 'requests.log');
@@ -827,7 +837,7 @@ async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promi
       const cold = variant.startsWith('held-');
       if (cold) await platform.terminateInstalledApp();
       await change({ fault: variant === 'held-timeout-delete' ? 'close-timeout'
-        : variant === 'held-resolved-fatal-delete' ? 'close-404-resolves-with-firstFatal'
+        : variant === 'held-unexpected-404-delete' ? 'close-unexpected-404'
           : variant === 'termination-home' ? 'lifecycle-overlap-before-handoff-armed' : '' });
       const gate = hold(cold ? 'delete' : 'inspection-transport');
       const pending = (variant === 'termination-home' ? platform.terminateInstalledApp() : platform.relaunchInstalledApp())
@@ -868,7 +878,7 @@ async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promi
       }
       assert.ok(stopPromise);
       assert.equal(platform.stopOwnedResources(), stopPromise);
-      if (variant === 'held-timeout-delete') {
+      if (variant === 'held-timeout-delete' || variant === 'held-unexpected-404-delete') {
         assert.ok(closeError instanceof Error);
         await assert.rejects(() => platform.stopOwnedResources(), error => error === closeError);
       } else {
@@ -876,16 +886,16 @@ async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promi
         await platform.stopOwnedResources();
       }
       const fatal = client.snapshot().firstFatal;
-      if (variant === 'held-timeout-delete' || variant === 'held-resolved-fatal-delete') {
+      if (variant === 'held-timeout-delete' || variant === 'held-unexpected-404-delete') {
         assert.ok(fatal);
         assert.equal(fatal.code, variant === 'held-timeout-delete' ? 'APPIUM_TIMEOUT' : 'APPIUM_COMMAND');
         assert.equal(fatal.path, '/session/original');
         assert.equal(fatal.method, 'DELETE');
         assert.notEqual(first, closeError);
       } else assert.equal(fatal, undefined);
-      if (variant === 'held-resolved-fatal-delete') {
-        assert.equal(client.snapshot().sessionId, '');
-        assert.equal(client.snapshot().unusable, false);
+      if (variant === 'held-unexpected-404-delete') {
+        assert.equal(client.snapshot().sessionId, '[active]');
+        assert.equal(client.snapshot().unusable, true);
       }
       await assertTerminal(first);
       assert.equal(client.snapshot().firstFatal, fatal);
@@ -1028,11 +1038,13 @@ export async function runAndroidLifecycleCase(fixture: LifecycleFixtureInput, gr
           assert.match(String(first), /ANDROID_CONTEXT_OWNERSHIP/u);
           const receipt = structuredClone(fatal);
           await assertTerminal(first);
-          await platform.stopOwnedResources();
-          await platform.stopOwnedResources();
-          assert.equal(deletes(), 1);
-          assert.equal(client.snapshot().sessionId, '');
-          assert.equal(client.snapshot().unusable, false);
+          const stopping = platform.stopOwnedResources();
+          await assert.rejects(stopping, /APPIUM_SESSION_UNUSABLE/u);
+          assert.equal(platform.stopOwnedResources(), stopping);
+          await assert.rejects(platform.stopOwnedResources(), /APPIUM_SESSION_UNUSABLE/u);
+          assert.equal(deletes(), 0);
+          assert.equal(client.snapshot().sessionId, '[active]');
+          assert.equal(client.snapshot().unusable, true);
           assert.equal(client.snapshot().firstFatal, fatal);
           assert.deepEqual(client.snapshot().firstFatal, receipt);
           await assertTerminal(first);
@@ -1085,10 +1097,8 @@ export async function runAndroidLifecycleCase(fixture: LifecycleFixtureInput, gr
           first = await capture(() => platform.relaunchInstalledApp());
           if (name.startsWith('close-')) {
             assert.ok(client.snapshot().firstFatal);
-            if (name !== 'close-transport-failure') {
-              assert.equal(client.snapshot().sessionId, '');
-              assert.equal(client.snapshot().unusable, false);
-            }
+            assert.equal(client.snapshot().sessionId, '[active]');
+            assert.equal(client.snapshot().unusable, true);
             assert.equal(platform.evidenceSnapshot().selectedInstalledWindow, beforeWindow);
             assert.equal(deletes(), 1);
             assert.equal(creates(), 1);
@@ -1151,7 +1161,7 @@ export async function runAndroidLifecycleCase(fixture: LifecycleFixtureInput, gr
       assert.deepEqual(await operations(), []);
     }
     if (group === 'coldHandoff') {
-      const retired = ['changed-measurement-object', 'changed-target', 'changed-owner', 'prior-platform-fatal', 'prior-driver-fatal-after-cleanup', 'reused-consumed-handoff', 'concurrent-cold-consumers', 'close-transport-failure', 'close-404-resolves-with-firstFatal', 'close-malformed-2xx-resolves-with-firstFatal', 'create-refusal', 'create-timeout'].includes(name);
+      const retired = ['changed-measurement-object', 'changed-target', 'changed-owner', 'prior-platform-fatal', 'reused-consumed-handoff', 'concurrent-cold-consumers', 'close-transport-failure', 'close-unexpected-404', 'close-malformed-2xx', 'create-refusal', 'create-timeout'].includes(name);
       const created = ['replaced-old-session', 'reused-consumed-handoff', 'create-refusal', 'create-timeout'].includes(name);
       const launched = ['reused-consumed-handoff', 'create-refusal', 'create-timeout'].includes(name);
       assert.equal(deletes(), retired ? 1 : 0);

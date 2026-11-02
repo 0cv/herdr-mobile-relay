@@ -1,0 +1,10 @@
+          1793397245.346  5723  5723 I HerdrMeasure: 6d891bc8-5ea7-46d0-8e7f-b88213d87dd2 START
+          1793397301.936  5389  5389 D Zygote  : Forked child process 8791
+          1793397301.950   555   649 I ActivityManager: Start proc 8791:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:15/u0ai15 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:15}
+          1793397301.954  8791  8791 D CompatChangeReporter: Compat change id reported: 242716250; UID 90015; state: ENABLED
+          1793397301.975  8791  8791 I cr_SplitCompatApp: version=131.0.6778.200 (677820038) minSdkVersion=29 isBundle=true processName=com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:15 isIsolatedProcess=true
+          1793397302.033  8791  8807 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.
+          1793397302.044  5349  5349 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=8791)
+          1793397302.045  5349  5349 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=8791)
+          1793397302.045   555  1673 I ActivityManager: Process com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:15 (pid 8791) has died: vis BTOP
+          1793397372.067 14077 14077 I HerdrMeasure: 6d891bc8-5ea7-46d0-8e7f-b88213d87dd2 END

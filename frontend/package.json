@@ -20,6 +20,7 @@
     "size": "bun scripts/check-size.mjs dist"
   },
   "dependencies": {
+    "@noble/hashes": "2.4.0",
     "svelte": "5.57.3"
   },
   "devDependencies": {

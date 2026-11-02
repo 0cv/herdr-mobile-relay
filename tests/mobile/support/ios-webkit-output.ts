@@ -12,7 +12,7 @@ const maximumEvents = 256;
 type WebKitStage = 'contexts-start' | 'views-start' | 'select-app-start' | 'app-attempt'
   | 'listing-send' | 'rpc-response' | 'app-selected' | 'select-app-end' | 'contexts-ready'
   | 'contexts-empty' | 'no-pages' | 'page-search-error' | 'app-not-connectable'
-  | 'socket-connected' | 'socket-disconnected' | 'debugger-version';
+  | 'socket-connected' | 'socket-disconnected' | 'debugger-version' | 'installed-candidate';
 
 interface WebKitEvent {
   ordinal: number;
@@ -21,6 +21,11 @@ interface WebKitEvent {
   appId?: number;
   messageId?: number;
   durationMs?: number;
+  hostId?: number;
+  nativePid?: number;
+  role?: 'webapp' | 'service' | 'generic' | 'other' | 'unknown';
+  reason?: 'inactive' | 'unreported' | 'malformed' | 'unsupported' | 'wrong-host' | 'proxy' | 'unowned' | 'provider' | 'host';
+  action?: 'list' | 'skip';
 }
 
 export class IOSWebKitOutputDiagnostics {
@@ -106,7 +111,12 @@ export class IOSWebKitOutputDiagnostics {
       } else if (match(/^No web frames found after \d{1,3} retr(?:y|ies)$/u)) event.stage = 'no-pages';
       else if (match(/^No available web pages after \d{1,3} retr(?:y|ies): /u)) event.stage = 'page-search-error';
     } else {
-      if (message === 'Selecting application') event.stage = 'select-app-start';
+      if ((fields = match(/^Installed candidate app=(\d{1,10}) host=(\d{1,10}) native=(\d{1,10}) role=(webapp|service|generic|other|unknown) reason=(inactive|unreported|malformed|unsupported|wrong-host|proxy|unowned|provider|host) action=(list|skip)$/u))) {
+        event.stage = 'installed-candidate'; event.appId = Number(fields[1]);
+        event.hostId = Number(fields[2]); event.nativePid = Number(fields[3]);
+        event.role = fields[4] as WebKitEvent['role']; event.reason = fields[5] as WebKitEvent['reason'];
+        event.action = fields[6] as WebKitEvent['action'];
+      } else if (message === 'Selecting application') event.stage = 'select-app-start';
       else if (message === 'Debugger socket connected') event.stage = 'socket-connected';
       else if (message === 'Debugger socket disconnected') event.stage = 'socket-disconnected';
       else if ((fields = match(/^Attempting app 'PID:(\d{1,10})'$/u))) {

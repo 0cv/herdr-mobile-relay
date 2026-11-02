@@ -5,6 +5,46 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-02
+
+### Added
+
+- Connect through Tailscale Serve on your own tailnet, with an isolated dev
+  tunnel or a persistent background service and setup QR. Always on Tailscale
+  replaces a selected WebRTC gateway after confirmation.
+
+### Changed
+
+- Group setup actions under Cloudflare, WebRTC and Tailscale so each connection
+  path shows only its own choices, and explain the phone app choice: the hosted
+  app versus the app served by this computer. Each menu screen replaces the
+  previous one, and Ctrl-D after an action closes the menu.
+- Read Oh My Pi settings with a standard YAML parser. A settings file that is
+  not valid YAML is now ignored as a whole instead of being partly salvaged, so
+  skill commands follow the defaults until the file is fixed.
+
+### Fixed
+
+- Refresh an open Conversation and resume live updates after a relay reconnect
+  interrupts its history request.
+- Keep terminal styling correct after extended-color codes with a zero channel
+  and after trailing resets such as `31;0`.
+- Focus Cancel when a destructive workspace confirmation opens and when it
+  escalates to force removal, so a stray Enter cannot confirm it.
+- Expand `~` in Pi profile skill paths exactly once, so a bare `~` or
+  `~/skills` resolves to the home directory instead of a `~` folder inside it.
+- Carry the conversation error reason code to the app so it can show the right
+  message.
+- Keep the phase, code and retry safety of workspace move refusals.
+- Stop delayed terminal reads from running after their relay connection was
+  replaced, closed or disconnected.
+- Stop UPnP port mapping from following redirects away from the router that
+  answered discovery.
+- Reject operation requests whose type and action disagree, consistently for
+  authorization, audit and dispatch.
+- Cancel tab and workspace reordering cleanly and release its pointer when the
+  gesture is interrupted.
+
 ## [0.23.5] - 2026-10-29
 
 ### Added
@@ -1938,7 +1978,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...v0.24.0
 [0.23.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...v0.23.5
 [0.23.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...v0.23.4
 [0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3

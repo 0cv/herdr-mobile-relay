@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { assetIdentity } from './asset-identity.mjs';
 import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 
@@ -12,8 +12,7 @@ if (!javascript || typeof javascript.path !== 'string' || typeof javascript.sha2
 
 const sourcePath = join(root, javascript.path);
 const source = await readFile(sourcePath);
-const sha256 = createHash('sha256').update(source).digest('hex');
-const integrity = `sha256-${Buffer.from(sha256, 'hex').toString('base64')}`;
+const { sha256, integrity } = assetIdentity(source);
 const nextPath = `assets/app-${sha256}.js`;
 const oldPath = javascript.path;
 if (oldPath !== nextPath) await rename(sourcePath, join(root, nextPath));
@@ -35,8 +34,7 @@ const nextEntry = entry
   .replaceAll(`/${oldPath}`, `/${nextPath}`)
   .replaceAll(javascript.integrity, integrity);
 await writeFile(entryFile, nextEntry);
-const entrySha256 = createHash('sha256').update(nextEntry).digest('hex');
-const entryIntegrity = `sha256-${Buffer.from(entrySha256, 'hex').toString('base64')}`;
+const { sha256: entrySha256, integrity: entryIntegrity } = assetIdentity(nextEntry);
 
 javascript.path = nextPath;
 javascript.sha256 = sha256;

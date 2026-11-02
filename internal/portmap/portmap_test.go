@@ -206,8 +206,13 @@ func TestMapUDPRejectsPortZero(t *testing.T) {
 }
 
 func TestMapUDPWithoutAnyResponder(t *testing.T) {
-	// Nothing listens on this port: every protocol must fail, and quickly.
-	c := testClient(1)
+	// Hold an owned socket without replying: every protocol must fail quickly.
+	blackhole, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen udp blackhole: %v", err)
+	}
+	t.Cleanup(func() { blackhole.Close() })
+	c := testClient(uint16(blackhole.LocalAddr().(*net.UDPAddr).Port))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

@@ -1,0 +1,14 @@
+{
+  "available": false,
+  "reason_code": "source_missing",
+  "reason": "Conversation source is missing.",
+  "entries": [],
+  "has_more": false,
+  "state": "ready",
+  "mode": "recent",
+  "total": null,
+  "diagnostics": {
+    "oversized_records": 0,
+    "corrupt_records": 0
+  }
+}

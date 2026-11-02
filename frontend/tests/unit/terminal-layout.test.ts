@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { terminalResizeLayoutEngaged, terminalScreenColumns } from '$lib/terminal';
+import { ansi256Color, ansiLineBackground, ansiLineBackgroundIndent, ansiToHtml, terminalHtmlRows, terminalResizeLayoutEngaged, terminalScreenColumns } from '$lib/terminal';
 
 // Row shape measured from a real Claude pane read over the Herdr socket API:
 // 23 physical rows, widest 162 columns, and no row narrow enough to fit a
@@ -14,6 +14,49 @@ function paneRows(): { columns: number; fixedGrid: boolean }[] {
     { columns: 39, fixedGrid: false },
   ];
 }
+
+describe('sequential ANSI SGR', () => {
+  it.each(['38;2;0;128;0', '38;5;0'])('retains bold and background around %s operands', (color) => {
+    const html = ansiToHtml(`\x1b[1;44m\x1b[${color}mtext`);
+    expect(html).toContain(`font-weight:700;background-color:${ansi256Color(4)};color:${color.includes(';2;') ? 'rgb(0,128,0)' : ansi256Color(0)}`);
+    expect(ansiLineBackground(`\x1b[44m\x1b[${color}mtext`)).toBe(ansi256Color(4));
+  });
+
+  it.each(['48;2;0;128;0', '48;5;0'])('retains bold and foreground around %s operands', (color) => {
+    expect(ansiToHtml(`\x1b[1;31m\x1b[${color}mtext`)).toContain(
+      `font-weight:700;color:${ansi256Color(1)};background-color:${color.includes(';2;') ? 'rgb(0,128,0)' : ansi256Color(0)}`,
+    );
+    expect(ansiLineBackground(`\x1b[${color}mtext`)).toBe(color.includes(';2;') ? 'rgb(0,128,0)' : ansi256Color(0));
+  });
+
+  it('applies leading and trailing resets in order', () => {
+    expect(ansiToHtml('\x1b[31;0mtext')).toBe('text');
+    expect(ansiToHtml('\x1b[0;31mtext')).toBe(`<span style="color:${ansi256Color(1)}">text</span>`);
+    expect(ansiLineBackground('\x1b[44;0mtext')).toBe('');
+    expect(ansiLineBackground('\x1b[0;44mtext')).toBe(ansi256Color(4));
+    expect(ansiLineBackground('\x1b[48;2;0;128;0;0mtext')).toBe('');
+    expect(ansiLineBackground('\x1b[0;48;5;0mtext')).toBe(ansi256Color(0));
+  });
+
+  it('preserves partial extended-color handling', () => {
+    expect(ansiToHtml('\x1b[38;2;31mtext')).toBe(`<span style="opacity:0.7;color:${ansi256Color(1)}">text</span>`);
+    expect(ansiLineBackground('\x1b[48;2;44mtext')).toBe(ansi256Color(4));
+  });
+
+  it('preserves escaping, indentation and snapshot cell geometry', () => {
+    const text = '  │<&>\t界  ';
+    const styled = `  \x1b[1;44m\x1b[38;2;0;128;0m${text.slice(2)}`;
+    expect(ansiLineBackgroundIndent(styled)).toBe(2);
+    const [plain] = terminalHtmlRows(text, false, true);
+    const [row] = terminalHtmlRows(styled, false, true);
+    expect({ ...row, html: '' }).toEqual({ ...plain, html: '' });
+    expect(row.columns).toBe(12);
+    expect(row.fixedGrid).toBe(true);
+    expect(row.html).toContain('&lt;&amp;&gt;');
+    expect(row.html).toContain('font-weight:700');
+    expect(row.html).toContain('transparent 0 2ch');
+  });
+});
 
 describe('terminalResizeLayoutEngaged', () => {
   it('engages once the cell advance and the pane width are both known', () => {

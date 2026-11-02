@@ -82,6 +82,22 @@ type upnpTarget struct {
 func newUPnPHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout: stepTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			if req == nil || req.URL == nil || len(via) == 0 || via[0] == nil || via[0].URL == nil {
+				return errors.New("invalid upnp redirect state")
+			}
+			// Every hop stays on the original approved responder, not just
+			// the previous hop. Ports may change; hostnames may not resolve.
+			gateway, validGateway := hostAddr(via[0].URL)
+			addr, validAddr := hostAddr(req.URL)
+			if req.URL.Scheme != "http" || !validGateway || !validAddr || addr != gateway {
+				return errors.New("upnp redirect leaves the original gateway")
+			}
+			return nil
+		},
 		Transport: &http.Transport{
 			// A router lives on the LAN: never route these through a proxy.
 			Proxy:                 nil,

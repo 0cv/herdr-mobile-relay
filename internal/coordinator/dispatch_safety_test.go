@@ -19,6 +19,30 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
+func TestConflictingOperationRejectedBeforeDispatch(t *testing.T) {
+	for _, admitted := range []bool{false, true} {
+		for _, pair := range [][2]string{{"refresh_agents", "send_secret"}, {"send_secret", "refresh_agents"}, {"submit_prompt", "send_secret"}} {
+			// A zero dispatcher has no state, scheduler, client or logger. Rejection
+			// must happen before any of those side-effect-capable dependencies.
+			d := &Dispatcher{}
+			message := map[string]any{"type": pair[0], "action": pair[1], "request_id": "conflict", "pane_id": "pane", "text": "fixture"}
+			var result *CommandResult
+			signals := 0
+			if admitted {
+				result = d.HandleAdmitted(context.Background(), message, func() { signals++ })
+			} else {
+				result = d.Handle(context.Background(), message)
+			}
+			if result == nil || result.OK || result.Phase != "failed" || result.RequestID != "conflict" || result.Error != "conflicting message type and action" {
+				t.Fatalf("result = %#v", result)
+			}
+			if admitted && signals != 1 {
+				t.Fatalf("admission signals = %d", signals)
+			}
+		}
+	}
+}
+
 func writeScript(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)

@@ -45,36 +45,74 @@ func newMemoryProjector(agent, revision string) *memoryProjector {
 	}
 }
 
-func (p *memoryProjector) apply(record JSONLRecord) projectionResult {
+// projectJSONLRecord projects one already-framed record without accumulating
+// plans, resolving tool results, or registering calls in either consumer.
+func projectJSONLRecord(agent, revision string, record JSONLRecord) (projectionResult, []toolResult) {
 	result := projectionResult{}
 	if record.Oversized {
 		result.Diagnostics.OversizedRecords = 1
-		return result
+		return result, nil
 	}
 	if !record.Complete {
-		return result
+		return result, nil
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(record.Raw, &raw); err != nil {
 		result.Diagnostics.CorruptRecords = 1
-		return result
+		return result, nil
 	}
-	result.Plan, result.TodoSeen, result.TodoInvalid = observeOMORecord(raw, p.agent)
-	if result.Plan != nil {
-		p.plan = result.Plan
-		p.todoValid = true
-	}
-	p.todoSeen = p.todoSeen || result.TodoSeen
+	result.Plan, result.TodoSeen, result.TodoInvalid = observeOMORecord(raw, agent)
 	if result.TodoInvalid {
 		result.Diagnostics.PlanCorrupt = true
 	}
 
-	calls, results := parseToolActivity(normalizedAgent(p.agent), raw)
+	calls, results := parseToolActivity(normalizedAgent(agent), raw)
 	toolEntry := Entry{Tools: calls}
 	omittedTools, omittedPayloads := normalizeEntryTools(&toolEntry)
 	calls = toolEntry.Tools
 	result.Diagnostics.OmittedTools += omittedTools
 	result.Diagnostics.OmittedPayloads += omittedPayloads
+	entry := prepareJSONLEntry(agent, raw, calls)
+	if entry == nil {
+		return result, results
+	}
+	entry.ID = browserEntryID(revision, record.Start, record.Raw)
+	entry.Truncated = entry.Truncated || omittedTools > 0 || omittedPayloads > 0
+	result.Entry = &projectedEntry{Offset: record.Start, Entry: *entry}
+	return result, results
+}
+
+func prepareJSONLEntry(agent string, record map[string]any, calls []ToolActivity) *Entry {
+	role, timestamp, body := visibleRecord(agent, record)
+	body = sanitizeText(body)
+	if role == "" && len(calls) > 0 {
+		role = "assistant"
+	}
+	if role == "" || (body == "" && len(calls) == 0) {
+		return nil
+	}
+	body, truncated := clampText(body, maxEntryBytes)
+	kind := ""
+	if role == "notice" {
+		kind, role = "notice", "assistant"
+	}
+	return &Entry{Kind: kind, Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
+}
+
+func applyProjectedToolResult(tool *ToolActivity, result toolResult) {
+	output, truncated := clampText(sanitizeText(result.output), maxEntryBytes)
+	tool.Output = output
+	tool.Error = result.failed
+	tool.Truncated = tool.Truncated || truncated
+}
+
+func (p *memoryProjector) apply(record JSONLRecord) projectionResult {
+	result, results := projectJSONLRecord(p.agent, p.revision, record)
+	if result.Plan != nil {
+		p.plan = result.Plan
+		p.todoValid = true
+	}
+	p.todoSeen = p.todoSeen || result.TodoSeen
 	for _, toolResult := range results {
 		location, ok := p.pending[toolAssociationKey(p.agent, toolResult.id)]
 		if !ok || location.entry < 0 || location.entry >= len(p.entries) {
@@ -84,33 +122,14 @@ func (p *memoryProjector) apply(record JSONLRecord) projectionResult {
 			continue
 		}
 		tool := &p.entries[location.entry].Entry.Tools[location.tool]
-		output, truncated := clampText(sanitizeText(toolResult.output), maxEntryBytes)
-		tool.Output = output
-		tool.Error = toolResult.failed
-		tool.Truncated = tool.Truncated || truncated
+		applyProjectedToolResult(tool, toolResult)
 		delete(p.pending, toolAssociationKey(p.agent, toolResult.id))
 	}
-
-	role, timestamp, body := visibleRecord(p.agent, raw)
-	body = sanitizeText(body)
-	if role == "" && len(calls) > 0 {
-		role = "assistant"
-	}
-	if role == "" || (body == "" && len(calls) == 0) {
+	if result.Entry == nil {
 		return result
 	}
-	body, truncated := clampText(body, maxEntryBytes)
-	kind := ""
-	if role == "notice" {
-		kind, role = "notice", "assistant"
-	}
-	entry := projectedEntry{
-		Offset: record.Start,
-		Entry: Entry{
-			ID: browserEntryID(p.revision, record.Start, record.Raw), Timestamp: timestamp,
-			Kind: kind, Role: role, Text: body, Tools: calls, Truncated: truncated || omittedTools > 0 || omittedPayloads > 0,
-		},
-	}
+	entry := *result.Entry
+	calls := entry.Entry.Tools
 	p.byOffset[record.Start] = len(p.entries)
 	p.entries = append(p.entries, entry)
 	for toolIndex := range calls {
@@ -118,7 +137,6 @@ func (p *memoryProjector) apply(record JSONLRecord) projectionResult {
 			p.pending[toolAssociationKey(p.agent, id)] = toolLocation{entry: len(p.entries) - 1, tool: toolIndex}
 		}
 	}
-	result.Entry = &entry
 	return result
 }
 

@@ -267,15 +267,29 @@ func DecodeMap(raw map[string]any) (Inbound, error) {
 	if err := json.Unmarshal(data, &message); err != nil {
 		return Inbound{}, err
 	}
-	if action, _ := raw["action"].(string); action != "" {
-		if message.Type == "" || message.Type == "command" {
-			message.Type = action
-		}
-	}
-	if message.Type == "" {
-		return Inbound{}, fmt.Errorf("message type is required")
+	action, _ := raw["action"].(string)
+	message.Type, err = ResolveOperation(message.Type, action)
+	if err != nil {
+		return Inbound{}, err
 	}
 	return message, nil
+}
+
+// ResolveOperation preserves legacy command/action-only envelopes, but rejects
+// contradictory concrete identities. Non-string field validation remains with
+// the decoder; callers using maps retain their existing string extraction policy.
+func ResolveOperation(messageType, action string) (string, error) {
+	if messageType == "" || messageType == "command" {
+		if action != "" {
+			return action, nil
+		}
+	} else if action != "" && action != messageType {
+		return "", fmt.Errorf("conflicting message type and action")
+	}
+	if messageType == "" {
+		return "", fmt.Errorf("message type is required")
+	}
+	return messageType, nil
 }
 
 type RequestScope struct {

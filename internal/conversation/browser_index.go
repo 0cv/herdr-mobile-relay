@@ -233,58 +233,9 @@ func (s *snapshotIndex) applyRecords(agent, revision string, records []JSONLReco
 	for index, record := range records {
 		item := &prepared[index]
 		item.record = record
-		item.result = projectionResult{}
-		if record.Oversized {
-			item.result.Diagnostics.OversizedRecords = 1
-			results[index] = item.result
-			continue
-		}
-		if !record.Complete {
-			results[index] = item.result
-			continue
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(record.Raw, &raw); err != nil {
-			item.result.Diagnostics.CorruptRecords = 1
-			results[index] = item.result
-			continue
-		}
-		item.result.Plan, item.result.TodoSeen, item.result.TodoInvalid = observeOMORecord(raw, agent)
-		if item.result.TodoInvalid {
-			item.result.Diagnostics.PlanCorrupt = true
-		}
-
-		calls, toolResults := parseToolActivity(normalizedAgent(agent), raw)
-		toolEntry := Entry{Tools: calls}
-		omittedTools, omittedPayloads := normalizeEntryTools(&toolEntry)
-		calls = toolEntry.Tools
-		item.result.Diagnostics.OmittedTools += omittedTools
-		item.result.Diagnostics.OmittedPayloads += omittedPayloads
-		item.toolResults = toolResults
-		role, timestamp, body := visibleRecord(agent, raw)
-		body = sanitizeText(body)
-		if role == "" && len(calls) > 0 {
-			role = "assistant"
-		}
-		visible := role != "" && (body != "" || len(calls) > 0)
-		if visible {
-			body, truncated := clampText(body, maxEntryBytes)
-			kind := ""
-			if role == "notice" {
-				kind, role = "notice", "assistant"
-			}
-			value := projectedEntry{
-				Offset: record.Start,
-				Entry: Entry{
-					ID: browserEntryID(revision, record.Start, record.Raw), Timestamp: timestamp,
-					Kind: kind, Role: role, Text: body, Tools: calls,
-					Truncated: truncated || omittedTools > 0 || omittedPayloads > 0,
-				},
-			}
-			item.entry = &value
-		}
+		item.result, item.toolResults = projectJSONLRecord(agent, revision, record)
+		item.entry = item.result.Entry
 		item.writes = item.entry != nil || len(item.toolResults) > 0
-		item.result.Entry = item.entry
 		results[index] = item.result
 		writes = writes || item.writes
 	}
@@ -318,10 +269,7 @@ func (s *snapshotIndex) applyRecords(agent, revision string, records []JSONLReco
 					return errSnapshotCorrupt
 				}
 				tool := &stored.Entry.Tools[pointer.ToolIndex]
-				output, truncated := clampText(sanitizeText(toolResult.output), maxEntryBytes)
-				tool.Output = output
-				tool.Error = toolResult.failed
-				tool.Truncated = tool.Truncated || truncated
+				applyProjectedToolResult(tool, toolResult)
 				encoded, err := json.Marshal(stored)
 				if err != nil {
 					return err

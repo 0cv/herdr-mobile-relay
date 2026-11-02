@@ -9,6 +9,34 @@ import (
 	"testing"
 )
 
+func TestDecodeCanonicalOperation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     map[string]any
+		want    string
+		invalid bool
+	}{
+		{"matching", map[string]any{"type": "send_secret", "action": "send_secret"}, "send_secret", false},
+		{"conflict", map[string]any{"type": "refresh_agents", "action": "send_secret"}, "", true},
+		{"reverse conflict", map[string]any{"type": "send_secret", "action": "refresh_agents"}, "", true},
+		{"type only", map[string]any{"type": "send_secret"}, "send_secret", false},
+		{"action only", map[string]any{"action": "send_secret"}, "send_secret", false},
+		{"legacy", map[string]any{"type": "command", "action": "send_secret"}, "send_secret", false},
+		{"missing", map[string]any{}, "", true},
+		{"unknown", map[string]any{"type": "unknown"}, "unknown", false},
+		{"bare command", map[string]any{"type": "command"}, "command", false},
+		{"nonstring type", map[string]any{"type": 1, "action": "send_secret"}, "", true},
+		{"nonstring action ignored", map[string]any{"type": "send_secret", "action": 1}, "send_secret", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DecodeMap(tc.raw)
+			if (err != nil) != tc.invalid || got.Type != tc.want {
+				t.Fatalf("DecodeMap = %q, %v; want %q, invalid=%v", got.Type, err, tc.want, tc.invalid)
+			}
+		})
+	}
+}
+
 func TestEveryInboundFixtureDecodesAsV3Action(t *testing.T) {
 	root := filepath.Join("..", "..", "contracts", "fixtures", "inbound")
 	entries, err := os.ReadDir(root)

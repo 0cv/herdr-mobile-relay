@@ -337,6 +337,41 @@ function simulate(workflow: any, rows: Row[], overrides: Record<string, Status> 
   return completed;
 }
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
+  ['mobile iOS producer install/start binds the post-install gate and never invokes a shadow global Appium', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun;
+    const document = runtime.YAML.parse(await readFile(repositoryPath('.github/actions/mobile-device-run/action.yml'), 'utf8'));
+    const steps = document.runs.steps;
+    const install = steps.find((step: any) => step.name === 'Install pinned Appium and platform driver');
+    assert.match(install.run, /bash tests\/mobile\/ios-appium\/ci\.sh install/u);
+    assert.doesNotMatch(install.run, /npm install --global|appium driver install/u);
+    const start = steps.find((step: any) => step.name === 'Start Appium');
+    assert.match(start.run, /ios-appium\/ci\.sh verify\n\s+bash tests\/mobile\/ios-appium\/ci\.sh start/u);
+    assert.doesNotMatch(start.run, /^\s*appium /mu);
+    assert.match(start.run, /\n\s+kill -0 "\$appium_pid"/u);
+    assert.doesNotMatch(start.run, /(?:sed|cat|tail|head).*appium\.log/u);
+    const script = await readFile(repositoryPath('tests/mobile/ios-appium/ci.sh'), 'utf8');
+    assert.ok(script.indexOf('npm install ') < script.indexOf('gate.ts" pristine'));
+    assert.ok(script.indexOf('gate.ts" pristine') < script.indexOf('"$root/test.ts" original'));
+    assert.ok(script.indexOf('"$root/test.ts" original') < script.indexOf('gate.ts" patch'));
+    assert.ok(script.indexOf('gate.ts" patch') < script.indexOf('"$root/test.ts" patched'));
+    assert.doesNotMatch(script, /MOBILE_UNIT_FILTER|test:unit/u);
+    const ordinary = await readFile(repositoryPath('tests/mobile/unit/run.ts'), 'utf8');
+    assert.doesNotMatch(ordinary, /iosProducerTests|iosProducerGateTests|IOS_PRODUCER_HOME/u);
+    const entry = await readFile(repositoryPath('tests/mobile/ios-appium/test.ts'), 'utf8');
+    assert.match(entry, /Unexpected fixture regression inventory/u);
+    assert.doesNotMatch(entry, /# SKIP|MOBILE_UNIT_FILTER/u);
+    const retain = steps.find((step: any) => step.name === 'Retain captured iOS producer integrity');
+    assert.equal(retain.if, "always() && inputs.platform == 'ios'");
+    assert.match(retain.run, /bun tests\/mobile\/ios-appium\/evidence\.ts "\$APPIUM_HOME" "\$MOBILE_OUTPUT"/u);
+    assert.doesNotMatch(retain.run, /verify|appium .*driver|\|\| true/u);
+    const scenarios = steps.findIndex((step: any) => step.name === 'Run installed-PWA upgrade scenarios');
+    const upload = steps.findIndex((step: any) => step.name === 'Upload mobile evidence');
+    const cleanup = steps.findIndex((step: any) => step.name === 'Stop owned mobile processes and devices');
+    assert.ok(scenarios < steps.indexOf(retain) && steps.indexOf(retain) < upload && upload < cleanup);
+    assert.equal(retain['continue-on-error'], undefined);
+    assert.match(script, /--install-strategy=nested/u);
+    assert.match(script, /start\)[\s\S]*gate.ts" verify "\$APPIUM_HOME"\n\s+exec "\$node_binary" "\$APPIUM_HOME\/node_modules\/appium\/build\/lib\/main.js" "\$@"/u);
+  }],
   ['mobile evidence accepts exactly one shared baseline across Android and iOS', async () => {
     const android = await evidenceFixture('android'), ios = await evidenceFixture('ios');
     const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-two-rows-'));
@@ -558,7 +593,8 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
         for (const [index, candidate] of steps.entries()) {
           if (!candidate.run?.includes('appium.log') || candidate === step) continue;
           assert.ok(copyIndex > index, 'only startup logging may precede capture');
-          assert.match(candidate.run, /sed -n '1,160p' "\$RUNNER_TEMP\/appium.log"/u);
+          assert.doesNotMatch(candidate.run, /(?:sed|cat|head|tail).*appium\.log/u);
+          assert.match(candidate.run, /payload-bearing log withheld/u);
           assert.doesNotMatch(candidate.run, /MOBILE_OUTPUT\/appium.log/u);
         }
         for (const upload of steps.filter((candidate: any) => candidate.uses?.startsWith('actions/upload-artifact'))) {
@@ -641,6 +677,47 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
         await rm(root, {recursive: true, force: true});
       }
     }
+  }],
+  ['mobile Android emulator lifetime keeps launch arguments, child readiness and upload-before-cleanup', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun;
+    const action = runtime.YAML.parse(await readFile(repositoryPath('.github/actions/mobile-device-run/action.yml'), 'utf8'));
+    const steps = action.runs.steps;
+    const boot = steps.find((step: any) => step.name === 'Create and boot Android emulator');
+    const source = boot.run as string;
+    const launch = source.split('\n').find(line => line.startsWith('node tests/mobile/support/android-emulator-lifetime.ts '));
+    assert.equal(launch, 'node tests/mobile/support/android-emulator-lifetime.ts "$lifetime_file" "$RUNNER_TEMP/emulator.log" emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect < /dev/null >"$MOBILE_PRIVATE/android-emulator-observer.log" 2>&1 &');
+    assert.ok(source.includes('avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'));
+    assert.ok(source.includes('lifetime_file="$MOBILE_OUTPUT/android-emulator-lifetime.json"'));
+    assert.ok(source.includes("printf 'ANDROID_EMULATOR_LIFETIME_FILE=%s\\n' \"$lifetime_file\" >> \"$GITHUB_ENV\""));
+    assert.doesNotMatch(source, /\$!|wait |trap |detached|nohup/u);
+    assert.equal(source.match(/for attempt in \$\(seq 1 180\); do/gu)?.length, 1);
+    assert.equal(source.match(/sleep 2/gu)?.length, 1);
+    const read = source.indexOf('emulator_pid="$(jq -er');
+    assert.ok(read > source.indexOf('for attempt in $(seq 1 180); do'));
+    assert.ok(source.includes('select(.schema == 1) | .binding.childPid | select(type == "number" and . > 0 and . <= 2147483647 and . == floor)'));
+    const filter = /jq -er '([^']+)'/u.exec(source)![1];
+    for (const birth of [null, { startTicks: '123', bootIdSha256: '0'.repeat(64) }]) {
+      const receipt = { schema: 1, binding: { childPid: 71, birth }, observerPid: 99 };
+      const result = await command('jq', ['-en', '--argjson', 'receipt', JSON.stringify(receipt), '$receipt | ' + filter]);
+      assert.equal(result.stdout.trim(), '71');
+    }
+    for (const childPid of [null, 0, -1, 1.5, 2147483648, '71']) {
+      await assert.rejects(command('jq', ['-en', '--argjson', 'receipt', JSON.stringify({ schema: 1, binding: { childPid } }), '$receipt | ' + filter]));
+    }
+    const exported = source.indexOf("printf 'ANDROID_EMULATOR_PID=%s\\n' \"$emulator_pid\" >> \"$GITHUB_ENV\"");
+    const booted = source.indexOf('if [ "$boot" = 1 ] && [ -n "$emulator_pid" ]; then');
+    assert.ok(read < exported && exported < booted && booted < source.indexOf('break', booted));
+    assert.ok(source.includes('if [ -n "$emulator_pid" ] && ! kill -0 "$emulator_pid" 2>/dev/null; then'));
+    assert.ok(steps.findIndex((step: any) => step.name === 'Assert shell Node runtime') < steps.indexOf(boot));
+    const uploads = steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@'));
+    assert.equal(uploads.length, 1);
+    assert.equal(uploads[0].with.path, '${{ runner.temp }}/herdr-mobile-output');
+    assert.equal(uploads[0].with['retention-days'], 1);
+    assert.equal(uploads[0].if, 'always()');
+    const cleanup = steps.find((step: any) => step.name === 'Stop owned mobile processes and devices');
+    assert.ok(steps.indexOf(uploads[0]) < steps.indexOf(cleanup));
+    assert.ok(cleanup.run.includes('adb -s "$ANDROID_SERIAL" emu kill'));
+    assert.doesNotMatch(cleanup.run, /observer|lifetime|ANDROID_EMULATOR_PID/u);
   }],
   ['mobile Android SDK install retries three times and fails after the last attempt', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): any } } }).Bun;
@@ -837,9 +914,10 @@ if (mode === operation + '-timeout') process.exit(124);
     }
     const matrixCommand = workflow.jobs.prepare.steps.find((s: any) => s.id === 'matrix').run;
     const manifest = JSON.parse(await readFile(repositoryPath('tests/mobile/baselines.json'), 'utf8'));
-    assert.deepEqual(manifest.baselines.map((entry: any) => entry.name), ['0.23.4', '0.23.3']);
+    assert.deepEqual(manifest.baselines.map((entry: any) => entry.name), ['0.23.5', '0.23.4']);
     const newest = manifest.baselines[0], previous = manifest.baselines[1];
     const cases = [
+      { baselines: manifest.baselines, candidate: newest, expected: previous.name },
       { baselines: manifest.baselines, candidate: { ...newest, version: 'next-version' }, expected: newest.name },
       { baselines: manifest.baselines, candidate: { ...newest, script: '/changed.js' }, expected: newest.name },
       { baselines: manifest.baselines, candidate: { ...newest, style: '/changed.css' }, expected: newest.name },

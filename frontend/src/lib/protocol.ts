@@ -23,6 +23,16 @@ const API_ERROR_ARG_KEY = /^[a-z0-9_]{1,32}$/u;
 const ACTION_ID = /^[A-Za-z0-9_-]{8,128}$/u;
 const encoder = new TextEncoder();
 
+export function parseCommandErrorDetail(value: unknown): string {
+  return typeof value === 'string' && encoder.encode(value).byteLength <= 512
+    ? value
+    : '';
+}
+
+export function parseWireSafeInteger(value: unknown): number | undefined {
+  return Number.isSafeInteger(Number(value)) ? Number(value) : undefined;
+}
+
 export function parseApiError(value: unknown): ApiError | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const candidate = value as Record<string, unknown>;

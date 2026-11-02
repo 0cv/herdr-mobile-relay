@@ -38,10 +38,10 @@
   import { ConversationMessageStateStore } from '$lib/conversation-message-state';
   import { securityState } from '$lib/security';
   import { terminalDraftState } from '$lib/terminal-draft-state.svelte';
-  import { relayStore } from '$lib/store';
+  import { CommandError, relayStore } from '$lib/store';
   import { stripAnsi } from '$lib/terminal';
   import { terminalTextInputMode } from '$lib/terminal-menu';
-  import type { Agent, ConversationCapabilities, ConversationEntry, ConversationPage, OmoTodoState, TerminalFrame } from '$lib/types';
+  import type { Agent, ConversationCapabilities, ConversationEntry, ConversationPage, TerminalFrame } from '$lib/types';
 
   let {
     agent,
@@ -69,7 +69,33 @@
   });
 
   const messageStates = new ConversationMessageStateStore();
-  let entries = $state<ConversationEntry[]>([]);
+  // The controller publishes cloned snapshots. Null preserves the pre-mount
+  // loading defaults without constructing another controller state object.
+  let historyState = $state.raw<ConversationHistoryControllerState | null>(null);
+  const entries = $derived(historyState?.entries ?? []);
+  const available = $derived(historyState?.available ?? true);
+  const reason = $derived(historyState?.reason ?? '');
+  const hasMore = $derived(historyState?.hasMore ?? false);
+  const nextCursor = $derived(historyState?.nextCursor ?? '');
+  const browseState = $derived(historyState?.state ?? 'ready');
+  const browseProgress = $derived(historyState?.progress);
+  const diagnostics = $derived(historyState?.diagnostics);
+  const omoPlan = $derived(historyState?.omoPlan ?? null);
+  const previewVisible = $derived(historyState?.preview ?? false);
+  const previewHistorical = $derived(historyState?.previewHistorical ?? false);
+  const authoritative = $derived(historyState?.authoritative ?? false);
+  const contextSearching = $derived(historyState?.contextSearching ?? false);
+  const pendingPrefix = $derived(historyState?.pendingPrefix ?? []);
+  const beginningReached = $derived(historyState?.beginningReached ?? false);
+  const pausedReason = $derived(historyState?.pausedReason ?? '');
+  const latestGapOutstanding = $derived(historyState?.latestGapOutstanding ?? false);
+  const requestPhase = $derived(historyState?.requestPhase ?? 'initial');
+  const preparationPolls = $derived(historyState?.preparationPolls ?? 0);
+  const error = $derived(historyState?.error?.message || '');
+  const errorCode = $derived(historyState?.errorCode ?? '');
+  const errorRetryable = $derived(historyState?.errorRetryable ?? false);
+  const loadingOlder = $derived(requestPhase === 'older');
+  const loading = $derived(!entries.length && !previewVisible && requestPhase === 'initial');
   let liveEntries = $state<ConversationEntry[]>([]);
   let liveState = $state<LiveReaderState>('unavailable');
   let liveCapabilities = $state<ConversationCapabilities>();
@@ -77,20 +103,7 @@
   let headPage: ConversationPage | null = null;
   let renderAnchor = $state<string | null>(null);
   const mountedEntryLimit = HISTORY_WIRE_PAGE_SIZE;
-  let available = $state(true);
-  let reason = $state('');
-  let hasMore = $state(false);
-  let nextCursor = $state('');
-  let browseState = $state<ConversationPage['state']>('ready');
-  let browseProgress = $state<ConversationPage['progress']>();
   let sourceChangedNotice = $state('');
-  let diagnostics = $state<ConversationPage['diagnostics']>();
-  let omoPlan = $state<OmoTodoState | null>(null);
-  let loading = $state(true);
-  let loadingOlder = $state(false);
-  let error = $state('');
-  let errorCode = $state('');
-  let errorRetryable = $state(false);
   let query = $state('');
   let mode = $state<'conversation' | 'activity'>('conversation');
   let listElement = $state<HTMLElement>(null!);
@@ -114,17 +127,8 @@
   let mounted = false;
   let controllerReady = $state(false);
   let historyController: ConversationHistoryController | null = null;
-  let previewVisible = $state(false);
-  let previewHistorical = $state(false);
-  let authoritative = $state(false);
-  let contextSearching = $state(false);
-  let pendingPrefix = $state<ConversationEntry[]>([]);
-  let beginningReached = $state(false);
-  let pausedReason = $state('');
-  let latestGapOutstanding = $state(false);
-  let preparationPolls = $state(0);
-  let requestPhase = $state<'idle' | 'initial' | 'refresh' | 'older' | 'preparing'>('initial');
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let recoveryAttemptedFor = '';
   let topSentinel = $state<HTMLElement>(null!);
   const refreshIntervalMs = 5_000;
   const maxPreparationPolls = HISTORY_MAX_PREPARATION_POLLS;
@@ -230,9 +234,18 @@
     });
     historyController = new ConversationHistoryController(agent, {
       request: async (target, request) => {
-        const page = await relayStore.getConversationHistory(target, request);
-        if (!request.cursor && !request.signal?.aborted) headPage = page;
-        return page;
+        try {
+          const page = await relayStore.getConversationHistory(target, request);
+          if (!request.cursor && !request.signal?.aborted) headPage = page;
+          return page;
+        } catch (failure) {
+          if (failure instanceof CommandError && (failure.message === 'Relay is not connected'
+            || failure.message === 'Could not send command to relay'
+            || (paneConnectionStatus !== 'connected' && failure.data?.dispatched_unknown === true))) {
+            throw { error: { code: 'transport_disconnected', message: failure.message, retryable: true } };
+          }
+          throw failure;
+        }
       },
       maxContentBytes: HISTORY_MAX_CONTENT_BYTES - LIVE_MAX_BYTES,
       onState: applyHistoryState,
@@ -362,6 +375,16 @@
     else { liveReader?.resume(); historyController.resume(); }
   });
 
+  $effect(() => {
+    const status = paneConnectionStatus;
+    const identity = `${paneStateIdentity}:${historyState?.epoch}`;
+    const failure = historyState?.error?.code;
+    const visible = paneVisible && !$securityState.locked;
+    if (status !== 'connected') { recoveryAttemptedFor = ''; return; }
+    if (!visible || failure !== 'transport_disconnected' || recoveryAttemptedFor === identity) return;
+    if (historyController?.recoverAfterReconnect(agent)) recoveryAttemptedFor = identity;
+  });
+
   function pinListToBottom(element: HTMLElement): void {
     if (element !== listElement || selectionInHistory()) return;
     pinTargetHeight = element.scrollHeight;
@@ -472,37 +495,14 @@
     const wasLoadingOlder = loadingOlder;
     const readingAnchor = !pinnedToBottom ? topVisibleEntry() : null;
     if (!pinnedToBottom && !renderAnchor && visibleEntries.length) renderAnchor = visibleEntries[0].id;
-    entries = next.entries;
+    historyState = next;
     if (next.authoritative && !next.error && headPage?.sourceRevision === next.sourceRevision) {
       liveReader?.observe(agent, headPage);
       headPage.provisional = undefined;
     }
-    available = next.available;
-    reason = next.reason;
-    hasMore = next.hasMore;
-    nextCursor = next.nextCursor;
-    browseState = next.state;
-    browseProgress = next.progress;
-    diagnostics = next.diagnostics;
-    omoPlan = next.omoPlan;
-    previewVisible = next.preview;
-    previewHistorical = next.previewHistorical;
-    authoritative = next.authoritative;
-    contextSearching = next.contextSearching;
-    pendingPrefix = next.pendingPrefix;
-    beginningReached = next.beginningReached;
-    pausedReason = next.pausedReason;
-    latestGapOutstanding = next.latestGapOutstanding;
-    requestPhase = next.requestPhase;
-    preparationPolls = next.preparationPolls;
-    error = next.error?.message || '';
-    errorCode = next.errorCode;
-    errorRetryable = next.errorRetryable;
     sourceChangedNotice = next.error && ['source_changed', 'invalid_cursor', 'cursor_expired'].includes(next.error.code)
       ? next.error.message
       : '';
-    loadingOlder = next.requestPhase === 'older';
-    loading = !entries.length && !previewVisible && next.requestPhase === 'initial';
 
     const prepended = oldEntries.length > 0
       && next.entries.findIndex((entry) => entry.id === oldEntries[0].id) > 0;

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/andybalholm/brotli"
@@ -40,8 +41,6 @@ const (
 	publicVerificationTimeout = 2 * time.Minute
 	publicRequestTimeout      = 20 * time.Second
 	deploymentTimeout         = 15 * time.Minute
-	processTermGrace          = 2 * time.Second
-	processWaitDelay          = 4 * time.Second
 )
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
@@ -204,69 +203,10 @@ func wranglerDeployArgs(job Job) []string {
 }
 
 func runCommandContext(ctx context.Context, command *exec.Cmd) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.WaitDelay = processWaitDelay
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	command.Stdout = stdout
-	command.Stderr = stderr
-	if err := command.Start(); err != nil {
-		return nil, err
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- command.Wait()
-	}()
-	select {
-	case err := <-waitCh:
-		return combinedCommandOutput(stdout, stderr), err
-	case <-ctx.Done():
-		terminateProcessGroup(command.Process.Pid, waitCh)
-		return nil, ctx.Err()
-	}
-}
-
-func combinedCommandOutput(stdout, stderr *bytes.Buffer) []byte {
-	output := make([]byte, 0, stdout.Len()+stderr.Len())
-	output = append(output, stdout.Bytes()...)
-	return append(output, stderr.Bytes()...)
-}
-
-func terminateProcessGroup(pgid int, waitCh <-chan error) {
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	timer := time.NewTimer(processTermGrace)
-	defer timer.Stop()
-	leaderDone := false
-	select {
-	case <-waitCh:
-		leaderDone = true
-		if !processGroupAlive(pgid) {
-			return
-		}
-		<-timer.C
-	case <-timer.C:
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-
-	if !leaderDone {
-		select {
-		case <-waitCh:
-		case <-time.After(2 * time.Second):
-		}
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for processGroupAlive(pgid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func processGroupAlive(pgid int) bool {
-	err := syscall.Kill(-pgid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return processgroup.Run(ctx, command, processgroup.Options{
+		PostKillWait:         2 * time.Second,
+		ReturnOutputOnCancel: false,
+	})
 }
 
 var cloudflareCredentialKeys = [...]string{

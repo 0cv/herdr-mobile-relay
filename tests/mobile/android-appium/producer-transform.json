@@ -30,5 +30,11 @@
       "  cacheChromedriverCaps.bind(this)(sessionCaps, context);\n  return chromedriver;",
       "  cacheChromedriverCaps.bind(this)(sessionCaps, context ?? (this.isChromeSession ? CHROMIUM_WIN : undefined));\n  return chromedriver;"
     ]
+  ],
+  "driver": [
+    [
+      "    } catch (e) {\n      await this.deleteSession();\n      throw e;\n    }",
+      "    } catch (e) {\n      try {\n        this.log.error(`create-before-cleanup: ${(e as Error)?.stack ?? e}`);\n      } catch {}\n      try {\n        await this.deleteSession();\n      } catch (cleanupError) {\n        try {\n          this.log.error(`create-cleanup-failed: ${(cleanupError as Error)?.stack ?? cleanupError}`);\n        } catch {}\n        throw cleanupError;\n      }\n      throw e;\n    }"
+    ]
   ]
 }

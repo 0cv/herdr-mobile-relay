@@ -2,6 +2,8 @@ package portmap
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -498,5 +501,257 @@ func TestSSDPSearchIgnoresOffHostLocations(t *testing.T) {
 
 	if found, err := c.ssdpSearch(ctx); err == nil {
 		t.Fatalf("ssdpSearch accepted a foreign location: %v", found)
+	}
+}
+
+var errUPnPRedirectDial = errors.New("guard blocked forbidden UPnP redirect dial")
+
+type upnpRedirectDialGuard struct {
+	mu     sync.Mutex
+	denied []string
+}
+
+func (g *upnpRedirectDialGuard) snapshot() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.denied...)
+}
+
+func upnpRedirectServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func guardedUPnPRedirectClient(t *testing.T, servers ...*httptest.Server) (*client, *upnpRedirectDialGuard) {
+	t.Helper()
+	c := newClient(testLogger())
+	transport := c.httpClient.Transport.(*http.Transport)
+	t.Cleanup(transport.CloseIdleConnections)
+	originalDial := transport.DialContext
+	allowed := make(map[string]bool)
+	for _, server := range servers {
+		endpoint := server.Listener.Addr().String()
+		addr, err := netip.ParseAddrPort(endpoint)
+		if err != nil || !addr.Addr().IsLoopback() || addr.Port() == 0 {
+			t.Fatalf("non-numeric/non-loopback owned endpoint: %q", endpoint)
+		}
+		allowed[endpoint] = true
+	}
+	guard := &upnpRedirectDialGuard{}
+	// Keep the production client/transport; only exact owned numeric endpoints
+	// may reach its original dialer. Denials occur before DNS or TLS work.
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		guard.mu.Lock()
+		ok := allowed[address]
+		if !ok {
+			guard.denied = append(guard.denied, address)
+		}
+		guard.mu.Unlock()
+		if !ok {
+			return nil, errUPnPRedirectDial
+		}
+		return originalDial(ctx, network, address)
+	}
+	return c, guard
+}
+
+func callUPnPRedirect(ctx context.Context, c *client, operation, endpoint string) ([]byte, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if operation == "description" {
+		return c.fetchDescription(ctx, u)
+	}
+	gateway, _ := hostAddr(u)
+	return c.soapCall(ctx, upnpTarget{gateway: gateway, control: u, service: upnpServiceTypes[1]}, "GetExternalIPAddress", nil)
+}
+
+func TestUPnPRedirectAllowed(t *testing.T) {
+	for _, operation := range []string{"description", "soap"} {
+		for _, tc := range []struct {
+			status int
+			kind   string
+		}{
+			{301, "relative"}, {301, "same_ip_port"},
+			{302, "relative"}, {302, "same_ip_port"},
+			{303, "relative"}, {303, "same_ip_port"},
+			{307, "relative"}, {307, "same_ip_port"},
+			{308, "relative"}, {308, "same_ip_port"},
+			{302, "drop_then_307"},
+		} {
+			t.Run(fmt.Sprintf("%s/%d/%s", operation, tc.status, tc.kind), func(t *testing.T) {
+				type observation struct {
+					method, body string
+					err          error
+				}
+				seen := make(chan observation, 12)
+				const payload = "<redirect>ok</redirect>"
+				var destination string
+				handler := func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					seen <- observation{r.Method, string(body), err}
+					switch {
+					case r.URL.Path == "/start":
+						http.Redirect(w, r, destination, tc.status)
+					case r.URL.Path == "/next" && tc.kind == "drop_then_307":
+						http.Redirect(w, r, "/end", http.StatusTemporaryRedirect)
+					default:
+						io.WriteString(w, payload)
+					}
+				}
+				start := upnpRedirectServer(t, handler)
+				end := upnpRedirectServer(t, handler)
+				destination = "/next"
+				if tc.kind == "same_ip_port" {
+					destination = end.URL + "/next"
+				}
+				c, guard := guardedUPnPRedirectClient(t, start, end)
+				body, err := callUPnPRedirect(context.Background(), c, operation, start.URL+"/start")
+				if err != nil || string(body) != payload {
+					t.Fatalf("response = %q, %v", body, err)
+				}
+				wantCount := 2
+				if tc.kind == "drop_then_307" {
+					wantCount = 3
+				}
+				if len(seen) != wantCount {
+					t.Fatalf("requests = %d, want %d", len(seen), wantCount)
+				}
+				method, requestBody := http.MethodGet, ""
+				if operation == "soap" {
+					method, requestBody = http.MethodPost, string(soapBody(upnpServiceTypes[1], "GetExternalIPAddress", nil))
+				}
+				for i := 0; i < wantCount; i++ {
+					if i > 0 && tc.status < 307 {
+						method, requestBody = http.MethodGet, ""
+					}
+					if got := <-seen; got.err != nil || got.method != method || got.body != requestBody {
+						t.Fatalf("hop %d = %+v, want %s %q", i, got, method, requestBody)
+					}
+				}
+				if denied := guard.snapshot(); len(denied) != 0 {
+					t.Fatalf("unexpected dial denials: %v", denied)
+				}
+			})
+		}
+	}
+}
+
+func TestUPnPRedirectChainLimit(t *testing.T) {
+	for _, operation := range []string{"description", "soap"} {
+		t.Run(operation, func(t *testing.T) {
+			var requests atomic.Int32
+			server := upnpRedirectServer(t, func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				http.Redirect(w, r, "/loop", http.StatusTemporaryRedirect)
+			})
+			c, guard := guardedUPnPRedirectClient(t, server)
+			_, err := callUPnPRedirect(context.Background(), c, operation, server.URL)
+			var urlErr *url.Error
+			if !errors.As(err, &urlErr) || urlErr.Err.Error() != "stopped after 10 redirects" {
+				t.Fatalf("chain error = %v, want Go's ten-redirect cause", err)
+			}
+			if got := requests.Load(); got != 10 {
+				t.Fatalf("server requests = %d, want exactly 10 (not 11)", got)
+			}
+			if denied := guard.snapshot(); len(denied) != 0 {
+				t.Fatalf("unexpected dial denials: %v", denied)
+			}
+		})
+	}
+}
+
+func TestUPnPRedirectCancellation(t *testing.T) {
+	for _, operation := range []string{"description", "soap"} {
+		t.Run(operation, func(t *testing.T) {
+			watchdog, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			ctx, cancel := context.WithCancel(watchdog)
+			defer cancel()
+			entered := make(chan struct{}, 1)
+			end := upnpRedirectServer(t, func(w http.ResponseWriter, r *http.Request) {
+				entered <- struct{}{}
+				select {
+				case <-r.Context().Done():
+				case <-watchdog.Done():
+				}
+			})
+			start := upnpRedirectServer(t, func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, end.URL, http.StatusTemporaryRedirect)
+			})
+			c, guard := guardedUPnPRedirectClient(t, start, end)
+			cancelled := make(chan bool, 1)
+			go func() {
+				select {
+				case <-entered:
+					cancel()
+					cancelled <- true
+				case <-watchdog.Done():
+					cancelled <- false
+				}
+			}()
+			_, err := callUPnPRedirect(ctx, c, operation, start.URL)
+			stop()
+			if didEnter := <-cancelled; !didEnter || !errors.Is(err, context.Canceled) {
+				t.Fatalf("redirected handler entered=%t, error=%v, want context.Canceled", didEnter, err)
+			}
+			if denied := guard.snapshot(); len(denied) != 0 {
+				t.Fatalf("unexpected dial denials: %v", denied)
+			}
+		})
+	}
+}
+
+func TestUPnPRedirectRejectsEscape(t *testing.T) {
+	for _, op := range []struct {
+		name, operation string
+		status          int
+	}{{"description_302", "description", 302}, {"soap_307", "soap", 307}} {
+		t.Run(op.name, func(t *testing.T) {
+			for _, dest := range []struct {
+				name, endpoint, dial string
+			}{
+				{"off_ip", "http://203.0.113.9:80/escape", "203.0.113.9:80"},
+				{"hostname", "http://escape.invalid:80/escape", "escape.invalid:80"},
+				{"https", "https://127.0.0.1:1/escape", "127.0.0.1:1"},
+			} {
+				t.Run(dest.name, func(t *testing.T) {
+					for _, position := range []string{"direct", "after_same_ip_port"} {
+						t.Run(position, func(t *testing.T) {
+							var requests atomic.Int32
+							intermediate := upnpRedirectServer(t, func(w http.ResponseWriter, r *http.Request) {
+								requests.Add(1)
+								http.Redirect(w, r, dest.endpoint, op.status)
+							})
+							destination, wantRequests := dest.endpoint, int32(1)
+							if position == "after_same_ip_port" {
+								destination, wantRequests = intermediate.URL, 2
+							}
+							start := upnpRedirectServer(t, func(w http.ResponseWriter, r *http.Request) {
+								requests.Add(1)
+								http.Redirect(w, r, destination, op.status)
+							})
+							c, guard := guardedUPnPRedirectClient(t, start, intermediate)
+							_, err := callUPnPRedirect(context.Background(), c, op.operation, start.URL)
+							var urlErr *url.Error
+							if !errors.As(err, &urlErr) || urlErr.Timeout() || requests.Load() != wantRequests {
+								t.Fatalf("requests=%d, error=%v, want %d owned requests and redirect error", requests.Load(), err, wantRequests)
+							}
+							denied, sentinel := guard.snapshot(), errors.Is(err, errUPnPRedirectDial)
+							t.Logf("guard denied=%d sentinel=%t destinations=%v error=%v", len(denied), sentinel, denied, err)
+							if len(denied) > 0 && (len(denied) != 1 || denied[0] != dest.dial || !sentinel) {
+								t.Fatalf("unexpected guard outcome: denied=%v sentinel=%t", denied, sentinel)
+							}
+							if len(denied) != 0 {
+								t.Fatalf("forbidden dial attempts: got %d, want 0", len(denied))
+							}
+						})
+					}
+				})
+			}
+		})
 	}
 }

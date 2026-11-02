@@ -372,6 +372,16 @@ interface IOSHomeObservation {
   page?: IOSHomePage;
   attributes?: Record<string, string | null>;
   reason: string;
+  classificationCounts?: { container: number; page: number; icon: number };
+}
+
+class IOSHomeObservationShortfall extends WebDriverError {
+  constructor(readonly phase: PhaseBudget) {
+    super({
+      code: 'IOS_HOME_OBSERVATION_SHORTFALL', message: 'Home observation allowance is insufficient before dispatch',
+      path: '', method: 'LOCAL', durationMs: 0, selectedContext: 'NATIVE_APP', selectedWindow: '',
+    });
+  }
 }
 
 // An XPath with visibility tests made WebDriverAgent serialize all of SpringBoard (over 16 s on hosted runners).
@@ -470,6 +480,7 @@ export class IOSPlatform implements MobilePlatform {
   private lastCompletion?: UpdateCompletionEvidence;
   private lastNativeActivity = '';
   private lastNativePid = '';
+  private installedContextContractReady = false;
   private simulatorReadyAt = '';
   private ownershipFailure?: QualificationFatalError;
   private nativeObservationFailure?: unknown;
@@ -1131,13 +1142,16 @@ export class IOSPlatform implements MobilePlatform {
         this.launchObservation.enter('provider');
         const providerTimeout = Math.min(30_000, phase.remainingMs);
         if (providerTimeout <= 1) break;
-        if (await this.waitForInstalledProvider(providerTimeout)) {
+        if (await this.waitForInstalledProvider(providerTimeout, phase)) {
           const foregroundTimeout = phase.remainingMs;
           if (foregroundTimeout <= 1) break;
           this.launchObservation.enter('foreground');
-          await this.requireInstalledProviderForeground(foregroundTimeout);
+          phase.assertAvailable('verify installed provider foreground');
+          await this.requireInstalledProviderForeground(foregroundTimeout, phase);
+          phase.assertAvailable('attach installed provider');
           this.launchObservation.enter('attachment');
           await delay(Math.min(750, phase.remainingMs), phase);
+          phase.assertAvailable('attach installed provider');
           await this.attachToInstalledView(Math.min(IOS_LAUNCH_ATTACHMENT_MS, Math.floor(phase.remainingMs / timingScale)));
           this.launchObservation.enter('complete');
           return;
@@ -1200,16 +1214,30 @@ export class IOSPlatform implements MobilePlatform {
           }
         }
         phase.assertAvailable('discover installed page metadata');
-        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) {
+        if (phase.remainingMs < (IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) * timingScale) {
           lastError ||= `not enough time for WebKit discovery and foreground observation (${phase.remainingMs}ms remains)`;
           break;
         }
+        if (!this.installedContextContractReady) {
+          this.driver.setRequestTimingScope('ios-attachment-contract', phase);
+          await this.driver.installedContextContract(IOS_INSTALLED_FOREGROUND_MS);
+          this.installedContextContractReady = true;
+        }
+        this.driver.setRequestTimingScope('ios-attachment-pre-discovery-native', phase);
+        const foreground = await this.observeCurrentNativeForeground(phase, IOS_INSTALLED_FOREGROUND_MS);
+        if (foreground !== IOS_INSTALLED_BUNDLE_ID) {
+          this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider is not foreground before discovery');
+        }
+        // These observations consume the original phase, never a new discovery clock.
+        if (phase.remainingMs < (IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) * timingScale) break;
+        const targetApp = Object.freeze({ bundleId: IOS_INSTALLED_BUNDLE_ID, nativePid: Number(this.lastNativePid) });
         this.driver.setRequestTimingScope('ios-attachment-discovery', phase);
-        const contexts = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
+        const contexts = await this.driver.installedContextMetadata(targetApp, IOS_WEBKIT_DISCOVERY_COMMAND_MS);
         phase.assertAvailable('validate installed discovery foreground');
         if (phase.remainingMs < IOS_INSTALLED_FOREGROUND_MS) break;
         this.driver.setRequestTimingScope('ios-attachment-discovery-native', phase);
         await this.requireInstalledProviderForeground(IOS_INSTALLED_FOREGROUND_MS);
+        if (Number(this.lastNativePid) !== targetApp.nativePid) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'native provider changed during scoped discovery');
         let candidateError: unknown;
         if (!contexts.length) {
           lastError = 'installed page metadata is unavailable';
@@ -1246,6 +1274,7 @@ export class IOSPlatform implements MobilePlatform {
               this.driver.setRequestTimingScope('ios-attachment-pre-attachment-native', phase);
               await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
               await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
+              if (Number(this.lastNativePid) !== targetApp.nativePid) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'native provider changed before scoped attachment');
               this.driver.setRequestTimingScope('ios-attachment-validation', phase);
               await this.driver.switchContext(context.id, Math.max(1, phase.remainingMs));
               if (this.installedBindingState !== 'bound') this.installedBindingState = 'inspecting';
@@ -2122,11 +2151,27 @@ export class IOSPlatform implements MobilePlatform {
     throw new Error(`IOS_SHARE: ${description}: ${lastError || 'control was not usable before the deadline'}`);
   }
 
+  private homeObservationRequest(phase: PhaseBudget, cap: number, allowance: number) {
+    const nativePolicy = this.driver.nativeRequestPolicy(phase);
+    const timeout = Math.max(Math.ceil(allowance / timingScale), Math.min(cap, Math.floor(phase.remainingMs / timingScale)));
+    const policy: WebDriverRequestPolicy = {
+      ...nativePolicy,
+      beforeDispatch: () => {
+        nativePolicy.beforeDispatch();
+        if (phase.remainingMs < Math.max(timeout, allowance)) throw new IOSHomeObservationShortfall(phase);
+      },
+    };
+    const assertComplete = () => {
+      nativePolicy.beforeDispatch();
+      phase.assertAvailable('complete Home observation request');
+    };
+    return { timeout, policy, assertComplete };
+  }
+
   private async readNativeHomeAttribute(element: string, name: string, phase: PhaseBudget): Promise<string | null> {
-    phase.assertAvailable(`read Home ${name}`);
-    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
-    if (timeout < minimumDriverRequestMs) throw new Error(`IOS_CONTEXT: insufficient time to read Home ${name}`);
-    const value = await this.driver.attribute(element, name, timeout);
+    const request = this.homeObservationRequest(phase, IOS_NATIVE_LOOKUP_ROUND_MS, driverRequestAllowanceMs.attribute);
+    const value = await this.driver.attribute(element, name, request.timeout, request.policy);
+    request.assertComplete();
     if (value !== null && typeof value !== 'string') {
       this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home ${name} attribute response was malformed`);
     }
@@ -2137,14 +2182,53 @@ export class IOSPlatform implements MobilePlatform {
   private async waitForHomeIconReadiness(observation: IOSHomeObservation, parent: PhaseBudget, firstObservation = false): Promise<IOSHomeObservation> {
     const settling = (current: IOSHomeObservation) => current.state === 'pending' || current.state === 'not-ready'
       || (firstObservation && current.state === 'missing');
-    if (!settling(observation)) return observation;
-    const phase = parent.phaseView('ios-home-readiness', IOS_NATIVE_LIST_READINESS_MS);
-    while (settling(observation) && phase.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS + minimumDriverRequestMs) {
-      if (phase.remainingMs < 250 + minimumDriverRequestMs) break;
-      await delay(250, phase);
-      observation = await this.observeHomeIcon(phase);
+    let phase: PhaseBudget | undefined;
+    let attemptedRounds = 1;
+    let completedRounds = 1;
+    let lastCompleteAttemptOrdinal = this.driver.snapshot().lastCommand?.timing?.attemptId ?? null;
+    let outcome: 'complete' | 'no-budget' | 'local-shortfall' | 'error' = 'error';
+    try {
+      const owner = this.driver.nativeRequestPolicy(parent);
+      owner.beforeDispatch();
+      parent.assertAvailable('settle Home observation');
+      if (!settling(observation)) {
+        outcome = 'complete';
+        return observation;
+      }
+      phase = parent.phaseView('ios-home-readiness', IOS_NATIVE_LIST_READINESS_MS);
+      while (settling(observation) && phase.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS + minimumDriverRequestMs) {
+        if (phase.remainingMs < 250 + minimumDriverRequestMs) break;
+        await delay(250, phase);
+        attemptedRounds += 1;
+        try {
+          owner.beforeDispatch();
+          parent.assertAvailable('observe Home readiness');
+          const complete = await this.observeHomeIcon(phase);
+          owner.beforeDispatch();
+          parent.assertAvailable('accept Home readiness');
+          observation = complete;
+          completedRounds += 1;
+          lastCompleteAttemptOrdinal = this.driver.snapshot().lastCommand?.timing?.attemptId ?? null;
+        } catch (error) {
+          if (!(error instanceof IOSHomeObservationShortfall) || error.phase !== phase) throw error;
+          owner.beforeDispatch();
+          parent.assertAvailable('retain complete Home observation');
+          outcome = 'local-shortfall';
+          return observation;
+        }
+      }
+      owner.beforeDispatch();
+      parent.assertAvailable('retain Home readiness');
+      outcome = settling(observation) ? 'no-budget' : 'complete';
+      return observation;
+    } finally {
+      this.diagnostics.record({ phase: 'ios-home-readiness', operation: 'terminal-observation', detail: {
+        outcome, state: observation.state, pageCurrent: observation.page?.current ?? null, pageTotal: observation.page?.total ?? null,
+        classificationCounts: observation.classificationCounts ?? null, attemptedRounds, completedRounds,
+        localRemainingMs: phase?.remainingMs ?? null, parentRemainingMs: parent.remainingMs, lastCompleteAttemptOrdinal,
+        attemptOrdinal: outcome === 'complete' || outcome === 'no-budget' ? lastCompleteAttemptOrdinal : null,
+      } });
     }
-    return observation;
   }
 
   // The Today View left of the first page keeps the icon container published but shows no page indicator or icons.
@@ -2158,10 +2242,9 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async homeObservationElementIds(phase: PhaseBudget): Promise<string[]> {
-    phase.assertAvailable('observe current SpringBoard page');
-    const queryTimeout = Math.min(IOS_NATIVE_HIERARCHY_COMMAND_MS, phase.remainingMs);
-    if (queryTimeout < minimumDriverRequestMs) throw new Error('IOS_CONTEXT: insufficient time to observe current SpringBoard page');
-    const response = await this.driver.command<unknown>('/elements', 'POST', iosHomeObservationLocator(), queryTimeout);
+    const request = this.homeObservationRequest(phase, IOS_NATIVE_HIERARCHY_COMMAND_MS, driverRequestAllowanceMs.lookup);
+    const response = await this.driver.command<unknown>('/elements', 'POST', iosHomeObservationLocator(), request.timeout, request.policy);
+    request.assertComplete();
     if (!Array.isArray(response)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'Home observation element response was not an array');
     const rawIds = response.map((candidate: unknown, index: number) => {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
@@ -2182,7 +2265,7 @@ export class IOSPlatform implements MobilePlatform {
 
   private async observeHomeIcon(phase: PhaseBudget): Promise<IOSHomeObservation> {
     const ids = await this.homeObservationElementIds(phase);
-    if (!ids.length) return { state: 'pending', reason: 'Home page elements are not published' };
+    if (!ids.length) return { state: 'pending', classificationCounts: { container: 0, page: 0, icon: 0 }, reason: 'Home page elements are not published' };
 
     const classified: Array<{ id: string; kind: 'container' | 'icon' | 'page' }> = [];
     for (const id of ids) {
@@ -2203,18 +2286,19 @@ export class IOSPlatform implements MobilePlatform {
     if (pages.length > 1) {
       this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home page indicator is ambiguous (${pages.map((element) => element.id).join(', ')})`);
     }
-    if (!containers.length) return { state: 'pending', reason: 'Home screen icon container is missing' };
-    if (!pages.length) return { state: 'pending', container: containers[0].id, reason: IOS_HOME_PAGE_INDICATOR_MISSING };
+    const icons = classified.filter((element) => element.kind === 'icon');
+    const classificationCounts = { container: containers.length, page: pages.length, icon: icons.length };
+    if (!containers.length) return { state: 'pending', classificationCounts, reason: 'Home screen icon container is missing' };
+    if (!pages.length) return { state: 'pending', classificationCounts, container: containers[0].id, reason: IOS_HOME_PAGE_INDICATOR_MISSING };
 
     const pageValue = await this.readNativeHomeAttribute(pages[0].id, 'value', phase);
     const page = typeof pageValue === 'string' ? parseIOSHomePage(pageValue) : undefined;
-    if (!page) return { state: 'pending', container: containers[0].id, reason: 'Home page indicator value is invalid' };
+    if (!page) return { state: 'pending', classificationCounts, container: containers[0].id, reason: 'Home page indicator value is invalid' };
 
-    const icons = classified.filter((element) => element.kind === 'icon');
     if (icons.length > 1) {
       this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home screen icon is ambiguous (${icons.map((element) => element.id).join(', ')})`);
     }
-    if (!icons.length) return { state: 'missing', container: containers[0].id, page, reason: 'installed provider icon is not on the current page' };
+    if (!icons.length) return { state: 'missing', classificationCounts, container: containers[0].id, page, reason: 'installed provider icon is not on the current page' };
 
     const icon = icons[0].id;
     const attributes: Record<string, string | null> = {};
@@ -2224,6 +2308,7 @@ export class IOSPlatform implements MobilePlatform {
     const ready = attributes.enabled === 'true' && attributes.visible === 'true' && attributes.hittable === 'true';
     return {
       state: ready ? 'ready' : 'not-ready',
+      classificationCounts,
       container: containers[0].id,
       icon,
       page,
@@ -2232,19 +2317,26 @@ export class IOSPlatform implements MobilePlatform {
     };
   }
 
-  private async waitForInstalledProvider(timeoutMs: number): Promise<boolean> {
-    const phase = this.budget.phaseView('ios-provider', timeoutMs);
+  private async waitForInstalledProvider(timeoutMs: number, parent = this.budget): Promise<boolean> {
+    const phase = parent.phaseView('ios-provider', timeoutMs);
+    const policy = this.driver.nativeRequestPolicy(phase);
     while (!phase.exhausted) {
       phase.assertAvailable('discover installed provider');
-      await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
-      const state = await this.driver.mobile('queryAppState', { bundleId: IOS_INSTALLED_BUNDLE_ID }, phase.remainingMs);
+      if (phase.remainingMs < driverRequestAllowanceMs.generic) break;
+      await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
+      const requestTimeout = phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS * timingScale
+        ? IOS_NATIVE_LOOKUP_ROUND_MS : Math.min(driverRequestAllowanceMs.lookup, Math.floor(phase.remainingMs / timingScale));
+      const state = await this.driver.mobile('queryAppState', { bundleId: IOS_INSTALLED_BUNDLE_ID }, requestTimeout, policy);
+      policy.beforeDispatch();
       if (state === 4) {
-        await this.observeNativeForeground(IOS_INSTALLED_BUNDLE_ID, phase);
         this.installedBundleId = IOS_INSTALLED_BUNDLE_ID;
         return true;
       }
       if (state !== 1 && state !== 2 && state !== 3) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider state is missing or invalid');
-      const homeState = await this.driver.mobile('queryAppState', { bundleId: IOS_SPRINGBOARD_BUNDLE_ID }, phase.remainingMs);
+      if (phase.remainingMs < requestTimeout) break;
+      const homeTimeout = Math.min(requestTimeout, Math.floor(phase.remainingMs / timingScale));
+      const homeState = await this.driver.mobile('queryAppState', { bundleId: IOS_SPRINGBOARD_BUNDLE_ID }, homeTimeout, policy);
+      policy.beforeDispatch();
       if (homeState !== 4) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'neither the launch screen nor installed provider is foreground');
       if (phase.exhausted) {
         this.budget.assertAvailable('discover installed provider');
@@ -2284,14 +2376,14 @@ export class IOSPlatform implements MobilePlatform {
     }
   }
 
-  private async observeCurrentNativeForeground(phase: PhaseBudget): Promise<string> {
+  private async observeCurrentNativeForeground(phase: PhaseBudget, timeoutMs?: number): Promise<string> {
     this.assertOwnershipClear();
     try {
       if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') {
-        await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
+        await this.driver.switchContext('NATIVE_APP', timeoutMs ?? phase.remainingMs);
       }
       phase.assertAvailable('observe current native foreground');
-      const info = await this.driver.activeAppInfo(phase.remainingMs);
+      const info = await this.driver.activeAppInfo(timeoutMs ?? phase.remainingMs);
       const activeValue = info?.bundleId ?? info?.bundleID;
       const active = typeof activeValue === 'string' ? activeValue : '';
       const pid = info?.pid;
@@ -2369,10 +2461,10 @@ export class IOSPlatform implements MobilePlatform {
     }
   }
 
-  private async requireInstalledProviderForeground(timeoutMs = 30_000): Promise<void> {
+  private async requireInstalledProviderForeground(timeoutMs = 30_000, parent = this.budget): Promise<void> {
     if (!this.installedBundleId) throw new Error('IOS_CONTEXT: installed provider identity is unavailable');
     if (this.installedBundleId !== IOS_INSTALLED_BUNDLE_ID) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `installed provider ${this.installedBundleId} is not ${IOS_INSTALLED_BUNDLE_ID}`);
-    await this.observeNativeForeground(this.installedBundleId, this.budget.phaseView('ios-native-foreground', Math.min(30_000, timeoutMs)));
+    await this.observeNativeForeground(this.installedBundleId, parent.phaseView('ios-native-foreground', Math.min(30_000, timeoutMs)));
   }
 
   private async validateInstalledDocument(timeoutMs?: number): Promise<void> {

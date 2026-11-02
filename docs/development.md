@@ -12,10 +12,19 @@ cd herdr-mobile-relay
 make dev-tunnel
 ```
 
-`make dev-tunnel` builds the current Go source and frontend, uses isolated ports
-and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
-installed production relay. If a Pi agent directory exists, it installs or
-updates the live-command integration there, including in noninteractive runs.
+`make dev-tunnel` builds the current Go source, interactively chooses Tailscale
+Serve (when available) or a temporary Cloudflare tunnel, then builds the
+frontend. Set `HERDR_DEV_TRANSPORT=tailscale` or `cloudflare` to skip the prompt
+(required without a terminal). Tailscale serves HTTPS port 9443, proxying to the
+dev relay
+on localhost port 18375; the plugin uses UDP port 18376 by default. A conflicting
+Serve port is refused; Ctrl-C attempts to remove only this dev mapping. Set
+`HERDR_DEV_CONFIG_DIR` to move isolated state from `relay/.dev/`. The dev run
+never uses the installed production relay or its port 8375. For Tailscale
+prerequisites, see [transports.md](transports.md#tailscale-serve).
+
+If a Pi agent directory exists, it installs or updates the live-command
+integration there, including in noninteractive runs.
 This changes the shared Pi profile, not the isolated relay state; the integration
 remains after the tunnel stops. Run `/reload` in affected Pi panes after the
 tunnel starts. Set `HERDR_DEV_PI_COMMANDS_INSTALL=0` to skip profile changes.

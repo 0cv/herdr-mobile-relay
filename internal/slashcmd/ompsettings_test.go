@@ -1,6 +1,10 @@
 package slashcmd
 
-import "testing"
+import (
+	"reflect"
+	"slices"
+	"testing"
+)
 
 func TestDefaultOMPSkillSettingsEnablesEverything(t *testing.T) {
 	s := defaultOMPSkillSettings()
@@ -19,6 +23,7 @@ func TestDefaultOMPSkillSettingsEnablesEverything(t *testing.T) {
 
 func TestParseOMPSkillSettingsBooleans(t *testing.T) {
 	s := defaultOMPSkillSettings()
+	s.enablePiProject = false
 	parseOMPSkillSettings([]byte(`skills:
   enableClaudeUser: false
   enableCodexUser: "FALSE"
@@ -28,8 +33,8 @@ func TestParseOMPSkillSettingsBooleans(t *testing.T) {
 	if s.enableClaudeUser {
 		t.Error("enableClaudeUser should be false")
 	}
-	if s.enableCodexUser {
-		t.Error("quoted FALSE should disable enableCodexUser")
+	if !s.enableCodexUser {
+		t.Error("quoted FALSE is a string and must leave enableCodexUser unchanged")
 	}
 	if !s.enableAgentsUser {
 		t.Error("an unrecognised scalar must leave the key at its default")
@@ -155,9 +160,10 @@ func TestParseOMPSkillSettingsDisabledExtensionsUnderSkillsIsIgnored(t *testing.
 
 func TestParseOMPSkillSettingsTabIndentationSkipped(t *testing.T) {
 	s := defaultOMPSkillSettings()
-	parseOMPSkillSettings([]byte("skills:\n\tenableClaudeUser: false\n"), &s)
-	if !s.enableClaudeUser {
-		t.Error("a tab-indented line must be skipped, leaving the default")
+	before := s
+	parseOMPSkillSettings([]byte("skills:\n  enabled: false\n\tenableClaudeUser: false\n"), &s)
+	if !reflect.DeepEqual(s, before) {
+		t.Errorf("invalid tab indentation must leave the entire file unapplied, got %+v", s)
 	}
 }
 
@@ -220,16 +226,42 @@ func TestParseOMPSkillSettingsDisabledExtensionsHeaderTrailingComment(t *testing
 }
 
 func TestSplitOMPKeyCommentOnlyValueIsEmpty(t *testing.T) {
-	key, value, ok := splitOMPKey("skills: # skill discovery")
-	if !ok || key != "skills" || value != "" {
-		t.Fatalf("a comment-only value must split to an empty value, got key=%q value=%q ok=%v", key, value, ok)
+	s := defaultOMPSkillSettings()
+	parseOMPSkillSettings([]byte("skills:\n  ignoredSkills: # bans\n    - noisy\n"), &s)
+	if !slices.Equal(s.ignoredSkills, []string{"noisy"}) {
+		t.Fatalf("a comment-only value must allow the following block list, got %q", s.ignoredSkills)
 	}
 }
 
 func TestSplitOMPKeyPreservesHashInsideQuotedValue(t *testing.T) {
-	key, value, ok := splitOMPKey(`ignoredSkills: "#deploy"`)
-	if !ok || key != "ignoredSkills" || value != `"#deploy"` {
-		t.Fatalf("a '#' inside a quoted value must not be treated as a comment, got key=%q value=%q ok=%v", key, value, ok)
+	s := defaultOMPSkillSettings()
+	parseOMPSkillSettings([]byte("skills:\n  ignoredSkills: [\"#deploy\"]\n"), &s)
+	if !slices.Equal(s.ignoredSkills, []string{"#deploy"}) {
+		t.Fatalf("a '#' inside a quoted value must not be treated as a comment, got %q", s.ignoredSkills)
+	}
+}
+
+func TestParseOMPSkillSettingsInvalidYAMLContributesNothing(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"unclosed-flow", "[unterminated"},
+		{"empty-flow-item", "[one,,two]"},
+		{"unquoted-star", "[*]"},
+		{"unknown-alias", "[*missing]"},
+		{"invalid-escape", `["bad\q"]`},
+	} {
+		for _, prior := range []string{"defaults", "settings"} {
+			t.Run(tc.name+"/prior-"+prior, func(t *testing.T) {
+				s := defaultOMPSkillSettings()
+				if prior == "settings" {
+					parseOMPSkillSettings([]byte("extensions: [personal]\ndisabledExtensions: [skill:personal]\nskills:\n  enablePiUser: false\n  customDirectories: [personal]\n  ignoredSkills: [personal]\n  includeSkills: [personal]\n"), &s)
+				}
+				before := s
+				parseOMPSkillSettings([]byte("extensions: []\ndisabledExtensions: []\nskills:\n  enabled: false\n  ignoredSkills: "+tc.value+"\n  enableClaudeUser: false\n"), &s)
+				if !reflect.DeepEqual(s, before) {
+					t.Fatalf("invalid YAML changed settings: got %+v, want %+v", s, before)
+				}
+			})
+		}
 	}
 }
 
@@ -249,5 +281,13 @@ func TestSourceFallbackEnabled(t *testing.T) {
 	s.enableAgentsProject = true
 	if s.sourceFallbackEnabled() {
 		t.Error("agents toggles must not open the fall-through gate")
+	}
+}
+
+func TestParseOMPSkillSettingsEmptyIncludeEntryDoesNotHideSkills(t *testing.T) {
+	s := defaultOMPSkillSettings()
+	parseOMPSkillSettings([]byte("skills:\n  includeSkills: [\"\"]\n"), &s)
+	if !s.allows("deploy") {
+		t.Fatalf("empty includeSkills entry restricted skills: %q", s.includeSkills)
 	}
 }

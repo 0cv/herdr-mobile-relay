@@ -1,0 +1,12 @@
+{
+  "name": "herdr-ios-installed-context-integration",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "26.13.0" },
+  "dependencies": {
+    "appium": "3.7.0",
+    "appium-xcuitest-driver": "12.12.4",
+    "@appium/logger": "2.0.11"
+  }
+}

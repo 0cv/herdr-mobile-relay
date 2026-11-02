@@ -1,0 +1,239 @@
+{
+  "schema": 1,
+  "contract": "herdr-installed-contexts-v1",
+  "provenance": {
+    "runtime": "Official installed npm artifacts; no package vendoring or dependency-version changes",
+    "verifiedTaggedSources": [
+      {
+        "url": "https://raw.githubusercontent.com/appium/appium-xcuitest-driver/v12.12.4/lib/commands/context.ts",
+        "sha256": "fb77e573c079563ce22f22f7871fad11b854ae8004355a3e4d1f8b14a803c59d"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/appium/appium-remote-debugger/v17.4.2/lib/mixins/connect.ts",
+        "sha256": "6afe90714df3d022d0046ad1bdd9bf92876525c66452680f77ce82dcd2c40f20"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/appium/appium-remote-debugger/v17.4.2/lib/rpc/rpc-client.ts",
+        "sha256": "81a3ae011d930d4c2880e4932c64113ad814444afc004296a3450dae17650f88"
+      }
+    ]
+  },
+  "compiler": "6.0.3",
+  "inputs": {
+    "gate.ts": "a8b7000a3215e9dfaac48f84e53452e5da342f33fa9ae73f12da977fa3b639a6",
+    "ci.sh": "b5ddc2b17efd837b1a9b90c758f563560ad6c224b2fb269565bde71553720492",
+    "producer-transform.json": "3be68060347bf26413ce569ee022309d212f58dec0d531495480dbdc65d088d1",
+    "package.json": "411655cf66e7af8ea5727a8ae54afa4b23a63335622287fc6ef68a8296a8ffb2",
+    "test.ts": "7689663c4f485f909f54b33393fa1581123f0e6291bc9d367e9ab4a14c11e315",
+    "evidence.ts": "7f6af712afee7d4d5f6c9789c7b3fd0305c26d77fbeef00619a7b702b7e254a5",
+    "../unit/ios-producer.ts": "d92a2c7d064ed47bd16601baf636ab61f3252c3b7f79089346f69ae600491859"
+  },
+  "packages": {
+    "appium": {
+      "name": "appium",
+      "version": "3.7.0",
+      "root": "node_modules/appium",
+      "entry": "build/lib/main.js",
+      "files": {
+        "package.json": "46ad82202fcf9eec68af080d472992f8ed65e99fcc43dec46c59d0bf983b542e",
+        "build/lib/main.js": "111f60b00dc83c062c4d46ed184407d3aa4ff24d14efd0a37c77e0442565e1da",
+        "build/lib/appium.js": "cda9044753ef61620afae4cbc25d5a312a51ce53922af4f46cc0737854c135f6",
+        "driver.js": "b4f8601ca3571dc9a5ceb8e3177b2d0b9f49c08ef35a857ffbe500524ddac008",
+        "build/lib/extension/extension-config.js": "a2acc7d7a91d706e8138dbf29f1afa62363878c5d62a08186bb3ac59f6cf8a37",
+        "build/lib/extension/manifest.js": "bacae9ad813d1fc1f0d83caf86af2fa4bf66f352c326443dac03f61c3b63760a"
+      }
+    },
+    "xcuitest": {
+      "name": "appium-xcuitest-driver",
+      "version": "12.12.4",
+      "root": "node_modules/appium-xcuitest-driver",
+      "entry": "build/lib/index.js",
+      "files": {
+        "lib/commands/context.ts": "fb77e573c079563ce22f22f7871fad11b854ae8004355a3e4d1f8b14a803c59d",
+        "build/lib/commands/context.js": "33e616989f0ca6259f4c870e345cfd07bbe54d58f90227f80d67a5402c8c0aa7",
+        "build/lib/commands/context.js.map": "d05e22ba0c8d471c22e86a54741b505919ea86e510ed9455d9dae63f40f1aace",
+        "lib/driver.ts": "881044ac1c59d6b63b033e7848bd4e133b67de1c97b089ca54adc98a0ca4ae6d",
+        "build/lib/driver.js": "fd12c1e4cc83f834461eb3f4f8d09cd5260ac76efbc5de961d31d775c32c25a2",
+        "build/lib/driver.js.map": "a9ff5f197f5757919cf4cdef0feec40839519415a74a9ed23fea9f36745ef4c4",
+        "lib/execute-method-map.ts": "4d35c372d7edbc867597d71cea872211367d53411f59a99107c6ae93293a1527",
+        "build/lib/execute-method-map.js": "7bc3e4e6b7f810411c7e6391ee4e3a02d8deee3652c0e01f5e903ff71b49af8e",
+        "build/lib/execute-method-map.js.map": "1531dd9af6acb89eb4e383d55fe4a75ccc9fff3c40cd6b53e6089331671a9be8",
+        "build/lib/commands/context.d.ts": "347dc22453c8c43b5ce702c28c9d40b91f7d5a222d25338461eaf92e44dec193",
+        "build/lib/driver.d.ts": "ae4666bbd48d118a66966db1eb6767ad499d6ad58810f7b01e0efc3191572609",
+        "build/lib/execute-method-map.d.ts": "55f013b95eec5ecc2ddacd8901cfc27f8c22592b657f2c849923a9d57f5f3b68",
+        "package.json": "81a238377cf2d577900e0f3a1ed265a6cfe98a7c48115ddfa796608474d85e5d",
+        "build/lib/index.js": "f038b63291c83d9053a60868924fb2c0edb5dadb9e56ef32b6b9e3c3de882748",
+        "build/lib/commands/execute.js": "d6f8d71322ff24005d823f8dbda03276c471f9fe92a1918cedd3867e9bf3d326",
+        "build/lib/commands/context.d.ts.map": "03ea5f53656457a6134877a13c0b1d82f1e090de606cce4e6ec3bf745cf02338",
+        "build/lib/driver.d.ts.map": "9a5d1d7905f24dd67efb835874ca5868afd1f43077b46f2d36bcbdc4695b60b5",
+        "build/lib/execute-method-map.d.ts.map": "f0cd752e455d0cfaa9617841c366e1a81f068006a50b10848b63baab3326b479"
+      }
+    },
+    "remote": {
+      "name": "appium-remote-debugger",
+      "version": "17.4.2",
+      "root": "node_modules/appium-xcuitest-driver/node_modules/appium-remote-debugger",
+      "entry": "build/lib/index.js",
+      "files": {
+        "lib/mixins/connect.ts": "6afe90714df3d022d0046ad1bdd9bf92876525c66452680f77ce82dcd2c40f20",
+        "build/lib/mixins/connect.js": "1fb6ef1e2ebc73a6c9acd4cf004058045704524e0c398c97d89d0b03ad928e09",
+        "build/lib/mixins/connect.js.map": "381ea83eb6c13cefd402783d5d5016aa1a6c01e760bcc64e85742dcfa13d3900",
+        "lib/types.ts": "7be6cf175e87026719cdb6dd4aa5be563173bd5153912e33f6cc6e861c870b07",
+        "build/lib/types.js": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+        "build/lib/types.js.map": "5dd676b52334d4c28b153dd3605081a4ff6316644ec0a6199c661df126b7f718",
+        "lib/utils/inspector.ts": "0d5bc7c1f86a217d62b22168f26763211dc6c8a15d168585ba2b918f63731776",
+        "build/lib/utils/inspector.js": "12caa16ee17e29bd5809f5371f3fb92ce08b9f6d93fd968eb7acf6c840e1d31f",
+        "build/lib/utils/inspector.js.map": "b2987fa7394f29d1793f39b64f8a9ec148ccf2c6b7d660399ff7f7e6e358b0ac",
+        "lib/mixins/message-handlers.ts": "e5d99c6dfc945a63ccce72ad2a118d29e7f5e918fb7680d2ef320b9349896983",
+        "build/lib/mixins/message-handlers.js": "c67fd0468ff622ae0c107b77e1f30f6b005c347b493294954c8d51527f2d64f7",
+        "build/lib/mixins/message-handlers.js.map": "19e52421b2f78d6be4e0bb5db8408b15cc57595964d87c2cd5aee8dd343d0890",
+        "lib/remote-debugger.ts": "ad529773e3fcb345d2ebfadb6e817b791e1c2220bd12198a17045deb3c7b8f50",
+        "build/lib/remote-debugger.js": "9098ac3027a78b59eebdd9e9c1d55f1d19b64ca55f29b1d98fd527d0d2d39872",
+        "build/lib/remote-debugger.js.map": "99d3228297fa3196cae9a16bd80578e3321487891e170cce3aa40aca3875244c",
+        "build/lib/mixins/connect.d.ts": "87f63fb5e805ad03b1422c2ca3fd1701552b0bcecf6604c54f9537730808577f",
+        "build/lib/types.d.ts": "413a6288f8f55d2b71ab0f9fc6b934908357bc814a18720603312c019bc31238",
+        "build/lib/remote-debugger.d.ts": "e1b90e15082e639f8207b18431c008afcc4e58e15320df24f4f5d3c72c2ae47a",
+        "package.json": "7cbcb1ba18fbfb4a411038706852626f7e26ec615c1d6759390da9ea24aaa583",
+        "build/lib/index.js": "7eb75891fd707e80f7fb20bdbf7a451b87b1aa4ed615ef54e18456902a8eca27",
+        "build/lib/mixins/property-accessors.js": "0cb2955482c1d4d38fe7bd417addb5705a530d0ebeb5086061fb73f39cd7d5b5",
+        "build/lib/utils/index.js": "1bd3480fb5f03cb31fe7dabb0ceeeef2726cc70f7e52cb0ef03f00ce5cab6550",
+        "build/lib/rpc/rpc-client.js": "02944dfcb3904db88c98fd0d501ead8ce516ead7de56bc9b9c5a4f758a24105a",
+        "build/lib/mixins/connect.d.ts.map": "67ad06947577c8b4085d2d3426aaf87e1847feb92380366918e7e79ad8046a32",
+        "build/lib/types.d.ts.map": "1cee4f049e6229f1ab2b21df3637f18e383cbe2f25b666392d969150e469dc98",
+        "build/lib/remote-debugger.d.ts.map": "bc6be3cac3b31b4bb8eb5f50184cdc235fae330d9222b241c4146a723d096c7f"
+      }
+    },
+    "wda": {
+      "name": "appium-webdriveragent",
+      "version": "16.12.8",
+      "root": "node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent",
+      "entry": "build/lib/index.js",
+      "files": {
+        "package.json": "de4b96e2760e57f6f53586994615e662236a0acc312ebb7c648959e5721f1a69",
+        "build/lib/webdriveragent.js": "cddad3a9ed7bf33c49a96567b15e0383f176d0c5f840c532e07fd7109e69b646"
+      }
+    }
+  },
+  "files": {
+    "remote/lib/mixins/connect.ts": {
+      "before": "6afe90714df3d022d0046ad1bdd9bf92876525c66452680f77ce82dcd2c40f20",
+      "after": "9baddf1bd191cca6e45e5e31520137742dda9d26b9a988562694e541bb6df66a"
+    },
+    "remote/build/lib/mixins/connect.js": {
+      "before": "1fb6ef1e2ebc73a6c9acd4cf004058045704524e0c398c97d89d0b03ad928e09",
+      "after": "62227aa110df63f6c800bed443069d52150c329a89cfe23ea9e488a95a8c2bf1"
+    },
+    "remote/build/lib/mixins/connect.js.map": {
+      "before": "381ea83eb6c13cefd402783d5d5016aa1a6c01e760bcc64e85742dcfa13d3900",
+      "after": "d30a7ede930b60f645f3a4a306606761ebdf9e7a4e8cf5953c60613890cbb2fc"
+    },
+    "remote/lib/types.ts": {
+      "before": "7be6cf175e87026719cdb6dd4aa5be563173bd5153912e33f6cc6e861c870b07",
+      "after": "994cfdbdd03f6c7b3a1a194655c99b901e3577a41a83865b32d5b54d003545f5"
+    },
+    "remote/build/lib/types.js": {
+      "before": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+      "after": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2"
+    },
+    "remote/build/lib/types.js.map": {
+      "before": "5dd676b52334d4c28b153dd3605081a4ff6316644ec0a6199c661df126b7f718",
+      "after": "32b6f6c4dfd413cacdb022fd126bd094b9570c2863475cfecad98a61b2dd2bc9"
+    },
+    "remote/lib/utils/inspector.ts": {
+      "before": "0d5bc7c1f86a217d62b22168f26763211dc6c8a15d168585ba2b918f63731776",
+      "after": "f46fe7b6aeb4b43f7792d5b9ede168442768f97cb044b2e8ade437a01bd67958"
+    },
+    "remote/build/lib/utils/inspector.js": {
+      "before": "12caa16ee17e29bd5809f5371f3fb92ce08b9f6d93fd968eb7acf6c840e1d31f",
+      "after": "6e12dd037074aa20e158289b44b2a965c5cd03514ef6dc394d44638c203bb937"
+    },
+    "remote/build/lib/utils/inspector.js.map": {
+      "before": "b2987fa7394f29d1793f39b64f8a9ec148ccf2c6b7d660399ff7f7e6e358b0ac",
+      "after": "38f453371537b65fd4a5385f0522fd0074c92e2591545206a1d7a97e7c6ade13"
+    },
+    "remote/lib/mixins/message-handlers.ts": {
+      "before": "e5d99c6dfc945a63ccce72ad2a118d29e7f5e918fb7680d2ef320b9349896983",
+      "after": "fb7a41085936338eeb5d6f841344ad507667f86fc306f0e9d1edd802b52623b5"
+    },
+    "remote/build/lib/mixins/message-handlers.js": {
+      "before": "c67fd0468ff622ae0c107b77e1f30f6b005c347b493294954c8d51527f2d64f7",
+      "after": "7521fc6e4628138285beda19f4950f07bcfd2a9ca9d3ab64fc7bc8da54850173"
+    },
+    "remote/build/lib/mixins/message-handlers.js.map": {
+      "before": "19e52421b2f78d6be4e0bb5db8408b15cc57595964d87c2cd5aee8dd343d0890",
+      "after": "cc3f4c9831ed93195b9bde0fe76cc6411d7d33e1f23ccde7a9062d16e0da4052"
+    },
+    "remote/lib/remote-debugger.ts": {
+      "before": "ad529773e3fcb345d2ebfadb6e817b791e1c2220bd12198a17045deb3c7b8f50",
+      "after": "84c1bf789b58fb6b2f7271fd8085a7faa0ad413fcd227c8ec6567941f788ddba"
+    },
+    "remote/build/lib/remote-debugger.js": {
+      "before": "9098ac3027a78b59eebdd9e9c1d55f1d19b64ca55f29b1d98fd527d0d2d39872",
+      "after": "3cd2dfbb3d18e617f667a5a80aee5e878d9f2f32ce47ac717316f1d11b524af4"
+    },
+    "remote/build/lib/remote-debugger.js.map": {
+      "before": "99d3228297fa3196cae9a16bd80578e3321487891e170cce3aa40aca3875244c",
+      "after": "4bd2cb572844c61a457d90c79bf331df2c3382aa30950141c24ea9354961ea1a"
+    },
+    "xcuitest/lib/commands/context.ts": {
+      "before": "fb77e573c079563ce22f22f7871fad11b854ae8004355a3e4d1f8b14a803c59d",
+      "after": "b219da90fad6340b7fdc4a5629447fe05e0a3928bdeae6171c80238114cbb6ab"
+    },
+    "xcuitest/build/lib/commands/context.js": {
+      "before": "33e616989f0ca6259f4c870e345cfd07bbe54d58f90227f80d67a5402c8c0aa7",
+      "after": "57fcc8e4bb259bde3632c4a4f4e8e5982db0d63deefee9655cdede5285b45744"
+    },
+    "xcuitest/build/lib/commands/context.js.map": {
+      "before": "d05e22ba0c8d471c22e86a54741b505919ea86e510ed9455d9dae63f40f1aace",
+      "after": "3a5f4ae4cbc5c09b6f52705a9576d30ce3825de1f63ec2b36d911699495db33c"
+    },
+    "xcuitest/lib/driver.ts": {
+      "before": "881044ac1c59d6b63b033e7848bd4e133b67de1c97b089ca54adc98a0ca4ae6d",
+      "after": "8925ae716fea3bbd1468e2aae34831318ed17592109f0c052b4ac0292d0875a9"
+    },
+    "xcuitest/build/lib/driver.js": {
+      "before": "fd12c1e4cc83f834461eb3f4f8d09cd5260ac76efbc5de961d31d775c32c25a2",
+      "after": "5686dde03207612ccbaa8733a655162a40af8856c3705fd0d2f1fa352fed574f"
+    },
+    "xcuitest/build/lib/driver.js.map": {
+      "before": "a9ff5f197f5757919cf4cdef0feec40839519415a74a9ed23fea9f36745ef4c4",
+      "after": "772a14e4a8dec5f26e4579f53610ead79ce8fab2e364dec72541e6197c93ad9e"
+    },
+    "xcuitest/lib/execute-method-map.ts": {
+      "before": "4d35c372d7edbc867597d71cea872211367d53411f59a99107c6ae93293a1527",
+      "after": "7f2f7c20c8dec7f2a18df9229d11930060800e4fa7d5403ac8475b9baa017670"
+    },
+    "xcuitest/build/lib/execute-method-map.js": {
+      "before": "7bc3e4e6b7f810411c7e6391ee4e3a02d8deee3652c0e01f5e903ff71b49af8e",
+      "after": "0b44c07087d682f82694329a733b3fc62dbe984d84283d7beb980e9f820cafff"
+    },
+    "xcuitest/build/lib/execute-method-map.js.map": {
+      "before": "1531dd9af6acb89eb4e383d55fe4a75ccc9fff3c40cd6b53e6089331671a9be8",
+      "after": "d1dbb11087b393c57535430f3c4545d90337280a076fd10c133a3bdac867fa61"
+    },
+    "remote/build/lib/mixins/connect.d.ts": {
+      "before": "87f63fb5e805ad03b1422c2ca3fd1701552b0bcecf6604c54f9537730808577f",
+      "after": "cdd999a3840c1cfb1095754e2739c8fa3b05f4cb7949cfad3a4fe97a1aff2bb4"
+    },
+    "remote/build/lib/types.d.ts": {
+      "before": "413a6288f8f55d2b71ab0f9fc6b934908357bc814a18720603312c019bc31238",
+      "after": "3ab5476f27a684e7b1d3c71768b8465d9b916388d556406486e890e9a7754c3a"
+    },
+    "remote/build/lib/remote-debugger.d.ts": {
+      "before": "e1b90e15082e639f8207b18431c008afcc4e58e15320df24f4f5d3c72c2ae47a",
+      "after": "f10f3aebc561aac45ef14508e51f1f467029e49e230b28241dbbaa90a6513aee"
+    },
+    "xcuitest/build/lib/commands/context.d.ts": {
+      "before": "347dc22453c8c43b5ce702c28c9d40b91f7d5a222d25338461eaf92e44dec193",
+      "after": "42a731c7d62b627400e76629945c6347a471d345e636cf15a3fc53be64b42c99"
+    },
+    "xcuitest/build/lib/driver.d.ts": {
+      "before": "ae4666bbd48d118a66966db1eb6767ad499d6ad58810f7b01e0efc3191572609",
+      "after": "031b3be32c219cb2523d40df615b22dac41c416cf43ea996ab90bf5728c25eba"
+    },
+    "xcuitest/build/lib/execute-method-map.d.ts": {
+      "before": "55f013b95eec5ecc2ddacd8901cfc27f8c22592b657f2c849923a9d57f5f3b68",
+      "after": "0e566b769c0c6b10fa5f45e10a8657de89b1ecdfaf4f660749cb18139a37581a"
+    }
+  }
+}

@@ -258,8 +258,10 @@ webdriverInterruptionTests.push(['Appium request timing SM57 dispatch gap preser
       if (provider === 'enforcement') a.observeNow(attempt);
       const retained = a.client.nativeRequestPolicy(budget);
       const policy = { ...retained, finalAction: true, beforeDispatch: () => { retained.beforeDispatch(); armed = true; } };
+      const commandCount = a.client.snapshot().commands.length;
       await assert.rejects(() => a.client.click('add', 12_000, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
       await Promise.all(followups);
+      assert.equal(a.client.snapshot().commands.length, commandCount + 1, 'late identity refusal is recorded once despite the unsent catch recheck');
       assert.equal(attempts, 1);
       assert.equal(followups.length, 1);
       assert.equal(a.wire.length, 1);
@@ -418,12 +420,12 @@ webdriverInterruptionTests.push(['Appium request timing SM57 remote work survivi
   }
   assert.equal(a.sent(), 1);
   assert.deepEqual(a.client.snapshot(), snapshot);
-  await a.client.close();
-  assert.equal(a.sent(), 2);
-  assert.equal(a.client.snapshot().unusable, true);
-  assert.deepEqual(a.client.snapshot().firstFatal, snapshot.firstFatal);
+  await assert.rejects(() => a.client.close(), /APPIUM_SESSION_UNUSABLE/u);
+  await assert.rejects(() => a.client.close(), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.sent(), 1);
+  assert.deepEqual(a.client.snapshot(), snapshot);
   await assert.rejects(() => a.client.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/u);
-  assert.equal(a.sent(), 2);
+  assert.equal(a.sent(), 1);
 }]);
 
 webdriverInterruptionTests.push(['Appium request timing SM57 unscoped defaults and diagnostic annotations stay observational', async () => {
@@ -522,9 +524,9 @@ webdriverInterruptionTests.push(['Appium request timing refusal is unsent and hi
   let ticks = 0;
   let sends = 0;
   let phaseNow = 0;
-  const client = new AppiumClient('http://protocol.invalid', 5_000, async () => {
+  const client = new AppiumClient('http://protocol.invalid', 5_000, async (_input, init) => {
     sends++;
-    return Response.json({ value: {}, sessionId: 'secret-session' });
+    return Response.json({ value: init?.method === 'DELETE' ? null : {}, sessionId: 'secret-session' });
   }, () => ++ticks);
   await client.create({ capabilities: {} });
   const phase = new PhaseBudget('original-phase', { timeoutMs: 30_000, now: () => phaseNow });

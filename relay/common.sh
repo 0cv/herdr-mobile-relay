@@ -994,6 +994,7 @@ report_inventory_failure() {
 verify_public_readiness() {
     local env_file="$1" health="$2"
     local config hostname public attempt binary
+    [ -z "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ] || return 0
     [ -z "$(gateway_urls "$env_file")" ] || return 0
     config="$(env_file_value "$env_file" CLOUDFLARED_CONFIG)"
     [ -n "$config" ] || return 0
@@ -1292,6 +1293,14 @@ prompt_gateway_selection() {
     gateway_selection_choice "$default_selection" "$answer"
 }
 
+refuse_if_tailscale_selected() {
+    if [ ! -f "$1" ] || ! grep -q '^HERDR_TAILSCALE_PORT=' "$1"; then
+        return 0
+    fi
+    echo "Always on Tailscale is selected. Choose Tailscale → Turn Always on Tailscale Off first." >&2
+    return 1
+}
+
 # Persists the transport choice. An empty URL removes the key, which returns
 # the relay to the Cloudflare tunnel path — and takes the selection policy with
 # it, so a relay that leaves the gateway path keeps no stale policy to revive
@@ -1300,6 +1309,7 @@ set_gateway_url() {
     local env_file="$1"
     local url="$2"
 
+    refuse_if_tailscale_selected "$env_file" || return 1
     if [ -z "$url" ]; then
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
@@ -1554,7 +1564,9 @@ choose_phone_app_base_url() {
         return
     fi
 
-    echo "Where should the phone setup link open?" >&2
+    echo "Which app should your phone open?" >&2
+    echo "This picks the web app only. How the phone reaches this computer" >&2
+    echo "(Cloudflare, WebRTC or Tailscale) stays the same." >&2
     echo "" >&2
     if [ -s "$configured_origin" ]; then
         if ! current_origin="$(phone_app_base_url "$relay_fallback" "$env_file")"; then
@@ -1564,38 +1576,50 @@ choose_phone_app_base_url() {
     elif [ -n "$discovered_origin" ]; then
         current_origin="$discovered_origin"
         echo "  Found an existing Herdr app in this Cloudflare zone." >&2
+        echo "" >&2
     elif [ -s "$observed_origin" ]; then
         current_origin="$(phone_app_base_url "$relay_fallback" "$env_file" || true)"
-        [ -z "$current_origin" ] ||
+        if [ -n "$current_origin" ]; then
             echo "  Last connected phone app: $current_origin" >&2
+            echo "" >&2
+        fi
     fi
     if [ -n "$current_origin" ]; then
-        echo "  Current phone app: $current_origin" >&2
-        echo "" >&2
-        menu_item 1 "Keep current phone app (recommended)" >&2
-        echo "     $current_origin" >&2
+        menu_item 1 "Keep $current_origin (recommended)" >&2
+        echo "     One app for all your computers; this computer is added to it." >&2
+        echo "     A hosted app must be redeployed when relays upgrade." >&2
         echo "" >&2
         if [ "$setup_kind" = "temporary" ]; then
-            menu_item 2 "Use this temporary relay instead" >&2
-            echo "     Opens the TryCloudflare app. Its address changes after restart." >&2
+            menu_item 2 "Use the app served by this temporary tunnel" >&2
         else
-            menu_item 2 "Use this relay instead" >&2
-            echo "     Switches the app origin to this computer's relay hostname." >&2
+            menu_item 2 "Use the app served by this computer" >&2
+        fi
+        [ -z "$relay_fallback" ] || echo "     $relay_fallback" >&2
+        if [ "$setup_kind" = "temporary" ]; then
+            echo "     Its address changes after every restart, so the phone must pair again." >&2
+        else
+            echo "     Always matches this relay's version; no separate deployment needed." >&2
+            echo "     A separate app: computers added to your other app won't appear in it." >&2
         fi
         echo "" >&2
-        menu_item 3 "Use another installed Herdr app" >&2
+        menu_item 3 "Use another Herdr app" >&2
+        echo "     Enter its address, e.g. another computer's relay or a hosted app." >&2
     else
         if [ "$setup_kind" = "temporary" ]; then
-            menu_item 1 "This temporary relay (recommended for trying one relay)" >&2
-            echo "     Opens the TryCloudflare app. Its address changes after restart." >&2
+            menu_item 1 "Use the app served by this temporary tunnel (recommended for a quick try)" >&2
         else
-            menu_item 1 "This relay (recommended for one relay)" >&2
-            echo "     Uses this computer's verified hostname as the installed app." >&2
+            menu_item 1 "Use the app served by this computer (recommended for one computer)" >&2
+        fi
+        [ -z "$relay_fallback" ] || echo "     $relay_fallback" >&2
+        if [ "$setup_kind" = "temporary" ]; then
+            echo "     Its address changes after every restart, so the phone must pair again." >&2
+        else
+            echo "     Always matches this relay's version; no separate deployment needed." >&2
         fi
         echo "" >&2
-        menu_item 2 "An existing installed Herdr app" >&2
+        menu_item 2 "Use another Herdr app" >&2
+        echo "     Enter its address to join the app your other computers use." >&2
     fi
-    echo "     Adds this computer to the same app as your other relays." >&2
     echo "" >&2
     menu_item q "Cancel, change nothing" >&2
     echo "" >&2
@@ -1705,7 +1729,8 @@ render_setup_qr() {
     local url="$1"
     local cols
     cols="$(tput cols 2>/dev/null || true)"
-    "$(relay_binary)" qr --columns "${cols:-80}" "$url" 2>/dev/null || true
+    "$(relay_binary)" qr --columns "${cols:-80}" "$url" 2>/dev/null ||
+        [ "${HERDR_REQUIRE_SETUP_QR:-}" != 1 ]
 }
 
 # The URL has already been validated before this internal emitter is called.
@@ -1731,7 +1756,7 @@ print_phone_setup() {
     local qr_code
 
     phone_setup_url_is_safe "$phone_url" || return 1
-    qr_code="$(render_setup_qr "$phone_url")"
+    qr_code="$(render_setup_qr "$phone_url")" || return 1
     if [ -n "$qr_code" ]; then
         echo "  Scan this QR code with your phone camera:"
         echo ""

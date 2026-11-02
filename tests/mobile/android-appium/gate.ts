@@ -14,10 +14,15 @@ type RuntimePackage = {
 };
 type ProducerManifest = {
   compiler: string;
-  files: Record<string, { before: string; after: string }>;
+  files: Record<string, { package: string; before: string; after: string }>;
   authored: Record<string, { source: string; sha256: string }>;
   inputs: Record<string, string>;
 };
+const producerTargets = [
+  { name: 'exports', package: 'android', source: 'lib/commands/context/exports.ts' },
+  { name: 'helpers', package: 'android', source: 'lib/commands/context/helpers.ts' },
+  { name: 'driver', package: 'uiautomator2', source: 'lib/driver.ts' },
+];
 const authoredFiles = ['kernel-namespace.cjs', 'kernel-namespace.d.cts', 'adb-inspection.cjs', 'adb-inspection.d.cts', 'retained-inspection.cjs', 'retained-inspection.d.cts', 'target-inspection.cjs', 'target-inspection.d.cts'];
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const artifact = (name: string) => new URL(name, import.meta.url);
@@ -58,13 +63,13 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
       await assert.rejects(readFile(path), { code: 'ENOENT' }, `Unexpected existing authored producer: ${file}`);
     }
   }
-  const producerFiles = ['exports', 'helpers'].flatMap(name => [
-    `lib/commands/context/${name}.ts`,
-    ...['.js', '.js.map', '.d.ts', '.d.ts.map'].map(extension => `build/lib/commands/context/${name}${extension}`),
-  ]);
-  assert.deepEqual(Object.keys(producer.files).sort(), producerFiles.sort(), 'Incomplete producer artifacts');
-  for (const file of producerFiles) {
-    assert.equal(packages.android.files[file], producer.files[file].before, `Unreviewed producer original: ${file}`);
+  const producerFiles = producerTargets.flatMap(target => [target.source,
+    ...['.js', '.js.map', '.d.ts', '.d.ts.map'].map(extension => `build/${target.source.replace(/\.ts$/, extension)}`),
+  ].map(file => ({ file, package: target.package })));
+  assert.deepEqual(Object.keys(producer.files).sort(), producerFiles.map(target => target.file).sort(), 'Incomplete producer artifacts');
+  for (const { file, package: owner } of producerFiles) {
+    assert.equal(producer.files[file].package, owner, `Incorrect producer package: ${file}`);
+    assert.equal(packages[owner].files[file], producer.files[file].before, `Unreviewed producer original: ${file}`);
   }
   for (const file of ['package.json', 'package-lock.json']) {
     assert.equal(hash(await readFile(join(root, file))), hash(await readFile(artifact(file))), `Changed installation ${file}`);
@@ -90,7 +95,7 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
       const path = join(packageRoot, file);
       assert.equal(await realpath(path), path, `${id}/${file}: unexpected realpath`);
       const value = hash(await readFile(path));
-      const expectedHash = patched && id === 'android' && producer.files[file] ? producer.files[file].after : original;
+      const expectedHash = patched && producer.files[file]?.package === id ? producer.files[file].after : original;
       assert.equal(value, expectedHash, `${id}/${file}: unexpected runtime bytes`);
       observed[file] = value;
     }
@@ -164,10 +169,12 @@ export async function patch(home: string): Promise<void> {
   assert.equal(ts.version, manifest.compiler, 'Unexpected source-map compiler');
   const transform = await load<Record<string, Array<[string, string]>>>('producer-transform.json');
   const runtime = await load<Record<string, RuntimePackage>>('runtime-manifest.json');
-  const root = join(await realpath(home), runtime.android.root);
+  const installation = await realpath(home);
   const output = new Map<string, string>();
-  for (const [name, replacements] of Object.entries(transform)) {
-    const source = `lib/commands/context/${name}.ts`;
+  assert.deepEqual(Object.keys(transform).sort(), producerTargets.map(target => target.name).sort(), 'Incomplete producer transformations');
+  for (const { name, package: owner, source } of producerTargets) {
+    const root = join(installation, runtime[owner].root);
+    const replacements = transform[name];
     const original = await readFile(join(root, source), 'utf8');
     let text = original;
     for (const [before, after] of replacements) {
@@ -179,24 +186,25 @@ export async function patch(home: string): Promise<void> {
     } });
     assert.ok(result.sourceMapText);
     const map = JSON.parse(result.sourceMapText);
-    map.sources = [`../../../../${source}`];
-    const declarationPath = `build/lib/commands/context/${name}.d.ts`;
+    const runtimePath = `build/${source.replace(/\.ts$/, '.js')}`;
+    map.sources = [relative(dirname(runtimePath), source)];
+    const declarationPath = runtimePath.replace(/\.js$/, '.d.ts');
     const declaration = await readFile(join(root, declarationPath), 'utf8');
     output.set(declarationPath, declaration);
-    output.set(`${declarationPath}.map`, relocateDeclarationMap(name, original, text, declaration,
+    output.set(`${declarationPath}.map`, relocateDeclarationMap(source, original, text, declaration,
       await readFile(join(root, `${declarationPath}.map`), 'utf8'), replacements));
     output.set(source, text);
-    output.set(`build/lib/commands/context/${name}.js`, result.outputText);
-    output.set(`build/lib/commands/context/${name}.js.map`, JSON.stringify(map));
+    output.set(runtimePath, result.outputText);
+    output.set(`${runtimePath}.map`, JSON.stringify(map));
   }
   assert.deepEqual([...output.keys()].sort(), Object.keys(manifest.files).sort());
   for (const [file, bytes] of output) {
-    assert.equal(hash(await readFile(join(root, file))), manifest.files[file].before, `Modified producer input: ${file}`);
+    assert.equal(hash(await readFile(join(installation, runtime[manifest.files[file].package].root, file))), manifest.files[file].before, `Modified producer input: ${file}`);
     assert.equal(hash(bytes), manifest.files[file].after, `Incorrect producer postimage: ${file}`);
   }
-  for (const [file, bytes] of output) await writeFile(join(root, file), bytes);
+  for (const [file, bytes] of output) await writeFile(join(installation, runtime[manifest.files[file].package].root, file), bytes);
   for (const [file, expected] of Object.entries(manifest.authored)) {
-    await writeFile(join(root, file), await readFile(artifact(expected.source)));
+    await writeFile(join(installation, runtime.android.root, file), await readFile(artifact(expected.source)));
   }
   const evidence = await effectiveInstallation(home, true);
   await writeFile(join(home, 'retained-owner-integrity.json'), JSON.stringify(evidence, null, 2) + '\n');
