@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Always on Tailscale replaces a selected WebRTC gateway after confirmation,
+  without making you switch to Cloudflare first.
+
 ## [0.24.0] - 2026-11-02
 
 ### Added

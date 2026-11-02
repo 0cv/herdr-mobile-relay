@@ -108,10 +108,10 @@ close after setup; the service stays installed. To pair another phone, reopen
 setup and choose **Tailscale → Choose Phone App and Show QR**. If already
 configured, use that QR action rather than running setup again.
 
-If you previously selected a gateway, select a Cloudflare choice first to clear
-it. Before choosing another transport later, choose **Tailscale → Turn Always
-on Tailscale Off**. Service reinstall, restart, and update do not require
-turning it off.
+If a WebRTC gateway is selected, **Always on Tailscale** replaces its selection
+after you confirm. Before choosing another transport later, choose **Tailscale →
+Turn Always on Tailscale Off**. Service reinstall, restart, and update do not
+require turning it off.
 See [Tailscale requirements and cleanup](docs/transports.md#tailscale-serve).
 
 ## Make the Cloudflare Tunnel Permanent

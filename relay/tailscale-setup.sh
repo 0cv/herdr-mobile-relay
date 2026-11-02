@@ -19,10 +19,7 @@ if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
     echo "Always on Tailscale is already set up. Use Tailscale → Choose Phone App and Show QR, or Tailscale → Turn Always on Tailscale Off first." >&2
     exit 1
 fi
-if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
-    echo "A gateway is selected. Switch to a Cloudflare tunnel first, then choose Always on Tailscale." >&2
-    exit 1
-fi
+GATEWAYS="$(gateway_urls "$ENV_FILE")"
 RELAY_BIN="$(relay_binary)"
 "$RELAY_BIN" tailscale check --port 8443 || exit $?
 ADDRESS="$("$RELAY_BIN" tailscale address --port 8443)" || exit $?
@@ -33,6 +30,9 @@ echo "Always on Tailscale"
 echo "  Phone address: $ADDRESS"
 echo "  Add only Tailscale Serve HTTPS port 8443 (relay port $PORT)."
 echo "  Install or reuse the background relay service."
+if [ -n "$GATEWAYS" ]; then
+    echo "  This replaces the selected WebRTC gateway list: $GATEWAYS."
+fi
 if [ ! -t 0 ] || ! read -r -p "Continue? [y/N] " answer; then
     echo "Cancelled; nothing changed."
     exit 1
@@ -54,6 +54,7 @@ SERVE_ATTEMPTED=false
 [ -z "$(installed_service_env_file)" ] || OLD_SERVICE_INSTALLED=true
 rollback() {
     local status=$?
+    local restored=true
     trap - EXIT
     if [ "$status" -ne 0 ]; then
         if [ "$SERVE_ATTEMPTED" = true ]; then
@@ -61,7 +62,7 @@ rollback() {
             "$RELAY_BIN" tailscale off --port 8443 --relay-port "$PORT" || off_status=$?
             if [ "$off_status" -ne 0 ]; then
                 if [ "${HERDR_TAILSCALE_ABANDON:-}" != 1 ]; then
-                    echo "✗ Tailscale Serve mapping may remain; selection kept. Run: tailscale serve --https=8443 off" >&2
+                    echo "✗ Tailscale Serve mapping may remain; Tailscale selection kept and gateway selection cleared. Run: tailscale serve --https=8443 off" >&2
                     echo "  Then choose Tailscale → Turn Always on Tailscale Off, or set HERDR_TAILSCALE_ABANDON=1 to clear the selection without removing Serve." >&2
                     rm -f "$ENV_BACKUP"
                     return
@@ -76,18 +77,28 @@ rollback() {
         fi
         if [ "$SERVICE_CHANGED" = true ]; then
             if [ "$OLD_SERVICE_INSTALLED" = true ]; then
-                "$SCRIPT_DIR/service.sh" install ||
+                if ! "$SCRIPT_DIR/service.sh" install; then
                     echo "✗ Previous service could not be restored; run relay/service.sh install." >&2
+                    restored=false
+                fi
             else
-                "$SCRIPT_DIR/service.sh" uninstall ||
+                if ! "$SCRIPT_DIR/service.sh" uninstall; then
                     echo "✗ New service could not be removed; run relay/service.sh uninstall." >&2
+                    restored=false
+                fi
             fi
         fi
-        echo "✗ Always on Tailscale was not published; the previous service form was restored." >&2
+        if [ "$restored" = true ]; then
+            echo "✗ Always on Tailscale was not published; the previous relay configuration and service form were restored." >&2
+        else
+            echo "✗ Always on Tailscale was not published; the previous relay configuration was restored, but the service needs attention." >&2
+        fi
     fi
     rm -f "$ENV_BACKUP"
 }
 trap rollback EXIT
+set_gateway_url "$ENV_FILE" ""
+unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
 set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT 8443
 export HERDR_RELAY_ENV="$ENV_FILE"
 if ! "$SCRIPT_DIR/setup.sh" --tailscale-prerequisites; then
