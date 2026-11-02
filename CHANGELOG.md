@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Each setup menu screen replaces the previous one, and Ctrl-D at the
+  post-action pause closes the menu.
+
 ## [0.24.0] - 2026-11-02
 
 ### Added

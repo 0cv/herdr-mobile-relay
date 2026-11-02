@@ -83,6 +83,74 @@ output="$(menu '8\n2\n9\nb\nq\n')"
 expect "$output" 'Enter 1–3 or q.'
 expect "$output" 'Enter 1–4, b or q.'
 reject "$output" 'ACTION:'
+reject "$output" $'\033'
+
+python3 - "$WORK/relay/plugin-setup-menu.sh" <<'PY'
+import errno
+import os
+import pty
+import select
+import subprocess
+import sys
+import time
+
+master, slave = pty.openpty()
+process = subprocess.Popen(
+    ["bash", sys.argv[1]], stdin=slave, stdout=slave, stderr=slave
+)
+os.close(slave)
+output = bytearray()
+deadline = time.monotonic() + 10
+
+def read_chunk():
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
+        raise TimeoutError("setup menu PTY timed out")
+    try:
+        return os.read(master, 4096)
+    except OSError as error:
+        if error.errno == errno.EIO:
+            return b""
+        raise
+
+def wait_for(text, start=0):
+    while True:
+        index = output.find(text, start)
+        if index >= 0:
+            return index + len(text)
+        chunk = read_chunk()
+        assert chunk, f"setup menu closed before {text!r}"
+        output.extend(chunk)
+
+try:
+    cursor = wait_for(b"Choice [1]: ")
+    os.write(master, b"2\n")
+    cursor = wait_for(b"Choice [1]: ", cursor)
+    os.write(master, b"9\n")
+    cursor = wait_for("Enter 1–4, b or q.".encode(), cursor)
+    cursor = wait_for(b"Choice [1]: ", cursor)
+    os.write(master, b"4\n")
+    wait_for(b"Press Enter to return to the menu.", cursor)
+    os.write(master, b"\x04")
+    while chunk := read_chunk():
+        output.extend(chunk)
+    assert process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0
+finally:
+    if process.poll() is None:
+        process.kill()
+        process.wait()
+    os.close(master)
+
+clear = b"\x1b[H\x1b[2J"
+header = "🐑 Herdr Mobile Relay Setup".encode()
+assert output.count(header) == 2
+assert output.count(clear + header) == 2, "every menu screen must start with a clear"
+assert output.count(clear) == 2, "invalid choices and EOF must not clear the screen"
+assert output.count("Enter 1–4, b or q.".encode()) == 1
+assert b"ACTION: plugin-status.sh" in output
+assert clear not in output.split(b"ACTION: plugin-status.sh", 1)[1]
+PY
+
 menu '1\n' >/dev/null
 menu '' >/dev/null
 
