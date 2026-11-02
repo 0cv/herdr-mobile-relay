@@ -16,7 +16,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Group setup actions under Cloudflare, WebRTC and Tailscale so each connection
   path shows only its own choices, and explain the phone app choice: the hosted
-  app versus the app served by this computer.
+  app versus the app served by this computer. Each menu screen replaces the
+  previous one, and Ctrl-D after an action closes the menu.
 - Read Oh My Pi settings with a standard YAML parser. A settings file that is
   not valid YAML is now ignored as a whole instead of being partly salvaged, so
   skill commands follow the defaults until the file is fixed.

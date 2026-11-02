@@ -181,6 +181,7 @@ render_menu() {
     local path="$1"
     local active
 
+    [ ! -t 1 ] || printf '\033[H\033[2J'
     echo "🐑 Herdr Mobile Relay Setup"
     echo ""
     if [ -z "$path" ]; then
@@ -276,7 +277,10 @@ run_action() {
     trap - INT
     if [ -t 0 ]; then
         echo ""
-        read -r -p "Press Enter to return to the menu." _answer || return 0
+        if ! read -r -p "Press Enter to return to the menu." _answer; then
+            echo ""
+            exit 0
+        fi
     fi
 }
 
