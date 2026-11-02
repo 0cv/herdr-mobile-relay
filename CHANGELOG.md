@@ -14,6 +14,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Group setup actions under Cloudflare, WebRTC, and Tailscale so each connection path shows only its own choices.
 - Read Oh My Pi settings with a standard YAML parser. A settings file that is
   not valid YAML is now ignored as a whole instead of being partly salvaged, so
   skill commands follow the defaults until the file is fixed.

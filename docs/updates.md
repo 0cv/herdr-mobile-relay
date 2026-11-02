@@ -91,14 +91,15 @@ If your phones load the app from a separately hosted origin — every gateway
 setup, and any tunnel setup that chose an installed app — that app is still
 0.19.1 and cannot talk to the new relay. The phone-driven updater would have
 published it first; a manual upgrade has to: on the deployment-owner computer
-choose **8. Configure App Deployment** and answer **Y** to "Deploy app version
-0.20.0 now?". The menu's status line says so as long as the hosted app is
-behind ("serves 0.19.1, this relay ships 0.20.0 — deploy with 8"). Relays
+choose **Cloudflare → Configure App Deployment — Cloudflare Pages** and answer
+**Y** to "Deploy app version 0.20.0 now?". The menu's status line says so as
+long as the hosted app is behind ("serves 0.19.1, this relay ships 0.20.0 —
+Cloudflare → Configure App Deployment"). Relays
 that serve the app themselves through a tunnel need nothing more.
 
 Then choose your connection option to print a fresh bootstrap QR. It pairs one
-phone; print it again (**Choose Phone App and Show QR** in the setup menu) for each
-additional phone, or use **Settings → Devices → Invite Device** on a paired
+phone; print it again (**Choose Phone App and Show QR** in the selected path's
+submenu) for each additional phone, or use **Settings → Devices → Invite Device** on a paired
 controller to create a reader or controller invitation from the phone.
 Previously paired phones cannot reuse their v0.19.1 key: pair them again with a
 freshly printed link.

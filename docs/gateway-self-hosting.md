@@ -15,8 +15,8 @@ is sized by concurrent phones, since each one may queue up to 4 MiB.
 
 ## Deploy it from the setup menu
 
-Open the setup menu and choose **Deploy or Upgrade Your Own WebRTC Gateway**.
-It asks for the public hostname phones will dial and the
+Open the setup menu and choose **WebRTC → Deploy or Upgrade Your Own WebRTC
+Gateway**. It asks for the public hostname phones will dial and the
 server's SSH address (`root@203.0.113.10`), then:
 
 1. writes a compose bundle — `docker-compose.yml`, Caddy TLS configuration,
@@ -416,9 +416,9 @@ month's quota accounting and breaks no session.
 **Keep port 80 reachable.** Caddy renews certificates itself; the failure worth
 alerting on is a renewal blocked because the ACME port was closed.
 
-**Upgrade by redeploying.** Open the setup menu and choose **Deploy or Upgrade
-Your Own WebRTC Gateway**, or run `bash relay/gateway-deploy.sh`. The remembered
-answers select the same host and directory; the current plugin copies its bundled
+**Upgrade by redeploying.** Open the setup menu and choose **WebRTC → Deploy or
+Upgrade Your Own WebRTC Gateway**, or run `bash relay/gateway-deploy.sh`. The
+remembered answers select the same host and directory; the current plugin copies its bundled
 source, rebuilds the image, and recreates both containers on the current Compose
 network. Relays reconnect on their own, so an upgrade costs a few seconds of
 relayed latency; no agent session is lost.

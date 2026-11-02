@@ -16,10 +16,12 @@ traffic always goes through Cloudflare; Tailscale Serve is tailnet-only.
 | **Community gateway** | No account and no domain, but the phone app must already be hosted somewhere — a gateway serves no app. | A gateway operated by the project, until the direct path forms | Free, shared, best-effort; not for heavy transfers. Pick it to avoid Cloudflare setup entirely. |
 | **Your own gateway** | A small VPS with Docker and a public hostname. | Your own gateway, until the direct path forms | Dedicated bandwidth, and the transport logs stay on your machine. See [gateway-self-hosting.md](gateway-self-hosting.md). |
 
-Pick **Temporary Cloudflare Tunnel**, **Community WebRTC Gateway**, **Deploy or
-Upgrade Your Own WebRTC Gateway**, **Stable Tunnel**, or **Always on Tailscale**
-from the setup menu. A completed choice starts or restarts the relay and prints
-the phone QR; there is no second Quick Start step.
+In the setup menu, pick **Cloudflare**, **WebRTC**, or **Tailscale**, then choose
+an action within that path. Use **Back** to switch paths. Cloudflare offers
+**Temporary Cloudflare Tunnel** and **Stable Tunnel**; WebRTC offers
+**Community WebRTC Gateway** and **Deploy or Upgrade Your Own WebRTC Gateway**;
+Tailscale offers **Always on Tailscale**. A completed choice starts or restarts
+the relay and prints the phone QR; there is no second Quick Start step.
 
 ## Tailscale Serve
 
@@ -45,10 +47,10 @@ lingering or make other automatic admin changes. Reinstalling, restarting, or
 updating the existing service remains permitted while Tailscale is selected.
 
 If a gateway is selected, choose a Cloudflare option first to deselect it.
-Before selecting another transport, choose **Turn Always on Tailscale Off**;
-transport switching is not automatic. If already configured, choose **Choose
-Phone App and Show QR** rather than repeating setup. Setup refuses a conflicting
-Serve port and reuses a matching background route; removal touches only this
+Before selecting another transport, choose **Tailscale → Turn Always on
+Tailscale Off**; transport switching is not automatic. If already configured,
+choose **Tailscale → Choose Phone App and Show QR** rather than repeating setup.
+Setup refuses a conflicting Serve port and reuses a matching background route; removal touches only this
 relay's mapped HTTPS port, never other Serve ports or Funnel. If Serve removal
 fails (including when the CLI is missing), the selection stays and the mapping
 may remain: restore Tailscale and retry. Successful removal clears the selection
@@ -60,8 +62,8 @@ uninstall attempts the same scoped removal and warns if manual cleanup is needed
 ## The gateway path
 
 Choosing a gateway skips `cloudflared` entirely — no Cloudflare account, domain,
-or tunnel. Already running one? Choose **Deploy or Upgrade Your Own WebRTC
-Gateway**, then **I already run a gateway** and type its address. Unattended
+or tunnel. Already running one? Choose **WebRTC → Deploy or Upgrade Your Own
+WebRTC Gateway**, then **I already run a gateway** and type its address. Unattended
 setups set the same list in the relay environment:
 
 ```bash

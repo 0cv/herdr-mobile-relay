@@ -1297,7 +1297,7 @@ refuse_if_tailscale_selected() {
     if [ ! -f "$1" ] || ! grep -q '^HERDR_TAILSCALE_PORT=' "$1"; then
         return 0
     fi
-    echo "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first." >&2
+    echo "Always on Tailscale is selected. Choose Tailscale → Turn Always on Tailscale Off first." >&2
     return 1
 }
 

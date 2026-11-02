@@ -17,8 +17,8 @@ rather than treating the whole connection as unavailable.
 herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-Choose **Temporary Cloudflare Tunnel** when the setup menu opens. If it does
-not:
+Choose **Cloudflare → Temporary Cloudflare Tunnel** when the setup menu opens.
+If it does not:
 
 ```bash
 herdr plugin action invoke setup --plugin herdr-mobile-relay.events
@@ -78,8 +78,8 @@ downloaded voices remain in place.
 
 ## Skip Cloudflare
 
-Choose **Community WebRTC Gateway** in the setup menu. It checks the project's
-published gateways, saves the ordered list, then starts the relay and prints its
+Choose **WebRTC → Community WebRTC Gateway** in the setup menu. It checks the
+project's published gateways, saves the ordered list, then starts the relay and prints its
 QR. No account, no domain, no `cloudflared`. The gateways are run by the
 project: free, shared, best-effort.
 
@@ -100,15 +100,16 @@ own gateway.
 Install Tailscale on your phone; the computer's Tailscale CLI must be 1.52 or
 newer. Sign in to the same tailnet and enable MagicDNS and HTTPS certificates in
 the tailnet DNS settings. On Linux or macOS with standalone or App Store
-Tailscale, open the plugin setup menu and choose **Always on Tailscale**; confirm the HTTPS port 8443 publication and
-background relay service. Scan the printed QR on your phone. The setup pane may
+Tailscale, open the plugin setup menu and choose **Tailscale → Always on
+Tailscale**; confirm the HTTPS port 8443 publication and background relay service. Scan the printed QR on your phone. The setup pane may
 close after setup; the service stays installed. To pair another phone, reopen
-setup and choose **Choose Phone App and Show QR**. If already configured, use
-that QR action rather than running setup again.
+setup and choose **Tailscale → Choose Phone App and Show QR**. If already
+configured, use that QR action rather than running setup again.
 
 If you previously selected a gateway, select a Cloudflare choice first to clear
-it. Before choosing another transport later, choose **Turn Always on Tailscale
-Off**. Service reinstall, restart, and update do not require turning it off.
+it. Before choosing another transport later, choose **Tailscale → Turn Always
+on Tailscale Off**. Service reinstall, restart, and update do not require
+turning it off.
 See [Tailscale requirements and cleanup](docs/transports.md#tailscale-serve).
 
 ## Make the Cloudflare Tunnel Permanent
