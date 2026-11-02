@@ -277,7 +277,7 @@ new_case() {
     unset STUB_APP_ORIGIN STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE
     unset STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL STUB_ROUTE_NAME
-    unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME
+    unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME HERDR_TAILSCALE_BIN STUB_OFF_FAIL
 }
 
 run_setup() {
@@ -340,6 +340,19 @@ test_success_and_alternate_port() {
     assert_contains "$STUB_LOG" 'cloudflared tunnel create --output json --credentials-file'
     assert_not_contains "$STUB_LOG" '--overwrite-dns'
     pass "successful creation uses the alternate relay port and prints QR only after verification"
+}
+
+test_refuses_tailscale() {
+    new_case
+    printf "HERDR_RELAY_TOKEN='fake-token'\nHERDR_TAILSCALE_PORT='8443'\n" > "$HERDR_RELAY_ENV"
+    : > "$STUB_LOG"
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "stable setup accepted Tailscale"
+    assert_contains "$OUTPUT" "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first."
+    assert_not_contains "$STUB_LOG" 'cloudflared'
+    assert_not_contains "$STUB_LOG" 'systemctl'
+    assert_contains "$HERDR_RELAY_ENV" "HERDR_TAILSCALE_PORT='8443'"
+    pass "stable setup refuses Tailscale without side effects"
 }
 
 test_existing_phone_app_origin() {
@@ -748,8 +761,9 @@ test_teardown_recovers_uuid_config_by_tunnel_name() {
 }
 
 
-echo "1..17"
+echo "1..18"
 test_success_and_alternate_port
+test_refuses_tailscale
 test_existing_phone_app_origin
 test_deployed_phone_app_origin
 test_discovered_phone_app_origin

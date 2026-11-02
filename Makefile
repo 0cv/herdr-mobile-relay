@@ -21,7 +21,7 @@ export PATH
 help:
 	@echo "Common targets:"
 	@echo "  make quick-start                First run: install missing tools and start the phone app"
-	@echo "  make dev-tunnel                Build and tunnel an isolated frontend for development"
+	@echo "  make dev-tunnel                Build an isolated frontend via Cloudflare or Tailscale"
 	@echo "  make stable-setup               Provision/resume a stable tunnel, service, and verified QR"
 	@echo "  make stable-teardown            Remove only resources recorded by the stable wizard"
 	@echo "  make setup                      Prepare config and check prerequisites without installing"
@@ -105,6 +105,8 @@ shell-check:
 	bun test tests/pi-command-bridge.test.mjs tests/pi-prompt.test.mjs tests/pi-activity.test.mjs tests/pi-notices.test.mjs tests/pi-reload.test.mjs
 	bash tests/test_pi_commands.sh
 	bash tests/test_dev_pi_commands.sh
+	bash tests/test_dev_tailscale.sh
+	bash tests/test_tailscale_setup.sh
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
 	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done

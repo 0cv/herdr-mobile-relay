@@ -21,6 +21,39 @@ if [ -z "${HERDR_RELAY_BIN:-}" ]; then
     export HERDR_RELAY_BIN="$DEV_BIN_DIR/herdr-mobile-relay"
 fi
 
+case "${HERDR_DEV_TRANSPORT:-}" in
+    "")
+        if [ ! -t 0 ]; then
+            echo "✗ Select a transport with HERDR_DEV_TRANSPORT=tailscale or cloudflare." >&2
+            exit 1
+        fi
+        if TAILSCALE_ERROR="$("$HERDR_RELAY_BIN" tailscale check --port 9443 2>&1)"; then
+            echo "  1) Tailscale Serve (HTTPS port 9443)"
+            echo "  2) Cloudflare quick tunnel"
+            read -r -p "Transport [1/2, q to cancel]: " choice || choice="q"
+            case "$choice" in
+                1) HERDR_DEV_TRANSPORT=tailscale ;;
+                2) HERDR_DEV_TRANSPORT=cloudflare ;;
+                *) echo "✗ Transport selection cancelled; nothing published." >&2; exit 1 ;;
+            esac
+        else
+            echo "✗ Tailscale unavailable: $TAILSCALE_ERROR" >&2
+            echo "  1) Cloudflare quick tunnel"
+            read -r -p "Transport [1, q to cancel]: " choice || choice="q"
+            case "$choice" in
+                1) HERDR_DEV_TRANSPORT=cloudflare ;;
+                *) echo "✗ Transport selection cancelled; nothing published." >&2; exit 1 ;;
+            esac
+        fi
+        ;;
+    tailscale)
+        "$HERDR_RELAY_BIN" tailscale check --port 9443 || exit $?
+        ;;
+    cloudflare) ;;
+    *) echo "✗ HERDR_DEV_TRANSPORT must be tailscale or cloudflare." >&2; exit 2 ;;
+esac
+export HERDR_DEV_TRANSPORT
+
 echo "🐑 Herdr Mobile Relay development tunnel"
 echo ""
 echo "  Config:      $HERDR_RELAY_ENV"

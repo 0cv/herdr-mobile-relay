@@ -994,6 +994,7 @@ report_inventory_failure() {
 verify_public_readiness() {
     local env_file="$1" health="$2"
     local config hostname public attempt binary
+    [ -z "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ] || return 0
     [ -z "$(gateway_urls "$env_file")" ] || return 0
     config="$(env_file_value "$env_file" CLOUDFLARED_CONFIG)"
     [ -n "$config" ] || return 0
@@ -1292,6 +1293,14 @@ prompt_gateway_selection() {
     gateway_selection_choice "$default_selection" "$answer"
 }
 
+refuse_if_tailscale_selected() {
+    if [ ! -f "$1" ] || ! grep -q '^HERDR_TAILSCALE_PORT=' "$1"; then
+        return 0
+    fi
+    echo "Always on Tailscale is selected. Choose 'Turn off Tailscale' in the setup menu first." >&2
+    return 1
+}
+
 # Persists the transport choice. An empty URL removes the key, which returns
 # the relay to the Cloudflare tunnel path — and takes the selection policy with
 # it, so a relay that leaves the gateway path keeps no stale policy to revive
@@ -1300,6 +1309,7 @@ set_gateway_url() {
     local env_file="$1"
     local url="$2"
 
+    refuse_if_tailscale_selected "$env_file" || return 1
     if [ -z "$url" ]; then
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
@@ -1705,7 +1715,8 @@ render_setup_qr() {
     local url="$1"
     local cols
     cols="$(tput cols 2>/dev/null || true)"
-    "$(relay_binary)" qr --columns "${cols:-80}" "$url" 2>/dev/null || true
+    "$(relay_binary)" qr --columns "${cols:-80}" "$url" 2>/dev/null ||
+        [ "${HERDR_REQUIRE_SETUP_QR:-}" != 1 ]
 }
 
 # The URL has already been validated before this internal emitter is called.
@@ -1731,7 +1742,7 @@ print_phone_setup() {
     local qr_code
 
     phone_setup_url_is_safe "$phone_url" || return 1
-    qr_code="$(render_setup_qr "$phone_url")"
+    qr_code="$(render_setup_qr "$phone_url")" || return 1
     if [ -n "$qr_code" ]; then
         echo "  Scan this QR code with your phone camera:"
         echo ""

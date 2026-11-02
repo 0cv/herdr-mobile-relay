@@ -1,8 +1,9 @@
 # Herdr Mobile Relay Quick Start
 
 Connect one Linux or macOS computer to your phone through a temporary Cloudflare
-tunnel, or through a gateway that needs no Cloudflare account (see **Skip
-Cloudflare**). You need Herdr 0.7.5 or newer, Git, and `curl`. Herdr 0.9.0 is
+tunnel, a gateway that needs no Cloudflare account (see **Skip Cloudflare**),
+or your Tailscale tailnet (see **Use Tailscale Instead**). You need Herdr 0.7.5
+or newer, Git, and `curl`. Herdr 0.9.0 is
 recommended for the complete live JSON inventory and workspace-management
 surface, but it is not the relay's minimum supported version.
 
@@ -94,9 +95,25 @@ cut it out of the path with a direct WebRTC connection.
 [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) covers running your
 own gateway.
 
-## Make It Permanent
+## Use Tailscale Instead
 
-Add a domain to Cloudflare, then run:
+Install Tailscale on your phone; the computer's Tailscale CLI must be 1.52 or
+newer. Sign in to the same tailnet and enable MagicDNS and HTTPS certificates in
+the tailnet DNS settings. On Linux or macOS with standalone or App Store
+Tailscale, open the plugin setup menu and choose **Always on Tailscale**; confirm the HTTPS port 8443 publication and
+background relay service. Scan the printed QR on your phone. The setup pane may
+close after setup; the service stays installed. To pair another phone, reopen
+setup and choose **Choose Phone App and Show QR**. If already configured, use
+that QR action rather than running setup again.
+
+If you previously selected a gateway, select a Cloudflare choice first to clear
+it. Before choosing another transport later, choose **Turn Always on Tailscale
+Off**. Service reinstall, restart, and update do not require turning it off.
+See [Tailscale requirements and cleanup](docs/transports.md#tailscale-serve).
+
+## Make the Cloudflare Tunnel Permanent
+
+For a permanent Cloudflare tunnel, add a domain to Cloudflare, then run:
 
 ```bash
 herdr plugin action invoke install-service --plugin herdr-mobile-relay.events

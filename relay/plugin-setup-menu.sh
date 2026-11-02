@@ -85,6 +85,10 @@ transport_summary() {
     local current
     local count
 
+    if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
+        printf 'Tailscale Serve (HTTPS port 8443)\n'
+        return 0
+    fi
     gateways="$(gateway_urls "$ENV_FILE")"
     if [ -n "$gateways" ]; then
         active="$(json_string_field "$health" gateway_url)"
@@ -207,6 +211,14 @@ render_menu() {
     menu_item 9 "Show Full Status"
     echo "     Service, health, and a sanitized support snapshot."
     echo ""
+    echo "Always on Tailscale"
+    echo ""
+    menu_item 10 "Always on Tailscale"
+    echo "     Publish HTTPS port 8443 and install a background relay service."
+    echo ""
+    menu_item 11 "Turn Always on Tailscale Off"
+    echo "     Remove only this relay's port 8443 and stop its service."
+    echo ""
     menu_item q "Exit, change nothing"
     echo ""
 }
@@ -227,7 +239,7 @@ run_action() {
         cd "$SCRIPT_DIR"
         HERDR_SETUP_MENU=1 "$action" "$@"
     ) || true
-    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
+    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION HERDR_TAILSCALE_PORT
     load_relay_env "$ENV_FILE"
     trap - INT
     if [ -t 0 ]; then
@@ -253,8 +265,10 @@ while true; do
             7) run_action "$SCRIPT_DIR/plugin-setup-link.sh"; break ;;
             8) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
             9) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
+            10) run_action "$SCRIPT_DIR/tailscale-setup.sh"; break ;;
+            11) run_action "$SCRIPT_DIR/tailscale-off.sh"; break ;;
             q | Q) exit 0 ;;
-            *) echo "Enter 1, 2, 3, 4, 5, 6, 7, 8, 9, or q." ;;
+            *) echo "Enter 1–11 or q." ;;
         esac
     done
 done

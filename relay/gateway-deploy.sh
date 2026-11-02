@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common.sh"
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 # Answers from the last run, kept beside the relay environment like the recorded
 # phone app origin. Rerunning to redeploy should not re-type a hostname, an SSH
 # address, and a directory that have not changed. Precedence everywhere below is

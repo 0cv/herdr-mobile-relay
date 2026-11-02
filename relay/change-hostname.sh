@@ -22,6 +22,7 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
+refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 assert_service_env_matches "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 

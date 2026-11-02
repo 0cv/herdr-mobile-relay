@@ -110,11 +110,14 @@ The setup menu exposes each complete connection path directly:
 | --- | --- | --- |
 | Community gateway | no account, domain, or tunnel configuration; an installed app origin | the recommended stable, no-configuration relay path |
 | Cloudflare tunnel | nothing for a temporary URL; a Cloudflare account and domain for a permanent hostname | the fastest one-computer trial or a permanent background service |
+| Tailscale Serve | Tailscale on phone and computer, in the same tailnet | private HTTPS without a Cloudflare account or gateway |
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
 
-All three are end-to-end encrypted. On either gateway the phone and the computer
-then negotiate a direct peer-to-peer connection, leaving the gateway with the
-fallback; Cloudflare tunnel traffic stays on Cloudflare.
+All four use end-to-end relay encryption. On either gateway the phone and the
+computer then negotiate a direct peer-to-peer connection, leaving the gateway
+with the fallback; Cloudflare tunnel traffic stays on Cloudflare. Tailscale
+Serve is available only inside your tailnet.
+[Set up Tailscale →](QUICKSTART.md#use-tailscale-instead).
 
 - **[Transports explained →](docs/transports.md)**
 - **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**
@@ -134,7 +137,7 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 | --- | --- |
 | [QUICKSTART.md](QUICKSTART.md) | The fast path, start to paired phone |
 | [docs/mobile-app.md](docs/mobile-app.md) | Every feature: agent list, terminal, devices, speech, notifications |
-| [docs/transports.md](docs/transports.md) | Cloudflare, community gateway, own gateway, direct WebRTC |
+| [docs/transports.md](docs/transports.md) | Cloudflare, Tailscale, gateways, direct WebRTC |
 | [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
 | [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |
 | [docs/agent-directories.md](docs/agent-directories.md) | Agents that use a non-default config or profile directory |
