@@ -5,17 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
-
-- Always on Tailscale replaces a selected WebRTC gateway after confirmation,
-  without making you switch to Cloudflare first.
-
 ## [0.24.0] - 2026-11-02
 
 ### Added
 
 - Connect through Tailscale Serve on your own tailnet, with an isolated dev
-  tunnel or a persistent background service and setup QR.
+  tunnel or a persistent background service and setup QR. Always on Tailscale
+  replaces a selected WebRTC gateway after confirmation.
 
 ### Changed
 

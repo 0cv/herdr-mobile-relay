@@ -30,7 +30,19 @@ disable individual actions without changing the relay release.
 herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-The setup menu opens automatically after installation.
+The setup menu opens automatically after installation and asks how your phone
+should reach this computer:
+
+```text
+Choose a path:
+
+  1. Cloudflare
+  2. WebRTC
+  3. Tailscale
+  q. Exit, change nothing
+```
+
+Each path then lists only its own actions; **b** goes back.
 
 To reopen the main setup menu later:
 
