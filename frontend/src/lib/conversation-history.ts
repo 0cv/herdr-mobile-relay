@@ -343,6 +343,14 @@ export class ConversationHistoryController {
     else this.enqueue(this.rawEntries.length ? 'refresh' : 'initial', true);
   }
 
+  recoverAfterReconnect(agent: Agent): boolean {
+    if (!this.matchesRequestTarget(agent) || !this.started || this.paused || !this.options.isActive()
+      || this.demandRunning || this.stateValue.pausedReason
+      || this.stateValue.error?.code !== 'transport_disconnected' || !this.stateValue.error.retryable) return false;
+    this.retry();
+    return true;
+  }
+
   returnToLatest(): void {
     if (!this.started || !this.options.isActive()) return;
     this.advanceEpoch(false);

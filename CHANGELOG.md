@@ -13,6 +13,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Refresh an open Conversation and resume live updates after a relay reconnect
+  interrupts its history request.
 - Keep terminal styling correct after extended-color codes with a zero channel
   and after trailing resets such as `31;0`.
 - Focus Cancel when a destructive workspace confirmation opens and when it
