@@ -52,14 +52,21 @@ and prints a QR code.
 one-computer trial. It installs any missing user-level tools with confirmation,
 starts the relay and bundled app, and prints a QR code.
 
-Scan the QR with your phone. Keep the pane open; Ctrl-C stops the relay.
+If you already use Tailscale on your phone and computer, choose **Tailscale →
+Always on Tailscale** for private HTTPS inside your tailnet, without a
+Cloudflare account or gateway. Tailscale keeps the connection up in the
+background, so the app reconnects quickly
+([setup steps](QUICKSTART.md#use-tailscale-instead)).
 
-Neither quick-start path needs `sudo` or a Python, Node.js, or Go toolchain.
+Scan the QR with your phone. A relay started in the pane stops with Ctrl-C; an
+installed background service keeps running.
+
+The relay setup does not run `sudo` or need a Python, Node.js, or Go toolchain.
 Treat the QR and its setup link as secrets: they contain a one-use device
 invitation.
 
-[QUICKSTART.md](QUICKSTART.md) has pairing detail and troubleshooting for both
-paths.
+[QUICKSTART.md](QUICKSTART.md) has pairing detail and troubleshooting for all
+three paths.
 
 ## What you get
 
@@ -84,14 +91,8 @@ paths.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.
 
-**New in 0.23.0:** Clean, recent-first Conversation by default, explicit Full
-history, sticky following while streaming, and a workspace inspector button.
-Enable **Settings → Pi Integration** for live Pi text, tool activity, notices
-and unconfirmed replies to Needs inspection panes. Other supported agents get
-recorded updates and a shared prompt composer. Advanced literal input and
-terminal keys stay in Terminal. Resize Session is on by default; saved off
-choices stay off. Kimi, Hermes and older/unindexed OpenCode histories can still
-have a [history-sized cold-open cost](docs/conversation-activity.md#native-history-opening-cost).
+**New in 0.24.0:** Connect through Tailscale. The setup menu groups Cloudflare,
+WebRTC and Tailscale; an open Conversation refreshes after a reconnect.
 
 **[Full feature tour →](docs/mobile-app.md)**
 
@@ -110,7 +111,7 @@ The setup menu starts with **Cloudflare**, **WebRTC**, and **Tailscale**. Select
 | --- | --- | --- |
 | Community gateway | no account, domain, or tunnel configuration; an installed app origin | the recommended stable, no-configuration relay path |
 | Cloudflare tunnel | nothing for a temporary URL; a Cloudflare account and domain for a permanent hostname | the fastest one-computer trial or a permanent background service |
-| Tailscale Serve | Tailscale on phone and computer, in the same tailnet | private HTTPS without a Cloudflare account or gateway |
+| Tailscale Serve | Tailscale on phone and computer, in the same tailnet | private HTTPS without Cloudflare or a gateway; fast reconnects |
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
 
 All four use end-to-end relay encryption. On either gateway the phone and the
@@ -150,12 +151,12 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 
 Prompts, terminal output, uploads, and push details are encrypted end to end
 between the phone and the relay. Whatever carries the traffic — a Cloudflare
-tunnel or a gateway — observes connection metadata only, never plaintext; on the
-direct path no application data reaches it at all, though a gateway still
-answers address discovery. Paired credentials distinguish controller and
-reader devices, mutations default to controller-only, attachment references
-stay bound to the terminal and agent session that created them, and the app can
-require device verification before it reconnects.
+tunnel, a gateway, or Tailscale Serve — observes connection metadata only, never
+plaintext; on the direct path no application data reaches it at all, though a
+gateway still answers address discovery. Paired credentials distinguish
+controller and reader devices, mutations default to controller-only, attachment
+references stay bound to the terminal and agent session that created them,
+and the app can require device verification before it reconnects.
 [Details →](docs/security.md)
 
 ## License

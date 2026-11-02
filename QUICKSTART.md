@@ -30,7 +30,7 @@ verified relay bundle; it does not require Python, Node.js, a Go toolchain, or
 
 ## 2. Pair the Phone
 
-Both paths print the QR once they know which origin serves the phone app.
+Each path prints the QR once it knows which origin serves the phone app.
 
 On the tunnel path, wait for the temporary tunnel, then choose:
 
@@ -51,8 +51,9 @@ prevents a disposable Safari tab from consuming the invitation. To use the tab
 itself as a device, choose **Pair this browser instead** in Settings. Each printed
 link pairs one phone within ten minutes; print it again for the next phone.
 
-Keep the Quick Start pane open. Ctrl-C stops the relay, and on the tunnel path
-the next run creates a new hostname and setup link.
+Keep the pane open for a foreground Quick Start; Ctrl-C stops its relay. An
+installed background service keeps running. A new temporary tunnel gets a new
+hostname and setup link.
 
 ## 3. Try It
 

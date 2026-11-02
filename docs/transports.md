@@ -11,7 +11,7 @@ traffic always goes through Cloudflare; Tailscale Serve is tailnet-only.
 
 | Choice | What it needs from you | Who carries the traffic | When to pick it |
 | --- | --- | --- | --- |
-| **Cloudflare tunnel** | Nothing for Quick Start's temporary URL; a Cloudflare account with a domain for a permanent hostname and background service. | Cloudflare's edge | The default. See [cloudflare-tunnel.md](cloudflare-tunnel.md) for the permanent hostname. |
+| **Cloudflare tunnel** | Nothing for Quick Start's temporary URL; a Cloudflare account with a domain for a permanent hostname and background service. | Cloudflare's edge | Fastest one-computer trial; permanent hostname with an account. See [cloudflare-tunnel.md](cloudflare-tunnel.md). |
 | **Tailscale Serve** | Tailscale on phone and computer in the same tailnet; MagicDNS and HTTPS certificates enabled. | Your Tailscale tailnet | Private HTTPS without a Cloudflare account, domain, or gateway. |
 | **Community gateway** | No account and no domain, but the phone app must already be hosted somewhere — a gateway serves no app. | A gateway operated by the project, until the direct path forms | Free, shared, best-effort; not for heavy transfers. Pick it to avoid Cloudflare setup entirely. |
 | **Your own gateway** | A small VPS with Docker and a public hostname. | Your own gateway, until the direct path forms | Dedicated bandwidth, and the transport logs stay on your machine. See [gateway-self-hosting.md](gateway-self-hosting.md). |
@@ -39,12 +39,15 @@ can run `sudo tailscale set --operator=$USER` once; setup never runs it for you.
 **Always on Tailscale** asks for confirmation, installs or reuses the existing
 user launchd/systemd relay service on localhost port 8375 by default, then
 publishes it at HTTPS port 8443 via `tailscale serve --bg`. Serve persists
-without the setup pane. After a reboot, the user service resumes according to
-its normal login/start policy: launchd runs in the macOS user session; a Linux
-systemd user service may require login or separately configured lingering to
-run before login. Tailscale must also be running. Setup does not enable
-lingering or make other automatic admin changes. Reinstalling, restarting, or
-updating the existing service remains permitted while Tailscale is selected.
+without the setup pane. The Tailscale app keeps the tailnet connection up
+outside the browser, so reopening the phone app connects straight to the relay
+instead of first going through a gateway and setting up a direct path. After a reboot, the user service
+resumes according to its normal login/start policy: launchd runs in the macOS
+user session; a Linux systemd user service may require login or separately
+configured lingering to run before login. Tailscale must also be running.
+Setup does not enable lingering or make other automatic admin changes.
+Reinstalling, restarting, or updating the existing service remains permitted
+while Tailscale is selected.
 
 If a gateway is selected, choose a Cloudflare option first to deselect it.
 Before selecting another transport, choose **Tailscale → Turn Always on
