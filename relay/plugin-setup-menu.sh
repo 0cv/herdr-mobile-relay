@@ -210,8 +210,8 @@ render_menu() {
                 menu_item 4 "Remove Stable Tunnel"
                 echo "     Remove this relay's recorded service, tunnel, config, and credentials."
                 echo ""
-                menu_item 5 "Configure App Deployment — Cloudflare Pages"
-                echo "     Designate this computer as the deployment owner and pin its shared app origin."
+                menu_item 5 "Configure App Deployment"
+                echo "     Make this computer the Cloudflare Pages deployment owner and pin its shared app origin."
                 ;;
             2)
                 echo "WebRTC"

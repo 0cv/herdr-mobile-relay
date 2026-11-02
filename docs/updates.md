@@ -91,7 +91,7 @@ If your phones load the app from a separately hosted origin — every gateway
 setup, and any tunnel setup that chose an installed app — that app is still
 0.19.1 and cannot talk to the new relay. The phone-driven updater would have
 published it first; a manual upgrade has to: on the deployment-owner computer
-choose **Cloudflare → Configure App Deployment — Cloudflare Pages** and answer
+choose **Cloudflare → Configure App Deployment** and answer
 **Y** to "Deploy app version 0.20.0 now?". The menu's status line says so as
 long as the hosted app is behind ("serves 0.19.1, this relay ships 0.20.0 —
 Cloudflare → Configure App Deployment"). Relays

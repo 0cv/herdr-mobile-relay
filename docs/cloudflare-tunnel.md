@@ -28,7 +28,7 @@ origin-scoped. The relay's own `wss://` hostname remains inside the private
 fragment. On a new computer the wizard checks `https://herdr.<authorized-zone>`
 for an existing Herdr app and uses it when found. In the setup menu, choose
 **Cloudflare → Choose Phone App and Show QR** to keep or change this origin. Use
-**Cloudflare → Configure App Deployment — Cloudflare Pages** only on the one computer that should publish app updates; its
+**Cloudflare → Configure App Deployment** only on the one computer that should publish app updates; its
 configured deployment origin is authoritative and cannot be replaced by an
 older relay-hosted app reconnecting in the background.
 When a current origin is shown, option **1** keeps it. Option **2** deliberately

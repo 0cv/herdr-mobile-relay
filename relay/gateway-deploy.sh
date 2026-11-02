@@ -607,7 +607,7 @@ proxied because raw UDP cannot travel through Caddy's TLS.
 
 ## Bring it up
 
-Setup-menu action 3 (**Deploy or Upgrade Your Own WebRTC Gateway**) copies this
+Setup menu **WebRTC → Deploy or Upgrade Your Own WebRTC Gateway** copies this
 directory to the server over SSH, brings it up, and verifies it. These are the
 same steps by hand:
 

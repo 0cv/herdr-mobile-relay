@@ -31,7 +31,7 @@ reject "$output" 'Temporary Cloudflare Tunnel'
 reject "$output" 'ACTION:'
 
 output="$(menu '1\nq\n')"
-expect "$output" '  5. Configure App Deployment — Cloudflare Pages'
+expect "$output" '  5. Configure App Deployment'
 expect "$output" '  7. Show Full Status'
 reject "$output" 'Community WebRTC Gateway'
 reject "$output" 'Always on Tailscale'
