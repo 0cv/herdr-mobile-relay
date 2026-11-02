@@ -107,6 +107,7 @@ shell-check:
 	bash tests/test_dev_pi_commands.sh
 	bash tests/test_dev_tailscale.sh
 	bash tests/test_tailscale_setup.sh
+	bash tests/test_setup_menu.sh
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
 	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done
