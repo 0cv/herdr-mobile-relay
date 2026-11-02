@@ -37,8 +37,8 @@ The setup menu's **Phone path** line and phone Settings show the active
 gateway's reported version and the latest gateway version available from the
 verified plugin release. The setup menu also probes a recorded self-hosted
 gateway for its **Own gateway** line. If a gateway reports an older version, run
-`herdr plugin install 0cv/herdr-mobile-relay` on the computer, then choose action
-3 and accept the remembered hostname, SSH address, and directory to copy the new
+`herdr plugin install 0cv/herdr-mobile-relay` on the computer, then choose
+**WebRTC → Deploy or Upgrade Your Own WebRTC Gateway** and accept the remembered hostname, SSH address, and directory to copy the new
 source, rebuild the image, and restart the gateway. A gateway deployed before
 version reporting appears as `version unknown` until it is redeployed.
 
