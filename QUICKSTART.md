@@ -34,13 +34,14 @@ Both paths print the QR once they know which origin serves the phone app.
 
 On the tunnel path, wait for the temporary tunnel, then choose:
 
-- **This temporary relay** for a simple one-computer trial.
-- **An existing installed Herdr app** to add this computer to an app you already
-  use.
+- **Use the app served by this temporary tunnel** for a quick one-computer trial.
+- **Use another Herdr app** to add this computer to an app you already use.
 
-On the gateway path the QR follows registration, and the app origin has to be an
-installed Herdr app — a gateway carries relay traffic only. It reuses a recorded
-or `HERDR_PHONE_APP_URL` origin, and asks for one when neither exists.
+Choosing the phone app does not change how your phone connects to this computer.
+WebRTC does not offer this chooser: the gateway serves no app. On that path the
+QR follows registration, and the app origin has to be an installed Herdr app.
+It reuses a recorded or `HERDR_PHONE_APP_URL` origin, and asks for one when
+neither exists.
 
 Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
 the one-use bootstrap invitation in the URL fragment, which is never sent in
