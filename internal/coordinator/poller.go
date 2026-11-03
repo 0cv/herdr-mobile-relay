@@ -63,6 +63,10 @@ func (p *Poller) SetOnInventoryChange(fn func() error) {
 	p.onInventoryChange = fn
 }
 
+func (p *Poller) SetHostname(hostname string) {
+	p.hostname = hostname
+}
+
 func (p *Poller) SetEnrich(fn func(context.Context, []*AgentState)) {
 	p.enrich = fn
 }
