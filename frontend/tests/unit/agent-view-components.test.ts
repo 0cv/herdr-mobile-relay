@@ -43,6 +43,7 @@ function page(overrides: Partial<ConversationPage> = {}): ConversationPage {
 
 describe('agent view controls and conversation loading hook', () => {
   beforeEach(() => {
+    relayStore.connections.set(new Map([['fedora', { capabilities: ['tab_rename', 'agent_launch'] } as never]]));
     localStorage.clear();
     defaultAgentView.set('terminal');
     paneAgentViewOverrides.set({});

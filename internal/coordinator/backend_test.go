@@ -12,9 +12,10 @@ import (
 
 type recordingBackend struct {
 	backend.Backend
-	pane        herdr.Pane
-	inventories int
-	prompts     atomic.Int32
+	pane          herdr.Pane
+	inventories   int
+	prompts       atomic.Int32
+	launchEffects atomic.Int32
 }
 
 func (b *recordingBackend) GetInventory(context.Context) (*herdr.Inventory, error) {
@@ -37,6 +38,44 @@ func (b *recordingBackend) TabList(context.Context) ([]herdr.Tab, error) {
 func (b *recordingBackend) Prompt(context.Context, string, string) error {
 	b.prompts.Add(1)
 	return nil
+}
+
+func (b *recordingBackend) CapabilityStatus() herdr.ServerStatus {
+	return herdr.ServerStatus{}
+}
+
+func (b *recordingBackend) StartAgent(context.Context, string, string, string, int, ...string) (string, error) {
+	b.launchEffects.Add(1)
+	return "", nil
+}
+
+func (b *recordingBackend) PaneRun(context.Context, string, []string) error {
+	b.launchEffects.Add(1)
+	return nil
+}
+
+func (b *recordingBackend) StopPane(context.Context, string) error {
+	b.launchEffects.Add(1)
+	return nil
+}
+
+func TestBackendRefusesUnsupportedAgentLaunch(t *testing.T) {
+	for _, action := range []string{"agent_start", "agent_clear", "agent_restart"} {
+		t.Run(action, func(t *testing.T) {
+			client := &recordingBackend{}
+			dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
+			defer dispatcher.Close(context.Background())
+			result := dispatcher.Handle(context.Background(), map[string]any{
+				"type": action, "pane_id": "pane-1",
+			})
+			if result.OK || result.Error != "This backend does not support launching agents" {
+				t.Fatalf("result = %+v", result)
+			}
+			if client.launchEffects.Load() != 0 {
+				t.Fatal("unsupported launch caused backend effects")
+			}
+		})
+	}
 }
 
 func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {

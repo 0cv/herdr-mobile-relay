@@ -309,9 +309,13 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleTabReorder(ctx, receivedAt, requestID, paneID, message)
 	case "acknowledge_pane":
 		return d.handleAcknowledge(requestID, paneID)
-	case "agent_start":
-		return d.handleAgentStart(ctx, receivedAt, requestID, message)
-	case "agent_clear", "agent_restart":
+	case "agent_start", "agent_clear", "agent_restart":
+		if !d.herdr.CapabilityStatus().Supports(herdr.FeatureAgentLaunch) {
+			return d.fail(requestID, action, paneID, "This backend does not support launching agents")
+		}
+		if action == "agent_start" {
+			return d.handleAgentStart(ctx, receivedAt, requestID, message)
+		}
 		return d.handleClear(ctx, receivedAt, requestID, paneID)
 	default:
 		return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: "Unknown command"}

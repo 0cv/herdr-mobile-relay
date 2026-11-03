@@ -1534,6 +1534,20 @@ func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []stri
 	if herdrStatus.Supports(herdr.FeaturePaneRead) {
 		capabilities = append(capabilities, "pane_realtime_delta")
 	}
+	for _, feature := range []string{
+		herdr.FeatureWorkspaceManagement,
+		herdr.FeatureWorktreeManagement,
+		herdr.FeatureTabRename,
+		herdr.FeatureAgentLaunch,
+		herdr.FeatureManualTerminalInput,
+		herdr.FeatureSecretInput,
+		herdr.FeatureSemanticInput,
+		herdr.FeaturePiIntegration,
+	} {
+		if herdrStatus.Supports(feature) {
+			capabilities = append(capabilities, feature)
+		}
+	}
 	if herdrStatus.Supports(herdr.FeatureTabMove) {
 		capabilities = append(capabilities, "tab_reorder")
 	}

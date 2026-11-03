@@ -21,6 +21,7 @@
   let confirmPanel = $state<HTMLDivElement | null>(null);
 
   const connections = relayStore.connections;
+  const capabilities = $derived(agent ? $connections.get(agent.relay_id)?.capabilities || [] : []);
   const panePreferenceKey = $derived(agent ? paneViewPreferenceKey(agent) : null);
   const paneViewSelection = $derived.by(() => {
     const override = panePreferenceKey ? $paneAgentViewOverrides[panePreferenceKey] : undefined;
@@ -249,11 +250,15 @@
         {/if}
       </p>
       <div class="dialog-actions">
-        <Button data-rename-action="tab" disabled={busy || readOnly} onclick={() => beginRename('tab')}>Rename Tab</Button>
+        {#if capabilities.includes('tab_rename')}
+          <Button data-rename-action="tab" disabled={busy || readOnly} onclick={() => beginRename('tab')}>Rename Tab</Button>
+        {/if}
         {#if sessionRenameAvailable}
           <Button data-rename-action="session" variant="secondary" disabled={busy || readOnly} onclick={() => beginRename('session')}>Rename Session</Button>
         {/if}
-        <Button data-confirm-action="clear" variant="secondary" disabled={busy || readOnly} onclick={clearAgent}>Clear Agent</Button>
+        {#if capabilities.includes('agent_launch')}
+          <Button data-confirm-action="clear" variant="secondary" disabled={busy || readOnly} onclick={clearAgent}>Clear Agent</Button>
+        {/if}
         <Button data-confirm-action="stop" variant="danger" disabled={busy || readOnly} onclick={stopAgent}>Stop Agent</Button>
         <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Close</Button>
       </div>
