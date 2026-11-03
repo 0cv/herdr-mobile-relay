@@ -13,8 +13,10 @@ project follows [Semantic Versioning](https://semver.org/).
 - Run a second relay for herdr-core beside the TUI relay, so agents in herdr-app
   appear as a separate computer on your phone. Read screens, send prompts and
   keys, answer questions without typed text, stop agents, and use Pi commands
-  and activity. Agent creation and restart, workspace management, typed answers
-  and phone-driven updates are not available on core yet.
+  and activity. Resize Session fits the shared core terminal to your phone;
+  resizing the desktop window takes the size back. Agent creation and restart,
+  workspace management, typed answers and phone-driven updates are not available
+  on core yet.
 
 ## [0.24.0] - 2026-11-02
 

@@ -76,6 +76,17 @@ type speechRequest struct {
 	cancel    context.CancelFunc
 }
 
+type paneSizer interface {
+	Available() bool
+	Acquire(context.Context, string, string, int, int) (int, int, error)
+	Release(context.Context, string, string, bool) error
+	ReleaseClient(context.Context, string) error
+	ReadGeometry(string, string) (int, int, bool)
+	ResizedWithin(string, time.Duration) bool
+	Run(context.Context)
+	Shutdown(context.Context) error
+}
+
 type Server struct {
 	cfg      *config.Config
 	version  string
@@ -117,7 +128,7 @@ type Server struct {
 	speechLanguages  []string
 	speechRequests   map[string]*speechRequest
 	copyMu           sync.Mutex
-	paneSizeM        *panesize.Manager
+	paneSizeM        paneSizer
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
 	piIntegration    *piintegration.Manager
@@ -189,11 +200,13 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	} else if idx := strings.Index(hostname, "."); idx > 0 {
 		hostname = hostname[:idx]
 	}
-	paneSizeProvider := panesize.Provider(herdrClient)
+	var paneSizeM paneSizer
 	if cfg.Backend == "hc" {
 		hostname += " (core)"
 		poller.SetHostname(hostname)
-		paneSizeProvider = nil
+		paneSizeM = hc.NewPaneSizer(herdrClient.(*hc.Client))
+	} else {
+		paneSizeM = panesize.NewManager(herdrClient, logger)
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
 	if cfg.RuntimeDir != "" {
@@ -269,7 +282,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		speechRemove:        speech.Remove,
 		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
-		paneSizeM:           panesize.NewManager(paneSizeProvider, logger),
+		paneSizeM:           paneSizeM,
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,

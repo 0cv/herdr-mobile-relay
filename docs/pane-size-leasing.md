@@ -3,11 +3,23 @@
 Resize Session lets a controller phone resize the shared pane to fit itself
 while it has the pane open. It is on by default per device; a saved off choice
 stays off. Lease Terminal Height stays off by default and requires Resize Session.
-The cost remains: **while a phone holds a lease, the desktop and SSH
+The cost remains: **on the TUI backend, while a phone holds a lease, the desktop and SSH
 views of that pane look garbled.** This page records the design, the safety
 boundary every write passes through, the cleanup budget, and the risks that
 remain. User-facing behavior is in
 [mobile-app.md](mobile-app.md#mobile-terminal).
+
+## herdr-core
+
+Core supports the same opt-in leases through a held framed terminal attachment,
+not a TTY ioctl. The shared grid and PTY resize together: herdr-app shows the
+phone's layout, and a later desktop resize takes precedence. The narrowest
+leased width and shortest explicitly leased height win among phone clients.
+Width-only leases retain the height captured at first acquisition; unlike the
+TUI's width-only ioctl, a core attachment must supply both dimensions.
+Closing the attachment on release, expiry, disconnect or shutdown lets core
+restore the previous viewer's size. A replaced terminal is never reattached
+automatically. The TUI-specific limitations below do not apply to core.
 
 ## Why the garbling is inherent
 
@@ -24,7 +36,7 @@ the relay side can fix that; a Herdr-owned resize API is the proper fix (see
 
 | Element | Behavior |
 | --- | --- |
-| Capabilities | `pane_size_opt_in` and `pane_size_opt_in_rows`, advertised only by relays built for darwin or linux. `pane_size_lease` / `pane_size_lease_rows` are never advertised: apps up to 0.22.7 lease automatically when they see them. No operator flag. |
+| Capabilities | `pane_size_opt_in` and `pane_size_opt_in_rows`, advertised on core, or by TUI relays built for darwin or linux. `pane_size_lease` / `pane_size_lease_rows` are never advertised: apps up to 0.22.7 lease automatically when they see them. No operator flag. |
 | `lease_pane_size` | Acquire and renew. Must carry `opt_in: true`; otherwise it fails with "Resize Session is unavailable on this relay" before any Herdr, process or TTY access. Carries `columns` (40–240) and optionally `rows` (10–120). Result data: applied `columns` and `rows`. |
 | `release_pane_size` | Idempotent cleanup. Without `immediate` the lease lapses after a 10 s navigation grace; `immediate: true` (sent when the user turns the switch off) skips it. |
 | Authorization | Both are controller-only ordered mutations with exact target validation (`validateExactPaneTarget`); release keeps the stale-target cleanup allowance. Readers are denied. |

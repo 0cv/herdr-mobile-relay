@@ -48,8 +48,8 @@ func TestHCInstanceDefaults(t *testing.T) {
 	if _, ok := s.herdrC.(*hc.Client); !ok {
 		t.Fatalf("backend: %T", s.herdrC)
 	}
-	if s.paneSizeM.Available() {
-		t.Fatal("core must not lease pane sizes")
+	if !s.paneSizeM.Available() {
+		t.Fatal("core must support pane size leasing")
 	}
 	hostname, _ := os.Hostname()
 	if hostname == "" {

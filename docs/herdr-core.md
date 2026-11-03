@@ -12,12 +12,16 @@ manage each instance yourself.
 - Prompts, including while an agent is waiting for an answer.
 - Key presses and structured question answers that need no typed text.
 - Stop an agent.
+- Pane size leasing (Resize Session). The phone's size applies to the shared
+  core terminal, so herdr-app shows the phone's layout while a device leases,
+  as with Resize Session on the TUI. The desktop can take the size back by
+  resizing its window. Releasing the lease restores the previous viewer's size.
 - Pi slash commands and activity when Pi runs in a core terminal with the Pi
   bridge installed. The TUI relay owns the shared Pi extension.
 
 The phone hides actions that core does not support: starting, clearing or
 restarting agents; renaming; tab, workspace and worktree management; manual and
-secret text input; answers requiring typed text; pane size leasing; the Pi
+secret text input; answers requiring typed text; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 

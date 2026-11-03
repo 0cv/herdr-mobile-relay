@@ -44,7 +44,7 @@ func (c *Client) Events(ctx context.Context) (herdr.TopologySnapshot, herdr.Topo
 	if err := conn.SetDeadline(deadline); err != nil {
 		return herdr.TopologySnapshot{}, nil, err
 	}
-	if err := hello(ctx, conn, s.reader); err != nil {
+	if err := hello(ctx, conn, s.reader, false); err != nil {
 		return herdr.TopologySnapshot{}, nil, err
 	}
 	if _, _, err := request(ctx, conn, s.reader, "subscribe", "events.subscribe", map[string]any{}, false); err != nil {

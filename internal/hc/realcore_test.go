@@ -68,6 +68,60 @@ func TestRealCore(t *testing.T) {
 		return result.Address
 	}
 	addr := start([]string{"/bin/sh"})
+	t.Run("pane-size-leasing", func(t *testing.T) {
+		desktop, err := client.attach(ctx, addr, 140, 45)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer desktop.Close()
+		m := NewPaneSizer(client)
+		defer m.Shutdown(context.Background())
+		size := func(cols, rows int) {
+			t.Helper()
+			wait(t, func() bool {
+				terminal, err := client.getTerminal(ctx, addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return terminal.Cols == cols && terminal.Rows == rows
+			})
+		}
+		if _, _, err := m.Acquire(ctx, "phone", addr, 60, 20); err != nil {
+			t.Fatal(err)
+		}
+		size(60, 20)
+		if err := client.Prompt(ctx, addr, "i=0; while [ $i -lt 40 ]; do echo resize-line; i=$((i+1)); done"); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, func() bool {
+			read, err := client.ReadPaneVisible(ctx, addr, 0, "plain")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return len(strings.Split(strings.TrimSuffix(string(read.Content), "\n"), "\n")) == 20
+		})
+		if _, _, err := m.Acquire(ctx, "phone", addr, 70, 25); err != nil {
+			t.Fatal(err)
+		}
+		size(70, 25)
+		if err := m.Release(ctx, "phone", addr, true); err != nil {
+			t.Fatal(err)
+		}
+		size(140, 45)
+		if _, _, err := m.Acquire(ctx, "phone", addr, 60, 20); err != nil {
+			t.Fatal(err)
+		}
+		size(60, 20)
+		if err := desktop.Resize(130, 40); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		terminal, err := client.getTerminal(ctx, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("later desktop resize while phone remains attached: %dx%d", terminal.Cols, terminal.Rows)
+	})
 	t.Run("labels", func(t *testing.T) {
 		panes, err := client.PaneList(ctx)
 		if err != nil {

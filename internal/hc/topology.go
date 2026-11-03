@@ -12,6 +12,8 @@ import (
 )
 
 type terminal struct {
+	Cols       int               `json:"cols"`
+	Rows       int               `json:"rows"`
 	Address    string            `json:"address"`
 	PID        *int              `json:"pid"`
 	State      string            `json:"state"`

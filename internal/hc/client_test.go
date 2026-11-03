@@ -60,8 +60,15 @@ func fakeCore(t *testing.T, generation int, respond func(net.Conn, fakeRequest))
 				}()
 				conn.SetDeadline(time.Now().Add(5 * time.Second))
 				reader := bufio.NewReader(conn)
+				framed := false
 				for i := 0; i < 2; i++ {
-					line, err := reader.ReadBytes('\n')
+					var line []byte
+					var err error
+					if framed {
+						_, _, line, err = readFrame(reader)
+					} else {
+						line, err = reader.ReadBytes('\n')
+					}
 					if err != nil {
 						return
 					}
@@ -75,18 +82,23 @@ func fakeCore(t *testing.T, generation int, respond func(net.Conn, fakeRequest))
 						return
 					}
 					if i == 0 {
-						if req.Method != "hello" || len(req.Params) != 1 || req.Params["generation"] != float64(1) {
+						if req.Method != "hello" || (len(req.Params) != 1 && len(req.Params) != 2) || req.Params["generation"] != float64(1) {
 							t.Errorf("hello = %+v", req)
 							return
 						}
-						reply(conn, req.ID, "result", map[string]any{"generation": generation, "version": "0.1.17", "core": map[string]any{}, "framed": false, "methods": []string{}, "features": []string{}})
+						framed, _ = req.Params["framed"].(bool)
+						reply(conn, req.ID, "result", map[string]any{"generation": generation, "version": "0.1.17", "core": map[string]any{}, "framed": framed, "methods": []string{}, "features": []string{}})
 					} else {
-						if req.Method == "events.subscribe" {
+						if req.Method == "events.subscribe" || req.Method == "terminal.attach" {
 							keep = true
 							conn.SetDeadline(time.Time{})
 							t.Cleanup(func() { conn.Close() })
 						}
-						respond(conn, req)
+						if framed {
+							respond(&framedTestConn{Conn: conn, reader: reader}, req)
+						} else {
+							respond(conn, req)
+						}
 					}
 				}
 			}()
