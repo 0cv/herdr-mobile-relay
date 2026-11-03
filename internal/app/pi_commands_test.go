@@ -67,13 +67,34 @@ func TestReaderCanDiscoverButCannotSubmitPiCommands(t *testing.T) {
 	}
 }
 
+func TestForegroundRootProcessShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shell int
+		group int
+		want  int
+	}{
+		{"direct program", 0, 42, 42},
+		{"program inside shell", 10, 42, 42},
+		{"idle shell", 10, 10, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &herdr.PaneProcessInfo{PaneID: "pane", ShellPID: tc.shell, ForegroundProcessGroupID: tc.group, ForegroundProcesses: []herdr.PaneProcess{{PID: tc.group}}}
+			got, err := foregroundRoot(info, "pane")
+			if got != tc.want || (err != nil) != (tc.want == 0) {
+				t.Fatalf("foregroundRoot = %d, %v; want %d", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestForegroundRootRejectsAmbiguousAndShell(t *testing.T) {
 	for _, info := range []*herdr.PaneProcessInfo{
 		nil, {PaneID: "other"}, {PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 1},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 3}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 2}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 3, Name: "vim"}}},
-		{PaneID: "pane", ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}}},
+		{PaneID: "pane", ShellPID: -1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 0}}},
 	} {
 		if _, err := foregroundRoot(info, "pane"); err == nil {

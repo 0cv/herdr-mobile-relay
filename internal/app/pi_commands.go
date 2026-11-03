@@ -25,7 +25,7 @@ type paneProcessReader interface {
 }
 
 func foregroundRoot(info *herdr.PaneProcessInfo, pane string) (int, error) {
-	if info == nil || pane == "" || info.PaneID != pane || info.ShellPID <= 0 ||
+	if info == nil || pane == "" || info.PaneID != pane || info.ShellPID < 0 ||
 		info.ForegroundProcessGroupID <= 0 || info.ForegroundProcessGroupID == info.ShellPID ||
 		len(info.ForegroundProcesses) != 1 || info.ForegroundProcesses[0].PID != info.ForegroundProcessGroupID {
 		return 0, errors.New("foreground ownership unavailable")
