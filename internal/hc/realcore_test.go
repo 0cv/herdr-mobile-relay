@@ -105,6 +105,29 @@ func TestRealCore(t *testing.T) {
 		}
 		t.Fatal("shell missing from Events snapshot")
 	})
+	t.Run("heartbeat", func(t *testing.T) {
+		time.Sleep(17 * time.Second)
+		if _, err := client.call(ctx, "terminal.label", map[string]any{"terminal": addr, "labels": map[string]string{"herdr.tab": "after-heartbeat"}}); err != nil {
+			t.Fatal(err)
+		}
+		eventCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		defer stop()
+		after, err := stream.Next(eventCtx)
+		if err != nil {
+			t.Fatalf("stream after heartbeat: %v", err)
+		}
+		for _, pane := range after.Panes {
+			if pane.ID != addr {
+				continue
+			}
+			for _, before := range snapshot.Panes {
+				if before.ID == addr && pane.TerminalID == before.TerminalID && pane.TabID == "after-heartbeat" {
+					return
+				}
+			}
+		}
+		t.Fatalf("shell identity or label after heartbeat: before=%+v after=%+v", snapshot.Panes, after.Panes)
+	})
 	t.Run("prompt-and-visible-read", func(t *testing.T) {
 		if err := client.Prompt(ctx, addr, "echo hc-relay-mark"); err != nil {
 			t.Fatal(err)

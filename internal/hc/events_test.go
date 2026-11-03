@@ -73,12 +73,19 @@ func TestEventsSnapshotsAndIdentity(t *testing.T) {
 		}
 		return s
 	}
-	push(eventLine("heartbeat", "", 1))
+	push(eventLine("status", "t1", 1))
+	beforeHeartbeat := next()
+	push(`{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":1}}`)
 	push(eventLine("lost", "rohan/t7", 2))
 	push(eventLine("status", "t1", 3))
 	status := next()
 	if status.Panes[0].Revision != 3 || status.Panes[0].TerminalID != first.Panes[0].TerminalID || !reflect.DeepEqual(status.Workspaces, first.Workspaces) || !reflect.DeepEqual(status.Tabs, first.Tabs) {
 		t.Fatalf("status snapshot: %+v", status)
+	}
+	for i, pane := range status.Panes {
+		if pane.TerminalID != beforeHeartbeat.Panes[i].TerminalID {
+			t.Fatalf("heartbeat changed identity: %+v, %+v", beforeHeartbeat.Panes, status.Panes)
+		}
 	}
 	push(eventLine("lost", "t1", 4))
 	push(eventLine("restarted", "t1", 5))
@@ -120,7 +127,7 @@ func TestEventsSnapshotsAndIdentity(t *testing.T) {
 }
 
 func TestEventsFailuresInvalidate(t *testing.T) {
-	for _, line := range []string{eventLine("missed", "", 0), "", "garbage", `{"jsonrpc":"2.0","method":"other"}`} {
+	for _, line := range []string{eventLine("missed", "", 0), `{"jsonrpc":"2.0","method":"missed","params":{"seq":0}}`, "", "garbage", `{"jsonrpc":"2.0","method":"other"}`} {
 		t.Run(line, func(t *testing.T) {
 			c, push := eventCore(t)
 			first, stream, err := c.Events(t.Context())

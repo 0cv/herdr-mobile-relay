@@ -108,11 +108,14 @@ func (s *topologyStream) Next(ctx context.Context) (herdr.TopologySnapshot, erro
 		if err := json.Unmarshal(line, &notification); err != nil {
 			return fail(err)
 		}
+		if notification.JSONRPC == "2.0" && notification.Method == "heartbeat" {
+			continue
+		}
 		if notification.JSONRPC != "2.0" || notification.Method != "event" || notification.Params.Type == "" {
 			return fail(errors.New("invalid core event notification"))
 		}
 		event := notification.Params
-		if event.Type == "heartbeat" || strings.Contains(event.Terminal, "/") {
+		if strings.Contains(event.Terminal, "/") {
 			continue
 		}
 		if event.Type == "missed" {
