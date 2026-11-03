@@ -74,6 +74,11 @@ func (e *CLIError) Error() string {
 }
 
 var refusalCodes = map[string]struct{}{
+	"blocked":                                {},
+	"status_mismatch":                        {},
+	"finished":                               {},
+	"needs_target":                           {},
+	"invalid_params":                         {},
 	"server_not_running":                     {},
 	"agent_pane_busy":                        {},
 	"protocol_mismatch":                      {},
