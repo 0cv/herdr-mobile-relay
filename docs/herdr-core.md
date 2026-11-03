@@ -23,6 +23,14 @@ are manual.
 
 ## Configuration and isolation
 
+Core passes the environment of whoever started it to every terminal it runs.
+If started from a Herdr TUI pane, every core terminal inherits that pane's
+`HERDR_PANE_ID`, `HERDR_SOCKET_PATH`, `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID`,
+which are stale and meaningless there.
+Inside a core terminal, the identity is `HC_TERMINAL_ID` and
+`HC_TERMINAL_SOCKET`; whenever either is present, the Pi bridge uses those and
+never falls back to the `HERDR_*` values, so Pi registers only with the core relay.
+
 `HERDR_RELAY_BACKEND` defaults to `herdr`; its other value is `hc`. On core:
 
 | Setting | Default |
