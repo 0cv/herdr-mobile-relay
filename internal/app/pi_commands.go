@@ -13,6 +13,63 @@ import (
 
 var piDiscoverySlots = make(chan struct{}, 8)
 
+func (s *Server) enrichPiSessions(ctx context.Context, agents []*coordinator.AgentState) {
+	if s.cfg.Backend != "hc" {
+		return
+	}
+	s.piSessionsMu.Lock()
+	cachedSessions := make(map[string]piSessionIdentity, len(s.piSessions))
+	for terminal, identity := range s.piSessions {
+		cachedSessions[terminal] = identity
+	}
+	s.piSessionsMu.Unlock()
+	current := make(map[string]piSessionIdentity)
+	for _, a := range agents {
+		if a == nil || !slashcmd.IsPi("", a.Agent) || a.Session != "" {
+			continue
+		}
+		func() {
+			ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+			defer cancel()
+			pid := 0
+			var err error
+			defer func() {
+				if err != nil && a.TerminalID != "" {
+					if cached := cachedSessions[a.TerminalID]; pid == 0 || cached.pid == pid {
+						a.Session = cached.session
+						if cached.session != "" {
+							current[a.TerminalID] = cached
+						}
+					}
+				}
+			}()
+			info, err := s.herdrC.PaneProcessInfoFresh(ctx, a.PaneID)
+			if err != nil {
+				return
+			}
+			pid, err = foregroundRoot(info, a.PaneID)
+			if err != nil {
+				return
+			}
+			instance, err := pibridge.Instance(s.cfg.SocketPath)
+			session := ""
+			if err == nil {
+				session, err = pibridge.Identify(ctx, instance, a.PaneID, pid)
+			}
+			if err != nil {
+				return
+			}
+			a.Session = session
+			if session != "" && a.TerminalID != "" {
+				current[a.TerminalID] = piSessionIdentity{pid: pid, session: session}
+			}
+		}()
+	}
+	s.piSessionsMu.Lock()
+	s.piSessions = current
+	s.piSessionsMu.Unlock()
+}
+
 func sameSlashTarget(before, after *coordinator.AgentState) bool {
 	return before != nil && after != nil && before.PaneID == after.PaneID &&
 		before.ServerSessionID == after.ServerSessionID && before.TerminalID == after.TerminalID &&

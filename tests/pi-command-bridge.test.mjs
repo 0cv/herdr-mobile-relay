@@ -13,13 +13,13 @@ import { herdrSocketFixture } from './fixtures/pi-herdr-socket.mjs';
 const sourceInfo = { path: '/fixture/extension.ts', source: 'npm:test', scope: 'user', origin: 'package' };
 const entry = (name, source = 'extension', info = sourceInfo) => ({ name, source, sourceInfo: info, description: `${name} description`, handler: () => { throw new Error('must not execute'); }, body: 'secret prompt body' });
 const identity = { instance: 'a'.repeat(64), pane: 'pane', session: 'session', pid: process.pid };
-function query(path, target = identity, operation = 'catalog') {
+function query(path, target = identity, operation = 'catalog', challenge = 'b'.repeat(32)) {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     let response = '';
     socket.setTimeout(1500, () => socket.destroy(new Error('timeout')));
     socket.on('error', reject);
-    socket.on('connect', () => socket.write(`${JSON.stringify({ ...target, operation, challenge: 'b'.repeat(32) })}\n`));
+    socket.on('connect', () => socket.write(`${JSON.stringify({ ...target, operation, challenge })}\n`));
     socket.on('data', data => { response += data; });
     socket.on('end', () => { try { resolve(JSON.parse(response)); } catch { reject(new Error('empty or malformed response')); } });
   });
@@ -56,6 +56,16 @@ test('socket queries current metadata, rejects identity mismatch and concurrent 
   const path = join(directory, `${process.pid}.sock`);
   try {
     expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    const anonymous = { ...identity, session: undefined };
+    const discovered = await query(path, anonymous, 'identity');
+    expect(discovered).toEqual({ ...identity, incarnation: discovered.incarnation, challenge: 'b'.repeat(32) });
+    for (const patch of [{ instance: 'wrong' }, { pane: 'wrong' }, { pid: 0 }]) {
+      await expect(query(path, { ...anonymous, ...patch }, 'identity')).rejects.toThrow();
+    }
+    await expect(query(path, anonymous, 'identity', 'bad')).rejects.toThrow();
+    for (const operation of ['catalog', 'prompt_capability', 'send_prompt_unconfirmed']) {
+      await expect(query(path, anonymous, operation)).rejects.toThrow();
+    }
     const first = await query(path);
     commands = [entry('second')];
     const second = await query(path);

@@ -12,10 +12,13 @@ import (
 	"time"
 
 	herdrmobilerelay "github.com/0cv/herdr-mobile-relay"
+	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/hc"
 	"github.com/0cv/herdr-mobile-relay/internal/hc/hctest"
 	"github.com/0cv/herdr-mobile-relay/internal/pibridge"
 	"github.com/0cv/herdr-mobile-relay/internal/piintegration"
+	"github.com/0cv/herdr-mobile-relay/internal/session"
 )
 
 func TestRealCorePiDiscovery(t *testing.T) {
@@ -60,8 +63,8 @@ func TestRealCorePiDiscovery(t *testing.T) {
 		t.Run(shape, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 			defer cancel()
-			session := fmt.Sprintf("00000000-0000-4000-8000-%012d", index+1)
-			args := []string{"pi", "--session-id", session, "--offline", "--no-mcp", "--no-approve", "--no-context-files"}
+			sessionID := fmt.Sprintf("00000000-0000-4000-8000-%012d", index+1)
+			args := []string{"pi", "--session-id", sessionID, "--offline", "--no-mcp", "--no-approve", "--no-context-files"}
 			argv := args
 			if shape == "shell" {
 				argv = []string{"/bin/sh"}
@@ -99,6 +102,8 @@ func TestRealCorePiDiscovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			s := &Server{cfg: &config.Config{Backend: "hc", SocketPath: socket}, herdrC: client, sessions: session.NewResolver(root)}
+			a := &coordinator.AgentState{PaneID: address, TerminalID: address, Agent: "pi"}
 			var pid, size int
 			var discoveryErr error
 			deadline := time.Now().Add(30 * time.Second)
@@ -108,7 +113,8 @@ func TestRealCorePiDiscovery(t *testing.T) {
 				if err == nil {
 					pid, discoveryErr = foregroundRoot(info, address)
 					if discoveryErr == nil {
-						catalog, err := runtimePiCatalog(ctx, client, socket, address, session)
+						s.enrichPiSessions(ctx, []*coordinator.AgentState{a})
+						catalog, err := runtimePiCatalog(ctx, client, socket, address, a.Session)
 						size, discoveryErr = len(catalog.Commands), err
 						if err == nil && size > 0 {
 							break
@@ -117,9 +123,16 @@ func TestRealCorePiDiscovery(t *testing.T) {
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
-			t.Logf("Pi pid=%d; session=%s (CLI --session-id); catalog size=%d; error=%v", pid, session, size, discoveryErr)
+			t.Logf("Pi pid=%d; session=%s (CLI --session-id); catalog size=%d; error=%v", pid, a.Session, size, discoveryErr)
 			if discoveryErr != nil || size == 0 {
 				t.Errorf("Pi discovery failed: pid=%d catalog=%d error=%v", pid, size, discoveryErr)
+			}
+			if a.Session != sessionID {
+				t.Fatalf("discovered %q, want %q", a.Session, sessionID)
+			}
+			s.resolveAgentSessionName(a)
+			if !a.ConversationHistoryAvailable || a.SessionID != sessionID || a.AgentSessionID != sessionID {
+				t.Fatalf("missing conversation identity: %+v", a)
 			}
 			inventory, err := client.GetInventory(ctx)
 			if err != nil {
