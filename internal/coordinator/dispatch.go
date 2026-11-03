@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
@@ -42,7 +43,7 @@ type CommandResult struct {
 
 type Dispatcher struct {
 	terminalTextKey  string
-	herdr            *herdr.Client
+	herdr            backend.Backend
 	state            *State
 	journal          *activity.Journal
 	activityW        *activity.Worker
@@ -88,7 +89,7 @@ type paneRead struct {
 	err  error
 }
 
-func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
+func NewDispatcher(client backend.Backend, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	dispatcher := &Dispatcher{
 		terminalTextKey: rand.Text(),

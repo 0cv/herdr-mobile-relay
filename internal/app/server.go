@@ -27,6 +27,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/audit"
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
@@ -102,7 +103,7 @@ type Server struct {
 	conversationB    *conversation.Browser
 	profiles         *profiles.Resolver
 	webH             *web.Handler
-	herdrC           *herdr.Client
+	herdrC           backend.Backend
 	kimiProcessBirth func(int) (string, error)
 	clipboardRead    func(context.Context) ([]byte, error)
 	clipboardWrite   func(context.Context, []byte) error
@@ -165,10 +166,14 @@ type Server struct {
 	historyTasks      *lifecycleTasks
 }
 
+func newBackend(cfg *config.Config) backend.Backend {
+	return herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
+}
+
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
-	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
+	herdrClient := newBackend(cfg)
 	_, clipboardRead, _ := clipboard.Reader()
 	pollInterval := time.Duration(cfg.PollInterval * float64(time.Second))
 	poller := coordinator.NewPoller(herdrClient, state, pollInterval, logger)
@@ -1391,16 +1396,7 @@ func (s *Server) Run(ctx context.Context) error {
 	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
 	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
-	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
-	eventClient.SetWorkspaceReorderedCapability(
-		s.herdrC.ShouldAttemptWorkspaceReordered,
-		s.herdrC.NoteWorkspaceReorderedSupported,
-		s.herdrC.NoteWorkspaceReorderedUnsupported,
-	)
-	eventClient.SetWorkspaceReorderedReset(func() {
-		s.herdrC.InvalidateLiveCapabilities()
-	})
-	startBackground(func() { s.poller.RunEvents(ctx, eventClient) })
+	startBackground(func() { s.poller.RunEvents(ctx) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
 	startBackground(func() { s.paneSizeM.Run(ctx) })
 	profileSignals := make(chan os.Signal, 1)

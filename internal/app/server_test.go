@@ -1540,7 +1540,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 
 	eventDone := make(chan struct{})
 	go func() {
-		server.poller.RunEvents(ctx, herdr.NewEventClient(socketPath))
+		server.poller.RunEvents(ctx)
 		close(eventDone)
 	}()
 	select {

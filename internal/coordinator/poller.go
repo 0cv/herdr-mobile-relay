@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
@@ -22,7 +23,7 @@ const (
 )
 
 type Poller struct {
-	client             *herdr.Client
+	client             backend.Backend
 	state              *State
 	logger             *slog.Logger
 	interval           time.Duration
@@ -39,7 +40,7 @@ type Poller struct {
 	broadcastMu         sync.Mutex
 }
 
-func NewPoller(client *herdr.Client, state *State, interval time.Duration, logger *slog.Logger) *Poller {
+func NewPoller(client backend.Backend, state *State, interval time.Duration, logger *slog.Logger) *Poller {
 	hostname, _ := os.Hostname()
 	if idx := strings.Index(hostname, "."); idx > 0 {
 		hostname = hostname[:idx]
@@ -265,17 +266,14 @@ func shorterPath(current, candidate string) string {
 	return candidate
 }
 
-func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
-	if events == nil {
-		return
-	}
+func (p *Poller) RunEvents(ctx context.Context) {
 	defer p.eventsActive.Store(false)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		baseRevision := p.state.RevisionCounter()
-		stream, snapshot, buffered, err := events.Bootstrap(ctx)
+		snapshot, stream, err := p.client.Events(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -290,30 +288,18 @@ func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
 			continue
 		}
 		p.eventsActive.Store(true)
-
-		cache := herdr.NewSessionCache(snapshot)
-		p.commitEventTopology(ctx, cache.Snapshot(), baseRevision)
-		reconnect := false
-		for _, event := range buffered {
-			if !p.applyTopologyEvent(ctx, cache, event) {
-				reconnect = true
-				break
-			}
-		}
-		for !reconnect {
-			event, err := stream.Next(ctx)
+		p.commitEventTopology(ctx, snapshot, baseRevision)
+		for {
+			snapshot, err := stream.Next(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					_ = stream.Close()
 					return
 				}
 				p.logger.Warn("Herdr events stream dropped", "error", err)
-				reconnect = true
 				break
 			}
-			if !p.applyTopologyEvent(ctx, cache, event) {
-				reconnect = true
-			}
+			p.commitEventTopology(ctx, snapshot, p.state.RevisionCounter())
 		}
 		p.eventsActive.Store(false)
 		_ = stream.Close()
@@ -321,19 +307,6 @@ func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
 			return
 		}
 	}
-}
-
-func (p *Poller) applyTopologyEvent(ctx context.Context, cache *herdr.SessionCache, event herdr.Event) bool {
-	changed, err := cache.Apply(event)
-	if err != nil {
-		p.logger.Warn("Herdr topology event decode failed", "event", event.Event, "error", err)
-		return false
-	}
-	if !changed {
-		return true
-	}
-	p.commitEventTopology(ctx, cache.Snapshot(), p.state.RevisionCounter())
-	return true
 }
 
 func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.TopologySnapshot, baseRevision int64) {
