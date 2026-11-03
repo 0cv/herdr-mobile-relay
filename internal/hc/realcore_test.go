@@ -194,6 +194,55 @@ func TestRealCore(t *testing.T) {
 			return strings.Contains(string(read.Content), "hc-relay-mark") && !read.Truncated
 		})
 	})
+	t.Run("scrollback", func(t *testing.T) {
+		shell := start([]string{"/bin/sh"})
+		if err := client.Prompt(ctx, shell, `i=1; while [ "$i" -le 300 ]; do printf 'history-row-%03d\n' "$i"; i=$((i+1)); done`); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, func() bool {
+			read, err := client.ReadPaneVisible(ctx, shell, 200, "text")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.Contains(string(read.Content), "history-row-300")
+		})
+		observe := func(label, terminal string) {
+			for _, lines := range []int{0, 80, 400} {
+				raw, err := client.terminalCall(ctx, "terminal.read", terminal, map[string]any{"lines": lines})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var result struct {
+					Text     string
+					Complete bool
+					How      string
+					Why      string
+				}
+				if err := json.Unmarshal(raw, &result); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("%s lines=%d: how=%q complete=%v why=%q rows=%d early-history=%v", label, lines, result.How, result.Complete, result.Why, strings.Count(result.Text, "\n"), strings.Contains(result.Text, "history-row-001"))
+			}
+		}
+		observe("shell", shell)
+		recent, err := client.ReadPaneRecent(ctx, shell, 400, "ansi")
+		if err != nil || recent.Truncated || !strings.Contains(string(recent.Content), "history-row-001") {
+			t.Fatalf("history = %+v, %v", recent, err)
+		}
+		visible, err := client.ReadPaneVisible(ctx, shell, 400, "ansi")
+		if err != nil || visible.Truncated || strings.Contains(string(visible.Content), "history-row-001") || !strings.Contains(string(visible.Content), "history-row-300") {
+			t.Fatalf("screen = %+v, %v", visible, err)
+		}
+		less := start([]string{"/bin/sh", "-c", "seq 1 300 | less"})
+		wait(t, func() bool {
+			read, err := client.ReadPaneVisible(ctx, less, 200, "text")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.Contains(string(read.Content), "\n2\n")
+		})
+		observe("less", less)
+	})
 	cat := start([]string{"/bin/sh", "-c", "trap '' INT; exec cat"})
 	for _, key := range []string{"Enter", "Escape", "Tab", "Up", "Down", "Left", "Right", "Shift+Tab", "ctrl+c", "f5", "A"} {
 		t.Run("key/"+key, func(t *testing.T) {
