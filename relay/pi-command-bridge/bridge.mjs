@@ -220,6 +220,15 @@ async function resolveLinks(input) {
   return resolved || '/';
 }
 
+export function bridgeIdentity(env) {
+  // HC_SESSION can be exported for CLI use outside a core terminal.
+  const hc = env.HC_TERMINAL_ID || env.HC_TERMINAL_SOCKET;
+  const pane = hc ? env.HC_TERMINAL_ID : env.HERDR_PANE_ID;
+  const socketPath = hc ? env.HC_TERMINAL_SOCKET : env.HERDR_SOCKET_PATH;
+  if (!pane || pane.length > 160 || !socketPath) return null;
+  return { pane, socketPath };
+}
+
 export async function instanceIdentity(socketPath) {
   const path = await resolveLinks(socketPath);
   const stat = await lstat(path, { bigint: true });
@@ -317,11 +326,12 @@ export default function commandBridge(pi) {
   pi.on('resources_discover', () => { discovering = true; });
   pi.on('session_start', async (_event, ctx) => {
     if (ctx.mode !== 'tui' || !process.stdin.isTTY || globalThis[ownerKey]) return;
-    const pane = process.env.HERDR_PANE_ID;
-    const socketPath = process.env.HERDR_SOCKET_PATH;
+    const identity = bridgeIdentity(process.env);
+    if (!identity) return;
+    const { pane, socketPath } = identity;
     const session = ctx.sessionManager.getSessionId();
     const sessionFile = ctx.sessionManager.getSessionFile();
-    if (!pane || pane.length > 160 || !socketPath || !session) return;
+    if (!session) return;
     owner = {};
     globalThis[ownerKey] = owner;
     try {

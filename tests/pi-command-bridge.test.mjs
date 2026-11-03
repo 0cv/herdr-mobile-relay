@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import redactionCases from '../contracts/fixtures/pi_provenance_redaction.json';
-import bridge, { createCatalog, normalizeCommands, startBridge, instanceIdentity } from '../relay/pi-command-bridge/bridge.mjs';
+import bridge, { createCatalog, normalizeCommands, startBridge, instanceIdentity, bridgeIdentity } from '../relay/pi-command-bridge/bridge.mjs';
 import { herdrSocketFixture } from './fixtures/pi-herdr-socket.mjs';
 
 const sourceInfo = { path: '/fixture/extension.ts', source: 'npm:test', scope: 'user', origin: 'package' };
@@ -234,6 +234,67 @@ test('names one instance for a socket reached through symbolic links', async () 
     }
   } finally {
     await new Promise(resolve => server.close(resolve));
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test('selects complete terminal namespaces without mixing or falling back', () => {
+  const herdr = { HERDR_PANE_ID: 'pane', HERDR_SOCKET_PATH: '/herdr.sock' };
+  const hc = { HC_TERMINAL_ID: 't4', HC_TERMINAL_SOCKET: '/core.sock' };
+  const coreIdentity = { pane: 't4', socketPath: '/core.sock' };
+  const tuiIdentity = { pane: 'pane', socketPath: '/herdr.sock' };
+  expect(bridgeIdentity(hc)).toEqual(coreIdentity);
+  expect(bridgeIdentity({ ...herdr, ...hc })).toEqual(coreIdentity);
+  expect(bridgeIdentity({ ...herdr, HC_TERMINAL_ID: 't4' })).toBeNull();
+  expect(bridgeIdentity({ ...herdr, HC_TERMINAL_SOCKET: '/core.sock' })).toBeNull();
+  expect(bridgeIdentity({ ...herdr, ...hc, HC_TERMINAL_ID: '' })).toBeNull();
+  expect(bridgeIdentity({ ...herdr, ...hc, HC_TERMINAL_SOCKET: '' })).toBeNull();
+  expect(bridgeIdentity({ ...herdr, ...hc, HC_TERMINAL_ID: 'x'.repeat(161) })).toBeNull();
+  expect(bridgeIdentity({ ...hc, HC_TERMINAL_ID: 'x'.repeat(160) })?.pane).toHaveLength(160);
+  expect(bridgeIdentity({ ...herdr, HC_SESSION: 'cli', HC_SCOPE: 'scope' })).toEqual(tuiIdentity);
+  expect(bridgeIdentity({ ...herdr, HC_TERMINAL_ID: '', HC_TERMINAL_SOCKET: '' })).toEqual(tuiIdentity);
+  expect(bridgeIdentity(herdr)).toEqual(tuiIdentity);
+});
+
+test('session registration validates the HC socket and never falls back to HERDR', async () => {
+  const herdr = await herdrSocketFixture();
+  const core = await herdrSocketFixture();
+  const fixture = await mkdtemp(join(tmpdir(), 'pi-core-'));
+  const file = join(fixture, 'file');
+  await writeFile(file, '');
+  const keys = ['HC_TERMINAL_ID', 'HC_TERMINAL_SOCKET', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH'];
+  const saved = keys.map(key => process.env[key]);
+  const tty = process.stdin.isTTY;
+  process.stdin.isTTY = true;
+  process.env.HERDR_PANE_ID = 'stale';
+  process.env.HERDR_SOCKET_PATH = herdr.path;
+  const instance = await instanceIdentity(core.path);
+  const directory = `/tmp/herdr-pi-${process.getuid()}-${instance.slice(0, 16)}`;
+  try {
+    for (const socketPath of [join(fixture, 'missing.sock'), file, core.path]) {
+      process.env.HC_TERMINAL_ID = 't4';
+      process.env.HC_TERMINAL_SOCKET = socketPath;
+      const handlers = {};
+      let registered = false;
+      bridge({ on: (event, handler) => { handlers[event] = handler; }, getCommands: () => [] });
+      const ctx = { mode: 'tui', isIdle: () => true,
+        sessionManager: { getSessionId: () => 'session', getSessionFile: () => '/fixture/session.jsonl', getLeafId: () => null, getEntry: () => undefined },
+        ui: { addAutocompleteProvider: () => { registered = true; } } };
+      try {
+        await handlers.session_start({}, ctx);
+        expect(registered).toBe(socketPath === core.path);
+        if (registered) {
+          const response = await query(join(directory, `${process.pid}.sock`), { ...identity, instance, pane: 't4' });
+          expect(response.pane).toBe('t4');
+        }
+      } finally { await handlers.session_shutdown(); }
+    }
+  } finally {
+    process.stdin.isTTY = tty;
+    keys.forEach((key, index) => { if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index]; });
+    await herdr.close();
+    await core.close();
+    await rm(directory, { recursive: true, force: true });
     await rm(fixture, { recursive: true, force: true });
   }
 });
