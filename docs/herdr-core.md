@@ -16,8 +16,10 @@ manage each instance yourself.
   core terminal, so herdr-app shows the phone's layout while a device leases,
   as with Resize Session on the TUI. The desktop can take the size back by
   resizing its window. Releasing the lease restores the previous viewer's size.
-- Pi slash commands and activity when Pi runs in a core terminal with the Pi
-  bridge installed. The TUI relay owns the shared Pi extension.
+- Pi slash commands, activity, and the Conversation view (history and live)
+  when Pi runs in a core terminal with the Pi bridge installed. Pi's session is
+  learned from its bridge, so it needs the bridge from this release. The TUI
+  relay owns the shared Pi extension.
 
 The phone hides actions that core does not support: starting, clearing or
 restarting agents; renaming; tab, workspace and worktree management; manual and
