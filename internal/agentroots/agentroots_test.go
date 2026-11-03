@@ -18,9 +18,23 @@ func clearAllEnv(t *testing.T) {
 		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME",
 		"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "XDG_DATA_HOME",
 		ClaudeListEnv, QoderListEnv, CodexListEnv, PiListEnv, OMPListEnv, OMOListEnv, OpenCodeListEnv,
-		HermesListEnv, CursorListEnv,
+		HermesListEnv, CursorListEnv, GrokListEnv, "GROK_HOME",
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestGrokRoots(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	if got := Grok(home); !slices.Equal(got, []string{filepath.Join(home, ".grok", "sessions")}) {
+		t.Fatalf("default roots = %v", got)
+	}
+	t.Setenv(GrokListEnv, "/g1:/g2")
+	t.Setenv("GROK_HOME", "/grok-home")
+	want := []string{"/g1/sessions", "/g2/sessions", "/grok-home/sessions", filepath.Join(home, ".grok", "sessions")}
+	if got := Grok(home); !slices.Equal(got, want) {
+		t.Fatalf("roots = %v, want %v", got, want)
 	}
 }
 

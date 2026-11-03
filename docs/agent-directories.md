@@ -94,8 +94,16 @@ Every other case needs to be named explicitly:
 | `HERDR_OPENCODE_DATA_DIRS` | `${XDG_DATA_HOME:-~/.local/share}/opencode` | none |
 | `HERDR_KIMI_CODE_HOME_DIRS` | `~/.kimi-code` | `KIMI_CODE_HOME` |
 | `HERDR_HERMES_DATA_DIRS` | `~/.hermes` | `HERMES_HOME` |
+| `HERDR_GROK_CONFIG_DIRS` | `~/.grok` | `GROK_HOME` |
 | `HERDR_AGY_DATA_DIRS` | `~/.gemini/antigravity-cli` (reads `conversations/<id>.db`) | none |
 | `HERDR_OMO_CONFIG_DIRS` | `~/.senpi/agent` plus supported `~/.omo` layouts | `OMO_CODING_AGENT_DIR`, `SENPI_CODING_AGENT_DIR`, `PI_CODING_AGENT_DIR` |
+
+Grok entries are config directories containing `sessions`, not the sessions
+leaf itself. The reader uses `sessions/<encoded cwd>/<session id>/updates.jsonl`
+and `summary.json` for titles; it does not fall back to `chat_history.jsonl`.
+With a known workspace, lookup stays within that workspace's encoded directory
+(including its resolved filesystem path). Historical lookups without a workspace
+can search project directories by session ID.
 
 Kimi entries are home directories containing `sessions`, not the sessions
 leaf itself. The reader uses `sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl`

@@ -20,7 +20,11 @@ func TestResolveCwdReturnsCanonicalSymlinkTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved != target {
-		t.Fatalf("resolved cwd = %q, want %q", resolved, target)
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != canonicalTarget {
+		t.Fatalf("resolved cwd = %q, want %q", resolved, canonicalTarget)
 	}
 }

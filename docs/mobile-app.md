@@ -413,8 +413,8 @@ of the available source have separate status messages. Search filters loaded
 content only. Older browsing keeps a fixed chain snapshot and continues across
 large parent files through the local index; a missing, invalid, ambiguous,
 cyclic, or bounded-out continuation remains readable and displays an
-incomplete-history warning. Reads are confined to known session directories and
-the newest 16 MiB of very large logs. When that bound omits older turns, they
+incomplete-history warning. Reads are confined to known session directories;
+the generic JSONL recent reader uses the newest 16 MiB of very large logs. When that bound omits older turns, they
 remain in the harness log on the computer. Preparation reports progress and
 never blocks the relay's live terminal paths. Snapshot pages remain stable while
 new turns are written, and storage, source-change, corruption, oversized-record,
@@ -433,6 +433,29 @@ unknown structural records and incomplete branch trees are unavailable, with
 Terminal as the fallback. Session selection, privacy and replay bounds are
 [documented separately](conversation-activity.md#kimi-code-recorded-history).
 
+### Grok recorded history
+
+Grok reads only `updates.jsonl`, retaining turns from before `/compact`.
+User and assistant text and tool activity are shown; thoughts, hooks, images
+and other server events are hidden. Titles prefer `generated_title` over
+`session_summary` in the adjacent `summary.json`.
+
+Every request parses the whole log, so cost grows with session length; there is
+no Grok projection cache. Records over 16 MiB are skipped and counted separately.
+A valid rewind removes its target turn and all later turns. Invalid targets are
+ignored and reported as corruption. Rewinds change the source revision, so the
+existing source-change notice and reload action prevent stale pages being merged;
+this support adds no automatic rewind reload.
+
+Browser cursors authenticate the captured file prefix as well as its identity
+and last rewind marker. Appends keep pagination usable; replacement, truncation
+or rewriting that prefix rejects old cursors. The older Reader API uses bare
+entry offsets, not authenticated browser cursors. A cursorless read always
+reparses current content, but an in-place rewrite without a new rewind marker
+keeps the same source revision: changed recent entries are detected by the
+recorded feed, while already loaded older entries can remain stale until paging
+or reloading. This is a bounded limitation, not a reproduced normal CLI rewrite.
+
 ### Conversation activity updates
 
 The updated optional integration supports stock Pi 1.3.0 public events and
@@ -448,6 +471,7 @@ token streams.
 | Pi without the integration; Claude Code; Codex; Cursor Agent; Qoder; Oh My Pi | Recorded JSONL changes checked every 250 ms |
 | OpenCode 1.x/2.x SQLite, including mixed stores; Hermes | Main/WAL changes checked every 250 ms; persisted new/edited messages and tool states |
 | Oh My OpenCode | Session JSONL checked every 250 ms; validated plan changes refresh the snapshot |
+| Grok | Recorded update log checked every 250 ms; changed logs are replayed in full |
 | Kimi Code native 1.5 / legacy-engine 1.4 | Main journal checked every 250 ms; validated undo branches reset history; recorded complete responses, not tokens |
 
 The recorded feed includes reader aliases such as `cursoragent`, `qodercli` and

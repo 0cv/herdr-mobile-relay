@@ -62,6 +62,7 @@ const (
 	AgyListEnv      = "HERDR_AGY_DATA_DIRS"
 	CursorListEnv   = "HERDR_CURSOR_PROJECTS_DIRS"
 	KimiCodeListEnv = "HERDR_KIMI_CODE_HOME_DIRS"
+	GrokListEnv     = "HERDR_GROK_CONFIG_DIRS"
 )
 
 // Claude reports the transcript roots for Claude Code, honouring
@@ -79,6 +80,10 @@ func Qoder(home string) []string {
 // Codex reports the rollout roots for OpenAI Codex.
 func Codex(home string) []string {
 	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "sessions")
+}
+
+func Grok(home string) []string {
+	return resolve(home, GrokListEnv, "GROK_HOME", filepath.Join(home, ".grok"), "sessions")
 }
 
 // CodexHomes reports the Codex config directories themselves, for consumers

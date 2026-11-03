@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Read native Grok conversations, including tool results and turns from before
+  compaction. Session titles use the generated title, then the session summary;
+  rewinds remove discarded turns and mark older history cursors as changed.
+
 ## [0.24.0] - 2026-11-02
 
 ### Added
