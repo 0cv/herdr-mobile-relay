@@ -14,7 +14,7 @@ func TestSocketFixtureDirectoryUsesSelectedTempAndCleanup(t *testing.T) {
 	var directory string
 	t.Run(strings.Repeat("long-test-name-", 8), func(t *testing.T) {
 		directory = testSocketDir(t)
-		if filepath.Dir(directory) != os.TempDir() {
+		if filepath.Dir(directory) != filepath.Clean(os.TempDir()) {
 			t.Fatalf("socket directory %q is outside the selected temporary directory", directory)
 		}
 		info, err := os.Lstat(directory)

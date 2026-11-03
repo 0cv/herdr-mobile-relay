@@ -172,6 +172,48 @@ check does not replace the real Android Home Screen or iOS Home Screen runs;
 macOS/Xcode is required for iOS, and each destructive device action requires a
 run-owned disposable emulator or simulator marker.
 
+## Grok history fixtures
+
+The Grok fixture builder and regression scenarios contain synthetic content.
+`internal/conversation/testdata/grok/rewind_updates.jsonl` is retained unchanged
+from PR #49 commit `414a5c5306cf2d0f1bd4285ac46cec96266f390e`. That commit
+attributes it to a reduced CLI 1.0.41 capture (ONE/TWO/THREE, rewind, FOUR).
+The original capture is unavailable here; retaining that attribution is not an
+independent live-provenance verification or a current-CLI compatibility claim.
+
+Read-only string inspection of the installed Grok executable during adaptation
+found `SessionUpdate::ImageCompressed`, `rewind_marker`, `target_prompt_index`,
+`SearchReplaceOutput`, `SearchReplaceEditsApplied` and `tool_output_for_prompt`.
+These corroborate protocol names, not complete serialization or replay rules.
+The retained fixture supplies ordinary `session/update` messages and extension
+`_x.ai/session/update` completion/rewind records. Synthetic hook/compression
+records use the extension family; compression precedes the user image/text
+chunks rather than splitting them. Edit fixtures exercise
+`SearchReplace.EditsApplied.tool_output_for_prompt`, not raw file content.
+
+The deterministic suite does not launch Grok or access existing conversations.
+Run `go test ./internal/conversation -run Grok -count=1 -v` for local replay,
+containment, pagination and full-file parsing scenarios; the live test is opt-in.
+
+`TestGrokCLIIntegration` passed with installed CLI 1.0.70 on 2026-11-03,
+confirming the earlier disposable exchange/edit observation. It creates fresh
+sessions, a temporary working directory and isolated mutable state, using the
+owner-authorized native login (including normal token refresh) without copying
+credentials or resuming existing conversations. It verifies production lookup
+and parsing of generated `updates.jsonl`, a user/assistant exchange, an exact
+edit to a disposable file and projection of the actual
+`SearchReplace.EditsApplied.tool_output_for_prompt` result. Observed method
+families were `session/update` for user/assistant chunks and tool calls/updates,
+and `_x.ai/session/update` for completion. Image/compression, hooks, rewind and
+interjection behavior were not live-qualified; their fixture/source coverage
+must not be mistaken for current CLI experiments.
+
+With authorization to use native authentication, reproduce with
+`HERDR_GROK_INTEGRATION=1 go test ./internal/conversation -run '^TestGrokCLIIntegration$' -count=1 -v -timeout 5m`.
+When enabled, missing CLI capabilities, failed exchanges or missing expected
+records fail the test rather than skip it. This live check does not replace the
+broad Go/frontend gates or independent cumulative review.
+
 ## Herdr compatibility checks
 
 The relay's minimum supported Herdr client is 0.7.5; 0.9.0 is the recommended

@@ -41,7 +41,10 @@ type piFixture struct {
 func newPiFixture(t *testing.T) piFixture {
 	t.Helper()
 	isolateAgentEnv(t)
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture := piFixture{
 		home: filepath.Join(root, "home"),
 		repo: filepath.Join(root, "repo"),
