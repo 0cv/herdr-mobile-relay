@@ -46,36 +46,40 @@ func fakeCore(t *testing.T, generation int, respond func(net.Conn, fakeRequest))
 	t.Cleanup(func() { listener.Close(); <-done })
 	go func() {
 		defer close(done)
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
-		reader := bufio.NewReader(conn)
-		for i := 0; i < 2; i++ {
-			line, err := reader.ReadBytes('\n')
+		for {
+			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			var req fakeRequest
-			if err := json.Unmarshal(line, &req); err != nil {
-				t.Error(err)
-				return
-			}
-			if req.JSONRPC != "2.0" {
-				t.Errorf("jsonrpc = %q", req.JSONRPC)
-				return
-			}
-			if i == 0 {
-				if req.Method != "hello" || len(req.Params) != 1 || req.Params["generation"] != float64(1) {
-					t.Errorf("hello = %+v", req)
-					return
+			func() {
+				defer conn.Close()
+				conn.SetDeadline(time.Now().Add(5 * time.Second))
+				reader := bufio.NewReader(conn)
+				for i := 0; i < 2; i++ {
+					line, err := reader.ReadBytes('\n')
+					if err != nil {
+						return
+					}
+					var req fakeRequest
+					if err := json.Unmarshal(line, &req); err != nil {
+						t.Error(err)
+						return
+					}
+					if req.JSONRPC != "2.0" {
+						t.Errorf("jsonrpc = %q", req.JSONRPC)
+						return
+					}
+					if i == 0 {
+						if req.Method != "hello" || len(req.Params) != 1 || req.Params["generation"] != float64(1) {
+							t.Errorf("hello = %+v", req)
+							return
+						}
+						reply(conn, req.ID, "result", map[string]any{"generation": generation, "version": "0.1.17", "core": map[string]any{}, "framed": false, "methods": []string{}, "features": []string{}})
+					} else {
+						respond(conn, req)
+					}
 				}
-				reply(conn, req.ID, "result", map[string]any{"generation": generation, "version": "0.1.17", "core": map[string]any{}, "framed": false, "methods": []string{}, "features": []string{}})
-			} else {
-				respond(conn, req)
-			}
+			}()
 		}
 	}()
 	return path

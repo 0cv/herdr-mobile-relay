@@ -65,7 +65,7 @@ func Revise(catalog Catalog) Catalog {
 func IsPi(profile, agent string) bool {
 	provider := resolveProvider(profile)
 	if provider == nil {
-		provider = resolveProvider(profileIDForAgentName(agent))
+		provider = resolveProvider(ProfileIDForAgentName(agent))
 	}
 	return provider != nil && provider.ID() == "pi"
 }
@@ -93,12 +93,12 @@ func MergePiRuntime(entries []RuntimeCommand, status string, truncated bool) Cat
 	return Revise(Catalog{Commands: commands, Metadata: metadata, Status: status, Truncated: truncated})
 }
 
-// profileIDForAgentName maps an agent name as herdr reports it onto a provider
+// ProfileIDForAgentName maps an agent name as herdr reports it onto a provider
 // profile ID. Both entrypoints resolve through this one table on purpose: while
 // they carried separate switches the two drifted, and a kimi or opencode pane
 // whose binary was missing from the relay's PATH fell through to the generic
 // path and got an empty palette - not even builtins.
-func profileIDForAgentName(agent string) string {
+func ProfileIDForAgentName(agent string) string {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "claude", "claude-code", "claude code":
 		return "claude"
@@ -125,7 +125,7 @@ func profileIDForAgentName(agent string) string {
 }
 
 func CatalogFor(agent, cwd, home string) Catalog {
-	return CatalogForProfile(profileIDForAgentName(agent), agent, cwd, home, nil, "", "", "")
+	return CatalogForProfile(ProfileIDForAgentName(agent), agent, cwd, home, nil, "", "", "")
 }
 
 func CatalogForProfile(
@@ -161,7 +161,7 @@ func CatalogForProfileWithSuppression(
 
 	p := resolveProvider(profileID)
 	if p == nil && reportedAgent != "" {
-		p = resolveProvider(profileIDForAgentName(reportedAgent))
+		p = resolveProvider(ProfileIDForAgentName(reportedAgent))
 	}
 
 	if p != nil {

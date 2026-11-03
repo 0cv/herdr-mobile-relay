@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
@@ -15,10 +16,14 @@ import (
 
 type Client struct {
 	socketPath string
+	mu         sync.Mutex
+	epochs     map[string]uint64
+	epochFloor uint64
+	revisions  map[string]int
 }
 
 func New(socketPath string) *Client {
-	return &Client{socketPath: socketPath}
+	return &Client{socketPath: socketPath, epochs: make(map[string]uint64), revisions: make(map[string]int)}
 }
 
 func (c *Client) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
