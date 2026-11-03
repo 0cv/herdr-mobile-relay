@@ -409,7 +409,7 @@ func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text 
 	if err := ctx.Err(); err != nil {
 		return errors.Join(herdr.ErrNotStarted, err)
 	}
-	if !requiresEnter {
+	if !requiresEnter || !d.herdr.CapabilityStatus().Supports(herdr.FeatureManualTerminalInput) {
 		return d.herdr.Prompt(ctx, token.PaneID, text)
 	}
 	if err := d.herdr.SendText(ctx, token.PaneID, text); err != nil {

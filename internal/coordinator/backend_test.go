@@ -54,6 +54,18 @@ func (b *recordingBackend) SendText(context.Context, string, string) error {
 	return nil
 }
 
+func TestBackendPromptSubmitsWithoutManualInput(t *testing.T) {
+	client := &recordingBackend{}
+	dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
+	defer dispatcher.Close(context.Background())
+	if err := dispatcher.deliverPrompt(context.Background(), WorkerToken{PaneID: "pane-1", AllowAbsent: true}, "answer", true); err != nil {
+		t.Fatal(err)
+	}
+	if client.prompts.Load() != 1 || client.texts.Load() != 0 || client.keys.Load() != 0 {
+		t.Fatalf("calls: prompt=%d text=%d keys=%d", client.prompts.Load(), client.texts.Load(), client.keys.Load())
+	}
+}
+
 func TestBackendRefusesQuestionTextBeforeSendingInput(t *testing.T) {
 	client := &recordingBackend{}
 	dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
