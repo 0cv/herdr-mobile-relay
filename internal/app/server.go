@@ -76,13 +76,20 @@ type speechRequest struct {
 	cancel    context.CancelFunc
 }
 
+type piSessionIdentity struct {
+	pid     int
+	session string
+}
+
 type Server struct {
-	cfg      *config.Config
-	version  string
-	revision string
-	hostname string
-	home     string
-	logger   *slog.Logger
+	piSessionsMu sync.Mutex
+	piSessions   map[string]piSessionIdentity
+	cfg          *config.Config
+	version      string
+	revision     string
+	hostname     string
+	home         string
+	logger       *slog.Logger
 
 	state          *coordinator.State
 	hub            *transport.Hub
@@ -1296,6 +1303,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.setInventoryPublisher(ctx)
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
+		s.enrichPiSessions(ctx, agents)
 		s.enrichKimiSessions(ctx, agents)
 		for _, a := range agents {
 			s.resolveAgentSessionName(a)

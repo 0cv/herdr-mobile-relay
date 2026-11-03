@@ -12,8 +12,10 @@ manage each instance yourself.
 - Prompts, including while an agent is waiting for an answer.
 - Key presses and structured question answers that need no typed text.
 - Stop an agent.
-- Pi slash commands and activity when Pi runs in a core terminal with the Pi
-  bridge installed. The TUI relay owns the shared Pi extension.
+- Pi slash commands, activity, and the Conversation view (history and live)
+  when Pi runs in a core terminal with the Pi bridge installed. Pi's session is
+  learned from its bridge, so it needs the bridge from this release. The TUI
+  relay owns the shared Pi extension.
 
 The phone hides actions that core does not support: starting, clearing or
 restarting agents; renaming; tab, workspace and worktree management; manual and
