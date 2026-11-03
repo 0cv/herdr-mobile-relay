@@ -210,10 +210,14 @@ backend; `HC_SOCKET_PATH` overrides its session socket. See
 
 ## Isolated core integration test
 
-Run `HERDR_RELAY_HC_INTEGRATION=1 go test -v ./internal/hc -run '^TestRealCore$'`
-with `hc` on PATH. The test starts and stops its own core in a temporary directory,
-with a separate session and configuration. It never touches the default core.
-Without the environment variable or `hc`, this test skips.
+Run `HERDR_RELAY_HC_INTEGRATION=1 go test -v ./internal/hc ./internal/app -run '^TestRealCore'`
+with `hc` on PATH. The tests start and stop their own core in a temporary directory,
+with a separate session and configuration. They never touch the default core.
+With `pi` on PATH, the run also checks Pi discovery inside a shell and as the
+terminal program, using an isolated Pi configuration. Prompts and activity still
+need a manual check before release; these tests do not start a model turn.
+Without the environment variable or `hc`, these tests skip; Pi discovery also
+skips without `pi`.
 
 ## Phone-side crash diagnostics
 
