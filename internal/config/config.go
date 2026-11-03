@@ -24,6 +24,7 @@ const (
 )
 
 type Config struct {
+	Backend        string
 	Host           string
 	Port           int
 	PluginPort     int
@@ -67,6 +68,7 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
+		Backend:      envOr("HERDR_RELAY_BACKEND", "herdr"),
 		Host:         envOr("HERDR_RELAY_HOST", "127.0.0.1"),
 		Port:         envIntOr("HERDR_RELAY_PORT", 8375),
 		PluginPort:   envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
@@ -126,6 +128,20 @@ func Load() (*Config, error) {
 
 	cfg.RuntimeDir = resolveRuntimeDir(cfg.ConfigHome)
 	cfg.CacheDir = filepath.Join(cacheHome, "herdr-mobile-relay")
+	if cfg.Backend == "hc" {
+		session := envOr("HC_SESSION", "default")
+		stateHome := envOr("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
+		// A TUI pane may leave HERDR_SOCKET_PATH pointing at its own backend.
+		cfg.SocketPath = envOr("HC_SOCKET_PATH", filepath.Join(stateHome, "herdr-core", session, session+".sock"))
+		cfg.Port = envIntOr("HERDR_RELAY_PORT", 8377)
+		cfg.PluginPort = envIntOr("HERDR_RELAY_PLUGIN_PORT", 8378)
+		cfg.ServiceName = envOr("HERDR_RELAY_SERVICE_NAME", strings.TrimSuffix(defaultServiceName(), ".service")+"-hc.service")
+		cfg.RuntimeDir = filepath.Join(cfg.ConfigHome, "herdr-mobile-relay-hc")
+		if env := os.Getenv("HERDR_RELAY_ENV"); env != "" {
+			cfg.RuntimeDir = filepath.Dir(env)
+		}
+		cfg.CacheDir = filepath.Join(cacheHome, "herdr-mobile-relay-hc")
+	}
 
 	if cfg.WebRoot == "" {
 		cfg.WebRoot = defaultWebRoot()
@@ -147,6 +163,9 @@ func (c *Config) Addr() string {
 }
 
 func (c *Config) validate() error {
+	if c.Backend != "herdr" && c.Backend != "hc" {
+		return fmt.Errorf("invalid HERDR_RELAY_BACKEND %q: want herdr or hc", c.Backend)
+	}
 	if c.Token == "" && c.Host != "127.0.0.1" && c.Host != "::1" && c.Host != "localhost" {
 		return fmt.Errorf("refusing to bind tokenless relay to non-loopback address %s", c.Host)
 	}

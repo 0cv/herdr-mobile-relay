@@ -19,7 +19,7 @@ func (s *Server) recordPiIntegrationFailures(state piintegration.State) {
 }
 
 func (s *Server) refreshPiIntegration() {
-	if s.piIntegration == nil {
+	if s.cfg.Backend == "hc" || s.piIntegration == nil {
 		return
 	}
 	s.recordPiIntegrationFailures(s.piIntegration.Refresh())
@@ -54,6 +54,10 @@ func (s *Server) handlePiIntegration(ctx context.Context, client *transport.Clie
 			return
 		}
 		s.sendCommandResult(client, inbound.RequestID, inbound.Type, ok, phase, problem, "", data)
+	}
+	if changing && s.cfg.Backend == "hc" {
+		respond(false, "Pi integration is managed by the TUI relay, not the hc backend", nil)
+		return
 	}
 	if s.piIntegration == nil || herdr.CheckDispatch(ctx) != nil {
 		respond(false, "Pi integration is unavailable", nil)

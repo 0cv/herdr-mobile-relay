@@ -142,3 +142,9 @@ changes, the full action list, teardown, and uninstall.
 - **Need relay log filtering:** see [Cloudflare tunnel logging](docs/cloudflare-tunnel.md#relay-logging).
 
 [README.md](README.md) indexes the rest of the documentation.
+
+## Add herdr-core
+
+To reach agents in herdr-app as well as the TUI, follow the
+[manual second-instance setup](docs/herdr-core.md). It covers separate services,
+pairing, and which actions are available on core.

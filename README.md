@@ -151,6 +151,7 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 | [QUICKSTART.md](QUICKSTART.md) | The fast path, start to paired phone |
 | [docs/mobile-app.md](docs/mobile-app.md) | Every feature: agent list, terminal, devices, speech, notifications |
 | [docs/transports.md](docs/transports.md) | Cloudflare, Tailscale, gateways, direct WebRTC |
+| [docs/herdr-core.md](docs/herdr-core.md) | A second relay for herdr-core (herdr-app) beside the TUI relay |
 | [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
 | [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |
 | [docs/agent-directories.md](docs/agent-directories.md) | Agents that use a non-default config or profile directory |
