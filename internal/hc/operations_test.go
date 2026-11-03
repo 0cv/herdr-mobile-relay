@@ -3,6 +3,7 @@ package hc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"net"
 	"reflect"
@@ -12,32 +13,49 @@ import (
 	"time"
 )
 
-func TestScreenReads(t *testing.T) {
+func TestPaneReads(t *testing.T) {
 	for _, complete := range []bool{true, false} {
-		screen := strings.Repeat("screen row\n", 120)
-		c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) {
-			if req.Method != "terminal.read" || !reflect.DeepEqual(req.Params, map[string]any{"terminal": "term", "lines": float64(0)}) {
-				t.Errorf("request = %+v", req)
+		for _, lines := range []int{-1, 0, 80, 200, 10000, 10001} {
+			for _, method := range []string{"read", "recent", "visible", "probe"} {
+				t.Run(fmt.Sprintf("%s/%d/complete=%v", method, lines, complete), func(t *testing.T) {
+					screen := strings.Repeat("screen row\n", 120)
+					wantLines := min(max(lines, 0), 10000)
+					if method == "visible" || method == "probe" {
+						wantLines = 0
+					}
+					c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) {
+						if req.Method != "terminal.read" || !reflect.DeepEqual(req.Params, map[string]any{"terminal": "term", "lines": float64(wantLines)}) {
+							t.Errorf("request = %+v", req)
+						}
+						reply(conn, req.ID, "result", map[string]any{"text": screen, "complete": complete, "how": "screen", "why": ""})
+					}))
+					read := c.ReadPane
+					switch method {
+					case "recent":
+						read = c.ReadPaneRecent
+					case "visible":
+						read = c.ReadPaneVisible
+					case "probe":
+						got, err := c.ProbePaneVisible(t.Context(), "term", lines, "text")
+						if err != nil || string(got) != screen {
+							t.Fatalf("probe = %q, %v", got, err)
+						}
+						_, err = c.ProbePaneVisible(t.Context(), "remote/term", lines, "text")
+						if !herdr.IsPaneNotFound(err) {
+							t.Fatal(err)
+						}
+						return
+					}
+					got, err := read(t.Context(), "term", lines, "ansi")
+					if err != nil || string(got.Content) != screen || got.Truncated != !complete {
+						t.Fatalf("read = %+v, %v", got, err)
+					}
+					_, err = read(t.Context(), "remote/term", lines, "text")
+					if !herdr.IsPaneNotFound(err) {
+						t.Fatalf("remote read = %v", err)
+					}
+				})
 			}
-			reply(conn, req.ID, "result", map[string]any{"text": screen, "complete": complete, "how": "screen", "why": ""})
-		}))
-		for _, read := range []func(context.Context, string, int, string) (herdr.PaneRead, error){c.ReadPane, c.ReadPaneRecent, c.ReadPaneVisible} {
-			got, err := read(t.Context(), "term", 200, "ansi")
-			if err != nil || string(got.Content) != screen || got.Truncated != !complete {
-				t.Fatalf("read = %+v, %v", got, err)
-			}
-			_, err = read(t.Context(), "remote/term", 200, "text")
-			if !herdr.IsPaneNotFound(err) {
-				t.Fatalf("remote read = %v", err)
-			}
-		}
-		got, err := c.ProbePaneVisible(t.Context(), "term", 200, "text")
-		if err != nil || string(got) != screen {
-			t.Fatalf("probe = %q, %v", got, err)
-		}
-		_, err = c.ProbePaneVisible(t.Context(), "remote/term", 200, "text")
-		if !herdr.IsPaneNotFound(err) {
-			t.Fatal(err)
 		}
 	}
 }
