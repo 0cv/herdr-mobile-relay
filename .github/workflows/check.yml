@@ -82,7 +82,7 @@ jobs:
 
   frontend:
     name: Frontend and mobile browsers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,7 +112,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+          key: playwright-ubuntu-24.04-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
       # The Ubuntu mirror has taken from 30 s to more than 44 min to serve the
       # WebKit system packages, so the downloaded packages are cached as well.
       # They are saved right after the install, even if a later check fails.
@@ -120,7 +120,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/playwright-apt
-          key: playwright-apt-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+          key: playwright-apt-ubuntu-24.04-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
       - name: Keep browser system packages for the cache
         run: |
           set -euo pipefail
