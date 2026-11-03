@@ -202,6 +202,13 @@ Use the fake Herdr binary or a temporary Unix socket fixture for tests. Do not
 run production Herdr commands or mutate production state while checking these
 paths.
 
+## Isolated core integration test
+
+Run `HERDR_RELAY_HC_INTEGRATION=1 go test -v ./internal/hc -run '^TestRealCore$'`
+with `hc` on PATH. The test starts and stops its own core in a temporary directory,
+with a separate session and configuration. It never touches the default core.
+Without the environment variable or `hc`, this test skips.
+
 ## Phone-side crash diagnostics
 
 The production frontend installs raw DOM handlers before Svelte mounts. An
