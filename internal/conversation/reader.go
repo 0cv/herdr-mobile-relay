@@ -150,6 +150,8 @@ func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 
 func (r *Reader) cursorRoots() []string { return agentroots.Cursor(r.home) }
 
+func (r *Reader) grokRoots() []string { return agentroots.Grok(r.home) }
+
 func Supported(agent string) bool {
 	return RecordedSupported(agent)
 }
@@ -159,7 +161,7 @@ func RecordedSupported(agent string) bool {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
 		"pi", "picodingagent", "omp", "ohmypi", "cursor", "cursoragent",
 		"opencode", "hermes", "hermesagent", "omo", "ohmyopencode", "kimi", "kimicode",
-		"agy", "antigravity", "antigravitycli":
+		"agy", "antigravity", "antigravitycli", "grok":
 		return true
 	default:
 		return false
@@ -213,6 +215,9 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 	}
 	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
 		return r.readOMO(project.CWD, sessionID, before, limit)
+	}
+	if normalizedAgent(agent) == "grok" {
+		return r.readGrokFor(project, sessionID, before, limit)
 	}
 	if !Supported(agent) {
 		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
@@ -377,6 +382,11 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		return location
 	case "cursor", "cursoragent":
 		return findCursorSession(r.cursorRoots(), project, sessionID)
+	case "grok":
+		if !safeSessionID(sessionID) {
+			return Location{}
+		}
+		return findGrokSession(r.grokRoots(), project, sessionID)
 	default:
 		return Location{}
 	}
