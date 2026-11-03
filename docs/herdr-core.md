@@ -23,6 +23,18 @@ secret text input; answers requiring typed text; pane size leasing; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 
+## How the core relay learns agent sessions
+
+The `herdr-mobile-relay agent-session claude|codex` hook command reads a
+SessionStart payload and reports its `session_id` through terminal labels:
+`herdr-mobile-relay.session` and `herdr-mobile-relay.pid`, written together.
+It uses only `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, and accepts the
+foreground pid only when it is an ancestor of the hook. The relay uses the
+session only while that pid remains the terminal's foreground pid, ignoring
+stale labels. Pi still discovers sessions through its bridge when no label
+session applies. Hook installation is a later task; this change does not
+install hooks or modify agent configurations.
+
 ## Configuration and isolation
 
 Core passes the environment of whoever started it to every terminal it runs.
