@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
@@ -276,7 +275,7 @@ func TestProductionInventoryOutcomesAtPublicationBarriers(t *testing.T) {
 							go func() {
 								defer close(recoveryDone)
 								server.poller.SetEventReconnectWait(func(context.Context) bool { return false })
-								server.poller.RunEvents(ctx, herdr.NewEventClient(server.cfg.SocketPath))
+								server.poller.RunEvents(ctx)
 							}()
 						}
 					}

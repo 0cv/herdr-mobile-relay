@@ -54,7 +54,7 @@ function launchConnection(agentProfiles: AgentProfile[], hermesProfiles: string[
   return {
     status: 'connected',
     inventory: { state: 'ready' },
-    capabilities: ['directory_browser'],
+    capabilities: ['tab_rename', 'agent_launch', 'directory_browser'],
     agentProfiles,
     hermesProfiles,
   } as unknown as RelayConnectionView;
@@ -1436,7 +1436,7 @@ describe('accessible Svelte interactions', () => {
       { id: 'slow', label: 'Slow', url: 'wss://slow', token: '' },
     ]);
     const ready = {
-      status: 'connected', inventory: { state: 'ready' }, capabilities: [], agentProfiles: [],
+      status: 'connected', inventory: { state: 'ready' }, capabilities: ['agent_launch'], agentProfiles: [],
     } as unknown as RelayConnectionView;
     relayStore.connections.set(new Map([['fast', ready as never]]));
     try {
@@ -1462,7 +1462,7 @@ describe('accessible Svelte interactions', () => {
   ])('offers Start Agent only for a project folder: %s', async (_case, cwd, shown, load, refused) => {
     const hint = 'Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.';
     const connection = {
-      status: 'connected', inventory: { state: 'ready' }, capabilities: ['directory_browser'],
+      status: 'connected', inventory: { state: 'ready' }, capabilities: ['directory_browser', 'agent_launch'],
       agentProfiles: [{ id: 'claude', label: 'Claude Code' }],
       directoryBrowser: shown, directoryLoading: false, directoryError: '',
     } as unknown as RelayConnectionView;

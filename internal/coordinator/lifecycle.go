@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
@@ -59,13 +60,13 @@ type StartResult struct {
 
 type Lifecycle struct {
 	state        *State
-	herdr        *herdr.Client
+	herdr        backend.Backend
 	profiles     *profiles.Resolver
 	home         string
 	waitForRetry func(context.Context, time.Duration) bool
 }
 
-func NewLifecycle(client *herdr.Client, resolver *profiles.Resolver) *Lifecycle {
+func NewLifecycle(client backend.Backend, resolver *profiles.Resolver) *Lifecycle {
 	home, _ := os.UserHomeDir()
 	return &Lifecycle{herdr: client, profiles: resolver, home: home}
 }

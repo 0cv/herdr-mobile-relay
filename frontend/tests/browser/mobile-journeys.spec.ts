@@ -583,13 +583,31 @@ async function handshake(page: Page, index: number, overrides: Record<string, un
   await server(page, index, {
     type: 'push_config', protocol: 3, version: 'abc1234', host: index ? 'mac' : 'fedora',
     home: '/home/test',
-    capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'self_update', 'structured_questions', 'slash_commands'],
+    capabilities: ['tab_rename', 'agent_launch', 'attention_classification', 'clear_activities', 'directory_browser', 'self_update', 'structured_questions', 'slash_commands'],
     agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
     ...overrides,
   });
 }
 
 const fedora = { id: 'fedora', label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' };
+
+test('hides backend-dependent launch and tab controls', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: [] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p2', status: 'working', project: 'relay', agent: 'codex' }],
+  });
+  await expect(page.getByRole('button', { name: 'Start agent', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Open relay on Fedora', exact: true }).click();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Manage Agent' });
+  await expect(dialog.getByRole('button', { name: 'Rename Tab' })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: /Clear|Restart/ })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Stop Agent' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Rename Session' })).toBeVisible();
+});
 
 test('guides an unpairable relay without ever dialing it', async ({ page }) => {
   // A relay key that is not a usable relay key, with no enrolled credential:
@@ -610,7 +628,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'directory_browser', 'workspace_management', 'workspace_reorder_block', 'worktree_management'],
+    capabilities: ['tab_rename', 'agent_launch', 'attention_classification', 'directory_browser', 'workspace_management', 'workspace_reorder_block', 'worktree_management'],
   });
   const parent = {
     workspace_id: 'w1', number: 1, label: 'Project', pane_count: 1, tab_count: 1,
@@ -776,7 +794,7 @@ test('groups working agents and synchronizes tab order in both directions', asyn
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'tab_reorder'],
+    capabilities: ['tab_rename', 'agent_launch', 'attention_classification', 'tab_reorder'],
   });
   const agents = [
     {
@@ -830,7 +848,7 @@ test('groups working agents and synchronizes tab order in both directions', asyn
 test('defaults to the mixed workspace layout and separates state sections on demand', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['attention_classification'] });
+  await handshake(page, 0, { capabilities: ['tab_rename', 'agent_launch', 'attention_classification'] });
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -4746,7 +4764,7 @@ test('pane view override: readers can change it while mutation actions stay disa
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await handshake(page, 0, { capabilities: ['conversation_history', 'tab_rename', 'agent_launch'] });
   await page.evaluate(() => {
     localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
       version: 1,
@@ -4758,7 +4776,7 @@ test('pane view override: readers can change it while mutation actions stay disa
       },
     }));
   });
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await handshake(page, 0, { capabilities: ['conversation_history', 'tab_rename', 'agent_launch'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
