@@ -98,7 +98,7 @@ func (c *Client) pane(t terminal) herdr.Pane {
 	if t.Status != nil {
 		p.Status = t.Status.State
 		if p.Status == "error" {
-			p.Status = "blocked"
+			p.Status = "done"
 		}
 		if t.Reported {
 			p.Agent = t.Status.App
