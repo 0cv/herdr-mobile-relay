@@ -68,7 +68,7 @@ func TestMappingAndInventory(t *testing.T) {
 	if len(panes) != 5 {
 		t.Fatalf("panes: %+v", panes)
 	}
-	want := herdr.Pane{ID: "t1", TerminalID: "t1:10:0", WorkspaceID: "s", TabID: "tab", Name: "named", Agent: "custom", Status: "blocked", Cwd: "/start", ForegroundCwd: "/now", Revision: 17, StateChangeSeq: 9}
+	want := herdr.Pane{ID: "t1", TerminalID: "t1:10:0", WorkspaceID: "s", TabID: "tab", Name: "named", Agent: "custom", Status: "done", Cwd: "/start", ForegroundCwd: "/now", Revision: 17, StateChangeSeq: 9}
 	if !reflect.DeepEqual(panes[0], want) {
 		t.Fatalf("pane: %+v, want %+v", panes[0], want)
 	}
