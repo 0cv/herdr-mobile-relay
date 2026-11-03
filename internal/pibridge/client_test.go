@@ -60,6 +60,39 @@ func testEndpoint(t *testing.T, change func(*Response), raw string, delay time.D
 	return dir, id
 }
 
+func TestIdentify(t *testing.T) {
+	for _, field := range []string{"valid", "instance", "pane", "pid", "challenge", "empty", "long"} {
+		t.Run(field, func(t *testing.T) {
+			dir, id := testEndpoint(t, func(r *Response) {
+				r.Session = "discovered"
+				switch field {
+				case "instance":
+					r.Instance = "wrong"
+				case "pane":
+					r.Pane = "wrong"
+				case "pid":
+					r.PID++
+				case "challenge":
+					r.Challenge = "wrong"
+				case "empty":
+					r.Session = ""
+				case "long":
+					r.Session = strings.Repeat("x", 2049)
+				}
+			}, "", 0)
+			id.Session = ""
+			got, err := identify(t.Context(), dir, id)
+			if field == "valid" {
+				if err != nil || got != "discovered" {
+					t.Fatalf("%q, %v", got, err)
+				}
+			} else if err == nil {
+				t.Fatal("accepted invalid identity")
+			}
+		})
+	}
+}
+
 func TestQuery(t *testing.T) {
 	dir, id := testEndpoint(t, nil, "", 0)
 	result, err := query(context.Background(), dir, id)

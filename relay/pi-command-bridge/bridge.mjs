@@ -278,9 +278,13 @@ export async function startBridge({ instance, pane, session, sessionFile, pid = 
         const request = JSON.parse(input);
         if (!request || typeof request !== 'object' || Array.isArray(request)
           || request.instance !== instance || request.pane !== pane
-          || (request.session !== session && (!sessionFile || request.session !== sessionFile))
+          || (request.operation !== 'identity' && request.session !== session && (!sessionFile || request.session !== sessionFile))
           || request.pid !== pid || !/^[a-f0-9]{32}$/.test(request.challenge)
           || closed) { socket.destroy(); return; }
+        if (request.operation === 'identity') {
+          socket.end(`${JSON.stringify({ instance, pane, pid, session, incarnation, challenge: request.challenge })}\n`);
+          return;
+        }
         if (['prompt_capability', 'send_prompt_unconfirmed'].includes(request.operation)) {
           if (!promptIngress) { socket.destroy(); return; }
           socket.end(`${JSON.stringify(promptIngress(request))}\n`);
