@@ -18,7 +18,7 @@ func (c *Client) terminalCall(ctx context.Context, method, paneID string, params
 }
 
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {
-	raw, err := c.terminalCall(ctx, "terminal.read", paneID, map[string]any{"lines": 0})
+	raw, err := c.terminalCall(ctx, "terminal.read", paneID, map[string]any{"lines": min(max(lines, 0), 10000)})
 	if err != nil {
 		return herdr.PaneRead{}, err
 	}
@@ -37,11 +37,11 @@ func (c *Client) ReadPaneRecent(ctx context.Context, paneID string, lines int, f
 }
 
 func (c *Client) ReadPaneVisible(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {
-	return c.ReadPane(ctx, paneID, lines, format)
+	return c.ReadPane(ctx, paneID, 0, format)
 }
 
 func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int, format string) ([]byte, error) {
-	read, err := c.ReadPane(ctx, paneID, lines, format)
+	read, err := c.ReadPaneVisible(ctx, paneID, lines, format)
 	return read.Content, err
 }
 
