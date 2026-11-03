@@ -2,12 +2,14 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 type recordingBackend struct {
@@ -16,6 +18,8 @@ type recordingBackend struct {
 	inventories   int
 	prompts       atomic.Int32
 	launchEffects atomic.Int32
+	keys          atomic.Int32
+	texts         atomic.Int32
 }
 
 func (b *recordingBackend) GetInventory(context.Context) (*herdr.Inventory, error) {
@@ -38,6 +42,39 @@ func (b *recordingBackend) TabList(context.Context) ([]herdr.Tab, error) {
 func (b *recordingBackend) Prompt(context.Context, string, string) error {
 	b.prompts.Add(1)
 	return nil
+}
+
+func (b *recordingBackend) SendKeys(context.Context, string, []string) error {
+	b.keys.Add(1)
+	return nil
+}
+
+func (b *recordingBackend) SendText(context.Context, string, string) error {
+	b.texts.Add(1)
+	return nil
+}
+
+func TestBackendRefusesQuestionTextBeforeSendingInput(t *testing.T) {
+	client := &recordingBackend{}
+	dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
+	defer dispatcher.Close(context.Background())
+	err := dispatcher.executeQuestion(context.Background(), WorkerToken{
+		PaneID: "pane-1", AllowAbsent: true,
+	}, "pane-1", questionPayload{
+		OtherSelected: true, OtherText: "A custom answer",
+	}, &question.Interaction{
+		Agent: "codex", Kind: "single_select", AllOptionCount: 2,
+		Focus: question.Focus{Kind: "option", Index: 0},
+	})
+	if !errors.Is(err, errQuestionTextUnsupported) {
+		t.Fatalf("error = %v, want unsupported typed text refusal", err)
+	}
+	if errors.Is(err, herdr.ErrPartiallyApplied) || errors.Is(err, herdr.ErrDispatchedUnknown) {
+		t.Fatalf("refusal classified as applied: %v", err)
+	}
+	if client.keys.Load() != 0 || client.texts.Load() != 0 {
+		t.Fatalf("backend received %d key calls and %d text calls", client.keys.Load(), client.texts.Load())
+	}
 }
 
 func (b *recordingBackend) CapabilityStatus() herdr.ServerStatus {
