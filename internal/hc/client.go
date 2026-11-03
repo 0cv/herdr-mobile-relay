@@ -15,11 +15,12 @@ import (
 )
 
 type Client struct {
-	socketPath string
-	mu         sync.Mutex
-	epochs     map[string]uint64
-	epochFloor uint64
-	revisions  map[string]int
+	socketPath    string
+	mu            sync.Mutex
+	epochs        map[string]uint64
+	epochFloor    uint64
+	revisions     map[string]int
+	eventsStarted bool
 }
 
 func New(socketPath string) *Client {
@@ -44,18 +45,8 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		return nil, errors.Join(herdr.ErrNotStarted, err)
 	}
 	reader := bufio.NewReader(conn)
-	raw, _, err := request(ctx, conn, reader, "hello", "hello", map[string]any{"generation": 1}, false)
-	if err != nil {
+	if err := hello(ctx, conn, reader); err != nil {
 		return nil, errors.Join(herdr.ErrNotStarted, err)
-	}
-	var hello struct {
-		Generation int `json:"generation"`
-	}
-	if err := json.Unmarshal(raw, &hello); err != nil {
-		return nil, errors.Join(herdr.ErrNotStarted, err)
-	}
-	if hello.Generation != 1 {
-		return nil, errors.Join(herdr.ErrNotStarted, &herdr.CLIError{Code: "protocol_mismatch"})
 	}
 	raw, started, err := request(ctx, conn, reader, "request", method, params, true)
 	if err == nil {
@@ -69,6 +60,23 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		return nil, err
 	}
 	return nil, errors.Join(herdr.ErrDispatchedUnknown, err)
+}
+
+func hello(ctx context.Context, conn net.Conn, reader *bufio.Reader) error {
+	raw, _, err := request(ctx, conn, reader, "hello", "hello", map[string]any{"generation": 1}, false)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Generation int `json:"generation"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return err
+	}
+	if result.Generation != 1 {
+		return &herdr.CLIError{Code: "protocol_mismatch"}
+	}
+	return nil
 }
 
 func request(ctx context.Context, conn net.Conn, reader *bufio.Reader, id, method string, params map[string]any, dispatch bool) (json.RawMessage, bool, error) {

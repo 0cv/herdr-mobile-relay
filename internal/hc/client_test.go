@@ -52,7 +52,12 @@ func fakeCore(t *testing.T, generation int, respond func(net.Conn, fakeRequest))
 				return
 			}
 			func() {
-				defer conn.Close()
+				keep := false
+				defer func() {
+					if !keep {
+						conn.Close()
+					}
+				}()
 				conn.SetDeadline(time.Now().Add(5 * time.Second))
 				reader := bufio.NewReader(conn)
 				for i := 0; i < 2; i++ {
@@ -76,6 +81,11 @@ func fakeCore(t *testing.T, generation int, respond func(net.Conn, fakeRequest))
 						}
 						reply(conn, req.ID, "result", map[string]any{"generation": generation, "version": "0.1.17", "core": map[string]any{}, "framed": false, "methods": []string{}, "features": []string{}})
 					} else {
+						if req.Method == "events.subscribe" {
+							keep = true
+							conn.SetDeadline(time.Time{})
+							t.Cleanup(func() { conn.Close() })
+						}
 						respond(conn, req)
 					}
 				}

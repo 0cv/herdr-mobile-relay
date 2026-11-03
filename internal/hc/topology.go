@@ -193,10 +193,10 @@ func (c *Client) PaneProcessInfoFresh(ctx context.Context, paneID string) (*herd
 	return info, nil
 }
 
-func (c *Client) topology(ctx context.Context) ([]herdr.Workspace, []herdr.Tab, error) {
+func (c *Client) topology(ctx context.Context) ([]herdr.Workspace, []herdr.Tab, []herdr.Pane, error) {
 	raw, err := c.call(ctx, "doc.get", map[string]any{"name": "herdr-app"})
 	if err != nil && !herdr.IsPaneNotFound(err) {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var doc struct {
 		Value struct {
@@ -213,12 +213,12 @@ func (c *Client) topology(ctx context.Context) ([]herdr.Workspace, []herdr.Tab, 
 	}
 	if err == nil {
 		if err := json.Unmarshal(raw, &doc); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	panes, err := c.PaneList(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	spaces := make([]herdr.Workspace, 0)
 	tabs := make([]herdr.Tab, 0)
@@ -253,15 +253,15 @@ func (c *Client) topology(ctx context.Context) ([]herdr.Workspace, []herdr.Tab, 
 		spaces[i].PaneCount++
 		addTab(i, p.TabID, p.TabID, p.Cwd)
 	}
-	return spaces, tabs, nil
+	return spaces, tabs, panes, nil
 }
 
 func (c *Client) WorkspaceList(ctx context.Context) ([]herdr.Workspace, error) {
-	spaces, _, err := c.topology(ctx)
+	spaces, _, _, err := c.topology(ctx)
 	return spaces, err
 }
 
 func (c *Client) TabList(ctx context.Context) ([]herdr.Tab, error) {
-	_, tabs, err := c.topology(ctx)
+	_, tabs, _, err := c.topology(ctx)
 	return tabs, err
 }
