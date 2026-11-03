@@ -202,6 +202,12 @@ Use the fake Herdr binary or a temporary Unix socket fixture for tests. Do not
 run production Herdr commands or mutate production state while checking these
 paths.
 
+## Core backend
+
+`HERDR_RELAY_BACKEND=hc` selects herdr-core instead of the default `herdr`
+backend; `HC_SOCKET_PATH` overrides its session socket. See
+[herdr-core](herdr-core.md) for defaults and manual second-instance operation.
+
 ## Isolated core integration test
 
 Run `HERDR_RELAY_HC_INTEGRATION=1 go test -v ./internal/hc -run '^TestRealCore$'`
