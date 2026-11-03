@@ -13,9 +13,10 @@ project follows [Semantic Versioning](https://semver.org/).
 - Run a second relay for herdr-core beside the TUI relay, so agents in herdr-app
   appear as a separate computer on your phone. Read screens, send prompts and
   keys, answer questions without typed text, stop agents, and use Pi commands
-  and activity, plus the Conversation view (history and live) for Pi. Agent
-  creation and restart, workspace management, typed answers and phone-driven
-  updates are not available on core yet.
+  and activity, plus the Conversation view (history and live) for Pi and, after
+  installing the session hooks, Claude Code and Codex. Agent creation and
+  restart, workspace management, typed answers and phone-driven updates are not
+  available on core yet.
 
 ## [0.24.0] - 2026-11-02
 

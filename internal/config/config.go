@@ -116,7 +116,7 @@ func Load() (*Config, error) {
 	cfg.DataHome = envOr("XDG_DATA_HOME", filepath.Join(homeDir(), ".local", "share"))
 	cfg.ReleaseRoot = os.Getenv("HERDR_RELEASE_ROOT")
 	if cfg.ReleaseRoot == "" {
-		cfg.ReleaseRoot = installedReleaseRoot()
+		cfg.ReleaseRoot = InstalledReleaseRoot()
 	}
 	if cfg.ReleaseRoot == "" {
 		cfg.ReleaseRoot = filepath.Join(cfg.DataHome, "herdr-mobile-relay")
@@ -202,7 +202,7 @@ func defaultWebRoot() string {
 	if err != nil {
 		return "web"
 	}
-	if root := installedReleaseRoot(); root != "" {
+	if root := InstalledReleaseRoot(); root != "" {
 		if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
 			return filepath.Join(filepath.Dir(resolved), "web")
 		}
@@ -211,7 +211,7 @@ func defaultWebRoot() string {
 	return filepath.Join(filepath.Dir(filepath.Dir(exe)), "web")
 }
 
-func installedReleaseRoot() string {
+func InstalledReleaseRoot() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return ""

@@ -48,6 +48,11 @@ func run(args []string) (int, error) {
 		command, args = args[0], args[1:]
 	}
 	switch command {
+	case "agent-hooks":
+		if len(args) != 1 || (args[0] != "install" && args[0] != "uninstall" && args[0] != "status") {
+			return 2, errors.New("usage: herdr-mobile-relay agent-hooks install|uninstall|status")
+		}
+		return status(agentsession.Hooks(args[0], os.Stdout))
 	case "agent-session":
 		if len(args) == 1 {
 			agentsession.Run(args[0], os.Stdin)
