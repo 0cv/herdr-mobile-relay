@@ -10,7 +10,10 @@ manage each instance yourself.
 
 - Agent list and status, and terminal screen reading.
 - Prompts, including while an agent is waiting for an answer.
-- Key presses and structured question answers that need no typed text.
+- Key presses, text without Enter, and typed question answers. Typed text must
+  be single-line and contain no control characters.
+- Secret input to a verified no-echo prompt, without input-side persistence.
+  Programs that echo or log a secret can still expose it in terminal output.
 - Stop an agent.
 - Pane size leasing (Resize Session). The phone's size applies to the shared
   core terminal, so herdr-app shows the phone's layout while a device leases,
@@ -22,8 +25,7 @@ manage each instance yourself.
   relay owns the shared Pi extension.
 
 The phone hides actions that core does not support: starting, clearing or
-restarting agents; renaming; tab, workspace and worktree management; manual and
-secret text input; answers requiring typed text; the Pi
+restarting agents; renaming; tab, workspace and worktree management; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 

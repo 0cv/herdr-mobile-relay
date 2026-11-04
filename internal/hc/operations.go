@@ -91,7 +91,9 @@ func (c *Client) Close() error { return nil }
 
 func (c *Client) CapabilityStatus() herdr.ServerStatus {
 	return herdr.ServerStatus{Features: map[string]herdr.FeatureEvidence{
-		herdr.FeaturePaneRead: {State: herdr.FeatureSupported, Reason: "Screen reads available"},
+		herdr.FeaturePaneRead:            {State: herdr.FeatureSupported, Reason: "Screen reads available"},
+		herdr.FeatureManualTerminalInput: {State: herdr.FeatureSupported, Reason: "Single-line text input available"},
+		herdr.FeatureSecretInput:         {State: herdr.FeatureSupported, Reason: "Hidden prompt input available"},
 	}}
 }
 

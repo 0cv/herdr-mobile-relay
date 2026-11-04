@@ -525,14 +525,11 @@ func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, req
 	if len(runes) > secretMaxRunes {
 		return d.fail(requestID, "send_secret", paneID, "Secret is too long")
 	}
-	keys := make([]string, 0, len(runes)+1)
 	for _, value := range runes {
 		if value < 0x20 || value == 0x7f {
 			return d.fail(requestID, "send_secret", paneID, "Secret must not contain control characters")
 		}
-		keys = append(keys, string(value))
 	}
-	keys = append(keys, "Enter")
 	result := d.schedule(ctx, ScheduleOptions{
 		// The payload stands in for the secret: nothing that reaches the
 		// scheduler, its ledger or its logs may carry the secret itself.
@@ -551,7 +548,7 @@ func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, req
 		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.herdr.SendKeys(effectCtx, paneID, keys); err != nil {
+		if err := d.herdr.SendSecret(effectCtx, paneID, text); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "send_secret", paneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, "send_secret", paneID, nil)}
