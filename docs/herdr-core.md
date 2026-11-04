@@ -12,6 +12,8 @@ manage each instance yourself.
 - Prompts, including while an agent is waiting for an answer.
 - Key presses and structured question answers that need no typed text.
 - Stop an agent.
+- Rename and reorder tabs in herdr-app. Either action can be refused when the
+  desktop changed the layout at the same moment; try again.
 - Pane size leasing (Resize Session). The phone's size applies to the shared
   core terminal, so herdr-app shows the phone's layout while a device leases,
   as with Resize Session on the TUI. The desktop can take the size back by
@@ -22,7 +24,8 @@ manage each instance yourself.
   relay owns the shared Pi extension.
 
 The phone hides actions that core does not support: starting, clearing or
-restarting agents; renaming; tab, workspace and worktree management; manual and
+restarting agents; agent identity renaming; tab creation and close; workspace
+and worktree management; manual and
 secret text input; answers requiring typed text; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.

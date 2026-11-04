@@ -40,7 +40,12 @@ func StartCore(t *testing.T, configure func(string, []string) []string) (socket 
 	for _, name := range []string{"STATE", "CONFIG", "DATA", "CACHE"} {
 		env = append(env, "XDG_"+name+"_HOME="+filepath.Join(root, strings.ToLower(name)))
 	}
-	socket = filepath.Join(root, "state", "herdr-core", session, session+".sock")
+	runtime := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(runtime, 0700); err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, "XDG_RUNTIME_DIR="+runtime, "HOME="+root)
+	socket = filepath.Join(runtime, "herdr-core", session+".sock")
 	relative, err := filepath.Rel(root, socket)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
 		t.Fatalf("socket outside scratch root: %s", socket)

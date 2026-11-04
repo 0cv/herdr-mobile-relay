@@ -12,8 +12,9 @@ project follows [Semantic Versioning](https://semver.org/).
   rewinds remove discarded turns and mark older history cursors as changed.
 - Run a second relay for herdr-core beside the TUI relay, so agents in herdr-app
   appear as a separate computer on your phone. Read screens and scrollback, send
-  prompts and keys, answer questions without typed text, stop agents, and use Pi
-  commands and activity, plus the Conversation view (history and live) for Pi.
+  prompts and keys, answer questions without typed text, stop agents, rename and
+  reorder tabs, and use Pi commands and activity, plus the Conversation view
+  (history and live) for Pi.
   Resize Session fits the shared core terminal to your phone; resizing the
   desktop window takes the size back. Agent creation and restart, workspace
   management, typed answers and phone-driven updates are not available on core

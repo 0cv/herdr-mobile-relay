@@ -17,8 +17,6 @@ func TestUnsupportedMethods(t *testing.T) {
 		"RenameAgent":        func() error { return c.RenameAgent(t.Context(), "term", "term") },
 		"AgentGet":           func() error { _, err := c.AgentGet(t.Context(), "term"); return err },
 		"TabCreate":          func() error { _, err := c.TabCreate(t.Context(), "term", "term", "term"); return err },
-		"TabRename":          func() error { return c.TabRename(t.Context(), "term", "term") },
-		"TabMove":            func() error { return c.TabMove(t.Context(), "term", 0) },
 		"WorkspaceCreate":    func() error { _, err := c.WorkspaceCreate(t.Context(), "term", "term"); return err },
 		"WorkspaceRename":    func() error { return c.WorkspaceRename(t.Context(), "term", "term") },
 		"WorkspaceMove":      func() error { return c.WorkspaceMove(t.Context(), "term", 0) },

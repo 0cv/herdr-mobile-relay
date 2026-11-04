@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,101 @@ func TestRealCore(t *testing.T) {
 			}
 		}
 		t.Fatal("started shell missing from PaneList")
+	})
+	t.Run("tab-layout", func(t *testing.T) {
+		value := strings.ReplaceAll(layoutFixture, `"id":"s"`, `"id":"relay-space"`)
+		value = strings.ReplaceAll(value, `"id":"a"`, `"id":"relay-tab"`)
+		value = strings.Replace(value, `"children":[]`, `"children":[{"type":"block","content":{"terminal":"`+addr+`"}}]`, 1)
+		if _, err := client.call(ctx, "doc.set", map[string]any{"name": "herdr-app", "value": json.RawMessage(value), "version": 0}); err != nil {
+			t.Fatal(err)
+		}
+		seed, err := client.call(ctx, "doc.get", map[string]any{"name": "herdr-app"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var seeded struct{ Value json.RawMessage }
+		if err := json.Unmarshal(seed, &seeded); err != nil {
+			t.Fatal(err)
+		}
+		value = string(seeded.Value)
+		before, events, err := client.Events(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer events.Close()
+		if err := client.TabRename(ctx, "relay-tab", "renamed"); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.TabMove(ctx, "relay-tab", 3); err != nil {
+			t.Fatal(err)
+		}
+		eventCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		defer stop()
+		after, err := events.Next(eventCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after.Tabs) != 3 || after.Tabs[2].ID != "relay-tab" || after.Tabs[2].Label != "renamed" {
+			t.Fatalf("tabs: %+v", after.Tabs)
+		}
+		if !reflect.DeepEqual(before.Panes, after.Panes) {
+			t.Fatalf("pane identity changed: %+v / %+v", before.Panes, after.Panes)
+		}
+		tabs, err := client.TabList(ctx)
+		if err != nil || !reflect.DeepEqual(tabs, after.Tabs) {
+			t.Fatalf("TabList: %+v, %v", tabs, err)
+		}
+		panes, err := client.PaneList(ctx)
+		if err != nil || !reflect.DeepEqual(panes, after.Panes) {
+			t.Fatalf("PaneList: %+v, %v", panes, err)
+		}
+		read := func() map[string]any {
+			raw, err := client.call(ctx, "doc.get", map[string]any{"name": "herdr-app"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			decoder.UseNumber()
+			if err := decoder.Decode(&doc); err != nil {
+				t.Fatal(err)
+			}
+			return doc
+		}
+		var expected map[string]any
+		decoder := json.NewDecoder(strings.NewReader(value))
+		decoder.UseNumber()
+		if err := decoder.Decode(&expected); err != nil {
+			t.Fatal(err)
+		}
+		space := expected["spaces"].([]any)[0].(map[string]any)
+		originalTabs := space["tabs"].([]any)
+		originalTabs[0].(map[string]any)["name"] = "renamed"
+		space["tabs"] = []any{originalTabs[1], originalTabs[2], originalTabs[0]}
+		stored := read()
+		if !reflect.DeepEqual(stored["value"], expected) {
+			t.Fatalf("stored: %+v, expected: %+v", stored, expected)
+		}
+		checks := 0
+		competing := herdr.WithDispatchCheck(ctx, func() error {
+			checks++
+			if checks == 2 {
+				return New(socket).TabRename(ctx, "b", "desktop")
+			}
+			return nil
+		})
+		err = client.TabRename(competing, "relay-tab", "loser")
+		if !herdr.IsRefused(err) || herdr.RefusalCode(err) != "layout_conflict" {
+			t.Fatalf("conflict: %v", err)
+		}
+		originalTabs[1].(map[string]any)["name"] = "desktop"
+		stored = read()
+		if !reflect.DeepEqual(stored["value"], expected) {
+			t.Fatalf("concurrent value: %+v", stored)
+		}
+		if _, err := client.call(ctx, "doc.set", map[string]any{"name": "herdr-app", "value": nil, "version": stored["version"]}); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("idle-shell", func(t *testing.T) {
 		wait(t, func() bool {
