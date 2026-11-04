@@ -12,6 +12,9 @@ import (
 
 func TestSession(t *testing.T) {
 	for _, tt := range []struct{ name, agent, body, key, value, want string }{
+		{"agy", "agy", `{"conversationId":"abc","session_id":"wrong"}`, "", "", "abc"},
+		{"agy missing", "agy", `{"session_id":"abc"}`, "", "", ""},
+		{"agy wrong type", "agy", `{"conversationId":123}`, "", "", ""},
 		{"claude", "claude", `{"session_id":"abc","hook_event_name":"SessionStart"}`, "", "", "abc"},
 		{"claude exact", "claude", `{"session_id":" abc ","hook_event_name":"SessionStart"}`, "", "", " abc "},
 		{"subagent", "claude", `{"session_id":"abc","hook_event_name":"SessionStart","agent_id":"sub"}`, "", "", ""},

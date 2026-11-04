@@ -108,6 +108,18 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 	if err != nil {
 		return nil, false, err
 	}
+	command := "'" + strings.ReplaceAll(binary, "'", "'\"'\"'") + "' agent-session " + agent
+	if agent == "agy" {
+		found := root.get("herdr-mobile-relay") != nil
+		if install {
+			root.set("herdr-mobile-relay", raw(object{{"SessionStart", raw([]hookCommand{{"command", command, 5}})}}))
+		} else if found {
+			root.set("herdr-mobile-relay", nil)
+		} else {
+			return data, false, nil
+		}
+		return formatHooks(root, found)
+	}
 	var hooks object
 	if value := root.get("hooks"); value != nil {
 		hooks, err = parseObject(value)
@@ -179,7 +191,6 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 		}
 	}
 	if install {
-		command := "'" + strings.ReplaceAll(binary, "'", "'\"'\"'") + "' agent-session " + agent
 		entry := object{}
 		if agent == "claude" {
 			entry.set("matcher", raw("^(startup|resume|clear|compact|fork)$"))
@@ -204,6 +215,10 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 	} else {
 		root.set("hooks", raw(hooks))
 	}
+	return formatHooks(root, found)
+}
+
+func formatHooks(root object, found bool) ([]byte, bool, error) {
 	var out bytes.Buffer
 	if err := json.Indent(&out, raw(root), "", "  "); err != nil {
 		return nil, false, err
@@ -257,10 +272,13 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 	}
 	var changes []change
 	var feedback bytes.Buffer
-	for _, agent := range []string{"claude", "codex", "cursor"} {
+	for _, agent := range []string{"claude", "codex", "cursor", "qoder", "agy"} {
 		dir := filepath.Join(home, "."+agent)
+		if agent == "agy" {
+			dir = filepath.Join(home, ".gemini", "config")
+		}
 		name := "hooks.json"
-		if agent == "claude" {
+		if agent == "claude" || agent == "qoder" {
 			name = "settings.json"
 		}
 		path := filepath.Join(dir, name)
@@ -319,11 +337,14 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 			changes = append(changes, change{path, updated, mode})
 		}
 	}
+	if err := manageOpenCodePlugin(home, binary, operation, &feedback); err != nil {
+		return err
+	}
 	if err := manageOmpExtension(home, binary, operation, &feedback); err != nil {
 		return err
 	}
 	if operation == "install" {
-		fmt.Fprintln(&feedback, "Restart Claude Code, Codex, Cursor and Omp to load session hooks; Hermes needs no hook.")
+		fmt.Fprintln(&feedback, "Restart Claude Code, Codex, Cursor, Omp, OpenCode, Qoder and agy to load session hooks; agy reports new conversations only. Hermes, Grok and Kimi need no hook.")
 	}
 	for _, c := range changes {
 		if _, err := atomicfile.Replace(filepath.Dir(c.path), c.path, ".agent-hooks-*", c.data, c.mode); err != nil {

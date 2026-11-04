@@ -1317,7 +1317,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
 		s.enrichPiSessions(ctx, agents)
-		s.enrichHermesSessions(ctx, agents)
+		s.enrichRegistrySessions(ctx, agents)
 		s.enrichKimiSessions(ctx, agents)
 		for _, a := range agents {
 			s.resolveAgentSessionName(a)

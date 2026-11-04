@@ -171,6 +171,9 @@ func RecordedSupported(agent string) bool {
 func normalizedAgent(agent string) string {
 	value := strings.ToLower(strings.TrimSpace(agent))
 	value = strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
+	if value == "grokbuild" {
+		return "grok"
+	}
 	return value
 }
 
