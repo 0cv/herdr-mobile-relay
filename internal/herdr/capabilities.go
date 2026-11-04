@@ -44,6 +44,7 @@ type FeatureEvidence struct {
 }
 
 type ServerStatus struct {
+	OneStepLaunch              bool                       `json:"-"`
 	InstalledClientVersion     string                     `json:"installed_client_version,omitempty"`
 	ServerVersion              string                     `json:"server_version,omitempty"`
 	ServerProtocol             int                        `json:"server_protocol,omitempty"`

@@ -1,0 +1,126 @@
+package coordinator
+
+import (
+	"context"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+)
+
+type coreLaunchBackend struct {
+	backend.Backend
+	pane               herdr.Pane
+	ready              bool
+	err                error
+	promptErr          error
+	calls              []string
+	argv               []string
+	workspace          string
+	inventoryWorkspace string
+	cwd                string
+}
+
+func (b *coreLaunchBackend) GetInventory(context.Context) (*herdr.Inventory, error) {
+	return &herdr.Inventory{Panes: []herdr.Pane{{ID: "other", WorkspaceID: b.inventoryWorkspace, Cwd: b.cwd}}}, nil
+}
+
+func (b *coreLaunchBackend) WorkspaceList(context.Context) ([]herdr.Workspace, error) {
+	return []herdr.Workspace{{ID: b.inventoryWorkspace}}, nil
+}
+
+func (b *coreLaunchBackend) CapabilityStatus() herdr.ServerStatus {
+	return herdr.ServerStatus{OneStepLaunch: true, Features: map[string]herdr.FeatureEvidence{herdr.FeatureAgentLaunch: {State: herdr.FeatureSupported}}}
+}
+func (b *coreLaunchBackend) LaunchTerminal(_ context.Context, argv []string, cwd, name, workspace string, _ bool) (*herdr.Pane, bool, error) {
+	b.calls = append(b.calls, "run")
+	b.argv = argv
+	b.workspace = workspace
+	b.pane.Cwd, b.pane.Name = cwd, name
+	return &b.pane, b.ready, b.err
+}
+func (b *coreLaunchBackend) StopPane(_ context.Context, id string) error {
+	b.calls = append(b.calls, "kill:"+id)
+	return nil
+}
+func (b *coreLaunchBackend) Prompt(context.Context, string, string) error {
+	b.calls = append(b.calls, "prompt")
+	return b.promptErr
+}
+
+func TestCoreLaunchReusesWorkspaceAndHermesArgs(t *testing.T) {
+	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{})
+	b := &coreLaunchBackend{Backend: f.dispatcher.herdr, inventoryWorkspace: "selected", cwd: f.cwd, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID}}
+	f.dispatcher.lifecycle.herdr = b
+	profile, ok := f.dispatcher.profiles.Profile("claude")
+	if !ok {
+		t.Fatal("missing fixture profile")
+	}
+	profile.Kind = "hermes"
+	profile.Argv = []string{"/bin/sleep", "120"}
+	ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+	defer cancel()
+	_, err := f.dispatcher.lifecycle.Start(ctx, profile, StartRequest{Name: "fixture", Cwd: f.cwd, HermesProfile: "default"})
+	if err != nil || b.workspace != "selected" || !reflect.DeepEqual(b.argv, []string{"/bin/sleep", "120", "-p", "default"}) {
+		t.Fatalf("workspace=%s argv=%v err=%v", b.workspace, b.argv, err)
+	}
+}
+
+func TestCoreClearAndRestart(t *testing.T) {
+	for _, action := range []string{"agent_clear", "agent_restart"} {
+		t.Run(action, func(t *testing.T) {
+			f, old := newClearFixture(t, launchFixtureOptions{})
+			b := &coreLaunchBackend{Backend: f.dispatcher.herdr, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID}}
+			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
+			message := clearMessage()
+			message["action"] = action
+			result := f.dispatcher.Handle(f.ctx, message)
+			if !result.OK || !reflect.DeepEqual(b.calls, []string{"run", "kill:" + old.PaneID}) {
+				t.Fatalf("result=%+v calls=%v", result, b.calls)
+			}
+			if !f.dispatcher.profiles.OwnsTarget(f.target, "claude") {
+				t.Fatal("missing replacement ownership")
+			}
+		})
+	}
+}
+
+func TestCoreLaunchPromptAndReplay(t *testing.T) {
+	for _, mode := range []string{"ready", "unready", "unknown", "prompt-unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newLaunchFixtureWithOptions(t, launchFixtureOptions{})
+			b := &coreLaunchBackend{Backend: f.dispatcher.herdr, ready: mode == "ready" || mode == "prompt-unknown", pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID}}
+			if mode == "unknown" {
+				b.err = herdr.ErrDispatchedUnknown
+			}
+			if mode == "prompt-unknown" {
+				b.promptErr = herdr.ErrDispatchedUnknown
+			}
+			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
+			message := map[string]any{"action": "agent_start", "request_id": "core-launch", "profile_id": "claude", "name": "fixture", "cwd": f.cwd, "prompt": "hello"}
+			result := f.dispatcher.Handle(f.ctx, message)
+			wantPhase := "completed"
+			wantCalls := []string{"run", "prompt"}
+			if mode == "prompt-unknown" {
+				wantPhase = "completed_with_warning"
+			}
+			if mode == "unready" {
+				wantPhase = "completed_with_warning"
+				wantCalls = []string{"run"}
+			}
+			if mode == "unknown" {
+				wantPhase = "dispatched_unknown"
+				wantCalls = []string{"run"}
+			}
+			if result.Phase != wantPhase || !reflect.DeepEqual(b.calls, wantCalls) {
+				t.Fatalf("result=%+v calls=%v", result, b.calls)
+			}
+			f.dispatcher.Handle(f.ctx, message)
+			if !reflect.DeepEqual(b.calls, wantCalls) {
+				t.Fatalf("replayed calls=%v", b.calls)
+			}
+		})
+	}
+}

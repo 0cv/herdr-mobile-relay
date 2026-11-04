@@ -90,8 +90,9 @@ func (c *Client) IntegrationStatus(context.Context) ([]byte, error) { return []b
 func (c *Client) Close() error { return nil }
 
 func (c *Client) CapabilityStatus() herdr.ServerStatus {
-	return herdr.ServerStatus{Features: map[string]herdr.FeatureEvidence{
-		herdr.FeaturePaneRead: {State: herdr.FeatureSupported, Reason: "Screen reads available"},
+	return herdr.ServerStatus{OneStepLaunch: true, Features: map[string]herdr.FeatureEvidence{
+		herdr.FeatureAgentLaunch: {State: herdr.FeatureSupported, Reason: "Agent launch available"},
+		herdr.FeaturePaneRead:    {State: herdr.FeatureSupported, Reason: "Screen reads available"},
 	}}
 }
 
