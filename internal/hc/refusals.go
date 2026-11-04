@@ -10,10 +10,6 @@ func unsupported() error {
 	return &herdr.CLIError{Code: "unsupported_method", Message: "Not available on core"}
 }
 
-func (c *Client) SendInput(context.Context, string, herdr.PaneInput) error { return unsupported() }
-
-func (c *Client) SendText(context.Context, string, string) error { return unsupported() }
-
 func (c *Client) PaneRun(context.Context, string, []string) error { return unsupported() }
 
 func (c *Client) StartAgent(context.Context, string, string, string, int, ...string) (string, error) {

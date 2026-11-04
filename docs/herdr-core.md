@@ -10,7 +10,10 @@ manage each instance yourself.
 
 - Agent list and status, and terminal screen reading.
 - Prompts, including while an agent is waiting for an answer.
-- Key presses and structured question answers that need no typed text.
+- Key presses, text without Enter, and typed question answers. Typed text must
+  be single-line and contain no control characters.
+- Secret input to a verified no-echo prompt, without input-side persistence.
+  Programs that echo or log a secret can still expose it in terminal output.
 - Start agents with **+**, and stop, clear or restart relay-launched agents.
   Clear and Restart start a replacement in a new terminal, then kill the old one.
   herdr.app names the adopted new tab itself; the terminal carries the agent name.
@@ -28,8 +31,7 @@ manage each instance yourself.
   relay owns the shared Pi extension.
 
 The phone hides actions that core does not support: agent identity renaming;
-tab creation and close; workspace and worktree management; manual and
-secret text input; answers requiring typed text; the Pi
+tab creation and close; workspace and worktree management; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 

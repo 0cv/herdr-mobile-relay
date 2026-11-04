@@ -10,8 +10,7 @@ import (
 func TestUnsupportedMethods(t *testing.T) {
 	c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) { t.Errorf("unexpected request: %+v", req) }))
 	for name, run := range map[string]func() error{
-		"SendInput":          func() error { return c.SendInput(t.Context(), "term", herdr.PaneInput{}) },
-		"SendText":           func() error { return c.SendText(t.Context(), "term", "term") },
+		"SendInput":          func() error { return c.SendInput(t.Context(), "term", herdr.PaneInput{Keys: []string{"Enter"}}) },
 		"PaneRun":            func() error { return c.PaneRun(t.Context(), "term", []string{"term"}) },
 		"StartAgent":         func() error { _, err := c.StartAgent(t.Context(), "term", "term", "term", 0); return err },
 		"RenameAgent":        func() error { return c.RenameAgent(t.Context(), "term", "term") },

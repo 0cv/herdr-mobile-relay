@@ -52,6 +52,7 @@ type Backend interface {
 	Close() error
 	SendKeys(ctx context.Context, paneID string, keys []string) error
 	SendText(ctx context.Context, paneID, text string) error
+	SendSecret(ctx context.Context, paneID, text string) error
 	Prompt(ctx context.Context, paneID, text string) error
 	StopPane(ctx context.Context, paneID string) error
 	RenameAgent(ctx context.Context, paneID, name string) error
