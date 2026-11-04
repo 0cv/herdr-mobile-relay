@@ -30,10 +30,6 @@ func (c *Client) TabCreate(context.Context, string, string, string) (*herdr.Crea
 	return nil, unsupported()
 }
 
-func (c *Client) TabRename(context.Context, string, string) error { return unsupported() }
-
-func (c *Client) TabMove(context.Context, string, int) error { return unsupported() }
-
 func (c *Client) WorkspaceCreate(context.Context, string, string) (*herdr.CreateResult, error) {
 	return nil, unsupported()
 }

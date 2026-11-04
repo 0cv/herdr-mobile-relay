@@ -136,7 +136,7 @@ func TestOperationRefusals(t *testing.T) {
 func TestCapabilitiesAndLifecycle(t *testing.T) {
 	c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) { t.Errorf("unexpected request: %+v", req) }))
 	status := c.CapabilityStatus()
-	if len(status.Features) != 1 || !status.Supports(herdr.FeaturePaneRead) || status.Supports(herdr.FeaturePiIntegration) || status.Supports(herdr.FeatureManualTerminalInput) {
+	if len(status.Features) != 3 || !status.Supports(herdr.FeaturePaneRead) || status.Supports(herdr.FeaturePiIntegration) || status.Supports(herdr.FeatureManualTerminalInput) {
 		t.Fatalf("status = %+v", status)
 	}
 	c.SetCapabilityChangeCallback(func(herdr.ServerStatus) { t.Error("unexpected callback") })
