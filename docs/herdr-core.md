@@ -27,6 +27,33 @@ secret text input; answers requiring typed text; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 
+## How the core relay learns agent sessions
+
+The `herdr-mobile-relay agent-session claude|codex` hook command reads a
+SessionStart payload and reports its `session_id` through terminal labels:
+`herdr-mobile-relay.session` and `herdr-mobile-relay.pid`, written together.
+It uses only `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, and accepts the
+foreground pid only when it is an ancestor of the hook. The relay uses the
+session only while that pid remains the terminal's foreground pid, ignoring
+stale labels. Pi still discovers sessions through its bridge when no label
+session applies.
+
+## Conversation for Claude Code and Codex
+
+Run `herdr-mobile-relay agent-hooks install` once from a terminal to enable
+Conversation for Claude Code and Codex. Restart running agents: the hooks fire
+at session start. The hook does nothing outside a core terminal.
+
+Use `herdr-mobile-relay agent-hooks status` to check installation and
+`herdr-mobile-relay agent-hooks uninstall` to remove only the relay's hooks.
+Existing Herdr hooks are preserved; missing agent config directories are skipped.
+Codex also needs `[features] hooks = true` in its `config.toml`, as enabled by
+Herdr's Codex integration. After installing, open `/hooks` in Codex once and
+trust the new SessionStart hook: Codex shows "1 hook needs review before it can
+run" until approved. Codex stores approval under `[hooks.state]` in
+`~/.codex/config.toml`; the installer never writes that trust and leaves this
+file unchanged.
+
 ## Configuration and isolation
 
 Core passes the environment of whoever started it to every terminal it runs.
