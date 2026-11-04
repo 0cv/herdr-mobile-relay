@@ -549,7 +549,8 @@ func topologyRefusalCode(code string) bool {
 		"linked_worktree_source", "worktree_operation_in_progress", "protocol_mismatch",
 		"workspace_group_close_required", "workspace_group_changed",
 		"workspace_group_primary_required", "workspace_group_consent_invalid",
-		"workspace_group_validation_unavailable", "workspace_move_block_failed":
+		"workspace_group_validation_unavailable", "workspace_move_block_failed",
+		"invalid_params", "layout_conflict":
 		return true
 	default:
 		return false

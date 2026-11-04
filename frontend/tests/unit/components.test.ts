@@ -1244,6 +1244,37 @@ describe('accessible Svelte interactions', () => {
     });
   });
 
+  it.each([
+    ['workspace_management', true, true, true],
+    ['workspace_rename', true, false, false],
+    ['workspace_reorder', false, true, false],
+  ] as const)('gates workspace controls with %s', async (capability, rename, reorder, manage) => {
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    relayStore.connections.set(new Map([['fedora', {
+      status: 'connected', inventory: { state: 'ready' }, capabilities: [capability],
+    } as never]]));
+    relayStore.workspaces.set([{
+      relay_id: 'fedora', relay_label: 'Fedora', workspace_id: 'w1', number: 1, label: 'Project',
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '', cwd: '/project',
+    }]);
+    try {
+      render(WorkspaceManager);
+      expect(Boolean(screen.queryByRole('button', { name: 'Rename' }))).toBe(rename);
+      expect(Boolean(screen.queryByRole('button', { name: 'Reorder Project' }))).toBe(reorder);
+      expect(Boolean(screen.queryByRole('button', { name: 'Create Workspace' }))).toBe(manage);
+      expect(Boolean(screen.queryByRole('button', { name: 'Close' }))).toBe(manage);
+      expect(Boolean(screen.queryByRole('button', { name: 'Worktrees' }))).toBe(manage);
+      if (rename) {
+        await fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
+        expect(screen.getByDisplayValue('Project')).toBeInTheDocument();
+      }
+    } finally {
+      relayStore.workspaces.set([]);
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
   it('drops an optimistic workspace order once an authoritative snapshot changes membership', async () => {
     const workspace = (id: string, label: string): RelayWorkspace => ({
       relay_id: 'fedora', relay_label: 'Fedora', workspace_id: id, number: 1, label,

@@ -138,8 +138,9 @@ func TestRealCore(t *testing.T) {
 		}
 		t.Fatal("started shell missing from PaneList")
 	})
-	t.Run("tab-layout", func(t *testing.T) {
+	t.Run("layout", func(t *testing.T) {
 		value := strings.ReplaceAll(layoutFixture, `"id":"s"`, `"id":"relay-space"`)
+		value = strings.Replace(value, `"spaces":[`, `"spaces":[{"id":"other","name":"Other","tabs":[]},`, 1)
 		value = strings.ReplaceAll(value, `"id":"a"`, `"id":"relay-tab"`)
 		value = strings.Replace(value, `"children":[]`, `"children":[{"type":"block","content":{"terminal":"`+addr+`"}}]`, 1)
 		if _, err := client.call(ctx, "doc.set", map[string]any{"name": "herdr-app", "value": json.RawMessage(value), "version": 0}); err != nil {
@@ -204,7 +205,7 @@ func TestRealCore(t *testing.T) {
 		if err := decoder.Decode(&expected); err != nil {
 			t.Fatal(err)
 		}
-		space := expected["spaces"].([]any)[0].(map[string]any)
+		space := expected["spaces"].([]any)[1].(map[string]any)
 		originalTabs := space["tabs"].([]any)
 		originalTabs[0].(map[string]any)["name"] = "renamed"
 		space["tabs"] = []any{originalTabs[1], originalTabs[2], originalTabs[0]}
@@ -212,19 +213,32 @@ func TestRealCore(t *testing.T) {
 		if !reflect.DeepEqual(stored["value"], expected) {
 			t.Fatalf("stored: %+v, expected: %+v", stored, expected)
 		}
+		if err := client.WorkspaceRename(ctx, "relay-space", "Workspace renamed"); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.WorkspaceMove(ctx, "relay-space", 0); err != nil {
+			t.Fatal(err)
+		}
+		space["name"] = "Workspace renamed"
+		spaces := expected["spaces"].([]any)
+		expected["spaces"] = []any{spaces[1], spaces[0]}
+		stored = read()
+		if !reflect.DeepEqual(stored["value"], expected) {
+			t.Fatalf("workspace layout: %+v, expected: %+v", stored, expected)
+		}
 		checks := 0
 		competing := herdr.WithDispatchCheck(ctx, func() error {
 			checks++
 			if checks == 2 {
-				return New(socket).TabRename(ctx, "b", "desktop")
+				return New(socket).WorkspaceRename(ctx, "relay-space", "desktop")
 			}
 			return nil
 		})
-		err = client.TabRename(competing, "relay-tab", "loser")
+		err = client.WorkspaceRename(competing, "relay-space", "loser")
 		if !herdr.IsRefused(err) || herdr.RefusalCode(err) != "layout_conflict" {
 			t.Fatalf("conflict: %v", err)
 		}
-		originalTabs[1].(map[string]any)["name"] = "desktop"
+		space["name"] = "desktop"
 		stored = read()
 		if !reflect.DeepEqual(stored["value"], expected) {
 			t.Fatalf("concurrent value: %+v", stored)

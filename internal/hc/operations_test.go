@@ -136,7 +136,7 @@ func TestOperationRefusals(t *testing.T) {
 func TestCapabilitiesAndLifecycle(t *testing.T) {
 	c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) { t.Errorf("unexpected request: %+v", req) }))
 	status := c.CapabilityStatus()
-	if len(status.Features) != 6 || !status.OneStepLaunch || !status.Supports(herdr.FeatureAgentLaunch) || !status.Supports(herdr.FeatureTabRename) || !status.Supports(herdr.FeatureTabMove) || !status.Supports(herdr.FeaturePaneRead) || !status.Supports(herdr.FeatureManualTerminalInput) || !status.Supports(herdr.FeatureSecretInput) || status.Supports(herdr.FeaturePiIntegration) {
+	if len(status.Features) != 9 || !status.Supports(herdr.FeatureWorkspaceRename) || !status.Supports(herdr.FeatureWorkspaceReorder) || !status.Supports(herdr.FeatureWorkspaceMoveBlock) || !status.OneStepLaunch || !status.Supports(herdr.FeatureAgentLaunch) || !status.Supports(herdr.FeatureTabRename) || !status.Supports(herdr.FeatureTabMove) || !status.Supports(herdr.FeaturePaneRead) || !status.Supports(herdr.FeatureManualTerminalInput) || !status.Supports(herdr.FeatureSecretInput) || status.Supports(herdr.FeaturePiIntegration) {
 		t.Fatalf("status = %+v", status)
 	}
 	c.SetCapabilityChangeCallback(func(herdr.ServerStatus) { t.Error("unexpected callback") })
