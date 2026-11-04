@@ -26,6 +26,8 @@ func TestTopologyOutcomePrecedence(t *testing.T) {
 		phase, message string
 		data           any
 	}{
+		{"layout conflict", "workspace_rename", cli("layout_conflict", herdr.RefusalMessage("layout_conflict")), "not_started", herdr.RefusalMessage("layout_conflict"), code("layout_conflict")},
+		{"invalid layout", "workspace_reorder", cli("invalid_params", "Layout is missing or ambiguous"), "not_started", "Layout is missing or ambiguous", code("invalid_params")},
 		{"dirty force", "worktree_remove", started(cli("dirty_worktree_requires_force", "private")), "not_started", "Worktree has uncommitted changes; force removal is required", map[string]any{"code": "dirty_worktree_requires_force", "force_available": true}},
 		{"known beats started", "workspace_reorder", started(cli("invalid_request", " refused ")), "not_started", "refused", code("invalid_request")},
 		{"blank refusal", "workspace_reorder", cli("invalid_request", " "), "not_started", "Herdr refused the command", code("invalid_request")},

@@ -91,6 +91,9 @@ func (c *Client) Close() error { return nil }
 
 func (c *Client) CapabilityStatus() herdr.ServerStatus {
 	return herdr.ServerStatus{OneStepLaunch: true, Features: map[string]herdr.FeatureEvidence{
+		herdr.FeatureWorkspaceRename:     {State: herdr.FeatureSupported, Reason: "Shared layout workspace names available"},
+		herdr.FeatureWorkspaceReorder:    {State: herdr.FeatureSupported, Reason: "Shared layout workspace ordering available"},
+		herdr.FeatureWorkspaceMoveBlock:  {State: herdr.FeatureSupported, Reason: "Shared layout workspace block ordering available"},
 		herdr.FeatureAgentLaunch:         {State: herdr.FeatureSupported, Reason: "Agent launch available"},
 		herdr.FeatureTabRename:           {State: herdr.FeatureSupported, Reason: "Shared layout tab names available"},
 		herdr.FeatureTabMove:             {State: herdr.FeatureSupported, Reason: "Shared layout tab ordering available"},

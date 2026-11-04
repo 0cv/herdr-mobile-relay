@@ -18,8 +18,8 @@ computers. Install and pair each instance separately with the commands below.
   herdr.app names the adopted new tab itself; the terminal carries the agent name.
   Initial prompts wait for reported idle status; otherwise launch completes with
   a warning and leaves the prompt unsent.
-- Rename and reorder tabs in herdr-app. Either action can be refused when the
-  desktop changed the layout at the same moment; try again.
+- Rename and reorder tabs and workspaces in herdr-app. These actions can be
+  refused when the desktop changed the layout at the same moment; try again.
 - Pane size leasing (Resize Session). The phone's size applies to the shared
   core terminal, so herdr-app shows the phone's layout while a device leases,
   as with Resize Session on the TUI. The desktop can take the size back by
@@ -30,7 +30,7 @@ computers. Install and pair each instance separately with the commands below.
   relay owns the shared Pi extension.
 
 The phone hides actions that core does not support: agent identity renaming;
-tab creation and close; workspace and worktree management; the Pi
+tab creation and close; creating and closing workspaces, and worktrees; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 

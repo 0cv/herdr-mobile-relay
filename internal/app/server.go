@@ -1582,6 +1582,8 @@ func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []stri
 	}
 	for _, feature := range []string{
 		herdr.FeatureWorkspaceManagement,
+		herdr.FeatureWorkspaceRename,
+		herdr.FeatureWorkspaceReorder,
 		herdr.FeatureWorktreeManagement,
 		herdr.FeatureTabRename,
 		herdr.FeatureAgentLaunch,
