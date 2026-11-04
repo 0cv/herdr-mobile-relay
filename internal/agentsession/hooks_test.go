@@ -16,6 +16,9 @@ func fixture(t *testing.T, home, agent, data string) string {
 		name = "settings.json"
 	}
 	dir := filepath.Join(home, "."+agent)
+	if agent == "agy" {
+		dir = filepath.Join(home, ".gemini", "config")
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +41,7 @@ func fileBytes(t *testing.T, path string) []byte {
 func TestHooksLifecycle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	for _, agent := range []string{"claude", "codex", "cursor", "qoder"} {
+	for _, agent := range []string{"claude", "codex", "cursor", "qoder", "agy"} {
 		t.Run(agent, func(t *testing.T) {
 			matcher := ""
 			if agent == "claude" {
@@ -47,6 +50,9 @@ func TestHooksLifecycle(t *testing.T) {
 			original := `{"z":1,"hooks":{"Stop":[],"SessionStart":[{` + matcher + `"hooks":[{"command":"bash '/home/test/.` + agent + `/herdr-agent-state.sh' session && echo ready > /dev/null < /dev/null","timeout":10,"type":"command"}]}]},"a":{"z":2,"a":1}}`
 			if agent == "cursor" {
 				original = `{"version":1,"z":1,"hooks":{"Stop":[],"sessionStart":[{"command":"herdr-agent-state.sh"}]},"a":2}`
+			}
+			if agent == "agy" {
+				original = `{"z":{"Stop":[]},"hooks":{"enabled":false},"a":{"SessionStart":[{"command":"keep"}]}}`
 			}
 			path := fixture(t, home, agent, original)
 			run := func(op, binary string) string {
@@ -63,7 +69,7 @@ func TestHooksLifecycle(t *testing.T) {
 				if op == "uninstall" {
 					state = "not installed"
 				}
-				lines := 6
+				lines := 7
 				if op == "install" {
 					lines++
 				}
@@ -83,7 +89,7 @@ func TestHooksLifecycle(t *testing.T) {
 			if agent == "qoder" && bytes.Contains(first, []byte("matcher")) {
 				t.Fatal("Qoder hook must not restrict session sources")
 			}
-			if agent != "cursor" && !bytes.Contains(first, []byte("&& echo ready > /dev/null < /dev/null")) {
+			if agent != "cursor" && agent != "agy" && !bytes.Contains(first, []byte("&& echo ready > /dev/null < /dev/null")) {
 				t.Fatalf("Herdr command rewritten: %s", first)
 			}
 			run("install", "/old relay")
@@ -127,7 +133,7 @@ func TestHooksAbsentAndMalformed(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nqoder: config absent\nopencode: config absent\nomp: config absent\n" {
+	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nqoder: config absent\nagy: config absent\nopencode: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 	binary := filepath.Join(home, "relay")
@@ -147,6 +153,58 @@ func TestHooksAbsentAndMalformed(t *testing.T) {
 	}
 	if string(fileBytes(t, claude)) != `{"z":1}` || string(fileBytes(t, codex)) != `{"hooks":` {
 		t.Fatal("malformed configuration caused a write")
+	}
+}
+
+func TestAgyHooksConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binary := filepath.Join(home, "relay")
+	if err := os.WriteFile(binary, nil, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := manageHooks(home, binary, nil, "install", &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "agy: config absent\n") {
+		t.Fatal(out.String())
+	}
+	dir := filepath.Join(home, ".gemini", "config")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("created absent config", err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := manageHooks(home, binary, nil, "install", &out); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "hooks.json")
+	root, err := parseObject(fileBytes(t, path))
+	want := raw(object{{"SessionStart", raw([]hookCommand{{"command", "'" + binary + "' agent-session agy", 5}})}})
+	var compact bytes.Buffer
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Compact(&compact, root.get("herdr-mobile-relay")); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(compact.Bytes(), want) {
+		t.Fatalf("entry: %s", compact.Bytes())
+	}
+	for _, malformed := range []string{"{", "null", `{"a":{},"a":{}}`} {
+		if err := os.WriteFile(path, []byte(malformed), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for _, op := range []string{"install", "uninstall", "status"} {
+			if err := manageHooks(home, binary, nil, op, &out); err == nil {
+				t.Fatalf("%s accepted %s", op, malformed)
+			}
+			if string(fileBytes(t, path)) != malformed {
+				t.Fatal("malformed file changed")
+			}
+		}
 	}
 }
 
@@ -258,7 +316,7 @@ func TestHooksStatusNotInstalled(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nqoder: config absent\nopencode: config absent\nomp: config absent\n" {
+	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nqoder: config absent\nagy: config absent\nopencode: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 }

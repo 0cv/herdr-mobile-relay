@@ -54,6 +54,9 @@ func run(args []string) (int, error) {
 		}
 		return status(agentsession.Hooks(args[0], os.Stdout))
 	case "agent-session":
+		if len(args) > 0 && args[0] == "agy" {
+			defer fmt.Fprint(os.Stdout, "{}")
+		}
 		if len(args) == 1 {
 			agentsession.Run(args[0], os.Stdin)
 		}

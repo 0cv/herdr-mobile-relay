@@ -34,64 +34,35 @@ tab creation and close; workspace and worktree management; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 
-## How the core relay learns agent sessions
+## Conversation on core
 
-The `herdr-mobile-relay agent-session claude|codex|cursor|omp|opencode` hook command reads a
-SessionStart payload and reports its `session_id` through terminal labels:
-`herdr-mobile-relay.session` and `herdr-mobile-relay.pid`, written together.
-It uses only `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, and accepts the
-foreground pid only when it is an ancestor of the hook. The relay uses the
-session only while that pid remains the terminal's foreground pid, ignoring
-stale labels. Pi still discovers sessions through its bridge when no label
-session applies.
+| Agent | How its session is found | What the user does |
+| --- | --- | --- |
+| Pi | Pi bridge; used when no label session applies. | Install this release's bridge through the TUI relay, which owns the shared extension; reload Pi. |
+| Claude Code | `SessionStart` hook in `~/.claude/settings.json`. | Install hooks and restart. |
+| Codex | `SessionStart` hook in `~/.codex/hooks.json`, after the first prompt of each start or resume. | Install hooks, enable `[features] hooks = true` (also enabled by Herdr), restart with `--no-daemon`, and trust the hook in `/hooks`. |
+| Cursor | Flat `sessionStart` hook in `~/.cursor/hooks.json`. | Install hooks and restart cursor-agent. Appears only once Herdr recognises it; it sends no OSC 7501 status. |
+| Omp | Extension in `~/.omp/agent/extensions/herdr-mobile-relay-session.ts` reports starts and switches. | Install hooks and restart. |
+| OpenCode | Plugin in `~/.config/opencode/herdr-mobile-relay-session.js`, registered alongside Herdr's plugin in `tui.jsonc`, follows the displayed session to its root parent. | Convert `tui.jsonc` to strict JSON (no comments or trailing commas) before install or uninstall; install hooks and restart. |
+| Qoder | `SessionStart` hook in `~/.qoder/settings.json`; subagent events ignored. | Install hooks and restart qodercli. |
+| agy (Antigravity CLI) | Named `herdr-mobile-relay` hook in `~/.gemini/config/hooks.json` reads `conversationId`. | Install hooks, restart agy and start a new conversation; `SessionStart` fires for new conversations only. |
+| Hermes | `runtime/active_sessions.json` under configured Hermes roots; exactly one CLI entry matching foreground PID and process creation time. | No hook. Appears only once Herdr recognises it; it sends no OSC 7501 status. |
+| Grok | `~/.grok/active_sessions.json`; unique foreground PID and process start-time match (within 1 ms). | No hook for grok-build. |
+| Kimi | Native journals, working directory and foreground process, as on the TUI. | No hook for kimi-code; subscription errors cannot produce a conversation. |
 
-## Conversation session discovery
+Run `herdr-mobile-relay agent-hooks install`, `status` or `uninstall` to manage
+the relay's hooks. Other hooks are preserved; missing config directories are
+skipped. Hooks do nothing outside core terminals: they use `HC_TERMINAL_ID`
+and `HC_TERMINAL_SOCKET`, verify foreground PID ancestry, and write
+`herdr-mobile-relay.session` and `herdr-mobile-relay.pid` together. Labels
+apply only while that PID stays foreground; missing, stale or ambiguous
+session evidence leaves Conversation unavailable.
 
-Run `herdr-mobile-relay agent-hooks install` once from a terminal to enable
-Conversation for Claude Code, Codex, Cursor (cursor-agent), Omp, OpenCode and Qoder. Restart
-running agents to load the hooks. The hook does nothing outside a core terminal.
-Cursor adds a flat `sessionStart` command in `~/.cursor/hooks.json`. Omp uses
-`~/.omp/agent/extensions/herdr-mobile-relay-session.ts`, reporting session start
-and switch events without changing Herdr's extension.
-
-OpenCode uses `~/.config/opencode/herdr-mobile-relay-session.js`, registered in
-`tui.jsonc` alongside Herdr's plugin. It follows the displayed session to its
-root parent. Restart OpenCode after installation. The installer refuses
-`tui.jsonc` with comments or trailing commas; convert it to strict JSON manually
-before installing or uninstalling. Missing OpenCode config directories are skipped.
-
-Hermes needs no hook. On core, the relay reads `runtime/active_sessions.json`
-under its configured Hermes roots. It accepts exactly one CLI entry matching the
-terminal foreground PID and its process creation time; missing, stale or
-ambiguous evidence leaves Conversation unavailable.
-
-Qoder (`qodercli`) uses a command `SessionStart` hook in
-`~/.qoder/settings.json`; subagent events are ignored.
-Grok (`grok-build`) needs no hook: the relay reads Grok's own
-`~/.grok/active_sessions.json` registry and requires a unique foreground PID
-and process start-time match (within 1 ms). Existing Herdr hooks are untouched.
-Kimi (`kimi-code`) needs no hook: sessions are inferred from native journals,
-working directory and foreground process, as on the TUI. Missing or ambiguous
-sessions remain unavailable; a subscription error cannot produce a conversation.
-
-Use `herdr-mobile-relay agent-hooks status` to check installation and
-`herdr-mobile-relay agent-hooks uninstall` to remove only the relay's hooks.
-Existing Herdr hooks are preserved; missing agent config directories are skipped.
-Codex also needs `[features] hooks = true` in its `config.toml`, as enabled by
-Herdr's Codex integration. After installing, open `/hooks` in Codex once and
-trust the new SessionStart hook: Codex shows "1 hook needs review before it can
-run" until approved. Codex stores approval under `[hooks.state]` in
-`~/.codex/config.toml`; the installer never writes that trust and leaves this
-file unchanged.
-
-In herdr.app terminals, start Codex with `codex --no-daemon`. By default, Codex
-runs hooks in a shared background server, outside the terminal, so its sessions
-cannot be matched to their terminal. Codex runs its session-start hook only when
-the first prompt is sent, so Conversation appears after the first prompt of each
-start or resume.
-
-To do this only inside Herdr (herdr.app terminals and Herdr TUI panes), add to
-`~/.zshrc`:
+Codex shows "1 hook needs review before it can run" until approved in `/hooks`.
+Approval lives under `[hooks.state]` in `~/.codex/config.toml`; the installer
+leaves that file and trust unchanged. Use `codex --no-daemon` in herdr.app:
+the default shared background server runs hooks outside the terminal.
+To apply this only inside Herdr (core terminals and TUI panes), add to `~/.zshrc`:
 
 ```zsh
 if [[ -n "$HC_TERMINAL_ID" || -n "$HERDR_PANE_ID" ]]; then

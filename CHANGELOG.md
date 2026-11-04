@@ -17,8 +17,9 @@ project follows [Semantic Versioning](https://semver.org/).
   secrets at hidden prompts, start, clear, restart and stop agents, rename and
   reorder tabs, and use Pi commands and activity, plus the Conversation view
   (history and live) for Pi, Claude Code, Codex, Cursor, Omp, OpenCode, Hermes,
-  Qoder, Grok and Kimi. Install hooks for Claude Code, Codex, Cursor, Omp,
-  OpenCode and Qoder; Hermes, Grok and Kimi need no hook.
+  Qoder, agy (Antigravity), Grok and Kimi. Install hooks for Claude Code, Codex,
+  Cursor, Omp, OpenCode, Qoder and agy (Antigravity); Hermes, Grok and Kimi need
+  no hook.
   Resize Session fits the shared core terminal to your phone; resizing the
   desktop window takes the size back. Workspace and worktree management, colour
   and phone-driven updates are not available on core yet.
