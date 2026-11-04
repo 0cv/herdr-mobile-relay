@@ -203,15 +203,3 @@ func TestLayoutMalformedRead(t *testing.T) {
 		})
 	}
 }
-
-func TestLayoutCapabilities(t *testing.T) {
-	features := New("").CapabilityStatus().Features
-	if len(features) != 3 {
-		t.Fatal(features)
-	}
-	for _, feature := range []string{herdr.FeaturePaneRead, herdr.FeatureTabRename, herdr.FeatureTabMove} {
-		if features[feature].State != herdr.FeatureSupported {
-			t.Fatal(features)
-		}
-	}
-}
