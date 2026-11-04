@@ -15,6 +15,7 @@ SCRIPT_DIR=$(CDPATH='' cd "$SCRIPT_DIR" && pwd)
 REPO_DIR=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+require_tui_backend
 
 require_user_service_context
 

@@ -261,7 +261,7 @@ echo "▸ Restarting the relay service.."
 "$SCRIPT_DIR/service.sh" install >/dev/null
 echo "✓ Restarted."
 
-PORT="${HERDR_RELAY_PORT:-8375}"
+PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 DEADLINE=$((SECONDS + ${HERDR_STABLE_HTTP_TIMEOUT:-90}))
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-hostname.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT

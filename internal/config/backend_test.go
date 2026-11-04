@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestBackendDefaults(t *testing.T) {
 				name += "-hc"
 				port = 8377
 				service = strings.TrimSuffix(service, ".service") + "-hc.service"
-				socket = filepath.Join(os.Getenv("HOME"), ".local/state/herdr-core/default/default.sock")
+				socket = coreSocketPath(filepath.Join("/run/user", strconv.Itoa(os.Getuid())))
 			}
 			if cfg.Backend != backend || cfg.Port != port || cfg.PluginPort != port+1 || cfg.ServiceName != service ||
 				cfg.SocketPath != socket || cfg.RuntimeDir != filepath.Join(cfg.ConfigHome, name) ||
@@ -41,6 +42,7 @@ func TestHCOverrides(t *testing.T) {
 	isolateLoadEnvironment(t)
 	t.Setenv("HERDR_RELAY_BACKEND", "hc")
 	t.Setenv("XDG_STATE_HOME", "/state")
+	t.Setenv("XDG_RUNTIME_DIR", "/runtime")
 	t.Setenv("HC_SESSION", "second")
 	t.Setenv("HERDR_RELAY_PORT", "9001")
 	t.Setenv("HERDR_RELAY_PLUGIN_PORT", "9002")
@@ -51,7 +53,7 @@ func TestHCOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SocketPath != "/state/herdr-core/second/second.sock" || cfg.Port != 9001 || cfg.PluginPort != 9002 ||
+	if cfg.SocketPath != "/runtime/herdr-core/second.sock" || cfg.Port != 9001 || cfg.PluginPort != 9002 ||
 		cfg.ServiceName != "custom.service" || cfg.RuntimeDir != "/runtime/core" {
 		t.Fatalf("%+v", cfg)
 	}

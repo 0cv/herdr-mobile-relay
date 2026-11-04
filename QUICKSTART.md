@@ -146,5 +146,6 @@ changes, the full action list, teardown, and uninstall.
 ## Add herdr-core
 
 To reach agents in herdr-app as well as the TUI, follow the
-[manual second-instance setup](docs/herdr-core.md). It covers separate services,
-pairing, and which actions are available on core.
+[second-relay setup](docs/herdr-core.md): use `HERDR_RELAY_BACKEND=hc make
+stable-setup`, or `HERDR_RELAY_BACKEND=hc bash relay/tailscale-setup.sh`, to
+install and pair a separate background service without changing the TUI relay.

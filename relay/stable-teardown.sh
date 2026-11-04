@@ -47,15 +47,15 @@ recover_state_from_config() {
     local resolved
 
     load_relay_env "$ENV_FILE"
-    port="${HERDR_RELAY_PORT:-8375}"
+    port="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
     config="${CLOUDFLARED_CONFIG:-}"
-    if [ -z "$config" ] && [ -r "$HOME/.cloudflared/config-herdr-mobile-relay.yml" ]; then
-        config="$HOME/.cloudflared/config-herdr-mobile-relay.yml"
+    if [ -z "$config" ] && [ -r "$RELAY_CLOUDFLARED_CONFIG" ]; then
+        config="$RELAY_CLOUDFLARED_CONFIG"
     fi
     if [ -z "$config" ] || [ ! -r "$config" ]; then
         echo "✗ No stable state or readable Herdr Cloudflare config was found." >&2
         echo "  Checked state:  $STATE_FILE" >&2
-        echo "  Checked config: ${config:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}" >&2
+        echo "  Checked config: ${config:-$RELAY_CLOUDFLARED_CONFIG}" >&2
         return 1
     fi
 
@@ -139,11 +139,11 @@ fi
 
 case "$(uname -s)" in
     Darwin)
-        SERVICE="com.herdr-mobile-relay.service"
+        SERVICE="$RELAY_LAUNCHD_LABEL"
         SERVICE_FILE="$HOME/Library/LaunchAgents/$SERVICE.plist"
         ;;
     Linux)
-        SERVICE="herdr-mobile-relay.service"
+        SERVICE="$RELAY_SYSTEMD_LABEL"
         SERVICE_FILE="$HOME/.config/systemd/user/$SERVICE"
         ;;
 esac

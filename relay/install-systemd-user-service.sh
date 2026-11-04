@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LABEL="herdr-mobile-relay.service"
-LEGACY_LABEL="herdr-remote.service"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-UNIT_DIR="$HOME/.config/systemd/user"
-UNIT_FILE="$UNIT_DIR/$LABEL"
-LEGACY_UNIT_FILE="$UNIT_DIR/$LEGACY_LABEL"
 
 export PATH="$HOME/.local/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+LABEL="$RELAY_SYSTEMD_LABEL"
+LEGACY_LABEL="herdr-remote.service"
+UNIT_DIR="$HOME/.config/systemd/user"
+UNIT_FILE="$UNIT_DIR/$LABEL"
+LEGACY_UNIT_FILE="$UNIT_DIR/$LEGACY_LABEL"
+if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+    LEGACY_LABEL=""
+    LEGACY_UNIT_FILE=""
+fi
 . "$SCRIPT_DIR/native-install-transaction.sh"
 require_user_service_context
 
@@ -21,7 +25,7 @@ ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 unset HERDR_TAILSCALE_PORT
 load_relay_env "$ENV_FILE"
 unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
-CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
+CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$RELAY_CLOUDFLARED_CONFIG}"
 
 if ! command -v systemctl >/dev/null 2>&1; then
     echo "systemctl not found"
@@ -103,7 +107,7 @@ echo "Logs: journalctl --user -u $LABEL -f"
 # ensure_relay_env generates the token and instance identity into the file
 # only, so read both back before the readiness gate compares identities.
 PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
-PORT="${PORT:-${HERDR_RELAY_PORT:-8375}}"
+PORT="${PORT:-${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}}"
 INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
 echo "Waiting for relay health on 127.0.0.1:$PORT..."
 if ! HEALTH="$(wait_for_relay_health "$PORT" 15 1 "$INSTANCE")"; then

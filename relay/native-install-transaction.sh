@@ -28,7 +28,7 @@ native_install_begin() {
     native_changed=false
     native_stage=""
     native_committed=false
-    local recovery_root="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/recovery"
+    local recovery_root="${XDG_STATE_HOME:-$HOME/.local/state}/$RELAY_INSTANCE_NAME/recovery"
     mkdir -p "$recovery_root" || return 1
     chmod 700 "$recovery_root" || return 1
     native_recovery="$(mktemp -d "$recovery_root/herdr-native-recovery.XXXXXX")" || return 1
@@ -49,12 +49,16 @@ native_install_begin() {
         systemctl --user show-environment >/dev/null || return 1
         native_active="$(native_systemd_state is-active "$native_label")" || return 1
         native_enabled="$(native_systemd_state is-enabled "$native_label")" || return 1
-        native_legacy_active="$(native_systemd_state is-active "$native_legacy_label")" || return 1
-        native_legacy_enabled="$(native_systemd_state is-enabled "$native_legacy_label")" || return 1
+        if [ -n "$native_legacy_label" ]; then
+            native_legacy_active="$(native_systemd_state is-active "$native_legacy_label")" || return 1
+            native_legacy_enabled="$(native_systemd_state is-enabled "$native_legacy_label")" || return 1
+        fi
     else
         launchctl print "gui/$UID" >/dev/null 2>&1 || return 1
         launchctl print "gui/$UID/$native_label" >/dev/null 2>&1 && native_active=true
-        launchctl print "gui/$UID/$native_legacy_label" >/dev/null 2>&1 && native_legacy_active=true
+        if [ -n "$native_legacy_label" ]; then
+            launchctl print "gui/$UID/$native_legacy_label" >/dev/null 2>&1 && native_legacy_active=true
+        fi
     fi
     printf 'definition=%s\nlegacy_definition=%s\nenvironment=%s\nactive=%s\nenabled=%s\nlegacy_active=%s\nlegacy_enabled=%s\n' \
         "$native_definition" "$native_legacy_definition" "$native_environment" \
@@ -63,7 +67,7 @@ native_install_begin() {
     native_snapshot_complete=true
     native_previous_ready=false
     native_previous_port="$(env_file_value "$native_environment" HERDR_RELAY_PORT)"
-    native_previous_port="${native_previous_port:-8375}"
+    native_previous_port="${native_previous_port:-$RELAY_DEFAULT_PORT}"
     if [ "$native_active" = true ] || [ "$native_legacy_active" = true ]; then
         local previous binary instance
         binary="$(relay_binary)" || return 1
@@ -81,6 +85,10 @@ native_install_begin() {
 native_install_restore_files() {
     local index=0 file failed=false
     for file in "$native_definition" "$native_legacy_definition" "$native_environment"; do
+        if [ -z "$file" ]; then
+            index=$((index + 1))
+            continue
+        fi
         if [ -f "$native_recovery/$index" ]; then
             cp -p "$native_recovery/$index" "$file" || failed=true
         else
@@ -96,6 +104,7 @@ native_install_restore_activation() {
     if [ "$native_manager" = systemd ]; then
         systemctl --user daemon-reload || failed=true
         for label in "$native_label" "$native_legacy_label"; do
+            [ -n "$label" ] || continue
             active="$native_active"
             enabled="$native_enabled"
             if [ "$label" = "$native_legacy_label" ]; then
@@ -173,6 +182,10 @@ native_install_exit() {
 }
 
 native_install_commit() {
+    if [ -z "$native_legacy_label" ]; then
+        native_committed=true
+        return
+    fi
     if [ "$native_manager" = systemd ]; then
         if [ -f "$native_legacy_definition" ]; then
             systemctl --user disable --now "$native_legacy_label" || return 1
