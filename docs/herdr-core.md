@@ -54,6 +54,21 @@ run" until approved. Codex stores approval under `[hooks.state]` in
 `~/.codex/config.toml`; the installer never writes that trust and leaves this
 file unchanged.
 
+In herdr.app terminals, start Codex with `codex --no-daemon`. By default, Codex
+runs hooks in a shared background server, outside the terminal, so its sessions
+cannot be matched to their terminal. Codex runs its session-start hook only when
+the first prompt is sent, so Conversation appears after the first prompt of each
+start or resume.
+
+To do this only inside Herdr (herdr.app terminals and Herdr TUI panes), add to
+`~/.zshrc`:
+
+```zsh
+if [[ -n "$HC_TERMINAL_ID" || -n "$HERDR_PANE_ID" ]]; then
+  codex() { command codex --no-daemon "$@"; }
+fi
+```
+
 ## Configuration and isolation
 
 Core passes the environment of whoever started it to every terminal it runs.

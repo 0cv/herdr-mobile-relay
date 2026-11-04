@@ -103,6 +103,11 @@ three paths.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.
 
+With Codex 0.160 or later, start Codex with `codex --no-daemon` in Herdr panes.
+Otherwise, Codex's shared background server runs Herdr's hooks outside the pane,
+and Codex's Conversation is missing or shows another pane's session.
+See [docs/herdr-core.md](docs/herdr-core.md) for the zsh snippet.
+
 **New in 0.24.0:** Connect through Tailscale. The setup menu groups Cloudflare,
 WebRTC and Tailscale; an open Conversation refreshes after a reconnect.
 
