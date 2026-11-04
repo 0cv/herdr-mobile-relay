@@ -11,7 +11,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 )
 
-const opencodePluginName = "./herdr-mobile-relay-session.js"
+const opencodePluginName = "./herdr-mobile-relay-session"
 
 func opencodePlugin(binary string) []byte {
 	return []byte(fmt.Sprintf(`// Session selection adapted from Herdr's herdr-tui-session.js (Apache-2.0).
@@ -66,7 +66,7 @@ func manageOpenCodePlugin(home, binary, operation string, output io.Writer) erro
 	if !info.IsDir() {
 		return fmt.Errorf("%s: not a directory", dir)
 	}
-	path := filepath.Join(dir, "tui.jsonc")
+	path := filepath.Join(dir, "cli.json")
 	data, err := os.ReadFile(path)
 	absent := os.IsNotExist(err)
 	if err != nil && !absent {
@@ -87,9 +87,9 @@ func manageOpenCodePlugin(home, binary, operation string, output io.Writer) erro
 		return fmt.Errorf("%s: refusing to edit: only strict JSON is supported; comments and trailing commas must be removed manually: %w", path, err)
 	}
 	entries := []json.RawMessage{}
-	if value := root.get("plugin"); value != nil {
+	if value := root.get("plugins"); value != nil {
 		if len(value) == 0 || value[0] != '[' {
-			return fmt.Errorf("%s: plugin must be an array", path)
+			return fmt.Errorf("%s: plugins must be an array", path)
 		}
 		if err := json.Unmarshal(value, &entries); err != nil {
 			return err
@@ -105,7 +105,8 @@ func manageOpenCodePlugin(home, binary, operation string, output io.Writer) erro
 			kept = append(kept, entry)
 		}
 	}
-	pluginPath := filepath.Join(dir, "herdr-mobile-relay-session.js")
+	pluginDir := filepath.Join(dir, "herdr-mobile-relay-session")
+	pluginPath := filepath.Join(pluginDir, "tui.js")
 	state := "not installed"
 	if found {
 		if _, err := os.Stat(pluginPath); err == nil {
@@ -113,14 +114,17 @@ func manageOpenCodePlugin(home, binary, operation string, output io.Writer) erro
 		}
 	}
 	if operation == "install" {
-		if _, err := atomicfile.Replace(dir, pluginPath, ".agent-hooks-*", opencodePlugin(binary), 0600); err != nil {
+		if err := os.MkdirAll(pluginDir, 0700); err != nil {
+			return err
+		}
+		if _, err := atomicfile.Replace(pluginDir, pluginPath, ".agent-hooks-*", opencodePlugin(binary), 0600); err != nil {
 			return err
 		}
 		kept = append(kept, raw(opencodePluginName))
 		state = "installed"
 	}
 	if operation == "install" || operation == "uninstall" && found {
-		root.set("plugin", raw(kept))
+		root.set("plugins", raw(kept))
 		var out bytes.Buffer
 		if err := json.Indent(&out, raw(root), "", "  "); err != nil {
 			return err
@@ -135,6 +139,15 @@ func manageOpenCodePlugin(home, binary, operation string, output io.Writer) erro
 	if operation == "uninstall" {
 		if err := os.Remove(pluginPath); err != nil && !os.IsNotExist(err) {
 			return err
+		}
+		entries, err := os.ReadDir(pluginDir)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && len(entries) == 0 {
+			if err := os.Remove(pluginDir); err != nil {
+				return err
+			}
 		}
 		state = "not installed"
 	}

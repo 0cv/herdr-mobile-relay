@@ -35,13 +35,13 @@ func TestOpenCodePluginLifecycle(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	config := filepath.Join(dir, "tui.jsonc")
-	original := []byte(`{"plugin":["./herdr-tui-session.js"],"theme":"test"}`)
+	config := filepath.Join(dir, "cli.json")
+	original := []byte(`{"plugins":["./herdr-opencode"],"theme":"test"}`)
 	if err := os.WriteFile(config, original, 0600); err != nil {
 		t.Fatal(err)
 	}
 	run("install")
-	path := filepath.Join(dir, "herdr-mobile-relay-session.js")
+	path := filepath.Join(dir, "herdr-mobile-relay-session", "tui.js")
 	plugin := fileBytes(t, path)
 	for _, want := range []string{"herdr-tui-session.js (Apache-2.0)", string(raw(`/relay's "binary"`)), "JSON.stringify({ session_id: id })", "if (!process.env.HC_TERMINAL_SOCKET) return;"} {
 		if !strings.Contains(string(plugin), want) {
@@ -49,6 +49,15 @@ func TestOpenCodePluginLifecycle(t *testing.T) {
 		}
 	}
 	installed := fileBytes(t, config)
+	wantConfig := "{\n  \"plugins\": [\n    \"./herdr-opencode\",\n    \"./herdr-mobile-relay-session\"\n  ],\n  \"theme\": \"test\"\n}\n"
+	if string(installed) != wantConfig {
+		t.Fatalf("config = %s", installed)
+	}
+	out.Reset()
+	run("status")
+	if out.String() != "opencode: installed\n" {
+		t.Fatal(out.String())
+	}
 	run("install")
 	if !bytes.Equal(installed, fileBytes(t, config)) || !bytes.Equal(plugin, fileBytes(t, path)) {
 		t.Fatal("not idempotent")
@@ -58,33 +67,40 @@ func TestOpenCodePluginLifecycle(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("plugin remains")
 	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatal("plugin directory remains")
+	}
 	root, err := parseObject(fileBytes(t, config))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var entries []string
-	if err := json.Unmarshal(root.get("plugin"), &entries); err != nil {
+	if err := json.Unmarshal(root.get("plugins"), &entries); err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0] != "./herdr-tui-session.js" || string(root.get("theme")) != `"test"` {
+	if len(entries) != 1 || entries[0] != "./herdr-opencode" || string(root.get("theme")) != `"test"` {
 		t.Fatal(string(fileBytes(t, config)))
 	}
-	commented := []byte("{\n// Herdr\n\"plugin\": []\n}")
-	if err := os.WriteFile(config, commented, 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, op := range []string{"install", "uninstall"} {
-		if err := manageOpenCodePlugin(home, "/relay", op, &out); err == nil || !strings.Contains(err.Error(), "strict JSON") {
-			t.Fatalf("expected refusal: %v", err)
+	for _, commented := range [][]byte{[]byte("{\n// Herdr\n\"plugins\": []\n}"), []byte(`{"plugins":[}`)} {
+		if err := os.WriteFile(config, commented, 0600); err != nil {
+			t.Fatal(err)
 		}
-		if !bytes.Equal(commented, fileBytes(t, config)) {
-			t.Fatal("comments changed")
+		for _, op := range []string{"install", "uninstall"} {
+			if err := manageOpenCodePlugin(home, "/relay", op, &out); err == nil || !strings.Contains(err.Error(), "strict JSON") {
+				t.Fatalf("expected refusal: %v", err)
+			}
+			if !bytes.Equal(commented, fileBytes(t, config)) {
+				t.Fatal("comments changed")
+			}
 		}
 	}
 	if err := os.Remove(config); err != nil {
 		t.Fatal(err)
 	}
 	run("install")
+	if got := string(fileBytes(t, config)); got != "{\n  \"plugins\": [\n    \"./herdr-mobile-relay-session\"\n  ]\n}\n" {
+		t.Fatal(got)
+	}
 	run("uninstall")
 }
 
@@ -98,14 +114,18 @@ func TestOpenCodePluginNode(t *testing.T) {
 	if err := os.WriteFile(stub, []byte("#!"+node+"\nconst fs = require('node:fs'); if (process.argv.slice(2).join(' ') !== 'agent-session opencode') process.exit(1); fs.appendFileSync(process.env.RECORD, fs.readFileSync(0, 'utf8') + '\\n');\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "plugin.mjs"), opencodePlugin(stub), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".config", "opencode"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := manageOpenCodePlugin(dir, stub, "install", &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	script := `import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import plugin from './plugin.mjs';
+import plugin from './.config/opencode/herdr-mobile-relay-session/tui.js';
 test('selection, retries, guard and disposal', async () => {
+  assert.equal(plugin.id, 'herdr-mobile-relay.opencode.session-selection');
   delete process.env.HC_TERMINAL_SOCKET;
   assert.equal(plugin.setup({}), undefined);
   process.env.HC_TERMINAL_SOCKET = 'fake';

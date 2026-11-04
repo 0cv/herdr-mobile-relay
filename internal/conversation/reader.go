@@ -359,14 +359,12 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSessionWithProject(r.claudeRoots(), project, sessionID+".jsonl", func(cwd string) string {
-			return claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-")
-		})
+		return findProjectSessionWithProject(r.claudeRoots(), project, sessionID+".jsonl", claudeProjectName)
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSessionWithProject(r.qoderRoots(), project, sessionID+".jsonl", func(string) string { return "" })
+		return findProjectSessionWithProject(r.qoderRoots(), project, sessionID+".jsonl", claudeProjectName)
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
 			return Location{}
@@ -393,6 +391,10 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 	default:
 		return Location{}
 	}
+}
+
+func claudeProjectName(cwd string) string {
+	return claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-")
 }
 
 func safeSessionID(value string) bool {

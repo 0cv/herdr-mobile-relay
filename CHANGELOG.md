@@ -26,6 +26,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Conversation for Qoder now finds sessions in folders whose path contains a dot
+  or other punctuation, such as a home folder named `first.last`.
 - Idle agents no longer look finished on the phone. The idle ring let a light
   logo, such as Claude Code's or Codex's, show through its centre, so it looked
   like the filled dot of an unread result.
