@@ -45,7 +45,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		return nil, errors.Join(herdr.ErrNotStarted, err)
 	}
 	reader := bufio.NewReader(conn)
-	if err := hello(ctx, conn, reader); err != nil {
+	if err := hello(ctx, conn, reader, false); err != nil {
 		return nil, errors.Join(herdr.ErrNotStarted, err)
 	}
 	raw, started, err := request(ctx, conn, reader, "request", method, params, true)
@@ -62,18 +62,23 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 	return nil, errors.Join(herdr.ErrDispatchedUnknown, err)
 }
 
-func hello(ctx context.Context, conn net.Conn, reader *bufio.Reader) error {
-	raw, _, err := request(ctx, conn, reader, "hello", "hello", map[string]any{"generation": 1}, false)
+func hello(ctx context.Context, conn net.Conn, reader *bufio.Reader, framed bool) error {
+	params := map[string]any{"generation": 1}
+	if framed {
+		params["framed"] = true
+	}
+	raw, _, err := request(ctx, conn, reader, "hello", "hello", params, false)
 	if err != nil {
 		return err
 	}
 	var result struct {
-		Generation int `json:"generation"`
+		Generation int  `json:"generation"`
+		Framed     bool `json:"framed"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return err
 	}
-	if result.Generation != 1 {
+	if result.Generation != 1 || (framed && !result.Framed) {
 		return &herdr.CLIError{Code: "protocol_mismatch"}
 	}
 	return nil
