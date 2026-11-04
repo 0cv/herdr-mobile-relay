@@ -29,7 +29,7 @@ are manual.
 
 ## How the core relay learns agent sessions
 
-The `herdr-mobile-relay agent-session claude|codex` hook command reads a
+The `herdr-mobile-relay agent-session claude|codex|cursor|omp` hook command reads a
 SessionStart payload and reports its `session_id` through terminal labels:
 `herdr-mobile-relay.session` and `herdr-mobile-relay.pid`, written together.
 It uses only `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, and accepts the
@@ -38,11 +38,19 @@ session only while that pid remains the terminal's foreground pid, ignoring
 stale labels. Pi still discovers sessions through its bridge when no label
 session applies.
 
-## Conversation for Claude Code and Codex
+## Conversation for Claude Code, Codex, Cursor, Omp and Hermes
 
 Run `herdr-mobile-relay agent-hooks install` once from a terminal to enable
-Conversation for Claude Code and Codex. Restart running agents: the hooks fire
-at session start. The hook does nothing outside a core terminal.
+Conversation for Claude Code, Codex, Cursor (cursor-agent) and Omp. Restart
+running agents to load the hooks. The hook does nothing outside a core terminal.
+Cursor adds a flat `sessionStart` command in `~/.cursor/hooks.json`. Omp uses
+`~/.omp/agent/extensions/herdr-mobile-relay-session.ts`, reporting session start
+and switch events without changing Herdr's extension.
+
+Hermes needs no hook. On core, the relay reads `runtime/active_sessions.json`
+under its configured Hermes roots. It accepts exactly one CLI entry matching the
+terminal foreground PID and its process creation time; missing, stale or
+ambiguous evidence leaves Conversation unavailable.
 
 Use `herdr-mobile-relay agent-hooks status` to check installation and
 `herdr-mobile-relay agent-hooks uninstall` to remove only the relay's hooks.
