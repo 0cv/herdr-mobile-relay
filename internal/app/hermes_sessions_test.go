@@ -31,7 +31,7 @@ func TestHermesRegistry(t *testing.T) {
 		{"other surface", `{"entries":[{"surface":"desktop","pid":42,"process_start_time":100,"session_id":"s"}]}`, "", false},
 		{"multiple", `{"entries":[{"surface":"cli","pid":42,"process_start_time":100,"session_id":"s"},{"surface":"cli","pid":42,"process_start_time":100,"session_id":"s"}]}`, "", false},
 		{"malformed", "{", "", true},
-		{"oversized", strings.Repeat(" ", maxHermesRegistry+1), "", true},
+		{"oversized", strings.Repeat(" ", maxSessionRegistry+1), "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.data != "" {
@@ -39,11 +39,11 @@ func TestHermesRegistry(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			entries, err := readHermesEntries([]string{root})
+			entries, err := readRegistryEntries([]string{path}, "hermes")
 			if (err != nil) != tc.bad {
 				t.Fatal(err)
 			}
-			if got := matchHermesSession(entries, 42, 100); got != tc.want {
+			if got := matchRegistrySession(entries, 42, 100); got != tc.want {
 				t.Fatalf("got %q", got)
 			}
 		})
@@ -55,7 +55,7 @@ func TestEnrichHermesSessions(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("HERMES_HOME", home)
 	t.Setenv(agentroots.HermesListEnv, "")
-	start, err := hermesProcessStart(t.Context(), os.Getpid())
+	start, err := registryProcessStart(t.Context(), os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestEnrichHermesSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "active_sessions.json")
-	data, _ := json.Marshal(map[string]any{"entries": []hermesEntry{{Session: "session", Surface: "cli", PID: os.Getpid(), Start: start}}})
+	data, _ := json.Marshal(map[string]any{"entries": []registryEntry{{Session: "session", Surface: "cli", PID: os.Getpid(), Start: start}}})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestEnrichHermesSessions(t *testing.T) {
 	check := func(agent, existing, want string) {
 		t.Helper()
 		a := &coordinator.AgentState{Agent: agent, PaneID: "pane", Session: existing}
-		s.enrichHermesSessions(t.Context(), []*coordinator.AgentState{a})
+		s.enrichRegistrySessions(t.Context(), []*coordinator.AgentState{a})
 		if a.Session != want {
 			t.Fatalf("got %q want %q", a.Session, want)
 		}

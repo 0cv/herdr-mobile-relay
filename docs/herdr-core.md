@@ -45,10 +45,10 @@ session only while that pid remains the terminal's foreground pid, ignoring
 stale labels. Pi still discovers sessions through its bridge when no label
 session applies.
 
-## Conversation for Claude Code, Codex, Cursor, Omp and Hermes
+## Conversation session discovery
 
 Run `herdr-mobile-relay agent-hooks install` once from a terminal to enable
-Conversation for Claude Code, Codex, Cursor (cursor-agent) and Omp. Restart
+Conversation for Claude Code, Codex, Cursor (cursor-agent), Omp and Qoder. Restart
 running agents to load the hooks. The hook does nothing outside a core terminal.
 Cursor adds a flat `sessionStart` command in `~/.cursor/hooks.json`. Omp uses
 `~/.omp/agent/extensions/herdr-mobile-relay-session.ts`, reporting session start
@@ -58,6 +58,15 @@ Hermes needs no hook. On core, the relay reads `runtime/active_sessions.json`
 under its configured Hermes roots. It accepts exactly one CLI entry matching the
 terminal foreground PID and its process creation time; missing, stale or
 ambiguous evidence leaves Conversation unavailable.
+
+Qoder (`qodercli`) uses a command `SessionStart` hook in
+`~/.qoder/settings.json`; subagent events are ignored.
+Grok (`grok-build`) needs no hook: the relay reads Grok's own
+`~/.grok/active_sessions.json` registry and requires a unique foreground PID
+and process start-time match (within 1 ms). Existing Herdr hooks are untouched.
+Kimi (`kimi-code`) needs no hook: sessions are inferred from native journals,
+working directory and foreground process, as on the TUI. Missing or ambiguous
+sessions remain unavailable; a subscription error cannot produce a conversation.
 
 Use `herdr-mobile-relay agent-hooks status` to check installation and
 `herdr-mobile-relay agent-hooks uninstall` to remove only the relay's hooks.

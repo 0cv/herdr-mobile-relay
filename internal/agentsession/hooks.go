@@ -257,10 +257,10 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 	}
 	var changes []change
 	var feedback bytes.Buffer
-	for _, agent := range []string{"claude", "codex", "cursor"} {
+	for _, agent := range []string{"claude", "codex", "cursor", "qoder"} {
 		dir := filepath.Join(home, "."+agent)
 		name := "hooks.json"
-		if agent == "claude" {
+		if agent == "claude" || agent == "qoder" {
 			name = "settings.json"
 		}
 		path := filepath.Join(dir, name)
@@ -323,7 +323,7 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 		return err
 	}
 	if operation == "install" {
-		fmt.Fprintln(&feedback, "Restart Claude Code, Codex, Cursor and Omp to load session hooks; Hermes needs no hook.")
+		fmt.Fprintln(&feedback, "Restart Claude Code, Codex, Cursor, Omp and Qoder to load session hooks; Hermes, Grok and Kimi need no hook.")
 	}
 	for _, c := range changes {
 		if _, err := atomicfile.Replace(filepath.Dir(c.path), c.path, ".agent-hooks-*", c.data, c.mode); err != nil {

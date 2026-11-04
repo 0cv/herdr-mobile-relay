@@ -1,11 +1,12 @@
 package app
 
 import (
+	"fmt"
 	"os/exec"
 	"testing"
 )
 
-func TestKimiE2dDarwinOwnedProcessStart(t *testing.T) {
+func TestDarwinOwnedProcessStart(t *testing.T) {
 	start := func() string {
 		t.Helper()
 		child := exec.Command("/bin/sleep", "30")
@@ -20,6 +21,14 @@ func TestKimiE2dDarwinOwnedProcessStart(t *testing.T) {
 		again, err := kimiProcessStart(child.Process.Pid)
 		if err != nil || again != first {
 			t.Fatal("owned process start unstable")
+		}
+		birth, err := processStartTime(t.Context(), child.Process.Pid)
+		if err != nil || first != fmt.Sprintf("%d:%06d", birth.Unix(), birth.Nanosecond()/1000) {
+			t.Fatalf("Kimi start differs from shared process start: %v", err)
+		}
+		registryStart, err := registryProcessStart(t.Context(), child.Process.Pid)
+		if err != nil || registryStart != float64(birth.Unix())+float64(birth.Nanosecond())/1e9 {
+			t.Fatalf("registry start differs from shared process start: %v", err)
 		}
 		return first
 	}

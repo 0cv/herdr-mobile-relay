@@ -12,7 +12,7 @@ import (
 func fixture(t *testing.T, home, agent, data string) string {
 	t.Helper()
 	name := "hooks.json"
-	if agent == "claude" {
+	if agent == "claude" || agent == "qoder" {
 		name = "settings.json"
 	}
 	dir := filepath.Join(home, "."+agent)
@@ -38,7 +38,7 @@ func fileBytes(t *testing.T, path string) []byte {
 func TestHooksLifecycle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	for _, agent := range []string{"claude", "codex", "cursor"} {
+	for _, agent := range []string{"claude", "codex", "cursor", "qoder"} {
 		t.Run(agent, func(t *testing.T) {
 			matcher := ""
 			if agent == "claude" {
@@ -63,7 +63,7 @@ func TestHooksLifecycle(t *testing.T) {
 				if op == "uninstall" {
 					state = "not installed"
 				}
-				lines := 4
+				lines := 5
 				if op == "install" {
 					lines++
 				}
@@ -80,6 +80,9 @@ func TestHooksLifecycle(t *testing.T) {
 			}
 			run("install", "/old relay")
 			first := fileBytes(t, path)
+			if agent == "qoder" && bytes.Contains(first, []byte("matcher")) {
+				t.Fatal("Qoder hook must not restrict session sources")
+			}
 			if agent != "cursor" && !bytes.Contains(first, []byte("&& echo ready > /dev/null < /dev/null")) {
 				t.Fatalf("Herdr command rewritten: %s", first)
 			}
@@ -124,7 +127,7 @@ func TestHooksAbsentAndMalformed(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nomp: config absent\n" {
+	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nqoder: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 	binary := filepath.Join(home, "relay")
@@ -255,7 +258,7 @@ func TestHooksStatusNotInstalled(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nomp: config absent\n" {
+	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nqoder: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 }

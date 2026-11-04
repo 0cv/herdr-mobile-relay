@@ -17,6 +17,13 @@ func TestMoreAgentPayloads(t *testing.T) {
 		{"cursor", `{"session_id":4}`, ""},
 		{"omp", `{"session_id":"/sessions/s.jsonl"}`, "/sessions/s.jsonl"},
 		{"omp", `{"session_id":null}`, ""},
+		{"qoder", `{"session_id":"s","hook_event_name":"SessionStart","source":"startup"}`, "s"},
+		{"qoder", `{"session_id":"s","hook_event_name":"SessionStart","source":"resume"}`, "s"},
+		{"qoder", `{"session_id":"s","hook_event_name":"SessionStart","agent_id":"sub"}`, ""},
+		{"qoder", `{"session_id":"s","hook_event_name":"SessionStart","agent_id":null}`, ""},
+		{"qoder", `{"session_id":"s","hook_event_name":"Stop"}`, ""},
+		{"qoder", `{"session_id":3,"hook_event_name":"SessionStart"}`, ""},
+		{"qoder", `{`, ""},
 	} {
 		if got := session(tc.agent, []byte(tc.data), func(string) string { return "" }); got != tc.want {
 			t.Fatalf("%s: %q", tc.data, got)
