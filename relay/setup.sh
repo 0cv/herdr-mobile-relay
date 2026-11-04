@@ -20,8 +20,8 @@ case "${1:-}" in
     "") ;;
     --install-missing) INSTALL_MISSING=1 ;;
     --tailscale-prerequisites) INSTALL_MISSING=1 ;;
-    --pi-install) exec bash "$SCRIPT_DIR/pi-commands.sh" install "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
-    --pi-remove) exec bash "$SCRIPT_DIR/pi-commands.sh" remove "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
+    --pi-install) require_tui_backend; exec bash "$SCRIPT_DIR/pi-commands.sh" install "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
+    --pi-remove) require_tui_backend; exec bash "$SCRIPT_DIR/pi-commands.sh" remove "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
     *)
         echo "Usage: $0 [--install-missing | --pi-install [agent-dir] | --pi-remove [agent-dir]]"
         exit 2
@@ -95,7 +95,8 @@ missing_tools=()
 find_missing_tools() {
     missing_tools=()
     local command
-    local required=(herdr)
+    local required=()
+    [ "$HERDR_RELAY_BACKEND" != herdr ] || required+=(herdr)
     # A gateway-configured relay dials the gateway itself, so cloudflared is
     # neither installed nor required on that path.
     if [ -z "$GATEWAY_URL" ] && [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ] &&
@@ -173,6 +174,9 @@ fi
 # Voices are cached outside the release, so this download happens once per
 # computer rather than once per update. The relay binary owns the catalog and
 # does the downloading, which the prerequisite check above already required.
+if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+    ensure_relay_env "$ENV_FILE"
+fi
 speech_missing="$("$SCRIPT_DIR/speech-voices.sh" --missing)"
 if [ -n "$speech_missing" ]; then
     if [ "$INSTALL_MISSING" -eq 1 ]; then
@@ -193,7 +197,7 @@ if [ -n "$speech_missing" ]; then
     fi
 fi
 
-if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
+if [ "$HERDR_RELAY_BACKEND" = herdr ] && [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
     install -m 0600 "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
     echo "Created $WEB_ENV_FILE"
 fi

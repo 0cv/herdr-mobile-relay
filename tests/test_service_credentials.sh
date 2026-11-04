@@ -35,4 +35,14 @@ if grep -E 'synthetic-(service|ambient|file)-token' "$WORK/output" >/dev/null; t
     echo 'service tracing exposed a credential' >&2
     exit 1
 fi
+printf "HERDR_RELAY_BACKEND='hc'\nHERDR_TAILSCALE_PORT='8444'\n" > "$WORK/core.env"
+cat > "$WORK/core-relay" <<'EOF'
+#!/bin/sh
+printf '%s|%s|%s|%s' "$HERDR_RELAY_BACKEND" "$HERDR_RELAY_PORT" "$HERDR_RELAY_PLUGIN_PORT" "$HERDR_RELAY_ENV" > "$SERVICE_TEST_ROOT/core-environment"
+exit 1
+EOF
+chmod 700 "$WORK/core-relay"
+HERDR_RELAY_ENV="$WORK/core.env" HERDR_RELAY_BIN="$WORK/core-relay" \
+    bash "$ROOT/relay/herdr-mobile-relay-service.sh" > "$WORK/core-output" 2>&1 || true
+test "$(<"$WORK/core-environment")" = "hc|8377|8378|$WORK/core.env"
 printf 'service credential boundaries passed\n'

@@ -7,11 +7,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+    load_relay_env "$HERDR_RELAY_ENV"
+elif [ -f "$HOME/Library/LaunchAgents/com.herdr-mobile-relay-hc.service.plist" ] ||
+    [ -f "$HOME/.config/systemd/user/herdr-mobile-relay-hc.service" ]; then
+    echo "Uninstall the herdr-core relay first (HERDR_RELAY_BACKEND=hc); it still needs the shared release and CLI." >&2
+    exit 1
+fi
+
 RELEASE_ROOT="$(relay_release_root)"
 BIN_LINK="${HERDR_RELAY_BIN_DIR:-$HOME/.local/bin}/herdr-mobile-relay"
 
 # Resolve config/state directory from the environment the service actually uses.
 resolve_config_dir() {
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        dirname "$HERDR_RELAY_ENV"
+        return
+    fi
     local env_file=""
     if [ -n "${HERDR_RELAY_ENV:-}" ]; then
         env_file="$HERDR_RELAY_ENV"
@@ -29,7 +41,7 @@ resolve_config_dir() {
 }
 
 resolve_cache_dir() {
-    printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay"
+    printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/$RELAY_INSTANCE_NAME"
 }
 
 CONFIG_DIR="$(resolve_config_dir)"
@@ -165,16 +177,22 @@ safe_remove_bin_link() {
 
 # Validate every directory before stopping the service. A bad custom/XDG path
 # must fail without disrupting a healthy installation.
-preflight_removal_target "$RELEASE_ROOT" "releases"
+if [ "$HERDR_RELAY_BACKEND" = herdr ]; then
+    preflight_removal_target "$RELEASE_ROOT" "releases"
+fi
 preflight_removal_target "$CONFIG_DIR" "config/state"
 preflight_removal_target "$CACHE_DIR" "cache"
 
 echo "Herdr Mobile Relay — full uninstall"
 echo ""
 echo "This will remove:"
-echo "  Service:      herdr-mobile-relay.service (systemd/launchd)"
-echo "  Releases:     $RELEASE_ROOT"
-echo "  Binary link:  $BIN_LINK"
+echo "  Service:      $RELAY_SYSTEMD_LABEL (systemd/launchd)"
+if [ "$HERDR_RELAY_BACKEND" = herdr ]; then
+    echo "  Releases:     $RELEASE_ROOT"
+    echo "  Binary link:  $BIN_LINK"
+else
+    echo "  Shared release, CLI, plugin, Pi extension and hooks will be kept."
+fi
 echo "  Config/state: $CONFIG_DIR"
 echo "  Cache:        $CACHE_DIR"
 echo ""
@@ -187,10 +205,11 @@ esac
 echo ""
 
 ENV_FILE="${HERDR_RELAY_ENV:-$CONFIG_DIR/relay.env}"
-if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
+TAILSCALE_PORT="$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
+if [ -n "$TAILSCALE_PORT" ]; then
     PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
-    if ! "$(relay_binary)" tailscale off --port 8443 --relay-port "${PORT:-8375}"; then
-        echo "✗ Tailscale Serve may remain. Run: tailscale serve --https=8443 off" >&2
+    if ! "$(relay_binary)" tailscale off --port "$TAILSCALE_PORT" --relay-port "${PORT:-$RELAY_DEFAULT_PORT}"; then
+        echo "✗ Tailscale Serve may remain. Run: tailscale serve --https=$TAILSCALE_PORT off" >&2
     fi
 fi
 export HERDR_TAILSCALE_FULL_UNINSTALL=1
@@ -225,8 +244,8 @@ if [ "$service_stopped" != "true" ]; then
     echo "" >&2
     echo "ERROR: Service uninstall failed. The relay may still be running." >&2
     echo "Stop it manually before removing files:" >&2
-    echo "  systemctl --user stop herdr-mobile-relay.service" >&2
-    echo "  (or launchctl unload ~/Library/LaunchAgents/com.herdr-mobile-relay.service.plist)" >&2
+    echo "  systemctl --user stop $RELAY_SYSTEMD_LABEL" >&2
+    echo "  (or launchctl bootout gui/$(id -u)/$RELAY_LAUNCHD_LABEL)" >&2
     echo "" >&2
     read -r -p "Continue with file removal anyway? [y/N] " force_choice
     case "$force_choice" in
@@ -239,7 +258,9 @@ fi
 case "$(uname -s)" in
     Linux)
         if command -v systemctl >/dev/null 2>&1; then
-            for svc in herdr-mobile-relay.service herdr-remote.service; do
+            services=("$RELAY_SYSTEMD_LABEL")
+            [ "$HERDR_RELAY_BACKEND" != herdr ] || services+=(herdr-remote.service)
+            for svc in "${services[@]}"; do
                 if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
                     echo "" >&2
                     echo "ERROR: $svc is still running." >&2
@@ -250,8 +271,10 @@ case "$(uname -s)" in
         fi
         ;;
     Darwin)
-        for label in com.herdr-mobile-relay com.herdr-remote; do
-            if launchctl list 2>/dev/null | grep -q "$label"; then
+        services=("$RELAY_LAUNCHD_LABEL")
+        [ "$HERDR_RELAY_BACKEND" != herdr ] || services+=(com.herdr-remote.service)
+        for label in "${services[@]}"; do
+            if launchctl list 2>/dev/null | awk '{print $NF}' | grep -Fxq "$label"; then
                 echo "" >&2
                 echo "ERROR: $label is still loaded." >&2
                 echo "Unload it first: launchctl bootout gui/$(id -u)/$label" >&2
@@ -261,11 +284,10 @@ case "$(uname -s)" in
         ;;
 esac
 
-# Remove the binary symlink (only if it points into our release root)
-safe_remove_bin_link "$BIN_LINK"
-
-# Remove all releases
-safe_remove_dir "$RELEASE_ROOT" "releases"
+if [ "$HERDR_RELAY_BACKEND" = herdr ]; then
+    safe_remove_bin_link "$BIN_LINK"
+    safe_remove_dir "$RELEASE_ROOT" "releases"
+fi
 
 # Remove config/state (push subscriptions, VAPID keys, tokens, update state)
 safe_remove_dir "$CONFIG_DIR" "config/state"
@@ -275,6 +297,9 @@ safe_remove_dir "$CACHE_DIR" "cache"
 
 echo ""
 echo "Herdr Mobile Relay has been uninstalled."
+if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+    exit 0
+fi
 if command -v herdr >/dev/null 2>&1; then
     echo "Removing Herdr plugin registration..."
     if ! herdr plugin uninstall herdr-mobile-relay.events; then

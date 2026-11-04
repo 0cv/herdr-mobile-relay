@@ -29,10 +29,11 @@ func socketDir(t *testing.T) string {
 }
 
 type fakeRequest struct {
-	JSONRPC string         `json:"jsonrpc"`
-	ID      string         `json:"id"`
-	Method  string         `json:"method"`
-	Params  map[string]any `json:"params"`
+	Raw     json.RawMessage `json:"-"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      string          `json:"id"`
+	Method  string          `json:"method"`
+	Params  map[string]any  `json:"params"`
 }
 
 func fakeCore(t *testing.T, generation int, respond func(net.Conn, fakeRequest)) string {
@@ -77,6 +78,7 @@ func fakeCore(t *testing.T, generation int, respond func(net.Conn, fakeRequest))
 						t.Error(err)
 						return
 					}
+					req.Raw = line
 					if req.JSONRPC != "2.0" {
 						t.Errorf("jsonrpc = %q", req.JSONRPC)
 						return

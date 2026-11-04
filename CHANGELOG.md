@@ -11,15 +11,16 @@ project follows [Semantic Versioning](https://semver.org/).
   compaction. Session titles use the generated title, then the session summary;
   rewinds remove discarded turns and mark older history cursors as changed.
 - Run a second relay for herdr-core beside the TUI relay, so agents in herdr-app
-  appear as a separate computer on your phone. Read screens and scrollback, send
-  prompts and keys, answer questions without typed text, stop agents, and use Pi
-  commands and activity, plus the Conversation view (history and live) for Pi,
-  Claude Code, Codex, Cursor, Omp and Hermes. Install session hooks for Claude
-  Code, Codex, Cursor and Omp; Hermes needs no hook.
+  appear as a separate computer on your phone; install it as a background service
+  and pair it with Tailscale or Cloudflare. Read screens and scrollback, send
+  prompts and keys, type single-line text without Enter, answer questions, enter
+  secrets at hidden prompts, start, clear, restart and stop agents, rename and
+  reorder tabs, and use Pi commands and activity, plus the Conversation view
+  (history and live) for Pi, Claude Code, Codex, Cursor, Omp and Hermes. Install
+  session hooks for Claude Code, Codex, Cursor and Omp; Hermes needs no hook.
   Resize Session fits the shared core terminal to your phone; resizing the
-  desktop window takes the size back. Agent creation and restart, workspace
-  management, typed answers and phone-driven updates are not available on core
-  yet.
+  desktop window takes the size back. Workspace and worktree management, colour
+  and phone-driven updates are not available on core yet.
 
 ### Fixed
 

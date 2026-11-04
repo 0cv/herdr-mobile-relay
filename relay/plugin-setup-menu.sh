@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+require_tui_backend
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 load_relay_env "$ENV_FILE"

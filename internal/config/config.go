@@ -129,10 +129,7 @@ func Load() (*Config, error) {
 	cfg.RuntimeDir = resolveRuntimeDir(cfg.ConfigHome)
 	cfg.CacheDir = filepath.Join(cacheHome, "herdr-mobile-relay")
 	if cfg.Backend == "hc" {
-		session := envOr("HC_SESSION", "default")
-		stateHome := envOr("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
-		// A TUI pane may leave HERDR_SOCKET_PATH pointing at its own backend.
-		cfg.SocketPath = envOr("HC_SOCKET_PATH", filepath.Join(stateHome, "herdr-core", session, session+".sock"))
+		cfg.SocketPath = coreSocketPath(filepath.Join("/run/user", strconv.Itoa(os.Getuid())))
 		cfg.Port = envIntOr("HERDR_RELAY_PORT", 8377)
 		cfg.PluginPort = envIntOr("HERDR_RELAY_PLUGIN_PORT", 8378)
 		cfg.ServiceName = envOr("HERDR_RELAY_SERVICE_NAME", strings.TrimSuffix(defaultServiceName(), ".service")+"-hc.service")
@@ -185,6 +182,23 @@ func (c *Config) validate() error {
 		return fmt.Errorf("gateway url requires a relay key: the gateway path derives its credentials from it")
 	}
 	return nil
+}
+
+func coreSocketPath(userRuntimeDir string) string {
+	for _, key := range []string{"HC_SOCKET_PATH", "HC_SOCKET"} {
+		if socket := os.Getenv(key); socket != "" {
+			return socket
+		}
+	}
+	session := envOr("HC_SESSION", "default")
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		return filepath.Join(dir, "herdr-core", session+".sock")
+	}
+	if info, err := os.Stat(userRuntimeDir); err == nil && info.IsDir() {
+		return filepath.Join(userRuntimeDir, "herdr-core", session+".sock")
+	}
+	stateHome := envOr("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
+	return filepath.Join(stateHome, "herdr-core", session, session+".sock")
 }
 
 func resolveRuntimeDir(configHome string) string {

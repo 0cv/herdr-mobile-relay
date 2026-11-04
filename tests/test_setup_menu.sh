@@ -23,7 +23,13 @@ items() { printf '%s\n' "$1" | grep -E '^  [123bq]\. ' || true; }
 expect() { [[ "$1" == *"$2"* ]] || { printf 'Missing: %s\n' "$2" >&2; exit 1; }; }
 reject() { [[ "$1" != *"$2"* ]] || { printf 'Unexpected: %s\n' "$2" >&2; exit 1; }; }
 
-: > "$HERDR_RELAY_ENV"
+> "$HERDR_RELAY_ENV"
+for entry in plugin-setup-menu plugin-build open-plugin-pane; do
+    if HERDR_RELAY_BACKEND=hc bash "$REPO_DIR/relay/$entry.sh" setup > "$WORK/core-output" 2>&1; then
+        echo "core accepted TUI entry point $entry" >&2; exit 1
+    fi
+    grep -q 'TUI-only' "$WORK/core-output"
+done
 output="$(menu 'q\n')"
 [[ "$(items "$output")" == $'  1. Cloudflare\n  2. WebRTC\n  3. Tailscale\n  q. Exit, change nothing' ]]
 reject "$output" '  b. Back'

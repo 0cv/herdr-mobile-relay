@@ -12,7 +12,8 @@ if [ "${HERDR_TAILSCALE_FULL_UNINSTALL:-}" != 1 ]; then
     refuse_if_tailscale_selected "${HERDR_RELAY_ENV:-${SERVICE_ENV:-$(relay_env_file "$SCRIPT_DIR")}}" || exit 1
 fi
 
-LABELS=("com.herdr-mobile-relay.service" "com.herdr-remote.service")
+LABELS=("$RELAY_LAUNCHD_LABEL")
+[ "$HERDR_RELAY_BACKEND" != herdr ] || LABELS+=("com.herdr-remote.service")
 
 for label in "${LABELS[@]}"; do
     plist="$HOME/Library/LaunchAgents/$label.plist"

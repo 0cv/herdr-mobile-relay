@@ -123,4 +123,34 @@ printf 'y\n' |
 test "$(grep -c 'tailscale off --port 8443' "$FAKE_LOG")" -eq 1
 test ! -e "$CONFIG_HOME/herdr-mobile-relay"
 
+for order in core-first tui-first; do
+    export HOME="$WORK_DIR/$order" HERDR_RELEASE_ROOT="$WORK_DIR/$order/releases"
+    export XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache"
+    mkdir -p "$HERDR_RELEASE_ROOT" "$HOME/.config/systemd/user"
+    for target in "$HERDR_RELEASE_ROOT" "$XDG_CONFIG_HOME/herdr-mobile-relay" "$XDG_CACHE_HOME/herdr-mobile-relay"; do
+        mkdir -p "$target"
+        printf 'product=herdr-mobile-relay\nroot=%s\n' "$(cd "$target" && pwd -P)" > "$target/.herdr-mobile-relay-installation"
+        chmod 600 "$target/.herdr-mobile-relay-installation"
+    done
+    printf 'TUI env sentinel\n' > "$XDG_CONFIG_HOME/herdr-mobile-relay/keep"
+    printf 'TUI unit sentinel\n' > "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    printf 'core unit\n' > "$HOME/.config/systemd/user/herdr-mobile-relay-hc.service"
+    HERDR_RELAY_BACKEND=hc bash -c '. "$1"; ensure_relay_env "$HERDR_RELAY_ENV"' _ "$SCRIPT_DIR/common.sh"
+    if [ "$order" = tui-first ]; then
+        if printf 'y\n' | bash "$SCRIPT_DIR/uninstall.sh" > "$WORK_DIR/refused" 2>&1; then
+            echo "TUI uninstall removed a shared release" >&2; exit 1
+        fi
+        grep -q 'shared release' "$WORK_DIR/refused"
+        rm "$XDG_CONFIG_HOME/herdr-mobile-relay-hc/relay.env"
+    fi
+    printf 'y\n' | HERDR_RELAY_BACKEND=hc bash "$SCRIPT_DIR/uninstall.sh" > "$WORK_DIR/core-uninstall"
+    test -d "$HERDR_RELEASE_ROOT"
+    test ! -e "$XDG_CONFIG_HOME/herdr-mobile-relay-hc"
+    test ! -e "$XDG_CACHE_HOME/herdr-mobile-relay-hc"
+    grep -Fx 'TUI env sentinel' "$XDG_CONFIG_HOME/herdr-mobile-relay/keep"
+    grep -Fx 'TUI unit sentinel' "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    if grep -q 'Removing Herdr plugin' "$WORK_DIR/core-uninstall"; then exit 1; fi
+    printf 'y\n' | bash "$SCRIPT_DIR/uninstall.sh" > /dev/null
+    test ! -e "$HERDR_RELEASE_ROOT"
+done
 echo "uninstall shell tests passed"

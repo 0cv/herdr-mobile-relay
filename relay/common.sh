@@ -368,13 +368,13 @@ installed_service_env_file() {
 
     case "$(uname -s)" in
         Linux)
-            service_file="$HOME/.config/systemd/user/herdr-mobile-relay.service"
+            service_file="$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL"
             if [ -r "$service_file" ]; then
                 systemd_field "$service_file" Environment
             fi
             ;;
         Darwin)
-            service_file="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+            service_file="$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist"
             if [ -r "$service_file" ]; then
                 awk '
                     /<key>HERDR_RELAY_ENV<\/key>/ { found = 1; next }
@@ -501,11 +501,11 @@ reload_launchd_service_definition() {
 installed_relay_service_active() {
     case "$(uname -s)" in
         Darwin)
-            launchd_service_loaded "gui/$(id -u)/com.herdr-mobile-relay.service"
+            launchd_service_loaded "gui/$(id -u)/$RELAY_LAUNCHD_LABEL"
             ;;
         Linux)
             command -v systemctl >/dev/null 2>&1 &&
-                systemctl --user is-active --quiet herdr-mobile-relay.service
+                systemctl --user is-active --quiet "$RELAY_SYSTEMD_LABEL"
             ;;
         *)
             return 1
@@ -516,10 +516,10 @@ installed_relay_service_active() {
 restart_installed_relay_service() {
     case "$(uname -s)" in
         Darwin)
-            launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service"
+            launchctl kickstart -k "gui/$(id -u)/$RELAY_LAUNCHD_LABEL"
             ;;
         Linux)
-            systemctl --user restart herdr-mobile-relay.service
+            systemctl --user restart "$RELAY_SYSTEMD_LABEL"
             ;;
         *)
             return 1
@@ -781,6 +781,11 @@ ensure_relay_env() {
     # so no child of this shell (npx, wrangler, node, cloudflared) inherits it.
     unset GH_TOKEN GITHUB_TOKEN
 
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        umask 077
+        prepare_core_directory "$(dirname "$env_file")"
+        prepare_core_directory "${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay-hc"
+    fi
     if [ ! -f "$env_file" ]; then
         umask 077
         touch "$env_file"
@@ -797,7 +802,21 @@ ensure_relay_env() {
     if [ -n "$cloudflared_config" ]; then
         append_env_default "$env_file" CLOUDFLARED_CONFIG "$cloudflared_config"
     fi
-    persist_github_token "$env_file" "$release_token"
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        append_env_default "$env_file" HERDR_RELAY_BACKEND hc
+        append_env_default "$env_file" HERDR_RELAY_PORT "$HERDR_RELAY_PORT"
+        append_env_default "$env_file" HERDR_RELAY_PLUGIN_PORT "$HERDR_RELAY_PLUGIN_PORT"
+        local key
+        for key in HC_SOCKET_PATH HC_SOCKET HC_SESSION; do
+            if [ "${!key+x}" = x ]; then
+                append_env_default "$env_file" "$key" "${!key}"
+            fi
+        done
+        append_env_default "$env_file" XDG_CACHE_HOME "${XDG_CACHE_HOME:-$HOME/.cache}"
+        append_env_default "$env_file" XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-$HOME/.config}"
+    else
+        persist_github_token "$env_file" "$release_token"
+    fi
     # Migrate older installs that exposed the token to the complete service
     # process tree. Only the credential-file path remains in relay.env.
     remove_env_value_atomic "$env_file" GH_TOKEN
@@ -808,14 +827,21 @@ load_relay_env() {
     if [ ! -f "$env_file" ]; then
         return
     fi
+    local recorded
+    recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$env_file" HERDR_RELAY_BACKEND)"
+    if [ -n "$recorded" ] && [ "$recorded" != "$HERDR_RELAY_BACKEND" ]; then
+        echo "HERDR_RELAY_BACKEND disagrees with $env_file." >&2
+        return 1
+    fi
     set -a
     # shellcheck source=/dev/null
     . "$env_file"
     set +a
+    resolve_relay_instance
 }
 
 wait_for_relay_health() {
-    local port="${1:-8375}"
+    local port="${1:-$RELAY_DEFAULT_PORT}"
     local attempts="${2:-15}"
     local delay="${3:-1}"
     local health
@@ -874,6 +900,9 @@ wait_for_relay_health() {
         fi
     done
 
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        echo "Start herdr-app or run hc server start for the selected HC_SESSION, then retry." >&2
+    fi
     return 1
 }
 
@@ -900,7 +929,7 @@ gateway_registration_state() {
 # Blocks until the relay reports a live gateway registration, so the QR is only
 # printed for a relay the phone can actually reach.
 wait_for_gateway_registration() {
-    local port="${1:-8375}"
+    local port="${1:-$RELAY_DEFAULT_PORT}"
     local attempts="${2:-30}"
     local delay="${3:-1}"
     local attempt
@@ -1796,6 +1825,74 @@ print_setup_link_arming() {
         echo "  The relay is not running here; start it, then print the link again."
     fi
 }
+
+prepare_core_directory() {
+    local directory="$1" sentinel
+    if [ ! -e "$directory" ]; then
+        mkdir -p "$directory"
+        chmod 700 "$directory"
+    fi
+    sentinel="$directory/.herdr-mobile-relay-installation"
+    if [ ! -e "$sentinel" ] && [ ! -L "$sentinel" ] &&
+        [ -z "$(find "$directory" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+        (umask 077; printf 'product=herdr-mobile-relay\nroot=%s\n' "$(cd "$directory" && pwd -P)" > "$sentinel")
+    fi
+}
+
+resolve_relay_instance() {
+    local recorded="" selected="${HERDR_RELAY_BACKEND:-}"
+    if [ -n "${HERDR_RELAY_ENV:-}" ] && [ -f "$HERDR_RELAY_ENV" ]; then
+        recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
+    fi
+    if [ -n "$selected" ] && [ -n "$recorded" ] && [ "$selected" != "$recorded" ]; then
+        echo "HERDR_RELAY_BACKEND disagrees with $HERDR_RELAY_ENV." >&2
+        return 1
+    fi
+    HERDR_RELAY_BACKEND="${selected:-${recorded:-herdr}}"
+    case "$HERDR_RELAY_BACKEND" in
+        herdr) RELAY_INSTANCE_SUFFIX="" ;;
+        hc) RELAY_INSTANCE_SUFFIX="-hc" ;;
+        *) echo "HERDR_RELAY_BACKEND must be herdr or hc." >&2; return 1 ;;
+    esac
+    RELAY_INSTANCE_NAME="herdr-mobile-relay$RELAY_INSTANCE_SUFFIX"
+    RELAY_SYSTEMD_LABEL="$RELAY_INSTANCE_NAME.service"
+    RELAY_LAUNCHD_LABEL="com.$RELAY_SYSTEMD_LABEL"
+    RELAY_LOG_DIR="$HOME/Library/Logs/$RELAY_INSTANCE_NAME"
+    RELAY_CLOUDFLARED_CONFIG="$HOME/.cloudflared/config-$RELAY_INSTANCE_NAME.yml"
+    RELAY_DEFAULT_PORT=8375
+    RELAY_TAILSCALE_PORT="${HERDR_TAILSCALE_PORT:-8443}"
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        export HERDR_RELAY_ENV="${HERDR_RELAY_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay-hc/relay.env}"
+        recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
+        if [ -n "$recorded" ] && [ "$recorded" != hc ]; then
+            echo "Core relay requires its own hc environment: $HERDR_RELAY_ENV" >&2
+            return 1
+        fi
+        RELAY_DEFAULT_PORT=8377
+        RELAY_TAILSCALE_PORT="${HERDR_TAILSCALE_PORT:-8444}"
+        export HERDR_RELAY_PORT="${HERDR_RELAY_PORT:-8377}"
+        export HERDR_RELAY_PLUGIN_PORT="${HERDR_RELAY_PLUGIN_PORT:-8378}"
+        unset HERDR_SOCKET_PATH HERDR_PLUGIN_CONFIG_DIR
+        if [ -n "$(gateway_urls "$HERDR_RELAY_ENV")" ]; then
+            echo "WebRTC gateway transport is not supported for herdr-core; use Tailscale or Cloudflare." >&2
+            return 1
+        fi
+    fi
+    export HERDR_RELAY_BACKEND
+}
+
+require_tui_backend() {
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        echo "This command is TUI-only; use the relay scripts directly for herdr-core." >&2
+        return 1
+    fi
+}
+
+relay_host_slug() {
+    printf '%s%s\n' "$(host_label | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')" "$RELAY_INSTANCE_SUFFIX"
+}
+
+resolve_relay_instance || return 1
 
 require_supported_platform() {
     case "$(uname -s)" in

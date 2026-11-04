@@ -15,20 +15,20 @@ fi
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"
-if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
+if [ -n "$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
     echo "Always on Tailscale is already set up. Use Tailscale → Choose Phone App and Show QR, or Tailscale → Turn Always on Tailscale Off first." >&2
     exit 1
 fi
 GATEWAYS="$(gateway_urls "$ENV_FILE")"
 RELAY_BIN="$(relay_binary)"
-"$RELAY_BIN" tailscale check --port 8443 || exit $?
-ADDRESS="$("$RELAY_BIN" tailscale address --port 8443)" || exit $?
+"$RELAY_BIN" tailscale check --port "$RELAY_TAILSCALE_PORT" || exit $?
+ADDRESS="$("$RELAY_BIN" tailscale address --port "$RELAY_TAILSCALE_PORT")" || exit $?
 PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
-PORT="${PORT:-8375}"
+PORT="${PORT:-$RELAY_DEFAULT_PORT}"
 
 echo "Always on Tailscale"
 echo "  Phone address: $ADDRESS"
-echo "  Add only Tailscale Serve HTTPS port 8443 (relay port $PORT)."
+echo "  Add only Tailscale Serve HTTPS port $RELAY_TAILSCALE_PORT (relay port $PORT)."
 echo "  Install or reuse the background relay service."
 if [ -n "$GATEWAYS" ]; then
     echo "  This replaces the selected WebRTC gateway list: $GATEWAYS."
@@ -59,15 +59,15 @@ rollback() {
     if [ "$status" -ne 0 ]; then
         if [ "$SERVE_ATTEMPTED" = true ]; then
             local off_status=0
-            "$RELAY_BIN" tailscale off --port 8443 --relay-port "$PORT" || off_status=$?
+            "$RELAY_BIN" tailscale off --port "$RELAY_TAILSCALE_PORT" --relay-port "$PORT" || off_status=$?
             if [ "$off_status" -ne 0 ]; then
                 if [ "${HERDR_TAILSCALE_ABANDON:-}" != 1 ]; then
-                    echo "✗ Tailscale Serve mapping may remain; Tailscale selection kept and gateway selection cleared. Run: tailscale serve --https=8443 off" >&2
+                    echo "✗ Tailscale Serve mapping may remain; Tailscale selection kept and gateway selection cleared. Run: tailscale serve --https=$RELAY_TAILSCALE_PORT off" >&2
                     echo "  Then choose Tailscale → Turn Always on Tailscale Off, or set HERDR_TAILSCALE_ABANDON=1 to clear the selection without removing Serve." >&2
                     rm -f "$ENV_BACKUP"
                     return
                 fi
-                echo "⚠ Tailscale Serve mapping may remain; abandoning the selection. Run: tailscale serve --https=8443 off" >&2
+                echo "⚠ Tailscale Serve mapping may remain; abandoning the selection. Run: tailscale serve --https=$RELAY_TAILSCALE_PORT off" >&2
             fi
         fi
         if [ "$ENV_WAS_PRESENT" = true ]; then
@@ -97,9 +97,10 @@ rollback() {
     rm -f "$ENV_BACKUP"
 }
 trap rollback EXIT
+ensure_relay_env "$ENV_FILE"
 set_gateway_url "$ENV_FILE" ""
 unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
-set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT 8443
+set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT "$RELAY_TAILSCALE_PORT"
 export HERDR_RELAY_ENV="$ENV_FILE"
 if ! "$SCRIPT_DIR/setup.sh" --tailscale-prerequisites; then
     echo "✗ Prerequisite setup failed." >&2
@@ -115,7 +116,7 @@ if ! wait_for_relay_health "$PORT" 15 1 "$(env_file_value "$ENV_FILE" HERDR_RELA
     exit 1
 fi
 SERVE_ATTEMPTED=true
-if ! "$RELAY_BIN" tailscale serve --bg --port 8443 --relay-port "$PORT"; then
+if ! "$RELAY_BIN" tailscale serve --bg --port "$RELAY_TAILSCALE_PORT" --relay-port "$PORT"; then
     echo "✗ Could not publish Tailscale Serve." >&2
     exit 1
 fi

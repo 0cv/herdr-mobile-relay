@@ -10,15 +10,12 @@ import (
 func TestUnsupportedMethods(t *testing.T) {
 	c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) { t.Errorf("unexpected request: %+v", req) }))
 	for name, run := range map[string]func() error{
-		"SendInput":          func() error { return c.SendInput(t.Context(), "term", herdr.PaneInput{}) },
-		"SendText":           func() error { return c.SendText(t.Context(), "term", "term") },
+		"SendInput":          func() error { return c.SendInput(t.Context(), "term", herdr.PaneInput{Keys: []string{"Enter"}}) },
 		"PaneRun":            func() error { return c.PaneRun(t.Context(), "term", []string{"term"}) },
 		"StartAgent":         func() error { _, err := c.StartAgent(t.Context(), "term", "term", "term", 0); return err },
 		"RenameAgent":        func() error { return c.RenameAgent(t.Context(), "term", "term") },
 		"AgentGet":           func() error { _, err := c.AgentGet(t.Context(), "term"); return err },
 		"TabCreate":          func() error { _, err := c.TabCreate(t.Context(), "term", "term", "term"); return err },
-		"TabRename":          func() error { return c.TabRename(t.Context(), "term", "term") },
-		"TabMove":            func() error { return c.TabMove(t.Context(), "term", 0) },
 		"WorkspaceCreate":    func() error { _, err := c.WorkspaceCreate(t.Context(), "term", "term"); return err },
 		"WorkspaceRename":    func() error { return c.WorkspaceRename(t.Context(), "term", "term") },
 		"WorkspaceMove":      func() error { return c.WorkspaceMove(t.Context(), "term", 0) },

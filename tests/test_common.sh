@@ -21,6 +21,46 @@ if require_user_service_context >/dev/null 2>&1; then
 fi
 unset -f id
 
+(
+    export HOME="$WORK_DIR/core-home" XDG_CONFIG_HOME="$WORK_DIR/core-home/config"
+    export XDG_STATE_HOME="$WORK_DIR/core-home/state" XDG_CACHE_HOME="$WORK_DIR/core-home/cache"
+    export HERDR_RELAY_BACKEND=hc HERDR_PLUGIN_CONFIG_DIR="$WORK_DIR/tui-plugin"
+    export HERDR_SOCKET_PATH="$WORK_DIR/tui.sock" HC_SESSION=testing
+    unset HERDR_RELAY_ENV HERDR_RELAY_PORT HERDR_RELAY_PLUGIN_PORT HC_SOCKET_PATH HC_SOCKET
+    resolve_relay_instance
+    test "$(relay_env_file "$REPO_DIR/relay")" = "$XDG_CONFIG_HOME/herdr-mobile-relay-hc/relay.env"
+    test "$RELAY_SYSTEMD_LABEL" = herdr-mobile-relay-hc.service
+    test "$RELAY_LAUNCHD_LABEL" = com.herdr-mobile-relay-hc.service
+    test "$RELAY_TAILSCALE_PORT" = 8444
+    test -z "${HERDR_PLUGIN_CONFIG_DIR:-}"
+    test -z "${HERDR_SOCKET_PATH:-}"
+    ensure_relay_env "$HERDR_RELAY_ENV"
+    test "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_PORT)" = 8377
+    test "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_PLUGIN_PORT)" = 8378
+    ! grep -q '^HC_SOCKET' "$HERDR_RELAY_ENV"
+    test "${HC_SOCKET_PATH+x}" != x
+    test "$(env_file_value "$HERDR_RELAY_ENV" HC_SESSION)" = testing
+    export HC_SOCKET_PATH=relative/relay.sock HC_SOCKET=relative/core.sock
+    resolve_relay_instance
+    ensure_relay_env "$HERDR_RELAY_ENV"
+    test "$(env_file_value "$HERDR_RELAY_ENV" HC_SOCKET_PATH)" = relative/relay.sock
+    test "$(env_file_value "$HERDR_RELAY_ENV" HC_SOCKET)" = relative/core.sock
+    unset HC_SESSION HC_SOCKET HC_SOCKET_PATH
+    ensure_relay_env "$WORK_DIR/core-default/relay.env"
+    ! grep -q '^HC_' "$WORK_DIR/core-default/relay.env"
+    test -n "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_TOKEN)"
+    test -n "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_INSTANCE_ID)"
+    test -f "$(dirname "$HERDR_RELAY_ENV")/.herdr-mobile-relay-installation"
+    test -f "$XDG_CACHE_HOME/herdr-mobile-relay-hc/.herdr-mobile-relay-installation"
+    case "$(relay_host_slug)" in *-hc) ;; *) exit 1 ;; esac
+    if HERDR_RELAY_BACKEND=herdr resolve_relay_instance; then
+        echo "backend mismatch accepted" >&2; exit 1
+    fi
+    if HERDR_GATEWAY_URL=wss://gateway.invalid resolve_relay_instance; then
+        echo "core gateway accepted" >&2; exit 1
+    fi
+)
+
 DEV_RELAY_BIN="$WORK_DIR/dev/herdr-mobile-relay"
 mkdir -p "$(dirname "$DEV_RELAY_BIN")"
 printf '#!/bin/sh\nexit 0\n' > "$DEV_RELAY_BIN"
@@ -613,6 +653,13 @@ for invalid_health in \
     fi
     test "$(wc -l < "$READY_CURL_LOG" | tr -d ' ')" = 1
 done
+
+if HERDR_RELAY_BACKEND=hc wait_for_relay_health 8377 1 0 test >"$WORK_DIR/core-ready.out" 2>"$WORK_DIR/core-ready.err"; then
+    echo "core readiness accepted failed inventory" >&2
+    exit 1
+fi
+grep -q 'Start herdr-app or run hc server start' "$WORK_DIR/core-ready.err"
+! grep -Eq 'Herdr|TUI' "$WORK_DIR/core-ready.err"
 
 # Preserve the bounded retry loop: an unready first reply is retried and a
 # matching reply on the second poll is returned unchanged.
