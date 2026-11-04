@@ -199,10 +199,24 @@ func Hooks(operation string, output io.Writer) error {
 	if root := config.InstalledReleaseRoot(); root != "" {
 		exe = filepath.Join(root, "current", "herdr-mobile-relay")
 	}
-	return manageHooks(home, exe, operation, output)
+	return manageHooks(home, exe, os.TempDir(), operation, output)
 }
 
-func manageHooks(home, binary, operation string, output io.Writer) error {
+func manageHooks(home, binary, tempDir, operation string, output io.Writer) error {
+	if operation == "install" {
+		resolvedBinary, err := filepath.EvalSymlinks(binary)
+		if err != nil {
+			return fmt.Errorf("agent-hooks: %w", err)
+		}
+		resolvedTemp, err := filepath.EvalSymlinks(tempDir)
+		if err != nil {
+			return fmt.Errorf("agent-hooks: %w", err)
+		}
+		if resolvedBinary == resolvedTemp || strings.HasPrefix(resolvedBinary, resolvedTemp+string(filepath.Separator)) {
+			return fmt.Errorf("agent-hooks: %s is a temporary build; run install from an installed or built herdr-mobile-relay binary", binary)
+		}
+	}
+	codexInstalled := false
 	type change struct {
 		path string
 		data []byte
@@ -256,6 +270,9 @@ func manageHooks(home, binary, operation string, output io.Writer) error {
 		switch operation {
 		case "install":
 			state = "installed"
+			if agent == "codex" {
+				codexInstalled = true
+			}
 		case "uninstall":
 			if !absent {
 				state = "not installed"
@@ -273,6 +290,9 @@ func manageHooks(home, binary, operation string, output io.Writer) error {
 		if _, err := atomicfile.Replace(filepath.Dir(c.path), c.path, ".agent-hooks-*", c.data, c.mode); err != nil {
 			return fmt.Errorf("%s: %w", c.path, err)
 		}
+	}
+	if codexInstalled {
+		fmt.Fprintln(&feedback, "codex: start Codex with --no-daemon in herdr.app terminals so its sessions can be matched to their terminal")
 	}
 	_, err := io.Copy(output, &feedback)
 	return err
