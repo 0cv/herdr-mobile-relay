@@ -56,7 +56,9 @@ file unchanged.
 
 In herdr.app terminals, start Codex with `codex --no-daemon`. By default, Codex
 runs hooks in a shared background server, outside the terminal, so its sessions
-cannot be matched to their terminal.
+cannot be matched to their terminal. Codex runs its session-start hook only when
+the first prompt is sent, so Conversation appears after the first prompt of each
+start or resume.
 
 To do this only inside herdr.app terminals, add to `~/.zshrc`:
 

@@ -199,21 +199,29 @@ func Hooks(operation string, output io.Writer) error {
 	if root := config.InstalledReleaseRoot(); root != "" {
 		exe = filepath.Join(root, "current", "herdr-mobile-relay")
 	}
-	return manageHooks(home, exe, os.TempDir(), operation, output)
+	refusedDirs := []string{os.TempDir()}
+	if cache := os.Getenv("GOCACHE"); cache != "" {
+		refusedDirs = append(refusedDirs, cache)
+	} else if cache, err := os.UserCacheDir(); err == nil {
+		refusedDirs = append(refusedDirs, filepath.Join(cache, "go-build"))
+	}
+	return manageHooks(home, exe, refusedDirs, operation, output)
 }
 
-func manageHooks(home, binary, tempDir, operation string, output io.Writer) error {
+func manageHooks(home, binary string, refusedDirs []string, operation string, output io.Writer) error {
 	if operation == "install" {
 		resolvedBinary, err := filepath.EvalSymlinks(binary)
 		if err != nil {
 			return fmt.Errorf("agent-hooks: %w", err)
 		}
-		resolvedTemp, err := filepath.EvalSymlinks(tempDir)
-		if err != nil {
-			return fmt.Errorf("agent-hooks: %w", err)
-		}
-		if resolvedBinary == resolvedTemp || strings.HasPrefix(resolvedBinary, resolvedTemp+string(filepath.Separator)) {
-			return fmt.Errorf("agent-hooks: %s is a temporary build; run install from an installed or built herdr-mobile-relay binary", binary)
+		for _, dir := range refusedDirs {
+			resolvedDir, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				continue
+			}
+			if resolvedBinary == resolvedDir || strings.HasPrefix(resolvedBinary, resolvedDir+string(filepath.Separator)) {
+				return fmt.Errorf("agent-hooks: %s is a temporary go run build; run install from an installed or built herdr-mobile-relay binary", binary)
+			}
 		}
 	}
 	codexInstalled := false
@@ -292,7 +300,7 @@ func manageHooks(home, binary, tempDir, operation string, output io.Writer) erro
 		}
 	}
 	if codexInstalled {
-		fmt.Fprintln(&feedback, "codex: start Codex with --no-daemon in herdr.app terminals so its sessions can be matched to their terminal")
+		fmt.Fprintln(&feedback, "codex: start Codex with --no-daemon in herdr.app terminals; its Conversation appears after the first prompt")
 	}
 	_, err := io.Copy(output, &feedback)
 	return err
