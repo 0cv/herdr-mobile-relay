@@ -49,6 +49,28 @@ func writeRows(t *testing.T, path string, rows ...map[string]any) {
 	}
 }
 
+func TestProjectSessionWithPunctuationWithoutCWDFile(t *testing.T) {
+	for _, agent := range []string{"qoder", "claude"} {
+		t.Run(agent, func(t *testing.T) {
+			reader, _ := testReader(t)
+			roots := reader.qoderRoots()
+			if agent == "claude" {
+				roots = reader.claudeRoots()
+			}
+			path := filepath.Join(roots[0], "-Users-first-last-Development-my-project-", testSessionID+".jsonl")
+			writeRows(t, path, map[string]any{"type": "user", "message": map[string]any{"content": "hello"}})
+			cwd := "/Users/first.last/Development/my_project!"
+			if got := reader.Locate(agent, cwd, testSessionID); got.Path != path {
+				t.Fatalf("location = %#v, want %s", got, path)
+			}
+			page, err := reader.ReadFor(agent, cwd, testSessionID, "", 80)
+			if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "hello" {
+				t.Fatalf("page = %#v, error = %v", page, err)
+			}
+		})
+	}
+}
+
 func TestClaudeConversationFiltersInjectedAndSidechainRows(t *testing.T) {
 	reader, home := testReader(t)
 	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")

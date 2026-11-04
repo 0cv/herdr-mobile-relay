@@ -43,7 +43,7 @@ are manual.
 | Codex | `SessionStart` hook in `~/.codex/hooks.json`, after the first prompt of each start or resume. | Install hooks, enable `[features] hooks = true` (also enabled by Herdr), restart with `--no-daemon`, and trust the hook in `/hooks`. |
 | Cursor | Flat `sessionStart` hook in `~/.cursor/hooks.json`. | Install hooks and restart cursor-agent. Appears only once Herdr recognises it; it sends no OSC 7501 status. |
 | Omp | Extension in `~/.omp/agent/extensions/herdr-mobile-relay-session.ts` reports starts and switches. | Install hooks and restart. |
-| OpenCode | Plugin in `~/.config/opencode/herdr-mobile-relay-session.js`, registered alongside Herdr's plugin in `tui.jsonc`, follows the displayed session to its root parent. | Convert `tui.jsonc` to strict JSON (no comments or trailing commas) before install or uninstall; install hooks and restart. |
+| OpenCode | Plugin in `~/.config/opencode/herdr-mobile-relay-session/tui.js`, registered alongside Herdr's plugin in `cli.json`, follows the displayed session to its root parent. | Convert `cli.json` to strict JSON (no comments or trailing commas) before install or uninstall; install hooks and restart. |
 | Qoder | `SessionStart` hook in `~/.qoder/settings.json`; subagent events ignored. | Install hooks and restart qodercli. |
 | agy (Antigravity CLI) | Named `herdr-mobile-relay` hook in `~/.gemini/config/hooks.json` reads `conversationId`. | Install hooks, restart agy and start a new conversation; `SessionStart` fires for new conversations only. |
 | Hermes | `runtime/active_sessions.json` under configured Hermes roots; exactly one CLI entry matching foreground PID and process creation time. | No hook. Appears only once Herdr recognises it; it sends no OSC 7501 status. |
