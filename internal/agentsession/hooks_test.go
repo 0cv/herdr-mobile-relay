@@ -63,7 +63,7 @@ func TestHooksLifecycle(t *testing.T) {
 				if op == "uninstall" {
 					state = "not installed"
 				}
-				lines := 4
+				lines := 5
 				if op == "install" {
 					lines++
 				}
@@ -124,7 +124,7 @@ func TestHooksAbsentAndMalformed(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nomp: config absent\n" {
+	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nopencode: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 	binary := filepath.Join(home, "relay")
@@ -255,7 +255,7 @@ func TestHooksStatusNotInstalled(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nomp: config absent\n" {
+	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nopencode: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 }

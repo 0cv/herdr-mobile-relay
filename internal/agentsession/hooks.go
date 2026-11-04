@@ -319,11 +319,14 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 			changes = append(changes, change{path, updated, mode})
 		}
 	}
+	if err := manageOpenCodePlugin(home, binary, operation, &feedback); err != nil {
+		return err
+	}
 	if err := manageOmpExtension(home, binary, operation, &feedback); err != nil {
 		return err
 	}
 	if operation == "install" {
-		fmt.Fprintln(&feedback, "Restart Claude Code, Codex, Cursor and Omp to load session hooks; Hermes needs no hook.")
+		fmt.Fprintln(&feedback, "Restart Claude Code, Codex, Cursor, Omp and OpenCode to load session hooks; Hermes needs no hook.")
 	}
 	for _, c := range changes {
 		if _, err := atomicfile.Replace(filepath.Dir(c.path), c.path, ".agent-hooks-*", c.data, c.mode); err != nil {

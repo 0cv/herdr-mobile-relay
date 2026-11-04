@@ -16,8 +16,9 @@ project follows [Semantic Versioning](https://semver.org/).
   prompts and keys, type single-line text without Enter, answer questions, enter
   secrets at hidden prompts, start, clear, restart and stop agents, rename and
   reorder tabs, and use Pi commands and activity, plus the Conversation view
-  (history and live) for Pi, Claude Code, Codex, Cursor, Omp and Hermes. Install
-  session hooks for Claude Code, Codex, Cursor and Omp; Hermes needs no hook.
+  (history and live) for Pi, Claude Code, Codex, Cursor, Omp, OpenCode and Hermes.
+  Install session hooks for Claude Code, Codex, Cursor, Omp and OpenCode;
+  Hermes needs no hook.
   Resize Session fits the shared core terminal to your phone; resizing the
   desktop window takes the size back. Workspace and worktree management, colour
   and phone-driven updates are not available on core yet.
