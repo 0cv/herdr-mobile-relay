@@ -63,7 +63,7 @@ func TestHooksLifecycle(t *testing.T) {
 				if op == "uninstall" {
 					state = "not installed"
 				}
-				lines := 5
+				lines := 6
 				if op == "install" {
 					lines++
 				}
