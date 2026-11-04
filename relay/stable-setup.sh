@@ -127,8 +127,8 @@ confirm_existing_config_reuse() {
 
 service_file_present() {
     case "$(uname -s)" in
-        Darwin) [ -f "$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist" ] ;;
-        Linux) [ -f "$HOME/.config/systemd/user/herdr-mobile-relay.service" ] ;;
+        Darwin) [ -f "$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist" ] ;;
+        Linux) [ -f "$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL" ] ;;
         *) return 1 ;;
     esac
 }
@@ -327,7 +327,7 @@ choose_hostname() {
                 [ -z "${HERDR_STABLE_DOMAIN:-}" ] || return 1
                 continue
             fi
-            proposed="relay-$(host_label | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-').$domain"
+            proposed="relay-$(relay_host_slug).$domain"
             read -r -p "Public hostname [$proposed]: " candidate || candidate=""
             candidate="${candidate:-$proposed}"
         fi
@@ -503,6 +503,10 @@ wait_for_agent_readiness() {
             echo ""
             curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" > "$LOCAL_HEALTH_FILE" 2>/dev/null || true
             echo "✗ The relay is running, but Herdr agent inventory is unavailable." >&2
+            if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+                echo "  Start herdr-app or run hc server start for the selected core session." >&2
+                return 1
+            fi
             case "$(cat "$LOCAL_HEALTH_FILE" 2>/dev/null || true)" in
                 *'"error_code": "protocol_mismatch"'*)
                     echo "  Run: herdr server live-handoff" >&2
@@ -596,7 +600,7 @@ fi
 
 load_relay_env "$ENV_FILE"
 ORIGIN_CERT="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
-PORT="${HERDR_RELAY_PORT:-8375}"
+PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 case "$PORT" in
     ""|*[!0-9]*|0)
         echo "✗ HERDR_RELAY_PORT must be a positive integer." >&2
@@ -608,8 +612,8 @@ esac
 PREVIOUS_STAGE="$(state_get stage)"
 STATE_CREATED_CONFIG="$(state_get created_config)"
 CONFIG="${CLOUDFLARED_CONFIG:-}"
-if [ -z "$CONFIG" ] && [ -r "$HOME/.cloudflared/config-herdr-mobile-relay.yml" ]; then
-    CONFIG="$HOME/.cloudflared/config-herdr-mobile-relay.yml"
+if [ -z "$CONFIG" ] && [ -r "$RELAY_CLOUDFLARED_CONFIG" ]; then
+    CONFIG="$RELAY_CLOUDFLARED_CONFIG"
 fi
 
 if [ "$STATE_CREATED_CONFIG" != true ] && [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
@@ -671,7 +675,7 @@ else
     CREATED_DNS="$(state_get created_dns)"
 
     if [ -z "$TUNNEL_NAME" ]; then
-        COMPUTER_LABEL="$(host_label | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
+        COMPUTER_LABEL="$(relay_host_slug)"
         TUNNEL_NAME="herdr-mobile-relay-${COMPUTER_LABEL:-relay}"
     fi
     if [ -z "$CONFIG" ]; then

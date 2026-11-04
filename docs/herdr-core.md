@@ -3,8 +3,7 @@
 Set `HERDR_RELAY_BACKEND=hc` to connect to herdr-core, the backend used by
 herdr-app, instead of the Herdr TUI. Each relay process has one backend. Run two
 relays to use both: the phone shows `<hostname>` and `<hostname> (core)` as two
-computers. There is no automatic discovery or relay supervisor; configure and
-manage each instance yourself.
+computers. Install and pair each instance separately with the commands below.
 
 ## Available on core
 
@@ -83,7 +82,7 @@ never falls back to the `HERDR_*` values, so Pi registers only with the core rel
 
 | Setting | Default |
 | --- | --- |
-| Socket | `HC_SOCKET_PATH`, otherwise `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock` |
+| Socket | `HC_SOCKET_PATH`, then `HC_SOCKET`, then `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`, then `/run/user/<uid>/herdr-core/<session>.sock` if `/run/user/<uid>` is a directory, otherwise `<state home>/herdr-core/<session>/<session>.sock` |
 | Session | `HC_SESSION`, otherwise `default` |
 | State home | `XDG_STATE_HOME`, otherwise `~/.local/state` |
 | HTTP port | `HERDR_RELAY_PORT=8377` |
@@ -92,6 +91,8 @@ never falls back to the `HERDR_*` values, so Pi registers only with the core rel
 | Linux service name | `herdr-mobile-relay-hc.service` |
 | Runtime directory | `$XDG_CONFIG_HOME/herdr-mobile-relay-hc` (normally `~/.config/herdr-mobile-relay-hc`) |
 | Cache directory | `$XDG_CACHE_HOME/herdr-mobile-relay-hc` (normally `~/.cache/herdr-mobile-relay-hc`) |
+
+The relay does not read the core's `socket` setting in `config.toml`.
 
 `HERDR_SOCKET_PATH` is ignored on core. Explicit port and
 `HERDR_RELAY_SERVICE_NAME` values win. If `HERDR_RELAY_ENV` is set, its containing
@@ -107,203 +108,101 @@ Do **not** share these with the TUI instance:
 The installed release and phone-app origin can be shared. Pair each relay
 separately in the same phone app.
 
-## Manual second-instance setup
+## Install and pair the second relay
 
-These steps assume an installed TUI user service, a shared release containing
-core support, and an already-running core accessible to the same OS user. They
-use a separate named Cloudflare tunnel so the existing TUI transport is left
-alone. You need `cloudflared`, an authorized Cloudflare zone and an unused
-hostname in that zone. Do not run the setup wizard for this second instance.
+Use the same installed release as the TUI relay. Start herdr-app or run
+`hc server start` yourself first: setup requires a reachable core and never
+starts or stops it; relay inventory readiness checks connectivity.
+For a non-default core, set `HC_SESSION`, `HC_SOCKET` or `HC_SOCKET_PATH`
+on the initial setup command; default paths are resolved in the service environment.
 
-### 1. Create private configuration
+Every command below selects core with `HERDR_RELAY_BACKEND=hc`. Its private env
+is `${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay-hc/relay.env`, not the
+checkout or plugin env. Setup creates a new key and instance ID and persists
+the backend, ports and explicitly set `HC_SOCKET_PATH`, `HC_SOCKET` and `HC_SESSION` for the background service. Never copy the TUI
+env, tunnel config or device state.
 
-In Bash, set the shared install path (adjust it if the TUI service uses a custom
-release root):
+### From a checkout
 
-```bash
-RELEASE="${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay/current"
-CORE_DIR="$HOME/.config/herdr-mobile-relay-hc"
-umask 077
-mkdir -p "$CORE_DIR"
-chmod 700 "$CORE_DIR"
-```
-
-Create a **new** `$CORE_DIR/relay.env`, not a copy of the TUI env. Use absolute
-paths for `HC_SOCKET_PATH` and `CLOUDFLARED_CONFIG` below:
-
-```sh
-HERDR_RELAY_BACKEND=hc
-HERDR_RELAY_HOST=127.0.0.1
-HERDR_RELAY_PORT=8377
-HERDR_RELAY_PLUGIN_PORT=8378
-HC_SOCKET_PATH='/absolute/path/to/herdr-core/default/default.sock'
-CLOUDFLARED_CONFIG='/absolute/path/to/.config/herdr-mobile-relay-hc/cloudflared.yml'
-```
-
-The service wrapper still supplies port 8375 when it is absent, so explicitly
-set 8377 even though the Go core backend defaults to it. Omit `HC_SOCKET_PATH`
-only if the default session socket is correct; otherwise use its actual path,
-or set `HC_SESSION` and `XDG_STATE_HOME` in this file.
-
-Generate a new key and instance ID using the same generators as the installers
-(run once on the new file):
+For stable Cloudflare, choose an unused hostname in your Cloudflare zone:
 
 ```bash
-. "$RELEASE/relay/common.sh"
-printf 'HERDR_RELAY_TOKEN=%s\nHERDR_RELAY_INSTANCE_ID=%s\n' \
-  "$(generate_token)" "$(generate_instance_id)" >> "$CORE_DIR/relay.env"
-chmod 600 "$CORE_DIR/relay.env"
+HERDR_RELAY_BACKEND=hc make stable-setup
+HERDR_RELAY_BACKEND=hc make service-status
+HERDR_RELAY_BACKEND=hc make setup-link APP_URL=https://YOUR-EXISTING-PHONE-APP
 ```
 
-### 2. Give core its own tunnel
+The wizard proposes a tunnel and DNS slug ending in `-hc`, writes its own
+Cloudflare config beside the core env and installs the background service.
+It never falls back to the TUI Cloudflare config.
 
-Choose a unique tunnel name and hostname; replace the examples below. The
-hostname must belong to the zone already authorized by `cloudflared`.
+Alternatively, use Tailscale on the computer and phone:
 
 ```bash
-cloudflared tunnel create --output json \
-  --credentials-file "$CORE_DIR/tunnel.json" herdr-mobile-relay-hc-mycomputer
+HERDR_RELAY_BACKEND=hc bash relay/tailscale-setup.sh
+HERDR_RELAY_BACKEND=hc make setup-link APP_URL=https://YOUR-EXISTING-PHONE-APP
 ```
 
-Use the returned tunnel UUID in `$CORE_DIR/cloudflared.yml`:
-
-```yaml
-tunnel: REPLACE_WITH_TUNNEL_UUID
-credentials-file: /absolute/path/to/.config/herdr-mobile-relay-hc/tunnel.json
-ingress:
-  - hostname: core-relay.example.com
-    service: http://127.0.0.1:8377
-  - service: http_status:404
-```
+Tailscale setup uses HTTPS port **8444**, leaving the TUI's 8443 alone.
+`HERDR_TAILSCALE_PORT` overrides that default. Turn it off before switching
+transports:
 
 ```bash
-chmod 600 "$CORE_DIR/cloudflared.yml" "$CORE_DIR/tunnel.json"
-cloudflared tunnel route dns REPLACE_WITH_TUNNEL_UUID core-relay.example.com
+HERDR_RELAY_BACKEND=hc bash relay/tailscale-off.sh
 ```
 
-Do not reuse the TUI tunnel or change its ingress. The copied service wrapper
-will run this tunnel alongside the core relay.
-
-### 3a. macOS: copy the launchd definition
+For a temporary Cloudflare tunnel instead of a background service:
 
 ```bash
-cp "$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist" \
-  "$HOME/Library/LaunchAgents/com.herdr-mobile-relay-hc.service.plist"
-mkdir -p "$HOME/Library/Logs/herdr-mobile-relay-hc"
+HERDR_RELAY_BACKEND=hc make quick-start
 ```
 
-Edit **only the copy**:
+### From an installed release
 
-- Set `Label` to `com.herdr-mobile-relay-hc.service`.
-- In `EnvironmentVariables`, set `HERDR_RELAY_ENV` to the absolute path of
-  `$CORE_DIR/relay.env` and `HERDR_RELAY_SERVICE_NAME` to
-  `com.herdr-mobile-relay-hc.service`.
-- Set `StandardOutPath` and `StandardErrorPath` to `service.log` and
-  `service.err` under the new `~/Library/Logs/herdr-mobile-relay-hc` directory,
-  using absolute paths.
-- Keep `ProgramArguments` pointing at the shared
-  `current/relay/herdr-mobile-relay-service.sh` and `WorkingDirectory` at
-  `current`. Keep the existing restart settings.
-
-Plists do not expand `$HOME` or `~`. Check and start the copy:
+No checkout or Makefile is needed. Adjust the shared root if you installed it
+elsewhere:
 
 ```bash
-chmod 600 "$HOME/Library/LaunchAgents/com.herdr-mobile-relay-hc.service.plist"
-plutil -lint "$HOME/Library/LaunchAgents/com.herdr-mobile-relay-hc.service.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.herdr-mobile-relay-hc.service.plist"
-launchctl print "gui/$(id -u)/com.herdr-mobile-relay-hc.service"
+RELEASE="${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}/current"
+
+# Choose one transport:
+HERDR_RELAY_BACKEND=hc bash "$RELEASE/relay/stable-setup.sh"
+# Or:
+HERDR_RELAY_BACKEND=hc bash "$RELEASE/relay/tailscale-setup.sh"
+
+HERDR_RELAY_BACKEND=hc bash "$RELEASE/relay/service.sh" status
+HERDR_RELAY_BACKEND=hc HERDR_PHONE_APP_URL=https://YOUR-EXISTING-PHONE-APP \
+  bash "$RELEASE/relay/setup-link.sh"
 ```
 
-Stop with `launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.herdr-mobile-relay-hc.service.plist"`;
-start again with `bootstrap` above. Restart a loaded service with
-`launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay-hc.service"`.
+For a temporary tunnel, run `setup.sh --install-missing` then `start.sh` under
+`$RELEASE/relay/`, prefixing both with `HERDR_RELAY_BACKEND=hc`.
 
-### 3b. Linux: copy the systemd user unit
+Scan the QR in the same phone app as the TUI relay. Each invitation pairs one
+device within ten minutes; rerun `setup-link.sh` or `make setup-link` for another
+phone. The core computer's label gets " (core)" automatically.
 
-```bash
-cp "$HOME/.config/systemd/user/herdr-mobile-relay.service" \
-  "$HOME/.config/systemd/user/herdr-mobile-relay-hc.service"
-```
+### Manage or remove core
 
-Edit **only the copy**. Change the description to identify core and replace its
-`Environment=HERDR_RELAY_ENV=...` line with these lines, using your absolute
-path rather than the example:
+| Action | Checkout | Installed release (`$RELEASE/relay/`) |
+| --- | --- | --- |
+| Install/reinstall and restart service | `make service-install` | `bash "$RELEASE/relay/service.sh" install` |
+| Status | `make service-status` | `bash "$RELEASE/relay/service.sh" status` |
+| Logs | `make service-logs` | `bash "$RELEASE/relay/service.sh" logs` |
+| Rotate key and pair again | `make rotate-token` | `bash "$RELEASE/relay/rotate-token.sh"` |
+| Change Cloudflare hostname | `bash relay/change-hostname.sh` | `bash "$RELEASE/relay/change-hostname.sh"` |
+| Tear down stable Cloudflare | `make stable-teardown` | `bash "$RELEASE/relay/stable-teardown.sh"` |
+| Turn off Tailscale | `bash relay/tailscale-off.sh` | `bash "$RELEASE/relay/tailscale-off.sh"` |
+| Remove service only | `make service-uninstall` | `bash "$RELEASE/relay/service.sh" uninstall` |
+| Remove core service and local state | `bash relay/uninstall.sh` | `bash "$RELEASE/relay/uninstall.sh"` |
 
-```ini
-Environment="HERDR_RELAY_ENV=/home/you/.config/herdr-mobile-relay-hc/relay.env"
-Environment="HERDR_RELAY_SERVICE_NAME=herdr-mobile-relay-hc.service"
-```
+**Prefix every table command with `HERDR_RELAY_BACKEND=hc`.** Turn off Tailscale
+or tear down the stable Cloudflare tunnel before removing the service. Full
+core uninstall preserves the shared release, CLI, TUI plugin, Pi extension and
+agent hooks. Full TUI uninstall refuses while the core service remains installed;
+remove core first.
 
-Keep `ExecStart` pointing at the shared
-`current/relay/herdr-mobile-relay-service.sh`, `WorkingDirectory` at `current`,
-and the existing restart and install settings. Then:
-
-```bash
-chmod 600 "$HOME/.config/systemd/user/herdr-mobile-relay-hc.service"
-systemctl --user daemon-reload
-systemctl --user enable herdr-mobile-relay-hc.service
-systemctl --user start herdr-mobile-relay-hc.service
-systemctl --user status herdr-mobile-relay-hc.service
-journalctl --user -u herdr-mobile-relay-hc.service -f
-```
-
-Use `systemctl --user stop herdr-mobile-relay-hc.service` to stop it and
-`systemctl --user restart herdr-mobile-relay-hc.service` to restart it.
-
-### 4. Check and pair the core instance
-
-Check `http://127.0.0.1:8377/readyz` and
-`https://core-relay.example.com/readyz`; both should report the core instance ID
-from its env file and ready inventory. Do not pair if the public endpoint
-reports the TUI identity.
-
-`relay/setup-link.sh` checks the installed **TUI** service's env path, so it is
-not the second-instance entry point. Instead, use its underlying helpers in a
-fresh Bash shell. Set `RELEASE` and `CORE_DIR` as above, then:
-
-```bash
-export HERDR_RELAY_ENV="$CORE_DIR/relay.env"
-. "$RELEASE/relay/common.sh"
-load_relay_env "$HERDR_RELAY_ENV"
-FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$(host_label) (core)" \
-  'wss://core-relay.example.com')"
-if arm_setup_link "$HERDR_RELAY_ENV"; then
-  print_phone_setup "https://YOUR-EXISTING-PHONE-APP/#$FRAGMENT"
-else
-  printf 'Core relay is not running; start it and try again.\n'
-fi
-```
-
-Replace the relay hostname and phone-app origin before running. The origin
-must be the same HTTPS app already installed on your phone, not a second app.
-`arm_setup_link` reads `relay.pid` beside the core env file and signals that
-relay to arm a fresh invitation. The fragment encoder uses the core token
-loaded from its env file, not the TUI token. Scan the QR or open the full
-link in your phone app. It pairs one device within ten minutes; repeat for
-another device. Keep the link private.
-
-## Helpers and upgrades
-
-The shipped service helpers still address the TUI service. Do not use these to
-manage core, even with `HERDR_RELAY_BACKEND=hc`:
-
-- `relay/service.sh`, `relay/install-service.sh`,
-  `relay/install-systemd-user-service.sh`, `relay/uninstall-service.sh` and
-  `relay/uninstall-systemd-user-service.sh`; the `make service-install`,
-  `service-uninstall`, `service-status` and `service-logs` targets.
-- `relay/rotate-token.sh` / `make rotate-token`: its restart targets the TUI.
-- `relay/plugin-setup-menu.sh`, the plugin setup actions,
-  `relay/setup.sh` / `make setup`, `relay/start.sh` / `make quick-start`,
-  `relay/stable-setup.sh` / `make stable-setup`, and
-  `relay/stable-teardown.sh` / `make stable-teardown`.
-- `relay/setup-link.sh` / `make setup-link`: use the core-specific helper calls
-  above instead.
-- Phone update and deploy actions, and `relay/configure-app-deploy.sh` /
-  `make app-deploy-setup`: keep these on the TUI owner.
-
-The plugin install/upgrade path in `relay/plugin-build.sh` manages the TUI
-service, not the copied core service. Upgrading the TUI relay updates the shared
-install. Restart the core service by
-hand afterwards using the command for your OS above. The core relay neither
-updates itself from the phone nor installs or refreshes the shared Pi extension;
-enable and maintain that integration through the TUI relay.
+WebRTC gateway transport and plugin menu entry points are refused on core.
+Phone-driven updates, app deployment and Pi integration management remain
+TUI-only. Updating the shared release changes what both services use on their
+next restart; reinstall/restart the core service manually after updating.

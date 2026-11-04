@@ -12,12 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
-if [ -f "$ENV_FILE" ]; then
-    set -a
-    # shellcheck source=/dev/null
-    . "$ENV_FILE"
-    set +a
-fi
+load_relay_env "$ENV_FILE"
 RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-$RELAY_UPDATER_TOKEN_FILE}
 unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
@@ -30,10 +25,10 @@ for agent_bin in "$HOME"/.[!.]*/bin; do
 done
 export PATH
 export HERDR_RELAY_HOST="${HERDR_RELAY_HOST:-127.0.0.1}"
-export HERDR_RELAY_PORT="${HERDR_RELAY_PORT:-8375}"
+export HERDR_RELAY_PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 
 CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-$(command -v cloudflared || true)}"
-CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
+CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$RELAY_CLOUDFLARED_CONFIG}"
 
 RELAY_BIN="$(relay_binary)"
 

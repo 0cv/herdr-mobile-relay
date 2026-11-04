@@ -66,11 +66,11 @@ wait_for_exit() {
 }
 
 RELAY_BIN="$(relay_binary)"
-if ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
+if [ "$HERDR_RELAY_BACKEND" = herdr ] && ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
     echo "✗ herdr is required. Install Herdr, then run Quick Start again."
     exit 1
 fi
-PORT="${HERDR_RELAY_PORT:-8375}"
+PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 HOST="${HERDR_RELAY_HOST:-127.0.0.1}"
 GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 TUNNEL_TARGET_HOST="$HOST"

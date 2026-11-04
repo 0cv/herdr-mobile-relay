@@ -23,16 +23,16 @@ case "$(uname -s)" in
         case "$ACTION" in
             install) exec "$SCRIPT_DIR/install-service.sh" ;;
             uninstall) exec "$SCRIPT_DIR/uninstall-service.sh" ;;
-            status) exec launchctl print "gui/$(id -u)/com.herdr-mobile-relay.service" ;;
-            logs) exec tail -f "$HOME/Library/Logs/herdr-mobile-relay/service.log" "$HOME/Library/Logs/herdr-mobile-relay/service.err" ;;
+            status) exec launchctl print "gui/$(id -u)/$RELAY_LAUNCHD_LABEL" ;;
+            logs) exec tail -f "$RELAY_LOG_DIR/service.log" "$RELAY_LOG_DIR/service.err" ;;
         esac
         ;;
     Linux)
         case "$ACTION" in
             install) exec "$SCRIPT_DIR/install-systemd-user-service.sh" ;;
             uninstall) exec "$SCRIPT_DIR/uninstall-systemd-user-service.sh" ;;
-            status) exec systemctl --user status herdr-mobile-relay.service ;;
-            logs) exec journalctl --user -u herdr-mobile-relay.service -f ;;
+            status) exec systemctl --user status "$RELAY_SYSTEMD_LABEL" ;;
+            logs) exec journalctl --user -u "$RELAY_SYSTEMD_LABEL" -f ;;
         esac
         ;;
 esac
