@@ -117,8 +117,21 @@ func (d *Dispatcher) SetProfiles(resolver *profiles.Resolver) {
 	d.state.mu.Lock()
 	d.state.onInventory = func(agents []*AgentState) {
 		targets := make([]profiles.PaneIdentity, 0, len(agents))
-		for _, agent := range agents {
-			targets = append(targets, profiles.PaneIdentity{PaneID: agent.PaneID, TerminalID: agent.TerminalID, TabID: agent.TabID, WorkspaceID: agent.WorkspaceID})
+		if d.herdr.CapabilityStatus().OneStepLaunch {
+			ctx, cancel := context.WithTimeout(d.watcherCtx, 15*time.Second)
+			defer cancel()
+			panes, err := d.herdr.PaneList(ctx)
+			if err != nil {
+				d.logger.Warn("profile ownership inventory failed", "error", err)
+				return
+			}
+			for _, pane := range panes {
+				targets = append(targets, profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID})
+			}
+		} else {
+			for _, agent := range agents {
+				targets = append(targets, profiles.PaneIdentity{PaneID: agent.PaneID, TerminalID: agent.TerminalID, TabID: agent.TabID, WorkspaceID: agent.WorkspaceID})
+			}
 		}
 		if err := resolver.ReconcileOwnership(targets); err != nil {
 			d.logger.Warn("profile ownership reconciliation failed", "error", err)
@@ -815,7 +828,7 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	if !exists {
 		return d.fail(requestID, "agent_clear", paneID, "Launch profile ownership is unknown; start a new agent explicitly before stopping this one")
 	}
-	name := "clear-" + fmt.Sprintf("%x", receivedAt.UnixNano())[:8]
+	name := fmt.Sprintf("clear-%08x", uint32(receivedAt.UnixNano()))
 	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd}
 	_, request, err := d.lifecycle.ValidateStart(request)
 	if err != nil {

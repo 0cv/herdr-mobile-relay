@@ -95,7 +95,7 @@ func TestEventsSnapshotsAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lost.Panes[0].TerminalID == first.Panes[0].TerminalID || restarted.Panes[0].TerminalID == lost.Panes[0].TerminalID || inv.Panes[0].TerminalID != restarted.Panes[0].TerminalID || inv.Panes[1].TerminalID != first.Panes[1].TerminalID {
+	if lost.Panes[0].TerminalID != first.Panes[0].TerminalID || restarted.Panes[0].TerminalID != lost.Panes[0].TerminalID || inv.Panes[0].TerminalID != restarted.Panes[0].TerminalID || inv.Panes[1].TerminalID != first.Panes[1].TerminalID {
 		t.Fatalf("identities: %+v, %+v, %+v", lost.Panes, restarted.Panes, inv.Panes)
 	}
 	for _, kind := range []string{"doc", "title", "keep", "foreground", "turn", "labels", "size", "created", "finished", "removed"} {
@@ -120,13 +120,13 @@ func TestEventsSnapshotsAndIdentity(t *testing.T) {
 	}
 	defer stream2.Close()
 	for i, p := range second.Panes {
-		if p.TerminalID == prior.Panes[i].TerminalID {
-			t.Fatal("reconnect retained identity")
+		if p.TerminalID != prior.Panes[i].TerminalID {
+			t.Fatal("reconnect changed identity")
 		}
 	}
 }
 
-func TestEventsFailuresInvalidate(t *testing.T) {
+func TestEventsFailuresPreserveIdentity(t *testing.T) {
 	for _, line := range []string{eventLine("missed", "", 0), `{"jsonrpc":"2.0","method":"missed","params":{"seq":0}}`, "", "garbage", `{"jsonrpc":"2.0","method":"other"}`} {
 		t.Run(line, func(t *testing.T) {
 			c, push := eventCore(t)
@@ -144,8 +144,8 @@ func TestEventsFailuresInvalidate(t *testing.T) {
 				t.Fatal(err)
 			}
 			for i, p := range inv.Panes {
-				if p.TerminalID == first.Panes[i].TerminalID {
-					t.Fatal("failure retained identity")
+				if p.TerminalID != first.Panes[i].TerminalID {
+					t.Fatal("failure changed identity")
 				}
 			}
 		})

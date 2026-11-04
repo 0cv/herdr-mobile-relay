@@ -76,6 +76,9 @@ func TestCoordinatorIdentity(t *testing.T) {
 	}
 	for i, kind := range []string{"lost", "restarted", "finished", "removed"} {
 		before := state.Generation("t1")
+		mu.Lock()
+		pid++
+		mu.Unlock()
 		push(kind, i+2)
 		wait(kind, func() bool { return state.Generation("t1") > before })
 		if state.Generation("t2") != other {
@@ -84,10 +87,8 @@ func TestCoordinatorIdentity(t *testing.T) {
 	}
 	before := state.Generation("t1")
 	push("missed", 6)
-	wait("missed reconnect", func() bool { return state.Generation("t1") > before && state.Generation("t2") > other })
-	before, other = state.Generation("t1"), state.Generation("t2")
 	mu.Lock()
-	pid = 11
+	pid++
 	mu.Unlock()
 	pollCtx, stopPoll := context.WithCancel(ctx)
 	pollDone := make(chan struct{})

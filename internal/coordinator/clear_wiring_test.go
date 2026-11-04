@@ -1,12 +1,15 @@
 package coordinator
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
@@ -104,6 +107,42 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type clearInventoryBackend struct {
+	backend.Backend
+	pane    herdr.Pane
+	checked bool
+}
+
+func (b *clearInventoryBackend) GetInventory(ctx context.Context) (*herdr.Inventory, error) {
+	if b.checked {
+		return b.Backend.GetInventory(ctx)
+	}
+	b.checked = true
+	return &herdr.Inventory{Panes: []herdr.Pane{b.pane}}, nil
+}
+
+func TestClearThenRestartDoesNotReuseTarget(t *testing.T) {
+	f, old := newClearFixture(t, launchFixtureOptions{})
+	cleared := f.dispatcher.Handle(f.ctx, clearMessage())
+	if !cleared.OK {
+		t.Fatalf("clear: %+v", cleared)
+	}
+	name := cleared.Data.(map[string]any)["name"].(string)
+	pane := herdr.Pane{ID: old.PaneID, TerminalID: old.TerminalID, TabID: old.TabID, WorkspaceID: old.WorkspaceID, Name: name, Cwd: f.cwd}
+	if err := f.dispatcher.profiles.RememberVerified(old, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	b := &clearInventoryBackend{Backend: f.dispatcher.herdr, pane: pane}
+	f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
+	restarted := f.dispatcher.Handle(f.ctx, map[string]any{"action": "agent_restart", "request_id": "restart", "pane_id": old.PaneID})
+	if !restarted.OK {
+		t.Fatalf("restart: %+v", restarted)
+	}
+	if restarted.Data.(map[string]any)["pane_id"] == old.PaneID || strings.Count(clearCalls(t, f), "agent start") != 2 {
+		t.Fatalf("restart reused its target: %+v", restarted)
 	}
 }
 

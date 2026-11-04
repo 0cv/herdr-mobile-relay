@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -84,6 +85,26 @@ func TestCoreClearAndRestart(t *testing.T) {
 				t.Fatal("missing replacement ownership")
 			}
 		})
+	}
+}
+
+func TestClearNamesDoNotCollide(t *testing.T) {
+	names := make(map[string]bool)
+	receivedAt := time.Now()
+	for i := range 2 {
+		f, _ := newClearFixture(t, launchFixtureOptions{})
+		result := f.dispatcher.handleClear(f.ctx, receivedAt.Add(time.Duration(i)), "clear", "pane-old")
+		if !result.OK {
+			t.Fatalf("clear: %+v", result)
+		}
+		name := result.Data.(map[string]any)["name"].(string)
+		if want := fmt.Sprintf("clear-%08x", uint32(receivedAt.Add(time.Duration(i)).UnixNano())); name != want {
+			t.Fatalf("replacement name = %q, want %q", name, want)
+		}
+		if names[name] {
+			t.Fatalf("replacement name reused: %s", name)
+		}
+		names[name] = true
 	}
 }
 
