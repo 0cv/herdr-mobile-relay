@@ -36,7 +36,7 @@ are manual.
 
 ## How the core relay learns agent sessions
 
-The `herdr-mobile-relay agent-session claude|codex|cursor|omp` hook command reads a
+The `herdr-mobile-relay agent-session claude|codex|cursor|omp|opencode` hook command reads a
 SessionStart payload and reports its `session_id` through terminal labels:
 `herdr-mobile-relay.session` and `herdr-mobile-relay.pid`, written together.
 It uses only `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, and accepts the
@@ -48,11 +48,17 @@ session applies.
 ## Conversation session discovery
 
 Run `herdr-mobile-relay agent-hooks install` once from a terminal to enable
-Conversation for Claude Code, Codex, Cursor (cursor-agent), Omp and Qoder. Restart
+Conversation for Claude Code, Codex, Cursor (cursor-agent), Omp, OpenCode and Qoder. Restart
 running agents to load the hooks. The hook does nothing outside a core terminal.
 Cursor adds a flat `sessionStart` command in `~/.cursor/hooks.json`. Omp uses
 `~/.omp/agent/extensions/herdr-mobile-relay-session.ts`, reporting session start
 and switch events without changing Herdr's extension.
+
+OpenCode uses `~/.config/opencode/herdr-mobile-relay-session.js`, registered in
+`tui.jsonc` alongside Herdr's plugin. It follows the displayed session to its
+root parent. Restart OpenCode after installation. The installer refuses
+`tui.jsonc` with comments or trailing commas; convert it to strict JSON manually
+before installing or uninstalling. Missing OpenCode config directories are skipped.
 
 Hermes needs no hook. On core, the relay reads `runtime/active_sessions.json`
 under its configured Hermes roots. It accepts exactly one CLI entry matching the

@@ -127,7 +127,7 @@ func TestHooksAbsentAndMalformed(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nqoder: config absent\nomp: config absent\n" {
+	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nqoder: config absent\nopencode: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 	binary := filepath.Join(home, "relay")
@@ -258,7 +258,7 @@ func TestHooksStatusNotInstalled(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nqoder: config absent\nomp: config absent\n" {
+	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nqoder: config absent\nopencode: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 }

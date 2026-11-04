@@ -48,7 +48,7 @@ func session(agent string, data []byte, getenv func(string) string) string {
 			return ""
 		}
 		id = first("session_id", "sessionId", "conversation_id", "conversationId")
-	case "omp":
+	case "omp", "opencode":
 	case "codex":
 		transcript, _ := p["transcript_path"].(string)
 		inherited := getenv("CODEX_THREAD_ID")
