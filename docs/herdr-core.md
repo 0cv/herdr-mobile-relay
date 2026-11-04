@@ -60,10 +60,11 @@ cannot be matched to their terminal. Codex runs its session-start hook only when
 the first prompt is sent, so Conversation appears after the first prompt of each
 start or resume.
 
-To do this only inside herdr.app terminals, add to `~/.zshrc`:
+To do this only inside Herdr (herdr.app terminals and Herdr TUI panes), add to
+`~/.zshrc`:
 
 ```zsh
-if [[ -n "$HC_TERMINAL_ID" ]]; then
+if [[ -n "$HC_TERMINAL_ID" || -n "$HERDR_PANE_ID" ]]; then
   codex() { command codex --no-daemon "$@"; }
 fi
 ```
