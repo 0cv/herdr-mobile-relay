@@ -30,12 +30,6 @@ func (c *Client) WorkspaceCreate(context.Context, string, string) (*herdr.Create
 	return nil, unsupported()
 }
 
-func (c *Client) WorkspaceRename(context.Context, string, string) error { return unsupported() }
-
-func (c *Client) WorkspaceMove(context.Context, string, int) error { return unsupported() }
-
-func (c *Client) WorkspaceMoveBlock(context.Context, []string, string) error { return unsupported() }
-
 func (c *Client) WorkspaceClose(context.Context, string, bool) error { return unsupported() }
 
 func (c *Client) WorktreeList(context.Context, string) (*herdr.WorktreeListResult, error) {

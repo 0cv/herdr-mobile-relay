@@ -28,6 +28,8 @@ const (
 	FeatureEndpoint            = "client_shell.endpoint"
 	FeatureDirectTerminal      = "direct_terminal"
 	FeatureWorkspaceManagement = "workspace_management"
+	FeatureWorkspaceRename     = "workspace_rename"
+	FeatureWorkspaceReorder    = "workspace_reorder"
 	FeatureWorktreeManagement  = "worktree_management"
 	FeatureTabRename           = "tab_rename"
 	FeatureAgentLaunch         = "agent_launch"
@@ -71,6 +73,8 @@ func initialServerStatus() ServerStatus {
 	}
 	for _, name := range []string{
 		FeatureWorkspaceManagement,
+		FeatureWorkspaceRename,
+		FeatureWorkspaceReorder,
 		FeatureWorktreeManagement,
 		FeatureTabRename,
 		FeatureAgentLaunch,

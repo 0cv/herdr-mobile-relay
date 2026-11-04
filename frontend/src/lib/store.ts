@@ -2247,7 +2247,8 @@ class RelayStore {
 
   private workspaceManagementAvailable(relayId: string, capability = 'workspace_management'): RelayConnection {
     const connection = this.connectionsValue.get(relayId);
-    if (!connection?.capabilities.includes(capability)) {
+    if (!connection?.capabilities.includes(capability)
+      && !(['workspace_rename', 'workspace_reorder'].includes(capability) && connection?.capabilities.includes('workspace_management'))) {
       throw new CommandError(capability === 'worktree_management'
         ? 'This relay does not support worktree management'
         : 'This relay does not support workspace management');
@@ -2263,7 +2264,7 @@ class RelayStore {
   }
 
   async renameWorkspace(workspace: RelayWorkspace, label: string): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id);
+    this.workspaceManagementAvailable(workspace.relay_id, 'workspace_rename');
     const result = await this.sendCommand(workspace.relay_id, {
       type: 'workspace_rename', workspace_id: workspace.workspace_id, label,
     });
@@ -2277,7 +2278,7 @@ class RelayStore {
     beforeWorkspaceId: string,
     legacyInsertIndex: number,
   ): Promise<CommandResult> {
-    const connection = this.workspaceManagementAvailable(relayId);
+    const connection = this.workspaceManagementAvailable(relayId, 'workspace_reorder');
     if (!workspaceIds.length || new Set(workspaceIds).size !== workspaceIds.length) {
       throw new CommandError('Workspace selection is invalid');
     }
