@@ -19,6 +19,12 @@ project follows [Semantic Versioning](https://semver.org/).
   management, typed answers and phone-driven updates are not available on core
   yet.
 
+### Fixed
+
+- Idle agents no longer look finished on the phone. The idle ring let a light
+  logo, such as Claude Code's or Codex's, show through its centre, so it looked
+  like the filled dot of an unread result.
+
 ## [0.24.0] - 2026-11-02
 
 ### Added
