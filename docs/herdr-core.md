@@ -11,7 +11,11 @@ manage each instance yourself.
 - Agent list and status, and terminal screen reading.
 - Prompts, including while an agent is waiting for an answer.
 - Key presses and structured question answers that need no typed text.
-- Stop an agent.
+- Start agents with **+**, and stop, clear or restart relay-launched agents.
+  Clear and Restart start a replacement in a new terminal, then kill the old one.
+  herdr.app names the adopted new tab itself; the terminal carries the agent name.
+  Initial prompts wait for reported idle status; otherwise launch completes with
+  a warning and leaves the prompt unsent.
 - Rename and reorder tabs in herdr-app. Either action can be refused when the
   desktop changed the layout at the same moment; try again.
 - Pane size leasing (Resize Session). The phone's size applies to the shared
@@ -23,9 +27,8 @@ manage each instance yourself.
   learned from its bridge, so it needs the bridge from this release. The TUI
   relay owns the shared Pi extension.
 
-The phone hides actions that core does not support: starting, clearing or
-restarting agents; agent identity renaming; tab creation and close; workspace
-and worktree management; manual and
+The phone hides actions that core does not support: agent identity renaming;
+tab creation and close; workspace and worktree management; manual and
 secret text input; answers requiring typed text; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.

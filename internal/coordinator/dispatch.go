@@ -724,6 +724,14 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 			return EffectResult{Result: d.failErr(requestID, "agent_start", started.PaneID, err)}
 		}
 		launchResult := completed(requestID, "agent_start", started.PaneID, started)
+		if started.PromptNotReady {
+			launchResult.Phase = "completed_with_warning"
+			launchResult.Data = map[string]any{
+				"pane_id": started.PaneID, "name": request.Name, "cwd": request.Cwd,
+				"warning": "Agent started, but the initial prompt was not confirmed",
+			}
+			return EffectResult{Result: launchResult}
+		}
 		if request.Prompt == "" || started.PaneID == "" {
 			return EffectResult{Result: launchResult}
 		}

@@ -32,20 +32,21 @@ func StartCore(t *testing.T, configure func(string, []string) []string) (socket 
 	session := fmt.Sprintf("relayit%d", os.Getpid())
 	env = []string{}
 	for _, value := range os.Environ() {
-		if !strings.HasPrefix(value, "HC_") && !strings.HasPrefix(value, "XDG_") {
+		if !strings.HasPrefix(value, "HC_") && !strings.HasPrefix(value, "XDG_") && !strings.HasPrefix(value, "TMPDIR=") && !strings.HasPrefix(value, "HOME=") {
 			env = append(env, value)
 		}
 	}
-	env = append(env, "HC_SESSION="+session)
+	for _, dir := range []string{"runtime", "tmp", "home"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env = append(env, "HC_SESSION="+session, "XDG_RUNTIME_DIR="+filepath.Join(root, "runtime"), "TMPDIR="+filepath.Join(root, "tmp"), "HOME="+filepath.Join(root, "home"))
 	for _, name := range []string{"STATE", "CONFIG", "DATA", "CACHE"} {
 		env = append(env, "XDG_"+name+"_HOME="+filepath.Join(root, strings.ToLower(name)))
 	}
-	runtime := filepath.Join(root, "runtime")
-	if err := os.MkdirAll(runtime, 0700); err != nil {
-		t.Fatal(err)
-	}
-	env = append(env, "XDG_RUNTIME_DIR="+runtime, "HOME="+root)
-	socket = filepath.Join(runtime, "herdr-core", session+".sock")
+	socket = filepath.Join(root, "runtime", session+".sock")
+	env = append(env, "HC_SOCKET="+socket)
 	relative, err := filepath.Rel(root, socket)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
 		t.Fatalf("socket outside scratch root: %s", socket)
