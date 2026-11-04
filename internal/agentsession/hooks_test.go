@@ -38,13 +38,16 @@ func fileBytes(t *testing.T, path string) []byte {
 func TestHooksLifecycle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	for _, agent := range []string{"claude", "codex"} {
+	for _, agent := range []string{"claude", "codex", "cursor"} {
 		t.Run(agent, func(t *testing.T) {
 			matcher := ""
 			if agent == "claude" {
 				matcher = `"matcher":"^(startup|resume|clear|compact|fork)$",`
 			}
 			original := `{"z":1,"hooks":{"Stop":[],"SessionStart":[{` + matcher + `"hooks":[{"command":"bash '/home/test/.` + agent + `/herdr-agent-state.sh' session && echo ready > /dev/null < /dev/null","timeout":10,"type":"command"}]}]},"a":{"z":2,"a":1}}`
+			if agent == "cursor" {
+				original = `{"version":1,"z":1,"hooks":{"Stop":[],"sessionStart":[{"command":"herdr-agent-state.sh"}]},"a":2}`
+			}
 			path := fixture(t, home, agent, original)
 			run := func(op, binary string) string {
 				t.Helper()
@@ -60,7 +63,10 @@ func TestHooksLifecycle(t *testing.T) {
 				if op == "uninstall" {
 					state = "not installed"
 				}
-				lines := 2
+				lines := 4
+				if op == "install" {
+					lines++
+				}
 				if op == "install" && strings.Contains(out.String(), "codex: installed\n") {
 					lines++
 					if !strings.HasSuffix(out.String(), "codex: start Codex with --no-daemon in herdr.app terminals; its Conversation appears after the first prompt\n") {
@@ -74,7 +80,7 @@ func TestHooksLifecycle(t *testing.T) {
 			}
 			run("install", "/old relay")
 			first := fileBytes(t, path)
-			if !bytes.Contains(first, []byte("&& echo ready > /dev/null < /dev/null")) {
+			if agent != "cursor" && !bytes.Contains(first, []byte("&& echo ready > /dev/null < /dev/null")) {
 				t.Fatalf("Herdr command rewritten: %s", first)
 			}
 			run("install", "/old relay")
@@ -118,7 +124,7 @@ func TestHooksAbsentAndMalformed(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: config absent\ncodex: config absent\n" {
+	if out.String() != "claude: config absent\ncodex: config absent\ncursor: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 	binary := filepath.Join(home, "relay")
@@ -249,7 +255,7 @@ func TestHooksStatusNotInstalled(t *testing.T) {
 	if err := Hooks("status", &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "claude: not installed\ncodex: not installed\n" {
+	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
 }

@@ -30,6 +30,21 @@ func session(agent string, data []byte, getenv func(string) string) string {
 		if getenv("CURSOR_VERSION") != "" || cursor || event != "SessionStart" || truthy(p["agent_id"]) {
 			return ""
 		}
+	case "cursor":
+		first := func(names ...string) string {
+			for _, name := range names {
+				if value, ok := p[name].(string); ok && value != "" {
+					return value
+				}
+			}
+			return ""
+		}
+		event = first("hook_event_name", "hookEventName")
+		if event != "" && event != "sessionStart" {
+			return ""
+		}
+		id = first("session_id", "sessionId", "conversation_id", "conversationId")
+	case "omp":
 	case "codex":
 		transcript, _ := p["transcript_path"].(string)
 		inherited := getenv("CODEX_THREAD_ID")

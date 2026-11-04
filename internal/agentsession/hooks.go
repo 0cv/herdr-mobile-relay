@@ -115,8 +115,15 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 			return nil, false, fmt.Errorf("hooks: %w", err)
 		}
 	}
+	event := "SessionStart"
+	if agent == "cursor" {
+		event = "sessionStart"
+		if install && root.get("version") == nil {
+			root.set("version", raw(1))
+		}
+	}
 	var entries []json.RawMessage
-	if value := hooks.get("SessionStart"); value != nil {
+	if value := hooks.get(event); value != nil {
 		if err := json.Unmarshal(value, &entries); err != nil {
 			return nil, false, err
 		}
@@ -127,6 +134,20 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 		obj, err := parseObject(entry)
 		if err != nil {
 			return nil, false, fmt.Errorf("SessionStart entry: %w", err)
+		}
+		if agent == "cursor" {
+			var command string
+			if value := obj.get("command"); value != nil {
+				if err := json.Unmarshal(value, &command); err != nil {
+					return nil, false, err
+				}
+			}
+			if strings.HasSuffix(strings.TrimSpace(command), " agent-session "+agent) {
+				found = true
+			} else {
+				kept = append(kept, entry)
+			}
+			continue
 		}
 		var commands []json.RawMessage
 		if value := obj.get("hooks"); value != nil {
@@ -163,16 +184,20 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 		if agent == "claude" {
 			entry.set("matcher", raw("^(startup|resume|clear|compact|fork)$"))
 		}
-		entry.set("hooks", raw([]hookCommand{{"command", command, 10}}))
+		if agent == "cursor" {
+			entry.set("command", raw(command))
+		} else {
+			entry.set("hooks", raw([]hookCommand{{"command", command, 10}}))
+		}
 		kept = append(kept, raw(entry))
 	}
 	if !install && !found {
 		return data, false, nil
 	}
 	if len(kept) == 0 {
-		hooks.set("SessionStart", nil)
+		hooks.set(event, nil)
 	} else {
-		hooks.set("SessionStart", raw(kept))
+		hooks.set(event, raw(kept))
 	}
 	if len(hooks) == 0 {
 		root.set("hooks", nil)
@@ -232,7 +257,7 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 	}
 	var changes []change
 	var feedback bytes.Buffer
-	for _, agent := range []string{"claude", "codex"} {
+	for _, agent := range []string{"claude", "codex", "cursor"} {
 		dir := filepath.Join(home, "."+agent)
 		name := "hooks.json"
 		if agent == "claude" {
@@ -293,6 +318,12 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 		if !bytes.Equal(updated, data) {
 			changes = append(changes, change{path, updated, mode})
 		}
+	}
+	if err := manageOmpExtension(home, binary, operation, &feedback); err != nil {
+		return err
+	}
+	if operation == "install" {
+		fmt.Fprintln(&feedback, "Restart Claude Code, Codex, Cursor and Omp to load session hooks; Hermes needs no hook.")
 	}
 	for _, c := range changes {
 		if _, err := atomicfile.Replace(filepath.Dir(c.path), c.path, ".agent-hooks-*", c.data, c.mode); err != nil {
