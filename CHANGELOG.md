@@ -12,7 +12,8 @@ project follows [Semantic Versioning](https://semver.org/).
   rewinds remove discarded turns and mark older history cursors as changed.
 - Run a second relay for herdr-core beside the TUI relay, so agents in herdr-app
   appear as a separate computer on your phone; install a background service and
-  pair it with Tailscale or Cloudflare. Read screens and scrollback, send
+  pair it with Tailscale or Cloudflare, or let the setup menu set up and pair
+  the TUI relay, the core relay, or both. Read screens and scrollback, send
   prompts and keys, type single-line text without Enter, answer questions, enter
   secrets at hidden prompts, start, clear, restart and stop agents, rename and
   reorder tabs, rename and reorder workspaces, and use Pi commands and activity,

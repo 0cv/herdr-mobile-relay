@@ -1048,6 +1048,14 @@ host_label() {
     hostname -s 2>/dev/null || hostname 2>/dev/null || echo relay
 }
 
+relay_host_label() {
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        printf '%s (core)\n' "$(host_label)"
+        return
+    fi
+    host_label
+}
+
 # The token passes through argv only for the short-lived compiled helper.
 build_setup_fragment() {
     "$(relay_binary)" setup-fragment "$1" "$2" "${3:-}"
@@ -1787,7 +1795,7 @@ print_phone_setup() {
     phone_setup_url_is_safe "$phone_url" || return 1
     qr_code="$(render_setup_qr "$phone_url")" || return 1
     if [ -n "$qr_code" ]; then
-        echo "  Scan this QR code with your phone camera:"
+        printf '  Scan with your phone to add %s\n' "$(relay_host_label)"
         echo ""
         printf '%s\n' "$qr_code"
         echo ""
@@ -1795,7 +1803,7 @@ print_phone_setup() {
         echo ""
         echo "  Or open this private setup link on your phone:"
     else
-        echo "  Open this private setup link on your phone:"
+        printf '  Open this private setup link on your phone to add %s:\n' "$(relay_host_label)"
     fi
     emit_phone_setup_url "$phone_url"
 }

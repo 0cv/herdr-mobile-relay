@@ -140,7 +140,7 @@ if [ -n "$GATEWAY_URL" ]; then
     fi
     echo " ✓"
 
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
     PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
     record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
@@ -178,7 +178,7 @@ elif [ "${HERDR_DEV_TRANSPORT:-}" = tailscale ]; then
     fi
     TAILSCALE_ACTIVE=1
 
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     RELAY_URL="wss://${URL#https://}"
     SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
     PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE")"
@@ -270,7 +270,7 @@ elif command -v cloudflared >/dev/null 2>&1; then
         echo "  does not open on your phone, wait a minute and scan again."
     fi
 
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     RELAY_URL="wss://${URL#https://}"
     SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
     PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE" temporary)"

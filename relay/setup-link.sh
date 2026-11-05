@@ -23,7 +23,7 @@ fi
 # the phone finds it through the gateway, so the link only needs the app origin.
 if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
     ADDRESS="$("$(relay_binary)" tailscale address --port "$RELAY_TAILSCALE_PORT")" || exit $?
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     RELAY_URL="wss://${ADDRESS#https://}"
     SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
     PHONE_APP_BASE="$(choose_phone_app_base_url "$ADDRESS" "$ENV_FILE" stable)"
@@ -46,7 +46,7 @@ fi
 
 GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 if [ -n "$GATEWAY_URL" ]; then
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
     PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
     record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
@@ -86,7 +86,7 @@ if [ -z "$TUNNEL_HOST" ]; then
     fi
 fi
 
-HOST_LABEL="$(host_label)"
+HOST_LABEL="$(relay_host_label)"
 RELAY_URL="wss://$TUNNEL_HOST"
 SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
 PHONE_APP_FALLBACK="https://$TUNNEL_HOST"

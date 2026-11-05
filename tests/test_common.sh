@@ -217,6 +217,7 @@ run_phone_setup_helper() (
     render_setup_qr() {
         [ "${PHONE_SETUP_RENDER_BAD_QR:-}" != 1 ] ||
             printf 'attacker-controlled QR\n'
+        [ "${PHONE_SETUP_RENDER_QR:-}" != 1 ] || printf 'fixture QR\n'
     }
     stdout_is_terminal() { [ "${PHONE_SETUP_TTY:-}" = 1 ]; }
     unset NO_COLOR
@@ -224,11 +225,13 @@ run_phone_setup_helper() (
     "$@"
 )
 
+PHONE_SETUP_LABEL="$(host_label)"
 PHONE_SETUP_PLAIN_EXPECTED="$(
-    printf '  Open this private setup link on your phone:\n  %s\n' "$PHONE_SETUP_URL"
+    printf '  Open this private setup link on your phone to add %s:\n  %s\n' \
+        "$PHONE_SETUP_LABEL" "$PHONE_SETUP_URL"
 )"
 PHONE_SETUP_LINK_EXPECTED="$(
-    printf '  Open this private setup link on your phone:\n'
+    printf '  Open this private setup link on your phone to add %s:\n' "$PHONE_SETUP_LABEL"
     printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "$PHONE_SETUP_URL" "$PHONE_SETUP_URL"
 )"
 
@@ -248,6 +251,17 @@ test "$(
     PHONE_SETUP_TTY=1 TERM=dumb \
         run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL"
 )" = "$PHONE_SETUP_PLAIN_EXPECTED"
+
+test "$(HERDR_RELAY_BACKEND=herdr relay_host_label)" = "$PHONE_SETUP_LABEL"
+test "$(HERDR_RELAY_BACKEND=hc relay_host_label)" = "$PHONE_SETUP_LABEL (core)"
+test "$(
+    PHONE_SETUP_RENDER_QR=1 HERDR_RELAY_BACKEND=hc \
+        run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL" | sed -n 1p
+)" = "  Scan with your phone to add $PHONE_SETUP_LABEL (core)"
+test "$(
+    PHONE_SETUP_RENDER_QR=1 HERDR_RELAY_BACKEND=herdr \
+        run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL" | sed -n 1p
+)" = "  Scan with your phone to add $PHONE_SETUP_LABEL"
 
 run_phone_setup_helper phone_setup_url_is_safe \
     'http://127.0.0.1:8375/#setup=fixture'
@@ -1287,7 +1301,11 @@ test "$(printf '%s\n' "$STABLE_SWITCH_OUTPUT" |
 MENU_BIN_DIR="$WORK_DIR/menu-bin"
 MENU_ENV="$WORK_DIR/config/menu.env"
 MENU_ROOT="$WORK_DIR/menu-release"
-mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current"
+mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current" "$WORK_DIR/menu-home"
+# The menu offers the core relay when `hc` or a core env exists, so these runs
+# see neither the developer's tools nor their home directory.
+MENU_SYSTEM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+menu_isolation=(env HERDR_BIN_PATH= HOME="$WORK_DIR/menu-home" XDG_CONFIG_HOME="$WORK_DIR/menu-home/.config" PATH="$MENU_BIN_DIR:$MENU_SYSTEM_PATH")
 printf '{\n  "version": "9.9.9"\n}\n' > "$MENU_ROOT/current/release-manifest.json"
 printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\nHERDR_APP_DEPLOY_ORIGIN='https://app.example.test'\n" > "$MENU_ENV"
 printf "HERDR_GATEWAY_DEPLOY_HOST='gw-owned.example.test'\n" \
@@ -1308,11 +1326,11 @@ chmod 700 "$MENU_BIN_DIR/curl"
 # the return prompt is skipped, so the input carries no extra newline.
 MENU_OUTPUT="$(
     printf '2\n4\nq\n' |
-        PATH="$MENU_BIN_DIR:$PATH" \
+        "${menu_isolation[@]}" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELEASE_ROOT="$MENU_ROOT" \
         HERDR_RELAY_ENV="$MENU_ENV" \
-        bash "$REPO_DIR/relay/plugin-setup-menu.sh"
+        "$BASH" "$REPO_DIR/relay/plugin-setup-menu.sh"
 )"
 case "$MENU_OUTPUT" in
     *"Herdr Mobile Relay status"*) ;;
@@ -1378,8 +1396,8 @@ chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" \
     "$REFRESH_MENU_DIR/plugin-status.sh"
 export REFRESH_MENU_MARKER
 printf '2\n1\n4\nq\n' |
-    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
-    bash "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
+    "${menu_isolation[@]}" HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
+    "$BASH" "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
 test "$(cat "$REFRESH_MENU_MARKER")" = "unset"
 
 # A setup pane can outlive an in-place plugin update. Replacing its script
@@ -1397,8 +1415,8 @@ cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-setup-menu.sh" \
 mkfifo "$STALE_MENU_FIFO"
 exec 7<> "$STALE_MENU_FIFO"
 (
-    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$MENU_ENV" \
-        bash "$STALE_MENU_DIR/plugin-setup-menu.sh" <&7 \
+    "${menu_isolation[@]}" HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$MENU_ENV" \
+        "$BASH" "$STALE_MENU_DIR/plugin-setup-menu.sh" <&7 \
         > "$STALE_MENU_OUTPUT" 2>&1
 ) &
 STALE_MENU_PID=$!
