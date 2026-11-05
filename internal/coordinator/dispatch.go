@@ -830,6 +830,9 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	}
 	name := fmt.Sprintf("clear-%08x", uint32(receivedAt.UnixNano()))
 	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd}
+	if d.herdr.CapabilityStatus().OneStepLaunch {
+		request.WorkspaceID, request.TabID = agent.WorkspaceID, agent.TabID
+	}
 	_, request, err := d.lifecycle.ValidateStart(request)
 	if err != nil {
 		return d.fail(requestID, "agent_clear", paneID, err.Error())

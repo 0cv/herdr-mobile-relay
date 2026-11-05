@@ -3,7 +3,9 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ type coreLaunchBackend struct {
 	calls              []string
 	argv               []string
 	workspace          string
+	tab                string
 	inventoryWorkspace string
 	cwd                string
 }
@@ -35,10 +38,10 @@ func (b *coreLaunchBackend) WorkspaceList(context.Context) ([]herdr.Workspace, e
 func (b *coreLaunchBackend) CapabilityStatus() herdr.ServerStatus {
 	return herdr.ServerStatus{OneStepLaunch: true, Features: map[string]herdr.FeatureEvidence{herdr.FeatureAgentLaunch: {State: herdr.FeatureSupported}}}
 }
-func (b *coreLaunchBackend) LaunchTerminal(_ context.Context, argv []string, cwd, name, workspace string, _ bool) (*herdr.Pane, bool, error) {
+func (b *coreLaunchBackend) LaunchTerminal(_ context.Context, argv []string, cwd, name, workspace, tab string, _ bool) (*herdr.Pane, bool, error) {
 	b.calls = append(b.calls, "run")
 	b.argv = argv
-	b.workspace = workspace
+	b.workspace, b.tab = workspace, tab
 	b.pane.Cwd, b.pane.Name = cwd, name
 	return &b.pane, b.ready, b.err
 }
@@ -49,6 +52,43 @@ func (b *coreLaunchBackend) StopPane(_ context.Context, id string) error {
 func (b *coreLaunchBackend) Prompt(context.Context, string, string) error {
 	b.calls = append(b.calls, "prompt")
 	return b.promptErr
+}
+
+func TestCodexLaunchArgs(t *testing.T) {
+	for _, core := range []bool{false, true} {
+		t.Run(fmt.Sprintf("core=%v", core), func(t *testing.T) {
+			f := newLaunchFixture(t)
+			profile, _ := f.dispatcher.profiles.Profile("claude")
+			profile.Kind = "codex"
+			profile.Argv = []string{"/fixture/codex", "--model", "fixture"}
+			original := append([]string(nil), profile.Argv...)
+			var b *coreLaunchBackend
+			if core {
+				b = &coreLaunchBackend{Backend: f.dispatcher.herdr, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID}}
+				f.dispatcher.lifecycle.herdr = b
+			}
+			_, err := f.dispatcher.lifecycle.Start(f.ctx, profile, StartRequest{Name: "fixture", Cwd: f.cwd})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(profile.Argv, original) {
+				t.Fatal("profile argv mutated")
+			}
+			if core {
+				if !reflect.DeepEqual(b.argv, []string{"/fixture/codex", "--no-daemon", "--model", "fixture"}) {
+					t.Fatalf("argv=%v", b.argv)
+				}
+			} else {
+				calls, err := os.ReadFile(f.calls)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(calls), "--no-daemon") || !strings.Contains(string(calls), "--kind codex --pane") {
+					t.Fatalf("TUI launch changed: %s", calls)
+				}
+			}
+		})
+	}
 }
 
 func TestCoreLaunchReusesWorkspaceAndHermesArgs(t *testing.T) {
@@ -73,7 +113,7 @@ func TestCoreClearAndRestart(t *testing.T) {
 	for _, action := range []string{"agent_clear", "agent_restart"} {
 		t.Run(action, func(t *testing.T) {
 			f, old := newClearFixture(t, launchFixtureOptions{})
-			b := &coreLaunchBackend{Backend: f.dispatcher.herdr, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID}}
+			b := &coreLaunchBackend{Backend: f.dispatcher.herdr, inventoryWorkspace: old.WorkspaceID, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID}}
 			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
 			message := clearMessage()
 			message["action"] = action
@@ -81,10 +121,31 @@ func TestCoreClearAndRestart(t *testing.T) {
 			if !result.OK || !reflect.DeepEqual(b.calls, []string{"run", "kill:" + old.PaneID}) {
 				t.Fatalf("result=%+v calls=%v", result, b.calls)
 			}
+			if b.tab != old.TabID || b.workspace != old.WorkspaceID {
+				t.Fatalf("replacement location = %s/%s, want %s/%s", b.workspace, b.tab, old.WorkspaceID, old.TabID)
+			}
 			if !f.dispatcher.profiles.OwnsTarget(f.target, "claude") {
 				t.Fatal("missing replacement ownership")
 			}
 		})
+	}
+}
+
+func TestCoreClearUnconfirmedAdoptionKillsOldTerminal(t *testing.T) {
+	f, old := newClearFixture(t, launchFixtureOptions{})
+	b := &coreLaunchBackend{
+		Backend: f.dispatcher.herdr, inventoryWorkspace: old.WorkspaceID,
+		pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: old.TabID, WorkspaceID: old.WorkspaceID},
+	}
+	f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
+	result := f.dispatcher.Handle(f.ctx, clearMessage())
+	if !result.OK || !reflect.DeepEqual(b.calls, []string{"run", "kill:" + old.PaneID}) {
+		t.Fatalf("result=%+v calls=%v", result, b.calls)
+	}
+	ownership := f.target
+	ownership.TabID, ownership.WorkspaceID = old.TabID, old.WorkspaceID
+	if !f.dispatcher.profiles.OwnsTarget(ownership, "claude") {
+		t.Fatal("replacement ownership lost after unconfirmed adoption")
 	}
 }
 

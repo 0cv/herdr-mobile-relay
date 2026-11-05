@@ -14,8 +14,11 @@ computers. Install and pair each instance separately with the commands below.
 - Secret input to a verified no-echo prompt, without input-side persistence.
   Programs that echo or log a secret can still expose it in terminal output.
 - Start agents with **+**, and stop, clear or restart relay-launched agents.
-  Clear and Restart start a replacement in a new terminal, then kill the old one.
-  herdr.app names the adopted new tab itself; the terminal carries the agent name.
+  Clear and Restart start a replacement in the same tab, then kill the old terminal
+  after waiting up to five seconds for herdr.app to adopt the replacement. If adoption
+  is not confirmed in time, the old terminal is still killed and the tab may come back unnamed.
+  New tabs receive the requested name if herdr.app adopts them within five seconds;
+  otherwise the agent still starts, with an unnamed tab.
   Initial prompts wait for reported idle status; otherwise launch completes with
   a warning and leaves the prompt unsent.
 - Rename and reorder tabs and workspaces in herdr-app. These actions can be
@@ -40,7 +43,7 @@ are manual.
 | --- | --- | --- |
 | Pi | Pi bridge; used when no label session applies. | Install this release's bridge through the TUI relay, which owns the shared extension; reload Pi. |
 | Claude Code | `SessionStart` hook in `~/.claude/settings.json`. | Install hooks and restart. |
-| Codex | `SessionStart` hook in `~/.codex/hooks.json`, after the first prompt of each start or resume. | Install hooks, enable `[features] hooks = true` (also enabled by Herdr), restart with `--no-daemon`, and trust the hook in `/hooks`. |
+| Codex | `SessionStart` hook in `~/.codex/hooks.json`, after the first prompt of each start or resume. | Install hooks, enable `[features] hooks = true` (also enabled by Herdr), and trust the hook in `/hooks`. Phone-started Codex needs nothing extra: the core relay adds `--no-daemon`. For desktop starts, use `codex --no-daemon`. |
 | Cursor | Flat `sessionStart` hook in `~/.cursor/hooks.json`. | Install hooks and restart cursor-agent. Appears only once Herdr recognises it; it sends no OSC 7501 status. |
 | Omp | Extension in `~/.omp/agent/extensions/herdr-mobile-relay-session.ts` reports starts and switches. | Install hooks and restart. |
 | OpenCode | Plugin in `~/.config/opencode/herdr-mobile-relay-session/tui.js`, registered alongside Herdr's plugin in `cli.json`, follows the displayed session to its root parent. | Convert `cli.json` to strict JSON (no comments or trailing commas) before install or uninstall; install hooks and restart. |

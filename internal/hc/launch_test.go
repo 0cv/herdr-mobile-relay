@@ -16,6 +16,10 @@ import (
 func TestLaunchParameters(t *testing.T) {
 	seen := map[string]bool{}
 	c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) {
+		if req.Method == "doc.get" {
+			reply(conn, req.ID, "result", map[string]any{"value": nil, "version": 0})
+			return
+		}
 		labels := req.Params["labels"].(map[string]any)
 		for _, key := range []string{"herdr.space", "herdr.tab"} {
 			id := labels[key].(string)
@@ -31,7 +35,7 @@ func TestLaunchParameters(t *testing.T) {
 		reply(conn, req.ID, "result", map[string]any{"address": "t1", "pid": 123, "state": "live", "labels": labels})
 	}))
 	for _, workspaceID := range []string{"", "", "core", "remote/space"} {
-		pane, _, err := c.LaunchTerminal(t.Context(), []string{"/bin/sleep", "120", "-p", "default"}, "/tmp", "fixture", workspaceID, false)
+		pane, _, err := c.LaunchTerminal(t.Context(), []string{"/bin/sleep", "120", "-p", "default"}, "/tmp", "fixture", workspaceID, "", false)
 		if err != nil || pane == nil {
 			t.Fatalf("launch: %v %v", pane, err)
 		}
@@ -44,6 +48,9 @@ func TestLaunchReadiness(t *testing.T) {
 			c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) {
 				result := map[string]any{"address": "t1", "pid": 123, "state": "live", "labels": map[string]string{"herdr.space": "existing"}}
 				switch req.Method {
+				case "doc.get":
+					reply(conn, req.ID, "result", map[string]any{"value": nil, "version": 0})
+					return
 				case "terminal.run":
 					if req.Params["labels"].(map[string]any)["herdr.space"] != "existing" {
 						t.Error("workspace not reused")
@@ -67,7 +74,7 @@ func TestLaunchReadiness(t *testing.T) {
 			}))
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			pane, ready, err := c.LaunchTerminal(ctx, []string{"/bin/sleep", "120"}, "/tmp", "fixture", "existing", true)
+			pane, ready, err := c.LaunchTerminal(ctx, []string{"/bin/sleep", "120"}, "/tmp", "fixture", "existing", "", true)
 			if err != nil || pane == nil || ready != (scenario == "idle") {
 				t.Fatalf("launch = %v, %v, %v", pane, ready, err)
 			}
@@ -78,7 +85,7 @@ func TestLaunchReadiness(t *testing.T) {
 func TestLaunchUnknownDoesNotRetry(t *testing.T) {
 	var calls atomic.Int32
 	c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) { calls.Add(1); conn.Close() }))
-	_, _, err := c.LaunchTerminal(t.Context(), []string{"/bin/sleep", "120"}, "/tmp", "fixture", "", false)
+	_, _, err := c.LaunchTerminal(t.Context(), []string{"/bin/sleep", "120"}, "/tmp", "fixture", "", "", false)
 	if !errors.Is(err, herdr.ErrDispatchedUnknown) || calls.Load() != 1 {
 		t.Fatalf("calls=%d error=%v", calls.Load(), err)
 	}
