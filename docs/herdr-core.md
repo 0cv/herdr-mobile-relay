@@ -3,7 +3,8 @@
 Set `HERDR_RELAY_BACKEND=hc` to connect to herdr-core, the backend used by
 herdr-app, instead of the Herdr TUI. Each relay process has one backend. Run two
 relays to use both: the phone shows `<hostname>` and `<hostname> (core)` as two
-computers. Install and pair each instance separately with the commands below.
+computers. Install and pair each instance separately, with the setup menu or the
+commands below.
 
 ## Available on core
 
@@ -123,6 +124,32 @@ starts or stops it; relay inventory readiness checks connectivity.
 For a non-default core, set `HC_SESSION`, `HC_SOCKET` or `HC_SOCKET_PATH`
 on the initial setup command; default paths are resolved in the service environment.
 
+### With the setup menu
+
+Open the menu from the Herdr plugin (**Herdr Mobile Relay: Setup**), or from the
+installed release, which also works on a computer with herdr-app and no `herdr`
+command (`install.sh` prints this command when it finishes):
+
+```bash
+bash "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}/current/relay/plugin-setup-menu.sh"
+```
+
+The menu shows the status of each relay it finds: **Herdr TUI relay** (the phone
+shows `<host>`) and **Herdr app relay** (the phone shows `<host> (core)`). When
+both exist it first asks what the phone should control:
+
+- **Herdr TUI**: the usual menu.
+- **Herdr app (core)**: Cloudflare (temporary tunnel, stable tunnel, change
+  hostname, remove) and Tailscale on port 8444. No WebRTC and no app deployment.
+- **Both**: Cloudflare stable tunnel or Always on Tailscale, run for the TUI
+  relay and then for the core relay with one transport for both, each followed
+  by its own QR. Temporary tunnels run in the foreground, so they are not offered.
+
+Each QR says which computer it adds. Scan both in the same phone app. **b** goes
+back to the first question.
+
+### With commands
+
 Every command below selects core with `HERDR_RELAY_BACKEND=hc`. Its private env
 is `${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay-hc/relay.env`, not the
 checkout or plugin env. Setup creates a new key and instance ID and persists
@@ -209,7 +236,7 @@ core uninstall preserves the shared release, CLI, TUI plugin, Pi extension and
 agent hooks. Full TUI uninstall refuses while the core service remains installed;
 remove core first.
 
-WebRTC gateway transport and plugin menu entry points are refused on core.
-Phone-driven updates, app deployment and Pi integration management remain
-TUI-only. Updating the shared release changes what both services use on their
+WebRTC gateway transport is refused on core, and the Herdr plugin's build and
+pane launchers are TUI-only. Phone-driven updates, app deployment and Pi
+integration management remain TUI-only. Updating the shared release changes what both services use on their
 next restart; reinstall/restart the core service manually after updating.

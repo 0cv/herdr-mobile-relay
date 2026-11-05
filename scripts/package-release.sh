@@ -72,16 +72,29 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     cp "$REPO_DIR/README.md" "$STAGE/README.md"
     cp -R "$REPO_DIR/relay/pi-command-bridge" "$STAGE/relay/pi-command-bridge"
     for WRAPPER in \
+        change-hostname.sh \
         common.sh \
+        configure-app-deploy.sh \
+        gateway-deploy.sh \
         herdr-mobile-relay-service.sh \
         install-service.sh \
         install-systemd-user-service.sh \
         native-install-transaction.sh \
+        plugin-change-hostname.sh \
+        plugin-choose-transport.sh \
+        plugin-configure-app-deploy.sh \
+        plugin-install-service.sh \
         plugin-on-event.sh \
+        plugin-quick-start.sh \
+        plugin-setup-link.sh \
+        plugin-setup-menu.sh \
+        plugin-stable-teardown.sh \
+        plugin-status.sh \
         pi-commands.sh \
         service.sh \
         setup-link.sh \
         setup.sh \
+        speech-voices.sh \
         stable-setup.sh \
         stable-teardown.sh \
         start.sh \

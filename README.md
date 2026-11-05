@@ -44,6 +44,10 @@ Choose a path:
 
 Each path then lists only its own actions; **b** goes back.
 
+On a computer that also runs herdr-app, the menu first asks whether the phone
+should control the Herdr TUI, herdr-app (core), or both, and shows each relay's
+status. [Core setup →](docs/herdr-core.md#with-the-setup-menu)
+
 To reopen the main setup menu later:
 
 ```bash

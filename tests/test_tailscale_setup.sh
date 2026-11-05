@@ -316,7 +316,9 @@ assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 grep -q 'mapping may remain' "$WORK/out"
 
 printf "HERDR_TAILSCALE_PORT='8443'\n" >> "$HERDR_RELAY_ENV"
-printf '3\n2\nq\n' | run plugin-setup-menu.sh
+# The menu also offers the core relay when `hc` exists, so it runs without the developer's PATH.
+ln -s "$BASH" "$WORK/bin/bash"
+printf '3\n2\nq\n' | HERDR_BIN_PATH= PATH="$WORK/bin:/usr/bin:/bin:/usr/sbin:/sbin" run plugin-setup-menu.sh
 assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 grep -q 'systemctl .* restart' "$FAKE_LOG" || grep -q 'systemctl .* start' "$FAKE_LOG"
 . "$REPO_DIR/relay/common.sh"
