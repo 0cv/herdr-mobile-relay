@@ -98,10 +98,12 @@ Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
   once Herdr recognises them.
 - Not yet: colour, creating/closing workspaces and tabs, worktrees, or phone-driven updates.
 
-The core relay runs from the same installed release as the TUI relay. Without the
-TUI, download `install.sh` from this repository at tag `v0.25.0` and run
-`sh install.sh 0.25.0`; it downloads and verifies the release bundle. Then follow
-the [core setup and pairing steps](docs/herdr-core.md) (Tailscale or Cloudflare).
+If you use the Herdr TUI, the setup menu above sets up the TUI relay, the core
+relay, or both, and each QR says which computer it adds. Without the TUI,
+download `install.sh` from this repository at tag `v0.25.0` and run
+`sh install.sh 0.25.0`; it downloads and verifies the release bundle and prints
+the command that opens the same menu. Core pairs over Tailscale or Cloudflare;
+see the [core guide](docs/herdr-core.md).
 
 ## What you get
 
