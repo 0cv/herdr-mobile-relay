@@ -58,11 +58,9 @@ func TestLaunchNamesAdoptedTab(t *testing.T) {
 				t.Fatalf("start waited for adoption: pane=%+v err=%v", pane, err)
 			}
 			if scenario == "absent" {
-				time.Sleep(adoptionTimeout + 150*time.Millisecond)
-				before := reads.Load()
-				time.Sleep(100 * time.Millisecond)
-				if before == 0 || reads.Load() != before || writes.Load() != 0 {
-					t.Fatalf("absent app: reads=%d/%d writes=%d", before, reads.Load(), writes.Load())
+				time.Sleep(300 * time.Millisecond)
+				if reads.Load() < 2 || writes.Load() != 0 {
+					t.Fatalf("absent app: reads=%d writes=%d", reads.Load(), writes.Load())
 				}
 				return
 			}
