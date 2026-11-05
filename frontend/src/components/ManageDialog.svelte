@@ -151,16 +151,17 @@
       void beginConfirm('clear');
       return;
     }
+    const { relay_id: relayId, cwd } = agent;
     busy = true;
     try {
       const result = await relayStore.sendToAgent(agent, { type: 'agent_clear' }, 45_000);
       const warning = String(result.data?.warning || '');
       relayStore.showToast(warning || 'Agent cleared.', Boolean(warning));
       const rawPaneId = String(result.data?.pane_id || '');
-      const replacement = await relayStore.waitForAgent(agent.relay_id, {
+      const replacement = await relayStore.waitForAgent(relayId, {
         rawPaneId,
         name: String(result.data?.name || ''),
-        cwd: String(result.data?.cwd || agent.cwd || ''),
+        cwd: String(result.data?.cwd || cwd || ''),
       });
       open = false;
       if (replacement) {

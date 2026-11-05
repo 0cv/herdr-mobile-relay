@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
+import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ConversationHistory from '$components/ConversationHistory.svelte';
 import ManageDialog from '$components/ManageDialog.svelte';
@@ -101,6 +102,35 @@ describe('agent view controls and conversation loading hook', () => {
     expect(screen.getByRole('combobox', { name: 'Default View' })).toHaveValue('conversation');
     await view.rerender({ open: true, agent: second });
     expect(screen.getByRole('combobox', { name: 'Default View' })).toHaveValue('default');
+  });
+
+  it('opens the replacement when the agent disappears while clear is pending', async () => {
+    const user = userEvent.setup();
+    const current = { ...agent(), cwd: '/project' };
+    const replacement = agent('fedora', 'pane-2', 'terminal-2');
+    let resolveClear!: (value: Awaited<ReturnType<typeof relayStore.sendToAgent>>) => void;
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementationOnce(() => new Promise((resolve) => {
+      resolveClear = resolve;
+    }));
+    const wait = vi.spyOn(relayStore, 'waitForAgent').mockResolvedValue(replacement);
+    const toast = vi.spyOn(relayStore, 'showToast').mockImplementation(() => {});
+    const view = render(ManageDialog, { open: true, agent: current });
+
+    await user.click(screen.getByRole('button', { name: 'Clear Agent' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm Clear' }));
+    expect(send).toHaveBeenCalledWith(current, { type: 'agent_clear' }, 45_000);
+    await view.rerender({ open: true, agent: null });
+    resolveClear({
+      type: 'command_result', request_id: 'clear-1', ok: true,
+      data: { pane_id: 'pane-2', name: 'replacement' },
+    });
+
+    await waitFor(() => expect(wait).toHaveBeenCalledWith('fedora', {
+      rawPaneId: 'pane-2', name: 'replacement', cwd: '/project',
+    }));
+    await waitFor(() => expect(get(currentView)).toMatchObject({ view: 'terminal', paneId: replacement.pane_id }));
+    expect(toast).toHaveBeenCalledExactlyOnceWith('Agent cleared.', false);
+    expect(screen.queryByRole('dialog', { name: 'Manage Agent' })).not.toBeInTheDocument();
   });
 
   it('allows readers to change only the local preference', async () => {

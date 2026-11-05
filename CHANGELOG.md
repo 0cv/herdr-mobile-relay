@@ -26,6 +26,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Clear Agent now opens the replacement agent instead of showing an error when
+  the old agent disappears before clearing finishes.
 - Conversation for Qoder now finds sessions in folders whose path contains a dot
   or other punctuation, such as a home folder named `first.last`.
 - Idle agents no longer look finished on the phone. The idle ring let a light
