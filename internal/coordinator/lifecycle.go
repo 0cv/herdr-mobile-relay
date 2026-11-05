@@ -41,6 +41,7 @@ var agentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 type StartRequest struct {
 	ProfileID   string
 	WorkspaceID string
+	TabID       string
 	Name        string
 	Cwd         string
 	Prompt      string
@@ -164,7 +165,10 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 			return result, err
 		}
 		argv := append(append([]string(nil), profile.Argv...), args...)
-		pane, ready, err := l.herdr.LaunchTerminal(startupCtx, argv, request.Cwd, request.Name, workspaceID, request.Prompt != "")
+		if profile.Kind == "codex" && len(argv) > 0 {
+			argv = append([]string{argv[0], "--no-daemon"}, argv[1:]...)
+		}
+		pane, ready, err := l.herdr.LaunchTerminal(startupCtx, argv, request.Cwd, request.Name, workspaceID, request.TabID, request.Prompt != "")
 		if err != nil {
 			return result, err
 		}

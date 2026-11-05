@@ -10,7 +10,7 @@ import (
 type TopologyStream = herdr.TopologyStream
 
 type Backend interface {
-	LaunchTerminal(ctx context.Context, argv []string, cwd, name, workspaceID string, waitReady bool) (*herdr.Pane, bool, error)
+	LaunchTerminal(ctx context.Context, argv []string, cwd, name, workspaceID, tabID string, waitReady bool) (*herdr.Pane, bool, error)
 	GetInventory(ctx context.Context) (*herdr.Inventory, error)
 	PaneList(ctx context.Context) ([]herdr.Pane, error)
 	WorkspaceList(ctx context.Context) ([]herdr.Workspace, error)
