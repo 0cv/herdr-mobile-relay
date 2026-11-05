@@ -47,8 +47,8 @@ printf 'ACTION: %s %s\n' "${0##*/}" "$*"
 printf 'BACKEND: %s env=%s plugin=%s\n' "$HERDR_RELAY_BACKEND" "$HERDR_RELAY_ENV" "${HERDR_PLUGIN_CONFIG_DIR:-}"
 FAKE
 done
-ln -s "$BASH" "$WORK/bin/bash"
 chmod +x "$WORK/bin/"* "$WORK/relay/"*.sh
+ln -s "$BASH" "$WORK/bin/bash"
 # The menu offers the core relay when `hc` exists, so tests never see the developer's PATH.
 PYTHON3="$(command -v python3)"
 export PATH="$WORK/bin:/usr/bin:/bin:/usr/sbin:/sbin"
