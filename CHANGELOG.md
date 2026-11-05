@@ -24,6 +24,13 @@ project follows [Semantic Versioning](https://semver.org/).
   desktop window takes the size back. Creating and closing workspaces, and
   worktrees, colour and phone-driven updates are not available on core yet.
 
+### Changed
+
+- Clear Agent now also works for agents you started on the computer, not only
+  those started from the phone. The new agent runs with the relay's launch
+  command for that agent, so options from the original command line are not
+  kept.
+
 ### Fixed
 
 - Clear Agent now opens the replacement agent instead of showing an error when

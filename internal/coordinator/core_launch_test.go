@@ -110,9 +110,13 @@ func TestCoreLaunchReusesWorkspaceAndHermesArgs(t *testing.T) {
 }
 
 func TestCoreClearAndRestart(t *testing.T) {
-	for _, action := range []string{"agent_clear", "agent_restart"} {
+	for _, action := range []string{"agent_clear", "agent_restart", "agent_clear_without_launch_record", "agent_restart_without_launch_record"} {
 		t.Run(action, func(t *testing.T) {
 			f, old := newClearFixture(t, launchFixtureOptions{})
+			action, unrecorded := strings.CutSuffix(action, "_without_launch_record")
+			if unrecorded {
+				f.dispatcher.profiles.Forget(old.PaneID)
+			}
 			b := &coreLaunchBackend{Backend: f.dispatcher.herdr, inventoryWorkspace: old.WorkspaceID, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID}}
 			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
 			message := clearMessage()

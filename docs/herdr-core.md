@@ -13,7 +13,9 @@ computers. Install and pair each instance separately with the commands below.
   be single-line and contain no control characters.
 - Secret input to a verified no-echo prompt, without input-side persistence.
   Programs that echo or log a secret can still expose it in terminal output.
-- Start agents with **+**, and stop, clear or restart relay-launched agents.
+- Start agents with **+**, and stop, clear or restart agents. Clear and Restart
+  run the agent's recorded launch profile, or else the profile matching its
+  name, so options from the original command line are not kept.
   Clear and Restart start a replacement in the same tab, then kill the old terminal
   after waiting up to five seconds for herdr.app to adopt the replacement. If adoption
   is not confirmed in time, the old terminal is still killed and the tab may come back unnamed.

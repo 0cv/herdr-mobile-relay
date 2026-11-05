@@ -28,7 +28,7 @@ func TestCoreOwnershipBeforeAgentReports(t *testing.T) {
 	for range 3 {
 		f.dispatcher.state.CommitInventory([]*AgentState{}, 0)
 	}
-	if got := f.dispatcher.profiles.ResolveOwnedPane(p.ID); got != "claude" {
+	if got := f.dispatcher.profiles.ResolvePane(p.ID, ""); got != "claude" {
 		t.Fatalf("ownership before status.app = %q", got)
 	}
 	b.panes = nil

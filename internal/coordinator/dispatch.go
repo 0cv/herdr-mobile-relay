@@ -823,10 +823,10 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 		return d.fail(requestID, "agent_clear", paneID, "Agent lifecycle is unavailable")
 	}
 
-	profileID := d.profiles.ResolveOwnedPane(paneID)
+	profileID := d.profiles.ResolvePane(paneID, agent.Agent)
 	profile, exists := d.profiles.Profile(profileID)
 	if !exists {
-		return d.fail(requestID, "agent_clear", paneID, "Launch profile ownership is unknown; start a new agent explicitly before stopping this one")
+		return d.fail(requestID, "agent_clear", paneID, "No launch profile matches this agent; start a new agent with + instead")
 	}
 	name := fmt.Sprintf("clear-%08x", uint32(receivedAt.UnixNano()))
 	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd}
