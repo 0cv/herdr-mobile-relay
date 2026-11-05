@@ -17,6 +17,7 @@ type terminal struct {
 	Rows       int               `json:"rows"`
 	Address    string            `json:"address"`
 	PID        *int              `json:"pid"`
+	CreatedMS  uint64            `json:"created_ms"`
 	State      string            `json:"state"`
 	Labels     map[string]string `json:"labels"`
 	Name       string            `json:"name"`
@@ -41,30 +42,6 @@ type foreground struct {
 	Argv []string `json:"argv"`
 }
 
-func (c *Client) bumpEpoch(address string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	epoch, ok := c.epochs[address]
-	if !ok {
-		epoch = c.epochFloor
-	}
-	c.epochs[address] = epoch + 1
-}
-
-func (c *Client) bumpAllEpochs() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, epoch := range c.epochs {
-		if epoch > c.epochFloor {
-			c.epochFloor = epoch
-		}
-	}
-	c.epochFloor++
-	for address := range c.epochs {
-		c.epochs[address] = c.epochFloor
-	}
-}
-
 func (c *Client) setRevision(address string, seq int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -77,15 +54,10 @@ func (t terminal) listed() bool {
 
 func (c *Client) pane(t terminal) herdr.Pane {
 	c.mu.Lock()
-	epoch, ok := c.epochs[t.Address]
-	if !ok {
-		epoch = c.epochFloor
-		c.epochs[t.Address] = epoch
-	}
 	revision := c.revisions[t.Address]
 	c.mu.Unlock()
 	p := herdr.Pane{
-		ID: t.Address, TerminalID: fmt.Sprintf("%s:%d:%d", t.Address, *t.PID, epoch),
+		ID: t.Address, TerminalID: fmt.Sprintf("%s:%d:%d", t.Address, *t.PID, t.CreatedMS),
 		WorkspaceID: t.Labels["herdr.space"], TabID: t.Labels["herdr.tab"],
 		Name: t.Name, Status: "unknown", Cwd: t.Cwd, Revision: revision, StateChangeSeq: t.Turn,
 	}

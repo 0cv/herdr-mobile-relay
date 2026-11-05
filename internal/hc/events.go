@@ -53,14 +53,6 @@ func (c *Client) Events(ctx context.Context) (herdr.TopologySnapshot, herdr.Topo
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return herdr.TopologySnapshot{}, nil, err
 	}
-	c.mu.Lock()
-	reconnect := c.eventsStarted
-	c.eventsStarted = true
-	c.mu.Unlock()
-	if reconnect {
-		// A gap can hide a terminal replacement even when its PID is unchanged.
-		c.bumpAllEpochs()
-	}
 	snapshot, err := c.snapshot(ctx)
 	if err != nil {
 		return herdr.TopologySnapshot{}, nil, err
@@ -77,24 +69,20 @@ func (c *Client) snapshot(ctx context.Context) (herdr.TopologySnapshot, error) {
 func (s *topologyStream) Next(ctx context.Context) (herdr.TopologySnapshot, error) {
 	stop := context.AfterFunc(ctx, func() { s.conn.Close() })
 	defer stop()
-	fail := func(err error) (herdr.TopologySnapshot, error) {
-		s.client.bumpAllEpochs()
-		return herdr.TopologySnapshot{}, err
-	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return fail(err)
+			return herdr.TopologySnapshot{}, err
 		}
 		deadline := time.Now().Add(eventReadTimeout)
 		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 			deadline = d
 		}
 		if err := s.conn.SetReadDeadline(deadline); err != nil {
-			return fail(err)
+			return herdr.TopologySnapshot{}, err
 		}
 		line, err := s.reader.ReadBytes('\n')
 		if err != nil {
-			return fail(err)
+			return herdr.TopologySnapshot{}, err
 		}
 		var notification struct {
 			JSONRPC string `json:"jsonrpc"`
@@ -106,24 +94,20 @@ func (s *topologyStream) Next(ctx context.Context) (herdr.TopologySnapshot, erro
 			} `json:"params"`
 		}
 		if err := json.Unmarshal(line, &notification); err != nil {
-			return fail(err)
+			return herdr.TopologySnapshot{}, err
 		}
 		if notification.JSONRPC == "2.0" && notification.Method == "heartbeat" {
 			continue
 		}
 		if notification.JSONRPC != "2.0" || notification.Method != "event" || notification.Params.Type == "" {
-			return fail(errors.New("invalid core event notification"))
+			return herdr.TopologySnapshot{}, errors.New("invalid core event notification")
 		}
 		event := notification.Params
 		if strings.Contains(event.Terminal, "/") {
 			continue
 		}
 		if event.Type == "missed" {
-			return fail(errors.New("core events missed"))
-		}
-		switch event.Type {
-		case "lost", "restarted", "finished", "removed":
-			s.client.bumpEpoch(event.Terminal)
+			return herdr.TopologySnapshot{}, errors.New("core events missed")
 		}
 		if event.Terminal != "" {
 			s.client.setRevision(event.Terminal, event.Seq)

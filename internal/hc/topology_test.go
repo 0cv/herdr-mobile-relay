@@ -51,7 +51,7 @@ func scriptedCore(t *testing.T, terminals string, doc string) *Client {
 
 func TestMappingAndInventory(t *testing.T) {
 	c := scriptedCore(t, `[
- {"address":"t1","pid":10,"state":"live","labels":{"herdr.space":"s","herdr.tab":"tab"},"name":"named","title":"ignored","cwd":"/start","turn":9,"reported":true,"status":{"app":"custom","state":"error"},"foreground":{"name":"zsh","pid":10,"cwd":"/now"}},
+ {"address":"t1","pid":10,"created_ms":1793827134400,"state":"live","labels":{"herdr.space":"s","herdr.tab":"tab"},"name":"named","title":"ignored","cwd":"/start","turn":9,"reported":true,"status":{"app":"custom","state":"error"},"foreground":{"name":"zsh","pid":10,"cwd":"/now"}},
  {"address":"t2","pid":20,"state":"live","title":"title","foreground":{"name":"pi","pid":20}},
  {"address":"t3","pid":30,"state":"live","reported":false,"status":{"app":"ignored","state":"idle"},"foreground":{"name":"zsh"}},
  {"address":"t4","pid":40,"state":"finished","reported":true,"status":{"app":"pi"}},
@@ -68,7 +68,7 @@ func TestMappingAndInventory(t *testing.T) {
 	if len(panes) != 5 {
 		t.Fatalf("panes: %+v", panes)
 	}
-	want := herdr.Pane{ID: "t1", TerminalID: "t1:10:0", WorkspaceID: "s", TabID: "tab", Name: "named", Agent: "custom", Status: "done", Cwd: "/start", ForegroundCwd: "/now", Revision: 17, StateChangeSeq: 9}
+	want := herdr.Pane{ID: "t1", TerminalID: "t1:10:1793827134400", WorkspaceID: "s", TabID: "tab", Name: "named", Agent: "custom", Status: "done", Cwd: "/start", ForegroundCwd: "/now", Revision: 17, StateChangeSeq: 9}
 	if !reflect.DeepEqual(panes[0], want) {
 		t.Fatalf("pane: %+v, want %+v", panes[0], want)
 	}
@@ -160,51 +160,24 @@ func TestProcessShapes(t *testing.T) {
 }
 
 func TestIdentity(t *testing.T) {
-	c := scriptedCore(t, `[{"address":"a","pid":10,"state":"live","foreground":{"name":"pi"}},{"address":"b","pid":10,"state":"live"}]`, "")
-	get := func(id string) string {
-		t.Helper()
-		p, err := c.PaneGet(t.Context(), id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return p.TerminalID
-	}
-	a, b := get("a"), get("b")
-	c.bumpEpoch("a")
-	if get("a") == a || get("b") != b {
-		t.Fatal("single bump changed wrong identities")
-	}
-	a = get("a")
-	c.bumpAllEpochs()
-	if get("a") == a || get("b") == b {
-		t.Fatal("all bump did not invalidate")
-	}
-	panes, err := c.PaneList(t.Context())
-	if err != nil || panes[0].TerminalID != get("a") {
-		t.Fatalf("list: %+v, %v", panes, err)
-	}
-	inv, err := c.GetInventory(t.Context())
-	if err != nil || inv.Panes[0].TerminalID != get("a") {
-		t.Fatalf("inventory: %+v, %v", inv, err)
-	}
+	c := New("")
 	pid := 10
-	term := terminal{Address: "later", PID: &pid}
-	later := c.pane(term).TerminalID
-	if later != "later:10:2" {
-		t.Fatalf("new address epoch: %s", later)
+	term := terminal{Address: "t1", PID: &pid, CreatedMS: 1793827134400}
+	original := c.pane(term).TerminalID
+	if original != "t1:10:1793827134400" {
+		t.Fatal(original)
 	}
-	pid = 11
-	if c.pane(term).TerminalID == later {
-		t.Fatal("pid replacement reused identity")
+	if New("").pane(term).TerminalID != original {
+		t.Fatal("relay restart changed identity")
 	}
-	pid = 10
-	c.bumpAllEpochs()
-	if c.pane(term).TerminalID == later {
-		t.Fatal("reused pid retained identity")
+	pid++
+	if c.pane(term).TerminalID == original {
+		t.Fatal("kept restart retained identity")
 	}
-	term.Address = "new"
-	if got := c.pane(term).TerminalID; got != "new:10:3" {
-		t.Fatalf("new floor: %s", got)
+	pid--
+	term.CreatedMS++
+	if c.pane(term).TerminalID == original {
+		t.Fatal("replacement with reused pid retained identity")
 	}
 }
 
@@ -215,8 +188,6 @@ func TestIdentityConcurrent(t *testing.T) {
 	for range 8 {
 		wg.Go(func() {
 			for i := range 100 {
-				c.bumpEpoch("a")
-				c.bumpAllEpochs()
 				c.setRevision("a", i)
 				c.pane(terminal{Address: "a", PID: &pid})
 			}
