@@ -70,7 +70,7 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 	if err != nil || len(inventory.Panes) != 0 {
 		t.Fatalf("unreported inventory: %+v %v", inventory, err)
 	}
-	if resolver.ResolveOwnedPane(old) != "fixture" {
+	if resolver.ResolvePane(old, "") != "fixture" {
 		t.Fatal("unreported launch lost ownership")
 	}
 	first, stream, err := client.Events(ctx)
@@ -95,7 +95,7 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 	d.SetProfiles(reloaded)
 	poller = NewPoller(client, state, time.Hour, testLogger())
 	poller.poll(ctx)
-	if reloaded.ResolveOwnedPane(old) != "fixture" {
+	if reloaded.ResolvePane(old, "") != "fixture" {
 		t.Fatal("relay restart lost ownership")
 	}
 	if err := os.WriteFile(gate, nil, 0600); err != nil {
@@ -132,7 +132,7 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 			t.Fatalf("old terminal still live: %v", err)
 		}
 		waitAgent(replacement)
-		if reloaded.ResolveOwnedPane(replacement) != "fixture" {
+		if reloaded.ResolvePane(replacement, "") != "fixture" {
 			t.Fatal("replacement ownership missing")
 		}
 		old = replacement

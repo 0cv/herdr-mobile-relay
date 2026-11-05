@@ -51,22 +51,27 @@ the same request ID replay that result.
 
 ## Profile ownership and installation recovery
 
-Relaunching an agent requires a verified association between its profile and
-terminal, pane, tab and workspace identities. Native conversation discovery or
-rollover does not establish ownership. Verified records are stored privately in
-`profile-ownership.json` under the relay runtime directory, and are usable after
-restart only once an accepted inventory confirms the same target. Pending
-launches, incomplete observations and removed profiles do not authorize relaunch.
-Confirmed disappearance or terminal replacement invalidates the association.
-Read-only access and explicitly requested stop operations remain available when
-ownership is unknown; create a new agent with an explicit profile instead of
-assuming a default executable for an existing pane.
+Clear and Restart start a replacement with the agent's launch profile. A
+verified association between the profile and the terminal, pane, tab and
+workspace identities wins; otherwise the profile matching the agent's reported
+name (including aliases) is used. The replacement runs that profile's command,
+so options from the original command line are not kept. With no matching
+profile, the request is refused without any change.
 
-A corrupt ownership store disables profile-derived relaunch. Preserve it for
-inspection and restore a trusted backup while the relay is stopped. If no backup
-exists, an operator can explicitly archive the damaged file and restart with an
-empty store; only new, verified launches establish ownership again. Do not copy
-records to a replacement terminal or edit a pending launch into a verified one.
+Native conversation discovery or rollover does not establish ownership.
+Verified records are stored privately in `profile-ownership.json` under the
+relay runtime directory, and are usable after restart only once an accepted
+inventory confirms the same target. Pending launches, incomplete observations
+and removed profiles are not verified. Confirmed disappearance or terminal
+replacement invalidates the association. Read-only access and explicitly
+requested stop operations do not need a profile.
+
+A corrupt ownership store disables verified associations, so Clear and Restart
+use the reported agent name. Preserve the store for inspection and restore a
+trusted backup while the relay is stopped. If no backup exists, an operator can
+explicitly archive the damaged file and restart with an empty store; only new,
+verified launches establish ownership again. Do not copy records to a
+replacement terminal or edit a pending launch into a verified one.
 
 Native installers stage definitions and preserve previous files, activation and
 available readiness identity before changing a service. They require both local
