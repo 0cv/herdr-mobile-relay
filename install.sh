@@ -475,6 +475,7 @@ main() {
 
     info "Installed ${BINARY} ${version} to $final_dir"
     info "Active release: $release_root/current"
+    info "Set up and pair your phone: bash \"$release_root/current/relay/plugin-setup-menu.sh\""
     case ":$PATH:" in
         *":$shim_dir:"*) ;;
         *) printf 'Add %s to PATH.\n' "$shim_dir" >&2 ;;

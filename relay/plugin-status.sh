@@ -25,21 +25,21 @@ fi
 
 case "$(uname -s)" in
     Darwin)
-        SERVICE_FILE="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+        SERVICE_FILE="$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist"
         if [ ! -f "$SERVICE_FILE" ]; then
             echo "  Service:      not installed"
-        elif launchctl print "gui/$(id -u)/com.herdr-mobile-relay.service" >/dev/null 2>&1; then
+        elif launchctl print "gui/$(id -u)/$RELAY_LAUNCHD_LABEL" >/dev/null 2>&1; then
             echo "  Service:      installed (active)"
         else
             echo "  Service:      installed (inactive)"
         fi
         ;;
     Linux)
-        SERVICE_FILE="$HOME/.config/systemd/user/herdr-mobile-relay.service"
+        SERVICE_FILE="$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL"
         if [ ! -f "$SERVICE_FILE" ]; then
             echo "  Service:      not installed"
         else
-            SERVICE_STATE="$(systemctl --user is-active herdr-mobile-relay.service 2>/dev/null || true)"
+            SERVICE_STATE="$(systemctl --user is-active "$RELAY_SYSTEMD_LABEL" 2>/dev/null || true)"
             if [ -n "$SERVICE_STATE" ]; then
                 echo "  Service:      installed ($SERVICE_STATE)"
             else
@@ -53,7 +53,7 @@ if [ -n "$SERVICE_ENV" ]; then
     echo "  Service env:  $SERVICE_ENV"
 fi
 
-PORT="${HERDR_RELAY_PORT:-8375}"
+PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 if HEALTH="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/healthz" 2>/dev/null)"; then
     echo "  Relay health: $HEALTH"
     echo ""
