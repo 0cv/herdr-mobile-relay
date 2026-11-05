@@ -19,7 +19,7 @@ computers. Install and pair each instance separately with the commands below.
   Clear and Restart start a replacement in the same tab, then kill the old terminal
   after waiting up to five seconds for herdr.app to adopt the replacement. If adoption
   is not confirmed in time, the old terminal is still killed and the tab may come back unnamed.
-  New tabs receive the requested name if herdr.app adopts them within five seconds;
+  New tabs receive the requested name if herdr.app adopts them within a minute;
   otherwise the agent still starts, with an unnamed tab.
   Initial prompts wait for reported idle status; otherwise launch completes with
   a warning and leaves the prompt unsent.

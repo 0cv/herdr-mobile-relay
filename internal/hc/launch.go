@@ -16,13 +16,13 @@ import (
 const adoptionTimeout = 5 * time.Second
 
 func (c *Client) nameAdoptedTab(tabID, name string) {
-	_ = pollAdoption(context.Background(), func(ctx context.Context) error {
+	_ = pollAdoption(context.Background(), time.Minute, func(ctx context.Context) error {
 		return c.TabRename(ctx, tabID, name)
 	})
 }
 
-func pollAdoption(ctx context.Context, attempt func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(ctx, adoptionTimeout)
+func pollAdoption(ctx context.Context, timeout time.Duration, attempt func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -58,7 +58,7 @@ func (n adoptionNode) contains(terminalID string) bool {
 }
 
 func (c *Client) waitForAdoption(ctx context.Context, tabID, terminalID string) error {
-	return pollAdoption(ctx, func(ctx context.Context) error {
+	return pollAdoption(ctx, adoptionTimeout, func(ctx context.Context) error {
 		raw, err := c.call(ctx, "doc.get", map[string]any{"name": "herdr-app"})
 		if err != nil {
 			return err
