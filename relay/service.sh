@@ -18,6 +18,8 @@ case "$ACTION" in
         ;;
 esac
 
+[ "$ACTION" != install ] || require_core_relay_release || exit 1
+
 case "$(uname -s)" in
     Darwin)
         case "$ACTION" in

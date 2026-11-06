@@ -21,6 +21,7 @@ if [ -n "$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCAL
 fi
 GATEWAYS="$(gateway_urls "$ENV_FILE")"
 RELAY_BIN="$(relay_binary)"
+require_core_relay_release || exit 1
 "$RELAY_BIN" tailscale check --port "$RELAY_TAILSCALE_PORT" || exit $?
 ADDRESS="$("$RELAY_BIN" tailscale address --port "$RELAY_TAILSCALE_PORT")" || exit $?
 PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"

@@ -26,7 +26,8 @@ case "$1" in
                 [ "${MISSING_CLI:-}" != 1 ] || { echo 'tailscale CLI not installed' >&2; exit 3; }
                 [ -z "${HERDR_TAILSCALE_BIN:-}" ] || { echo 'HERDR_TAILSCALE_BIN must be an absolute executable' >&2; exit 3; } ;;
         esac ;;
-    version) echo '{"version":"v","revision":"r"}' ;;
+    version) if [ "${OLD_RELAY:-}" = 1 ]; then echo '{"version":"v","revision":"r"}'
+        else echo '{"version":"v","revision":"r","backends":["herdr","hc"]}'; fi ;;
     setup-fragment) [ "${FAIL_LINK:-}" != 1 ] || exit 8
         printf 'token=%s&relay=%s\n' "$2" "$4" ;;
     normalize-origin) printf '%s\n' "${@: -1}" ;;
@@ -362,5 +363,47 @@ if command -v script >/dev/null 2>&1; then
     grep -q 'tailscale address --port 8555' "$FAKE_LOG"
     run tailscale-off.sh
     grep -q 'tailscale off --port 8555 --relay-port 8377' "$FAKE_LOG"
+
+    old_core_unit="$HOME/.config/systemd/user/herdr-mobile-relay-hc.service"
+    export HERDR_RELAY_ENV="$HOME/old-core/relay.env"
+    run service.sh uninstall
+    test ! -e "$old_core_unit"
+    : > "$FAKE_LOG"
+    for refused in 'service.sh install' 'start.sh' 'plugin-quick-start.sh'; do
+        read -r -a args <<< "$refused"
+        if (export OLD_RELAY=1; run "${args[@]}"); then echo "$refused accepted an old relay release" >&2; exit 1; fi
+        grep -q 'The installed relay release (v) cannot serve herdr-core' "$WORK/out"
+    done
+    if (export OLD_RELAY=1; { printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1; then
+        echo 'tailscale setup accepted an old relay release' >&2; exit 1
+    fi
+    grep -q 'cannot serve herdr-core' "$WORK/out"
+    test ! -e "$HERDR_RELAY_ENV"
+    test ! -e "$old_core_unit"
+    assert_absent 'tailscale|systemctl|launchctl|cloudflared|curl' "$FAKE_LOG"
+
+    printf "HERDR_TAILSCALE_PORT='8444'\n" > "$WORK/old-core-env"
+    mkdir -p "$(dirname "$HERDR_RELAY_ENV")"
+    cp "$WORK/old-core-env" "$HERDR_RELAY_ENV"
+    run service.sh install
+    test -f "$old_core_unit"
+    : > "$FAKE_LOG"
+    (export OLD_RELAY=1; run service.sh status)
+    grep -q 'systemctl --user status' "$FAKE_LOG"
+    (export OLD_RELAY=1; run tailscale-off.sh)
+    grep -q 'tailscale off --port 8444' "$FAKE_LOG"
+    test ! -e "$old_core_unit"
+    printf "CLOUDFLARED_CONFIG='%s'\n" "$HOME/cloudflare.yml" > "$HERDR_RELAY_ENV"
+    run service.sh install
+    (export OLD_RELAY=1; run service.sh uninstall)
+    test ! -e "$old_core_unit"
+
+    unset HERDR_RELAY_BACKEND
+    export HERDR_RELAY_ENV="$HOME/old-tui/relay.env"
+    mkdir -p "$(dirname "$HERDR_RELAY_ENV")"
+    printf "HERDR_TAILSCALE_PORT='8443'\n" > "$HERDR_RELAY_ENV"
+    (export OLD_RELAY=1; run service.sh install)
+    assert_absent 'cannot serve herdr-core' "$WORK/out"
+    test -f "$HOME/.config/systemd/user/herdr-mobile-relay.service"
 fi
 echo 'always-on Tailscale tests passed'
