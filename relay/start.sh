@@ -19,6 +19,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+require_core_relay_release || exit 1
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 export HERDR_RELAY_ENV="$ENV_FILE"

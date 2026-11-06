@@ -782,8 +782,27 @@ test_core_instance() {
     pass "core provisions its own tunnel and config without TUI fallback"
 }
 
-echo "1..19"
+test_core_refuses_old_release() {
+    new_case
+    export HERDR_RELAY_BACKEND=hc
+    export HERDR_RELAY_ENV="$HOME/.config/herdr-mobile-relay-hc/relay.env"
+    export HERDR_STABLE_STATE_FILE="$HOME/.config/herdr-mobile-relay-hc/stable-setup.json"
+    export HERDR_RELAY_BIN="$TEST_BIN_DIR/old-relay"
+    printf '#!/bin/sh\necho '"'"'{"version":"0.24.0","revision":"r","target":"t"}'"'"'\n' > "$HERDR_RELAY_BIN"
+    chmod +x "$HERDR_RELAY_BIN"
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "core stable setup accepted an old relay release"
+    assert_contains "$OUTPUT" 'The installed relay release (0.24.0) cannot serve herdr-core.'
+    [ ! -s "$STUB_LOG" ] || fail "old relay release reached cloudflared or systemctl"
+    [ ! -e "$HERDR_RELAY_ENV" ] || fail "old relay release created the core env"
+    [ ! -e "$HERDR_STABLE_STATE_FILE" ] || fail "old relay release created setup state"
+    unset HERDR_RELAY_BACKEND
+    pass "core stable setup refuses an old relay release before changing anything"
+}
+
+echo "1..20"
 test_core_instance
+test_core_refuses_old_release
 test_success_and_alternate_port
 test_refuses_tailscale
 test_existing_phone_app_origin

@@ -67,6 +67,35 @@ printf '#!/bin/sh\nexit 0\n' > "$DEV_RELAY_BIN"
 chmod 700 "$DEV_RELAY_BIN"
 test "$(HERDR_RELAY_BIN="$DEV_RELAY_BIN" relay_binary)" = "$DEV_RELAY_BIN"
 
+(
+    CORE_RELEASE_LOG="$WORK_DIR/core-release.log"
+    core_release_binary() {
+        printf '#!/bin/sh\necho ran >> "%s"\necho '"'"'%s'"'"'\n' "$CORE_RELEASE_LOG" "$1" > "$DEV_RELAY_BIN"
+    }
+    export HERDR_RELAY_BIN="$DEV_RELAY_BIN"
+
+    core_release_binary '{"version":"0.25.0","revision":"r","target":"t","backends":["herdr","hc"]}'
+    HERDR_RELAY_BACKEND=hc require_core_relay_release
+
+    for old_identity in \
+        '{"version":"0.24.0","revision":"r","target":"t"}' \
+        '{"version":"0.25.0","revision":"r","target":"t","backends":["herdr"]}'; do
+        core_release_binary "$old_identity"
+        if HERDR_RELAY_BACKEND=hc require_core_relay_release 2>"$WORK_DIR/core-release.err"; then
+            echo "core accepted a relay release without the hc backend: $old_identity" >&2
+            exit 1
+        fi
+        grep -Fq 'cannot serve herdr-core.' "$WORK_DIR/core-release.err"
+        grep -Fq 'Install 0.25.0 or newer first' "$WORK_DIR/core-release.err"
+    done
+
+    : > "$CORE_RELEASE_LOG"
+    HERDR_RELAY_BACKEND=herdr require_core_relay_release
+    test ! -s "$CORE_RELEASE_LOG"
+
+    HERDR_RELAY_BIN="$WORK_DIR/missing/herdr-mobile-relay" HERDR_RELAY_BACKEND=hc require_core_relay_release
+)
+
 PACKAGED_RELEASE="$WORK_DIR/releases/0.0.0-test"
 mkdir -p "$PACKAGED_RELEASE/relay"
 cp "$REPO_DIR/relay/common.sh" "$PACKAGED_RELEASE/relay/common.sh"

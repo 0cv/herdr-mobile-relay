@@ -25,6 +25,7 @@ ENV_FILE="$(canonical_file_path "$ENV_FILE")"
 refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 assert_service_env_matches "$ENV_FILE"
 load_relay_env "$ENV_FILE"
+require_core_relay_release || exit 1
 
 CONFIG="${CLOUDFLARED_CONFIG:-}"
 if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then

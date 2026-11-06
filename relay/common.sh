@@ -69,6 +69,23 @@ relay_binary() {
     printf '%s\n' "$binary"
 }
 
+# Releases before herdr-core support silently ignore HERDR_RELAY_BACKEND=hc and
+# serve the Herdr TUI instead. Only newer ones list "hc" in `version --json`.
+# A missing release passes here: setup installs one, and later steps report it.
+require_core_relay_release() {
+    local binary identity
+
+    [ "$HERDR_RELAY_BACKEND" = hc ] || return 0
+    binary="$(relay_binary 2>/dev/null)" || return 0
+    identity="$("$binary" version --json 2>/dev/null)" || identity=""
+    case "$identity" in
+        *'"backends":'*'"hc"'*) return 0 ;;
+    esac
+    echo "✗ The installed relay release ($(json_string_field "$identity" version)) cannot serve herdr-core." >&2
+    echo "  Install 0.25.0 or newer first (herdr plugin install 0cv/herdr-mobile-relay, or install.sh), then retry." >&2
+    return 1
+}
+
 # The plugin is installed from a git clone, so its verified release belongs to
 # the repository that checkout points at: a fork or a private canary installs
 # its own bundle instead of this project's. Anything that is not a plain GitHub

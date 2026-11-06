@@ -584,6 +584,7 @@ require_supported_platform
 assert_service_env_matches "$ENV_FILE"
 export HERDR_RELAY_ENV="$ENV_FILE"
 
+require_core_relay_release || exit 1
 if ! "$SCRIPT_DIR/setup.sh" --install-missing; then
     echo "✗ Prerequisite setup did not complete." >&2
     exit 1
