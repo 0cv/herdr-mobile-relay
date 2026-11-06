@@ -2,11 +2,11 @@
 
 [![check](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml)
 
-Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
-computer runs its own relay; the phone connects to them and merges every agent
-into one installable web app.
+Control agents from the [Herdr](https://herdr.dev) TUI, herdr-app or herdr-core
+from your phone. Each Linux or macOS computer runs its own relay; the phone
+connects to them and merges every agent into one installable web app.
 
-**Current version:** [`0.24.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.24.0) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.25.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.25.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -18,7 +18,7 @@ into one installable web app.
 
 ## Get started in two minutes
 
-Requirements: Herdr 0.7.5 or newer, Git, and `curl`. Herdr 0.9.0 is
+For the TUI relay: Herdr 0.7.5 or newer, Git, and `curl`. Herdr 0.9.0 is
 recommended for the complete live JSON inventory and workspace-management
 surface; the relay does not treat that recommendation as a new minimum.
 
@@ -83,6 +83,27 @@ invitation.
 
 [QUICKSTART.md](QUICKSTART.md) has pairing detail and troubleshooting for all
 three paths.
+
+## Core compatibility — new in 0.25.0
+
+Control herdr-app and herdr-core (`hc`) agents from your phone through a second
+relay, shown as `<hostname> (core)` beside the Herdr TUI relay.
+Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
+
+- Available: agents, status, screens, prompts, keys, secrets, start/stop/clear/restart,
+  tab and workspace rename and reorder, and **Resize Session**.
+- **Conversation** supports Pi, Claude Code, Codex, Cursor, Omp, OpenCode, Hermes,
+  Qoder, agy, Grok and Kimi, with the session setup described in the guide.
+- Cursor and Hermes need a newer Herdr core/app to report status; they appear
+  once Herdr recognises them.
+- Not yet: colour, creating/closing workspaces and tabs, worktrees, or phone-driven updates.
+
+If you use the Herdr TUI, the setup menu above sets up the TUI relay, the core
+relay, or both, and each QR says which computer it adds. Without the TUI,
+download `install.sh` from this repository at tag `v0.25.0` and run
+`sh install.sh 0.25.0`; it downloads and verifies the release bundle and prints
+the command that opens the same menu. Core pairs over Tailscale or Cloudflare;
+see the [core guide](docs/herdr-core.md).
 
 ## What you get
 
