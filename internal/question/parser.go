@@ -81,6 +81,7 @@ var (
 	)
 	openCodeColumnPattern  = regexp.MustCompile(`\s{20,}`)
 	ompAskHeaderPattern    = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
+	ompStatusChromePattern = regexp.MustCompile(`^\s*(?:[ZX]\s.*\bdrain\b|[\x{2800}-\x{28ff}]|cache ✓|⟲ history|omp-cache-keepalive:)`)
 	ompOptionPattern       = regexp.MustCompile(`^\s*([❯›>]?)\s*(☑|☐|◉|○|||||\[[xX ]\]|\([oO ]\))\s+(.+?)\s*$`)
 	ompFrameMetaPattern    = regexp.MustCompile(`\[\s*([\p{L}\p{N}_-]+)\s*\]\s*[·•]\s*options:\s*\d+`)
 	ompProgressPattern     = regexp.MustCompile(`\s+\((\d+)\s*/\s*(\d+)\)\s*$`)
@@ -397,7 +398,8 @@ func ompLayoutHint(text string) bool {
 			reviewSubmit = true
 		}
 		lower := strings.ToLower(line)
-		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") {
+		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") ||
+			strings.Contains(lower, "⏎ select") || strings.Contains(lower, "select · ") {
 			footer = index
 		}
 	}
@@ -405,9 +407,10 @@ func ompLayoutHint(text string) bool {
 		return false
 	}
 	for _, line := range lines[footer+1:] {
-		if line != "" && !ompBorderLine(line) {
-			return false
+		if line == "" || ompBorderLine(line) || ompStatusChromePattern.MatchString(line) {
+			continue
 		}
+		return false
 	}
 	return true
 }
@@ -438,7 +441,8 @@ func parseOMP(text string) *Interaction {
 	end := len(lines)
 	for index := start + 1; index < len(lines); index++ {
 		lower := strings.ToLower(lines[index])
-		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") {
+		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") ||
+			strings.Contains(lower, "⏎ select") || strings.Contains(lower, "select · ") {
 			end = index
 			break
 		}

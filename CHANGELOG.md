@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Parse omp `ask` dialogs when the TUI status bar renders below the modal;
+  pending omp questions were showing as plain text without answer buttons.
+
 ## [0.24.0] - 2026-11-02
 
 ### Added

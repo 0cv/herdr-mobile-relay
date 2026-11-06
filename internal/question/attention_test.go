@@ -1369,6 +1369,29 @@ func attentionFixture(t *testing.T, name string) string {
 	return string(content)
 }
 
+func TestOMPAskParsesWithStatusBarBelowModal(t *testing.T) {
+	frame := attentionFixture(t, "omp-ask-status-below.ansi")
+	if !LayoutHint(frame) {
+		t.Fatal("live omp ask with status bar below the modal was rejected")
+	}
+	interaction := Parse(frame, "omp")
+	if interaction == nil || interaction.Kind != "single_select" ||
+		interaction.Question != "Relay test 3: do you see this card on the phone?" ||
+		len(interaction.Options) != 3 ||
+		interaction.Options[0].Label != "Yes" ||
+		interaction.Options[2].Label != "Partially" ||
+		interaction.Other.Label != "Other (type your own)" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	if Classify(frame, "omp").Kind != AttentionQuestion {
+		t.Fatal("classification was not a question")
+	}
+	// Transcript content below the modal means the dialog is scrolled history.
+	if LayoutHint(frame + "\n2026-11-06 10:29:22  ⤵ 27K  ⤴ 118  ⏱ 3.1s  ⚡ 22.9/s") {
+		t.Fatal("ask with transcript content below the modal was treated as live")
+	}
+}
+
 func TestApprovalFingerprintIgnoresPaneChangesOutsideDialog(t *testing.T) {
 	snapshot := attentionFixture(t, "omp-tool-approval.ansi")
 	first := Classify(snapshot+"\nStatus: 10%/272K\n", "omp")
