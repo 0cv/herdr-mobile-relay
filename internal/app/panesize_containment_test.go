@@ -117,7 +117,7 @@ func TestPaneSizeCapabilitiesAreOptInOnly(t *testing.T) {
 		t.Fatalf("production backend available = %v on %s", s.paneSizeM.Available(), runtime.GOOS)
 	}
 	for range 2 { // initial and subsequent capability snapshots
-		caps := s.effectiveCapabilitiesFor(herdr.ServerStatus{})
+		caps := s.effectiveCapabilitiesFor(s.herdrC.CapabilityStatus())
 		for _, legacy := range []string{"pane_size_lease", "pane_size_lease_rows"} {
 			if slices.Contains(caps, legacy) {
 				t.Fatalf("advertised legacy %s", legacy)

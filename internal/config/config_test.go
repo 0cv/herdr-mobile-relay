@@ -295,6 +295,13 @@ func TestLoadRejectsInvalidSecondGatewayURL(t *testing.T) {
 func isolateLoadEnvironment(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("HERDR_RELAY_BACKEND", "")
+	t.Setenv("HC_SESSION", "")
+	t.Setenv("HC_SOCKET_PATH", "")
+	t.Setenv("HC_SOCKET", "")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("HERDR_RELAY_HOST", "127.0.0.1")
 	t.Setenv("HERDR_RELAY_PORT", "")
 	t.Setenv("HERDR_RELAY_PLUGIN_PORT", "")

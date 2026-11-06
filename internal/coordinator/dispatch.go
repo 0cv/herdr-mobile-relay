@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
@@ -42,7 +43,7 @@ type CommandResult struct {
 
 type Dispatcher struct {
 	terminalTextKey  string
-	herdr            *herdr.Client
+	herdr            backend.Backend
 	state            *State
 	journal          *activity.Journal
 	activityW        *activity.Worker
@@ -88,7 +89,7 @@ type paneRead struct {
 	err  error
 }
 
-func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
+func NewDispatcher(client backend.Backend, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	dispatcher := &Dispatcher{
 		terminalTextKey: rand.Text(),
@@ -116,8 +117,21 @@ func (d *Dispatcher) SetProfiles(resolver *profiles.Resolver) {
 	d.state.mu.Lock()
 	d.state.onInventory = func(agents []*AgentState) {
 		targets := make([]profiles.PaneIdentity, 0, len(agents))
-		for _, agent := range agents {
-			targets = append(targets, profiles.PaneIdentity{PaneID: agent.PaneID, TerminalID: agent.TerminalID, TabID: agent.TabID, WorkspaceID: agent.WorkspaceID})
+		if d.herdr.CapabilityStatus().OneStepLaunch {
+			ctx, cancel := context.WithTimeout(d.watcherCtx, 15*time.Second)
+			defer cancel()
+			panes, err := d.herdr.PaneList(ctx)
+			if err != nil {
+				d.logger.Warn("profile ownership inventory failed", "error", err)
+				return
+			}
+			for _, pane := range panes {
+				targets = append(targets, profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID})
+			}
+		} else {
+			for _, agent := range agents {
+				targets = append(targets, profiles.PaneIdentity{PaneID: agent.PaneID, TerminalID: agent.TerminalID, TabID: agent.TabID, WorkspaceID: agent.WorkspaceID})
+			}
 		}
 		if err := resolver.ReconcileOwnership(targets); err != nil {
 			d.logger.Warn("profile ownership reconciliation failed", "error", err)
@@ -308,9 +322,13 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleTabReorder(ctx, receivedAt, requestID, paneID, message)
 	case "acknowledge_pane":
 		return d.handleAcknowledge(requestID, paneID)
-	case "agent_start":
-		return d.handleAgentStart(ctx, receivedAt, requestID, message)
-	case "agent_clear", "agent_restart":
+	case "agent_start", "agent_clear", "agent_restart":
+		if !d.herdr.CapabilityStatus().Supports(herdr.FeatureAgentLaunch) {
+			return d.fail(requestID, action, paneID, "This backend does not support launching agents")
+		}
+		if action == "agent_start" {
+			return d.handleAgentStart(ctx, receivedAt, requestID, message)
+		}
 		return d.handleClear(ctx, receivedAt, requestID, paneID)
 	default:
 		return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: "Unknown command"}
@@ -404,7 +422,7 @@ func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text 
 	if err := ctx.Err(); err != nil {
 		return errors.Join(herdr.ErrNotStarted, err)
 	}
-	if !requiresEnter {
+	if !requiresEnter || !d.herdr.CapabilityStatus().Supports(herdr.FeatureManualTerminalInput) {
 		return d.herdr.Prompt(ctx, token.PaneID, text)
 	}
 	if err := d.herdr.SendText(ctx, token.PaneID, text); err != nil {
@@ -520,14 +538,11 @@ func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, req
 	if len(runes) > secretMaxRunes {
 		return d.fail(requestID, "send_secret", paneID, "Secret is too long")
 	}
-	keys := make([]string, 0, len(runes)+1)
 	for _, value := range runes {
 		if value < 0x20 || value == 0x7f {
 			return d.fail(requestID, "send_secret", paneID, "Secret must not contain control characters")
 		}
-		keys = append(keys, string(value))
 	}
-	keys = append(keys, "Enter")
 	result := d.schedule(ctx, ScheduleOptions{
 		// The payload stands in for the secret: nothing that reaches the
 		// scheduler, its ledger or its logs may carry the secret itself.
@@ -546,7 +561,7 @@ func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, req
 		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.herdr.SendKeys(effectCtx, paneID, keys); err != nil {
+		if err := d.herdr.SendSecret(effectCtx, paneID, text); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "send_secret", paneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, "send_secret", paneID, nil)}
@@ -719,6 +734,14 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 			return EffectResult{Result: d.failErr(requestID, "agent_start", started.PaneID, err)}
 		}
 		launchResult := completed(requestID, "agent_start", started.PaneID, started)
+		if started.PromptNotReady {
+			launchResult.Phase = "completed_with_warning"
+			launchResult.Data = map[string]any{
+				"pane_id": started.PaneID, "name": request.Name, "cwd": request.Cwd,
+				"warning": "Agent started, but the initial prompt was not confirmed",
+			}
+			return EffectResult{Result: launchResult}
+		}
 		if request.Prompt == "" || started.PaneID == "" {
 			return EffectResult{Result: launchResult}
 		}
@@ -800,13 +823,16 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 		return d.fail(requestID, "agent_clear", paneID, "Agent lifecycle is unavailable")
 	}
 
-	profileID := d.profiles.ResolveOwnedPane(paneID)
+	profileID := d.profiles.ResolvePane(paneID, agent.Agent)
 	profile, exists := d.profiles.Profile(profileID)
 	if !exists {
-		return d.fail(requestID, "agent_clear", paneID, "Launch profile ownership is unknown; start a new agent explicitly before stopping this one")
+		return d.fail(requestID, "agent_clear", paneID, "No launch profile matches this agent; start a new agent with + instead")
 	}
-	name := "clear-" + fmt.Sprintf("%x", receivedAt.UnixNano())[:8]
+	name := fmt.Sprintf("clear-%08x", uint32(receivedAt.UnixNano()))
 	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd}
+	if d.herdr.CapabilityStatus().OneStepLaunch {
+		request.WorkspaceID, request.TabID = agent.WorkspaceID, agent.TabID
+	}
 	_, request, err := d.lifecycle.ValidateStart(request)
 	if err != nil {
 		return d.fail(requestID, "agent_clear", paneID, err.Error())

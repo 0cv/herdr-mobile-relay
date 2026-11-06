@@ -319,15 +319,9 @@ func (r *Resolver) Forget(paneID string) {
 	}
 }
 
-// ResolveOwnedPane answers only with a verified association, so a relaunch
-// never guesses which executable owns a pane.
-func (r *Resolver) ResolveOwnedPane(paneID string) string {
-	return r.verifiedProfile(paneID)
-}
-
-// ResolvePane answers read-only questions such as slash-command discovery and
-// version display. A verified association wins; otherwise the agent Herdr
-// reports is enough, because nothing here starts a process.
+// ResolvePane picks the profile for a pane: slash-command discovery, version
+// display, and the agent that Clear and Restart start. A verified launch record
+// wins; otherwise the profile matching the agent name Herdr reports is used.
 func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 	if profileID := r.verifiedProfile(paneID); profileID != "" {
 		return profileID

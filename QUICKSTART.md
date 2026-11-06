@@ -142,3 +142,10 @@ changes, the full action list, teardown, and uninstall.
 - **Need relay log filtering:** see [Cloudflare tunnel logging](docs/cloudflare-tunnel.md#relay-logging).
 
 [README.md](README.md) indexes the rest of the documentation.
+
+## Add herdr-core
+
+To reach agents in herdr-app as well as the TUI, follow the
+[second-relay setup](docs/herdr-core.md): use `HERDR_RELAY_BACKEND=hc make
+stable-setup`, or `HERDR_RELAY_BACKEND=hc bash relay/tailscale-setup.sh`, to
+install and pair a separate background service without changing the TUI relay.

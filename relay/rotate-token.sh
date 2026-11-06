@@ -31,15 +31,15 @@ echo ""
 RESTARTED=""
 case "$(uname -s)" in
     Darwin)
-        SERVICE="gui/$(id -u)/com.herdr-mobile-relay.service"
+        SERVICE="gui/$(id -u)/$RELAY_LAUNCHD_LABEL"
         if launchctl print "$SERVICE" >/dev/null 2>&1; then
             launchctl kickstart -k "$SERVICE"
             RESTARTED=1
         fi
         ;;
     Linux)
-        if systemctl --user cat herdr-mobile-relay.service >/dev/null 2>&1; then
-            systemctl --user restart herdr-mobile-relay.service
+        if systemctl --user cat "$RELAY_SYSTEMD_LABEL" >/dev/null 2>&1; then
+            systemctl --user restart "$RELAY_SYSTEMD_LABEL"
             RESTARTED=1
         fi
         ;;

@@ -72,9 +72,12 @@
     const connection = $connections.get(relay.id);
     return connection?.status === 'connected'
       && connection.inventory.state === 'ready'
-      && connection.capabilities.includes('workspace_management');
+      && ['workspace_management', 'workspace_rename', 'workspace_reorder'].some((capability) => connection.capabilities.includes(capability));
   }));
   const connection = $derived($connections.get(relayId));
+  const workspaceManagementAvailable = $derived(connection?.capabilities.includes('workspace_management') ?? false);
+  const workspaceRenameAvailable = $derived(workspaceManagementAvailable || (connection?.capabilities.includes('workspace_rename') ?? false));
+  const workspaceReorderAvailable = $derived(workspaceManagementAvailable || (connection?.capabilities.includes('workspace_reorder') ?? false));
   const worktreeManagementAvailable = $derived(connection?.capabilities.includes('worktree_management') ?? false);
   const relayWorkspaces = $derived(
     $workspaces.filter((workspace) => workspace.relay_id === relayId),
@@ -111,7 +114,7 @@
     worktreeWorkspaceId = '';
     worktreeOpen = false;
     worktreeListing = null;
-    void loadDirectory('');
+    if (workspaceManagementAvailable) void loadDirectory('');
   });
 
   $effect(() => {
@@ -273,7 +276,7 @@
     cancelWorkspaceReorders.add(cancel);
 
     function onPointerDown(event: PointerEvent) {
-      if (current.tree.workspace.relay_id !== relayId || !event.isPrimary || event.button !== 0 || movingWorkspace || isReadOnly(current.tree.workspace.relay_id)) return;
+      if (!workspaceReorderAvailable || current.tree.workspace.relay_id !== relayId || !event.isPrimary || event.button !== 0 || movingWorkspace || isReadOnly(current.tree.workspace.relay_id)) return;
       if (event.target instanceof Element && event.target.closest('button, input, select, textarea, a') && !event.target.closest('.workspace-drag-handle')) return;
       hold.start(event, () => {
         const items = measureWorkspaceSlots(node);
@@ -369,7 +372,7 @@
   }
 
   async function commitWorkspaceReorder(tree: RelayWorkspaceTree, insertIdx: number) {
-    if (movingWorkspace || isReadOnly(tree.workspace.relay_id)) return;
+    if (!workspaceReorderAvailable || movingWorkspace || isReadOnly(tree.workspace.relay_id)) return;
     const sourceID = tree.workspace.workspace_id;
     const others = displayWorkspaceTrees.filter((item) => item.workspace.workspace_id !== sourceID);
     const beforeWorkspaceID = others[insertIdx]?.workspace.workspace_id || '';
@@ -635,7 +638,7 @@
           <strong>{workspace.label}</strong>
           {#if shownPath}<small>{shownPath}</small>{/if}
         </span>
-        {#if tree}
+        {#if tree && workspaceReorderAvailable}
           <button
             class="workspace-drag-handle"
             type="button"
@@ -657,8 +660,10 @@
       {/if}
       <div class="workspace-management-actions">
         <Button size="sm" disabled={busy || isReadOnly(workspace.relay_id) || !(workspace.cwd || workspace.worktree?.checkout_path)} onclick={() => startAgent(workspace)}>Start Agent</Button>
-        <Button size="sm" variant="secondary" disabled={busy || isReadOnly(workspace.relay_id)} onclick={(event) => beginRename(workspace, event.currentTarget)}>Rename</Button>
-        {#if !workspace.worktree?.is_linked_worktree}
+        {#if workspaceRenameAvailable}
+          <Button size="sm" variant="secondary" disabled={busy || isReadOnly(workspace.relay_id)} onclick={(event) => beginRename(workspace, event.currentTarget)}>Rename</Button>
+        {/if}
+        {#if workspaceManagementAvailable && !workspace.worktree?.is_linked_worktree}
           <Button
             size="sm"
             variant="secondary"
@@ -667,8 +672,10 @@
             onclick={() => showWorktrees(workspace)}
           >Worktrees</Button>
         {/if}
-        <Button size="sm" variant="danger" disabled={busy || isReadOnly(workspace.relay_id)} onclick={() => beginConfirm('close', workspace)}>Close</Button>
-        {#if workspace.worktree?.is_linked_worktree}
+        {#if workspaceManagementAvailable}
+          <Button size="sm" variant="danger" disabled={busy || isReadOnly(workspace.relay_id)} onclick={() => beginConfirm('close', workspace)}>Close</Button>
+        {/if}
+        {#if workspaceManagementAvailable && workspace.worktree?.is_linked_worktree}
           <Button
             size="sm"
             variant="danger"
@@ -700,6 +707,7 @@
     </div>
   </Card>
 
+  {#if workspaceManagementAvailable}
   <Card>
     <Button
       class="workspace-create-button"
@@ -707,6 +715,7 @@
       onclick={openCreateWorkspace}
     >Create Workspace</Button>
   </Card>
+  {/if}
 
   <section class="workspace-management-list" aria-label="Herdr workspaces">
     {#if relayId && !relayWorkspaces.length}
@@ -717,7 +726,7 @@
         class:workspace-dragging={workspaceDrag?.sourceKey === tree.workspace.workspace_id}
         class="workspace-management-slot"
         data-workspace-key={tree.workspace.workspace_id}
-        title="Hold to reorder this workspace."
+        title={workspaceReorderAvailable ? "Hold to reorder this workspace." : undefined}
         style:transform={workspaceShift(tree.workspace.workspace_id) || undefined}
         use:workspaceReorderPress={{ tree }}
       >

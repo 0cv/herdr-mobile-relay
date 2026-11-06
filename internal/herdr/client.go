@@ -74,6 +74,12 @@ func (e *CLIError) Error() string {
 }
 
 var refusalCodes = map[string]struct{}{
+	"layout_conflict":                        {},
+	"blocked":                                {},
+	"status_mismatch":                        {},
+	"finished":                               {},
+	"needs_target":                           {},
+	"invalid_params":                         {},
 	"server_not_running":                     {},
 	"agent_pane_busy":                        {},
 	"protocol_mismatch":                      {},
@@ -128,6 +134,8 @@ func RefusalCode(err error) string {
 
 func RefusalMessage(code string) string {
 	switch code {
+	case "layout_conflict":
+		return "The layout changed on the desktop; try again"
 	case "server_not_running":
 		return "Herdr server is not running"
 	case "agent_pane_busy":

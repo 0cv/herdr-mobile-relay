@@ -18,6 +18,8 @@ func testReader(t *testing.T) (*Reader, string) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("HERMES_HOME", "")
+	t.Setenv("GROK_HOME", "")
+	t.Setenv(agentroots.GrokListEnv, "")
 	t.Setenv(agentroots.ClaudeListEnv, "")
 	t.Setenv(agentroots.QoderListEnv, "")
 	t.Setenv(agentroots.CodexListEnv, "")
@@ -44,6 +46,28 @@ func writeRows(t *testing.T, path string, rows ...map[string]any) {
 		if err := encoder.Encode(row); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestProjectSessionWithPunctuationWithoutCWDFile(t *testing.T) {
+	for _, agent := range []string{"qoder", "claude"} {
+		t.Run(agent, func(t *testing.T) {
+			reader, _ := testReader(t)
+			roots := reader.qoderRoots()
+			if agent == "claude" {
+				roots = reader.claudeRoots()
+			}
+			path := filepath.Join(roots[0], "-Users-first-last-Development-my-project-", testSessionID+".jsonl")
+			writeRows(t, path, map[string]any{"type": "user", "message": map[string]any{"content": "hello"}})
+			cwd := "/Users/first.last/Development/my_project!"
+			if got := reader.Locate(agent, cwd, testSessionID); got.Path != path {
+				t.Fatalf("location = %#v, want %s", got, path)
+			}
+			page, err := reader.ReadFor(agent, cwd, testSessionID, "", 80)
+			if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "hello" {
+				t.Fatalf("page = %#v, error = %v", page, err)
+			}
+		})
 	}
 }
 

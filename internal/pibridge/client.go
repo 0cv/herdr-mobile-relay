@@ -162,6 +162,50 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 	if directory == "" || identity.PID <= 0 || identity.Pane == "" || identity.Session == "" || len(identity.Session) > 2048 {
 		return result, errors.New("missing bridge identity")
 	}
+	result, err := exchange(ctx, directory, identity, "catalog")
+	if err != nil {
+		return result, err
+	}
+	if result.Identity != identity || len(result.Incarnation) != 36 || len(result.Revision) != 64 {
+		return result, errors.New("bridge identity mismatch")
+	}
+	if result.Status != "available" && result.Status != "partial" && result.Status != "loading" && result.Status != "unavailable" {
+		return result, errors.New("invalid bridge status")
+	}
+	if len(result.Commands) > 4096 {
+		return result, errors.New("too many bridge commands")
+	}
+	for index, entry := range result.Commands {
+		if err := validate(entry); err != nil {
+			return Response{}, err
+		}
+		result.Commands[index].Provenance.Source = sanitizeSource(entry.Provenance.Source)
+		result.Commands[index].Provenance.Path = sanitizePath(entry.Provenance.Path)
+		result.Commands[index].Provenance.BaseDir = sanitizePath(entry.Provenance.BaseDir)
+	}
+	return result, nil
+}
+
+func Identify(ctx context.Context, instance, pane string, pid int) (string, error) {
+	return identify(ctx, Directory(instance), Identity{Instance: instance, Pane: pane, PID: pid})
+}
+
+func identify(ctx context.Context, directory string, identity Identity) (string, error) {
+	if directory == "" || identity.PID <= 0 || identity.Pane == "" {
+		return "", errors.New("missing bridge identity")
+	}
+	result, err := exchange(ctx, directory, identity, "identity")
+	if err != nil {
+		return "", err
+	}
+	if result.Session == "" || len(result.Session) > 2048 {
+		return "", errors.New("invalid bridge session")
+	}
+	return result.Session, nil
+}
+
+func exchange(ctx context.Context, directory string, identity Identity, operation string) (Response, error) {
+	var result Response
 	select {
 	case slots <- struct{}{}:
 		defer func() { <-slots }()
@@ -184,7 +228,7 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 		Identity
 		Challenge string `json:"challenge"`
 		Operation string `json:"operation"`
-	}{identity, challenge, "catalog"}
+	}{identity, challenge, operation}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -208,22 +252,8 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 	if err != nil || !os.SameFile(conn.before, after) {
 		return result, errors.New("bridge replaced")
 	}
-	if result.Identity != identity || result.Challenge != challenge || len(result.Incarnation) != 36 || len(result.Revision) != 64 {
+	if result.Instance != identity.Instance || result.Pane != identity.Pane || result.PID != identity.PID || result.Challenge != challenge {
 		return result, errors.New("bridge identity mismatch")
-	}
-	if result.Status != "available" && result.Status != "partial" && result.Status != "loading" && result.Status != "unavailable" {
-		return result, errors.New("invalid bridge status")
-	}
-	if len(result.Commands) > 4096 {
-		return result, errors.New("too many bridge commands")
-	}
-	for index, entry := range result.Commands {
-		if err := validate(entry); err != nil {
-			return Response{}, err
-		}
-		result.Commands[index].Provenance.Source = sanitizeSource(entry.Provenance.Source)
-		result.Commands[index].Provenance.Path = sanitizePath(entry.Provenance.Path)
-		result.Commands[index].Provenance.BaseDir = sanitizePath(entry.Provenance.BaseDir)
 	}
 	return result, nil
 }

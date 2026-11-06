@@ -690,7 +690,9 @@
             <path d="M8 13h8M12 9v8"></path>
           </svg>
         </Button>
-        <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>
+        {#if [...$connections.values()].some((connection) => connection.capabilities.includes('agent_launch'))}
+          <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>
+        {/if}
         <Button variant="ghost" size="icon" aria-label="Activity history" onclick={() => toggle('activity')}>
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <circle cx="12" cy="12" r="9"></circle>

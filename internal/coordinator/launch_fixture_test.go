@@ -32,7 +32,10 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 
 func newLaunchFixtureWithOptions(t *testing.T, options launchFixtureOptions) *launchFixture {
 	t.Helper()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	home := filepath.Join(dir, "home")
 	f := &launchFixture{
 		cwd: filepath.Join(home, "project"), calls: filepath.Join(dir, "calls"),

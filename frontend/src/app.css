@@ -295,8 +295,9 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .agent-identity { flex: 0 0 auto; height: 1.6rem; position: relative; width: 1.6rem; }
 .agent-logo { color: var(--foreground); display: inline-flex; height: 1.5rem; width: 1.5rem; }
 .agent-logo > svg { display: block; height: 100%; width: 100%; }
-.agent-identity > .status-dot { bottom: -.02rem; box-shadow: 0 0 0 2px var(--card); height: .46rem; position: absolute; right: -.02rem; width: .46rem; }
-.agent-open:hover .agent-identity > .status-dot { box-shadow: 0 0 0 2px var(--card-hover); }
+.agent-identity > .status-dot { bottom: -.02rem; box-shadow: 0 0 0 2px var(--status-dot-surface, var(--card)); height: .46rem; position: absolute; right: -.02rem; width: .46rem; }
+.agent-identity > .status-dot:is(.status-ready, .hollow) { background: var(--status-dot-surface, var(--card)); }
+.agent-open:hover .agent-identity { --status-dot-surface: var(--card-hover); }
 .agent-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .agent-project { font-size: .9rem; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-title-row { align-items: baseline; display: flex; gap: .5rem; min-width: 0; }
@@ -923,7 +924,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .jump-results section > header span { color: var(--muted); flex: 1; font-size: .6rem; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .jump-results section > button { align-items: center; background: transparent; border: 0; border-top: 1px solid var(--border); color: var(--foreground); cursor: pointer; display: flex; gap: .65rem; padding: .62rem .7rem; text-align: left; width: 100%; }
 .jump-results section > button:first-of-type { border-top: 0; }
-.jump-results section > button:hover { background: var(--card-hover); }
+.jump-results section > button:hover { --status-dot-surface: var(--card-hover); background: var(--card-hover); }
 .jump-results section > button > span:last-child { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .jump-results section > button strong { font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jump-results section > button small { color: var(--muted); font-size: .64rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1009,8 +1010,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
   .agent-rail h2 { align-items: baseline; color: var(--muted); display: flex; font-size: .64rem; gap: .35rem; margin: 0 .4rem .28rem; overflow: hidden; text-transform: uppercase; }
   .agent-rail h2 small { font-size: .55rem; font-weight: 400; overflow: hidden; text-overflow: ellipsis; text-transform: none; white-space: nowrap; }
   .agent-rail section > button { align-items: center; background: transparent; border: 0; border-radius: .48rem; color: var(--foreground); cursor: pointer; display: flex; gap: .55rem; padding: .45rem .5rem; text-align: left; width: 100%; }
-  .agent-rail section > button:hover { background: var(--card-hover); }
-  .agent-rail section > button.active { background: var(--secondary); box-shadow: inset 2px 0 var(--primary); }
+  .agent-rail section > button:hover { --status-dot-surface: var(--card-hover); background: var(--card-hover); }
+  .agent-rail section > button.active { --status-dot-surface: var(--secondary); background: var(--secondary); box-shadow: inset 2px 0 var(--primary); }
   .agent-rail section > button > span:last-child { display: flex; flex: 1; flex-direction: column; min-width: 0; }
   .agent-rail section > button strong { font-size: .72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .agent-rail section > button small { color: var(--muted); font-size: .58rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

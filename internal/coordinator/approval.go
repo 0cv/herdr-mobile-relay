@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -16,6 +17,8 @@ const (
 	approvalPollTimeout  = 5 * time.Second
 	questionKeyDelay     = 150 * time.Millisecond
 )
+
+var errQuestionTextUnsupported = errors.New("This answer needs typed text, which this backend cannot send")
 
 type approvalPayload struct {
 	EventID     string
@@ -336,6 +339,11 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 			return EffectResult{Result: stale}
 		}
 		if err := d.executeQuestion(effectCtx, token, paneID, payload, interaction); err != nil {
+			if errors.Is(err, errQuestionTextUnsupported) {
+				result := d.fail(requestID, action, paneID, err.Error())
+				result.Phase = "not_started"
+				return EffectResult{Result: result}
+			}
 			if errors.Is(err, ErrPaneReplaced) {
 				return EffectResult{Result: d.fail(requestID, action, paneID, ErrPaneReplaced.Error())}
 			}
@@ -439,6 +447,11 @@ func (d *Dispatcher) executeQuestion(
 		OtherSelected: payload.OtherSelected,
 		OtherText:     payload.OtherText,
 	})
+	for _, step := range steps {
+		if step.Text != "" && !d.herdr.CapabilityStatus().Supports(herdr.FeatureManualTerminalInput) {
+			return errQuestionTextUnsupported
+		}
+	}
 	for index, step := range steps {
 		if len(step.Keys) > 0 {
 			if err := keys(step.Keys); err != nil {

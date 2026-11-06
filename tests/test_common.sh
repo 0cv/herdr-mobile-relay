@@ -21,6 +21,46 @@ if require_user_service_context >/dev/null 2>&1; then
 fi
 unset -f id
 
+(
+    export HOME="$WORK_DIR/core-home" XDG_CONFIG_HOME="$WORK_DIR/core-home/config"
+    export XDG_STATE_HOME="$WORK_DIR/core-home/state" XDG_CACHE_HOME="$WORK_DIR/core-home/cache"
+    export HERDR_RELAY_BACKEND=hc HERDR_PLUGIN_CONFIG_DIR="$WORK_DIR/tui-plugin"
+    export HERDR_SOCKET_PATH="$WORK_DIR/tui.sock" HC_SESSION=testing
+    unset HERDR_RELAY_ENV HERDR_RELAY_PORT HERDR_RELAY_PLUGIN_PORT HC_SOCKET_PATH HC_SOCKET
+    resolve_relay_instance
+    test "$(relay_env_file "$REPO_DIR/relay")" = "$XDG_CONFIG_HOME/herdr-mobile-relay-hc/relay.env"
+    test "$RELAY_SYSTEMD_LABEL" = herdr-mobile-relay-hc.service
+    test "$RELAY_LAUNCHD_LABEL" = com.herdr-mobile-relay-hc.service
+    test "$RELAY_TAILSCALE_PORT" = 8444
+    test -z "${HERDR_PLUGIN_CONFIG_DIR:-}"
+    test -z "${HERDR_SOCKET_PATH:-}"
+    ensure_relay_env "$HERDR_RELAY_ENV"
+    test "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_PORT)" = 8377
+    test "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_PLUGIN_PORT)" = 8378
+    ! grep -q '^HC_SOCKET' "$HERDR_RELAY_ENV"
+    test "${HC_SOCKET_PATH+x}" != x
+    test "$(env_file_value "$HERDR_RELAY_ENV" HC_SESSION)" = testing
+    export HC_SOCKET_PATH=relative/relay.sock HC_SOCKET=relative/core.sock
+    resolve_relay_instance
+    ensure_relay_env "$HERDR_RELAY_ENV"
+    test "$(env_file_value "$HERDR_RELAY_ENV" HC_SOCKET_PATH)" = relative/relay.sock
+    test "$(env_file_value "$HERDR_RELAY_ENV" HC_SOCKET)" = relative/core.sock
+    unset HC_SESSION HC_SOCKET HC_SOCKET_PATH
+    ensure_relay_env "$WORK_DIR/core-default/relay.env"
+    ! grep -q '^HC_' "$WORK_DIR/core-default/relay.env"
+    test -n "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_TOKEN)"
+    test -n "$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_INSTANCE_ID)"
+    test -f "$(dirname "$HERDR_RELAY_ENV")/.herdr-mobile-relay-installation"
+    test -f "$XDG_CACHE_HOME/herdr-mobile-relay-hc/.herdr-mobile-relay-installation"
+    case "$(relay_host_slug)" in *-hc) ;; *) exit 1 ;; esac
+    if HERDR_RELAY_BACKEND=herdr resolve_relay_instance; then
+        echo "backend mismatch accepted" >&2; exit 1
+    fi
+    if HERDR_GATEWAY_URL=wss://gateway.invalid resolve_relay_instance; then
+        echo "core gateway accepted" >&2; exit 1
+    fi
+)
+
 DEV_RELAY_BIN="$WORK_DIR/dev/herdr-mobile-relay"
 mkdir -p "$(dirname "$DEV_RELAY_BIN")"
 printf '#!/bin/sh\nexit 0\n' > "$DEV_RELAY_BIN"
@@ -177,6 +217,7 @@ run_phone_setup_helper() (
     render_setup_qr() {
         [ "${PHONE_SETUP_RENDER_BAD_QR:-}" != 1 ] ||
             printf 'attacker-controlled QR\n'
+        [ "${PHONE_SETUP_RENDER_QR:-}" != 1 ] || printf 'fixture QR\n'
     }
     stdout_is_terminal() { [ "${PHONE_SETUP_TTY:-}" = 1 ]; }
     unset NO_COLOR
@@ -184,11 +225,13 @@ run_phone_setup_helper() (
     "$@"
 )
 
+PHONE_SETUP_LABEL="$(host_label)"
 PHONE_SETUP_PLAIN_EXPECTED="$(
-    printf '  Open this private setup link on your phone:\n  %s\n' "$PHONE_SETUP_URL"
+    printf '  Open this private setup link on your phone to add %s:\n  %s\n' \
+        "$PHONE_SETUP_LABEL" "$PHONE_SETUP_URL"
 )"
 PHONE_SETUP_LINK_EXPECTED="$(
-    printf '  Open this private setup link on your phone:\n'
+    printf '  Open this private setup link on your phone to add %s:\n' "$PHONE_SETUP_LABEL"
     printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "$PHONE_SETUP_URL" "$PHONE_SETUP_URL"
 )"
 
@@ -208,6 +251,17 @@ test "$(
     PHONE_SETUP_TTY=1 TERM=dumb \
         run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL"
 )" = "$PHONE_SETUP_PLAIN_EXPECTED"
+
+test "$(HERDR_RELAY_BACKEND=herdr relay_host_label)" = "$PHONE_SETUP_LABEL"
+test "$(HERDR_RELAY_BACKEND=hc relay_host_label)" = "$PHONE_SETUP_LABEL (core)"
+test "$(
+    PHONE_SETUP_RENDER_QR=1 HERDR_RELAY_BACKEND=hc \
+        run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL" | sed -n 1p
+)" = "  Scan with your phone to add $PHONE_SETUP_LABEL (core)"
+test "$(
+    PHONE_SETUP_RENDER_QR=1 HERDR_RELAY_BACKEND=herdr \
+        run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL" | sed -n 1p
+)" = "  Scan with your phone to add $PHONE_SETUP_LABEL"
 
 run_phone_setup_helper phone_setup_url_is_safe \
     'http://127.0.0.1:8375/#setup=fixture'
@@ -613,6 +667,13 @@ for invalid_health in \
     fi
     test "$(wc -l < "$READY_CURL_LOG" | tr -d ' ')" = 1
 done
+
+if HERDR_RELAY_BACKEND=hc wait_for_relay_health 8377 1 0 test >"$WORK_DIR/core-ready.out" 2>"$WORK_DIR/core-ready.err"; then
+    echo "core readiness accepted failed inventory" >&2
+    exit 1
+fi
+grep -q 'Start herdr-app or run hc server start' "$WORK_DIR/core-ready.err"
+! grep -Eq 'Herdr|TUI' "$WORK_DIR/core-ready.err"
 
 # Preserve the bounded retry loop: an unready first reply is retried and a
 # matching reply on the second poll is returned unchanged.
@@ -1240,7 +1301,11 @@ test "$(printf '%s\n' "$STABLE_SWITCH_OUTPUT" |
 MENU_BIN_DIR="$WORK_DIR/menu-bin"
 MENU_ENV="$WORK_DIR/config/menu.env"
 MENU_ROOT="$WORK_DIR/menu-release"
-mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current"
+mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current" "$WORK_DIR/menu-home"
+# The menu offers the core relay when `hc` or a core env exists, so these runs
+# see neither the developer's tools nor their home directory.
+MENU_SYSTEM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+menu_isolation=(env HERDR_BIN_PATH= HOME="$WORK_DIR/menu-home" XDG_CONFIG_HOME="$WORK_DIR/menu-home/.config" PATH="$MENU_BIN_DIR:$MENU_SYSTEM_PATH")
 printf '{\n  "version": "9.9.9"\n}\n' > "$MENU_ROOT/current/release-manifest.json"
 printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\nHERDR_APP_DEPLOY_ORIGIN='https://app.example.test'\n" > "$MENU_ENV"
 printf "HERDR_GATEWAY_DEPLOY_HOST='gw-owned.example.test'\n" \
@@ -1261,11 +1326,11 @@ chmod 700 "$MENU_BIN_DIR/curl"
 # the return prompt is skipped, so the input carries no extra newline.
 MENU_OUTPUT="$(
     printf '2\n4\nq\n' |
-        PATH="$MENU_BIN_DIR:$PATH" \
+        "${menu_isolation[@]}" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELEASE_ROOT="$MENU_ROOT" \
         HERDR_RELAY_ENV="$MENU_ENV" \
-        bash "$REPO_DIR/relay/plugin-setup-menu.sh"
+        "$BASH" "$REPO_DIR/relay/plugin-setup-menu.sh"
 )"
 case "$MENU_OUTPUT" in
     *"Herdr Mobile Relay status"*) ;;
@@ -1331,8 +1396,8 @@ chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" \
     "$REFRESH_MENU_DIR/plugin-status.sh"
 export REFRESH_MENU_MARKER
 printf '2\n1\n4\nq\n' |
-    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
-    bash "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
+    "${menu_isolation[@]}" HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
+    "$BASH" "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
 test "$(cat "$REFRESH_MENU_MARKER")" = "unset"
 
 # A setup pane can outlive an in-place plugin update. Replacing its script
@@ -1350,8 +1415,8 @@ cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-setup-menu.sh" \
 mkfifo "$STALE_MENU_FIFO"
 exec 7<> "$STALE_MENU_FIFO"
 (
-    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$MENU_ENV" \
-        bash "$STALE_MENU_DIR/plugin-setup-menu.sh" <&7 \
+    "${menu_isolation[@]}" HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$MENU_ENV" \
+        "$BASH" "$STALE_MENU_DIR/plugin-setup-menu.sh" <&7 \
         > "$STALE_MENU_OUTPUT" 2>&1
 ) &
 STALE_MENU_PID=$!

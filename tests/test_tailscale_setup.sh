@@ -2,7 +2,7 @@
 set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/herdr-always-ts.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" -ne 0 ]; then tail -80 "$WORK/out" >&2; fi; rm -rf "$WORK"; exit "$status"' EXIT
 mkdir -p "$WORK/tmp"
 export TMPDIR="$WORK/tmp" HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/xdg/config" XDG_DATA_HOME="$WORK/xdg/data" XDG_CACHE_HOME="$WORK/xdg/cache"
 export HERDR_PLUGIN_CONFIG_DIR="$WORK/plugin" HERDR_RELEASE_ROOT="$WORK/release"
@@ -316,7 +316,9 @@ assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 grep -q 'mapping may remain' "$WORK/out"
 
 printf "HERDR_TAILSCALE_PORT='8443'\n" >> "$HERDR_RELAY_ENV"
-printf '3\n2\nq\n' | run plugin-setup-menu.sh
+# The menu also offers the core relay when `hc` exists, so it runs without the developer's PATH.
+ln -s "$BASH" "$WORK/bin/bash"
+printf '3\n2\nq\n' | HERDR_BIN_PATH= PATH="$WORK/bin:/usr/bin:/bin:/usr/sbin:/sbin" run plugin-setup-menu.sh
 assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
 grep -q 'systemctl .* restart' "$FAKE_LOG" || grep -q 'systemctl .* start' "$FAKE_LOG"
 . "$REPO_DIR/relay/common.sh"
@@ -337,4 +339,28 @@ printf "HERDR_TAILSCALE_PORT='8443'\n" >> "$HERDR_RELAY_ENV"
 run tailscale-off.sh
 grep -q 'systemctl --user disable --now' "$FAKE_LOG" || grep -q 'systemctl --user stop' "$FAKE_LOG"
 assert_absent '^HERDR_TAILSCALE_PORT=' "$HERDR_RELAY_ENV"
+if command -v script >/dev/null 2>&1; then
+    export HERDR_RELAY_BACKEND=hc HERDR_RELAY_ENV="$HOME/core/relay.env"
+    unset HERDR_GATEWAY_URL HERDR_RELAY_PORT HERDR_RELAY_PLUGIN_PORT
+    mkdir -p "$HOME/.config/systemd/user"
+    printf 'TUI sentinel\n' > "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    : > "$FAKE_LOG"
+    ({ printf 'y\n'; /bin/sleep 1; } | tty_setup) > "$WORK/out" 2>&1
+    grep -q 'serve --bg --port 8444 --relay-port 8377' "$FAKE_LOG"
+    grep -q 'tailscale address --port 8444' "$FAKE_LOG"
+    grep -q "HERDR_TAILSCALE_PORT='8444'" "$HERDR_RELAY_ENV"
+    test -f "$HOME/.config/systemd/user/herdr-mobile-relay-hc.service"
+    run setup-link.sh
+    run tailscale-off.sh
+    grep -q 'tailscale off --port 8444 --relay-port 8377' "$FAKE_LOG"
+    assert_absent 'port 8443|herdr-remote|herdr-mobile-relay\.service' "$FAKE_LOG"
+    grep -Fx 'TUI sentinel' "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    : > "$FAKE_LOG"
+    ({ printf 'y\n'; /bin/sleep 1; } | HERDR_TAILSCALE_PORT=8555 tty_setup) > "$WORK/out" 2>&1
+    grep -q 'serve --bg --port 8555 --relay-port 8377' "$FAKE_LOG"
+    run setup-link.sh
+    grep -q 'tailscale address --port 8555' "$FAKE_LOG"
+    run tailscale-off.sh
+    grep -q 'tailscale off --port 8555 --relay-port 8377' "$FAKE_LOG"
+fi
 echo 'always-on Tailscale tests passed'

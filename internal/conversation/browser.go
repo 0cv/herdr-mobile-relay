@@ -705,6 +705,9 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	if isAgyAgent(provider) {
 		return b.readNativePage(ctx, request, "agy")
 	}
+	if provider == "grok" {
+		return b.readNativePage(ctx, request, "grok")
+	}
 	return b.readFilePage(ctx, request, false)
 }
 
@@ -2538,6 +2541,8 @@ func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, pro
 		return b.readHermesNative(ctx, request, cursor, before)
 	case "agy":
 		return b.readAgyNative(ctx, request, cursor, before)
+	case "grok":
+		return b.readGrokNative(ctx, request, cursor, before)
 	}
 	return b.readOpenCodeNative(ctx, request, cursor, before)
 }
@@ -2663,6 +2668,7 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 		}
 		return encodeBrowseCursor(b.key, browseCursor{
 			Mode: "native", Scope: browseScopeID(scope), Revision: revision, NativeBefore: before,
+			RangeEnd: cursor.RangeEnd, RangeDigest: cursor.RangeDigest,
 			ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 		})
 	}

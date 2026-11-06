@@ -9,6 +9,10 @@ go build -o "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay"
 # that still rejects a missing or empty staged plist.
 HOST_PLUTIL="$(command -v plutil || true)"
 
+for backend in herdr hc; do
+export HERDR_RELAY_BACKEND="$backend"
+suffix=""
+[ "$backend" != hc ] || suffix="-hc"
 for platform in systemd launchd; do
   for initial in active inactive fresh; do
     for failure in none write reload start readiness public rollback; do
@@ -21,7 +25,7 @@ for platform in systemd launchd; do
             *:none|*:rollback) ;;
             *) continue ;;
         esac
-        CASE="$WORK_DIR/$platform-$initial-$failure-$envstate home & space"
+        CASE="$WORK_DIR/$backend-$platform-$initial-$failure-$envstate home & space"
         export HOME="$CASE" CASE FAILURE="$failure" INITIAL="$initial"
         export XDG_STATE_HOME="$HOME/state"
         BIN="$HOME/.local/bin"
@@ -123,11 +127,13 @@ EOF
         export PATH="$BIN:$PATH"
         if [ "$initial" = active ]; then touch "$CASE/loaded" "$CASE/legacy-loaded"; fi
         if [ "$platform" = systemd ]; then
-            definition="$HOME/.config/systemd/user/herdr-mobile-relay.service"
+            definition="$HOME/.config/systemd/user/herdr-mobile-relay$suffix.service"
+            sibling="$HOME/.config/systemd/user/herdr-mobile-relay.service"
             legacy="$HOME/.config/systemd/user/herdr-remote.service"
             script=install-systemd-user-service.sh
         else
-            definition="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+            definition="$HOME/Library/LaunchAgents/com.herdr-mobile-relay$suffix.service.plist"
+            sibling="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
             legacy="$HOME/Library/LaunchAgents/com.herdr-remote.service.plist"
             script=install-service.sh
         fi
@@ -135,16 +141,21 @@ EOF
             printf 'previous definition\n' > "$definition"
             printf 'legacy definition\n' > "$legacy"
         fi
+        if [ "$backend" = hc ]; then
+            printf 'TUI unit sentinel\n' > "$sibling"
+            printf 'legacy definition\n' > "$legacy"
+            printf 'TUI environment sentinel\n' > "$HOME/config/tui.env"
+        fi
         if [ -f "$HERDR_RELAY_ENV" ]; then cp "$HERDR_RELAY_ENV" "$CASE/env-before"; fi
         if bash "$REPO_DIR/relay/$script" > "$CASE/output" 2>&1; then
             if [ "$failure" != none ]; then echo "$platform accepted $failure failure" >&2; exit 1; fi
-            test ! -e "$legacy"
+            if [ "$backend" = herdr ]; then test ! -e "$legacy"; fi
             test -n "$(sed -n 's/^HERDR_RELAY_INSTANCE_ID=//p' "$HERDR_RELAY_ENV")"
         else
             if [ "$failure" = none ]; then cat "$CASE/output" >&2; exit 1; fi
             if [ "$initial" = fresh ]; then
                 test ! -e "$definition"
-                test ! -e "$legacy"
+                if [ "$backend" = herdr ]; then test ! -e "$legacy"; fi
             else
                 grep -Fx 'previous definition' "$definition" >/dev/null
                 grep -Fx 'legacy definition' "$legacy" >/dev/null
@@ -159,8 +170,18 @@ EOF
                 test -n "$(find "$HOME/state" -name herdr-native-recovery.\* -type d -print -quit)"
             fi
         fi
+        if [ "$backend" = hc ]; then
+            grep -Fx 'TUI unit sentinel' "$sibling"
+            grep -Fx 'TUI environment sentinel' "$HOME/config/tui.env"
+            grep -Fx 'legacy definition' "$legacy"
+            if grep -E 'herdr-remote|herdr-mobile-relay\.service' "$CASE/manager.log"; then
+                echo "Core installation touched a TUI service" >&2
+                exit 1
+            fi
+        fi
      done
     done
   done
+done
 done
 printf 'native installation transaction fixtures passed\n'

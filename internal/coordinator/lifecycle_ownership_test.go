@@ -125,7 +125,7 @@ func TestLifecyclePersistsShellOwnershipBeforeAgentDiscovery(t *testing.T) {
 			if err := f.lifecycle.profiles.ReconcileOwnership([]profiles.PaneIdentity{records[0].Target}); err != nil {
 				t.Fatal(err)
 			}
-			if got := f.lifecycle.profiles.ResolveOwnedPane(result.PaneID); got != profileID {
+			if got := f.lifecycle.profiles.ResolvePane(result.PaneID, ""); got != profileID {
 				t.Fatalf("profile before restart = %q", got)
 			}
 			resolver := profiles.NewResolver(f.configHome, nil)
@@ -138,7 +138,7 @@ func TestLifecyclePersistsShellOwnershipBeforeAgentDiscovery(t *testing.T) {
 			d.lifecycle.home = f.lifecycle.home
 			t.Cleanup(func() { _ = d.Close(context.Background()) })
 			state.CommitInventory([]*AgentState{{PaneID: result.PaneID, RawPaneID: result.PaneID, TerminalID: "terminal-pane-new", TabID: "tab-new", WorkspaceID: "workspace-new", Agent: profileID, Status: "idle", Cwd: f.request.Cwd}}, state.RevisionCounter())
-			if got := resolver.ResolveOwnedPane(result.PaneID); got != profileID {
+			if got := resolver.ResolvePane(result.PaneID, ""); got != profileID {
 				t.Fatalf("profile after restart = %q", got)
 			}
 			if err := os.WriteFile(f.nextPane, []byte("pane-replacement"), 0600); err != nil {
