@@ -18,7 +18,9 @@ func (c *Client) terminalCall(ctx context.Context, method, paneID string, params
 }
 
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {
-	raw, err := c.terminalCall(ctx, "terminal.read", paneID, map[string]any{"lines": min(max(lines, 0), 10000)})
+	// Positive history reads can scroll a full-screen agent and hold desktop
+	// input while core stitches its history. Mobile reads must stay passive.
+	raw, err := c.terminalCall(ctx, "terminal.read", paneID, map[string]any{"lines": 0})
 	if err != nil {
 		return herdr.PaneRead{}, err
 	}
@@ -29,7 +31,7 @@ func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format 
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return herdr.PaneRead{}, err
 	}
-	return herdr.PaneRead{Content: []byte(result.Text), Truncated: !result.Complete}, nil
+	return herdr.PaneRead{Content: []byte(result.Text), Truncated: !result.Complete || lines > 0}, nil
 }
 
 func (c *Client) ReadPaneRecent(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {

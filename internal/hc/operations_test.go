@@ -19,10 +19,9 @@ func TestPaneReads(t *testing.T) {
 			for _, method := range []string{"read", "recent", "visible", "probe"} {
 				t.Run(fmt.Sprintf("%s/%d/complete=%v", method, lines, complete), func(t *testing.T) {
 					screen := strings.Repeat("screen row\n", 120)
-					wantLines := min(max(lines, 0), 10000)
-					if method == "visible" || method == "probe" {
-						wantLines = 0
-					}
+					// Mobile reads must not invoke core's scrolling history collector,
+					// which gates the desktop viewer's keyboard input.
+					wantLines := 0
 					c := New(fakeCore(t, 1, func(conn net.Conn, req fakeRequest) {
 						if req.Method != "terminal.read" || !reflect.DeepEqual(req.Params, map[string]any{"terminal": "term", "lines": float64(wantLines)}) {
 							t.Errorf("request = %+v", req)
@@ -47,7 +46,8 @@ func TestPaneReads(t *testing.T) {
 						return
 					}
 					got, err := read(t.Context(), "term", lines, "ansi")
-					if err != nil || string(got.Content) != screen || got.Truncated != !complete {
+					wantTruncated := !complete || ((method == "read" || method == "recent") && lines > 0)
+					if err != nil || string(got.Content) != screen || got.Truncated != wantTruncated {
 						t.Fatalf("read = %+v, %v", got, err)
 					}
 					_, err = read(t.Context(), "remote/term", lines, "text")

@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep desktop typing responsive while a phone views a herdr-core terminal.
+  Core screen reads no longer collect scrollback by scrolling the live agent,
+  which can hold the desktop's keyboard input. The core terminal view shows
+  the current screen and marks requested history as truncated; native
+  Conversation history is unchanged.
+
 ## [0.25.0] - 2026-11-05
 
 ### Added
