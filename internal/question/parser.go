@@ -98,6 +98,11 @@ var (
 	)
 	responseStartPattern  = regexp.MustCompile(`^\s*[•●]\s+\S`)
 	responsePrefixPattern = regexp.MustCompile(`^\s*[•●]\s+`)
+
+	claudeSessionRulePattern = regexp.MustCompile(`^─{3,} \S.* ─$`)
+	claudeTaskPanelPattern   = regexp.MustCompile(
+		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ pending(?:, \d+ completed)?)$`,
+	)
 )
 
 func Supports(agent string) bool {
@@ -204,6 +209,10 @@ func LayoutHint(text string) bool {
 	}
 	for _, line := range lines[lastControl+1:] {
 		if hasCodexHeader && strings.EqualFold(strings.TrimSpace(line), "esc to interrupt") {
+			continue
+		}
+		// A named Claude session ends its input rule with the name, and its task panel follows.
+		if claudeSessionRulePattern.MatchString(line) || claudeTaskPanelPattern.MatchString(line) {
 			continue
 		}
 		if line != "" && strings.Trim(line, "─━═_—│| ") != "" {
