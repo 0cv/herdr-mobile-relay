@@ -1198,6 +1198,22 @@ func TestCapturedClaudeControlsFollowedByNewPromptAreChat(t *testing.T) {
 	}
 }
 
+func TestClassifyClaudeQuestionWithTaskPanelOverflowLine(t *testing.T) {
+	fixture := attentionFixture(t, "claude-named-session-task-panel.ansi")
+	withoutOverflow := fixture[:strings.LastIndex(fixture, "\n")]
+	for _, overflow := range []string{
+		"… +16 pending, 124 completed",
+		"… +5 completed",
+		"… +1 in progress",
+		"… +2 in progress, 16 pending, 124 completed",
+	} {
+		got := Classify(withoutOverflow+"\n   "+overflow, "claude")
+		if got.Kind != AttentionQuestion || got.Interaction == nil {
+			t.Fatalf("%q classification = %+v", overflow, got)
+		}
+	}
+}
+
 func TestCapturedQoderApprovalFollowedByIndentedOutputIsUnknown(t *testing.T) {
 	content := attentionFixture(t, "qodercli-permission-required2.ansi") +
 		"\n  Newer output is still arriving.\n"

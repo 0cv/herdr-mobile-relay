@@ -101,7 +101,7 @@ var (
 
 	claudeSessionRulePattern = regexp.MustCompile(`^─{3,} \S.* ─$`)
 	claudeTaskPanelPattern   = regexp.MustCompile(
-		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ pending(?:, \d+ completed)?)$`,
+		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*)$`,
 	)
 )
 
