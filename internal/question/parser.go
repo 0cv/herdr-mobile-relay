@@ -81,7 +81,26 @@ var (
 	)
 	openCodeColumnPattern  = regexp.MustCompile(`\s{20,}`)
 	ompAskHeaderPattern    = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
-	ompStatusChromePattern = regexp.MustCompile(`^\s*(?:[ZX]\s.*\bdrain\b|[\x{2800}-\x{28ff}]|cache ✓|⟲ history|omp-cache-keepalive:)`)
+	// ompFooterPattern matches an Ask dialog's footer hint line across omp
+	// versions: 18.0-era ASCII symbols render "enter select"/"enter
+	// submit", 18.1x renders "⏎ select"/"⏎ submit"/"⏎ next" and the
+	// Nerd-Font enter glyph (U+F0311). Footers of other dialogs never
+	// match: the plan-review footer binds confirm (not select/submit/next)
+	// to enter ("↑↓ select · ⏎ confirm · …") and the tool-approval footer
+	// has no enter hint at all.
+	ompFooterPattern = regexp.MustCompile(`(?i)(?:enter|⏎|\x{F0311})\s+(?:select|submit|next)\b`)
+	// ompFooterSubmitPattern is the submit form of ompFooterPattern, used
+	// to detect that the free-text "Other" row is focused (omp switches
+	// the footer to "⏎ submit" while notes entry is active).
+	ompFooterSubmitPattern = regexp.MustCompile(`(?i)(?:enter|⏎|\x{F0311})\s+submit\b`)
+	// ompStatusChromePattern matches status-bar lines omp renders below a
+	// dialog: the context-drain summary ("<provider> <n>%·<duration> …
+	// drain <A>→<B>") and the default/full status-line presets (a braille
+	// spinner frame followed by ·-separated segments), plus notices
+	// printed by extensions under the input area as exact prefixes.
+	// Transcript lines never match: they lack the drain usage tokens, the
+	// spinner-plus-separator structure, or the exact extension prefixes.
+	ompStatusChromePattern = regexp.MustCompile(`^\s*(?:\S{1,4}\s+\d+%·\d+[dhm].*\bdrain\b.*→|[\x{2800}-\x{28ff}]\s+.* · .* · .* · |omp-cache-keepalive: |cache ✓\s*$|⟲ history\s*$)`)
 	ompOptionPattern       = regexp.MustCompile(`^\s*([❯›>]?)\s*(☑|☐|◉|○|||||\[[xX ]\]|\([oO ]\))\s+(.+?)\s*$`)
 	ompFrameMetaPattern    = regexp.MustCompile(`\[\s*([\p{L}\p{N}_-]+)\s*\]\s*[·•]\s*options:\s*\d+`)
 	ompProgressPattern     = regexp.MustCompile(`\s+\((\d+)\s*/\s*(\d+)\)\s*$`)
@@ -397,10 +416,18 @@ func ompLayoutHint(text string) bool {
 		if review && ompReviewSubmitPattern.MatchString(line) {
 			reviewSubmit = true
 		}
-		lower := strings.ToLower(line)
-		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") ||
-			strings.Contains(lower, "⏎ select") || strings.Contains(lower, "select · ") {
+		if ompFooterPattern.MatchString(line) {
 			footer = index
+		}
+		// The footer must sit inside the Ask box: stop at its closing
+		// border so a footer of a later dialog is not attributed to this
+		// header. omp keeps answered ask calls in the transcript as
+		// "╭─── Ask 1 questions" boxes and renders the tool-approval and
+		// plan-review footers below the live dialog; the plan-review
+		// footer contains "select · " and turned plan approvals into fake
+		// questions when the scan crossed the box boundary.
+		if strings.HasPrefix(line, "╰") {
+			break
 		}
 	}
 	if footer < 0 || (options < 2 && !reviewSubmit) {
@@ -440,9 +467,7 @@ func parseOMP(text string) *Interaction {
 
 	end := len(lines)
 	for index := start + 1; index < len(lines); index++ {
-		lower := strings.ToLower(lines[index])
-		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") ||
-			strings.Contains(lower, "⏎ select") || strings.Contains(lower, "select · ") {
+		if ompFooterPattern.MatchString(lines[index]) {
 			end = index
 			break
 		}
@@ -613,8 +638,7 @@ func ompQuestion(lines []string, start, firstOption int) string {
 func ompDescription(lines []string, start, end int) string {
 	var parts []string
 	for _, line := range lines[start+1 : end] {
-		if line == "" || ompBorderLine(line) ||
-			strings.Contains(strings.ToLower(line), "enter select") {
+		if line == "" || ompBorderLine(line) || ompFooterPattern.MatchString(line) {
 			continue
 		}
 		parts = append(parts, strings.TrimSpace(strings.TrimPrefix(line, "↳")))
@@ -1308,7 +1332,7 @@ func parseQoder(text string) *Interaction {
 	}
 	notes := ""
 	notesActive := otherRow.focus &&
-		strings.Contains(strings.ToLower(lines[footerIndex]), "enter submit")
+		ompFooterSubmitPattern.MatchString(lines[footerIndex])
 	if notesActive {
 		var noteLines []string
 		for _, line := range lines[otherRow.line+1 : footerIndex] {

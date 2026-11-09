@@ -1390,6 +1390,92 @@ func TestOMPAskParsesWithStatusBarBelowModal(t *testing.T) {
 	if LayoutHint(frame + "\n2026-11-06 10:29:22  ⤵ 27K  ⤴ 118  ⏱ 3.1s  ⚡ 22.9/s") {
 		t.Fatal("ask with transcript content below the modal was treated as live")
 	}
+	// Status-chrome rules must not admit transcript lines: a prose sentence
+	// that merely mentions "drain" and a line that happens to start with a
+	// braille character are both transcript.
+	for _, transcript := range []string{
+		"Z some transcript sentence mentioning drain",
+		"⠋ a transcript line that starts with a braille character",
+	} {
+		if LayoutHint(frame + "\n" + transcript + "\n") {
+			t.Fatalf("transcript line was accepted as status chrome: %q", transcript)
+		}
+	}
+}
+
+func TestOMPAskFooterMustSitInsideAskBox(t *testing.T) {
+	// omp keeps answered ask calls in the transcript as
+	// "╭─── Ask 1 questions" boxes; in plan mode the agent asks clarifying
+	// questions and then submits the plan, so a plan approval frequently
+	// renders below such a box (the relay reads ~80 lines of scrollback).
+	// The plan-review footer ("↑↓ select · ⏎ confirm · …") must not be
+	// mistaken for the answered box's footer and turn the plan approval
+	// into a fake question.
+	lines := strings.Split(attentionFixture(t, "omp-ask-status-below.ansi"), "\n")
+	if len(lines) < 34 {
+		t.Fatalf("fixture has %d lines, want at least 34", len(lines))
+	}
+	frame := strings.Join(lines[:33], "\n") + "\n" +
+		attentionFixture(t, "omp-plan-approval.ansi")
+	if LayoutHint(frame) {
+		t.Fatal("plan approval with an answered ask box above it was treated as a live question")
+	}
+	if got := Classify(frame, "omp"); got.Kind != AttentionApproval {
+		t.Fatalf("classification = %+v, want approval", got)
+	}
+	// The fixture is a scrollback capture: the same capture with the live
+	// modal removed is pure history (answered ask boxes plus transcript),
+	// and must not hint at a live dialog. This is the "dialog left in
+	// scrollback" case: answered boxes carry no footer, and the transcript
+	// below them is neither border nor status chrome.
+	if LayoutHint(strings.Join(lines[:33], "\n")) {
+		t.Fatal("scrollback with only answered ask boxes was treated as live")
+	}
+}
+
+func TestOMPAskFootersAcrossQuestionStyles(t *testing.T) {
+	frame := attentionFixture(t, "omp-ask-status-below.ansi")
+	live := "⏎ select · n note · ↑/↓ move · ⎋ cancel · Alt+H hide"
+	for _, tc := range []struct{ name, footer string }{
+		{"multiple choice", "␣ toggle · ⏎ submit · ↑/↓ move · ⎋ cancel · Alt+H hide"},
+		{"multiple questions", "␣ toggle · ⏎ next · ↑/↓ move · ⎋ cancel · Alt+H hide"},
+		{"answer review", "⏎ submit · ↑/↓ scroll · ⎋ cancel · Alt+H hide"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			variant := strings.Replace(frame, live, tc.footer, 1)
+			if variant == frame {
+				t.Fatalf("footer line not found in fixture: %q", live)
+			}
+			if !LayoutHint(variant) {
+				t.Fatalf("%s footer was not detected", tc.name)
+			}
+			if Parse(variant, "omp") == nil {
+				t.Fatalf("frame with %s footer did not parse", tc.name)
+			}
+		})
+	}
+}
+
+func TestOMPStockAskParsesWithoutExtensions(t *testing.T) {
+	// Captured from stock omp 18.17 (isolated profile, no extensions):
+	// the frame contains the transcript rendering of the ask call (a
+	// "╭─── Ask: <id> ─" box closed by "╰─── 3 options ─") above the live
+	// modal, and nothing but empty lines below the modal's own border.
+	frame := attentionFixture(t, "omp-ask-stock.ansi")
+	if !LayoutHint(frame) {
+		t.Fatal("stock omp ask frame was rejected")
+	}
+	interaction := Parse(frame, "omp")
+	if interaction == nil || interaction.Kind != "single_select" ||
+		interaction.Question != "Stock capture: does the relay parse this?" ||
+		len(interaction.Options) != 3 ||
+		interaction.Options[0].Label != "Yes" ||
+		interaction.Other.Label != "Other (type your own)" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	if Classify(frame, "omp").Kind != AttentionQuestion {
+		t.Fatal("classification was not a question")
+	}
 }
 
 func TestApprovalFingerprintIgnoresPaneChangesOutsideDialog(t *testing.T) {
