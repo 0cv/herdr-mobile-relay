@@ -11,6 +11,9 @@ project follows [Semantic Versioning](https://semver.org/).
   while the task list is showing. The name in the input rule and the task panel
   under it hid the question, so the agent showed as blocked with nothing to
   answer (#155).
+- Reading older history of a long, active conversation no longer fails with a
+  storage-limit error after repeated reads; the relay now frees space held by
+  older, unused copies. (#157)
 
 ## [0.25.0] - 2026-11-05
 
