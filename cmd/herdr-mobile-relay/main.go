@@ -68,7 +68,7 @@ func run(args []string) (int, error) {
 		return runServe()
 	case "version":
 		if len(args) == 1 && args[0] == "--json" {
-			data, _ := json.Marshal(map[string]string{"version": version, "revision": revision, "target": release.CurrentTarget()})
+			data, _ := json.Marshal(map[string]any{"version": version, "revision": revision, "target": release.CurrentTarget(), "backends": []string{"herdr", "hc"}})
 			fmt.Println(string(data))
 			return 0, nil
 		}
