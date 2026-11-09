@@ -21,6 +21,7 @@
   let confirmPanel = $state<HTMLDivElement | null>(null);
 
   const connections = relayStore.connections;
+  const capabilities = $derived(agent ? $connections.get(agent.relay_id)?.capabilities || [] : []);
   const panePreferenceKey = $derived(agent ? paneViewPreferenceKey(agent) : null);
   const paneViewSelection = $derived.by(() => {
     const override = panePreferenceKey ? $paneAgentViewOverrides[panePreferenceKey] : undefined;
@@ -150,16 +151,17 @@
       void beginConfirm('clear');
       return;
     }
+    const { relay_id: relayId, cwd } = agent;
     busy = true;
     try {
       const result = await relayStore.sendToAgent(agent, { type: 'agent_clear' }, 45_000);
       const warning = String(result.data?.warning || '');
       relayStore.showToast(warning || 'Agent cleared.', Boolean(warning));
       const rawPaneId = String(result.data?.pane_id || '');
-      const replacement = await relayStore.waitForAgent(agent.relay_id, {
+      const replacement = await relayStore.waitForAgent(relayId, {
         rawPaneId,
         name: String(result.data?.name || ''),
-        cwd: String(result.data?.cwd || agent.cwd || ''),
+        cwd: String(result.data?.cwd || cwd || ''),
       });
       open = false;
       if (replacement) {
@@ -249,11 +251,15 @@
         {/if}
       </p>
       <div class="dialog-actions">
-        <Button data-rename-action="tab" disabled={busy || readOnly} onclick={() => beginRename('tab')}>Rename Tab</Button>
+        {#if capabilities.includes('tab_rename')}
+          <Button data-rename-action="tab" disabled={busy || readOnly} onclick={() => beginRename('tab')}>Rename Tab</Button>
+        {/if}
         {#if sessionRenameAvailable}
           <Button data-rename-action="session" variant="secondary" disabled={busy || readOnly} onclick={() => beginRename('session')}>Rename Session</Button>
         {/if}
-        <Button data-confirm-action="clear" variant="secondary" disabled={busy || readOnly} onclick={clearAgent}>Clear Agent</Button>
+        {#if capabilities.includes('agent_launch')}
+          <Button data-confirm-action="clear" variant="secondary" disabled={busy || readOnly} onclick={clearAgent}>Clear Agent</Button>
+        {/if}
         <Button data-confirm-action="stop" variant="danger" disabled={busy || readOnly} onclick={stopAgent}>Stop Agent</Button>
         <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Close</Button>
       </div>

@@ -79,28 +79,11 @@ var (
 	openCodeActivePattern = regexp.MustCompile(
 		`\x1b\[[^m]*48(?:;|:)2(?:;|:)157(?:;|:)124(?:;|:)216m([^\x1b]*)`,
 	)
-	openCodeColumnPattern  = regexp.MustCompile(`\s{20,}`)
-	ompAskHeaderPattern    = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
-	// ompFooterPattern matches an Ask dialog's footer hint line across omp
-	// versions: 18.0-era ASCII symbols render "enter select"/"enter
-	// submit", 18.1x renders "⏎ select"/"⏎ submit"/"⏎ next" and the
-	// Nerd-Font enter glyph (U+F0311). Footers of other dialogs never
-	// match: the plan-review footer binds confirm (not select/submit/next)
-	// to enter ("↑↓ select · ⏎ confirm · …") and the tool-approval footer
-	// has no enter hint at all.
-	ompFooterPattern = regexp.MustCompile(`(?i)(?:enter|⏎|\x{F0311})\s+(?:select|submit|next)\b`)
-	// ompFooterSubmitPattern is the submit form of ompFooterPattern, used
-	// to detect that the free-text "Other" row is focused (omp switches
-	// the footer to "⏎ submit" while notes entry is active).
-	ompFooterSubmitPattern = regexp.MustCompile(`(?i)(?:enter|⏎|\x{F0311})\s+submit\b`)
-	// ompStatusChromePattern matches status-bar lines omp renders below a
-	// dialog: the context-drain summary ("<provider> <n>%·<duration> …
-	// drain <A>→<B>") and the default/full status-line presets (a braille
-	// spinner frame followed by ·-separated segments), plus notices
-	// printed by extensions under the input area as exact prefixes.
-	// Transcript lines never match: they lack the drain usage tokens, the
-	// spinner-plus-separator structure, or the exact extension prefixes.
-	ompStatusChromePattern = regexp.MustCompile(`^\s*(?:\S{1,4}\s+\d+%·\d+[dhm].*\bdrain\b.*→|[\x{2800}-\x{28ff}]\s+.* · .* · .* · |omp-cache-keepalive: |cache ✓\s*$|⟲ history\s*$)`)
+	openCodeColumnPattern = regexp.MustCompile(`\s{20,}`)
+	ompAskHeaderPattern   = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
+	// Footer hint of omp Ask dialogs; (?i) because 18.0-era fixtures render
+	// "Enter select". Only live dialogs render it, so it doubles as the live signal.
+	ompFooterPattern       = regexp.MustCompile(`(?i)(?:enter|⏎)\s+(?:select|submit|next)\b`)
 	ompOptionPattern       = regexp.MustCompile(`^\s*([❯›>]?)\s*(☑|☐|◉|○|||||\[[xX ]\]|\([oO ]\))\s+(.+?)\s*$`)
 	ompFrameMetaPattern    = regexp.MustCompile(`\[\s*([\p{L}\p{N}_-]+)\s*\]\s*[·•]\s*options:\s*\d+`)
 	ompProgressPattern     = regexp.MustCompile(`\s+\((\d+)\s*/\s*(\d+)\)\s*$`)
@@ -118,6 +101,11 @@ var (
 	)
 	responseStartPattern  = regexp.MustCompile(`^\s*[•●]\s+\S`)
 	responsePrefixPattern = regexp.MustCompile(`^\s*[•●]\s+`)
+
+	claudeSessionRulePattern = regexp.MustCompile(`^─{3,} \S.* ─$`)
+	claudeTaskPanelPattern   = regexp.MustCompile(
+		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*)$`,
+	)
 )
 
 func Supports(agent string) bool {
@@ -224,6 +212,10 @@ func LayoutHint(text string) bool {
 	}
 	for _, line := range lines[lastControl+1:] {
 		if hasCodexHeader && strings.EqualFold(strings.TrimSpace(line), "esc to interrupt") {
+			continue
+		}
+		// A named Claude session ends its input rule with the name, and its task panel follows.
+		if claudeSessionRulePattern.MatchString(line) || claudeTaskPanelPattern.MatchString(line) {
 			continue
 		}
 		if line != "" && strings.Trim(line, "─━═_—│| ") != "" {
@@ -419,13 +411,8 @@ func ompLayoutHint(text string) bool {
 		if ompFooterPattern.MatchString(line) {
 			footer = index
 		}
-		// The footer must sit inside the Ask box: stop at its closing
-		// border so a footer of a later dialog is not attributed to this
-		// header. omp keeps answered ask calls in the transcript as
-		// "╭─── Ask 1 questions" boxes and renders the tool-approval and
-		// plan-review footers below the live dialog; the plan-review
-		// footer contains "select · " and turned plan approvals into fake
-		// questions when the scan crossed the box boundary.
+		// The footer must sit inside this Ask box: tool approvals render
+		// "enter select" too, but below this border, so the break rejects it.
 		if strings.HasPrefix(line, "╰") {
 			break
 		}
@@ -433,12 +420,9 @@ func ompLayoutHint(text string) bool {
 	if footer < 0 || (options < 2 && !reviewSubmit) {
 		return false
 	}
-	for _, line := range lines[footer+1:] {
-		if line == "" || ompBorderLine(line) || ompStatusChromePattern.MatchString(line) {
-			continue
-		}
-		return false
-	}
+	// Anything below the closing border is display chrome of unknown
+	// presets, themes and extensions; the footer inside the box is the
+	// live signal, so it is deliberately not inspected.
 	return true
 }
 
@@ -1332,7 +1316,7 @@ func parseQoder(text string) *Interaction {
 	}
 	notes := ""
 	notesActive := otherRow.focus &&
-		ompFooterSubmitPattern.MatchString(lines[footerIndex])
+		strings.Contains(strings.ToLower(lines[footerIndex]), "enter submit")
 	if notesActive {
 		var noteLines []string
 		for _, line := range lines[otherRow.line+1 : footerIndex] {

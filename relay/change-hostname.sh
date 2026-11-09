@@ -25,6 +25,7 @@ ENV_FILE="$(canonical_file_path "$ENV_FILE")"
 refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 assert_service_env_matches "$ENV_FILE"
 load_relay_env "$ENV_FILE"
+require_core_relay_release || exit 1
 
 CONFIG="${CLOUDFLARED_CONFIG:-}"
 if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
@@ -261,7 +262,7 @@ echo "▸ Restarting the relay service.."
 "$SCRIPT_DIR/service.sh" install >/dev/null
 echo "✓ Restarted."
 
-PORT="${HERDR_RELAY_PORT:-8375}"
+PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 DEADLINE=$((SECONDS + ${HERDR_STABLE_HTTP_TIMEOUT:-90}))
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-hostname.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT

@@ -19,6 +19,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+require_core_relay_release || exit 1
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 export HERDR_RELAY_ENV="$ENV_FILE"
@@ -66,11 +67,11 @@ wait_for_exit() {
 }
 
 RELAY_BIN="$(relay_binary)"
-if ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
+if [ "$HERDR_RELAY_BACKEND" = herdr ] && ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
     echo "✗ herdr is required. Install Herdr, then run Quick Start again."
     exit 1
 fi
-PORT="${HERDR_RELAY_PORT:-8375}"
+PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 HOST="${HERDR_RELAY_HOST:-127.0.0.1}"
 GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 TUNNEL_TARGET_HOST="$HOST"
@@ -140,7 +141,7 @@ if [ -n "$GATEWAY_URL" ]; then
     fi
     echo " ✓"
 
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
     PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
     record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
@@ -178,7 +179,7 @@ elif [ "${HERDR_DEV_TRANSPORT:-}" = tailscale ]; then
     fi
     TAILSCALE_ACTIVE=1
 
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     RELAY_URL="wss://${URL#https://}"
     SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
     PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE")"
@@ -270,7 +271,7 @@ elif command -v cloudflared >/dev/null 2>&1; then
         echo "  does not open on your phone, wait a minute and scan again."
     fi
 
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     RELAY_URL="wss://${URL#https://}"
     SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
     PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE" temporary)"

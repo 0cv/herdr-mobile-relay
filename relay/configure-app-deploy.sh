@@ -6,6 +6,7 @@ WRANGLER_VERSION="4.125.0"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+require_tui_backend
 
 ENV_FILE="${HERDR_RELAY_ENV:-}"
 if [ -z "$ENV_FILE" ]; then

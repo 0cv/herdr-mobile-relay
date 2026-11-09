@@ -2,11 +2,11 @@
 
 [![check](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml)
 
-Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
-computer runs its own relay; the phone connects to them and merges every agent
-into one installable web app.
+Control agents from the [Herdr](https://herdr.dev) TUI, herdr-app or herdr-core
+from your phone. Each Linux or macOS computer runs its own relay; the phone
+connects to them and merges every agent into one installable web app.
 
-**Current version:** [`0.24.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.24.0) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.25.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.25.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -18,7 +18,7 @@ into one installable web app.
 
 ## Get started in two minutes
 
-Requirements: Herdr 0.7.5 or newer, Git, and `curl`. Herdr 0.9.0 is
+For the TUI relay: Herdr 0.7.5 or newer, Git, and `curl`. Herdr 0.9.0 is
 recommended for the complete live JSON inventory and workspace-management
 surface; the relay does not treat that recommendation as a new minimum.
 
@@ -43,6 +43,10 @@ Choose a path:
 ```
 
 Each path then lists only its own actions; **b** goes back.
+
+On a computer that also runs herdr-app, the menu first asks whether the phone
+should control the Herdr TUI, herdr-app (core), or both, and shows each relay's
+status. [Core setup →](docs/herdr-core.md#with-the-setup-menu)
 
 To reopen the main setup menu later:
 
@@ -80,6 +84,27 @@ invitation.
 [QUICKSTART.md](QUICKSTART.md) has pairing detail and troubleshooting for all
 three paths.
 
+## Core compatibility — new in 0.25.0
+
+Control herdr-app and herdr-core (`hc`) agents from your phone through a second
+relay, shown as `<hostname> (core)` beside the Herdr TUI relay.
+Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
+
+- Available: agents, status, screens, prompts, keys, secrets, start/stop/clear/restart,
+  tab and workspace rename and reorder, and **Resize Session**.
+- **Conversation** supports Pi, Claude Code, Codex, Cursor, Omp, OpenCode, Hermes,
+  Qoder, agy, Grok and Kimi, with the session setup described in the guide.
+- Cursor and Hermes need a newer Herdr core/app to report status; they appear
+  once Herdr recognises them.
+- Not yet: colour, creating/closing workspaces and tabs, worktrees, or phone-driven updates.
+
+If you use the Herdr TUI, the setup menu above sets up the TUI relay, the core
+relay, or both, and each QR says which computer it adds. Without the TUI,
+download `install.sh` from this repository at tag `v0.25.0` and run
+`sh install.sh 0.25.0`; it downloads and verifies the release bundle and prints
+the command that opens the same menu. Core pairs over Tailscale or Cloudflare;
+see the [core guide](docs/herdr-core.md).
+
 ## What you get
 
 | Agents | Terminal | Pairing |
@@ -96,12 +121,17 @@ three paths.
   by enabling **Settings → Pi Integration** for that computer, then reloading Pi
   ([CLI alternative](docs/slash-command-discovery.md#pi-runtime-commands)).
 - Read and search native conversations for agents with a native history reader,
-  including Hermes, OpenCode, Antigravity CLI, Oh My OpenCode plans and native Kimi Code journals.
+  including Hermes, OpenCode, Antigravity CLI, Grok, Oh My OpenCode plans and native Kimi Code journals.
   Kimi imports and human-engine-only histories use the Terminal fallback. Inspect workspace files, images, and Git diffs read-only.
 - Manage workspaces and Git worktrees; start, rename, clear, and stop agents.
 - Have the relay read responses aloud, even with the screen off.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.
+
+With Codex 0.160 or later, start Codex with `codex --no-daemon` in Herdr panes.
+Otherwise, Codex's shared background server runs Herdr's hooks outside the pane,
+and Codex's Conversation is missing or shows another pane's session.
+See [docs/herdr-core.md](docs/herdr-core.md) for the zsh snippet.
 
 **New in 0.24.0:** Connect through Tailscale. The setup menu groups Cloudflare,
 WebRTC and Tailscale; an open Conversation refreshes after a reconnect.
@@ -151,6 +181,7 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 | [QUICKSTART.md](QUICKSTART.md) | The fast path, start to paired phone |
 | [docs/mobile-app.md](docs/mobile-app.md) | Every feature: agent list, terminal, devices, speech, notifications |
 | [docs/transports.md](docs/transports.md) | Cloudflare, Tailscale, gateways, direct WebRTC |
+| [docs/herdr-core.md](docs/herdr-core.md) | A second relay for herdr-core (herdr-app) beside the TUI relay |
 | [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
 | [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |
 | [docs/agent-directories.md](docs/agent-directories.md) | Agents that use a non-default config or profile directory |

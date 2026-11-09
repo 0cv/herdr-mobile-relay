@@ -1,0 +1,426 @@
+package hc
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/hc/hctest"
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+)
+
+func TestRealCore(t *testing.T) {
+	var root string
+	socket, _ := hctest.StartCore(t, func(scratch string, env []string) []string {
+		root = scratch
+		return env
+	})
+	client := New(socket)
+	var started []string
+	t.Cleanup(func() {
+		for _, addr := range started {
+			for _, method := range []string{"terminal.kill", "terminal.rm"} {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, err := client.call(ctx, method, map[string]any{"terminal": addr})
+				cancel()
+				if err != nil {
+					t.Errorf("cleanup %s %s: %v", method, addr, err)
+				}
+			}
+		}
+	})
+	wait := func(t *testing.T, ready func() bool) {
+		t.Helper()
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		tick := time.NewTicker(20 * time.Millisecond)
+		defer tick.Stop()
+		for !ready() {
+			select {
+			case <-deadline.C:
+				t.Fatal("condition not satisfied within 10s")
+			case <-tick.C:
+			}
+		}
+	}
+	wait(t, func() bool { _, err := os.Stat(socket); return err == nil })
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	start := func(argv []string) string {
+		raw, err := client.call(ctx, "terminal.run", map[string]any{"argv": argv, "cwd": root, "no_parent": true, "labels": map[string]string{"herdr.space": "relay-space", "herdr.tab": "relay-tab"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			Address string `json:"address"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Address == "" {
+			t.Fatalf("terminal.run has no address: %s", raw)
+		}
+		started = append(started, result.Address)
+		return result.Address
+	}
+	addr := start([]string{"/bin/sh"})
+	t.Run("pane-size-leasing", func(t *testing.T) {
+		desktop, err := client.attach(ctx, addr, 140, 45)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer desktop.Close()
+		m := NewPaneSizer(client)
+		defer m.Shutdown(context.Background())
+		size := func(cols, rows int) {
+			t.Helper()
+			wait(t, func() bool {
+				terminal, err := client.getTerminal(ctx, addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return terminal.Cols == cols && terminal.Rows == rows
+			})
+		}
+		if _, _, err := m.Acquire(ctx, "phone", addr, 60, 20); err != nil {
+			t.Fatal(err)
+		}
+		size(60, 20)
+		if err := client.Prompt(ctx, addr, "i=0; while [ $i -lt 40 ]; do echo resize-line; i=$((i+1)); done"); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, func() bool {
+			read, err := client.ReadPaneVisible(ctx, addr, 0, "plain")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return len(strings.Split(strings.TrimSuffix(string(read.Content), "\n"), "\n")) == 20
+		})
+		if _, _, err := m.Acquire(ctx, "phone", addr, 70, 25); err != nil {
+			t.Fatal(err)
+		}
+		size(70, 25)
+		if err := m.Release(ctx, "phone", addr, true); err != nil {
+			t.Fatal(err)
+		}
+		size(140, 45)
+		if _, _, err := m.Acquire(ctx, "phone", addr, 60, 20); err != nil {
+			t.Fatal(err)
+		}
+		size(60, 20)
+		if err := desktop.Resize(130, 40); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		terminal, err := client.getTerminal(ctx, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("later desktop resize while phone remains attached: %dx%d", terminal.Cols, terminal.Rows)
+	})
+	t.Run("labels", func(t *testing.T) {
+		panes, err := client.PaneList(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pane := range panes {
+			if pane.ID == addr {
+				if pane.WorkspaceID != "relay-space" || pane.TabID != "relay-tab" {
+					t.Fatalf("labels: %+v", pane)
+				}
+				return
+			}
+		}
+		t.Fatal("started shell missing from PaneList")
+	})
+	t.Run("layout", func(t *testing.T) {
+		value := strings.ReplaceAll(layoutFixture, `"id":"s"`, `"id":"relay-space"`)
+		value = strings.Replace(value, `"spaces":[`, `"spaces":[{"id":"other","name":"Other","tabs":[]},`, 1)
+		value = strings.ReplaceAll(value, `"id":"a"`, `"id":"relay-tab"`)
+		value = strings.Replace(value, `"children":[]`, `"children":[{"type":"block","content":{"terminal":"`+addr+`"}}]`, 1)
+		if _, err := client.call(ctx, "doc.set", map[string]any{"name": "herdr-app", "value": json.RawMessage(value), "version": 0}); err != nil {
+			t.Fatal(err)
+		}
+		seed, err := client.call(ctx, "doc.get", map[string]any{"name": "herdr-app"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var seeded struct{ Value json.RawMessage }
+		if err := json.Unmarshal(seed, &seeded); err != nil {
+			t.Fatal(err)
+		}
+		value = string(seeded.Value)
+		before, events, err := client.Events(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer events.Close()
+		if err := client.TabRename(ctx, "relay-tab", "renamed"); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.TabMove(ctx, "relay-tab", 3); err != nil {
+			t.Fatal(err)
+		}
+		eventCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		defer stop()
+		after, err := events.Next(eventCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after.Tabs) != 3 || after.Tabs[2].ID != "relay-tab" || after.Tabs[2].Label != "renamed" {
+			t.Fatalf("tabs: %+v", after.Tabs)
+		}
+		if !reflect.DeepEqual(before.Panes, after.Panes) {
+			t.Fatalf("pane identity changed: %+v / %+v", before.Panes, after.Panes)
+		}
+		tabs, err := client.TabList(ctx)
+		if err != nil || !reflect.DeepEqual(tabs, after.Tabs) {
+			t.Fatalf("TabList: %+v, %v", tabs, err)
+		}
+		panes, err := client.PaneList(ctx)
+		if err != nil || !reflect.DeepEqual(panes, after.Panes) {
+			t.Fatalf("PaneList: %+v, %v", panes, err)
+		}
+		read := func() map[string]any {
+			raw, err := client.call(ctx, "doc.get", map[string]any{"name": "herdr-app"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			decoder.UseNumber()
+			if err := decoder.Decode(&doc); err != nil {
+				t.Fatal(err)
+			}
+			return doc
+		}
+		var expected map[string]any
+		decoder := json.NewDecoder(strings.NewReader(value))
+		decoder.UseNumber()
+		if err := decoder.Decode(&expected); err != nil {
+			t.Fatal(err)
+		}
+		space := expected["spaces"].([]any)[1].(map[string]any)
+		originalTabs := space["tabs"].([]any)
+		originalTabs[0].(map[string]any)["name"] = "renamed"
+		space["tabs"] = []any{originalTabs[1], originalTabs[2], originalTabs[0]}
+		stored := read()
+		if !reflect.DeepEqual(stored["value"], expected) {
+			t.Fatalf("stored: %+v, expected: %+v", stored, expected)
+		}
+		if err := client.WorkspaceRename(ctx, "relay-space", "Workspace renamed"); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.WorkspaceMove(ctx, "relay-space", 0); err != nil {
+			t.Fatal(err)
+		}
+		space["name"] = "Workspace renamed"
+		spaces := expected["spaces"].([]any)
+		expected["spaces"] = []any{spaces[1], spaces[0]}
+		stored = read()
+		if !reflect.DeepEqual(stored["value"], expected) {
+			t.Fatalf("workspace layout: %+v, expected: %+v", stored, expected)
+		}
+		checks := 0
+		competing := herdr.WithDispatchCheck(ctx, func() error {
+			checks++
+			if checks == 2 {
+				return New(socket).WorkspaceRename(ctx, "relay-space", "desktop")
+			}
+			return nil
+		})
+		err = client.WorkspaceRename(competing, "relay-space", "loser")
+		if !herdr.IsRefused(err) || herdr.RefusalCode(err) != "layout_conflict" {
+			t.Fatalf("conflict: %v", err)
+		}
+		space["name"] = "desktop"
+		stored = read()
+		if !reflect.DeepEqual(stored["value"], expected) {
+			t.Fatalf("concurrent value: %+v", stored)
+		}
+		if _, err := client.call(ctx, "doc.set", map[string]any{"name": "herdr-app", "value": nil, "version": stored["version"]}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("idle-shell", func(t *testing.T) {
+		wait(t, func() bool {
+			info, err := client.PaneProcessInfoFresh(ctx, addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return info.ShellPID > 0 && info.ShellPID == info.ForegroundProcessGroupID
+		})
+	})
+	snapshot, stream, err := client.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	t.Run("snapshot", func(t *testing.T) {
+		for _, pane := range snapshot.Panes {
+			if pane.ID == addr {
+				return
+			}
+		}
+		t.Fatal("shell missing from Events snapshot")
+	})
+	t.Run("heartbeat", func(t *testing.T) {
+		time.Sleep(17 * time.Second)
+		if _, err := client.call(ctx, "terminal.label", map[string]any{"terminal": addr, "labels": map[string]string{"herdr.tab": "after-heartbeat"}}); err != nil {
+			t.Fatal(err)
+		}
+		eventCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		defer stop()
+		after, err := stream.Next(eventCtx)
+		if err != nil {
+			t.Fatalf("stream after heartbeat: %v", err)
+		}
+		for _, pane := range after.Panes {
+			if pane.ID != addr {
+				continue
+			}
+			for _, before := range snapshot.Panes {
+				if before.ID == addr && pane.TerminalID == before.TerminalID && pane.TabID == "after-heartbeat" {
+					return
+				}
+			}
+		}
+		t.Fatalf("shell identity or label after heartbeat: before=%+v after=%+v", snapshot.Panes, after.Panes)
+	})
+	t.Run("prompt-and-visible-read", func(t *testing.T) {
+		if err := client.Prompt(ctx, addr, "echo hc-relay-mark"); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, func() bool {
+			read, err := client.ReadPaneVisible(ctx, addr, 0, "text")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.Contains(string(read.Content), "hc-relay-mark") && !read.Truncated
+		})
+	})
+	t.Run("scrollback", func(t *testing.T) {
+		shell := start([]string{"/bin/sh"})
+		if err := client.Prompt(ctx, shell, `i=1; while [ "$i" -le 300 ]; do printf 'history-row-%03d\n' "$i"; i=$((i+1)); done`); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, func() bool {
+			read, err := client.ReadPaneVisible(ctx, shell, 200, "text")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.Contains(string(read.Content), "history-row-300")
+		})
+		observe := func(label, terminal string) {
+			for _, lines := range []int{0, 80, 400} {
+				raw, err := client.terminalCall(ctx, "terminal.read", terminal, map[string]any{"lines": lines})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var result struct {
+					Text     string
+					Complete bool
+					How      string
+					Why      string
+				}
+				if err := json.Unmarshal(raw, &result); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("%s lines=%d: how=%q complete=%v why=%q rows=%d early-history=%v", label, lines, result.How, result.Complete, result.Why, strings.Count(result.Text, "\n"), strings.Contains(result.Text, "history-row-001"))
+			}
+		}
+		observe("shell", shell)
+		recent, err := client.ReadPaneRecent(ctx, shell, 400, "ansi")
+		if err != nil || recent.Truncated || !strings.Contains(string(recent.Content), "history-row-001") {
+			t.Fatalf("history = %+v, %v", recent, err)
+		}
+		visible, err := client.ReadPaneVisible(ctx, shell, 400, "ansi")
+		if err != nil || visible.Truncated || strings.Contains(string(visible.Content), "history-row-001") || !strings.Contains(string(visible.Content), "history-row-300") {
+			t.Fatalf("screen = %+v, %v", visible, err)
+		}
+		less := start([]string{"/bin/sh", "-c", "seq 1 300 | less"})
+		wait(t, func() bool {
+			read, err := client.ReadPaneVisible(ctx, less, 200, "text")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.Contains(string(read.Content), "\n2\n")
+		})
+		observe("less", less)
+	})
+	cat := start([]string{"/bin/sh", "-c", "trap '' INT; exec cat"})
+	for _, key := range []string{"Enter", "Escape", "Tab", "Up", "Down", "Left", "Right", "Shift+Tab", "ctrl+c", "f5", "A"} {
+		t.Run("key/"+key, func(t *testing.T) {
+			if err := client.SendKeys(ctx, cat, []string{key}); err != nil {
+				t.Fatalf("client/core key mismatch for %q: %v", key, err)
+			}
+		})
+	}
+	for _, key := range []string{"/", "A", "1", " "} {
+		t.Run("literal/"+key, func(t *testing.T) {
+			if err := client.SendLiteralKey(ctx, cat, key); err != nil {
+				t.Fatalf("client/core literal key mismatch for %q: %v", key, err)
+			}
+		})
+	}
+	t.Run("unknown-key-refused", func(t *testing.T) {
+		err := client.SendKeys(ctx, cat, []string{"not-a-real-key"})
+		if !herdr.IsRefused(err) || errors.Is(err, herdr.ErrDispatchedUnknown) {
+			t.Fatalf("unknown key classification: %v", err)
+		}
+	})
+	t.Run("status-event-and-inventory", func(t *testing.T) {
+		if err := client.Prompt(ctx, addr, `printf '\033]7501;state=blocked:kind=permission:app=relayit\033\\'`); err != nil {
+			t.Fatal(err)
+		}
+		eventCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		defer stop()
+		for {
+			snapshot, err := stream.Next(eventCtx)
+			if err != nil {
+				t.Fatalf("status stream: %v", err)
+			}
+			found := false
+			for _, pane := range snapshot.Panes {
+				if pane.ID == addr && pane.Agent == "relayit" && pane.Status == "blocked" {
+					found = true
+				}
+			}
+			if found {
+				break
+			}
+		}
+		inventory, err := client.GetInventory(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pane := range inventory.Panes {
+			if pane.ID == addr && pane.Agent == "relayit" && pane.Status == "blocked" {
+				return
+			}
+		}
+		t.Fatalf("reported status missing from inventory: %+v", inventory)
+	})
+	t.Run("stop", func(t *testing.T) {
+		if err := client.StopPane(ctx, addr); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, func() bool {
+			panes, err := client.PaneList(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, pane := range panes {
+				if pane.ID == addr {
+					return false
+				}
+			}
+			return true
+		})
+	})
+}

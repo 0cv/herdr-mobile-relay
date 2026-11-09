@@ -21,9 +21,9 @@ fi
 
 # A gateway-configured relay has no tunnel hostname and no cloudflared config:
 # the phone finds it through the gateway, so the link only needs the app origin.
-if [ "${HERDR_TAILSCALE_PORT:-}" = 8443 ]; then
-    ADDRESS="$("$(relay_binary)" tailscale address --port 8443)" || exit $?
-    HOST_LABEL="$(host_label)"
+if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
+    ADDRESS="$("$(relay_binary)" tailscale address --port "$RELAY_TAILSCALE_PORT")" || exit $?
+    HOST_LABEL="$(relay_host_label)"
     RELAY_URL="wss://${ADDRESS#https://}"
     SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
     PHONE_APP_BASE="$(choose_phone_app_base_url "$ADDRESS" "$ENV_FILE" stable)"
@@ -46,7 +46,7 @@ fi
 
 GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 if [ -n "$GATEWAY_URL" ]; then
-    HOST_LABEL="$(host_label)"
+    HOST_LABEL="$(relay_host_label)"
     SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
     PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
     record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
@@ -71,7 +71,7 @@ TUNNEL_HOST="${TUNNEL_HOST#https://}"
 TUNNEL_HOST="${TUNNEL_HOST#wss://}"
 TUNNEL_HOST="${TUNNEL_HOST%%/*}"
 if [ -z "$TUNNEL_HOST" ]; then
-    CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
+    CONFIG="${CLOUDFLARED_CONFIG:-$RELAY_CLOUDFLARED_CONFIG}"
     if [ ! -r "$CONFIG" ]; then
         echo "✗ Cannot determine this relay's hostname: $CONFIG is missing."
         echo "  Follow the README's Stable Hostnames section first, or pass the"
@@ -86,7 +86,7 @@ if [ -z "$TUNNEL_HOST" ]; then
     fi
 fi
 
-HOST_LABEL="$(host_label)"
+HOST_LABEL="$(relay_host_label)"
 RELAY_URL="wss://$TUNNEL_HOST"
 SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
 PHONE_APP_FALLBACK="https://$TUNNEL_HOST"

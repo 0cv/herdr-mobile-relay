@@ -493,7 +493,10 @@ func TestActivityBackfillUsesLiveForegroundProject(t *testing.T) {
 
 func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
 	home := t.TempDir()
-	profile := t.TempDir()
+	profile, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv(agentroots.OMPListEnv, profile)
 	const sessionID = "123e4567-e89b-12d3-a456-426614174321"
 	path := filepath.Join(profile, "sessions", "-work", "session_"+sessionID+".jsonl")
@@ -515,7 +518,10 @@ func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
 
 func TestForegroundClaudeTranscriptUsesConfiguredRoot(t *testing.T) {
 	home := t.TempDir()
-	profile := t.TempDir()
+	profile, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv(agentroots.ClaudeListEnv, profile)
 	const sessionID = "123e4567-e89b-12d3-a456-426614174322"
 	path := filepath.Join(profile, "projects", "-work-foreground", sessionID+".jsonl")
@@ -1540,7 +1546,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 
 	eventDone := make(chan struct{})
 	go func() {
-		server.poller.RunEvents(ctx, herdr.NewEventClient(socketPath))
+		server.poller.RunEvents(ctx)
 		close(eventDone)
 	}()
 	select {

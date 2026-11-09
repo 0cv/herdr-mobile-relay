@@ -11,19 +11,20 @@ if [ -z "${HERDR_RELAY_ENV:-}" ]; then
 fi
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 assert_service_env_matches "$ENV_FILE"
-if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" != 8443 ]; then
+RELAY_TAILSCALE_PORT="$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
+if [ -z "$RELAY_TAILSCALE_PORT" ]; then
     echo "Always on Tailscale is not selected; nothing changed."
     exit 0
 fi
 PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
 status=0
-"$(relay_binary)" tailscale off --port 8443 --relay-port "${PORT:-8375}" || status=$?
+"$(relay_binary)" tailscale off --port "$RELAY_TAILSCALE_PORT" --relay-port "${PORT:-$RELAY_DEFAULT_PORT}" || status=$?
 if [ "$status" -ne 0 ]; then
     if [ "${HERDR_TAILSCALE_ABANDON:-}" != 1 ]; then
-        echo "✗ Tailscale Serve could not be removed (exit $status); mapping may remain, selection kept. Run: tailscale serve --https=8443 off" >&2
+        echo "✗ Tailscale Serve could not be removed (exit $status); mapping may remain, selection kept. Run: tailscale serve --https=$RELAY_TAILSCALE_PORT off" >&2
         exit 1
     fi
-    echo "⚠ Clearing the selection (exit $status); Tailscale Serve mapping may remain. Run: tailscale serve --https=8443 off" >&2
+    echo "⚠ Clearing the selection (exit $status); Tailscale Serve mapping may remain. Run: tailscale serve --https=$RELAY_TAILSCALE_PORT off" >&2
 fi
 remove_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT
 unset HERDR_TAILSCALE_PORT

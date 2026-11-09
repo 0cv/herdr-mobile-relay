@@ -42,7 +42,7 @@ func TestOwnershipSurvivesOneStaleObservation(t *testing.T) {
 	if err := resolver.ReconcileOwnership([]PaneIdentity{target}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "wrapper" {
+	if got := resolver.ResolvePane("pane", ""); got != "wrapper" {
 		t.Fatalf("stale observation deleted live ownership: %q", got)
 	}
 
@@ -53,7 +53,7 @@ func TestOwnershipSurvivesOneStaleObservation(t *testing.T) {
 	if err := reloaded.ReconcileOwnership([]PaneIdentity{target}); err != nil {
 		t.Fatal(err)
 	}
-	if got := reloaded.ResolveOwnedPane("pane"); got != "wrapper" {
+	if got := reloaded.ResolvePane("pane", ""); got != "wrapper" {
 		t.Fatalf("ownership was not persisted: %q", got)
 	}
 
@@ -62,7 +62,7 @@ func TestOwnershipSurvivesOneStaleObservation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "" {
+	if got := resolver.ResolvePane("pane", ""); got != "" {
 		t.Fatalf("ownership of a gone pane was kept: %q", got)
 	}
 	gone := NewResolver(dir, nil)
@@ -72,7 +72,7 @@ func TestOwnershipSurvivesOneStaleObservation(t *testing.T) {
 	if err := gone.ReconcileOwnership([]PaneIdentity{target}); err != nil {
 		t.Fatal(err)
 	}
-	if got := gone.ResolveOwnedPane("pane"); got != "" {
+	if got := gone.ResolvePane("pane", ""); got != "" {
 		t.Fatalf("deletion was not persisted: %q", got)
 	}
 }
@@ -90,7 +90,7 @@ func TestVerifiedOwnershipSurvivesRestartNotReplacement(t *testing.T) {
 	if err := resolver.ReconcileOwnership([]PaneIdentity{target}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "" {
+	if got := resolver.ResolvePane("pane", ""); got != "" {
 		t.Fatalf("pending ownership resolved to %q", got)
 	}
 	if err := resolver.RememberVerified(target, "wrapper"); err != nil {
@@ -100,7 +100,7 @@ func TestVerifiedOwnershipSurvivesRestartNotReplacement(t *testing.T) {
 	if err := resolver.SetOwnershipPath(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "" {
+	if got := resolver.ResolvePane("pane", ""); got != "" {
 		t.Fatal("resolved before authoritative observation")
 	}
 	if err := resolver.ReconcileOwnership([]PaneIdentity{target}); err != nil {
@@ -114,13 +114,13 @@ func TestVerifiedOwnershipSurvivesRestartNotReplacement(t *testing.T) {
 	if err := resolver.ReconcileOwnership([]PaneIdentity{replacement}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "" {
+	if got := resolver.ResolvePane("pane", ""); got != "" {
 		t.Fatalf("ownership transferred: %q", got)
 	}
 	if err := resolver.ReconcileOwnership([]PaneIdentity{target}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "" {
+	if got := resolver.ResolvePane("pane", ""); got != "" {
 		t.Fatal("old ownership revived")
 	}
 }
@@ -142,7 +142,7 @@ func TestPendingOwnershipAndCorruptStoreFailClosed(t *testing.T) {
 	if err := restarted.ReconcileOwnership([]PaneIdentity{target}); err != nil {
 		t.Fatal(err)
 	}
-	if restarted.ResolveOwnedPane("pane") != "" {
+	if restarted.ResolvePane("pane", "") != "" {
 		t.Fatal("interrupted launch became verified")
 	}
 	if err := os.WriteFile(path, []byte("not-json"), 0600); err != nil {
@@ -154,7 +154,7 @@ func TestPendingOwnershipAndCorruptStoreFailClosed(t *testing.T) {
 	if err := restarted.ReconcileOwnership(nil); err == nil {
 		t.Fatal("overwrote corrupt ownership")
 	}
-	if restarted.ResolveOwnedPane("pane") != "" {
+	if restarted.ResolvePane("pane", "") != "" {
 		t.Fatal("guessed relaunch ownership after corruption")
 	}
 	if restarted.ResolvePane("pane", "wrapper") != "wrapper" {
@@ -228,7 +228,7 @@ func TestLaunchBetweenAbsencesKeepsOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "wrapper" {
+	if got := resolver.ResolvePane("pane", ""); got != "wrapper" {
 		t.Fatalf("absences straddling a launch deleted ownership: %q", got)
 	}
 }
@@ -259,7 +259,7 @@ func TestFailedReconcilePersistFailsClosed(t *testing.T) {
 	if err := resolver.ReconcileOwnership([]PaneIdentity{target}); err == nil {
 		t.Fatal("kept reconciling after the store became unavailable")
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "" {
+	if got := resolver.ResolvePane("pane", ""); got != "" {
 		t.Fatalf("resolved ownership from an unavailable store: %q", got)
 	}
 	if resolver.OwnsTarget(target, "wrapper") {
@@ -277,7 +277,7 @@ func TestFailedReconcilePersistFailsClosed(t *testing.T) {
 	if err := resolver.ReconcileOwnership([]PaneIdentity{target}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolver.ResolveOwnedPane("pane"); got != "wrapper" {
+	if got := resolver.ResolvePane("pane", ""); got != "wrapper" {
 		t.Fatalf("reload did not recover the persisted record: %q", got)
 	}
 }
@@ -308,7 +308,24 @@ func TestOwnershipPersistenceFailureAndRemovedProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver.Reload()
-	if resolver.ResolveOwnedPane("pane") != "" {
+	if resolver.ResolvePane("pane", "") != "" {
 		t.Fatal("resolved removed profile")
+	}
+}
+
+func TestResolvePaneFallsBackToReportedAgent(t *testing.T) {
+	dir, path := ownershipFixture(t)
+	resolver := NewResolver(dir, nil)
+	if err := resolver.SetOwnershipPath(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolver.ResolvePane("pane", "Wrapper"); got != "wrapper" {
+		t.Fatalf("reported agent resolved to %q", got)
+	}
+	if got := resolver.ResolvePane("pane", "claude-code"); got != "" {
+		t.Fatalf("alias without installed profile resolved to %q", got)
+	}
+	if got := resolver.ResolvePane("pane", "mystery"); got != "" {
+		t.Fatalf("unknown agent resolved to %q", got)
 	}
 }

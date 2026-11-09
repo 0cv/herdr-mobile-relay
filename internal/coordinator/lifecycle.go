@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
@@ -40,6 +41,7 @@ var agentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 type StartRequest struct {
 	ProfileID   string
 	WorkspaceID string
+	TabID       string
 	Name        string
 	Cwd         string
 	Prompt      string
@@ -50,22 +52,23 @@ type StartRequest struct {
 }
 
 type StartResult struct {
-	Identity    LaunchIdentity `json:"-"`
-	PaneID      string         `json:"pane_id"`
-	Name        string         `json:"name"`
-	Cwd         string         `json:"cwd"`
-	WorkspaceID string         `json:"workspace_id,omitempty"`
+	PromptNotReady bool           `json:"-"`
+	Identity       LaunchIdentity `json:"-"`
+	PaneID         string         `json:"pane_id"`
+	Name           string         `json:"name"`
+	Cwd            string         `json:"cwd"`
+	WorkspaceID    string         `json:"workspace_id,omitempty"`
 }
 
 type Lifecycle struct {
 	state        *State
-	herdr        *herdr.Client
+	herdr        backend.Backend
 	profiles     *profiles.Resolver
 	home         string
 	waitForRetry func(context.Context, time.Duration) bool
 }
 
-func NewLifecycle(client *herdr.Client, resolver *profiles.Resolver) *Lifecycle {
+func NewLifecycle(client backend.Backend, resolver *profiles.Resolver) *Lifecycle {
 	home, _ := os.UserHomeDir()
 	return &Lifecycle{herdr: client, profiles: resolver, home: home}
 }
@@ -126,7 +129,7 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 	}
 	if existing := l.reconcileExisting(ctx, profile.ID, request); existing.PaneID != "" {
 		expectedTerminal = existing.TerminalID
-		return StartResult{PaneID: existing.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
+		return StartResult{PaneID: existing.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID, PromptNotReady: l.herdr.CapabilityStatus().OneStepLaunch && request.Prompt != ""}, nil
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -154,6 +157,28 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 	}
 	if workspaceID == "" {
 		workspaceID = SelectWorkspaceForCwd(request.Cwd, inventory.Panes, workspaces, l.home)
+	}
+
+	if l.herdr.CapabilityStatus().OneStepLaunch {
+		args, err := hermesProfileArgs(request.HermesProfile)
+		if err != nil {
+			return result, err
+		}
+		argv := append(append([]string(nil), profile.Argv...), args...)
+		if profile.Kind == "codex" && len(argv) > 0 {
+			argv = append([]string{argv[0], "--no-daemon"}, argv[1:]...)
+		}
+		pane, ready, err := l.herdr.LaunchTerminal(startupCtx, argv, request.Cwd, request.Name, workspaceID, request.TabID, request.Prompt != "")
+		if err != nil {
+			return result, err
+		}
+		expectedTerminal = pane.TerminalID
+		result = StartResult{PaneID: pane.ID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: pane.WorkspaceID, PromptNotReady: request.Prompt != "" && !ready}
+		ownership := profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
+		if err := l.profiles.RememberVerified(ownership, profile.ID); err != nil {
+			return result, partiallyApplied("agent started but profile ownership could not be saved", err)
+		}
+		return result, nil
 	}
 
 	target, err := l.createTarget(startupCtx, workspaceID, request.Name, request.Cwd)

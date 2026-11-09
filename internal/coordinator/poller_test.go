@@ -339,7 +339,7 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 	defer cancel()
 	runDone := make(chan struct{})
 	go func() {
-		poller.RunEvents(ctx, herdr.NewEventClient(socketPath))
+		poller.RunEvents(ctx)
 		close(runDone)
 	}()
 

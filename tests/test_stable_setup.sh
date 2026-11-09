@@ -761,7 +761,48 @@ test_teardown_recovers_uuid_config_by_tunnel_name() {
 }
 
 
-echo "1..18"
+test_core_instance() {
+    new_case
+    export HERDR_RELAY_BACKEND=hc
+    export HERDR_RELAY_ENV="$HOME/.config/herdr-mobile-relay-hc/relay.env"
+    export HERDR_STABLE_STATE_FILE="$HOME/.config/herdr-mobile-relay-hc/stable-setup.json"
+    export HERDR_STABLE_HOSTNAME=relay-workstation-hc.example.test
+    mkdir -p "$HOME/.cloudflared" "$HOME/.config/systemd/user"
+    printf 'TUI config sentinel\n' > "$HOME/.cloudflared/config-herdr-mobile-relay.yml"
+    printf 'TUI unit sentinel\n' > "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "core stable setup"; }
+    assert_contains "$HOME/.config/herdr-mobile-relay-hc/cloudflared/config.yml" 'service: http://127.0.0.1:8377'
+    assert_contains "$STUB_LOG" 'herdr-mobile-relay-workstation-hc'
+    assert_contains "$STUB_LOG" 'relay-workstation-hc.example.test'
+    assert_not_contains "$STUB_LOG" 'herdr-remote'
+    assert_contains "$HOME/.cloudflared/config-herdr-mobile-relay.yml" 'TUI config sentinel'
+    assert_contains "$HOME/.config/systemd/user/herdr-mobile-relay.service" 'TUI unit sentinel'
+    unset HERDR_RELAY_BACKEND
+    pass "core provisions its own tunnel and config without TUI fallback"
+}
+
+test_core_refuses_old_release() {
+    new_case
+    export HERDR_RELAY_BACKEND=hc
+    export HERDR_RELAY_ENV="$HOME/.config/herdr-mobile-relay-hc/relay.env"
+    export HERDR_STABLE_STATE_FILE="$HOME/.config/herdr-mobile-relay-hc/stable-setup.json"
+    export HERDR_RELAY_BIN="$TEST_BIN_DIR/old-relay"
+    printf '#!/bin/sh\necho '"'"'{"version":"0.24.0","revision":"r","target":"t"}'"'"'\n' > "$HERDR_RELAY_BIN"
+    chmod +x "$HERDR_RELAY_BIN"
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "core stable setup accepted an old relay release"
+    assert_contains "$OUTPUT" 'The installed relay release (0.24.0) cannot serve herdr-core.'
+    [ ! -s "$STUB_LOG" ] || fail "old relay release reached cloudflared or systemctl"
+    [ ! -e "$HERDR_RELAY_ENV" ] || fail "old relay release created the core env"
+    [ ! -e "$HERDR_STABLE_STATE_FILE" ] || fail "old relay release created setup state"
+    unset HERDR_RELAY_BACKEND
+    pass "core stable setup refuses an old relay release before changing anything"
+}
+
+echo "1..20"
+test_core_instance
+test_core_refuses_old_release
 test_success_and_alternate_port
 test_refuses_tailscale
 test_existing_phone_app_origin

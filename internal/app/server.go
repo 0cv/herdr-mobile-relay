@@ -27,6 +27,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/audit"
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
@@ -34,6 +35,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
+	"github.com/0cv/herdr-mobile-relay/internal/hc"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
@@ -74,13 +76,31 @@ type speechRequest struct {
 	cancel    context.CancelFunc
 }
 
+type paneSizer interface {
+	Available() bool
+	Acquire(context.Context, string, string, int, int) (int, int, error)
+	Release(context.Context, string, string, bool) error
+	ReleaseClient(context.Context, string) error
+	ReadGeometry(string, string) (int, int, bool)
+	ResizedWithin(string, time.Duration) bool
+	Run(context.Context)
+	Shutdown(context.Context) error
+}
+
+type piSessionIdentity struct {
+	pid     int
+	session string
+}
+
 type Server struct {
-	cfg      *config.Config
-	version  string
-	revision string
-	hostname string
-	home     string
-	logger   *slog.Logger
+	piSessionsMu sync.Mutex
+	piSessions   map[string]piSessionIdentity
+	cfg          *config.Config
+	version      string
+	revision     string
+	hostname     string
+	home         string
+	logger       *slog.Logger
 
 	state          *coordinator.State
 	hub            *transport.Hub
@@ -102,7 +122,7 @@ type Server struct {
 	conversationB    *conversation.Browser
 	profiles         *profiles.Resolver
 	webH             *web.Handler
-	herdrC           *herdr.Client
+	herdrC           backend.Backend
 	kimiProcessBirth func(int) (string, error)
 	clipboardRead    func(context.Context) ([]byte, error)
 	clipboardWrite   func(context.Context, []byte) error
@@ -115,7 +135,7 @@ type Server struct {
 	speechLanguages  []string
 	speechRequests   map[string]*speechRequest
 	copyMu           sync.Mutex
-	paneSizeM        *panesize.Manager
+	paneSizeM        paneSizer
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
 	piIntegration    *piintegration.Manager
@@ -165,10 +185,17 @@ type Server struct {
 	historyTasks      *lifecycleTasks
 }
 
+func newBackend(cfg *config.Config) backend.Backend {
+	if cfg.Backend == "hc" {
+		return hc.New(cfg.SocketPath)
+	}
+	return herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
+}
+
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
-	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
+	herdrClient := newBackend(cfg)
 	_, clipboardRead, _ := clipboard.Reader()
 	pollInterval := time.Duration(cfg.PollInterval * float64(time.Second))
 	poller := coordinator.NewPoller(herdrClient, state, pollInterval, logger)
@@ -179,6 +206,14 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		hostname = "relay"
 	} else if idx := strings.Index(hostname, "."); idx > 0 {
 		hostname = hostname[:idx]
+	}
+	var paneSizeM paneSizer
+	if cfg.Backend == "hc" {
+		hostname += " (core)"
+		poller.SetHostname(hostname)
+		paneSizeM = hc.NewPaneSizer(herdrClient.(*hc.Client))
+	} else {
+		paneSizeM = panesize.NewManager(herdrClient, logger)
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
 	if cfg.RuntimeDir != "" {
@@ -254,7 +289,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		speechRemove:        speech.Remove,
 		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
-		paneSizeM:           panesize.NewManager(herdrClient, logger),
+		paneSizeM:           paneSizeM,
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
@@ -756,46 +791,8 @@ func (s *Server) Run(ctx context.Context) error {
 				s.recordWriteAudit(client, msg, result)
 			}
 			s.hub.Send(client, commandResultMessage(result))
-		case "check_update":
-			s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
-				"state":            "checking",
-				"current_version":  s.version,
-				"current_revision": s.revision,
-			}})
-			updateState := s.updateM.Check(ctx)
-			s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-			s.sendCommandResult(client, inbound.RequestID, "check_update", true, "completed", "", "", map[string]any{"update": updateState})
-		case "install_update":
-			deployAppFirst := s.appDeployM.Required()
-			expectedAppOrigin := ""
-			if deployAppFirst {
-				if originErr := s.appDeployM.ValidateOrigin(inbound.ExpectedOrigin); originErr != nil {
-					s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", originErr.Error(), "", map[string]any{"update": s.updateM.State()})
-					break
-				}
-				expectedAppOrigin = inbound.ExpectedOrigin
-			}
-			job, updateState, scheduleErr := s.updateM.Schedule(
-				ctx,
-				inbound.ExpectedVersion,
-				inbound.ExpectedRevision,
-				deployAppFirst,
-				expectedAppOrigin,
-			)
-			if scheduleErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", scheduleErr.Error(), "", map[string]any{"update": updateState})
-				break
-			}
-			s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-			s.sendCommandResult(client, inbound.RequestID, "install_update", true, "scheduled", "", "", map[string]any{"job": job, "update": updateState})
-		case "deploy_app_update":
-			job, deployState, scheduleErr := s.appDeployM.Schedule(ctx, inbound.ExpectedVersion, inbound.ExpectedRevision, inbound.ExpectedOrigin)
-			if scheduleErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", false, "failed", scheduleErr.Error(), "", map[string]any{"app_deploy": deployState})
-				break
-			}
-			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
-			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
+		case "check_update", "install_update", "deploy_app_update":
+			s.handleUpdate(ctx, client, inbound)
 		case "lease_pane_size", "release_pane_size":
 			s.handlePaneSizeCommand(client, inbound)
 		case "read_pane":
@@ -1319,6 +1316,8 @@ func (s *Server) Run(ctx context.Context) error {
 	s.setInventoryPublisher(ctx)
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
+		s.enrichPiSessions(ctx, agents)
+		s.enrichRegistrySessions(ctx, agents)
 		s.enrichKimiSessions(ctx, agents)
 		for _, a := range agents {
 			s.resolveAgentSessionName(a)
@@ -1391,16 +1390,7 @@ func (s *Server) Run(ctx context.Context) error {
 	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
 	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
-	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
-	eventClient.SetWorkspaceReorderedCapability(
-		s.herdrC.ShouldAttemptWorkspaceReordered,
-		s.herdrC.NoteWorkspaceReorderedSupported,
-		s.herdrC.NoteWorkspaceReorderedUnsupported,
-	)
-	eventClient.SetWorkspaceReorderedReset(func() {
-		s.herdrC.InvalidateLiveCapabilities()
-	})
-	startBackground(func() { s.poller.RunEvents(ctx, eventClient) })
+	startBackground(func() { s.poller.RunEvents(ctx) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
 	startBackground(func() { s.paneSizeM.Run(ctx) })
 	profileSignals := make(chan os.Signal, 1)
@@ -1480,6 +1470,55 @@ func (s *Server) Run(ctx context.Context) error {
 	return runErr
 }
 
+func (s *Server) handleUpdate(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound) {
+	if s.cfg.Backend == "hc" {
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", "Updates are managed by the TUI relay, not the hc backend", "", nil)
+		return
+	}
+	switch inbound.Type {
+	case "check_update":
+		s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
+			"state":            "checking",
+			"current_version":  s.version,
+			"current_revision": s.revision,
+		}})
+		updateState := s.updateM.Check(ctx)
+		s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
+		s.sendCommandResult(client, inbound.RequestID, "check_update", true, "completed", "", "", map[string]any{"update": updateState})
+	case "install_update":
+		deployAppFirst := s.appDeployM.Required()
+		expectedAppOrigin := ""
+		if deployAppFirst {
+			if originErr := s.appDeployM.ValidateOrigin(inbound.ExpectedOrigin); originErr != nil {
+				s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", originErr.Error(), "", map[string]any{"update": s.updateM.State()})
+				break
+			}
+			expectedAppOrigin = inbound.ExpectedOrigin
+		}
+		job, updateState, scheduleErr := s.updateM.Schedule(
+			ctx,
+			inbound.ExpectedVersion,
+			inbound.ExpectedRevision,
+			deployAppFirst,
+			expectedAppOrigin,
+		)
+		if scheduleErr != nil {
+			s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", scheduleErr.Error(), "", map[string]any{"update": updateState})
+			break
+		}
+		s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
+		s.sendCommandResult(client, inbound.RequestID, "install_update", true, "scheduled", "", "", map[string]any{"job": job, "update": updateState})
+	case "deploy_app_update":
+		job, deployState, scheduleErr := s.appDeployM.Schedule(ctx, inbound.ExpectedVersion, inbound.ExpectedRevision, inbound.ExpectedOrigin)
+		if scheduleErr != nil {
+			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", false, "failed", scheduleErr.Error(), "", map[string]any{"app_deploy": deployState})
+			break
+		}
+		s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
+		s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
+	}
+}
+
 // Resize Session is a per-device opt-in. A PTY resize Herdr does not perform
 // leaves its grid at the layout size while the application draws at the
 // leased one, so the desktop and SSH views of a leased pane look garbled
@@ -1516,6 +1555,9 @@ func (s *Server) effectiveCapabilities() []string {
 
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
+	if s.cfg.Backend == "hc" {
+		capabilities = slices.DeleteFunc(capabilities, func(capability string) bool { return capability == "self_update" })
+	}
 	capabilities = append(capabilities, "pi_prompt_unconfirmed")
 	// Never the legacy pane_size_lease names: apps up to 0.22.7 lease
 	// automatically when they see them.
@@ -1538,13 +1580,29 @@ func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []stri
 	if herdrStatus.Supports(herdr.FeaturePaneRead) {
 		capabilities = append(capabilities, "pane_realtime_delta")
 	}
+	for _, feature := range []string{
+		herdr.FeatureWorkspaceManagement,
+		herdr.FeatureWorkspaceRename,
+		herdr.FeatureWorkspaceReorder,
+		herdr.FeatureWorktreeManagement,
+		herdr.FeatureTabRename,
+		herdr.FeatureAgentLaunch,
+		herdr.FeatureManualTerminalInput,
+		herdr.FeatureSecretInput,
+		herdr.FeatureSemanticInput,
+		herdr.FeaturePiIntegration,
+	} {
+		if herdrStatus.Supports(feature) {
+			capabilities = append(capabilities, feature)
+		}
+	}
 	if herdrStatus.Supports(herdr.FeatureTabMove) {
 		capabilities = append(capabilities, "tab_reorder")
 	}
 	if herdrStatus.Supports(herdr.FeatureWorkspaceMoveBlock) {
 		capabilities = append(capabilities, "workspace_reorder_block")
 	}
-	if s.appDeployM.State().Configured {
+	if s.cfg.Backend != "hc" && s.appDeployM.State().Configured {
 		capabilities = append(capabilities, "app_deploy")
 	}
 	if s.hybrid != nil && s.hybrid.directEnabled() {

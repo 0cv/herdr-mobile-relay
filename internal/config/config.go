@@ -24,6 +24,7 @@ const (
 )
 
 type Config struct {
+	Backend        string
 	Host           string
 	Port           int
 	PluginPort     int
@@ -67,6 +68,7 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
+		Backend:      envOr("HERDR_RELAY_BACKEND", "herdr"),
 		Host:         envOr("HERDR_RELAY_HOST", "127.0.0.1"),
 		Port:         envIntOr("HERDR_RELAY_PORT", 8375),
 		PluginPort:   envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
@@ -114,7 +116,7 @@ func Load() (*Config, error) {
 	cfg.DataHome = envOr("XDG_DATA_HOME", filepath.Join(homeDir(), ".local", "share"))
 	cfg.ReleaseRoot = os.Getenv("HERDR_RELEASE_ROOT")
 	if cfg.ReleaseRoot == "" {
-		cfg.ReleaseRoot = installedReleaseRoot()
+		cfg.ReleaseRoot = InstalledReleaseRoot()
 	}
 	if cfg.ReleaseRoot == "" {
 		cfg.ReleaseRoot = filepath.Join(cfg.DataHome, "herdr-mobile-relay")
@@ -126,6 +128,17 @@ func Load() (*Config, error) {
 
 	cfg.RuntimeDir = resolveRuntimeDir(cfg.ConfigHome)
 	cfg.CacheDir = filepath.Join(cacheHome, "herdr-mobile-relay")
+	if cfg.Backend == "hc" {
+		cfg.SocketPath = coreSocketPath(filepath.Join("/run/user", strconv.Itoa(os.Getuid())))
+		cfg.Port = envIntOr("HERDR_RELAY_PORT", 8377)
+		cfg.PluginPort = envIntOr("HERDR_RELAY_PLUGIN_PORT", 8378)
+		cfg.ServiceName = envOr("HERDR_RELAY_SERVICE_NAME", strings.TrimSuffix(defaultServiceName(), ".service")+"-hc.service")
+		cfg.RuntimeDir = filepath.Join(cfg.ConfigHome, "herdr-mobile-relay-hc")
+		if env := os.Getenv("HERDR_RELAY_ENV"); env != "" {
+			cfg.RuntimeDir = filepath.Dir(env)
+		}
+		cfg.CacheDir = filepath.Join(cacheHome, "herdr-mobile-relay-hc")
+	}
 
 	if cfg.WebRoot == "" {
 		cfg.WebRoot = defaultWebRoot()
@@ -147,6 +160,9 @@ func (c *Config) Addr() string {
 }
 
 func (c *Config) validate() error {
+	if c.Backend != "herdr" && c.Backend != "hc" {
+		return fmt.Errorf("invalid HERDR_RELAY_BACKEND %q: want herdr or hc", c.Backend)
+	}
 	if c.Token == "" && c.Host != "127.0.0.1" && c.Host != "::1" && c.Host != "localhost" {
 		return fmt.Errorf("refusing to bind tokenless relay to non-loopback address %s", c.Host)
 	}
@@ -168,6 +184,23 @@ func (c *Config) validate() error {
 	return nil
 }
 
+func coreSocketPath(userRuntimeDir string) string {
+	for _, key := range []string{"HC_SOCKET_PATH", "HC_SOCKET"} {
+		if socket := os.Getenv(key); socket != "" {
+			return socket
+		}
+	}
+	session := envOr("HC_SESSION", "default")
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		return filepath.Join(dir, "herdr-core", session+".sock")
+	}
+	if info, err := os.Stat(userRuntimeDir); err == nil && info.IsDir() {
+		return filepath.Join(userRuntimeDir, "herdr-core", session+".sock")
+	}
+	stateHome := envOr("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
+	return filepath.Join(stateHome, "herdr-core", session, session+".sock")
+}
+
 func resolveRuntimeDir(configHome string) string {
 	if env := os.Getenv("HERDR_RELAY_ENV"); env != "" {
 		return filepath.Dir(env)
@@ -183,7 +216,7 @@ func defaultWebRoot() string {
 	if err != nil {
 		return "web"
 	}
-	if root := installedReleaseRoot(); root != "" {
+	if root := InstalledReleaseRoot(); root != "" {
 		if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
 			return filepath.Join(filepath.Dir(resolved), "web")
 		}
@@ -192,7 +225,7 @@ func defaultWebRoot() string {
 	return filepath.Join(filepath.Dir(filepath.Dir(exe)), "web")
 }
 
-func installedReleaseRoot() string {
+func InstalledReleaseRoot() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return ""

@@ -3,11 +3,53 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# The menu belongs to no relay: it picks the instance for each probe and action.
+unset HERDR_RELAY_BACKEND
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
-ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
-load_relay_env "$ENV_FILE"
+# Runs only inside a subshell (see in_instance): it rewrites the environment so
+# the chosen relay resolves its own env file, service and ports. The core relay
+# never inherits the Herdr TUI pane's configuration.
+select_instance() {
+    local backend="$1"
+    local service_env
+
+    if [ "$backend" = hc ]; then
+        unset HERDR_RELAY_ENV HERDR_PLUGIN_CONFIG_DIR HERDR_RELAY_PORT HERDR_RELAY_PLUGIN_PORT \
+            HERDR_TAILSCALE_PORT HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION CLOUDFLARED_CONFIG \
+            HERDR_BIN HERDR_BIN_PATH HERDR_SOCKET_PATH
+    fi
+    export HERDR_RELAY_BACKEND="$backend"
+    resolve_relay_instance
+    if [ -z "${HERDR_RELAY_ENV:-}" ]; then
+        service_env="$(installed_service_env_file)"
+        [ -z "$service_env" ] || export HERDR_RELAY_ENV="$service_env"
+    fi
+    ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+    load_relay_env "$ENV_FILE"
+}
+
+in_instance() {
+    local backend="$1"
+    shift
+    (
+        select_instance "$backend" || exit 1
+        "$@"
+    )
+}
+
+instance_value() {
+    (
+        select_instance "$1" >/dev/null 2>&1 || exit 1
+        printf '%s' "${!2}"
+    )
+}
+
+instance_configured() {
+    [ -f "$ENV_FILE" ]
+}
 
 # The menu opens after every install, so it has to answer "what do I have" before
 # it asks "what next". Every probe is bounded and optional: a status line that
@@ -21,7 +63,7 @@ installed_release_version() {
 }
 
 running_health() {
-    local port="${HERDR_RELAY_PORT:-8375}"
+    local port="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
 
     curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null
 }
@@ -63,28 +105,30 @@ own_gateway_summary() {
 }
 
 service_state() {
+    local state
+
     case "$(uname -s)" in
         Darwin)
-            [ -f "$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist" ] || return 1
-            launchd_service_loaded "gui/$(id -u)/com.herdr-mobile-relay.service" &&
+            [ -f "$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist" ] || return 1
+            launchd_service_loaded "gui/$(id -u)/$RELAY_LAUNCHD_LABEL" &&
                 printf 'installed (loaded)\n' || printf 'installed (not loaded)\n'
             ;;
         Linux)
-            [ -f "$HOME/.config/systemd/user/herdr-mobile-relay.service" ] || return 1
-            printf 'installed (%s)\n' \
-                "$(systemctl --user is-active herdr-mobile-relay.service 2>/dev/null || echo unknown)"
+            [ -f "$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL" ] || return 1
+            state="$(systemctl --user is-active "$RELAY_SYSTEMD_LABEL" 2>/dev/null || true)"
+            printf 'installed (%s)\n' "${state:-unknown}"
             ;;
         *) return 1 ;;
     esac
 }
 
 active_path() {
-    if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
-        printf '3\n'
+    if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
+        printf 'tailscale\n'
     elif [ -n "$(gateway_urls "$ENV_FILE")" ]; then
-        printf '2\n'
+        printf 'webrtc\n'
     elif [ -n "${CLOUDFLARED_CONFIG:-}" ] && [ -f "$CLOUDFLARED_CONFIG" ]; then
-        printf '1\n'
+        printf 'cloudflare\n'
     fi
 }
 
@@ -96,8 +140,8 @@ transport_summary() {
     local current
     local count
 
-    if [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" = 8443 ]; then
-        printf 'Tailscale Serve (HTTPS port 8443)\n'
+    if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
+        printf 'Tailscale Serve (HTTPS port %s)\n' "$RELAY_TAILSCALE_PORT"
         return 0
     fi
     gateways="$(gateway_urls "$ENV_FILE")"
@@ -169,111 +213,288 @@ print_status() {
         if [ -z "$deployed" ]; then
             printf '  Phone app:  %s (version unknown)\n' "$app_origin"
         elif [ -n "$installed" ] && [ "$deployed" != "$installed" ]; then
-            printf '  Phone app:  %s serves %s, this relay ships %s - Cloudflare → Configure App Deployment\n' \
+            printf '  Phone app:  %s serves %s, this relay ships %s' \
                 "$app_origin" "$deployed" "$installed"
+            if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+                printf '\n'
+            else
+                printf ' - Cloudflare → Configure App Deployment\n'
+            fi
         else
             printf '  Phone app:  %s serves %s\n' "$app_origin" "$deployed"
         fi
     fi
 }
 
+core_server_running() {
+    local server watchdog status=0
+
+    hc server status >/dev/null 2>&1 &
+    server=$!
+    (sleep 3; kill "$server" 2>/dev/null) >/dev/null 2>&1 &
+    watchdog=$!
+    { wait "$server"; } 2>/dev/null || status=$?
+    kill "$watchdog" 2>/dev/null || true
+    return "$status"
+}
+
+print_instance_status() {
+    if [ "$HERDR_RELAY_BACKEND" = hc ]; then
+        echo "Herdr app relay (phone shows $(relay_host_label))"
+        if core_server_running; then
+            echo "  Core:       running"
+        else
+            echo "  Core:       not running - Start herdr-app or run \`hc server start\`"
+        fi
+    else
+        echo "Herdr TUI relay (phone shows $(relay_host_label))"
+    fi
+    print_status
+}
+
+print_all_status() {
+    local backend
+
+    for backend in $detected; do
+        in_instance "$backend" print_instance_status || echo "  Cannot read this relay's configuration."
+        echo ""
+    done
+}
+
+# Screens are lists of tokens: targets, then paths, then the actions of a path.
+# Rendering and dispatch both read the same list, so numbers cannot drift.
+target_backends() {
+    case "$1" in
+        tui) echo herdr ;;
+        core) echo hc ;;
+        both) echo "herdr hc" ;;
+    esac
+}
+
+target_name() {
+    case "$1" in
+        tui) echo "Herdr TUI relay" ;;
+        core) echo "Herdr app relay" ;;
+    esac
+}
+
+target_paths() {
+    case "$1" in
+        tui) echo "cloudflare webrtc tailscale" ;;
+        core) echo "cloudflare tailscale" ;;
+        both) echo "stable on qr status" ;;
+    esac
+}
+
+path_title() {
+    case "$1" in
+        cloudflare) echo "Cloudflare" ;;
+        webrtc) echo "WebRTC" ;;
+        tailscale) echo "Tailscale" ;;
+    esac
+}
+
+path_items() {
+    case "$2" in
+        cloudflare)
+            if [ "$1" = core ]; then
+                echo "temporary stable hostname remove qr status"
+            else
+                echo "temporary stable hostname remove deploy qr status"
+            fi
+            ;;
+        webrtc) echo "community own qr status" ;;
+        tailscale) echo "on off qr status" ;;
+    esac
+}
+
+screen_tokens() {
+    if [ -z "$target" ]; then
+        echo "tui core both"
+    elif [ -n "$path" ]; then
+        path_items "$target" "$path"
+    else
+        target_paths "$target"
+    fi
+}
+
+tailscale_ports() {
+    local backend
+
+    for backend in $(target_backends "$target"); do
+        instance_value "$backend" RELAY_TAILSCALE_PORT
+        printf ' '
+    done
+}
+
+render_item() {
+    local number="$1"
+    local token="$2"
+    local ports
+
+    case "$token" in
+        temporary)
+            menu_item "$number" "Temporary Cloudflare Tunnel"
+            echo "     Start a foreground relay and temporary URL, then print its QR."
+            echo "     An installed background relay is restarted instead of duplicated."
+            ;;
+        stable)
+            if [ "$target" = both ]; then
+                menu_item "$number" "Cloudflare Stable Tunnel"
+                echo "     Guided permanent hostname and background service for the TUI relay,"
+                echo "     then for the core relay, each followed by its own QR."
+            else
+                menu_item "$number" "Stable Tunnel"
+                echo "     Guided permanent hostname, dedicated tunnel, and background service."
+            fi
+            ;;
+        hostname)
+            menu_item "$number" "Change Tunnel Hostname"
+            echo "     Move this relay to a different tunnel hostname and reprint the QR."
+            ;;
+        remove)
+            menu_item "$number" "Remove Stable Tunnel"
+            echo "     Remove this relay's recorded service, tunnel, config, and credentials."
+            ;;
+        deploy)
+            menu_item "$number" "Configure App Deployment"
+            echo "     Make this computer the Cloudflare Pages deployment owner and pin its shared app origin."
+            ;;
+        community)
+            menu_item "$number" "Community WebRTC Gateway"
+            echo "     Check the project's shared gateways, save the healthy candidates,"
+            echo "     then start or restart the relay and print its QR."
+            ;;
+        own)
+            menu_item "$number" "Deploy or Upgrade Your Own WebRTC Gateway"
+            echo "     Copy the gateway shipped by this plugin to your server over SSH,"
+            echo "     then start or restart the relay and print its QR."
+            ;;
+        on)
+            menu_item "$number" "Always on Tailscale"
+            read -ra ports <<< "$(tailscale_ports)"
+            if [ "$target" = both ]; then
+                echo "     Publish HTTPS port ${ports[0]} for the TUI relay and ${ports[1]} for the core relay,"
+                echo "     each with its own background service and QR."
+            else
+                echo "     Publish HTTPS port ${ports[0]} and install a background relay service."
+            fi
+            ;;
+        off)
+            menu_item "$number" "Turn Always on Tailscale Off"
+            echo "     Remove only this relay's port $(tailscale_ports) and stop its service."
+            ;;
+        qr)
+            menu_item "$number" "Choose Phone App and Show QR"
+            echo "     Keep or change the shared app origin, then reprint the private setup QR."
+            ;;
+        status)
+            menu_item "$number" "Show Full Status"
+            echo "     Service, health, and a sanitized support snapshot."
+            ;;
+    esac
+    echo ""
+}
+
+item_command() {
+    case "$1" in
+        temporary) echo "plugin-choose-transport.sh temporary" ;;
+        stable) echo "plugin-install-service.sh" ;;
+        hostname) echo "plugin-change-hostname.sh" ;;
+        remove) echo "plugin-stable-teardown.sh" ;;
+        deploy) echo "plugin-configure-app-deploy.sh" ;;
+        community) echo "plugin-choose-transport.sh community" ;;
+        own) echo "plugin-choose-transport.sh own" ;;
+        on) echo "tailscale-setup.sh" ;;
+        off) echo "tailscale-off.sh" ;;
+        qr) echo "plugin-setup-link.sh" ;;
+        status) echo "plugin-status.sh" ;;
+    esac
+}
+
 render_menu() {
-    local path="$1"
-    local active
+    local number=0 token heading
 
     [ ! -t 1 ] || printf '\033[H\033[2J'
     echo "🐑 Herdr Mobile Relay Setup"
     echo ""
     if [ -z "$path" ]; then
-        print_status
-        echo ""
-        echo "Choose a path:"
-        echo ""
-        active="$(active_path)"
-        menu_item 1 "Cloudflare$([ "$active" != 1 ] || printf ' (active)')"
-        menu_item 2 "WebRTC$([ "$active" != 2 ] || printf ' (active)')"
-        menu_item 3 "Tailscale$([ "$active" != 3 ] || printf ' (active)')"
+        print_all_status
+        if [ -z "$target" ]; then
+            echo "What should your phone control?"
+            echo ""
+            menu_item 1 "Herdr TUI"
+            echo "     The relay for the Herdr terminal app. The phone shows $(host_label)."
+            echo ""
+            menu_item 2 "Herdr app (core)"
+            echo "     A second relay for herdr-app. The phone shows $(host_label) (core)."
+            echo ""
+            menu_item 3 "Both"
+            echo "     Set up both relays with one connection type, each paired separately."
+            echo ""
+        elif [ "$target" = both ]; then
+            echo "Choose a path for both relays:"
+            echo ""
+            for token in "${tokens[@]}"; do
+                number=$((number + 1))
+                render_item "$number" "$token"
+            done
+        else
+            echo "Choose a path:"
+            echo ""
+            for token in "${tokens[@]}"; do
+                number=$((number + 1))
+                menu_item "$number" "$(path_title "$token")$([ "$active" != "$token" ] || printf ' (active)')"
+            done
+            echo ""
+        fi
     else
-        case "$path" in
-            1)
-                echo "Cloudflare"
-                echo ""
-                menu_item 1 "Temporary Cloudflare Tunnel"
-                echo "     Start a foreground relay and temporary URL, then print its QR."
-                echo "     An installed background relay is restarted instead of duplicated."
-                echo ""
-                menu_item 2 "Stable Tunnel"
-                echo "     Guided permanent hostname, dedicated tunnel, and background service."
-                echo ""
-                menu_item 3 "Change Tunnel Hostname"
-                echo "     Move this relay to a different tunnel hostname and reprint the QR."
-                echo ""
-                menu_item 4 "Remove Stable Tunnel"
-                echo "     Remove this relay's recorded service, tunnel, config, and credentials."
-                echo ""
-                menu_item 5 "Configure App Deployment"
-                echo "     Make this computer the Cloudflare Pages deployment owner and pin its shared app origin."
-                ;;
-            2)
-                echo "WebRTC"
-                echo ""
-                menu_item 1 "Community WebRTC Gateway"
-                echo "     Check the project's shared gateways, save the healthy candidates,"
-                echo "     then start or restart the relay and print its QR."
-                echo ""
-                menu_item 2 "Deploy or Upgrade Your Own WebRTC Gateway"
-                echo "     Copy the gateway shipped by this plugin to your server over SSH,"
-                echo "     then start or restart the relay and print its QR."
-                ;;
-            3)
-                echo "Tailscale"
-                echo ""
-                menu_item 1 "Always on Tailscale"
-                echo "     Publish HTTPS port 8443 and install a background relay service."
-                echo ""
-                menu_item 2 "Turn Always on Tailscale Off"
-                echo "     Remove only this relay's port 8443 and stop its service."
-                ;;
-        esac
+        heading="$(path_title "$path")"
+        [ "$asked" = 0 ] || heading="$heading - $(target_name "$target")"
+        echo "$heading"
         echo ""
-        case "$path" in
-            1) menu_item 6 "Choose Phone App and Show QR" ;;
-            2) menu_item 3 "Choose Phone App and Show QR" ;;
-            3) menu_item 3 "Choose Phone App and Show QR" ;;
-        esac
-        echo "     Keep or change the shared app origin, then reprint the private setup QR."
-        echo ""
-        case "$path" in
-            1) menu_item 7 "Show Full Status" ;;
-            2) menu_item 4 "Show Full Status" ;;
-            3) menu_item 4 "Show Full Status" ;;
-        esac
-        echo "     Service, health, and a sanitized support snapshot."
-        echo ""
-        menu_item b "Back"
+        for token in "${tokens[@]}"; do
+            number=$((number + 1))
+            render_item "$number" "$token"
+        done
     fi
+    [ "$can_back" = 0 ] || menu_item b "Back"
     menu_item q "Exit, change nothing"
     echo ""
 }
 
 # Every action runs as a child, so finishing one comes back here with the status
-# recomputed instead of ending the pane. Ctrl-C belongs to the action: the menu
-# must survive it without swallowing it. A handler, never `trap '' INT` - an
-# ignored signal is inherited by children as SIG_IGN, which would leave a
-# prompt loop with no way out at all. Actions pause here rather than inside each
-# script, which is why pause_before_close stands down under HERDR_SETUP_MENU.
-run_action() {
-    local action="$1"
-    shift
+# recomputed instead of ending the pane. Each relay's action runs in its own
+# instance, so a core action never sees the TUI's environment and vice versa.
+# Ctrl-C belongs to the action: the menu must survive it without swallowing it.
+# A handler, never `trap '' INT` - an ignored signal is inherited by children as
+# SIG_IGN, which would leave a prompt loop with no way out at all. Actions pause
+# here rather than inside each script, which is why pause_before_close stands
+# down under HERDR_SETUP_MENU.
+run_item() {
+    local command="$1"
+    local backend
+    local status
 
     echo ""
     trap 'printf "\n"' INT
-    (
-        cd "$SCRIPT_DIR"
-        HERDR_SETUP_MENU=1 "$action" "$@"
-    ) || true
-    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION HERDR_TAILSCALE_PORT CLOUDFLARED_CONFIG
-    load_relay_env "$ENV_FILE"
+    for backend in $(target_backends "$target"); do
+        if [ "$target" = both ]; then
+            case "$backend" in
+                herdr) echo "── Herdr TUI relay ──" ;;
+                hc) echo "── Herdr app relay ──" ;;
+            esac
+        fi
+        status=0
+        (
+            select_instance "$backend" || exit 1
+            cd "$SCRIPT_DIR"
+            # shellcheck disable=SC2086
+            set -- $command
+            HERDR_SETUP_MENU=1 "$SCRIPT_DIR/$1" "${@:2}"
+        ) || status=$?
+        [ "$status" -ne 130 ] || break
+    done
     trap - INT
     if [ -t 0 ]; then
         echo ""
@@ -284,36 +505,72 @@ run_action() {
     fi
 }
 
+detected=""
+if command -v "${HERDR_BIN_PATH:-herdr}" >/dev/null 2>&1 || in_instance herdr instance_configured; then
+    detected="herdr"
+fi
+if command -v hc >/dev/null 2>&1 || in_instance hc instance_configured; then
+    detected="$detected hc"
+fi
+detected="${detected:-herdr}"
+detected="${detected# }"
+
+target=""
+asked=0
+case "$detected" in
+    herdr) target=tui ;;
+    hc) target=core ;;
+    *) asked=1 ;;
+esac
 path=""
 while true; do
-    render_menu "$path"
+    can_back=0
+    if [ -n "$path" ] || { [ -n "$target" ] && [ "$asked" = 1 ]; }; then
+        can_back=1
+    fi
+    read -ra tokens <<< "$(screen_tokens)"
+    active=""
+    default=1
+    if [ -n "$target" ] && [ -z "$path" ] && [ "$target" != both ]; then
+        active="$(in_instance "$(target_backends "$target")" active_path || true)"
+        for index in "${!tokens[@]}"; do
+            [ "${tokens[$index]}" != "$active" ] || default=$((index + 1))
+        done
+    fi
+    render_menu
     while true; do
-        default=1
-        [ -n "$path" ] || default="$(active_path)"
-        default="${default:-1}"
         if ! read -r -p "Choice [$default]: " choice; then
             echo ""
             exit 0
         fi
         choice="${choice:-$default}"
-        case "$path:$choice" in
-            :1 | :2 | :3) path="$choice"; break ;;
-            1:1) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" temporary; break ;;
-            1:2) run_action "$SCRIPT_DIR/plugin-install-service.sh"; break ;;
-            1:3) run_action "$SCRIPT_DIR/plugin-change-hostname.sh"; break ;;
-            1:4) run_action "$SCRIPT_DIR/plugin-stable-teardown.sh"; break ;;
-            1:5) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
-            2:1) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" community; break ;;
-            2:2) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" own; break ;;
-            3:1) run_action "$SCRIPT_DIR/tailscale-setup.sh"; break ;;
-            3:2) run_action "$SCRIPT_DIR/tailscale-off.sh"; break ;;
-            1:6 | 2:3 | 3:3) run_action "$SCRIPT_DIR/plugin-setup-link.sh"; break ;;
-            1:7 | 2:4 | 3:4) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
-            [123]:b | [123]:B) path=""; break ;;
-            *:q | *:Q) exit 0 ;;
-            :*) echo "Enter 1–3 or q." ;;
-            1:*) echo "Enter 1–7, b or q." ;;
-            2:* | 3:*) echo "Enter 1–4, b or q." ;;
+        case "$choice" in
+            q | Q) exit 0 ;;
+            b | B)
+                if [ "$can_back" = 1 ]; then
+                    if [ -n "$path" ]; then path=""; else target=""; fi
+                    break
+                fi
+                ;;
+            *[!0-9]* | 0*) ;;
+            *)
+                if [ "$choice" -le "${#tokens[@]}" ]; then
+                    token="${tokens[$((choice - 1))]}"
+                    if [ -z "$target" ]; then
+                        target="$token"
+                    elif [ -n "$path" ] || [ "$target" = both ]; then
+                        run_item "$(item_command "$token")"
+                    else
+                        path="$token"
+                    fi
+                    break
+                fi
+                ;;
         esac
+        if [ "$can_back" = 1 ]; then
+            echo "Enter 1–${#tokens[@]}, b or q."
+        else
+            echo "Enter 1–${#tokens[@]} or q."
+        fi
     done
 done

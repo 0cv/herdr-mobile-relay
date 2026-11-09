@@ -12,7 +12,8 @@ if [ "${HERDR_TAILSCALE_FULL_UNINSTALL:-}" != 1 ]; then
     refuse_if_tailscale_selected "${HERDR_RELAY_ENV:-${SERVICE_ENV:-$(relay_env_file "$SCRIPT_DIR")}}" || exit 1
 fi
 
-LABELS=("herdr-mobile-relay.service" "herdr-remote.service")
+LABELS=("$RELAY_SYSTEMD_LABEL")
+[ "$HERDR_RELAY_BACKEND" != herdr ] || LABELS+=("herdr-remote.service")
 
 for label in "${LABELS[@]}"; do
     systemctl --user disable --now "$label" >/dev/null 2>&1 || true

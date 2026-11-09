@@ -45,7 +45,8 @@
 
   const connectedRelays = $derived($relays.filter((relay) => {
     const connection = $connections.get(relay.id);
-    return connection?.status === 'connected' && connection.inventory.state === 'ready';
+    return connection?.status === 'connected' && connection.inventory.state === 'ready'
+      && connection.capabilities.includes('agent_launch');
   }));
   const unavailableRelays = $derived($relays.filter((relay) => {
     const connection = $connections.get(relay.id);

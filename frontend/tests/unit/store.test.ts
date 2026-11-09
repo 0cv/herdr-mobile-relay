@@ -443,7 +443,10 @@ describe('relay command store', () => {
     expect(relayStore.connection(relayId)?.capabilities).toEqual(['workspace_management']);
   });
 
-  it('stores empty workspaces and sends workspace and worktree commands', async () => {
+  it.each([
+    ['workspace_management', 'workspace_reorder_block', 'worktree_management'],
+    ['workspace_rename', 'workspace_reorder', 'workspace_reorder_block'],
+  ])('stores workspaces and sends layout commands with %j', async (...capabilities) => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -451,7 +454,7 @@ describe('relay command store', () => {
       protocol: 3,
       version: 'abc123',
       host: 'fedora',
-      capabilities: ['workspace_management', 'workspace_reorder_block', 'worktree_management'],
+      capabilities,
       agent_profiles: [],
       inventory: { state: 'ready' },
     });
@@ -486,6 +489,11 @@ describe('relay command store', () => {
     ]);
 
     const workspace = get(relayStore.workspaces)[0];
+    if (!capabilities.includes('workspace_management')) {
+      await expect(relayStore.createWorkspace(workspace.relay_id, '/tmp/project', 'New')).rejects.toThrow('workspace management');
+      await expect(relayStore.closeWorkspace(workspace)).rejects.toThrow('workspace management');
+      await expect(relayStore.listWorktrees(workspace)).rejects.toThrow('worktree management');
+    }
     const rename = relayStore.renameWorkspace(workspace, 'Renamed');
     const renameCommand = JSON.parse(socket.sent.at(-1)!);
     expect(renameCommand).toMatchObject({

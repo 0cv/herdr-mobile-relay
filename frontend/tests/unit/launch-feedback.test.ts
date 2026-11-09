@@ -7,7 +7,7 @@ import type { Agent, CommandResult, RelayConnectionView } from '$lib/types';
 
 vi.mock('$lib/router', async original => ({ ...await original<typeof import('$lib/router')>(), replaceView: vi.fn() }));
 
-const ready = { status: 'connected', inventory: { state: 'ready', stale: false }, capabilities: ['directory_browser'], agentProfiles: [{ id: 'hermes', label: 'Hermes' }] } as RelayConnectionView;
+const ready = { status: 'connected', inventory: { state: 'ready', stale: false }, capabilities: ['directory_browser', 'agent_launch'], agentProfiles: [{ id: 'hermes', label: 'Hermes' }] } as RelayConnectionView;
 const result: CommandResult = { type: 'command_result', request_id: 'launch', ok: true, phase: 'completed', data: { pane_id: 'created', name: 'development-hermes', cwd: '/fixture/Development' } };
 let resolve: (result: CommandResult) => void;
 let reject: (error: Error) => void;

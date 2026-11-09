@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=common.sh
+. "$SCRIPT_DIR/common.sh"
+require_tui_backend
+
 ENTRYPOINT="${1:-}"
 PLUGIN_ID="${HERDR_PLUGIN_ID:-herdr-mobile-relay.events}"
 HERDR_COMMAND="${HERDR_BIN_PATH:-herdr}"

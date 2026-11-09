@@ -1,12 +1,15 @@
 package coordinator
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
@@ -19,6 +22,10 @@ func newClearFixture(t *testing.T, options launchFixtureOptions) (*launchFixture
 		t.Fatal(err)
 	}
 	return f, old
+}
+
+func reportAgent(f *launchFixture, old profiles.PaneIdentity, agent string) {
+	f.dispatcher.state.CommitInventory([]*AgentState{{PaneID: old.PaneID, RawPaneID: old.PaneID, TerminalID: old.TerminalID, TabID: old.TabID, WorkspaceID: old.WorkspaceID, Agent: agent, Status: "idle", Cwd: f.cwd}}, f.dispatcher.state.RevisionCounter())
 }
 
 func clearMessage() map[string]any {
@@ -38,7 +45,7 @@ func clearCalls(t *testing.T, f *launchFixture) string {
 }
 
 func TestClearConfiguredOutcomes(t *testing.T) {
-	for _, mode := range []string{"success", "close-failure", "uncertain-start", "unknown-owner", "invalid-cwd"} {
+	for _, mode := range []string{"success", "close-failure", "uncertain-start", "no-launch-record", "alias-no-launch-record", "record-wins-over-name", "no-profile", "invalid-cwd"} {
 		t.Run(mode, func(t *testing.T) {
 			options := launchFixtureOptions{}
 			if mode == "close-failure" {
@@ -48,8 +55,21 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				options.start = "exit 2"
 			}
 			f, old := newClearFixture(t, options)
-			if mode == "unknown-owner" {
+			switch mode {
+			case "no-launch-record", "alias-no-launch-record", "no-profile":
 				f.dispatcher.profiles.Forget(old.PaneID)
+			}
+			switch mode {
+			case "alias-no-launch-record":
+				reportAgent(f, old, "claude-code")
+			case "record-wins-over-name":
+				reportAgent(f, old, "qodercli")
+			case "no-profile":
+				reportAgent(f, old, "mystery")
+			}
+			ownershipBefore, err := os.ReadFile(f.ownership)
+			if err != nil {
+				t.Fatal(err)
 			}
 			if mode == "invalid-cwd" {
 				if err := os.Remove(f.cwd); err != nil {
@@ -59,9 +79,16 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 			result := f.dispatcher.Handle(f.ctx, clearMessage())
 			calls := clearCalls(t, f)
 			switch mode {
-			case "unknown-owner", "invalid-cwd":
+			case "no-profile", "invalid-cwd":
 				if result.OK || calls != "" {
 					t.Fatalf("refusal = %+v; calls %s", result, calls)
+				}
+				if mode == "no-profile" && !strings.Contains(result.Error, "No launch profile matches") {
+					t.Fatalf("refusal message = %q", result.Error)
+				}
+				ownershipAfter, err := os.ReadFile(f.ownership)
+				if err != nil || string(ownershipBefore) != string(ownershipAfter) {
+					t.Fatalf("ownership changed: %v", err)
 				}
 			case "uncertain-start":
 				if result.OK || result.Phase != "dispatched_unknown" || strings.Contains(calls, "pane close") || !strings.Contains(calls, "agent start") {
@@ -85,6 +112,9 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				if !f.dispatcher.profiles.OwnsTarget(f.target, "claude") {
 					t.Fatal("replacement ownership missing")
 				}
+				if !strings.Contains(calls, "--kind claude") || strings.Contains(calls, "qodercli") {
+					t.Fatalf("replacement profile: %s", calls)
+				}
 				if mode == "close-failure" {
 					if result.Phase != "completed_with_warning" || data["warning"] == nil || !f.dispatcher.profiles.OwnsTarget(old, "claude") {
 						t.Fatalf("warning = %+v", result)
@@ -93,17 +123,50 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 					t.Fatalf("success = %+v", result)
 				}
 				retry := f.dispatcher.Handle(f.ctx, clearMessage())
-				if mode == "success" && (retry.OK || !strings.Contains(retry.Error, "ownership is unknown")) {
-					t.Fatalf("post-forget retry = %+v", retry)
-				}
-				if mode == "close-failure" && (!retry.OK || !retry.replayed) {
-					t.Fatalf("warning replay = %+v", retry)
+				if !retry.OK || !retry.replayed {
+					t.Fatalf("retry = %+v", retry)
 				}
 				if clearCalls(t, f) != calls {
 					t.Fatal("retry duplicated mutation")
 				}
 			}
 		})
+	}
+}
+
+type clearInventoryBackend struct {
+	backend.Backend
+	pane    herdr.Pane
+	checked bool
+}
+
+func (b *clearInventoryBackend) GetInventory(ctx context.Context) (*herdr.Inventory, error) {
+	if b.checked {
+		return b.Backend.GetInventory(ctx)
+	}
+	b.checked = true
+	return &herdr.Inventory{Panes: []herdr.Pane{b.pane}}, nil
+}
+
+func TestClearThenRestartDoesNotReuseTarget(t *testing.T) {
+	f, old := newClearFixture(t, launchFixtureOptions{})
+	cleared := f.dispatcher.Handle(f.ctx, clearMessage())
+	if !cleared.OK {
+		t.Fatalf("clear: %+v", cleared)
+	}
+	name := cleared.Data.(map[string]any)["name"].(string)
+	pane := herdr.Pane{ID: old.PaneID, TerminalID: old.TerminalID, TabID: old.TabID, WorkspaceID: old.WorkspaceID, Name: name, Cwd: f.cwd}
+	if err := f.dispatcher.profiles.RememberVerified(old, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	b := &clearInventoryBackend{Backend: f.dispatcher.herdr, pane: pane}
+	f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
+	restarted := f.dispatcher.Handle(f.ctx, map[string]any{"action": "agent_restart", "request_id": "restart", "pane_id": old.PaneID})
+	if !restarted.OK {
+		t.Fatalf("restart: %+v", restarted)
+	}
+	if restarted.Data.(map[string]any)["pane_id"] == old.PaneID || strings.Count(clearCalls(t, f), "agent start") != 2 {
+		t.Fatalf("restart reused its target: %+v", restarted)
 	}
 }
 

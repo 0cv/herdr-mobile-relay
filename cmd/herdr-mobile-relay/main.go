@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentsession"
 	"github.com/0cv/herdr-mobile-relay/internal/app"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
@@ -47,6 +48,19 @@ func run(args []string) (int, error) {
 		command, args = args[0], args[1:]
 	}
 	switch command {
+	case "agent-hooks":
+		if len(args) != 1 || (args[0] != "install" && args[0] != "uninstall" && args[0] != "status") {
+			return 2, errors.New("usage: herdr-mobile-relay agent-hooks install|uninstall|status")
+		}
+		return status(agentsession.Hooks(args[0], os.Stdout))
+	case "agent-session":
+		if len(args) > 0 && args[0] == "agy" {
+			defer fmt.Fprint(os.Stdout, "{}")
+		}
+		if len(args) == 1 {
+			agentsession.Run(args[0], os.Stdin)
+		}
+		return 0, nil
 	case "serve":
 		if len(args) != 0 {
 			return 2, errors.New("serve does not accept arguments")
@@ -54,7 +68,7 @@ func run(args []string) (int, error) {
 		return runServe()
 	case "version":
 		if len(args) == 1 && args[0] == "--json" {
-			data, _ := json.Marshal(map[string]string{"version": version, "revision": revision, "target": release.CurrentTarget()})
+			data, _ := json.Marshal(map[string]any{"version": version, "revision": revision, "target": release.CurrentTarget(), "backends": []string{"herdr", "hc"}})
 			fmt.Println(string(data))
 			return 0, nil
 		}

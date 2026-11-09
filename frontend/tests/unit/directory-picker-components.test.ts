@@ -27,7 +27,7 @@ const emptyNotice = 'This folder has no subdirectories. It remains selected.';
 function fixture(patch: Partial<RelayConnectionView> = {}) {
   let connection = {
     status: 'connected', inventory: { state: 'ready' },
-    capabilities: ['directory_browser', 'workspace_management'],
+    capabilities: ['directory_browser', 'workspace_management', 'agent_launch'],
     agentProfiles: [{ id: 'codex', label: 'Codex' }], hermesProfiles: [],
     directoryBrowser: null, directoryLoading: false, directoryError: '',
     ...patch,

@@ -3,8 +3,15 @@ package app
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
+	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/session"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -16,7 +23,95 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
+type discoveryBackend struct {
+	backend.Backend
+	*fixtureProcesses
+}
+
+func (b *discoveryBackend) PaneProcessInfoFresh(ctx context.Context, pane string) (*herdr.PaneProcessInfo, error) {
+	return b.fixtureProcesses.PaneProcessInfoFresh(ctx, pane)
+}
+
+func TestEnrichPiSessions(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "core.sock")
+	core, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	instance, err := pibridge.Instance(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := pibridge.Directory(instance)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, strconv.Itoa(os.Getpid())+".sock")
+	bridge, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.Close()
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		conn, err := bridge.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var request struct {
+			pibridge.Identity
+			Challenge string
+		}
+		if json.NewDecoder(conn).Decode(&request) != nil {
+			return
+		}
+		request.Session = "session"
+		_ = json.NewEncoder(conn).Encode(request)
+	}()
+	processes := &fixtureProcesses{pid: os.Getpid()}
+	s := &Server{cfg: &config.Config{Backend: "hc", SocketPath: socket}, herdrC: &discoveryBackend{fixtureProcesses: processes}, sessions: session.NewResolver(t.TempDir())}
+	check := func(terminal, want string) {
+		t.Helper()
+		a := &coordinator.AgentState{PaneID: "pane", TerminalID: terminal, Agent: "pi"}
+		s.enrichPiSessions(t.Context(), []*coordinator.AgentState{a})
+		s.resolveAgentSessionName(a)
+		if a.SessionID != want || a.AgentSessionID != want || a.ConversationHistoryAvailable != (want != "") {
+			t.Fatalf("unexpected agent: %+v", a)
+		}
+	}
+	check("terminal", "session")
+	_ = bridge.Close()
+	processes.err = context.DeadlineExceeded
+	check("terminal", "session")
+	check("terminal", "session")
+	processes.err = nil
+	processes.pid = 1
+	check("terminal", "session")
+	processes.pid = os.Getpid()
+	check("terminal", "session")
+	processes.pid++
+	check("terminal", "")
+	processes.pid--
+	s.piSessions["terminal"] = piSessionIdentity{pid: processes.pid, session: "session"}
+	check("other", "")
+	if len(s.piSessions) != 0 {
+		t.Fatal("stale cache retained")
+	}
+	s.cfg.Backend = "herdr"
+	calls := processes.calls
+	check("terminal", "")
+	if processes.calls != calls {
+		t.Fatal("TUI attempted discovery")
+	}
+}
+
 type fixtureProcesses struct {
+	err     error
 	pid     int
 	calls   int
 	replace bool
@@ -24,6 +119,9 @@ type fixtureProcesses struct {
 
 func (f *fixtureProcesses) PaneProcessInfoFresh(_ context.Context, pane string) (*herdr.PaneProcessInfo, error) {
 	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
 	pid := f.pid
 	if f.replace && f.calls > 1 {
 		pid++
@@ -67,13 +165,34 @@ func TestReaderCanDiscoverButCannotSubmitPiCommands(t *testing.T) {
 	}
 }
 
+func TestForegroundRootProcessShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shell int
+		group int
+		want  int
+	}{
+		{"direct program", 0, 42, 42},
+		{"program inside shell", 10, 42, 42},
+		{"idle shell", 10, 10, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &herdr.PaneProcessInfo{PaneID: "pane", ShellPID: tc.shell, ForegroundProcessGroupID: tc.group, ForegroundProcesses: []herdr.PaneProcess{{PID: tc.group}}}
+			got, err := foregroundRoot(info, "pane")
+			if got != tc.want || (err != nil) != (tc.want == 0) {
+				t.Fatalf("foregroundRoot = %d, %v; want %d", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestForegroundRootRejectsAmbiguousAndShell(t *testing.T) {
 	for _, info := range []*herdr.PaneProcessInfo{
 		nil, {PaneID: "other"}, {PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 1},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 3}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 2}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 3, Name: "vim"}}},
-		{PaneID: "pane", ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}}},
+		{PaneID: "pane", ShellPID: -1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 0}}},
 	} {
 		if _, err := foregroundRoot(info, "pane"); err == nil {

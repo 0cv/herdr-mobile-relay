@@ -20,13 +20,23 @@ const (
 )
 
 const (
-	FeatureJSONAvailability   = "ordinary_json"
-	FeatureWorkspaceMoveBlock = "workspace.move_block"
-	FeatureWorkspaceReordered = "workspace.reordered"
-	FeaturePaneRead           = "pane.read"
-	FeatureTabMove            = "tab.move"
-	FeatureEndpoint           = "client_shell.endpoint"
-	FeatureDirectTerminal     = "direct_terminal"
+	FeatureJSONAvailability    = "ordinary_json"
+	FeatureWorkspaceMoveBlock  = "workspace.move_block"
+	FeatureWorkspaceReordered  = "workspace.reordered"
+	FeaturePaneRead            = "pane.read"
+	FeatureTabMove             = "tab.move"
+	FeatureEndpoint            = "client_shell.endpoint"
+	FeatureDirectTerminal      = "direct_terminal"
+	FeatureWorkspaceManagement = "workspace_management"
+	FeatureWorkspaceRename     = "workspace_rename"
+	FeatureWorkspaceReorder    = "workspace_reorder"
+	FeatureWorktreeManagement  = "worktree_management"
+	FeatureTabRename           = "tab_rename"
+	FeatureAgentLaunch         = "agent_launch"
+	FeatureManualTerminalInput = "manual_terminal_input"
+	FeatureSecretInput         = "secret_input"
+	FeatureSemanticInput       = "semantic_input"
+	FeaturePiIntegration       = "pi_integration"
 )
 
 type FeatureEvidence struct {
@@ -36,6 +46,7 @@ type FeatureEvidence struct {
 }
 
 type ServerStatus struct {
+	OneStepLaunch              bool                       `json:"-"`
 	InstalledClientVersion     string                     `json:"installed_client_version,omitempty"`
 	ServerVersion              string                     `json:"server_version,omitempty"`
 	ServerProtocol             int                        `json:"server_protocol,omitempty"`
@@ -59,6 +70,20 @@ func initialServerStatus() ServerStatus {
 		FeatureDirectTerminal,
 	} {
 		features[name] = FeatureEvidence{State: FeatureUnknown, Reason: "not_checked"}
+	}
+	for _, name := range []string{
+		FeatureWorkspaceManagement,
+		FeatureWorkspaceRename,
+		FeatureWorkspaceReorder,
+		FeatureWorktreeManagement,
+		FeatureTabRename,
+		FeatureAgentLaunch,
+		FeatureManualTerminalInput,
+		FeatureSecretInput,
+		FeatureSemanticInput,
+		FeaturePiIntegration,
+	} {
+		features[name] = FeatureEvidence{State: FeatureSupported, Reason: "client_supported"}
 	}
 	return ServerStatus{Features: features}
 }

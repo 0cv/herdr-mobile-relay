@@ -526,20 +526,14 @@ const PaneSizeOptInRowsCapability = "pane_size_opt_in_rows"
 const SpeechVoiceManagementCapability = "speech_voice_management"
 
 var Capabilities = []string{
-	"pi_integration",
 	"attention_classification",
 	"clear_activities",
 	"directory_browser",
-	"workspace_management",
-	"worktree_management",
 	"self_update",
 	"structured_questions",
 	"slash_commands",
 	"conversation_history",
 	"conversation_activity",
 	"workspace_inspection",
-	"semantic_input",
-	"manual_terminal_input",
-	"secret_input",
 	"invitation_qr",
 }

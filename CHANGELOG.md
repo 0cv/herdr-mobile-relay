@@ -7,8 +7,51 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Parse omp `ask` dialogs when the TUI status bar renders below the modal;
-  pending omp questions were showing as plain text without answer buttons.
+- Claude Code questions can be answered from the phone in a named session, or
+  while the task list is showing. The name in the input rule and the task panel
+  under it hid the question, so the agent showed as blocked with nothing to
+  answer (#155).
+- omp asks render as tappable cards again when the TUI status bar or extension
+  output sits below the dialog (#153).
+
+## [0.25.0] - 2026-11-05
+
+### Added
+
+- Read native Grok conversations, including tool results and turns from before
+  compaction. Session titles use the generated title, then the session summary;
+  rewinds remove discarded turns and mark older history cursors as changed.
+- Run a second relay for herdr-core beside the TUI relay, so agents in herdr-app
+  appear as a separate computer on your phone; install a background service and
+  pair it with Tailscale or Cloudflare, or let the setup menu set up and pair
+  the TUI relay, the core relay, or both. Read screens and scrollback, send
+  prompts and keys, type single-line text without Enter, answer questions, enter
+  secrets at hidden prompts, start, clear, restart and stop agents, rename and
+  reorder tabs, rename and reorder workspaces, and use Pi commands and activity,
+  plus the Conversation view (history and live) for Pi, Claude Code, Codex,
+  Cursor, Omp, OpenCode, Hermes, Qoder, agy (Antigravity), Grok and Kimi.
+  Install hooks for Claude Code, Codex, Cursor, Omp, OpenCode, Qoder and agy;
+  Hermes, Grok and Kimi need no hook.
+  Resize Session fits the shared core terminal to your phone; resizing the
+  desktop window takes the size back. Creating and closing workspaces, and
+  worktrees, colour and phone-driven updates are not available on core yet.
+
+### Changed
+
+- Clear Agent now also works for agents you started on the computer, not only
+  those started from the phone. The new agent runs with the relay's launch
+  command for that agent, so options from the original command line are not
+  kept.
+
+### Fixed
+
+- Clear Agent now opens the replacement agent instead of showing an error when
+  the old agent disappears before clearing finishes.
+- Conversation for Qoder now finds sessions in folders whose path contains a dot
+  or other punctuation, such as a home folder named `first.last`.
+- Idle agents no longer look finished on the phone. The idle ring let a light
+  logo, such as Claude Code's or Codex's, show through its centre, so it looked
+  like the filled dot of an unread result.
 
 ## [0.24.0] - 2026-11-02
 
@@ -1983,7 +2026,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...v0.24.0
 [0.23.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...v0.23.5
 [0.23.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...v0.23.4

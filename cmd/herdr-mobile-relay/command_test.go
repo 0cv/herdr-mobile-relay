@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,14 +89,20 @@ func TestCommandBoundaries(t *testing.T) {
 		if len(output) == 0 || output[0] == '<' {
 			t.Fatalf("stdout = %q, want unprefixed JSON", result.stdout)
 		}
-		var record map[string]string
+		var record struct {
+			Version  string   `json:"version"`
+			Revision string   `json:"revision"`
+			Target   string   `json:"target"`
+			Backends []string `json:"backends"`
+		}
 		if err := json.Unmarshal(output, &record); err != nil {
 			t.Fatalf("stdout = %q, want directly parseable JSON: %v", result.stdout, err)
 		}
-		for _, key := range []string{"version", "revision", "target"} {
-			if record[key] == "" {
-				t.Errorf("version JSON field %q is empty: %#v", key, record)
-			}
+		if record.Version == "" || record.Revision == "" || record.Target == "" {
+			t.Errorf("version JSON has an empty field: %#v", record)
+		}
+		if !slices.Equal(record.Backends, []string{"herdr", "hc"}) {
+			t.Errorf("backends = %v, want [herdr hc]", record.Backends)
 		}
 	})
 }
