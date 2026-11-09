@@ -1451,6 +1451,7 @@ func TestOMPAskFootersAcrossQuestionStyles(t *testing.T) {
 		{"multiple choice", "␣ toggle · ⏎ submit · ↑/↓ move · ⎋ cancel · Alt+H hide"},
 		{"multiple questions", "␣ toggle · ⏎ next · ↑/↓ move · ⎋ cancel · Alt+H hide"},
 		{"answer review", "⏎ submit · ↑/↓ scroll · ⎋ cancel · Alt+H hide"},
+		{"nerd font enter icon", "\U000F0311 select · n note · ↑/↓ move · ⎋ cancel · Alt+H hide"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			variant := strings.Replace(frame, live, tc.footer, 1)

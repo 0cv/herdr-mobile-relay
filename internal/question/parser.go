@@ -81,9 +81,9 @@ var (
 	)
 	openCodeColumnPattern = regexp.MustCompile(`\s{20,}`)
 	ompAskHeaderPattern   = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
-	// Footer hint of omp Ask dialogs; (?i) because 18.0-era fixtures render
-	// "Enter select". Only live dialogs render it, so it doubles as the live signal.
-	ompFooterPattern       = regexp.MustCompile(`(?i)(?:enter|⏎)\s+(?:select|submit|next)\b`)
+	// Only live omp Ask dialogs render this footer. Enter shows as "Enter" (18.0),
+	// ⏎, or the Nerd Font Enter icon U+F0311.
+	ompFooterPattern       = regexp.MustCompile(`(?i)(?:enter|⏎|\x{F0311})\s+(?:select|submit|next)\b`)
 	ompOptionPattern       = regexp.MustCompile(`^\s*([❯›>]?)\s*(☑|☐|◉|○|||||\[[xX ]\]|\([oO ]\))\s+(.+?)\s*$`)
 	ompFrameMetaPattern    = regexp.MustCompile(`\[\s*([\p{L}\p{N}_-]+)\s*\]\s*[·•]\s*options:\s*\d+`)
 	ompProgressPattern     = regexp.MustCompile(`\s+\((\d+)\s*/\s*(\d+)\)\s*$`)
