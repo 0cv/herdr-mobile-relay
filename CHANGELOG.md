@@ -11,6 +11,8 @@ project follows [Semantic Versioning](https://semver.org/).
   while the task list is showing. The name in the input rule and the task panel
   under it hid the question, so the agent showed as blocked with nothing to
   answer (#155).
+- omp asks render as tappable cards again when the TUI status bar or extension
+  output sits below the dialog (#153).
 
 ## [0.25.0] - 2026-11-05
 
