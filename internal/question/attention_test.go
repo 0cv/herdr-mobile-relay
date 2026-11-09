@@ -1486,6 +1486,26 @@ func TestOMPStockAskParsesWithoutExtensions(t *testing.T) {
 	}
 }
 
+func TestOMPAnsweredAskAboveIdleInputIsNotQuestion(t *testing.T) {
+	// An answered Ask box can stay on screen above omp's empty input box.
+	rule := strings.Repeat("─", 80)
+	lines := strings.Split(attentionFixture(t, "omp-ask-stock.ansi"), "\n")
+	if len(lines) < 41 {
+		t.Fatalf("fixture has %d lines, want at least 41", len(lines))
+	}
+	frame := strings.Join(lines[:41], "\n") +
+		"\n\n Answer received: Yes\n\n" + rule + "\n > \n" + rule + "\n 3%/1M\n"
+	if LayoutHint(frame) {
+		t.Fatal("answered ask box above the idle input was treated as live")
+	}
+	if got := Parse(frame, "omp"); got != nil {
+		t.Fatalf("interaction = %+v, want nil", got)
+	}
+	if Classify(frame, "omp").Kind == AttentionQuestion {
+		t.Fatal("classification was a question")
+	}
+}
+
 func TestApprovalFingerprintIgnoresPaneChangesOutsideDialog(t *testing.T) {
 	snapshot := attentionFixture(t, "omp-tool-approval.ansi")
 	first := Classify(snapshot+"\nStatus: 10%/272K\n", "omp")

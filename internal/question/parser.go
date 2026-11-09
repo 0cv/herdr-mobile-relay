@@ -420,10 +420,9 @@ func ompLayoutHint(text string) bool {
 	if footer < 0 || (options < 2 && !reviewSubmit) {
 		return false
 	}
-	// Anything below the closing border is display chrome of unknown
-	// presets, themes and extensions; the footer inside the box is the
-	// live signal, so it is deliberately not inspected.
-	return true
+	// omp's empty input box at the bottom means the question was already answered.
+	// Other lines below the box are ignored.
+	return !ruleFramedStatusPrompt(lines[footer+1:])
 }
 
 // ompCleanLines additionally strips the Ask frame's inner scrollbar column,
