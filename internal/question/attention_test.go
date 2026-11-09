@@ -1396,6 +1396,96 @@ func attentionFixture(t *testing.T, name string) string {
 	return string(content)
 }
 
+func TestOMPAskParsesWithStatusBarBelowModal(t *testing.T) {
+	frame := attentionFixture(t, "omp-ask-status-below.ansi")
+	if !LayoutHint(frame) {
+		t.Fatal("live omp ask with status bar below the modal was rejected")
+	}
+	interaction := Parse(frame, "omp")
+	if interaction == nil || interaction.Kind != "single_select" ||
+		interaction.Question != "Relay test 3: do you see this card on the phone?" ||
+		len(interaction.Options) != 3 ||
+		interaction.Options[0].Label != "Yes" ||
+		interaction.Options[2].Label != "Partially" ||
+		interaction.Other.Label != "Other (type your own)" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	if Classify(frame, "omp").Kind != AttentionQuestion {
+		t.Fatal("classification was not a question")
+	}
+	// Extra lines below the closing border must not hide the question.
+	interaction2 := Parse(frame+"\n⠙ 19s · ◉ max · $0.03\nsome-extension: doing things\n", "omp")
+	if interaction2 == nil || interaction2.Question != "Relay test 3: do you see this card on the phone?" {
+		t.Fatalf("arbitrary content below the border broke parsing: %+v", interaction2)
+	}
+	if Classify(frame+"\n⠙ 19s · ◉ max · $0.03\nsome-extension: doing things\n", "omp").Kind != AttentionQuestion {
+		t.Fatal("arbitrary content below the border broke classification")
+	}
+}
+
+func TestOMPAskFooterMustSitInsideAskBox(t *testing.T) {
+	// Answered Ask boxes remain above plan approvals. The plan-review footer
+	// must not make an answered box look like a live question.
+	lines := strings.Split(attentionFixture(t, "omp-ask-status-below.ansi"), "\n")
+	if len(lines) < 34 {
+		t.Fatalf("fixture has %d lines, want at least 34", len(lines))
+	}
+	frame := strings.Join(lines[:33], "\n") + "\n" +
+		attentionFixture(t, "omp-plan-approval.ansi")
+	if LayoutHint(frame) {
+		t.Fatal("plan approval with an answered ask box above it was treated as a live question")
+	}
+	if got := Classify(frame, "omp"); got.Kind != AttentionApproval {
+		t.Fatalf("classification = %+v, want approval", got)
+	}
+	// Answered Ask boxes in scrollback have no footer and are not live dialogs.
+	if LayoutHint(strings.Join(lines[:33], "\n")) {
+		t.Fatal("scrollback with only answered ask boxes was treated as live")
+	}
+}
+
+func TestOMPAskFootersAcrossQuestionStyles(t *testing.T) {
+	frame := attentionFixture(t, "omp-ask-status-below.ansi")
+	live := "⏎ select · n note · ↑/↓ move · ⎋ cancel · Alt+H hide"
+	for _, tc := range []struct{ name, footer string }{
+		{"multiple choice", "␣ toggle · ⏎ submit · ↑/↓ move · ⎋ cancel · Alt+H hide"},
+		{"multiple questions", "␣ toggle · ⏎ next · ↑/↓ move · ⎋ cancel · Alt+H hide"},
+		{"answer review", "⏎ submit · ↑/↓ scroll · ⎋ cancel · Alt+H hide"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			variant := strings.Replace(frame, live, tc.footer, 1)
+			if variant == frame {
+				t.Fatalf("footer line not found in fixture: %q", live)
+			}
+			if !LayoutHint(variant) {
+				t.Fatalf("%s footer was not detected", tc.name)
+			}
+			if Parse(variant, "omp") == nil {
+				t.Fatalf("frame with %s footer did not parse", tc.name)
+			}
+		})
+	}
+}
+
+func TestOMPStockAskParsesWithoutExtensions(t *testing.T) {
+	// Stock omp 18.17 shows the ask call above the live dialog, with blank lines below.
+	frame := attentionFixture(t, "omp-ask-stock.ansi")
+	if !LayoutHint(frame) {
+		t.Fatal("stock omp ask frame was rejected")
+	}
+	interaction := Parse(frame, "omp")
+	if interaction == nil || interaction.Kind != "single_select" ||
+		interaction.Question != "Stock capture: does the relay parse this?" ||
+		len(interaction.Options) != 3 ||
+		interaction.Options[0].Label != "Yes" ||
+		interaction.Other.Label != "Other (type your own)" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	if Classify(frame, "omp").Kind != AttentionQuestion {
+		t.Fatal("classification was not a question")
+	}
+}
+
 func TestApprovalFingerprintIgnoresPaneChangesOutsideDialog(t *testing.T) {
 	snapshot := attentionFixture(t, "omp-tool-approval.ansi")
 	first := Classify(snapshot+"\nStatus: 10%/272K\n", "omp")
