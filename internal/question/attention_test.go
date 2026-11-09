@@ -1129,6 +1129,16 @@ func TestClassifyCapturedClaudeQuestionLayouts(t *testing.T) {
 			firstDescription: "1. Which activities would you like to include on your week-end trip: " +
 				"Sightseeing, Relaxation, Sport haha!!",
 		},
+		{
+			name:             "named session with task panel",
+			fixture:          "claude-named-session-task-panel.ansi",
+			kind:             "single_select",
+			question:         "Capture for the relay fix: which answer should this test pick? Please answer at the laptop.",
+			submitLabel:      "Submit",
+			options:          []string{"First choice", "Second choice"},
+			selected:         []bool{false, false},
+			firstDescription: "Pick this one to finish the capture.",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1177,12 +1187,29 @@ func TestCapturedClaudeControlsFollowedByNewPromptAreChat(t *testing.T) {
 	for _, fixture := range []string{
 		"claude-single-approval.ansi",
 		"claude-plan-submit-answers.ansi",
+		"claude-named-session-task-panel.ansi",
 	} {
 		content := attentionFixture(t, fixture) +
 			"\n\n⏺ The request was handled.\n✻ Worked for 1s\n\n❯\n"
 		got := Classify(content, "claude")
 		if got.Kind != AttentionChat || len(got.Options) != 0 || got.Interaction != nil {
 			t.Fatalf("%s classification = %+v", fixture, got)
+		}
+	}
+}
+
+func TestClassifyClaudeQuestionWithTaskPanelOverflowLine(t *testing.T) {
+	fixture := attentionFixture(t, "claude-named-session-task-panel.ansi")
+	withoutOverflow := fixture[:strings.LastIndex(fixture, "\n")]
+	for _, overflow := range []string{
+		"… +16 pending, 124 completed",
+		"… +5 completed",
+		"… +1 in progress",
+		"… +2 in progress, 16 pending, 124 completed",
+	} {
+		got := Classify(withoutOverflow+"\n   "+overflow, "claude")
+		if got.Kind != AttentionQuestion || got.Interaction == nil {
+			t.Fatalf("%q classification = %+v", overflow, got)
 		}
 	}
 }

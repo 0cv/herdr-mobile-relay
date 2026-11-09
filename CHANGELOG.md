@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code questions can be answered from the phone in a named session, or
+  while the task list is showing. The name in the input rule and the task panel
+  under it hid the question, so the agent showed as blocked with nothing to
+  answer (#155).
+
 ## [0.25.0] - 2026-11-05
 
 ### Added
