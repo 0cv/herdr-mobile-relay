@@ -6,6 +6,22 @@
   },
   "baselines": [
     {
+      "name": "0.25.1",
+      "version": "0.25.1",
+      "assets": 491,
+      "sourceRelease": "v0.25.1",
+      "sourceCommit": "7fb48b27d3c4b81089bf91f7534d626faf018390",
+      "archive": "herdr-mobile-relay_0.25.1_linux_amd64.tar.gz",
+      "url": "https://github.com/0cv/herdr-mobile-relay/releases/download/v0.25.1/herdr-mobile-relay_0.25.1_linux_amd64.tar.gz",
+      "archiveSha256": "0e702ad51a0daacdbb3433cc2e6abc225a1acbcddb1028b3734b53384859c02c",
+      "webHash": "47bfa5fbd97dd0c34a7fc2ac50eb1266f07f5a1da1f4420db19014efb169e41f",
+      "revision": "7fb48b27d3c4b81089bf91f7534d626faf018390",
+      "entry": "/builds/0.25.1-491-a8fdfc3f884adbfe/index.html",
+      "script": "/assets/app-c1d90055892685f0f6e8afcfffd3ce88f415c91fe4b4d89a31d5156e3e17d389.js",
+      "style": "/assets/app-b43b657a15ca3aad8c8181eab513263693022eab31dd59f37c875541b4f131c8.css",
+      "build": "a8fdfc3f884adbfe3b39964343b5b4afc4847528d1e9e9d6ae6d4c9794f87c89"
+    },
+    {
       "name": "0.25.0",
       "version": "0.25.0",
       "assets": 490,
@@ -20,22 +36,6 @@
       "script": "/assets/app-c41dcc486755761ea1614ab4ac6ffa60e535d7ccd4d035d0d250da95de6e65e0.js",
       "style": "/assets/app-b43b657a15ca3aad8c8181eab513263693022eab31dd59f37c875541b4f131c8.css",
       "build": "d1262d57620f2e22448374ae6b0a22479b181c986fe4fbff560e371250e15037"
-    },
-    {
-      "name": "0.24.0",
-      "version": "0.24.0",
-      "assets": 485,
-      "sourceRelease": "v0.24.0",
-      "sourceCommit": "3aa3888a474f7ce4a5469fa9de15a463aeaf2c41",
-      "archive": "herdr-mobile-relay_0.24.0_linux_amd64.tar.gz",
-      "url": "https://github.com/0cv/herdr-mobile-relay/releases/download/v0.24.0/herdr-mobile-relay_0.24.0_linux_amd64.tar.gz",
-      "archiveSha256": "fa91a805e31df3dc3428d9f6e451be3784db9575dc5e6972e4280adb7ca7fd2a",
-      "webHash": "342e46d3d3dce513d08cabbafa95e2d07f7d0f34cd1b4175b0e96f8fe32697cf",
-      "revision": "3aa3888a474f7ce4a5469fa9de15a463aeaf2c41",
-      "entry": "/builds/0.24.0-485-5b76ce14c26ec65b/index.html",
-      "script": "/assets/app-a117555d3e8fa299206ed9e542af79e17a393af48abd43736e9da168a5c6b54e.js",
-      "style": "/assets/app-26918f6791a7740bd67b81af0c572f99ac2fa911d87d1eec46b41f1d0572ef4d.css",
-      "build": "5b76ce14c26ec65ba9d4b41020fd05f2d4ed9b0d556ac2f968c0d4b5bf58e944"
     }
   ]
 }
