@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-11-10
+
 ### Fixed
 
 - Claude Code questions can be answered from the phone in a named session, or

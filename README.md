@@ -6,7 +6,7 @@ Control agents from the [Herdr](https://herdr.dev) TUI, herdr-app or herdr-core
 from your phone. Each Linux or macOS computer runs its own relay; the phone
 connects to them and merges every agent into one installable web app.
 
-**Current version:** [`0.25.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.25.0) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.25.1`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.25.1) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -100,8 +100,8 @@ Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
 
 If you use the Herdr TUI, the setup menu above sets up the TUI relay, the core
 relay, or both, and each QR says which computer it adds. Without the TUI,
-download `install.sh` from this repository at tag `v0.25.0` and run
-`sh install.sh 0.25.0`; it downloads and verifies the release bundle and prints
+download `install.sh` from this repository at tag `v0.25.1` and run
+`sh install.sh 0.25.1`; it downloads and verifies the release bundle and prints
 the command that opens the same menu. Core pairs over Tailscale or Cloudflare;
 see the [core guide](docs/herdr-core.md).
 
