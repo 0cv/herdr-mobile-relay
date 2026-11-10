@@ -13,6 +13,9 @@ project follows [Semantic Versioning](https://semver.org/).
   answer (#155).
 - omp asks render as tappable cards again when the TUI status bar or extension
   output sits below the dialog (#153).
+- Reading older history of a long, active conversation no longer fails with a
+  storage-limit error after repeated reads; the relay now frees space held by
+  older, unused copies. (#157)
 
 ## [0.25.0] - 2026-11-05
 

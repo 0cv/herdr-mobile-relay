@@ -81,6 +81,7 @@ func openSnapshotIndex(root, snapshotID string, metadata snapshotMetadata) (*sna
 	if err == nil {
 		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
 			_ = db.Close()
+			_ = os.Remove(path)
 			return nil, chmodErr
 		}
 	}

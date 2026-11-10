@@ -524,6 +524,43 @@ func TestClaudeChainTraversesTwoClippedSegmentsWithSavedCursorExactOrder(t *test
 	if fmt.Sprint(savedSaw) != fmt.Sprint(saw) || fmt.Sprint(savedGlobal) != fmt.Sprint(global) {
 		t.Fatalf("saved cursor traversal changed content/order: first=%v/%v saved=%v/%v", saw, global, savedSaw, savedGlobal)
 	}
+	browser.workerWG.Wait()
+	browser.capacityMu.Lock()
+	quota := browser.options.AggregateQuota
+	browser.options.AggregateQuota = 1
+	code := browser.ensureCapacity(nil, nil, "admission", true)
+	browser.options.AggregateQuota = quota
+	browser.unlockCapacity()
+	if code != "" {
+		t.Fatalf("idle chain reclamation: %s", code)
+	}
+	cursor := latest.NextCursor
+	expired := false
+	for cursor != "" {
+		page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Cursor: cursor, Limit: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.ReasonCode == "cursor_expired" {
+			expired = true
+			break
+		}
+		if page.State != BrowseReady {
+			t.Fatalf("evicted chain silently rebuilt: %+v", page)
+		}
+		cursor = page.NextCursor
+	}
+	if !expired {
+		t.Fatal("evicted chain cursor did not expire")
+	}
+	fresh, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 2})
+	if err != nil || fresh.ReasonCode != "" {
+		t.Fatalf("fresh latest: %+v %v", fresh, err)
+	}
+	freshGlobal, _ := traverse(fresh.NextCursor, fresh.Entries)
+	if fmt.Sprint(freshGlobal) != fmt.Sprint(global) {
+		t.Fatal("fresh chain did not recover after reclamation")
+	}
 }
 
 func TestClaudeChainRecentTailDoesNotSkipPrefixWhenPreparationFinishesConcurrently(t *testing.T) {
