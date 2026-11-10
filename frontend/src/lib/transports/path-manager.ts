@@ -349,16 +349,20 @@ export function createHybridTransport(
 
   /**
    * Bridge-window safety net. A config migrated from the legacy WSS URL keeps
-   * that URL, so a phone that cannot reach the gateway at all — blocked
+   * that URL, and a gateway entry imported from a setup link carries the app
+   * origin instead, so a phone that cannot reach the gateway at all — blocked
    * network, gateway outage, relay not registered — falls back to the path
    * that was working before the migration instead of being stranded.
    */
   function startLegacy(detail?: TransportStatusDetail): boolean {
-    if (legacyTried || !relay.url) return false;
+    // Read outside `url`: gateway entries leave it empty on purpose, and
+    // `makeRelayId` derives their identity from the gateway they answer on.
+    const target = relay.legacyUrl || relay.url;
+    if (legacyTried || !target) return false;
     legacyTried = true;
     active = 'legacy';
     handlers.onStatus('connecting', { reason: detail?.reason });
-    legacy = makeLegacy(relay, {
+    legacy = makeLegacy({ ...relay, url: target }, {
       onMessage(message: Record<string, any>): void {
         if (closed || active !== 'legacy') return;
         handlers.onMessage(message);

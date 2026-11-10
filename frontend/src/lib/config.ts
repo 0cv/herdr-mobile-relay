@@ -191,6 +191,10 @@ export function normalizeRelayConfig(relay: Partial<RelayConfig>): RelayConfig {
   config.transport = 'hybrid';
   config.gatewayUrl = gatewayUrl;
   if (gateways.length) config.gatewayUrls = gateways;
+  // A hybrid entry's fallback is read back with the permissive rule, like its
+  // gateways: it was checked against the page protocol when it was imported.
+  const legacyUrl = safeSocketOrigin(String(relay.legacyUrl || ''), 'http:') ?? '';
+  if (legacyUrl) config.legacyUrl = legacyUrl;
   if (rendezvous) {
     config.gatewayRelayId = relay.gatewayRelayId;
     config.rendezvousKey = relay.rendezvousKey;
@@ -271,6 +275,14 @@ export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): Qui
   return { id, version, secret, expiresAt };
 }
 
+/**
+ * The page's own origin as a socket address: a link printed over plain http
+ * pairs over ws:, anything else over wss:. It is the fallback address of a
+ * gateway entry, and the only address of a direct one.
+ */
+function pageSocketOrigin(locationValue: Pick<Location, 'protocol' | 'host'>): string {
+  return `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
+}
 
 export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>): Omit<RelayConfig, 'id'> | null {
   const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
@@ -288,9 +300,19 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     // The separator stays literal; each entry is percent-encoded on its own.
     const gatewayUrls = gatewayOrigins(configuredGateways.split(','), locationValue.protocol);
     if (!gatewayUrls.length) return null;
+    // The page that printed the link is the last resort a direct link names
+    // below; `relay=` may override it, and a garbled override is as hostile as
+    // any other setup address. This never lands in `url`, which decides the id.
+    const configuredRelay = params.get('relay');
+    const legacyUrl = safeSocketOrigin(
+      configuredRelay || pageSocketOrigin(locationValue),
+      locationValue.protocol,
+    );
+    if (configuredRelay && !legacyUrl) return null;
     const config: Omit<RelayConfig, 'id'> = {
       label, url: '', token: invitation ? '' : token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls,
     };
+    if (legacyUrl) config.legacyUrl = legacyUrl;
     if (!invitation) return config;
     // An invited device holds no relay key, so the link must carry what the
     // gateway challenge needs; without it the entry could never connect.
@@ -300,7 +322,7 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     return { ...config, gatewayRelayId, rendezvousKey };
   }
   const configuredRelay = params.get('relay');
-  let url = `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
+  let url = pageSocketOrigin(locationValue);
   if (configuredRelay) {
     const origin = safeSocketOrigin(configuredRelay, locationValue.protocol);
     if (!origin) return null;
@@ -368,6 +390,9 @@ export function importQuickSetup(
     id: existing?.id,
     label: existing?.label || setup.label,
     url: setup.url,
+    // The new fallback is stored beside the entry, never in `url`, so the id
+    // and the device credential enrolled under it stay put.
+    legacyUrl: setup.legacyUrl ?? existing?.legacyUrl,
     token: invitation && existing ? existing.token : setup.token,
     transport: invitation && existing ? existing.transport : setup.transport,
     gatewayUrl: invitation && existing ? existing.gatewayUrl : setup.gatewayUrl,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   importQuickSetup,
   loadRelayConfigs,
+  makeRelayId,
   normalizeRelayConfig,
   quickSetupConfig,
   quickSetupInvitation,
@@ -118,6 +119,7 @@ describe('device invitation setup', () => {
       gatewayUrls: ['wss://a.example', 'wss://b.example'],
       gatewayRelayId: relayId,
       rendezvousKey: rendezvous,
+      legacyUrl: 'wss://app.example.com',
     });
     // Without the rendezvous the invited device could never reach the relay.
     expect(quickSetupConfig(link(''))).toBeNull();
@@ -154,6 +156,7 @@ describe('ordered gateway lists', () => {
       transport: 'hybrid',
       gatewayUrl: 'wss://a.example',
       gatewayUrls: ['wss://a.example', 'wss://b.example'],
+      legacyUrl: 'wss://app.example.com',
     });
   });
 
@@ -283,5 +286,77 @@ describe('ordered gateway lists', () => {
     expect(setup?.transport).toBe('hybrid');
     expect(setup?.gatewayUrl).toBe('wss://primary.example');
     expect(setup?.gatewayUrls).toEqual(['wss://primary.example', 'wss://backup.example']);
+  });
+});
+
+describe('legacy target of a gateway entry', () => {
+  it('carries the app origin as a field of its own, never as url', () => {
+    // A gateway entry has no address of its own, so the page that printed the
+    // link is the last resort if the gateway turns out to be unreachable.
+    const setup = quickSetupConfig(setupLink(
+      'label=Fedora&gateways=wss%3A%2F%2Fa.example,wss%3A%2F%2Fb.example',
+    ));
+    expect(setup?.url).toBe('');
+    expect(setup?.legacyUrl).toBe('wss://app.example.com');
+
+    // Over plain http the page's own origin is a ws: address, never wss:.
+    expect(quickSetupConfig({
+      hash: `#setup=${TOKEN}&label=Pi&gateways=wss%3A%2F%2Fa.example`,
+      protocol: 'http:',
+      host: 'app.local:8080',
+    })?.legacyUrl).toBe('ws://app.local:8080');
+  });
+
+  it('lets relay= name the legacy target of a gateway link', () => {
+    const setup = quickSetupConfig(setupLink(
+      'label=Fedora&gateways=wss%3A%2F%2Fa.example&relay=wss%3A%2F%2Flegacy.example.com',
+    ));
+    expect(setup?.legacyUrl).toBe('wss://legacy.example.com');
+    expect(setup?.url).toBe('');
+  });
+
+  it('rejects a hostile relay= on a gateway link', () => {
+    // The override goes through the same origin check as every setup address.
+    expect(quickSetupConfig(setupLink(
+      'label=Fedora&gateways=wss%3A%2F%2Fa.example&relay=javascript%3Aalert(1)',
+    ))).toBeNull();
+    expect(quickSetupConfig(setupLink(
+      'label=Fedora&gateways=wss%3A%2F%2Fa.example&relay=wss%3A%2F%2Fuser%40legacy.example.com',
+    ))).toBeNull();
+  });
+
+  it('keeps the id of a gateway entry stable across the new field', () => {
+    // Credentials are keyed by this id, so the fallback must stay outside the
+    // formula that derives it: url is empty, and the gateway decides identity.
+    const link = setupLink('label=Fedora&gateways=wss%3A%2F%2Fa.example,wss%3A%2F%2Fb.example');
+    const imported = importQuickSetup([], link)!;
+    expect(imported).toHaveLength(1);
+    expect(imported[0].id).toBe(makeRelayId('Fedora', '', 'wss://a.example'));
+    expect(imported[0].legacyUrl).toBe('wss://app.example.com');
+
+    // A re-import that reorders the gateways keeps the entry, its id and its
+    // fallback: the computer is the same one, still paired once.
+    const again = importQuickSetup(imported, setupLink(
+      'label=Fedora&gateways=wss%3A%2F%2Fb.example,wss%3A%2F%2Fa.example',
+    ))!;
+    expect(again).toHaveLength(1);
+    expect(again[0].id).toBe(imported[0].id);
+    expect(again[0].legacyUrl).toBe('wss://app.example.com');
+  });
+
+  it('drops the field from an entry that reaches its relay directly', () => {
+    // A direct entry already owns `url`; a stored legacy one keeps its exact
+    // shape, so the field never leaks onto a transport that cannot use it.
+    expect(normalizeRelayConfig({
+      label: 'cv', url: 'wss://relay.example.com', token: TOKEN, legacyUrl: 'wss://app.example.com',
+    })).toEqual({
+      id: 'cv-wss-relay-example-com',
+      label: 'cv',
+      url: 'wss://relay.example.com',
+      token: TOKEN,
+    });
+    expect(normalizeRelayConfig({
+      label: 'Fedora', token: TOKEN, legacyUrl: 'javascript:alert(1)', gatewayUrl: 'wss://a.example',
+    })).not.toHaveProperty('legacyUrl');
   });
 });

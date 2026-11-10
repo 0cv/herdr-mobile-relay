@@ -1236,6 +1236,133 @@ describe('hybrid path manager', () => {
     expect(hybridOnly.send({ type: 'refresh_agents' })).toBe(false);
   });
 
+  // Characterisation, not a fix: upstream 842b680 already falls back without a
+  // fatal code, and no test pinned the non-fatal case, so a reintroduced gate
+  // would have gone unnoticed. This locks the behaviour in as it stands.
+  it('falls back to the legacy URL when every gateway fails without a fatal reason', () => {
+    // A phone on a blocked network never receives a fatal code: the gateway is
+    // simply unreachable, which is exactly the state the fallback exists for.
+    const legacies: FakeTransport[] = [];
+    const gatewayUrls = ['wss://a.example', 'wss://b.example'];
+    const transport = createHybridTransport(
+      { ...HYBRID_RELAY, url: 'wss://fedora.example', gatewayUrl: gatewayUrls[0], gatewayUrls },
+      handlers,
+      {
+        createGateway: (_relay, gatewayHandlers) => {
+          const fake = fakeTransport('gateway', gatewayHandlers);
+          gateways.push(fake);
+          return fake;
+        },
+        createDirect: (_relay, signal, directHandlers) => {
+          const fake = fakeTransport('webrtc', directHandlers);
+          signals.push(signal);
+          directs.push(fake);
+          return fake;
+        },
+        createLegacy: (_relay, legacyHandlers) => {
+          const fake = fakeTransport('websocket', legacyHandlers);
+          legacies.push(fake);
+          return fake;
+        },
+      },
+    );
+    transport.connect();
+    const refused = { reason: 'The gateway refused the connection.' };
+    gateways[0].handlers.onStatus('closed', refused);
+    expect(legacies).toHaveLength(0);
+
+    gateways[1].handlers.onStatus('closed', refused);
+    expect(gateways).toHaveLength(2);
+    expect(legacies).toHaveLength(1);
+    expect(legacies[0].connects).toBe(1);
+    expect(legacies[0].closed).toBe(false);
+
+    legacies[0].handlers.onStatus('connected', { path: 'websocket' });
+    expect(statuses.at(-1)).toEqual({ status: 'connected', detail: { path: 'websocket' } });
+    expect(transport.send({ type: 'refresh_agents' })).toBe(true);
+    expect(legacies[0].sent).toHaveLength(1);
+  });
+
+  // Characterisation too: the single-candidate path has no failover to fall back
+  // on, so the legacy dial and the single terminal close are what upstream does.
+  it('makes one legacy attempt when the only gateway is unreachable', () => {
+    const legacies: FakeTransport[] = [];
+    const transport = createHybridTransport(
+      { ...HYBRID_RELAY, url: 'wss://fedora.example' },
+      handlers,
+      {
+        createGateway: (_relay, gatewayHandlers) => {
+          const fake = fakeTransport('gateway', gatewayHandlers);
+          gateways.push(fake);
+          return fake;
+        },
+        createDirect: (_relay, signal, directHandlers) => {
+          const fake = fakeTransport('webrtc', directHandlers);
+          signals.push(signal);
+          directs.push(fake);
+          return fake;
+        },
+        createLegacy: (_relay, legacyHandlers) => {
+          const fake = fakeTransport('websocket', legacyHandlers);
+          legacies.push(fake);
+          return fake;
+        },
+      },
+    );
+    transport.connect();
+    expect(gateways).toHaveLength(1);
+
+    // A single candidate is never retried in this pass; legacy gets the turn.
+    gateways[0].handlers.onStatus('closed', { reason: 'Could not reach the gateway.' });
+    expect(gateways).toHaveLength(1);
+    expect(legacies).toHaveLength(1);
+    expect(legacies[0].connects).toBe(1);
+
+    // The transport ends the moment the last resort dies, and only once: the
+    // store owns the backoff from here.
+    legacies[0].handlers.onStatus('closed', { reason: 'The relay refused the connection.' });
+    expect(statuses.filter((event) => event.status === 'closed')).toHaveLength(1);
+    expect(statuses.at(-1)).toEqual({ status: 'closed', detail: { reason: 'The relay refused the connection.' } });
+    expect(transport.send({ type: 'refresh_agents' })).toBe(false);
+  });
+
+  it('dials a gateway entry\'s own legacy URL, and nothing else', () => {
+    const legacyTargets: string[] = [];
+    const build = (relay: RelayConfig): RelayTransport => createHybridTransport(relay, handlers, {
+      createGateway: (_relay, gatewayHandlers) => {
+        const fake = fakeTransport('gateway', gatewayHandlers);
+        gateways.push(fake);
+        return fake;
+      },
+      createDirect: (_relay, signal, directHandlers) => {
+        const fake = fakeTransport('webrtc', directHandlers);
+        signals.push(signal);
+        directs.push(fake);
+        return fake;
+      },
+      createLegacy: (target, legacyHandlers) => {
+        legacyTargets.push(String(target.url));
+        return fakeTransport('websocket', legacyHandlers);
+      },
+    });
+    const refused = { reason: 'The gateway refused the connection.' };
+
+    const withFallback = build({ ...HYBRID_RELAY, url: '', legacyUrl: 'wss://app.example.com' });
+    withFallback.connect();
+    gateways[0].handlers.onStatus('closed', refused);
+    expect(legacyTargets).toEqual(['wss://app.example.com']);
+
+    // An entry with neither address keeps the old behaviour: no last resort.
+    legacyTargets.length = 0;
+    gateways.length = 0;
+    statuses.length = 0;
+    const addressless = build(HYBRID_RELAY);
+    addressless.connect();
+    gateways[0].handlers.onStatus('closed', refused);
+    expect(legacyTargets).toEqual([]);
+    expect(statuses.at(-1)?.status).toBe('closed');
+  });
+
   /**
    * Address discovery, hello to peer connection. Only the port is advertised:
    * the host is always the one this phone dialed, so a gateway can neither aim
@@ -1315,6 +1442,7 @@ describe('hybrid relay configuration', () => {
       transport: 'hybrid',
       gatewayUrl: 'wss://gw.example.com',
       gatewayUrls: ['wss://gw.example.com'],
+      legacyUrl: 'wss://app.example.com',
     });
 
     const imported = importQuickSetup([], {

@@ -82,6 +82,12 @@ export interface RelayConfig {
   label: string;
   /** Direct relay WebSocket URL. Empty for gateway-reachable computers. */
   url: string;
+  /**
+   * Last-resort WSS address of a gateway entry, tried once the whole gateway
+   * list has failed. Deliberately outside `makeRelayId`: the stored id keys
+   * this device's credentials, so it must survive a newly imported fallback.
+   */
+  legacyUrl?: string;
   token: string;
   /**
    * Which path reaches this computer. A missing value means the legacy setup:

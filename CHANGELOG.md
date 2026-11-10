@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A computer reachable only through its gateway keeps the address its setup
+  link was printed from as a last resort. Once every gateway in the list has
+  failed, the app makes one attempt there instead of retrying the same dead
+  gateways forever.
+
 ## [0.25.1] - 2026-11-10
 
 ### Fixed

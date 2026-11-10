@@ -123,6 +123,7 @@ describe('protocol and setup parsing', () => {
       transport: 'hybrid',
       gatewayUrl: 'wss://gw.example.com',
       gatewayUrls: ['wss://gw.example.com'],
+      legacyUrl: 'wss://app.example.com',
     });
     expect(quickSetupConfig({
       hash: '#setup=0123456789abcdef0123456789abcdef&gateways=wss%3A%2F%2Fgw.example.com%2Fconnect%3Fkey%3Dleak',
