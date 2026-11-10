@@ -112,6 +112,7 @@ type BrowsePage struct {
 }
 
 type BrowserOptions struct {
+	CapacityObserver     func(CapacityEvent)
 	RecentBytes          int64
 	MaxRecordBytes       int64
 	DefaultPageSize      int
@@ -288,6 +289,13 @@ type Browser struct {
 	done   chan *browseJob
 	closed chan struct{}
 
+	capacityMu         sync.Mutex
+	capacityEvent      *CapacityEvent
+	capacityLast       time.Time
+	capacitySuppressed int
+	capacityNow        func() time.Time
+	capacityRemove     func(*snapshotIndex) error
+
 	mu                    sync.Mutex
 	jobs                  map[string]*browseJob
 	dedup                 map[string]string
@@ -310,6 +318,8 @@ type Browser struct {
 	validationWG sync.WaitGroup
 	closeOnce    sync.Once
 
+	capacityOperationObserver        func(string, *browseJob, bool)
+	snapshotReadObserver             func(*browseJob)
 	sourceReadObserver               func(int64)
 	recentReadObserver               func(int64)
 	physicalReadObserver             func(int64)
@@ -422,6 +432,8 @@ func (b *Browser) Close() error {
 		b.readWG.Wait()
 		b.kimiProjection = nil
 		b.validationWG.Wait()
+		b.capacityMu.Lock()
+		defer b.unlockCapacity()
 		b.mu.Lock()
 		jobs := make([]*browseJob, 0, len(b.jobs))
 		for _, job := range b.jobs {
@@ -612,22 +624,15 @@ func (b *Browser) observeChainWorkerCapture(evidence []claudeRangeEvidence) {
 }
 
 func (b *Browser) evictExpired(now time.Time) {
+	b.observeCapacityOperation("expiry", nil, false)
+	b.capacityMu.Lock()
+	defer b.unlockCapacity()
 	var expired []expiredJob
 	b.mu.Lock()
-	for id, job := range b.jobs {
+	for _, job := range b.jobs {
 		job.mu.Lock()
-		eligible := (job.state == BrowseReady || job.state == BrowseFailed) && !job.running && !job.queued && job.readers == 0 && now.Sub(job.lastAccess) >= b.options.SnapshotTTL
-		if eligible {
-			job.retired = true
-			delete(b.jobs, id)
-			if b.dedup[job.dedupKey] == id {
-				delete(b.dedup, job.dedupKey)
-			}
-			index := job.index
-			job.index = nil
-			sourceFile := job.source.file
-			job.source.file = nil
-			expired = append(expired, expiredJob{index: index, sourceFile: sourceFile})
+		if b.capacityEligibleLocked(job) && now.Sub(job.lastAccess) >= b.options.SnapshotTTL {
+			expired = append(expired, b.detachJobLocked(job))
 		}
 		job.mu.Unlock()
 	}
@@ -657,12 +662,7 @@ func (b *Browser) evictExpired(now time.Time) {
 	}
 	b.mu.Unlock()
 	for _, item := range expired {
-		if item.sourceFile != nil {
-			_ = item.sourceFile.Close()
-		}
-		if item.index != nil {
-			_ = item.index.remove()
-		}
+		_ = b.removeCapacityItem(item)
 	}
 }
 
@@ -1545,13 +1545,22 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		page := browseFailure(true, "index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
 		return nil, &page
 	}
-	if b.aggregateCacheBytes() >= b.options.AggregateQuota {
-		page := browseFailure(true, "index_capacity_exceeded", "The conversation history cache reached its storage limit.", browseErrorFor("index_capacity_exceeded", "The conversation history cache reached its storage limit.", true))
-		return nil, &page
-	}
+	b.observeCapacityOperation("admission", nil, false)
+	b.capacityMu.Lock()
+	capacityLocked := true
+	defer func() {
+		if capacityLocked {
+			b.unlockCapacity()
+		}
+	}()
 	scopeID := browseScopeID(scope)
 	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%d", scopeID, source.revision, start, end, boundary, digest, chainContextID, chainSegment)
 	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		page := browseFailure(true, "index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
+		return nil, &page
+	}
 	if id := b.dedup[dedupKey]; id != "" {
 		job := b.jobs[id]
 		b.mu.Unlock()
@@ -1584,14 +1593,29 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		page := browseFailure(true, "index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
 		return nil, &page
 	}
+	b.mu.Unlock()
+	request := &browseJob{scopeID: scopeID, source: source}
+	if code := b.ensureCapacity(request, nil, "admission", true); code != "" {
+		return nil, capacityFailurePage(code)
+	}
 	metadata := snapshotMetadata{
 		Schema: 1, State: "building", SnapshotID: snapshotID, SourceRevision: source.revision,
 		EndOffset: source.end, Boundary: boundary, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	index, err := openSnapshotIndex(b.cacheRoot, snapshotID, metadata)
 	if err != nil {
-		b.mu.Unlock()
 		page := browseFailure(true, "index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
+		return nil, &page
+	}
+	if code := b.ensureCapacity(request, index, "admission", false); code != "" {
+		_ = index.remove()
+		return nil, capacityFailurePage(code)
+	}
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		_ = index.remove()
+		page := browseFailure(true, "index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
 		return nil, &page
 	}
 	var binding claudeChainJobBinding
@@ -1614,8 +1638,8 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		RangeDigest: digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 	})
 	if err != nil {
-		_ = index.remove()
 		b.mu.Unlock()
+		_ = index.remove()
 		page := browseFailure(true, "index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
 		return nil, &page
 	}
@@ -1624,6 +1648,8 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	b.dedup[dedupKey] = id
 	b.queue = append(b.queue, job)
 	b.mu.Unlock()
+	b.unlockCapacity()
+	capacityLocked = false
 	b.signalWake()
 	if chainContextID != "" && b.chainQueueAdmissionObserver != nil {
 		b.chainQueueAdmissionObserver(job)
@@ -1742,6 +1768,14 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*c
 	} else if digest, err := fileRangeDigest(ctx, source.file, rangeStart, rangeEnd); err != nil || digest != rangeDigest {
 		return false
 	}
+	b.observeCapacityOperation("retry", job, false)
+	b.capacityMu.Lock()
+	capacityLocked := true
+	defer func() {
+		if capacityLocked {
+			b.unlockCapacity()
+		}
+	}()
 	b.mu.Lock()
 	if b.closing || len(b.queue) >= b.options.QueuedPreparations {
 		b.mu.Unlock()
@@ -1755,23 +1789,34 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*c
 	}
 	oldIndex := job.index
 	oldSourceFile := job.source.file
-	job.index = nil
+	boundary := job.boundary
+	job.mu.Unlock()
+	b.mu.Unlock()
+	if code := b.ensureCapacity(job, nil, "retry", true); code != "" {
+		return false
+	}
 	snapshotID, err := randomIdentifier()
 	if err != nil {
-		job.index = oldIndex
-		job.mu.Unlock()
-		b.mu.Unlock()
 		return false
 	}
 	metadata := snapshotMetadata{
 		Schema: 1, State: "building", SnapshotID: snapshotID, SourceRevision: source.revision,
-		EndOffset: source.end, Boundary: job.boundary, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		EndOffset: source.end, Boundary: boundary, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	index, err := openSnapshotIndex(b.cacheRoot, snapshotID, metadata)
 	if err != nil {
-		job.index = oldIndex
+		return false
+	}
+	if code := b.ensureCapacity(job, index, "retry", false); code != "" {
+		_ = index.remove()
+		return false
+	}
+	b.mu.Lock()
+	job.mu.Lock()
+	if b.closing || b.jobs[job.id] != job || job.retired || job.running || job.queued {
 		job.mu.Unlock()
 		b.mu.Unlock()
+		_ = index.remove()
 		return false
 	}
 	job.source = source
@@ -1804,6 +1849,8 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*c
 	if oldIndex != nil {
 		_ = oldIndex.remove()
 	}
+	b.unlockCapacity()
+	capacityLocked = false
 	b.signalWake()
 	if job.chainContextID != "" && b.chainQueueAdmissionObserver != nil {
 		b.chainQueueAdmissionObserver(job)
@@ -1848,6 +1895,12 @@ func (b *Browser) readSnapshotPage(ctx context.Context, scope BrowseScope, limit
 }
 
 func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, limit int, job *browseJob, boundary int64) (BrowsePage, error) {
+	b.mu.Lock()
+	observer := b.snapshotReadObserver
+	b.mu.Unlock()
+	if observer != nil {
+		observer(job)
+	}
 	b.renewJob(job)
 	job.mu.Lock()
 	index := job.index
@@ -2331,9 +2384,12 @@ func (b *Browser) runJob(job *browseJob) {
 		if len(batch) == 0 {
 			break
 		}
-		results, applyErr := job.index.applyRecords(job.scope.Provider, job.source.revision, batch)
-		if applyErr != nil {
-			b.failJob(job, "index_failed", "History preparation could not store its index.", true)
+		var results []projectionResult
+		if code := b.writeWithCapacity(job, "batch", "History preparation could not store its index.", func() error {
+			var err error
+			results, err = job.index.applyRecords(job.scope.Provider, job.source.revision, batch)
+			return err
+		}); code != "" {
 			return
 		}
 		for _, result := range results {
@@ -2348,10 +2404,6 @@ func (b *Browser) runJob(job *browseJob) {
 			}
 			todoSeen = todoSeen || result.TodoSeen
 			recordCount++
-		}
-		if job.index.size() > b.options.SnapshotQuota || b.aggregateCacheBytes() > b.options.AggregateQuota {
-			b.failJob(job, "index_capacity_exceeded", "The conversation history index reached its storage limit.", true)
-			return
 		}
 		if eof {
 			break
@@ -2438,10 +2490,6 @@ func (b *Browser) runJob(job *browseJob) {
 		b.failJob(job, "index_failed", "The prepared conversation index is corrupt.", true)
 		return
 	}
-	if job.index.size() > b.options.SnapshotQuota || b.aggregateCacheBytes() > b.options.AggregateQuota {
-		b.failJob(job, "index_capacity_exceeded", "The conversation history index reached its storage limit.", true)
-		return
-	}
 	metadata.State = "ready"
 	metadata.SourceDigest = secondDigest
 	metadata.VisibleEntries = count
@@ -2456,8 +2504,12 @@ func (b *Browser) runJob(job *browseJob) {
 		b.failJob(job, "index_failed", "History preparation paused because no client is waiting for it.", true)
 		return
 	}
-	if err := job.index.setMetadata(metadata); err != nil || job.index.sync() != nil {
-		b.failJob(job, "index_failed", "The prepared conversation index could not be finalized.", true)
+	if code := b.writeWithCapacity(job, "finalize", "The prepared conversation index could not be finalized.", func() error {
+		if err := job.index.setMetadata(metadata); err != nil {
+			return err
+		}
+		return job.index.sync()
+	}); code != "" {
 		return
 	}
 	verifiedInfo, _ := file.Stat()
@@ -2495,6 +2547,12 @@ func (b *Browser) jobHasInterest(job *browseJob) bool {
 }
 
 func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) {
+	b.capacityMu.Lock()
+	defer b.unlockCapacity()
+	b.failJobCapacityLocked(job, code, message, retryable)
+}
+
+func (b *Browser) failJobCapacityLocked(job *browseJob, code, message string, retryable bool) {
 	failure := browseErrorFor(code, message, retryable)
 	job.mu.Lock()
 	job.err = failure
@@ -2503,12 +2561,7 @@ func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) 
 	sourceFile := job.source.file
 	job.source.file = nil
 	job.mu.Unlock()
-	if sourceFile != nil {
-		_ = sourceFile.Close()
-	}
-	if index != nil {
-		_ = index.remove()
-	}
+	_ = b.removeCapacityItem(expiredJob{index: index, sourceFile: sourceFile})
 }
 
 func (b *Browser) readOpenCodePage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
@@ -2707,28 +2760,4 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 		}
 	}
 	return b.enforcePageBudget(base)
-}
-
-func (b *Browser) aggregateCacheBytes() int64 {
-	if b.cacheRoot == "" {
-		return 0
-	}
-	entries, err := os.ReadDir(b.cacheRoot)
-	if err != nil {
-		return 0
-	}
-	var total int64
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "snapshot-") || !strings.HasSuffix(entry.Name(), ".db") {
-			continue
-		}
-		info, err := os.Lstat(filepath.Join(b.cacheRoot, entry.Name()))
-		if err == nil && info.Mode().IsRegular() {
-			if info.Size() > math.MaxInt64-total {
-				return math.MaxInt64
-			}
-			total += info.Size()
-		}
-	}
-	return total
 }

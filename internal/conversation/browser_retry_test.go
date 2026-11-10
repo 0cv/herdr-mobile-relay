@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,12 +13,12 @@ func TestBrowserFailurePublishesAfterWorkerRelinquishesJob(t *testing.T) {
 	reader, home := testReader(t)
 	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")
 	writeRows(t, path,
-		map[string]any{"type": "user", "uuid": "u1", "message": map[string]any{"content": "hello"}},
+		map[string]any{"type": "user", "uuid": "u1", "message": map[string]any{"content": strings.Repeat("hello", 20000)}},
 		map[string]any{"type": "assistant", "uuid": "a1", "message": map[string]any{"content": "answer"}},
 	)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	options.SnapshotQuota = 1024
+	options.SnapshotQuota = initialSnapshotBytes(t)
 	options.AggregateQuota = 1024 * 1024
 	options.ActiveWorkers = 2
 	browser, err := NewBrowser(reader, t.TempDir(), options)

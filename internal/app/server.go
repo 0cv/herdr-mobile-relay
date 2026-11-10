@@ -227,7 +227,9 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	if strings.TrimSpace(cfg.CacheDir) != "" {
 		cacheRoot = filepath.Join(cfg.CacheDir, "conversation-history")
 	}
-	conversationBrowser, browserErr := conversation.NewBrowser(conversationReader, cacheRoot, conversation.DefaultBrowserOptions())
+	browserOptions := conversation.DefaultBrowserOptions()
+	browserOptions.CapacityObserver = conversationCapacityLogger(logger)
+	conversationBrowser, browserErr := conversation.NewBrowser(conversationReader, cacheRoot, browserOptions)
 	if browserErr != nil {
 		logger.Warn("interactive conversation browsing unavailable", "error", browserErr)
 	}

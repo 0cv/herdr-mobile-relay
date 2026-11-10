@@ -79,8 +79,11 @@ var (
 	openCodeActivePattern = regexp.MustCompile(
 		`\x1b\[[^m]*48(?:;|:)2(?:;|:)157(?:;|:)124(?:;|:)216m([^\x1b]*)`,
 	)
-	openCodeColumnPattern  = regexp.MustCompile(`\s{20,}`)
-	ompAskHeaderPattern    = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
+	openCodeColumnPattern = regexp.MustCompile(`\s{20,}`)
+	ompAskHeaderPattern   = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
+	// Only live omp Ask dialogs render this footer. Enter shows as "Enter" (18.0),
+	// ⏎, or the Nerd Font Enter icon U+F0311.
+	ompFooterPattern       = regexp.MustCompile(`(?i)(?:enter|⏎|\x{F0311})\s+(?:select|submit|next)\b`)
 	ompOptionPattern       = regexp.MustCompile(`^\s*([❯›>]?)\s*(☑|☐|◉|○|||||\[[xX ]\]|\([oO ]\))\s+(.+?)\s*$`)
 	ompFrameMetaPattern    = regexp.MustCompile(`\[\s*([\p{L}\p{N}_-]+)\s*\]\s*[·•]\s*options:\s*\d+`)
 	ompProgressPattern     = regexp.MustCompile(`\s+\((\d+)\s*/\s*(\d+)\)\s*$`)
@@ -98,6 +101,11 @@ var (
 	)
 	responseStartPattern  = regexp.MustCompile(`^\s*[•●]\s+\S`)
 	responsePrefixPattern = regexp.MustCompile(`^\s*[•●]\s+`)
+
+	claudeSessionRulePattern = regexp.MustCompile(`^─{3,} \S.* ─$`)
+	claudeTaskPanelPattern   = regexp.MustCompile(
+		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*)$`,
+	)
 )
 
 func Supports(agent string) bool {
@@ -204,6 +212,10 @@ func LayoutHint(text string) bool {
 	}
 	for _, line := range lines[lastControl+1:] {
 		if hasCodexHeader && strings.EqualFold(strings.TrimSpace(line), "esc to interrupt") {
+			continue
+		}
+		// A named Claude session ends its input rule with the name, and its task panel follows.
+		if claudeSessionRulePattern.MatchString(line) || claudeTaskPanelPattern.MatchString(line) {
 			continue
 		}
 		if line != "" && strings.Trim(line, "─━═_—│| ") != "" {
@@ -396,20 +408,21 @@ func ompLayoutHint(text string) bool {
 		if review && ompReviewSubmitPattern.MatchString(line) {
 			reviewSubmit = true
 		}
-		lower := strings.ToLower(line)
-		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") {
+		if ompFooterPattern.MatchString(line) {
 			footer = index
+		}
+		// The footer must sit inside this Ask box: tool approvals render
+		// "enter select" too, but below this border, so the break rejects it.
+		if strings.HasPrefix(line, "╰") {
+			break
 		}
 	}
 	if footer < 0 || (options < 2 && !reviewSubmit) {
 		return false
 	}
-	for _, line := range lines[footer+1:] {
-		if line != "" && !ompBorderLine(line) {
-			return false
-		}
-	}
-	return true
+	// omp's empty input box at the bottom means the question was already answered.
+	// Other lines below the box are ignored.
+	return !ruleFramedStatusPrompt(lines[footer+1:])
 }
 
 // ompCleanLines additionally strips the Ask frame's inner scrollbar column,
@@ -437,8 +450,7 @@ func parseOMP(text string) *Interaction {
 
 	end := len(lines)
 	for index := start + 1; index < len(lines); index++ {
-		lower := strings.ToLower(lines[index])
-		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") {
+		if ompFooterPattern.MatchString(lines[index]) {
 			end = index
 			break
 		}
@@ -609,8 +621,7 @@ func ompQuestion(lines []string, start, firstOption int) string {
 func ompDescription(lines []string, start, end int) string {
 	var parts []string
 	for _, line := range lines[start+1 : end] {
-		if line == "" || ompBorderLine(line) ||
-			strings.Contains(strings.ToLower(line), "enter select") {
+		if line == "" || ompBorderLine(line) || ompFooterPattern.MatchString(line) {
 			continue
 		}
 		parts = append(parts, strings.TrimSpace(strings.TrimPrefix(line, "↳")))
