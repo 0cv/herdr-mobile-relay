@@ -96,14 +96,9 @@ export function putConversationPreview(preview: ConversationPreview, now = Date.
   if (!candidate) return false;
   const bytes = estimatePreviewBytes(candidate);
   if (bytes > limits.itemBytes || bytes > limits.totalBytes) return false;
-  const previous = cache.get(candidate.identity);
   cache.set(candidate.identity, { preview: candidate, bytes, lastUsed: now });
-  evictToLimits(now, previous?.bytes || 0);
+  evictToLimits(now);
   return cache.has(candidate.identity);
-}
-
-export function deleteConversationPreview(identity: string): void {
-  cache.delete(identity);
 }
 
 export function clearConversationPreviews(): void {
@@ -173,10 +168,7 @@ function boundedPreview(input: ConversationPreview): ConversationPreview | null 
   };
 }
 
-function evictToLimits(now: number, replacedBytes: number): void {
-  // `replacedBytes` is intentionally unused in the map scan below; retaining it
-  // in the signature documents that a replacement is not double-counted.
-  void replacedBytes;
+function evictToLimits(now: number): void {
   for (const [identity, record] of cache) {
     if (now - record.preview.savedAt >= limits.ttlMs) cache.delete(identity);
   }

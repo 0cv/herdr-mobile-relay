@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AttachmentBatchController } from '$lib/attachments';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
-import { fencedCodeText, linkifyPlainText, safeExternalUrl, safeMarkdownHtml, speakableText } from '$lib/markdown';
+import { fencedCodeText, safeMarkdownHtml, speakableText } from '$lib/markdown';
+import { safeExternalUrl } from '$lib/rich-output';
 import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
 import { escapeHtml, linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
@@ -660,7 +661,7 @@ describe('attachment batches', () => {
 describe('rich output public-consumer characterization', () => {
   it('preserves all five entities and double escaping through public consumers', () => {
     expect(escapeHtml('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
-    expect(linkifyPlainText('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
+    expect(linkifyTerminalText('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
     expect(safeMarkdownHtml('&<>"\' &amp;')).toBe('<p>&amp;&lt;&gt;&quot;&#39; &amp;amp;</p>');
   });
 
@@ -691,7 +692,6 @@ describe('rich output public-consumer characterization', () => {
   });
 
   it('does not extend link recognition to every native URL-accepted form', () => {
-    expect(linkifyPlainText('https:example.com/a')).toBe('https:example.com/a');
     expect(linkifyTerminalText('https:example.com/a')).toBe('https:example.com/a');
     expect(safeMarkdownHtml('https:example.com/a')).toBe('<p>https:example.com/a</p>');
   });
@@ -703,14 +703,12 @@ describe('rich output public-consumer characterization', () => {
     ['https://example.com/a([)]', '<a href="https://example.com/a([)]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a([)]</a>', '<a class="terminal-link" href="https://example.com/a([)]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a([)]</a>'],
     ['https://example.com/a(b))].,;:!?', '<a href="https://example.com/a(b)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b)</a>)].,;:!?', '<a class="terminal-link" href="https://example.com/a(b)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b)</a>)].,;:!?'],
   ])('preserves punctuation bytes for %s across consumers', (value, markdown, terminal) => {
-    expect(linkifyPlainText(value)).toBe(markdown);
     expect(safeMarkdownHtml(value)).toBe(`<p>${markdown}</p>`);
     expect(linkifyTerminalText(value)).toBe(terminal);
   });
 
   it('separates canonical encoded hrefs from escaped original display text', () => {
     const value = 'HTTPS://ExAmPlE.COM:443/café/%2F?q=é&x=%20#été';
-    expect(linkifyPlainText(value)).toBe('<a href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a>');
     expect(safeMarkdownHtml(value)).toBe('<p><a href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a></p>');
     expect(linkifyTerminalText(value)).toBe('<a class="terminal-link" href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a>');
   });

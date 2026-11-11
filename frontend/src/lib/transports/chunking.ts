@@ -55,7 +55,6 @@ export interface ReassemblerOptions {
    * raised from `push`, so the transport learns about it here and closes.
    */
   onStall(reason: string): void;
-  stallTimeoutMs?: number;
 }
 
 /**
@@ -100,7 +99,7 @@ export class Reassembler {
       this.failed = true;
       this.discard();
       this.options.onStall('The peer stalled halfway through a message.');
-    }, this.options.stallTimeoutMs ?? CHUNK_STALL_TIMEOUT_MS);
+    }, CHUNK_STALL_TIMEOUT_MS);
     if ((flags & FLAG_END) === 0) return null;
     if (this.received !== buffer.length) this.reject('The peer sent less data than it declared.');
     this.discard();

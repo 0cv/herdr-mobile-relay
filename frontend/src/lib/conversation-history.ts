@@ -19,7 +19,6 @@ export const HISTORY_WIRE_PAGE_SIZE = 24;
 export const HISTORY_PREPARATION_INTERVAL_MS = 1_000;
 export const HISTORY_MAX_PREPARATION_POLLS = 30;
 export const HISTORY_MAX_PAGES_PER_DEMAND = 100;
-export const HISTORY_MAX_NO_PROGRESS_PAGES = 32;
 export const HISTORY_MAX_RAW_ENTRIES = 20_000;
 export const HISTORY_MAX_CONTENT_BYTES = 32 * 1024 * 1024;
 export const HISTORY_ACTIVE_DEADLINE_MS = 2 * 60_000;
@@ -94,18 +93,11 @@ export interface ConversationHistoryControllerOptions {
   onInitialPage?: (page: ConversationPage) => void;
   getPreview?: (identity: string) => ConversationPreview | null;
   putPreview?: (preview: ConversationPreview) => void;
-  now?: () => number;
   yieldToBrowser?: () => Promise<void>;
   isActive?: () => boolean;
   preparationIntervalMs?: number;
-  maxPreparationPolls?: number;
   maxPagesPerDemand?: number;
-  maxRawEntries?: number;
   maxContentBytes?: number;
-  activeDeadlineMs?: number;
-  maxNoRawProgressPages?: number;
-  breatherIntervalPages?: number;
-  breatherMs?: number;
 }
 
 /**
@@ -164,20 +156,14 @@ export function analyzeConversationBatch(
 export class ConversationHistoryController {
   private agent: Agent;
   private readonly options: Required<Pick<ConversationHistoryControllerOptions,
-    'request' | 'now' | 'yieldToBrowser' | 'isActive'>>;
+    'request' | 'yieldToBrowser' | 'isActive'>>;
   private readonly onState?: ConversationHistoryControllerOptions['onState'];
   private readonly onInitialPage?: ConversationHistoryControllerOptions['onInitialPage'];
   private readonly getPreview?: ConversationHistoryControllerOptions['getPreview'];
   private readonly putPreview?: ConversationHistoryControllerOptions['putPreview'];
   private readonly preparationIntervalMs: number;
-  private readonly maxPreparationPolls: number;
   private readonly maxPagesPerDemand: number;
-  private readonly maxRawEntries: number;
   private readonly maxContentBytes: number;
-  private readonly activeDeadlineMs: number;
-  private readonly maxNoRawProgressPages: number;
-  private readonly breatherIntervalPages: number;
-  private readonly breatherMs: number;
 
   private stateValue: ConversationHistoryControllerState;
   /** Entries currently rendered; while preview is warm these are preview entries. */
@@ -191,7 +177,6 @@ export class ConversationHistoryController {
   private cursor = '';
   private demandRunning = false;
   private queuedDemand: Demand | null = null;
-  private activeDemand: Demand | null = null;
   private activeAbort: AbortController | null = null;
   /** Cursor for a cursorful refresh/bridge; never replaces the older lane. */
   private headCursor = '';
@@ -217,7 +202,6 @@ export class ConversationHistoryController {
     this.agent = { ...agent };
     this.options = {
       request: options.request,
-      now: options.now || (() => Date.now()),
       yieldToBrowser: options.yieldToBrowser || yieldToBrowser,
       isActive: options.isActive || (() => true),
     };
@@ -226,23 +210,13 @@ export class ConversationHistoryController {
     this.getPreview = options.getPreview;
     this.putPreview = options.putPreview;
     this.preparationIntervalMs = Math.max(0, options.preparationIntervalMs ?? HISTORY_PREPARATION_INTERVAL_MS);
-    this.maxPreparationPolls = Math.max(1, options.maxPreparationPolls ?? HISTORY_MAX_PREPARATION_POLLS);
     this.maxPagesPerDemand = Math.max(1, options.maxPagesPerDemand ?? HISTORY_MAX_PAGES_PER_DEMAND);
-    this.maxRawEntries = Math.max(1, options.maxRawEntries ?? HISTORY_MAX_RAW_ENTRIES);
     this.maxContentBytes = Math.max(1, options.maxContentBytes ?? HISTORY_MAX_CONTENT_BYTES);
-    this.activeDeadlineMs = Math.max(0, options.activeDeadlineMs ?? HISTORY_ACTIVE_DEADLINE_MS);
-    this.maxNoRawProgressPages = Math.max(1, options.maxNoRawProgressPages ?? HISTORY_MAX_NO_RAW_PROGRESS_PAGES);
-    this.breatherIntervalPages = Math.max(1, options.breatherIntervalPages ?? HISTORY_BREATHER_INTERVAL_PAGES);
-    this.breatherMs = Math.max(0, options.breatherMs ?? HISTORY_BREATHER_MS);
     this.stateValue = initialState(conversationIdentity(this.agent));
   }
 
   get state(): ConversationHistoryControllerState {
     return cloneState(this.stateValue);
-  }
-
-  get currentIdentity(): string | null {
-    return this.stateValue.identity;
   }
 
   matchesRequestTarget(agent: Agent): boolean {
@@ -297,7 +271,7 @@ export class ConversationHistoryController {
     this.liveSourceRevision = sourceRevision;
     if (!entries.length) return true;
     const merged = mergeFreshEntries(this.rawEntries, cloneEntries(entries));
-    if (merged.length > this.maxRawEntries || estimateEntriesBytes(merged) > this.maxContentBytes) {
+    if (merged.length > HISTORY_MAX_RAW_ENTRIES || estimateEntriesBytes(merged) > this.maxContentBytes) {
       this.pauseWithError('History and live output reached this device’s memory limit. Loaded messages remain readable.', false, 'memory_limit');
       return false;
     }
@@ -320,17 +294,6 @@ export class ConversationHistoryController {
     if (!this.cursor || !this.stateValue.hasMore) return;
     this.markHistoricalDemand();
     this.enqueue('older');
-  }
-
-  /** Explicitly request another recorded page without changing live intent. */
-  ensureMore(): void {
-    if (!this.started || this.paused || !this.options.isActive() || this.stateValue.error) return;
-    if (this.demandRunning) {
-      this.queueDemand('full');
-      return;
-    }
-    if (!this.cursor || !this.stateValue.hasMore) return;
-    this.enqueue(this.stateValue.intent === 'historical' ? 'older' : 'full');
   }
 
   retry(): void {
@@ -414,7 +377,7 @@ export class ConversationHistoryController {
     this.advanceEpoch(true);
     this.queuedDemand = null;
     this.stateValue.requestPhase = 'idle';
-    this.stateValue.preparationPolls = this.maxPreparationPolls;
+    this.stateValue.preparationPolls = HISTORY_MAX_PREPARATION_POLLS;
     this.stateValue.pausedReason = 'Preparation is paused. Continue when you are ready.';
     this.emit();
   }
@@ -438,7 +401,6 @@ export class ConversationHistoryController {
     this.paused = true;
     this.advanceEpoch(true);
     this.queuedDemand = null;
-    this.activeDemand = null;
     this.stateValue.requestPhase = 'idle';
     this.emit();
   }
@@ -493,7 +455,6 @@ export class ConversationHistoryController {
   private async runDemand(demand: Demand): Promise<void> {
     if (this.demandRunning || this.paused || !this.options.isActive()) return;
     this.demandRunning = true;
-    this.activeDemand = demand;
     this.lastDemand = demand;
     if (demand === 'refresh') this.headCursor = '';
     this.seenReadyCursors.clear();
@@ -501,7 +462,7 @@ export class ConversationHistoryController {
     this.preparationProgressKey = '';
     this.readyPages = 0;
     const demandEpoch = this.stateValue.epoch;
-    const demandStartedAt = this.options.now();
+    const demandStartedAt = Date.now();
     this.stateValue.olderDemandOutstanding = demand === 'older';
     this.stateValue.requestPhase = demand === 'initial' ? 'initial'
       : demand === 'refresh' ? 'refresh'
@@ -513,7 +474,7 @@ export class ConversationHistoryController {
     try {
       for (let pageNumber = 0; pageNumber < this.maxPagesPerDemand; pageNumber++) {
         if (!this.canContinue(demandEpoch, abort)) return;
-        if (this.activeDeadlineMs > 0 && this.options.now() - demandStartedAt >= this.activeDeadlineMs) {
+        if (Date.now() - demandStartedAt >= HISTORY_ACTIVE_DEADLINE_MS) {
           this.pauseWithError('History loading was paused after two minutes of active work. Continue to load more.', true, 'work_deadline');
           return;
         }
@@ -546,16 +507,12 @@ export class ConversationHistoryController {
         this.stateValue.requestPhase = demand === 'older' ? 'older' : 'idle';
         this.readyPages++;
         this.emit();
-        if (requestedCursor && page.nextCursor === requestedCursor && this.rawProgressDidNotAdvance()) {
+        if (requestedCursor && page.nextCursor === requestedCursor && !this.rawProgressThisPage) {
           this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
           return;
         }
         if (!this.bridgeActive) {
           this.finishDemand();
-          return;
-        }
-        if (demand !== 'refresh' && this.noRawProgressPages >= HISTORY_MAX_NO_PROGRESS_PAGES) {
-          this.pauseWithError('History loading stalled without finding more messages. Continue to retry.', true, 'stalled');
           return;
         }
         const continuationCursor = demand === 'refresh' ? this.headCursor : this.cursor;
@@ -568,9 +525,9 @@ export class ConversationHistoryController {
           return;
         }
         this.seenReadyCursors.add(continuationCursor);
-        if (this.rawProgressDidNotAdvance()) {
+        if (!this.rawProgressThisPage) {
           this.noRawProgressPages++;
-          if (this.noRawProgressPages >= this.maxNoRawProgressPages) {
+          if (this.noRawProgressPages >= HISTORY_MAX_NO_RAW_PROGRESS_PAGES) {
             this.pauseWithError('History loading stalled without finding more records. Continue to retry.', true, 'stalled');
             return;
           }
@@ -578,8 +535,8 @@ export class ConversationHistoryController {
           this.noRawProgressPages = 0;
         }
         await this.options.yieldToBrowser();
-        if (this.breatherMs > 0 && this.readyPages % this.breatherIntervalPages === 0) {
-          await this.wait(this.breatherMs, demandEpoch, abort, demandStartedAt);
+        if (this.readyPages % HISTORY_BREATHER_INTERVAL_PAGES === 0) {
+          await this.wait(HISTORY_BREATHER_MS, demandEpoch, abort, demandStartedAt);
         }
       }
       this.pauseWithError('History loading was paused after too many pages. Continue to load more.', true, 'work_limit');
@@ -598,7 +555,6 @@ export class ConversationHistoryController {
       if (this.activeAbort === abort) this.activeAbort = null;
       if (demandEpoch === this.stateValue.epoch) {
         this.demandRunning = false;
-        this.activeDemand = null;
         if (this.stateValue.requestPhase === 'initial' || this.stateValue.requestPhase === 'refresh') {
           this.stateValue.requestPhase = 'idle';
           this.emit();
@@ -940,7 +896,7 @@ export class ConversationHistoryController {
     if (demand === 'older') this.stateValue.olderDemandOutstanding = true;
     this.rawProgressThisPage = !sameEntryIDs(laneBefore, this.networkEntries);
 
-    if (retainedEntryCount(this.rawEntries, this.networkEntries, this.bridgeEntries) > this.maxRawEntries
+    if (retainedEntryCount(this.rawEntries, this.networkEntries, this.bridgeEntries) > HISTORY_MAX_RAW_ENTRIES
       || retainedEntryBytes(this.rawEntries, this.networkEntries, this.bridgeEntries) > this.maxContentBytes) {
       this.rawEntries = rawBefore;
       this.networkEntries = networkBefore;
@@ -1002,15 +958,11 @@ export class ConversationHistoryController {
       this.stateValue.preparationPolls = 1;
     }
     this.emit();
-    if (this.stateValue.preparationPolls >= this.maxPreparationPolls) {
+    if (this.stateValue.preparationPolls >= HISTORY_MAX_PREPARATION_POLLS) {
       this.pauseWithError('Preparation is paused because progress has not changed. Continue to retry.', true, 'preparation_stalled');
       return false;
     }
     return this.canContinue(demandEpoch, abort);
-  }
-
-  private rawProgressDidNotAdvance(): boolean {
-    return !this.rawProgressThisPage;
   }
 
   private finishDemand(): void {
@@ -1044,11 +996,10 @@ export class ConversationHistoryController {
     abort: AbortController,
     request: ConversationHistoryRequest,
   ): Promise<ConversationPage> {
-    const remaining = this.activeDeadlineMs > 0 ? this.activeDeadlineMs - (this.options.now() - startedAt) : 0;
-    if (this.activeDeadlineMs > 0 && remaining <= 0) {
+    const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
+    if (remaining <= 0) {
       throw { error: { code: 'work_deadline', message: 'History loading was paused after two minutes of active work. Continue to load more.', retryable: true } };
     }
-    if (this.activeDeadlineMs <= 0) return this.options.request({ ...this.agent }, request);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     const timeout = new Promise<ConversationPage>((_, reject) => {
@@ -1073,8 +1024,8 @@ export class ConversationHistoryController {
 
   private async wait(milliseconds: number, epoch: number, abort: AbortController, startedAt?: number): Promise<void> {
     if (milliseconds <= 0) return;
-    if (startedAt !== undefined && this.activeDeadlineMs > 0) {
-      const remaining = this.activeDeadlineMs - (this.options.now() - startedAt);
+    if (startedAt !== undefined) {
+      const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
       if (remaining <= 0) {
         throw { error: { code: 'work_deadline', message: 'History loading was paused after two minutes of active work. Continue to load more.', retryable: true } };
       }
@@ -1104,7 +1055,6 @@ export class ConversationHistoryController {
     this.activeAbort = null;
     this.headCursor = '';
     this.demandRunning = false;
-    this.activeDemand = null;
     if (!retainPaused) this.paused = false;
   }
 
@@ -1114,7 +1064,7 @@ export class ConversationHistoryController {
     this.putPreview({
       identity,
       relayId: this.agent.relay_id,
-      savedAt: this.options.now(),
+      savedAt: Date.now(),
       sourceRevision: this.stateValue.sourceRevision,
       historical: this.stateValue.intent === 'historical',
       ...(this.stateValue.mode ? { mode: this.stateValue.mode } : {}),
