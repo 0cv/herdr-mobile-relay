@@ -398,7 +398,7 @@
   .device-heading, .device-list-heading, .device-name-line { display: flex; align-items: center; gap: .65rem; }
   .device-heading, .device-list-heading { justify-content: space-between; }
   .device-heading h3, .device-list-heading h4, .device-heading p { margin: 0; }
-  .device-heading p, .hint { color: var(--muted); }
+  .device-heading p { color: var(--muted); }
   .device-list-heading h4 { font-size: .82rem; }
   .device-list-heading span { color: var(--muted); font-size: .74rem; }
   .storage-notice { margin: 0; }
@@ -419,7 +419,7 @@
   .danger-actions { padding-top: .25rem; }
   .invitation-link { display: grid; gap: .5rem; justify-items: stretch; }
   .invitation-qr { width: min(14rem, 100%); height: auto; justify-self: center; border-radius: .5rem; }
-  .error, .warning { color: var(--danger); }
+  .error { color: var(--danger); }
   .safe-cancel { min-height: 2.5rem; padding: 0 1rem; border: 0; border-radius: .5rem; background: transparent; color: inherit; font: inherit; cursor: pointer; }
   .safe-cancel:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .safe-cancel:disabled { cursor: default; opacity: .5; }
