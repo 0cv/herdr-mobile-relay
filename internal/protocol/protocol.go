@@ -25,11 +25,7 @@ type TargetRef struct {
 type ActionReceiptPhase string
 
 const (
-	ReceiptPrepared             ActionReceiptPhase = "prepared"
 	ReceiptFailedBeforeDispatch ActionReceiptPhase = "failed_before_dispatch"
-	ReceiptAwaitingEvidence     ActionReceiptPhase = "awaiting_evidence"
-	ReceiptConfirmed            ActionReceiptPhase = "confirmed"
-	ReceiptDispatchedUnknown    ActionReceiptPhase = "dispatched_unknown"
 )
 
 type ApiError struct {
@@ -55,23 +51,7 @@ type DeviceRole string
 const (
 	RoleReader     DeviceRole = "reader"
 	RoleController DeviceRole = "controller"
-	RoleBootstrap  DeviceRole = "bootstrap"
 )
-
-type DeviceContext struct {
-	DeviceID          string     `json:"device_id"`
-	CredentialID      string     `json:"credential_id"`
-	Role              DeviceRole `json:"role"`
-	Locale            string     `json:"locale"`
-	CredentialVersion int64      `json:"credential_version"`
-}
-
-type OpaquePage[T any] struct {
-	Items       []T    `json:"items"`
-	NextCursor  string `json:"next_cursor,omitempty"`
-	Truncated   bool   `json:"truncated"`
-	GeneratedAt int64  `json:"generated_at"`
-}
 
 type ActionClass string
 

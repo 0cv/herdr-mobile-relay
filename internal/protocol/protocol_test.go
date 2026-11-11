@@ -283,3 +283,18 @@ func TestApiErrorArgumentsAreBounded(t *testing.T) {
 		}
 	}
 }
+
+type DeviceContext struct {
+	DeviceID          string     `json:"device_id"`
+	CredentialID      string     `json:"credential_id"`
+	Role              DeviceRole `json:"role"`
+	Locale            string     `json:"locale"`
+	CredentialVersion int64      `json:"credential_version"`
+}
+
+type OpaquePage[T any] struct {
+	Items       []T    `json:"items"`
+	NextCursor  string `json:"next_cursor,omitempty"`
+	Truncated   bool   `json:"truncated"`
+	GeneratedAt int64  `json:"generated_at"`
+}

@@ -205,9 +205,6 @@ func (m *capabilityManager) reusableFeature(name, identity string) (FeatureEvide
 	return FeatureEvidence{}, false
 }
 
-func (m *capabilityManager) invalidate(name string) {
-	m.invalidateMany(name)
-}
 func (m *capabilityManager) invalidateMany(names ...string) {
 	m.mu.Lock()
 	m.liveEpoch++
@@ -388,16 +385,8 @@ func (c *Client) SetCapabilityChangeCallback(callback func(ServerStatus)) {
 	c.capabilities.setOnChange(callback)
 }
 
-func (c *Client) RefreshCapabilities(ctx context.Context) ServerStatus {
-	return c.capabilities.refresh(ctx)
-}
-
 func (c *Client) RunCapabilityRefresh(ctx context.Context, interval time.Duration) {
 	c.capabilities.run(ctx, interval)
-}
-
-func (c *Client) RequestCapabilityRefresh() {
-	c.capabilities.requestRefresh()
 }
 
 func (c *Client) InvalidateLiveCapabilities() {
@@ -412,24 +401,8 @@ func (c *Client) InvalidateLiveCapabilities() {
 	c.capabilities.requestRefresh()
 }
 
-func (c *Client) SupportsWorkspaceMoveBlock() bool {
-	return c.CapabilityStatus().Supports(FeatureWorkspaceMoveBlock)
-}
-
-func (c *Client) SupportsPaneRead() bool {
-	return c.CapabilityStatus().Supports(FeaturePaneRead)
-}
-
-func (c *Client) SupportsTabMove() bool {
-	return c.CapabilityStatus().Supports(FeatureTabMove)
-}
-
 func (c *Client) ShouldAttemptWorkspaceReordered() bool {
 	return c.CapabilityStatus().Feature(FeatureWorkspaceReordered).State != FeatureUnsupported
-}
-
-func (c *Client) InvalidateWorkspaceReordered() {
-	c.capabilities.invalidate(FeatureWorkspaceReordered)
 }
 
 func (c *Client) NoteWorkspaceReorderedSupported() {
@@ -440,16 +413,8 @@ func (c *Client) NoteWorkspaceReorderedUnsupported() {
 	c.capabilities.updateFeature(FeatureWorkspaceReordered, FeatureUnsupported, "subscription_rejected")
 }
 
-func (c *Client) noteFeatureSupported(name, reason string) {
-	c.capabilities.updateFeature(name, FeatureSupported, reason)
-}
-
 func (c *Client) noteFeatureSupportedAt(epoch uint64, name, reason string) {
 	c.capabilities.updateFeatureAt(epoch, name, FeatureSupported, reason)
-}
-
-func (c *Client) noteFeatureUnsupported(name, reason string) {
-	c.capabilities.updateFeature(name, FeatureUnsupported, reason)
 }
 
 func (c *Client) capabilityEpoch() uint64 {
@@ -597,12 +562,4 @@ func (c *Client) noteSocketFeature(epoch uint64, name string, err error) {
 			c.capabilities.updateFeatureAt(epoch, name, FeatureUnsupported, "method_not_supported")
 		}
 	}
-}
-
-func capabilityStatusError(status ServerStatus) error {
-	feature := status.Feature(FeatureJSONAvailability)
-	if feature.State == FeatureSupported {
-		return nil
-	}
-	return fmt.Errorf("Herdr socket API unavailable: %s", feature.Reason)
 }

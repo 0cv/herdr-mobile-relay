@@ -40,15 +40,6 @@ var defaultAliases = map[string]string{
 	"devin cli":       "devin",
 }
 
-// defaultSkillDirs and defaultCommandFormats hold no defaults: every provider
-// discovers its own skill directories the way its agent does, and a default
-// format would make CommandConfig report every such profile as explicitly
-// configured, permanently routing it down the INI escape hatch. Both maps stay
-// because the INI [skills] and [commands] sections populate them at runtime.
-var defaultSkillDirs = map[string][]string{}
-
-var defaultCommandFormats = map[string]string{}
-
 type IntegrationStatuser interface {
 	IntegrationStatus(ctx context.Context) ([]byte, error)
 }
@@ -78,8 +69,8 @@ func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 		observed:   make(map[string]PaneIdentity),
 		unobserved: make(map[string]bool),
 		aliases:    cloneAliases(defaultAliases),
-		skillDirs:  cloneStringSlices(defaultSkillDirs),
-		formats:    cloneStrings(defaultCommandFormats),
+		skillDirs:  make(map[string][]string),
+		formats:    make(map[string]string),
 		warned:     make(map[string]bool),
 	}
 }
@@ -160,8 +151,8 @@ func (r *Resolver) loadINI() (
 	formats map[string]string,
 ) {
 	aliases = cloneAliases(defaultAliases)
-	skillDirs = cloneStringSlices(defaultSkillDirs)
-	formats = cloneStrings(defaultCommandFormats)
+	skillDirs = make(map[string][]string)
+	formats = make(map[string]string)
 	iniPath := filepath.Join(r.configHome, "herdr", "agent-profiles.ini")
 	data, err := os.ReadFile(iniPath)
 	if err != nil {
@@ -343,11 +334,6 @@ func (r *Resolver) Reload() {
 	r.mu.Unlock()
 }
 
-func (r *Resolver) CommandConfig(profileID string) ([]string, string, bool) {
-	dirs, format, suppressed := r.CommandDiscovery(profileID)
-	return dirs, format, !suppressed && format != ""
-}
-
 // CommandDiscovery preserves an explicit "off" independently from an absent or
 // invalid command format so native provider discovery cannot override opt-out.
 func (r *Resolver) CommandDiscovery(profileID string) (dirs []string, format string, suppressed bool) {
@@ -399,22 +385,6 @@ func cloneAliases(source map[string]string) map[string]string {
 	result := make(map[string]string, len(source))
 	for key, value := range source {
 		result[key] = value
-	}
-	return result
-}
-
-func cloneStrings(source map[string]string) map[string]string {
-	result := make(map[string]string, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
-	return result
-}
-
-func cloneStringSlices(source map[string][]string) map[string][]string {
-	result := make(map[string][]string, len(source))
-	for key, value := range source {
-		result[key] = append([]string(nil), value...)
 	}
 	return result
 }

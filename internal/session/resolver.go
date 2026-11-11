@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
 
@@ -28,11 +27,6 @@ type Resolver struct {
 	reader *conversation.Reader
 }
 
-// NewResolver creates an independent title and transcript resolver.
-func NewResolver(home string) *Resolver {
-	return NewResolverWithReader(home, conversation.NewReader(home))
-}
-
 // NewResolverWithReader shares transcript-location decisions with conversation
 // history consumers.
 func NewResolverWithReader(home string, reader *conversation.Reader) *Resolver {
@@ -41,13 +35,6 @@ func NewResolverWithReader(home string, reader *conversation.Reader) *Resolver {
 	}
 	return &Resolver{cache: make(map[string]cacheEntry), home: home, reader: reader}
 }
-
-// Root accessors remain useful in tests that pin configuration precedence.
-func (r *Resolver) claudeRoots() []string { return agentroots.Claude(r.home) }
-func (r *Resolver) qoderRoots() []string  { return agentroots.Qoder(r.home) }
-func (r *Resolver) codexHomes() []string  { return agentroots.CodexHomes(r.home) }
-func (r *Resolver) piRoots() []string     { return agentroots.Pi(r.home) }
-func (r *Resolver) ompRoots() []string    { return agentroots.OMP(r.home) }
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	return r.SessionNameWithProject(agent, conversation.ProjectContext{CWD: cwd}, sessionID)

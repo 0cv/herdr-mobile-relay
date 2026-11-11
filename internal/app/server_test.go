@@ -305,7 +305,7 @@ func TestResolveAgentSessionName(t *testing.T) {
 	}
 
 	s := testServer()
-	s.sessions = session.NewResolver(home)
+	s.sessions = session.NewResolverWithReader(home, nil)
 
 	// named carries a canonical session id with both an index record and the
 	// rollout the reader would serve, the shape Locate requires post round-3.
@@ -341,7 +341,7 @@ func TestResolveAgentSessionNameTrimsWhitespaceOnlySession(t *testing.T) {
 	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Sole Transcript Title")
 
 	s := testServer()
-	s.sessions = session.NewResolver(home)
+	s.sessions = session.NewResolverWithReader(home, nil)
 
 	agent := &coordinator.AgentState{Agent: "claude", Cwd: cwd, Session: "   "}
 	s.resolveAgentSessionName(agent)

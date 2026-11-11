@@ -40,16 +40,6 @@ var supportedInputModifiers = map[string]string{
 	"shift": "shift",
 }
 
-// SemanticInputKeys returns the exact unmodified key names advertised to
-// clients. Modifiers may be prepended in ctrl, alt, shift order.
-func SemanticInputKeys() []string {
-	keys := []string{"Enter", "Esc", "Tab", "Backspace", "Up", "Down", "Left", "Right"}
-	for number := 1; number <= 24; number++ {
-		keys = append(keys, fmt.Sprintf("F%d", number))
-	}
-	return keys
-}
-
 func ValidatePaneInput(input PaneInput) (PaneInput, error) {
 	return normalizePaneInput(input)
 }

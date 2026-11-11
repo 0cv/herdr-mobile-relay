@@ -290,3 +290,8 @@ func profileLabel(profiles []Profile, id string) string {
 	}
 	return ""
 }
+
+func (r *Resolver) CommandConfig(profileID string) ([]string, string, bool) {
+	dirs, format, suppressed := r.CommandDiscovery(profileID)
+	return dirs, format, !suppressed && format != ""
+}
