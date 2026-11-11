@@ -1,7 +1,6 @@
 {
   "schema": 1,
   "verified": false,
-  "verificationNote": "The repository host cannot prove macOS simulator feasibility, Android device/module qualification, or local ARM64 browser alignment. The first hosted run must record the selected image, browser, package, and module identities before this file is marked verified.",
   "node": "26.13.0",
   "bun": "1.4.4",
   "appium": "3.7.0",
@@ -21,7 +20,6 @@
     "vendingPolicy": "absent-or-disabled-user-0",
     "browserPackage": "com.android.chrome",
     "browserVersion": "131.0.6778.200 (677820038)",
-    "browserSource": "APK.now pinned direct binary; Google-signed third-party mirror",
     "browserUrl": "https://download.apk.now/apks/chrome/677820038/google-chrome-131-0-6778-200-14-android-apk-download.apk",
     "browserSha256": "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35a",
     "browserCertificateSha256": "f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83",
@@ -31,25 +29,14 @@
     "trichromeLibraryUrl": "https://download.apk.now/apks/trichrome-library/677820038/trichrome-library-131-0-6778-200-4-android-apk-download.apk",
     "trichromeLibrarySha256": "f7d82fa76a99f13980c4205484f4ae78742755d2e9b7276fd60c20e3cd7f9090",
     "trichromeLibraryCertificateSha256": "b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1",
-    "trichromeLibraryCertificateSha1": "9524aa4a04aceeab425451e593ac639c942fb3cd",
-    "installationProvider": "signed Chrome WebappLauncherActivity or WebAPK; every attach requires fresh foreground and Chromium-target evidence"
+    "trichromeLibraryCertificateSha1": "9524aa4a04aceeab425451e593ac639c942fb3cd"
   },
   "ios": {
     "runner": "xcode-27",
-    "imageSelection": "GitHub-hosted xcode-27 label; the image revision is not pinnable, so ImageOS, ImageVersion and macOS version/build are recorded per run",
     "xcode": "/Applications/Xcode_27.app",
     "xcodeVersion": "27.0",
     "xcodeBuild": "27A266a",
     "runtime": "iOS 27.0",
-    "deviceType": "iPhone 17",
-    "installationProvider": "Home Screen web app",
-    "contextRequirement": "an inspectable installed-app web context with the expected origin"
-  },
-  "limits": {
-    "deviceBootSeconds": 300,
-    "ordinaryWaitSeconds": 30,
-    "smokeMinutes": 30,
-    "releaseMinutes": 45,
-    "diagnosticBytes": 104857600
+    "deviceType": "iPhone 17"
   }
 }

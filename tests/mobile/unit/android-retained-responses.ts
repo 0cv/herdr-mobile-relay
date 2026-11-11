@@ -60,7 +60,7 @@ export async function runAndroidRetainedResponseRegressions(): Promise<void> {
         return response(null);
       });
       await client.create({ capabilities: {} });
-      const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://responses.invalid', outputDir: root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
+      const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://responses.invalid', outputDir: root, certificate: '', deviceId: 'emulator-5554' });
       Object.assign(platform, { driver: client, installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
         retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([handle], handle, handle, startedAt).original } });
       await platform.attachToInstalledView();

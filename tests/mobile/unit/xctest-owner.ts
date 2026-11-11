@@ -3825,7 +3825,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
             await assert.rejects(managedWdaCapabilities(udid), /managed WDA not ready/u);
           } else {
             assert.deepEqual(await managedWdaCapabilities(udid), { 'appium:webDriverAgentUrl': `http://127.0.0.1:${port}`, 'appium:isHeadless': true });
-            const platform = new IOSPlatform({ deviceId: udid, origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+            const platform = new IOSPlatform({ deviceId: udid, origin: 'https://example.test', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
             let sessions = 0;
             platform.driver.create = async options => {
               sessions++;

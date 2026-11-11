@@ -133,7 +133,3 @@ export class PhaseBudget {
     };
   }
 }
-
-export function phaseBudget(phase: string, timeoutMs: number, recoveryLimit = 2): PhaseBudget {
-  return new PhaseBudget(phase, { timeoutMs, recoveryLimit });
-}

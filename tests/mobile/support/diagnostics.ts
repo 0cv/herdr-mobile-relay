@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 const MAX_DIAGNOSTIC_BYTES = 100 * 1024 * 1024;
@@ -90,14 +90,4 @@ export async function writeBoundedText(filename: string, value: string, maximum 
   const content = redactText(value).slice(0, maximum);
   await mkdir(dirname(filename), { recursive: true });
   await writeFile(filename, content, { mode: 0o600 });
-}
-
-export async function appendSanitized(filename: string, value: string): Promise<void> {
-  const content = redactText(value);
-  const existing = await readFile(filename).catch(() => Buffer.alloc(0));
-  if (existing.byteLength + Buffer.byteLength(content) > MAX_DIAGNOSTIC_BYTES) {
-    throw new Error('DIAGNOSTIC_LIMIT: text evidence exceeds the limit');
-  }
-  await mkdir(dirname(filename), { recursive: true });
-  await appendFile(filename, content, { mode: 0o600 });
 }

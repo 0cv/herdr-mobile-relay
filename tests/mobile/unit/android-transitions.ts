@@ -154,7 +154,7 @@ await Bun.write(file, JSON.stringify(state));\n`);
   });
   const platform = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://android-replay.invalid', outputDir: root,
-    certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget,
+    certificate: '', deviceId: 'emulator-5554', budget,
   });
   (platform as any).driver = client;
   const originalForeground = (platform as any).foregroundEvidence.bind(platform);

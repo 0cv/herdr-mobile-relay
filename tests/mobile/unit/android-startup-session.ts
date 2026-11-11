@@ -51,7 +51,7 @@ async function replay(mode: Mode): Promise<void> {
   });
   client.setBudget(budget);
   const platform = new AndroidPlatform({
-    deviceId: 'emulator-5554', origin: 'https://fixture.test', setupUrl: 'https://fixture.test/setup',
+    deviceId: 'emulator-5554', origin: 'https://fixture.test',
     outputDir: root, appiumUrl: 'http://startup.invalid', certificate: '/unused', budget,
   });
   Object.assign(platform, { driver: client });

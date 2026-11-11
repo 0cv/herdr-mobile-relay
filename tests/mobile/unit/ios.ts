@@ -73,7 +73,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
   const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now });
-  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', deviceId: 'protocol-only', budget });
   const requests: Request[] = [];
   const nativeAdmissions: Array<{ phase: string; phaseRemainingMs: number; rootRemainingMs: number }> = [];
   let dispatchedOrdinal = 0;
@@ -381,7 +381,7 @@ test('installed discovery timeout preserves the hosted phase and ignores late li
   let reply!: (response: Response) => void;
   const now = () => clockMs;
   const budget = new PhaseBudget('recorded-hosted-discovery', { timeoutMs: 45 * 60_000, now, recoveryLimit: 0 });
-  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', deviceId: 'protocol-only', budget });
   const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
     if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
     const body = JSON.parse(String(init?.body));

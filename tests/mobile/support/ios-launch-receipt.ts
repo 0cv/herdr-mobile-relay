@@ -58,7 +58,7 @@ export class IOSLaunchObservation {
   private click: Boundary | null = null;
   private page: number | null = null;
   private remainingMs: number | null = null;
-  private originalFatal?: unknown;
+  originalFatal?: unknown;
   private queryRevoked = false;
   failure?: Readonly<IOSLaunchFailure>;
 

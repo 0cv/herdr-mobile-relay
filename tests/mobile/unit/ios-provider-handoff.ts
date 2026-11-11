@@ -45,7 +45,7 @@ async function fixture(mode: Mode) {
     return phase;
   };
   const outputDir = await mkdtemp(join(tmpdir(), 'ios-provider-handoff-'));
-  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', deviceId: 'protocol-only', budget });
   const native = platform as any;
   let clicked = false;
   let ready = false;

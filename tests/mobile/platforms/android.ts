@@ -892,44 +892,6 @@ export class AndroidPlatform implements MobilePlatform {
     throw new Error(`ANDROID_SHORTCUT: ${lastError}`);
   }
 
-  private async findLauncherIcon(): Promise<string> {
-    const locators = [
-      textLocator('Herdr Mobile Relay'),
-      accessibility('Herdr Mobile Relay'),
-      textLocator('Herdr Relay'),
-      accessibility('Herdr Relay'),
-    ];
-    try {
-      // A shortcut installation normally places the icon on the current home
-      // screen. A WebAPK, however, can be registered in the launcher app
-      // drawer without being pinned to that screen (notably on hosted Android
-      // 15 images), so inspect both launcher surfaces before failing.
-      return await this.driver.findAny(locators, 5_000);
-    } catch (homeError) {
-      if (isFatalDriverError(homeError)) throw homeError;
-      const size = await this.driver.windowSize().catch((error: unknown) => {
-        if (isFatalDriverError(error)) throw error;
-        return { width: 1_080, height: 2_400 };
-      });
-      await this.driver.mobile('swipeGesture', {
-        left: 0,
-        top: 100,
-        width: size.width,
-        height: Math.max(1, size.height - 200),
-        direction: 'up',
-        percent: 0.75,
-      }).catch((error: unknown) => {
-        if (isFatalDriverError(error)) throw error;
-      });
-      try {
-        return await this.driver.findAny(locators, 30_000);
-      } catch (drawerError) {
-        if (isFatalDriverError(drawerError)) throw drawerError;
-        throw new Error(`ANDROID_LAUNCHER: home screen and app drawer did not expose Herdr Relay (${drawerError instanceof Error ? drawerError.message : String(homeError)})`, { cause: drawerError });
-      }
-    }
-  }
-
   async attachToInstalledView(timeoutMs = 30_000): Promise<void> {
     this.beginLifecycle();
     try {

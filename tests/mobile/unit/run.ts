@@ -1058,7 +1058,7 @@ test('Android Chrome startup only enables attach mode after explicit launch', as
 test('Android native settings are applied and read back before lookup', async () => {
   const platform = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('android-settings-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    certificate: '', deviceId: 'emulator-5554', budget: new PhaseBudget('android-settings-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
   });
   const updates: Record<string, unknown>[] = [];
   (platform as any).driver = {
@@ -1158,7 +1158,7 @@ test('Android web controls use supported locators and preserve ownership failure
     await client.create({ capabilities: {}, budget });
     const platform = new AndroidPlatform({
       origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-      certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget,
+      certificate: '', deviceId: 'emulator-5554', budget,
     });
     (platform as any).driver = client;
     (platform as any).installedTarget = {
@@ -1211,7 +1211,7 @@ test('Android web controls use supported locators and preserve ownership failure
 test('Android fixture verification keeps the HTTP status separate from the Appium response status', async () => {
   const platform = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'emulator-5554',
+    certificate: '', deviceId: 'emulator-5554',
     budget: new PhaseBudget('android-fixture-test', { timeoutMs: 15_000, recoveryLimit: 1 }),
   });
   const transport = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -1265,7 +1265,7 @@ test('Android fixture verification rejects unsafe HTTP response identities witho
     const clock = { value: 0 };
     const platform = new AndroidPlatform({
       origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-      certificate: '', setupUrl: '', deviceId: 'emulator-5554',
+      certificate: '', deviceId: 'emulator-5554',
       budget: new PhaseBudget(`android-fixture-rejection-${index}`, { timeoutMs: 350, recoveryLimit: 1, now: () => clock.value }),
     });
     const driver = platform.driver as any;
@@ -1296,7 +1296,7 @@ test('Android Chrome shortcut output preserves the signed launch fields', async 
   const args = androidChromeShortcutArgs('emulator-5554', shortcuts[0]);
   const platform = new AndroidPlatform({
     origin: 'https://localhost:38289', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('shortcut-evidence', { timeoutMs: 10_000, recoveryLimit: 1 }),
+    certificate: '', deviceId: 'emulator-5554', budget: new PhaseBudget('shortcut-evidence', { timeoutMs: 10_000, recoveryLimit: 1 }),
   });
   const evidence = (platform as any).shortcutEvidence(shortcuts[0]);
   assert.equal(evidence.url, '[REDACTED]');
@@ -1917,7 +1917,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
   let androidScrolls = 0;
   const android = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-native-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
+    certificate: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-native-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
   });
   (android as any).driver = {
     windowSize: async () => ({ width: 1_080, height: 2_400 }),
@@ -1930,7 +1930,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
   let iosScrolls = 0;
   const ios = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', budget: new PhaseBudget('ios-native-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
+    certificate: '', budget: new PhaseBudget('ios-native-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   (ios as any).driver = {
     pageSource: async () => iosShareHierarchy(0),
@@ -1945,7 +1945,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
 test('native lookup scrolls between single-pass locator rounds', async () => {
   const android = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
+    certificate: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   let androidLookups = 0;
   let androidScrolls = 0;
@@ -1963,7 +1963,7 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
 
   const ios = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'simulator-1', budget: new PhaseBudget('ios-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
+    certificate: '', deviceId: 'simulator-1', budget: new PhaseBudget('ios-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   let iosLookups = 0;
   let iosScrolls = 0;
@@ -1995,7 +1995,7 @@ test('iOS native scrolling rejects a hidden match when the hierarchy shows no pr
   const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-scroll-'));
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
-    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    certificate: '', deviceId: 'simulator-1',
     budget: new PhaseBudget('ios-no-progress-test', { timeoutMs: 20_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
@@ -2021,7 +2021,7 @@ test('iOS native action controls stop when readiness is indeterminate', async ()
   const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-indeterminate-'));
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
-    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    certificate: '', deviceId: 'simulator-1',
     budget: new PhaseBudget('ios-indeterminate', { timeoutMs: 20_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
@@ -2047,7 +2047,7 @@ test('iOS progress ignores browser bars and rejects a dismissed action list', as
     const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-progress-'));
     const platform = new IOSPlatform({
       origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
-      certificate: '', setupUrl: '', deviceId: 'simulator-1',
+      certificate: '', deviceId: 'simulator-1',
       budget: new PhaseBudget(`ios-progress-${dismissAfterGesture}`, { timeoutMs: 20_000, recoveryLimit: 1 }),
     });
     const driver = platform.driver as any;
@@ -2092,7 +2092,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-install-'));
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
-    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    certificate: '', deviceId: 'simulator-1',
     budget: new PhaseBudget('ios-install-scroll-test', { timeoutMs: 120_000, recoveryLimit: 1 }),
   });
   let sheetOpen = false;
@@ -2256,7 +2256,7 @@ test('iOS native installation rejects a disabled Share control', async () => {
   const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-install-'));
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
-    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    certificate: '', deviceId: 'simulator-1',
     budget: new PhaseBudget('ios-install-test', { timeoutMs: 120_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
@@ -2319,7 +2319,7 @@ test('mobile timing scale stretches phase views and request caps only when confi
 test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    certificate: '', deviceId: 'simulator-1',
     budget: new PhaseBudget('ios-discovery-test', { timeoutMs: 60_000, recoveryLimit: 1 }),
   });
   let discoveries = 0;
@@ -2365,7 +2365,6 @@ test('iOS attachment selects a page without enumerating windows', async () => {
     appiumUrl: 'http://fake.test',
     outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '',
-    setupUrl: '',
     budget: new PhaseBudget('ios-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
@@ -2398,7 +2397,6 @@ test('iOS attachment rejects incorrect foreground, origin, and standalone state'
       appiumUrl: 'http://fake.test',
       outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
       certificate: '',
-      setupUrl: '',
       budget: new PhaseBudget('ios-negative-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
     });
     const driver = platform.driver as any;
@@ -2423,7 +2421,6 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
     appiumUrl: 'http://fake.test',
     outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '',
-    setupUrl: '',
     budget: new PhaseBudget('ios-stale-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;

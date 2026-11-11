@@ -178,7 +178,7 @@ console.log(output);
         return response(null);
       } finally { active--; }
     });
-    const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: root, certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget });
+    const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: root, certificate: '', deviceId: 'emulator-5554', budget });
     Object.assign(platform, { driver: client });
     try {
       const captureStartedAt = Date.now();
@@ -517,7 +517,7 @@ else if (request === 'shell pm list packages') {
       return response(null);
     } finally { active--; }
   });
-  const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate, setupUrl: '', deviceId: 'emulator-5554', budget });
+  const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate, deviceId: 'emulator-5554', budget });
   Object.assign(platform, { driver: client });
   if (fixture.realCertificate) {
     assert.equal((platform as any).installCertificate, (AndroidPlatform.prototype as any).installCertificate);
@@ -992,7 +992,7 @@ export async function runAndroidLifecycleCase(fixture: LifecycleFixtureInput, gr
     let first: unknown;
     if (group === 'warmOwner') {
       if (name === 'missing-owner') {
-        const unowned = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
+        const unowned = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate: '', deviceId: 'emulator-5554' });
         first = await capture(() => unowned.relaunchInstalledApp());
         await assert.rejects(() => unowned.readRunningIdentity(), error => error === first);
         assert.equal(deletes(), 0);

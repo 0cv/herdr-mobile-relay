@@ -578,14 +578,6 @@ export class AppiumClient {
     return { width: rect.width, height: rect.height };
   }
 
-  async back(timeoutMs?: number): Promise<void> {
-    await this.command('/back', 'POST', undefined, timeoutMs);
-  }
-
-  async performActions(actions: unknown[], timeoutMs?: number): Promise<void> {
-    await this.command('/actions', 'POST', { actions }, timeoutMs);
-  }
-
   async mobile(command: string, args: Record<string, unknown> = {}, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<unknown> {
     return this.command('/execute/sync', 'POST', { script: `mobile: ${command}`, args }, timeoutMs, policy);
   }
@@ -1155,10 +1147,6 @@ export function accessibility(value: string): Locator {
   return { using: 'accessibility id', value };
 }
 
-export function accessibilityPrefix(value: string): Locator {
-  return { using: 'xpath', value: `//*[@aria-label and starts-with(@aria-label,${xpathLiteral(value)})]` };
-}
-
 export function ariaLabel(value: string): Locator {
   return { using: 'xpath', value: `//*[@aria-label=${xpathLiteral(value)}]` };
 }
@@ -1179,17 +1167,4 @@ export async function delay(milliseconds: number, budget?: PhaseBudget): Promise
     return;
   }
   await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
-
-export async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean, timeoutMs = 30_000, budget?: PhaseBudget): Promise<T> {
-  const phase = budget || new PhaseBudget('wait', { timeoutMs, recoveryLimit: 0 });
-  const deadline = Date.now() + Math.min(timeoutMs, phase.remainingMs);
-  let last: T | undefined;
-  while (!phase.exhausted && Date.now() < deadline) {
-    phase.assertAvailable('poll');
-    last = await read();
-    if (ready(last)) return last;
-    await delay(250, phase);
-  }
-  throw new Error(`APPIUM_WAIT: condition was not met before the deadline (${last === undefined ? 'no value' : 'last value observed'})`);
 }

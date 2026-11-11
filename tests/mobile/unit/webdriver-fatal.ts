@@ -307,8 +307,8 @@ webdriverFatalTests.push(['Appium strict quarantine platform teardown rejects an
     const policy = driver.nativeRequestPolicy(new PhaseBudget('platform', { timeoutMs: 30_000 }));
     await assert.rejects(() => driver.contexts(), /APPIUM_TIMEOUT/u);
     const platform = platformName === 'ios'
-      ? new IOSPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', setupUrl: 'https://fixture.invalid/setup', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' })
-      : new AndroidPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', setupUrl: 'https://fixture.invalid/setup', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' });
+      ? new IOSPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' })
+      : new AndroidPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' });
     (platform as any).driver = driver;
     (platform as any).startupLog = { finish: async () => { finished++; } };
     const stopping = platform.stopOwnedResources();
