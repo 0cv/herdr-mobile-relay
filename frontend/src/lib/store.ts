@@ -131,7 +131,6 @@ const AGENT_START_TIMEOUT_MS = 60_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
 const BACKGROUND_HEALTH_TIMEOUT_MS = 10_000;
-const FOREGROUND_HEALTH_TIMEOUT_MS = 2_000;
 const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
@@ -189,18 +188,6 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   acknowledge_pane: true,
   copy_agent_response: true,
 };
-
-/**
- * How long an app-level ping may go unanswered before the socket counts as
- * half dead. A foregrounded page is what the person is looking at, so it pays
- * a short deadline to notice a stalled resume; a hidden page waits longer
- * rather than churning sockets in the background.
- */
-function healthTimeoutMs(): number {
-  return document.visibilityState === 'visible'
-    ? FOREGROUND_HEALTH_TIMEOUT_MS
-    : BACKGROUND_HEALTH_TIMEOUT_MS;
-}
 
 function normalizeAgentInventory(
   value: unknown,
@@ -1172,7 +1159,7 @@ class RelayStore {
     this.syncKeepalive();
   }
 
-  revalidateConnections(timeoutMs = healthTimeoutMs()): void {
+  revalidateConnections(timeoutMs: number): void {
     if (!this.reconnectEnabled || this.hidden) return;
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
@@ -3367,8 +3354,7 @@ function applyPaneDelta(previous: string, value: unknown): string | null {
   for (let index = 0; index < previous.length; index += 1) {
     if (previous.charCodeAt(index) === 10) boundaries.push(index + 1);
   }
-  if (boundaries.at(-1) !== previous.length) boundaries.push(previous.length);
-  else boundaries.push(previous.length);
+  boundaries.push(previous.length);
 
   const chunks: string[] = [];
   for (const candidate of value) {

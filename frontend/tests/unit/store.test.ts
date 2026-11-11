@@ -1083,7 +1083,7 @@ describe('relay command store', () => {
     // The bug this guards: a plaintext ladder against an encrypted relay, with
     // no credential, no relay key, and nothing said to the person holding it.
     const dialsAtForget = dials;
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     relayStore.resetReconnectBackoff();
     relayStore.connectAll(true);
     expect(dials).toBe(dialsAtForget);
@@ -1187,14 +1187,14 @@ describe('relay command store', () => {
     vi.useFakeTimers();
 
     // Focus events fire on every app switch; a young dial must not be churned.
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     expect(MockWebSocket.instances).toHaveLength(1);
 
     // Once the revalidation event postdates the dial by the stale threshold,
     // the blackholed attempt is replaced instead of waiting out its own
     // handshake timeout plus reconnect backoff.
     vi.advanceTimersByTime(5_000);
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     expect(MockWebSocket.instances).toHaveLength(2);
   });
 
@@ -2407,7 +2407,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
 
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     expect(JSON.parse(socket.sent.at(-1)!).type).toBe('ping');
     await vi.advanceTimersByTimeAsync(1_999);
     expect(MockWebSocket.instances).toHaveLength(1);
@@ -2415,24 +2415,17 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances).toHaveLength(2);
   });
 
-  it('waits longer for the ping while the page is hidden', async () => {
+  it('uses the requested health probe deadline', async () => {
     vi.useFakeTimers();
-    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    try {
-      const socket = MockWebSocket.instances.at(-1)!;
-      socket.open();
-      socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
 
-      relayStore.revalidateConnections();
-      await vi.advanceTimersByTimeAsync(9_999);
-      expect(MockWebSocket.instances).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(MockWebSocket.instances).toHaveLength(2);
-    } finally {
-      if (visibility) Object.defineProperty(document, 'visibilityState', visibility);
-      else Reflect.deleteProperty(document, 'visibilityState');
-    }
+    relayStore.revalidateConnections(10_000);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(MockWebSocket.instances).toHaveLength(2);
   });
 
   it('keeps every connected relay warm with a proof-of-life ping', async () => {
@@ -2644,7 +2637,7 @@ describe('relay command store', () => {
     expect(connection?.pairingRequired).toBe(true);
     expect(connection?.status).toBe('disconnected');
 
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     relayStore.connectAll(true);
     expect(MockWebSocket.instances).toHaveLength(0);
   });
@@ -2685,7 +2678,7 @@ describe('relay command store', () => {
     expect(connection?.status).toBe('disconnected');
     expect(localStorage.getItem('herdr_device_auth_v1')).toBe(credentials);
     expect(get(relayStore.toast)?.message || '').not.toContain('refused this device');
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     expect(MockWebSocket.instances).toHaveLength(2);
     MockWebSocket.instances[1].open();
     expect(get(relayStore.connections).values().next().value?.status).toBe('connected');
@@ -2732,11 +2725,11 @@ describe('relay command store', () => {
       expect(get(relayStore.toast)?.message).toContain('refused this device. Import a new invitation');
       await vi.advanceTimersByTimeAsync(120_000);
       relayStore.resetReconnectBackoff();
-      relayStore.revalidateConnections();
+      relayStore.revalidateConnections(2_000);
       expect(MockWebSocket.instances).toHaveLength(1);
     } else {
       expect(get(relayStore.toast)?.message || '').not.toContain('refused this device');
-      relayStore.revalidateConnections();
+      relayStore.revalidateConnections(2_000);
       expect(MockWebSocket.instances).toHaveLength(2);
     }
     expect(socket.sent.map(value => JSON.parse(value).type)).toEqual(opened ? ['e2ee_client_hello'] : []);
@@ -2756,7 +2749,7 @@ describe('relay command store', () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(MockWebSocket.instances).toHaveLength(2);
 
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     expect(MockWebSocket.instances).toHaveLength(3);
 
     // The cleared attempt counter also puts the next failure back on the base delay.
@@ -2829,9 +2822,9 @@ describe('relay command store', () => {
     report('closed', { reason: 'Device credential refused', fatal: true, code: 'device_unauthorized' });
     expect(get(relayStore.connections).get(relayId)?.authRejected).toBe(true);
     await vi.advanceTimersByTimeAsync(120_000);
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     relayStore.resetReconnectBackoff();
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     expect(attempts).toBe(1);
   });
 
@@ -3838,7 +3831,7 @@ describe('hidden reconnect retirement', () => {
     expect(relayStore.connection(relayId)?.status).toBe('disconnected');
     expect(relayStore.connection(relayId)?.reconnectTimer).toBeNull();
     await vi.advanceTimersByTimeAsync(3_600_000);
-    relayStore.revalidateConnections();
+    relayStore.revalidateConnections(2_000);
     expect(MockWebSocket.instances).toHaveLength(1);
     expect(socket.sent.filter(payload => JSON.parse(payload).type === 'ping')).toHaveLength(pings);
     relayStore.setHidden(false);

@@ -60,7 +60,6 @@
     relayServesCurrentOrigin,
     reloadHeldMessage,
     reloadUpdatedSameOriginApp,
-    type PhoneAppTarget,
   } from '$lib/updates';
   import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
@@ -371,8 +370,8 @@
     }
   });
 
-  function reloadIntoUpdate(version: string, target: PhoneAppTarget | null) {
-    void reloadUpdatedSameOriginApp(version, target).then((reloaded) => {
+  function reloadIntoUpdate(version: string) {
+    void reloadUpdatedSameOriginApp(version).then((reloaded) => {
       const held = reloadHeldMessage();
       if (!reloaded && held) relayStore.showToast(held, true);
     });
@@ -388,14 +387,7 @@
       clearPendingRelayUpdate(relayId);
       relayStore.showToast(`${connection.relay.label} updated to v${pending.version}.`);
       if (relayServesCurrentOrigin(connection.relay.url)) {
-        const target = $appUpdates.deployedVersion === pending.version
-          ? {
-            version: pending.version,
-            assets: $appUpdates.deployedAssets,
-            build: $appUpdates.deployedBuild || '',
-          }
-          : null;
-        reloadIntoUpdate(pending.version, target);
+        reloadIntoUpdate(pending.version);
       }
     }
   });
@@ -415,14 +407,7 @@
       const identity = `${deployment.target_version}:${deployment.target_revision}`;
       if (awaitedDeployments.has(identity)) continue;
       awaitedDeployments.add(identity);
-      const target = $appUpdates.deployedVersion === deployment.target_version
-        ? {
-          version: deployment.target_version,
-          assets: $appUpdates.deployedAssets,
-          build: $appUpdates.deployedBuild || '',
-        }
-        : null;
-      reloadIntoUpdate(deployment.target_version, target);
+      reloadIntoUpdate(deployment.target_version);
     }
   });
 
