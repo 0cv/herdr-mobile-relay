@@ -310,7 +310,7 @@ func TestFinishedNotificationRejectsSupersededTransition(t *testing.T) {
 	s.CommitEvent("p1", "idle", 1000)
 	revision := s.Revision("p1")
 	s.CommitEvent("p1", "working", 2000)
-	if s.RegisterFinishedNotificationForTransition("p1", "idle", revision) {
+	if s.RegisterFinishedNotificationForTransition("p1", revision) {
 		t.Fatal("superseded completion registered a notification")
 	}
 }
@@ -330,7 +330,7 @@ func TestInitialDoneAndDoneSynonymsDoNotPublishCompletion(t *testing.T) {
 		t.Fatalf("false completion transition published for %q", status)
 	case <-time.After(50 * time.Millisecond):
 	}
-	if s.RegisterFinishedNotificationForTransition("p1", "completed", s.Revision("p1")) {
+	if s.RegisterFinishedNotificationForTransition("p1", s.Revision("p1")) {
 		t.Fatal("non-attention completion transition registered a notification")
 	}
 }
@@ -340,10 +340,10 @@ func TestFinishedRegistrationRequiresAttentionTransition(t *testing.T) {
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
 	s.CommitEvent("p1", "finished", 1000)
 	revision := s.Revision("p1")
-	if !s.RegisterFinishedNotificationForTransition("p1", "finished", revision) {
+	if !s.RegisterFinishedNotificationForTransition("p1", revision) {
 		t.Fatal("working-to-finished transition did not register")
 	}
-	if s.RegisterFinishedNotificationForTransition("p1", "finished", revision) {
+	if s.RegisterFinishedNotificationForTransition("p1", revision) {
 		t.Fatal("completion transition registered twice")
 	}
 }
@@ -357,7 +357,7 @@ func TestCompletionRegistrationSurvivesDoneSynonymRedraw(t *testing.T) {
 	if !s.CompletionCurrent("p1", completionRevision) {
 		t.Fatal("done-synonym redraw invalidated the real completion cycle")
 	}
-	if !s.RegisterFinishedNotificationForTransition("p1", "done", completionRevision) {
+	if !s.RegisterFinishedNotificationForTransition("p1", completionRevision) {
 		t.Fatal("real completion could not register after a done-synonym redraw")
 	}
 }
@@ -621,7 +621,7 @@ func TestBlockedClassificationChangeTriggersAndChatSuppressesIdleCompletion(t *t
 	if !s.CompletionCurrent("p1", chat.StateRevision) {
 		t.Fatal("chat classification did not establish a completion transition")
 	}
-	if !s.RegisterFinishedNotificationForTransition("p1", "blocked", chat.StateRevision) {
+	if !s.RegisterFinishedNotificationForTransition("p1", chat.StateRevision) {
 		t.Fatal("chat completion could not register its notification")
 	}
 

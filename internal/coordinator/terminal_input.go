@@ -37,7 +37,7 @@ func (d *Dispatcher) handleTerminalText(ctx context.Context, receivedAt time.Tim
 	}
 	text := stringValue(message, "text")
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, len(text)),
+		Command:     d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
 		LedgerKey:   action + "\x00" + paneID + "\x00" + requestID,
 		PayloadHash: d.terminalTextConflictToken(text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {

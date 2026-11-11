@@ -7,7 +7,7 @@ import (
 )
 
 func TestContinuationReleasesCapacityAndKeepsLedgerPending(t *testing.T) {
-	s := NewScheduler(2, testLogger())
+	s := NewScheduler(2)
 	release := make(chan struct{})
 	t.Cleanup(func() {
 		select {
@@ -73,7 +73,7 @@ func TestContinuationReleasesCapacityAndKeepsLedgerPending(t *testing.T) {
 func TestContinuationInvalidationIsCachedWarning(t *testing.T) {
 	for _, mode := range []string{"expired", "replaced", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {
-			s := NewScheduler(2, testLogger())
+			s := NewScheduler(2)
 			release := make(chan struct{})
 			t.Cleanup(func() {
 				select {

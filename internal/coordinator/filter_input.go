@@ -56,7 +56,7 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time,
 	var gate sync.Mutex
 	dispatched := false
 	stopped := false
-	result := d.schedule(ctx, ScheduleOptions{Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, text)}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+	result := d.schedule(ctx, ScheduleOptions{Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline)}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		run := func() error {
 			check := func() error {
 				if err := ctx.Err(); err != nil {

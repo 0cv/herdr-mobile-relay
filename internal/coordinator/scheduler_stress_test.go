@@ -14,7 +14,7 @@ func TestSchedulerCompletesBurstWithinOwnedCapacity(t *testing.T) {
 		capacity = 4
 		total    = 80
 	)
-	scheduler := NewScheduler(capacity, testLogger())
+	scheduler := NewScheduler(capacity)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -90,7 +90,7 @@ func TestSchedulerCompletesBurstWithinOwnedCapacity(t *testing.T) {
 
 func TestSchedulerPreservesTenClientReceiptOrderForOnePane(t *testing.T) {
 	const total = 10
-	scheduler := NewScheduler(8, testLogger())
+	scheduler := NewScheduler(8)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -134,7 +134,7 @@ func TestSchedulerPreservesTenClientReceiptOrderForOnePane(t *testing.T) {
 }
 
 func TestSchedulerShutdownCancelsPendingWork(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
 	go func() {
@@ -170,7 +170,7 @@ func TestSchedulerShutdownCancelsPendingWork(t *testing.T) {
 }
 
 func TestApprovalExpiresNotStartedWhileQueued(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -223,7 +223,7 @@ func TestApprovalExpiresNotStartedWhileQueued(t *testing.T) {
 }
 
 func TestConfirmationWatchCannotLandAfterGenerationBump(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

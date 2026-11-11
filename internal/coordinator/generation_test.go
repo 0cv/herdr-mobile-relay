@@ -95,7 +95,7 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 }
 
 func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -157,7 +157,7 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 }
 
 func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -321,7 +321,7 @@ func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
 }
 
 func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -378,7 +378,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 }
 
 func TestSchedulerRejectsOperationAdmittedBeforeReplacementTopology(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

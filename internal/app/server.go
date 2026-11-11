@@ -1895,7 +1895,7 @@ func (s *Server) handleTransition(
 		s.broadcastBlockedAttention(agentState)
 		return
 	}
-	if !s.state.RegisterFinishedNotificationForTransition(paneID, status, revision) {
+	if !s.state.RegisterFinishedNotificationForTransition(paneID, revision) {
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
@@ -2128,7 +2128,7 @@ func (s *Server) handleChatCompletion(
 		return s.state.CompletionCurrent(agent.PaneID, revision)
 	}
 	if !current() ||
-		!s.state.RegisterFinishedNotificationForTransition(agent.PaneID, "blocked", revision) {
+		!s.state.RegisterFinishedNotificationForTransition(agent.PaneID, revision) {
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), agent.PaneID)
