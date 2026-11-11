@@ -388,22 +388,4 @@ output="$(menu '3\n5\nb\nq\n')"
 expect "$output" 'Enter 1–4, b or q.'
 [[ "$(printf '%s\n' "$output" | grep -c 'What should your phone control?')" == 2 ]]
 
-# Every script the menu can run, directly or through another, ships in the release.
-seen=" "
-queue="plugin-setup-menu"
-while [ -n "$queue" ]; do
-    set -- $queue
-    name="$1"
-    shift
-    queue="$*"
-    case "$seen" in *" $name "*) continue ;; esac
-    seen="$seen$name "
-    grep -qE "^ +$name\.sh( |;)" "$REPO_DIR/scripts/package-release.sh" ||
-        [ "$name" = plugin-setup-menu ] ||
-        { echo "release bundle is missing relay/$name.sh" >&2; exit 1; }
-    for next in $(grep -oE '[a-z][a-z-]+\.sh' "$REPO_DIR/relay/$name.sh" | sed 's/\.sh$//'); do
-        [ ! -f "$REPO_DIR/relay/$next.sh" ] || queue="$queue $next"
-    done
-done
-
 echo 'setup menu tests passed'

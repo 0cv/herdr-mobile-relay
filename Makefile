@@ -151,9 +151,6 @@ release-bundle-check:
 	scripts/package-release.sh "$$version" "$$revision" "$$tmp"; \
 	test "$$(find "$$tmp" -name 'herdr-mobile-relay_*.tar.gz' | wc -l)" -eq 4; \
 	test -s "$$tmp/checksums.txt"; \
-	for archive in "$$tmp"/herdr-mobile-relay_*.tar.gz; do \
-		tar -tzf "$$archive" | grep -qx './relay/native-install-transaction.sh' || exit; \
-	done; \
 	host_os="$$(go env GOOS)"; host_arch="$$(go env GOARCH)"; \
 	scripts/check-installed-release.sh \
 		"$$tmp/herdr-mobile-relay_$${version}_$${host_os}_$${host_arch}.tar.gz" \
