@@ -53,7 +53,7 @@ func (f ompFixture) gitRepo(t *testing.T) {
 }
 
 func (f ompFixture) catalog(cwd string) Catalog {
-	return CatalogForProfile("omp", "omp", cwd, f.home, nil, "", "18.0.3", "")
+	return CatalogForProfile("omp", "omp", cwd, f.home, nil, "", "")
 }
 
 func commandByName(catalog Catalog, name string) (Command, bool) {
@@ -235,7 +235,7 @@ func TestOMPDiscoversUserSkillsFromActiveProfileAgentDir(t *testing.T) {
 	writeSkill(t, filepath.Join(f.home, ".omp", "profiles", "other", "agent", "skills"),
 		"other-skill", "From another profile")
 
-	catalog := CatalogForProfile("omp", "omp", f.repo, f.home, nil, "", "18.0.3", agentDir)
+	catalog := CatalogForProfile("omp", "omp", f.repo, f.home, nil, "", agentDir)
 	command, ok := commandByName(catalog, "/skill:profile-skill")
 	if !ok {
 		t.Fatal("the active named profile's skills must be discovered")
@@ -394,7 +394,7 @@ func TestOMPINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	writeSkill(t, explicit, "explicit-one", "Explicitly configured")
 
 	catalog := CatalogForProfile("omp", "omp", f.repo, f.home,
-		[]string{explicit}, "skill:{name}", "18.0.3", "")
+		[]string{explicit}, "skill:{name}", "")
 	if _, ok := commandByName(catalog, "/skill:explicit-one"); !ok {
 		t.Error("the INI-configured directory must be scanned")
 	}
@@ -425,7 +425,7 @@ func TestOMPActiveProfileConfigGovernsDiscovery(t *testing.T) {
 	agentDir := filepath.Join(f.home, ".omp", "profiles", "personal", "agent")
 	writeFile(t, filepath.Join(agentDir, "config.yml"), "disabledExtensions:\n  - skill:deploy\n")
 
-	catalog := CatalogForProfile("omp", "omp", f.repo, f.home, nil, "", "18.0.3", agentDir)
+	catalog := CatalogForProfile("omp", "omp", f.repo, f.home, nil, "", agentDir)
 	if _, ok := commandByName(catalog, "/skill:deploy"); ok {
 		t.Error("the active profile's config.yml must apply its bans")
 	}
@@ -488,7 +488,7 @@ func TestOMPEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
 	writeSkill(t, filepath.Join(scratch, ".claude", "skills"), "leak-omp", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("omp", "omp", repo, "", nil, "", "18.0.3", "")
+	catalog := CatalogForProfile("omp", "omp", repo, "", nil, "", "")
 	if _, ok := commandByName(catalog, "/skill:leak-omp"); ok {
 		t.Fatal("empty ctx.Home must not make omp scan the service's own working directory")
 	}
@@ -525,7 +525,7 @@ func TestOMPCustomDirectorySkippedWhenCwdUnknown(t *testing.T) {
 	writeSkill(t, filepath.Join(scratch, "relskills"), "stray", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("omp", "omp", "", f.home, nil, "", "18.0.3", "")
+	catalog := CatalogForProfile("omp", "omp", "", f.home, nil, "", "")
 	if _, ok := commandByName(catalog, "/skill:stray"); ok {
 		t.Fatal("a relative customDirectories entry must not resolve against the service's cwd when ctx.Cwd is empty")
 	}

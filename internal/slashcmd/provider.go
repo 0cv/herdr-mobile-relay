@@ -17,7 +17,6 @@ type DiscoverContext struct {
 	Home           string
 	SkillDirs      []string
 	CommandFormat  string
-	AgentVersion   string
 	SuppressNative bool
 }
 

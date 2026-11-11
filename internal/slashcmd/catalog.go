@@ -127,24 +127,24 @@ func ProfileIDForAgentName(agent string) string {
 }
 
 func CatalogFor(agent, cwd, home string) Catalog {
-	return CatalogForProfile(ProfileIDForAgentName(agent), agent, cwd, home, nil, "", "", "")
+	return CatalogForProfile(ProfileIDForAgentName(agent), agent, cwd, home, nil, "", "")
 }
 
 func CatalogForProfile(
 	profileID, reportedAgent, cwd, home string,
 	skillDirs []string,
-	commandFormat, agentVersion, agentDir string,
+	commandFormat, agentDir string,
 ) Catalog {
 	return CatalogForProfileWithSuppression(
 		profileID, reportedAgent, cwd, home,
-		skillDirs, commandFormat, agentVersion, agentDir, false,
+		skillDirs, commandFormat, agentDir, false,
 	)
 }
 
 func CatalogForProfileWithSuppression(
 	profileID, reportedAgent, cwd, home string,
 	skillDirs []string,
-	commandFormat, agentVersion, agentDir string,
+	commandFormat, agentDir string,
 	suppressNative bool,
 ) Catalog {
 	var commands []Command
@@ -156,7 +156,6 @@ func CatalogForProfileWithSuppression(
 		Home:           home,
 		SkillDirs:      skillDirs,
 		CommandFormat:  commandFormat,
-		AgentVersion:   agentVersion,
 		SuppressNative: suppressNative,
 	}
 

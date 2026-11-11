@@ -189,7 +189,7 @@ func TestGenericConfiguredSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	catalog := CatalogForProfile("pi", "pi-coding-agent", root, root, []string{first, second}, "skill:{name}", "", "")
+	catalog := CatalogForProfile("pi", "pi-coding-agent", root, root, []string{first, second}, "skill:{name}", "")
 	if len(catalog.Commands) != len(piBuiltins)+1 {
 		t.Fatalf("command count = %d, want %d: %+v", len(catalog.Commands), len(piBuiltins)+1, catalog.Commands)
 	}
@@ -207,7 +207,7 @@ func TestGenericConfiguredSkills(t *testing.T) {
 }
 
 func TestUnknownProfileHasNoClaudeFallback(t *testing.T) {
-	catalog := CatalogForProfile("custom", "custom", t.TempDir(), t.TempDir(), nil, "", "", "")
+	catalog := CatalogForProfile("custom", "custom", t.TempDir(), t.TempDir(), nil, "", "")
 	if len(catalog.Commands) != 0 {
 		t.Fatalf("unexpected commands: %+v", catalog.Commands)
 	}
@@ -232,7 +232,7 @@ func TestExplicitSuppressionSkipsNativeDiscovery(t *testing.T) {
 			home := t.TempDir()
 			writeSkill(t, filepath.Join(home, tc.skillRoot), "native-only", "Must stay suppressed")
 			catalog := CatalogForProfileWithSuppression(
-				tc.profile, tc.profile, t.TempDir(), home, nil, "", "", "", true,
+				tc.profile, tc.profile, t.TempDir(), home, nil, "", "", true,
 			)
 			if len(catalog.Commands) != tc.builtins {
 				t.Fatalf("commands = %d, want %d builtins", len(catalog.Commands), tc.builtins)

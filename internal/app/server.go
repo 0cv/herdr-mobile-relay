@@ -1022,11 +1022,10 @@ func (s *Server) Run(ctx context.Context) error {
 			home, _ := os.UserHomeDir()
 			profileID := s.profiles.ResolvePane(paneID, agent)
 			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
-			agentVersion := s.profiles.AgentVersion(profileID)
 			location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
 			agentDir := locatedAgentDir(home, agent, location)
 			catalog := slashcmd.CatalogForProfileWithSuppression(
-				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
+				profileID, agent, cwd, home, skillDirs, commandFormat, agentDir, suppressNative,
 			)
 			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
 				catalog.Status = "partial"

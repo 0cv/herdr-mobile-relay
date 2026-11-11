@@ -298,7 +298,7 @@ func TestCursorHonorsConfiguredSkillDirs(t *testing.T) {
 
 	catalog := CatalogForProfile(
 		"cursor", "cursor", t.TempDir(), home,
-		[]string{extra}, "/{name}", "", "",
+		[]string{extra}, "/{name}", "",
 	)
 	if !containsCommand(catalog, "/custom-command") {
 		t.Errorf("configured skill dir ignored; catalog=%v", commandNames(catalog))
@@ -344,7 +344,7 @@ func TestCursorSuppressNativeYieldsBuiltinsOnly(t *testing.T) {
 
 	catalog := CatalogForProfileWithSuppression(
 		"cursor", "cursor", t.TempDir(), home,
-		nil, "/{name}", "", "", true,
+		nil, "/{name}", "", true,
 	)
 	if len(catalog.Commands) != len(cursorBuiltins) {
 		t.Errorf("suppressed catalog has %d commands, want %d builtins",

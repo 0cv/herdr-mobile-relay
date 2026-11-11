@@ -20,8 +20,7 @@ type ompProvider struct{}
 
 func (p *ompProvider) ID() string { return "omp" }
 
-// ompBuiltins mirrors the primary TUI commands in OMP 17.1.7. AgentVersion is
-// available in DiscoverContext for adding a clean version cutover when needed.
+// ompBuiltins mirrors the primary TUI commands in OMP 17.1.7.
 var ompBuiltins = []Command{
 	{"/settings", "Open settings menu", "builtin", ""},
 	{"/setup", "Open provider setup", "builtin", "[providers]"},

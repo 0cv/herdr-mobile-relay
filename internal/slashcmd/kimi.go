@@ -7,8 +7,7 @@ import (
 )
 
 // kimiBuiltins mirrors the primary interactive TUI commands in standalone
-// Kimi Code 0.36.1. AgentVersion remains available in DiscoverContext for a
-// clean cutover when the command registry changes.
+// Kimi Code 0.36.1.
 var kimiBuiltins = []Command{
 	{"/yolo", "Toggle YOLO mode: auto-approve tool actions, but the agent may still ask questions", "builtin", ""},
 	{"/auto", "Toggle Auto mode: fully autonomous, agent decides everything without asking", "builtin", ""},
