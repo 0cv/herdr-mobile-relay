@@ -413,7 +413,7 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	want := rows[1]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", "", sessionID); got != want {
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", "", sessionID, conversation.ProjectContext{}); got != want {
 		t.Fatalf("captured response = %q, want full conversation response %q", got, want)
 	}
 
@@ -765,7 +765,7 @@ func TestLatestConversationResponseFollowsClaudeContinuation(t *testing.T) {
 	)
 	server := testServer()
 	server.conversationM = conversation.NewReader(home)
-	if got := server.latestConversationResponse("claude", "/work", anchor); got != "new child response" {
+	if got := server.latestConversationResponse("claude", anchor, conversation.ProjectContext{CWD: "/work"}); got != "new child response" {
 		t.Fatalf("latest conversation response = %q, want child response", got)
 	}
 }
@@ -784,7 +784,7 @@ func TestCaptureFinishedPaneFollowsClaudeContinuation(t *testing.T) {
 	)
 	server := testServer()
 	server.conversationM = conversation.NewReader(home)
-	if got := server.captureFinishedPane(context.Background(), "pane-1", "claude", "/work", anchor); got != "finished child response" {
+	if got := server.captureFinishedPane(context.Background(), "pane-1", "claude", "/work", anchor, conversation.ProjectContext{CWD: "/work"}); got != "finished child response" {
 		t.Fatalf("finished-pane extraction = %q, want child response", got)
 	}
 }
@@ -3098,7 +3098,7 @@ func TestUnchangedPollPreservesBlockedTransitionSideEffects(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision)
+		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision, time.Now().UnixMilli())
 		close(done)
 	}()
 	<-enrichStarted
@@ -3136,7 +3136,7 @@ func TestBlockedBroadcastDoesNotOvertakeNewerWorkingState(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision)
+		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision, time.Now().UnixMilli())
 		close(done)
 	}()
 	<-push.started
@@ -3178,7 +3178,7 @@ func TestApprovalPushCanceledWhenAttentionIsReclassified(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision)
+		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision, time.Now().UnixMilli())
 		close(done)
 	}()
 	<-push.started
@@ -3243,7 +3243,7 @@ func TestChatClassificationUsesOneCompletionPath(t *testing.T) {
 	s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli())
 	s.handleTransition(
 		context.Background(), "pane-1", "codex", "relay", "blocked",
-		s.state.Revision("pane-1"),
+		s.state.Revision("pane-1"), time.Now().UnixMilli(),
 	)
 
 	entries := journal.Recent(10)
@@ -3273,7 +3273,7 @@ func TestChatClassificationUsesOneCompletionPath(t *testing.T) {
 	s.state.CommitEvent("pane-1", "idle", time.Now().UnixMilli())
 	s.handleTransition(
 		context.Background(), "pane-1", "codex", "relay", "idle",
-		s.state.Revision("pane-1"),
+		s.state.Revision("pane-1"), time.Now().UnixMilli(),
 	)
 	if len(journal.Recent(10)) != 1 || len(push.messages) != 0 {
 		t.Fatal("raw idle duplicated the classified chat completion")
@@ -3305,7 +3305,7 @@ func TestUnknownClassificationHasNoNotificationActions(t *testing.T) {
 	s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli())
 	s.handleTransition(
 		context.Background(), "pane-1", "opencode", "relay", "blocked",
-		s.state.Revision("pane-1"),
+		s.state.Revision("pane-1"), time.Now().UnixMilli(),
 	)
 
 	var payload map[string]any

@@ -102,19 +102,11 @@ func runtimePiCatalog(ctx context.Context, reader paneProcessReader, socket, pan
 	if session == "" {
 		return slashcmd.Catalog{}, errors.New("missing Pi session identity")
 	}
-	instance, err := pibridge.Instance(socket)
+	identity, err := runtimePiPromptIdentity(ctx, reader, socket, pane, session)
 	if err != nil {
 		return slashcmd.Catalog{}, err
 	}
-	before, err := reader.PaneProcessInfoFresh(ctx, pane)
-	if err != nil {
-		return slashcmd.Catalog{}, err
-	}
-	pid, err := foregroundRoot(before, pane)
-	if err != nil {
-		return slashcmd.Catalog{}, err
-	}
-	response, err := pibridge.Query(ctx, pibridge.Identity{Instance: instance, Pane: pane, Session: session, PID: pid})
+	response, err := pibridge.Query(ctx, identity)
 	if err != nil {
 		return slashcmd.Catalog{}, err
 	}
@@ -124,7 +116,7 @@ func runtimePiCatalog(ctx context.Context, reader paneProcessReader, socket, pan
 	}
 	currentPID, err := foregroundRoot(after, pane)
 	currentInstance, instanceErr := pibridge.Instance(socket)
-	if err != nil || instanceErr != nil || currentPID != pid || currentInstance != instance {
+	if err != nil || instanceErr != nil || currentPID != identity.PID || currentInstance != identity.Instance {
 		return slashcmd.Catalog{}, errors.New("Pi process replaced")
 	}
 	return slashcmd.MergePiRuntime(response.Commands, response.Status, response.Truncated), nil

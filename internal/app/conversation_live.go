@@ -65,16 +65,7 @@ func (s *Server) conversationCurrent(feed *conversationFeed) bool {
 	return ok && s.kimiSelectionCurrent(feed.ctx, feed.agent) && validateExactPaneTarget(s.state, protocol.Inbound{PaneID: feed.target.PaneID, Target: &feed.target}, true) == nil && sameConversationTuple(feed.agent, current)
 }
 func (s *Server) activityIdentity(ctx context.Context, target protocol.TargetRef) (pibridge.Identity, error) {
-	instance, err := pibridge.Instance(s.cfg.SocketPath)
-	if err != nil {
-		return pibridge.Identity{}, err
-	}
-	info, err := s.herdrC.PaneProcessInfoFresh(ctx, target.PaneID)
-	if err != nil {
-		return pibridge.Identity{}, err
-	}
-	pid, err := foregroundRoot(info, target.PaneID)
-	return pibridge.Identity{Instance: instance, Pane: target.PaneID, Session: target.AgentSessionID, PID: pid}, err
+	return runtimePiPromptIdentity(ctx, s.herdrC, s.cfg.SocketPath, target.PaneID, target.AgentSessionID)
 }
 func (s *Server) acquireConversationFeed(client *transport.ClientConn, inbound protocol.Inbound, agent *coordinator.AgentState) (*conversationFeed, error) {
 	if inbound.Target == nil || validateExactPaneTarget(s.state, inbound, true) != nil {

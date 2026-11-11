@@ -1002,8 +1002,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case "list_directories":
 			requestID, _ := msg["request_id"].(string)
 			path, _ := msg["path"].(string)
-			home, _ := os.UserHomeDir()
-			listing := fsutil.ListDirectories(path, home)
+			listing := fsutil.ListDirectories(path, s.home)
 			s.sendCommandResult(client, requestID, "list_directories", true, "completed", "", "", listing)
 		case "list_slash_commands":
 			requestID, _ := msg["request_id"].(string)
@@ -1019,13 +1018,12 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			agent, cwd := activeAgent.Agent, activeAgent.Cwd
 			project := projectContextForAgent(activeAgent)
-			home, _ := os.UserHomeDir()
 			profileID := s.profiles.ResolvePane(paneID, agent)
 			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
 			location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
-			agentDir := locatedAgentDir(home, agent, location)
+			agentDir := locatedAgentDir(s.home, agent, location)
 			catalog := slashcmd.CatalogForProfileWithSuppression(
-				profileID, agent, cwd, home, skillDirs, commandFormat, agentDir, suppressNative,
+				profileID, agent, cwd, s.home, skillDirs, commandFormat, agentDir, suppressNative,
 			)
 			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
 				catalog.Status = "partial"
@@ -1321,10 +1319,7 @@ func (s *Server) Run(ctx context.Context) error {
 			if err != nil {
 				s.recordSafeError("blocked pane enrichment failed", err)
 				s.logger.Warn("blocked pane enrichment failed", "pane_id", a.PaneID, "error", err)
-				setAgentAttention(s.state, a, question.Classification{
-					Kind:   question.AttentionUnknown,
-					Prompt: "Agent needs inspection",
-				})
+				setAgentAttention(s.state, a, unknownPaneClassification())
 				continue
 			}
 			setAgentAttention(s.state, a, question.Classify(string(read.Content), a.Agent))
@@ -1730,13 +1725,8 @@ func (s *Server) publishAgentPush(
 func (s *Server) handleTransition(
 	parent context.Context,
 	paneID, agent, project, status string,
-	revision int64,
-	observedAt ...int64,
+	revision, transitionAt int64,
 ) {
-	transitionAt := time.Now().UnixMilli()
-	if len(observedAt) > 0 && observedAt[0] > 0 {
-		transitionAt = observedAt[0]
-	}
 	agentState, agentExists := s.state.Agent(paneID)
 	var session string
 	var sessionID string
@@ -1978,13 +1968,17 @@ func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator
 		return string(read.Content), readErr
 	})
 	if err != nil {
-		setAgentAttention(s.state, agent, question.Classification{
-			Kind:   question.AttentionUnknown,
-			Prompt: "Agent needs inspection",
-		})
+		setAgentAttention(s.state, agent, unknownPaneClassification())
 		return
 	}
 	setAgentAttention(s.state, agent, classification)
+}
+
+func unknownPaneClassification() question.Classification {
+	return question.Classification{
+		Kind:   question.AttentionUnknown,
+		Prompt: "Agent needs inspection",
+	}
 }
 
 func classifyBlockedTransition(
@@ -1992,10 +1986,7 @@ func classifyBlockedTransition(
 	agent string,
 	read func(context.Context) (string, error),
 ) (question.Classification, error) {
-	classification := question.Classification{
-		Kind:   question.AttentionUnknown,
-		Prompt: "Agent needs inspection",
-	}
+	classification := unknownPaneClassification()
 	for attempt := range blockedClassificationAttempts {
 		content, err := read(ctx)
 		if err != nil {
@@ -2306,17 +2297,9 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 	s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
 }
 
-// Conversation logs preserve the full assistant message; the terminal pane is
-// only a bounded fallback for agents without a readable transcript. The
-// optional context keeps pane-only callers source compatible while live
-// completion paths pass the captured foreground hint.
-func (s *Server) latestConversationResponse(agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
+func (s *Server) latestConversationResponse(agent, sessionID string, project conversation.ProjectContext) string {
 	if s.conversationM == nil || conversation.IsKimi(agent) || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
-	}
-	project := conversation.ProjectContext{CWD: cwd}
-	if len(contexts) > 0 {
-		project = contexts[0]
 	}
 	page, err := s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
 	if err != nil || !page.Available || len(page.Entries) == 0 {
@@ -2329,7 +2312,7 @@ func (s *Server) latestConversationResponse(agent, cwd, sessionID string, contex
 	return entry.Text
 }
 
-func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
+func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string, project conversation.ProjectContext) string {
 	if conversation.IsKimi(agent) {
 		current, exists := s.state.Agent(paneID)
 		if !exists || current.Agent != agent || current.SessionID != sessionID || current.Cwd != cwd || s.conversationM == nil {
@@ -2346,7 +2329,7 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 			}
 		}
 	}
-	if response := s.latestConversationResponse(agent, cwd, sessionID, contexts...); response != "" {
+	if response := s.latestConversationResponse(agent, sessionID, project); response != "" {
 		return response
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -2427,29 +2410,15 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := map[string]any{
-		"status":          "ok",
-		"readiness":       readiness,
-		"inventory":       inventory,
-		"instance":        s.cfg.InstanceID,
-		"version":         s.version,
-		"release_version": s.version,
-		"revision":        s.revision,
-		"protocol":        protocol.Version,
-	}
+	resp := s.healthPayload(inventory)
+	resp["status"] = "ok"
+	resp["readiness"] = readiness
 	gateway := s.hybrid.status()
 	resp["gateway"] = gateway
 	resp["gateway_url"] = gateway["url"]
 	resp["gateway_version"] = gateway["version"]
 	resp["gateway_revision"] = gateway["revision"]
 	resp["gateway_available_version"] = s.gatewayAvailableVersion()
-
-	if s.webH != nil {
-		resp["bundle_hash"] = s.webH.BundleHash()
-		resp["bundle_version"] = s.webH.BundleVersion()
-		resp["bundle_revision"] = s.webH.BundleRevision()
-		resp["bundle_build"] = s.webH.BundleBuild()
-	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -2470,8 +2439,17 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusOK
 	}
 
+	resp := s.healthPayload(inventory)
+	resp["status"] = status
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) healthPayload(inventory map[string]any) map[string]any {
 	resp := map[string]any{
-		"status":          status,
 		"inventory":       inventory,
 		"instance":        s.cfg.InstanceID,
 		"version":         s.version,
@@ -2485,11 +2463,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		resp["bundle_revision"] = s.webH.BundleRevision()
 		resp["bundle_build"] = s.webH.BundleBuild()
 	}
-
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(resp)
+	return resp
 }
 
 func (s *Server) pruneUploads(ctx context.Context) {
@@ -2534,9 +2508,8 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 		return
 	}
 	generation := s.state.Generation(paneID)
-	agentName, _ := s.agentInfo(paneID)
-	profileID := s.profiles.ResolvePane(paneID, agentName)
-	profile, ok := slashcmd.CopyProfileFor(profileID, agentName)
+	profileID := s.profiles.ResolvePane(paneID, agent.Agent)
+	profile, ok := slashcmd.CopyProfileFor(profileID, agent.Agent)
 	if !ok {
 		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent does not support response copying", paneID, nil)
 		return
@@ -2777,15 +2750,6 @@ func (s *Server) currentPaneRevision(ctx context.Context, paneID string) (int64,
 	return 0, fmt.Errorf("pane %q was not found", paneID)
 }
 
-func (s *Server) agentInfo(paneID string) (agent, cwd string) {
-	for _, a := range s.state.Snapshot() {
-		if a.PaneID == paneID {
-			return a.Agent, a.Cwd
-		}
-	}
-	return "", ""
-}
-
 func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 	vapidPublicKey := ""
 	if s.pushM != nil {
@@ -2845,11 +2809,7 @@ func (s *Server) requestAgentRefresh(client *transport.ClientConn) {
 	s.hub.SendBatchPrepared(client, func() []any {
 		committed := s.committedInventorySnapshot()
 		s.observeInventoryPublication("immediate")
-		return []any{
-			inventoryStatusMessage(committed.status),
-			map[string]any{"type": "agents", "agents": committed.agents},
-			map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
-		}
+		return committed.messages()
 	})
 	s.poller.Wake()
 }
@@ -2867,11 +2827,7 @@ func (s *Server) sendRequestedAgentRefreshes() {
 		s.hub.SendBatchPreparedByID(clientID, func() []any {
 			committed := s.committedInventorySnapshot()
 			s.observeInventoryPublication("deferred")
-			return []any{
-				inventoryStatusMessage(committed.status),
-				map[string]any{"type": "agents", "agents": committed.agents},
-				map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
-			}
+			return committed.messages()
 		})
 	}
 }
@@ -2971,8 +2927,12 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 		return response
 	}
 	paneID, _ := message["pane_id"].(string)
-	agent, _ := s.agentInfo(paneID)
-	classification := question.Classify(content, agent)
+	agent, _ := s.state.Agent(paneID)
+	agentName := ""
+	if agent != nil {
+		agentName = agent.Agent
+	}
+	classification := question.Classify(content, agentName)
 	response["attention_kind"] = classification.Kind
 	response["prompt"] = classification.Prompt
 	response["command"] = classification.Command
@@ -2992,9 +2952,7 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 		// not commit rows from frames read inside this window as history.
 		response["resize_settling"] = true
 	}
-	agentLower := strings.ToLower(agent)
-	if classification.Interaction != nil ||
-		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
+	if classification.Interaction != nil || !isClaudeLike(agentName) {
 		return response
 	}
 	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly {
@@ -3563,6 +3521,14 @@ type committedInventory struct {
 	status     map[string]any
 	agents     []*coordinator.AgentState
 	workspaces []herdr.Workspace
+}
+
+func (inventory committedInventory) messages() []any {
+	return []any{
+		inventoryStatusMessage(inventory.status),
+		map[string]any{"type": "agents", "agents": inventory.agents},
+		map[string]any{"type": "workspaces", "workspaces": inventory.workspaces},
+	}
 }
 
 // publishCurrentInventory is the sole authoritative inventory writer. Fresh

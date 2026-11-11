@@ -171,7 +171,11 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 		return
 	}
 	probeFingerprint := paneFingerprint(probeContent)
-	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	agent, _ := s.state.Agent(watch.paneID)
+	classificationAgentID := ""
+	if agent != nil {
+		classificationAgentID = agent.Agent
+	}
 	if !paneWatchNeedsFrameRead(
 		previousProbe,
 		probeFingerprint,
@@ -214,7 +218,11 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 	}
 	contentFingerprint := paneFingerprint(content)
 	frameFingerprint := paneFrameFingerprint(response)
-	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	agent, _ := s.state.Agent(watch.paneID)
+	classificationAgentID := ""
+	if agent != nil {
+		classificationAgentID = agent.Agent
+	}
 	resizeSettling, _ := response["resize_settling"].(bool)
 	response["content_fingerprint"] = contentFingerprint
 	return response, &paneWatchFrame{

@@ -194,7 +194,7 @@ func TestKimiE2dReportedContentPolicy(t *testing.T) {
 	agent.ConversationInferred, agent.ConversationSource, agent.ConversationInferredOwner = false, "", ""
 	server.state.CommitInventory([]*coordinator.AgentState{agent}, server.state.RevisionCounter())
 	agent, _ = server.state.Agent(agent.PaneID)
-	if got := server.captureFinishedPane(t.Context(), agent.PaneID, agent.Agent, agent.Cwd, agent.SessionID); got != "Seed answer" {
+	if got := server.captureFinishedPane(t.Context(), agent.PaneID, agent.Agent, agent.Cwd, agent.SessionID, projectContextForAgent(agent)); got != "Seed answer" {
 		t.Fatalf("reported-ID completion changed: %q", got)
 	}
 	entries := server.enrichActivityResponses([]activity.Entry{{Kind: "finished", PaneID: agent.PaneID, Agent: "kimi", Session: agent.SessionID}})
