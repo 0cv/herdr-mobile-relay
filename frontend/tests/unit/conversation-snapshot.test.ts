@@ -25,7 +25,7 @@ function deferred<T>() {
 function savePreview() {
   expect(putConversationPreview({
     identity: conversationIdentity(agent)!, relayId: agent.relay_id, savedAt: Date.now(),
-    sourceRevision: 'source:1', historical: true, mode: 'native',
+    sourceRevision: 'source:1', historical: true,
     entries: [entry('cached', 'Cached answer')],
   })).toBe(true);
 }

@@ -1,6 +1,6 @@
 import { cloneEntries, clonePlan } from './conversation-values';
 import { registerConversationCacheClearer } from './conversation-cache-control';
-import type { ConversationBrowseDiagnostics, ConversationBrowseMode, ConversationEntry, OmoTodoState } from './types';
+import type { ConversationBrowseDiagnostics, ConversationEntry, OmoTodoState } from './types';
 
 /** Maximum number of conversation identities retained in the in-memory preview. */
 export const CONVERSATION_CACHE_MAX_IDENTITIES = 6;
@@ -20,7 +20,6 @@ export interface ConversationPreview {
   savedAt: number;
   sourceRevision: string;
   historical: boolean;
-  mode?: ConversationBrowseMode;
   diagnostics?: ConversationBrowseDiagnostics;
   plan?: OmoTodoState | null;
   entries: ConversationEntry[];
@@ -161,7 +160,6 @@ function boundedPreview(input: ConversationPreview): ConversationPreview | null 
     savedAt: Number.isFinite(input.savedAt) ? input.savedAt : Date.now(),
     sourceRevision: input.sourceRevision || '',
     historical: input.historical === true,
-    ...(input.mode ? { mode: input.mode } : {}),
     ...(input.diagnostics ? { diagnostics: cloneDiagnostics(input.diagnostics) } : {}),
     ...(input.plan ? { plan: clonePlan(input.plan) } : {}),
     entries: keptEntries,

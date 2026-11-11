@@ -38,7 +38,7 @@ it('bridges backend-produced B-only and C-only heads in the established A contro
   controller.refresh();
   await idle();
   expect(request.mock.calls.map(([, input]) => input.cursor)).toEqual([undefined, undefined, pages.latestB.nextCursor]);
-  expect(controller.state.errorCode).toBe('');
+  expect(controller.state.error).toBeNull();
   expect(controller.state.latestGapOutstanding).toBe(false);
   expect(controller.state.entries.map(({ text }) => text)).toEqual(['A latest question', 'A latest answer', 'B question', 'B answer']);
   expect(controller.state.sourceRevision).toBe(revision);
@@ -62,6 +62,6 @@ it('bridges backend-produced B-only and C-only heads in the established A contro
   const retained = controller.state.entries;
   head = 'replacement';
   controller.refresh();
-  await vi.waitFor(() => expect(controller.state.errorCode).toBe('source_changed'));
+  await vi.waitFor(() => expect(controller.state.error?.code).toBe('source_changed'));
   expect(controller.state.entries).toEqual(retained);
 });
