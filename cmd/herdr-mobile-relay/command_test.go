@@ -177,7 +177,6 @@ func commandEnvironment(args, root, herdr string) []string {
 		"HERDR_RELAY_POLL_INTERVAL=2",
 		"HERDR_RELAY_LOG_FORMAT=" + os.Getenv("HERDR_RELAY_LOG_FORMAT"),
 		"HERDR_RELAY_LOG_LEVEL=" + os.Getenv("HERDR_RELAY_LOG_LEVEL"),
-		"HERDR_RELAY_SERVICE_NAME=herdr-command-test.service",
 		"HERDR_ALLOWED_ORIGINS=",
 		"HERDR_GATEWAY_URL=",
 		"HERDR_GATEWAY_SELECTION=",

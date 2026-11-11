@@ -49,12 +49,9 @@ type State struct {
 	UpstreamRevision  string `json:"upstream_revision,omitempty"`
 	TargetVersion     string `json:"target_version,omitempty"`
 	TargetRevision    string `json:"target_revision,omitempty"`
-	Target            string `json:"target,omitempty"`
 	CheckedAt         int64  `json:"checked_at,omitempty"`
 	StartedAt         string `json:"started_at,omitempty"`
 	FinishedAt        string `json:"finished_at,omitempty"`
-	Mode              string `json:"mode,omitempty"`
-	Eligible          bool   `json:"eligible"`
 	CanInstall        bool   `json:"can_install"`
 	Reason            string `json:"reason,omitempty"`
 	Error             string `json:"error,omitempty"`
@@ -89,10 +86,7 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 		State:          "scheduled",
 		TargetVersion:  job.TargetVersion,
 		TargetRevision: job.TargetRevision,
-		Target:         relayrelease.CurrentTarget(),
 		StartedAt:      started,
-		Mode:           "plugin",
-		Eligible:       true,
 	}
 	failStartup := func(startupErr error) error {
 		if job.StatePath == "" || !filepath.IsAbs(job.StatePath) {

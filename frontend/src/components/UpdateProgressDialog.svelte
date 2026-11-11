@@ -220,9 +220,6 @@
     if (update.state === 'failed') {
       return { ...base, label: 'Update failed', detail: update.error || 'The relay reported an update failure.', tone: 'danger', score: 0, canStart: true, manual: false };
     }
-    if (update.state === 'rolled_back') {
-      return { ...base, label: 'Previous version restored', detail: update.error || 'The replacement failed and the previous relay was restored.', tone: 'danger', score: 0, canStart: true, manual: false };
-    }
     if (update.state === 'blocked') {
       return { ...base, label: 'Update blocked', detail: update.reason || 'This update needs attention before it can continue.', tone: 'danger', score: 0, canStart: false, manual: false };
     }

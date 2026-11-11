@@ -26,7 +26,6 @@ const RELAY_UPDATE_STATES = new Set([
   'restarting',
   'succeeded',
   'failed',
-  'rolled_back',
 ]);
 
 export interface PhoneAppTarget {
@@ -173,7 +172,6 @@ export function normalizeRelayUpdate(
     upstream_revision: String(update.upstream_revision || update.target_revision || '').slice(0, 40),
     checked_at: Number.isFinite(Number(update.checked_at)) ? Number(update.checked_at) : 0,
     can_install: update.can_install === true,
-    mode: String(update.mode || '').slice(0, 20),
     reason: String(update.reason || '').slice(0, 500),
     error: String(update.error || '').slice(0, 500),
   };

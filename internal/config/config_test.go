@@ -147,9 +147,6 @@ func TestLoadIsolatesAllXDGPaths(t *testing.T) {
 	if cfg.CacheDir != filepath.Join(cacheHome, "herdr-mobile-relay") {
 		t.Fatalf("cache dir = %q", cfg.CacheDir)
 	}
-	if cfg.DataHome != dataHome {
-		t.Fatalf("data home = %q, want %q", cfg.DataHome, dataHome)
-	}
 	if cfg.RuntimeDir != filepath.Join(configHome, "herdr-mobile-relay") {
 		t.Fatalf("runtime dir = %q", cfg.RuntimeDir)
 	}
@@ -169,8 +166,8 @@ func TestLoadGatewayDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.GatewayURL != "" {
-		t.Errorf("gateway url = %q, want empty", cfg.GatewayURL)
+	if len(cfg.GatewayURLs) != 0 {
+		t.Errorf("gateway urls = %v, want empty", cfg.GatewayURLs)
 	}
 	if cfg.WebRTCUDPPort != 0 {
 		t.Errorf("webrtc udp port = %d, want 0", cfg.WebRTCUDPPort)
@@ -195,8 +192,8 @@ func TestLoadGatewaySettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.GatewayURL != "wss://gw.example.com" {
-		t.Errorf("gateway url = %q, want trailing slash trimmed", cfg.GatewayURL)
+	if !slices.Equal(cfg.GatewayURLs, []string{"wss://gw.example.com"}) {
+		t.Errorf("gateway urls = %v, want trailing slash trimmed", cfg.GatewayURLs)
 	}
 	if cfg.WebRTCUDPPort != 41234 {
 		t.Errorf("webrtc udp port = %d, want 41234", cfg.WebRTCUDPPort)
@@ -241,9 +238,6 @@ func TestLoadParsesOrderedGatewayList(t *testing.T) {
 	want := []string{"wss://a.example.com", "wss://b.example.com"}
 	if !slices.Equal(cfg.GatewayURLs, want) {
 		t.Errorf("gateway urls = %v, want %v", cfg.GatewayURLs, want)
-	}
-	if cfg.GatewayURL != want[0] {
-		t.Errorf("gateway url = %q, want the first list entry %q", cfg.GatewayURL, want[0])
 	}
 }
 
@@ -313,7 +307,6 @@ func isolateLoadEnvironment(t *testing.T) {
 	t.Setenv("HERDR_RELAY_POLL_INTERVAL", "")
 	t.Setenv("HERDR_RELAY_LOG_FORMAT", "")
 	t.Setenv("HERDR_RELAY_LOG_LEVEL", "")
-	t.Setenv("HERDR_RELAY_SERVICE_NAME", "")
 	t.Setenv("HERDR_ALLOWED_ORIGINS", "")
 	t.Setenv("HERDR_GATEWAY_URL", "")
 	t.Setenv("HERDR_GATEWAY_SELECTION", "")

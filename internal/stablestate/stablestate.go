@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
@@ -42,7 +41,7 @@ func Default(envFile string) map[string]any {
 	}
 }
 
-func Run(args []string, stdout, stderr *os.File) error {
+func Run(args []string, stdout *os.File) error {
 	if len(args) == 0 {
 		return usage()
 	}
@@ -94,17 +93,6 @@ func Run(args []string, stdout, stderr *os.File) error {
 			state[key] = parseValue(value)
 		}
 		return Write(args[0], state)
-	case "show":
-		if len(args) != 1 {
-			return usage()
-		}
-		state, err := ReadState(args[0])
-		if err != nil {
-			return err
-		}
-		data, _ := json.MarshalIndent(orderedState(state), "", "  ")
-		fmt.Fprintln(stdout, string(data))
-		return nil
 	case "credential-id", "create-id":
 		if len(args) != 1 {
 			return usage()
@@ -168,16 +156,6 @@ func Run(args []string, stdout, stderr *os.File) error {
 			return nil
 		}
 		return fmt.Errorf("Cloudflare tunnel %s was not found", args[1])
-	case "health-valid":
-		if len(args) != 1 {
-			return usage()
-		}
-		value, err := readJSON(args[0])
-		if err != nil {
-			return err
-		}
-		_, err = validHealth(value, "Relay")
-		return err
 	case "health-match":
 		if len(args) != 2 {
 			return usage()
@@ -223,7 +201,7 @@ func write(filename string, state map[string]any, replace func(string, string, s
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(orderedState(state), "", "  ")
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -347,21 +325,6 @@ func printable(value any) string {
 	}
 }
 
-// JSON maps are deterministically ordered by encoding/json. Copying also
-// prevents callers from mutating state while it is marshaled.
-func orderedState(state map[string]any) map[string]any {
-	keys := make([]string, 0, len(state))
-	for key := range state {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	result := make(map[string]any, len(state))
-	for _, key := range keys {
-		result[key] = state[key]
-	}
-	return result
-}
-
 func usage() error {
-	return errors.New("usage: stable-state {init|get|update|show|credential-id|create-id|tunnel-id-by-name|tunnel-list-has|tunnel-name-by-id|health-valid|health-match} ...")
+	return errors.New("usage: stable-state {init|get|update|credential-id|create-id|tunnel-id-by-name|tunnel-list-has|tunnel-name-by-id|health-match} ...")
 }

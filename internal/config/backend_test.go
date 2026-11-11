@@ -21,15 +21,14 @@ func TestBackendDefaults(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			name, port, service := "herdr-mobile-relay", 8375, defaultServiceName()
+			name, port := "herdr-mobile-relay", 8375
 			socket := filepath.Join(cfg.ConfigHome, "herdr", "herdr.sock")
 			if backend == "hc" {
 				name += "-hc"
 				port = 8377
-				service = strings.TrimSuffix(service, ".service") + "-hc.service"
 				socket = coreSocketPath(filepath.Join("/run/user", strconv.Itoa(os.Getuid())))
 			}
-			if cfg.Backend != backend || cfg.Port != port || cfg.PluginPort != port+1 || cfg.ServiceName != service ||
+			if cfg.Backend != backend || cfg.Port != port || cfg.PluginPort != port+1 ||
 				cfg.SocketPath != socket || cfg.RuntimeDir != filepath.Join(cfg.ConfigHome, name) ||
 				cfg.CacheDir != filepath.Join(os.Getenv("XDG_CACHE_HOME"), name) {
 				t.Fatalf("unexpected config: %+v", cfg)
@@ -46,7 +45,6 @@ func TestHCOverrides(t *testing.T) {
 	t.Setenv("HC_SESSION", "second")
 	t.Setenv("HERDR_RELAY_PORT", "9001")
 	t.Setenv("HERDR_RELAY_PLUGIN_PORT", "9002")
-	t.Setenv("HERDR_RELAY_SERVICE_NAME", "custom.service")
 	t.Setenv("HERDR_RELAY_ENV", "/runtime/core/relay.env")
 	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "/tui/plugin")
 	cfg, err := Load()
@@ -54,7 +52,7 @@ func TestHCOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.SocketPath != "/runtime/herdr-core/second.sock" || cfg.Port != 9001 || cfg.PluginPort != 9002 ||
-		cfg.ServiceName != "custom.service" || cfg.RuntimeDir != "/runtime/core" {
+		cfg.RuntimeDir != "/runtime/core" {
 		t.Fatalf("%+v", cfg)
 	}
 	t.Setenv("HC_SOCKET_PATH", "/explicit/core.sock")
