@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Self-hosted gateways deployed with the generated Compose bundle now honor
+  `HERDR_GATEWAY_MAX_RELAYS` and `HERDR_GATEWAY_MAX_CLIENTS` from `.env`, so
+  operators can change the gateway-wide connection limits.
+
 ## [0.25.1] - 2026-11-10
 
 ### Fixed
