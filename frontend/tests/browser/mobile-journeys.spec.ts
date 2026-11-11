@@ -4888,7 +4888,7 @@ test('shows tool-only agent turns only in full history and decodes their argumen
 
 async function openFollowingConversation(page: Page, mode: 'conversation' | 'activity' = 'activity') {
   await page.addInitScript(value => localStorage.setItem('herdr-conversation-view', value), mode);
-  await boot(page, [fedora], '/', { answerHealthPings: true });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity'] });
   const capabilities = { source: 'pi_events', active_branch: true };
@@ -8272,7 +8272,7 @@ test('phone feedback integrated history loads on upward demand and explicit acti
 
 
 test('followup combined notices and Pi bridge stay fenced across paging, modes and reconnect', async ({ page }) => {
-  await boot(page, [fedora], '/', { answerHealthPings: true });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await page.evaluate(() => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'synthetic-controller', version: 1, secret: 'C'.repeat(43), deviceId: 'synthetic-controller', role: 'controller', locale: 'en', issuedAt: Date.now() } } })));
   const capabilities = ['conversation_history', 'conversation_activity', 'pi_prompt_unconfirmed', 'manual_terminal_input'];
@@ -8370,7 +8370,7 @@ test('followup Pi sends are exclusive across pages', async ({ page, context }) =
   for (const view of pages) {
     if (view === second) await page.evaluate(() => localStorage.removeItem('herdr_device_auth_v1'));
     await view.addInitScript(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }));
-    await boot(view, [fedora], '/', { answerHealthPings: true });
+    await boot(view, [fedora]);
     await expect.poll(() => socketCount(view)).toBe(1);
     await view.evaluate(() => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'synthetic-controller', version: 1, secret: 'C'.repeat(43), deviceId: 'synthetic-controller', role: 'controller', locale: 'en', issuedAt: Date.now() } } })));
     await setAutoCommands(view, false);
@@ -8406,7 +8406,7 @@ test('followup Pi sends are exclusive across pages', async ({ page, context }) =
 });
 
 for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`followup Pi send survives reload after ${phase}`, async ({ page }) => {
-  await boot(page, [fedora], '/', { answerHealthPings: true });
+  await boot(page, [fedora]);
   const capabilities = ['conversation_history', 'conversation_activity', 'pi_prompt_unconfirmed', 'manual_terminal_input'];
   const target = { ...composerTarget, agent_session_id: `reload-pi-${phase}` };
   const agent = { ...target, status: 'blocked', attention_kind: 'unknown', project: 'Reload Pi', agent: 'pi', conversation_history_available: true };
@@ -8506,7 +8506,7 @@ test('followup raw development close stays recoverable', async ({ page }) => {
 });
 
 for (const role of ['controller', 'reader']) test(`followup Pi Integration setting is ${role === 'reader' ? 'read-only for readers' : 'controller-controlled with per-profile results'}`, async ({ page }) => {
-  await boot(page, [fedora], '/', { answerHealthPings: true });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await page.evaluate(role => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: {
     kind: 'credential', id: 'synthetic-setting', version: 1, secret: 'S'.repeat(43), deviceId: 'synthetic-setting', role, locale: 'en', issuedAt: Date.now(),
@@ -8557,7 +8557,7 @@ for (const role of ['controller', 'reader']) test(`followup Pi Integration setti
 });
 
 test('followup blocked Pi without a bridge points to Settings without fallback input', async ({ page }) => {
-  await boot(page, [fedora], '/', { answerHealthPings: true });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { capabilities: ['conversation_history', 'pi_integration', 'manual_terminal_input'] });
   await setConversationFixture(page, { entries: [{ id: 'setting-notice', role: 'assistant', kind: 'notice', text: 'Synthetic extension question', timestamp: '' }], total: 1 });

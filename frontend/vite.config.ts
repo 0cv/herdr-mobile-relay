@@ -177,10 +177,6 @@ function stableReleaseAssets(): Plugin {
   };
 }
 
-export function assetContentVersion(source: string | Uint8Array): string {
-  return digest(source).sha256.slice(0, 16);
-}
-
 // HERDR_DEV_RUNTIME=1 builds the bundle with Svelte's dev runtime, whose
 // errors carry the failing data - a keyed each names its duplicate key and
 // indexes. It exists for on-device debugging through `make dev-tunnel`;

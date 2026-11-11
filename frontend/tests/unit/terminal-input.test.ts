@@ -1,7 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import ConversationHistory from '$components/ConversationHistory.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 import { relayStore } from '$lib/store';
@@ -41,9 +40,9 @@ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); relayStore.connectio
 // The open panel survives the agent settling into another state, such as idle.
 const offeringManualInput = (current: Agent): Agent => promptDispatchRestriction(current) ? current : { ...current, status: 'blocked', attention_kind: 'unknown' };
 
-async function open(view: 'Conversation' | 'Terminal', current = agent) {
+async function open(current = agent) {
   const opening = offeringManualInput(current);
-  const rendered = view === 'Conversation' ? render(ConversationHistory, { agent: opening }) : render(TerminalView, { agent: opening, allAgents: [opening], responding: new Set<string>() });
+  const rendered = render(TerminalView, { agent: opening, allAgents: [opening], responding: new Set<string>() });
   await rendered.rerender({ frame: frame(current) });
   await fireEvent.click(button('Keyboard'));
   await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
@@ -102,11 +101,10 @@ it.each([
   expect(trigger!.closest('.term-keys')).toBe(button('Esc').closest('.term-keys'));
 });
 
-const manualViews: Array<'Conversation' | 'Terminal'> = ['Terminal'];
-for (const view of manualViews) describe(view, () => {
+describe('Terminal', () => {
   it.each(['working','blocked','idle'])('keeps %s editing separate from dispatch', async status => {
     const current = { ...agent, status };
-    const rendered = view === 'Conversation' ? render(ConversationHistory, { agent: current }) : render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
+    const rendered = render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
     const prompt = screen.getByLabelText('Prompt');
     expect(prompt).toBeEnabled();
     await fireEvent.input(prompt, { target: { value: 'local draft' } });
@@ -115,7 +113,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it('sends literal text once, never Enter, slash handling, prompt history or semantic answers', async () => {
-    const rendered = await open(view);
+    const rendered = await open();
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: '  /unrelated 界😀  ' } });
     await fireEvent.click(button('Send text'));
@@ -134,7 +132,7 @@ for (const view of manualViews) describe(view, () => {
 
   it('keeps an unconfirmed Pi bridge send fenced in advanced input without clearing it from pixels', async () => {
     const current = { ...agent };
-    const rendered = await open(view, current);
+    const rendered = await open(current);
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'another message' } });
     expect(button('Send text')).toBeEnabled();
     const piDelivery = piPromptDelivery(current);
@@ -157,7 +155,7 @@ for (const view of manualViews) describe(view, () => {
   it('blocks double taps and Enter until text delivery completes', async () => {
     let finish!: (value: CommandResult) => void;
     vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
-    await open(view);
+    await open();
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'queued' } });
     const send = button('Send text');
     await fireEvent.click(send); await fireEvent.click(send);
@@ -169,7 +167,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it.each(['dispatched_unknown','accepted'])('requires inspection after %s without replay', async phase => {
-    const rendered = await open(view, { ...agent, status: 'idle' });
+    const rendered = await open({ ...agent, status: 'idle' });
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'private uncertain' } });
     await fireEvent.click(button('Send text'));
@@ -205,7 +203,7 @@ for (const view of manualViews) describe(view, () => {
       (['idle', 'question', 'approval'] as const).map(attention => ({ transition, phase, attention })))))('retains $phase guards for $attention across $transition until fresh inspection', async ({ transition, phase, attention }) => {
     const interaction: QuestionInteraction = { id: `recovery-${transition}-${phase}-${attention}`, kind: 'single_select', question: 'Choose a destination', options: [{ index: 0, label: 'North', selected: true }], can_go_back: true, can_chat: true };
     const current: Agent = { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
-    const rendered = await open(view, current);
+    const rendered = await open(current);
     const stale = frame(current);
     await rendered.rerender({ frame: stale });
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase });
@@ -253,7 +251,7 @@ for (const view of manualViews) describe(view, () => {
     const approve = vi.spyOn(relayStore, 'respond').mockResolvedValue(true);
     const navigate = vi.spyOn(relayStore, 'navigateQuestionPrevious').mockResolvedValue(receipt);
     const chat = vi.spyOn(relayStore, 'clarifyQuestion').mockResolvedValue(receipt);
-    const rendered = await open(view, current);
+    const rendered = await open(current);
     now = 110;
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'dispatched_unknown' });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'uncertain before lock' } });
@@ -322,7 +320,7 @@ for (const view of manualViews) describe(view, () => {
   it.each((['disconnect', 'lock'] as const).flatMap(transition =>
     (['completed', 'dispatched_unknown'] as const).map(phase => ({ transition, phase }))))('keeps pending dispatch guarded across $transition before a late $phase result', async ({ transition, phase }) => {
     const current = { ...agent, status: 'idle' };
-    const rendered = await open(view, current);
+    const rendered = await open(current);
     let finish!: (result: CommandResult) => void;
     vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'pending transient' } });
@@ -355,14 +353,14 @@ for (const view of manualViews) describe(view, () => {
 
   it.each(['uncertain', 'pending'] as const)('preserves $0 delivery guards through a whole-view remount', async state => {
     const current = { ...agent, status: 'idle' };
-    const original = await open(view, current);
+    const original = await open(current);
     let finish!: (result: CommandResult) => void;
     if (state === 'pending') vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     else vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'dispatched_unknown' });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'unmounted transient' } });
     await fireEvent.click(button('Send text'));
     original.unmount();
-    const restored = view === 'Conversation' ? render(ConversationHistory, { agent: current }) : render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
+    const restored = render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
     await restored.rerender({ frame: frame(current) });
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal draft after remount' } });
     expect(button('Send prompt')).toBeDisabled();
@@ -387,7 +385,7 @@ for (const view of manualViews) describe(view, () => {
   it('keeps hidden-value Enter behind the uncertainty fence after a safe return', async () => {
     relayStore.connections.set(new Map([[agent.relay_id, { ...connection, capabilities: ['manual_terminal_input', 'secret_input'] }]] as never));
     const secret = vi.spyOn(relayStore, 'sendSecret').mockResolvedValue(receipt);
-    const rendered = await open(view, { ...agent, status: 'idle' });
+    const rendered = await open({ ...agent, status: 'idle' });
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'accepted' });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'uncertain' } });
     await fireEvent.click(button('Send text'));
@@ -405,7 +403,7 @@ for (const view of manualViews) describe(view, () => {
       (['idle', 'question', 'approval'] as const).map(attention => ({ field, state, attention })))))('retains $state guards for $attention across same-target $field changes', async ({ field, state, attention }) => {
     const interaction: QuestionInteraction = { id: 'metadata-change', kind: 'single_select', question: 'Choose a destination', options: [{ index: 0, label: 'North', selected: true }], can_go_back: true, can_chat: true };
     const current: Agent = { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
-    const rendered = await open(view, current);
+    const rendered = await open(current);
     let finish!: (result: CommandResult) => void;
     if (state === 'uncertain') vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'dispatched_unknown' });
     else vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
@@ -440,7 +438,7 @@ for (const view of manualViews) describe(view, () => {
 
   it('rejects late pre-send observations and uncorrelated frames before explicit inspection', async () => {
     const current = { ...agent, status: 'idle' };
-    const rendered = await open(view, current);
+    const rendered = await open(current);
     const beforeSend = frame(current);
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'dispatched_unknown' });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'uncertain observation' } });
@@ -466,7 +464,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it.each(['generation','terminal_id','agent_session_id','server_session_id','agent','relay_id'] as const)('invalidates mode and late callbacks on %s replacement', async field => {
-    const rendered = await open(view);
+    const rendered = await open();
     let finish!: (value: CommandResult) => void;
     vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'old transient' } });
@@ -480,7 +478,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it('invalidates on disconnect and lock, requiring a fresh post-recovery frame', async () => {
-    const rendered = await open(view);
+    const rendered = await open();
     relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never));
     await waitFor(() => expect(button('Keyboard')).toBeVisible());
     relayStore.connections.set(new Map([[agent.relay_id, connection]] as never));
@@ -494,7 +492,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it.each([true, undefined])('keeps hidden/unknown input %s transient across mode and echo changes', async noEcho => {
-    const rendered = await open(view);
+    const rendered = await open();
     await rendered.rerender({ frame: { ...frame(), noEcho } });
     expect(screen.getByLabelText('Terminal text')).toHaveAttribute('type', 'password');
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'transient-secret' } });
@@ -506,7 +504,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it('does not infer manual input authorization from an untagged frame', async () => {
-    const rendered = await open(view);
+    const rendered = await open();
     await rendered.rerender({ frame: { ...frame(), inputTarget: undefined } });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'unbound' } });
     expect(button('Send text')).toBeDisabled();
@@ -516,7 +514,7 @@ for (const view of manualViews) describe(view, () => {
   it.each(['lock', 'disconnect'] as const)('requires a correlated recovery read before accepting deltas after %s', async transition => {
     let now = 100;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
-    const rendered = await open(view);
+    const rendered = await open();
     now = 110;
     const beforeRecovery = frame();
     await rendered.rerender({ frame: beforeRecovery });
@@ -561,7 +559,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it('keeps exact-target manual input available on unknown-echo deltas without allowing draft persistence', async () => {
-    const rendered = await open(view);
+    const rendered = await open();
     await rendered.rerender({ frame: { ...frame(), readStartedAt: undefined, target: undefined, noEcho: undefined } });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'unknown-echo transient' } });
     expect(button('Send text')).toBeEnabled();
@@ -571,7 +569,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it('rejects multiline paste before the browser can silently strip newlines', async () => {
-    await open(view);
+    await open();
     const input = screen.getByLabelText('Terminal text');
     const paste = new Event('paste', { bubbles: true, cancelable: true });
     Object.defineProperty(paste, 'clipboardData', { value: { getData: () => 'first\nsecond' } });
@@ -583,7 +581,7 @@ for (const view of manualViews) describe(view, () => {
 
   it('leaves approval identity and choices intact after manual text delivery', async () => {
     const current = { ...agent, attention_capable: true, attention_kind: 'approval' as const, options: ['Allow once', 'Deny'], event_id: 'approval-identity' };
-    await open(view, current);
+    await open(current);
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'explicit manual text' } });
     await fireEvent.click(button('Send text'));
     await fireEvent.click(button('Close'));
@@ -595,7 +593,7 @@ for (const view of manualViews) describe(view, () => {
 
   it('supports sessionless targets without enabling draft persistence', async () => {
     const current = { ...agent, agent_session_id: undefined };
-    await open(view, current);
+    await open(current);
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'sessionless' } });
     await fireEvent.click(button('Send text'));
     expect(relayStore.sendToAgent).toHaveBeenCalledWith(current, { type: 'send_terminal_text', text: 'sessionless' });
@@ -609,7 +607,7 @@ for (const view of manualViews) describe(view, () => {
     const approve = vi.spyOn(relayStore, 'respond').mockResolvedValue(true);
     const navigate = vi.spyOn(relayStore, 'navigateQuestionPrevious').mockResolvedValue(receipt);
     const chat = vi.spyOn(relayStore, 'clarifyQuestion').mockResolvedValue(receipt);
-    await open(view, current);
+    await open(current);
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'accepted' });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'uncertain' } });
     await fireEvent.click(button('Send text'));
@@ -634,7 +632,7 @@ for (const view of manualViews) describe(view, () => {
   it.each(['single_select','multi_select'] as const)('recovers %s and genuine Other controls without clearing the interaction', async kind => {
     const interaction: QuestionInteraction = { id: 'genuine', kind, question: 'Choose a destination', options: [{ index: 0, label: 'North' }, { index: 1, label: 'South' }], other: { label: 'Other', placeholder: 'Other answer' }, submit_label: 'Submit' };
     const current = { ...agent, attention_capable: true, attention_kind: 'question' as const, interaction };
-    const rendered = view === 'Conversation' ? render(ConversationHistory, { agent: current }) : render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
+    const rendered = render(TerminalView, { agent: current, allAgents: [current], responding: new Set<string>() });
     expect(screen.getByLabelText('Prompt')).toBeEnabled();
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'question-local draft' } });
     await fireEvent.click(button('Keyboard'));
@@ -650,8 +648,7 @@ for (const view of manualViews) describe(view, () => {
   });
 
   it('never offers manual controls to a reader', () => {
-    if (view === 'Conversation') render(ConversationHistory, { agent, readOnly: true });
-    else render(TerminalView, { agent, readOnly: true, allAgents: [agent], responding: new Set<string>() });
+    render(TerminalView, { agent, readOnly: true, allAgents: [agent], responding: new Set<string>() });
     expect(screen.queryByRole('button', { name: 'Keyboard' })).not.toBeInTheDocument();
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
   });

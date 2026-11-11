@@ -14,9 +14,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:browser": "playwright test",
     "test:browser:attention": "bash scripts/run-attention-tests.sh",
-    "test:browser:release": "HERDR_WEB_ROOT=../web playwright test",
     "size": "bun scripts/check-size.mjs dist"
   },
   "dependencies": {
