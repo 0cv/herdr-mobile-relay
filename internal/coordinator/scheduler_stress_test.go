@@ -37,7 +37,7 @@ func TestSchedulerCompletesBurstWithinOwnedCapacity(t *testing.T) {
 				RequestID:  fmt.Sprintf("request-%d", index),
 				ReceivedAt: now,
 				Deadline:   now.Add(5 * time.Second),
-				Kind:       CommandPrompt,
+				Action:     "submit_prompt",
 				PaneID:     fmt.Sprintf("pane-%d", index),
 			}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 				current := active.Add(1)
@@ -109,7 +109,7 @@ func TestSchedulerPreservesTenClientReceiptOrderForOnePane(t *testing.T) {
 				RequestID:  fmt.Sprintf("client-%d", index),
 				ReceivedAt: now,
 				Deadline:   now.Add(2 * time.Second),
-				Kind:       CommandPrompt,
+				Action:     "submit_prompt",
 				PaneID:     "pane-1",
 			}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 				mu.Lock()
@@ -144,7 +144,7 @@ func TestSchedulerShutdownCancelsPendingWork(t *testing.T) {
 			RequestID:  "pending",
 			ReceivedAt: now,
 			Deadline:   now.Add(30 * time.Second),
-			Kind:       CommandPrompt,
+			Action:     "submit_prompt",
 			PaneID:     "pane-1",
 		}}, EffectFunc(func(ctx context.Context, _ WorkerToken) EffectResult {
 			close(started)
@@ -185,7 +185,7 @@ func TestApprovalExpiresNotStartedWhileQueued(t *testing.T) {
 			RequestID:  "slow",
 			ReceivedAt: now,
 			Deadline:   now.Add(time.Second),
-			Kind:       CommandPrompt,
+			Action:     "submit_prompt",
 			PaneID:     "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(blockingStarted)
@@ -203,7 +203,7 @@ func TestApprovalExpiresNotStartedWhileQueued(t *testing.T) {
 			RequestID:  "approval",
 			ReceivedAt: now,
 			Deadline:   now.Add(100 * time.Millisecond),
-			Kind:       CommandApproval,
+			Action:     "approval",
 			PaneID:     "pane-1",
 		},
 		LedgerKey:   "approval\x00pane-1\x00event-1",
@@ -230,33 +230,33 @@ func TestConfirmationWatchCannotLandAfterGenerationBump(t *testing.T) {
 		_ = scheduler.Close(ctx)
 	})
 	const approvalKey = "approval\x00pane-1\x00event-1"
-	execute := func(kind CommandKind, key string, bump bool) {
+	execute := func(action string, key string, bump bool) {
 		t.Helper()
 		now := time.Now()
 		result, err := scheduler.Execute(context.Background(), ScheduleOptions{
 			Command: Command{
 				ID:         scheduler.NextCommandID(),
-				RequestID:  string(kind),
+				RequestID:  action,
 				ReceivedAt: now,
 				Deadline:   now.Add(time.Second),
-				Kind:       kind,
+				Action:     action,
 				PaneID:     "pane-1",
 			},
 			LedgerKey:   key,
-			PayloadHash: string(kind),
+			PayloadHash: action,
 		}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			return EffectResult{
-				Result:         completed(string(kind), string(kind), "pane-1", nil),
+				Result:         completed(action, action, "pane-1", nil),
 				BumpGeneration: bump,
 			}
 		}))
 		if err != nil || result == nil || !result.OK {
-			t.Fatalf("%s result = %+v, err = %v", kind, result, err)
+			t.Fatalf("%s result = %+v, err = %v", action, result, err)
 		}
 	}
 
-	execute(CommandApproval, approvalKey, false)
-	execute(CommandClear, "clear\x00pane-1", true)
+	execute("approval", approvalKey, false)
+	execute("agent_clear", "clear\x00pane-1", true)
 	if scheduler.UpdateLedgerPhase(approvalKey, 0, "confirmed") {
 		t.Fatal("stale confirmation watch updated a ledger after generation bump")
 	}

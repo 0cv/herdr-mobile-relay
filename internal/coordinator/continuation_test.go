@@ -20,7 +20,7 @@ func TestContinuationReleasesCapacityAndKeepsLedgerPending(t *testing.T) {
 	entered := make(chan struct{})
 	blockerDone := make(chan struct{})
 	options := func(id string, pane string) ScheduleOptions {
-		return ScheduleOptions{Command: Command{RequestID: id, Kind: CommandPrompt, PaneID: pane, Deadline: time.Now().Add(5 * time.Second)}}
+		return ScheduleOptions{Command: Command{RequestID: id, Action: "submit_prompt", PaneID: pane, Deadline: time.Now().Add(5 * time.Second)}}
 	}
 	go func() {
 		defer close(blockerDone)
@@ -94,7 +94,7 @@ func TestContinuationInvalidationIsCachedWarning(t *testing.T) {
 			}()
 			<-entered
 			ready := make(chan struct{})
-			options := ScheduleOptions{Command: Command{RequestID: "launch", Kind: CommandStart, Deadline: deadline}, RelayLevel: true, LedgerKey: "launch", PayloadHash: "payload"}
+			options := ScheduleOptions{Command: Command{RequestID: "launch", Action: "agent_start", Deadline: deadline}, RelayLevel: true, LedgerKey: "launch", PayloadHash: "payload"}
 			results := make(chan *CommandResult, 1)
 			go func() {
 				result, _ := s.Execute(context.Background(), options, EffectFunc(func(context.Context, WorkerToken) EffectResult {

@@ -400,7 +400,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 		requiresEnter = isQoderAgent(agent.Agent)
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, CommandPrompt, paneID, commandDeadline, text),
+		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if err := d.deliverPrompt(effectCtx, token, text, requiresEnter); err != nil {
 			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
@@ -444,7 +444,7 @@ func (d *Dispatcher) handleKeys(ctx context.Context, receivedAt time.Time, reque
 		return d.fail(requestID, action, paneID, "Keys and agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, CommandKeys, paneID, commandDeadline, keys),
+		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, keys),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
@@ -472,7 +472,7 @@ func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, reque
 		return d.fail(requestID, action, paneID, "Text and agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, CommandText, paneID, commandDeadline, text),
+		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
@@ -502,7 +502,7 @@ func (d *Dispatcher) handleInput(ctx context.Context, receivedAt time.Time, requ
 		return d.fail(requestID, "send_input", paneID, "Valid text or keys and an agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, CommandInput, paneID, commandDeadline, input),
+		Command: d.command(ctx, receivedAt, requestID, "send_input", paneID, commandDeadline, input),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "send_input"); stale != nil {
 			return EffectResult{Result: stale}
@@ -546,7 +546,7 @@ func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, req
 	result := d.schedule(ctx, ScheduleOptions{
 		// The payload stands in for the secret: nothing that reaches the
 		// scheduler, its ledger or its logs may carry the secret itself.
-		Command: d.command(ctx, receivedAt, requestID, CommandSecret, paneID, commandDeadline, len(runes)),
+		Command: d.command(ctx, receivedAt, requestID, "send_secret", paneID, commandDeadline, len(runes)),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
 			return EffectResult{Result: stale}
@@ -580,7 +580,7 @@ func (d *Dispatcher) handleStop(ctx context.Context, receivedAt time.Time, reque
 		return d.fail(requestID, "agent_stop", paneID, "Agent is required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, CommandStop, paneID, commandDeadline, nil),
+		Command:     d.command(ctx, receivedAt, requestID, "agent_stop", paneID, commandDeadline, nil),
 		LedgerKey:   "stop\x00" + paneID + "\x00" + requestID,
 		PayloadHash: hashPayload(struct{}{}),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
@@ -617,7 +617,7 @@ func (d *Dispatcher) handleTabRename(ctx context.Context, receivedAt time.Time, 
 		return d.fail(requestID, "agent_rename", paneID, "Tab is unavailable")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, CommandTabRename, paneID, commandDeadline, label),
+		Command: d.command(ctx, receivedAt, requestID, "agent_rename", paneID, commandDeadline, label),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "agent_rename"); stale != nil {
 			return EffectResult{Result: stale}
@@ -647,7 +647,7 @@ func (d *Dispatcher) handleTabReorder(ctx context.Context, receivedAt time.Time,
 		return d.fail(requestID, "tab_reorder", paneID, "Tab is unavailable")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, CommandTabReorder, paneID, commandDeadline, insertIndex),
+		Command: d.command(ctx, receivedAt, requestID, "tab_reorder", paneID, commandDeadline, insertIndex),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "tab_reorder"); stale != nil {
 			return EffectResult{Result: stale}
@@ -719,7 +719,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		budget += commandDeadline
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, CommandStart, "", budget, request),
+		Command:     d.command(ctx, receivedAt, requestID, "agent_start", "", budget, request),
 		RelayLevel:  true,
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
@@ -839,7 +839,7 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	}
 
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:   d.command(ctx, receivedAt, requestID, CommandClear, paneID, agentStartDeadline, request),
+		Command:   d.command(ctx, receivedAt, requestID, "agent_clear", paneID, agentStartDeadline, request),
 		LedgerKey: "clear\x00" + paneID + "\x00" + requestID,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
@@ -873,7 +873,7 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	return result
 }
 
-func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestID string, kind CommandKind, paneID string, budget time.Duration, payload any) Command {
+func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestID, action, paneID string, budget time.Duration, payload any) Command {
 	deadline := receivedAt.Add(budget)
 	id, _ := ctx.Value(receiptContextKey{}).(CommandID)
 	if id == 0 {
@@ -884,7 +884,7 @@ func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestI
 		RequestID:  requestID,
 		ReceivedAt: receivedAt,
 		Deadline:   deadline,
-		Kind:       kind,
+		Action:     action,
 		PaneID:     paneID,
 		Payload:    payload,
 	}
@@ -900,7 +900,7 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 		generation, active := d.state.PaneSession(options.PaneID)
 		if uint64(generation) != admission.generation ||
 			(!active && !admission.allowAbsent) {
-			return d.fail(options.RequestID, string(options.Kind), options.PaneID, ErrPaneReplaced.Error())
+			return d.fail(options.RequestID, options.Action, options.PaneID, ErrPaneReplaced.Error())
 		}
 		options.PaneGeneration = admission.generation
 		options.AllowAbsent = admission.allowAbsent
@@ -918,13 +918,13 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 	case err == nil && result != nil:
 		return result
 	case errors.Is(err, ErrConflict):
-		return d.fail(options.RequestID, string(options.Kind), options.PaneID, "A different response was already submitted")
+		return d.fail(options.RequestID, options.Action, options.PaneID, "A different response was already submitted")
 	case errors.Is(err, ErrIngressFull), errors.Is(err, ErrClosed):
-		return &CommandResult{RequestID: options.RequestID, Action: string(options.Kind), OK: false, Phase: "not_started", Error: "command was not sent; retry is safe", PaneID: options.PaneID}
+		return &CommandResult{RequestID: options.RequestID, Action: options.Action, OK: false, Phase: "not_started", Error: "command was not sent; retry is safe", PaneID: options.PaneID}
 	case err != nil:
-		return d.failErr(options.RequestID, string(options.Kind), options.PaneID, err)
+		return d.failErr(options.RequestID, options.Action, options.PaneID, err)
 	default:
-		return d.fail(options.RequestID, string(options.Kind), options.PaneID, "Command failed")
+		return d.fail(options.RequestID, options.Action, options.PaneID, "Command failed")
 	}
 }
 

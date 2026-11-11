@@ -86,7 +86,7 @@ func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {
 				RequestID:  "approve",
 				ReceivedAt: now,
 				Deadline:   now.Add(time.Second),
-				Kind:       CommandApproval,
+				Action:     "approval",
 				PaneID:     "pane-1",
 			},
 			LedgerKey:   ledgerKey,
@@ -697,7 +697,7 @@ func TestSchedulerEvictsOldCompletedLedgerEntries(t *testing.T) {
 		result, err := scheduler.Execute(context.Background(), ScheduleOptions{
 			Command: Command{
 				ID: scheduler.NextCommandID(), RequestID: key, ReceivedAt: now,
-				Deadline: now.Add(time.Second), Kind: CommandStart,
+				Deadline: now.Add(time.Second), Action: "agent_start",
 			},
 			RelayLevel:  true,
 			LedgerKey:   key,
