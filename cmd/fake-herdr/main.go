@@ -62,10 +62,6 @@ type Agent struct {
 }
 
 type Injection struct {
-	DelayMS               int    `json:"delay_ms,omitempty"`
-	Error                 string `json:"error,omitempty"`
-	Hang                  bool   `json:"hang,omitempty"`
-	BeforeExecuteBarrier  string `json:"before_execute_barrier,omitempty"`
 	BeforeResponseBarrier string `json:"before_response_barrier,omitempty"`
 }
 
@@ -77,8 +73,6 @@ type Scenario struct {
 	Content    map[string]string    `json:"content,omitempty"`
 	Responses  map[string]string    `json:"responses,omitempty"`
 	Injections map[string]Injection `json:"injections,omitempty"`
-	FailNext   bool                 `json:"fail_next,omitempty"`
-	HangNext   bool                 `json:"hang_next,omitempty"`
 	Sequence   uint64               `json:"sequence,omitempty"`
 }
 
@@ -93,21 +87,12 @@ type Operation struct {
 }
 
 type ControlCmd struct {
-	Cmd         string      `json:"cmd"`
-	Pane        string      `json:"pane,omitempty"`
-	Status      string      `json:"status,omitempty"`
-	Agent       string      `json:"agent,omitempty"`
-	Name        string      `json:"name,omitempty"`
-	WorkspaceID string      `json:"workspace_id,omitempty"`
-	Label       string      `json:"label,omitempty"`
-	Cwd         string      `json:"cwd,omitempty"`
-	Command     string      `json:"command,omitempty"`
-	Content     string      `json:"content,omitempty"`
-	Barrier     string      `json:"barrier,omitempty"`
-	Injection   *Injection  `json:"injection,omitempty"`
-	AgentInfo   *Agent      `json:"agent_info,omitempty"`
-	Workspace   *Workspace  `json:"workspace,omitempty"`
-	Raw         interface{} `json:"raw,omitempty"`
+	Cmd       string     `json:"cmd"`
+	Pane      string     `json:"pane,omitempty"`
+	Command   string     `json:"command,omitempty"`
+	Content   string     `json:"content,omitempty"`
+	Barrier   string     `json:"barrier,omitempty"`
+	Injection *Injection `json:"injection,omitempty"`
 }
 
 type stateStore struct {
@@ -142,29 +127,11 @@ func main() {
 
 	key := strings.Join(args[:2], " ")
 	injection := scenario.Injections[key]
-	if scenario.HangNext {
-		_, _ = store.update(func(s *Scenario) error { s.HangNext = false; return nil })
-		injection.Hang = true
+	injected := ""
+	if injection.BeforeResponseBarrier != "" {
+		injected = "barrier"
 	}
-	if scenario.FailNext {
-		_, _ = store.update(func(s *Scenario) error { s.FailNext = false; return nil })
-		injection.Error = "injected failure"
-	}
-	injected := injectionLabel(injection)
 	recordOperation(scenario.Sequence, args, started, time.Time{}, "started", injected)
-	if injection.DelayMS > 0 {
-		time.Sleep(time.Duration(injection.DelayMS) * time.Millisecond)
-	}
-	if injection.Hang {
-		select {}
-	}
-	if injection.Error != "" {
-		recordOperation(scenario.Sequence, args, started, time.Now().UTC(), "failed", injected)
-		fatal("%s", injection.Error)
-	}
-	if injection.BeforeExecuteBarrier != "" {
-		waitBarrier(injection.BeforeExecuteBarrier, scenario.Sequence)
-	}
 
 	output, commandErr := execute(store, scenario, args)
 	if injection.BeforeResponseBarrier != "" {
@@ -184,21 +151,6 @@ func main() {
 		if !strings.HasSuffix(output, "\n") {
 			fmt.Println()
 		}
-	}
-}
-
-func injectionLabel(injection Injection) string {
-	switch {
-	case injection.Hang:
-		return "hang"
-	case injection.Error != "":
-		return "error"
-	case injection.BeforeExecuteBarrier != "" || injection.BeforeResponseBarrier != "":
-		return "barrier"
-	case injection.DelayMS > 0:
-		return "delay"
-	default:
-		return ""
 	}
 }
 
@@ -690,28 +642,6 @@ func handleControl(store *stateStore, conn net.Conn) {
 		}
 		state, err := store.update(func(s *Scenario) error {
 			switch command.Cmd {
-			case "set_status":
-				for i := range s.Panes {
-					if s.Panes[i].ID == command.Pane {
-						s.Panes[i].Status = command.Status
-						return nil
-					}
-				}
-				return errors.New("pane not found")
-			case "add_pane":
-				s.Panes = append(s.Panes, Pane{ID: command.Pane, Agent: command.Agent, Name: command.Name, Status: command.Status, WorkspaceID: command.WorkspaceID, Cwd: command.Cwd})
-			case "remove_pane":
-				s.Panes = removePane(s.Panes, command.Pane)
-			case "add_workspace":
-				if command.Workspace == nil {
-					return errors.New("workspace is required")
-				}
-				s.Workspaces = append(s.Workspaces, *command.Workspace)
-			case "set_agent":
-				if command.AgentInfo == nil {
-					return errors.New("agent_info is required")
-				}
-				s.Agents[command.Pane] = *command.AgentInfo
 			case "set_content":
 				if command.Pane == "" {
 					return errors.New("pane is required")
