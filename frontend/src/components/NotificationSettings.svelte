@@ -28,7 +28,6 @@
   let {
     scopes = [],
     platform,
-    testState = { status: 'idle' },
     testStates = {},
     busy = false,
     deliveryEnabled = false,
@@ -38,7 +37,6 @@
   }: {
     scopes?: NotificationPolicyScope[];
     platform: NotificationPlatformInfo;
-    testState?: PushTestState;
     testStates?: Record<string, PushTestState>;
     busy?: boolean;
     // Categories, delays, and tests only mean something once this browser
@@ -64,9 +62,9 @@
   const selectedPolicy = $derived(selectedScope
     ? localPolicies[effectiveSelectedKey] || selectedScope.policy
     : null);
-  const selectedTestState = $derived(selectedScope
-    ? testStates[selectedScope.relay_id] || testState
-    : testState);
+  const selectedTestState = $derived<PushTestState>((selectedScope
+    ? testStates[selectedScope.relay_id]
+    : undefined) || { status: 'idle' });
   const blocked = $derived(!platform.supports_push || platform.permission === 'denied');
   const deliveryHint = $derived.by(() => {
     if (!platform.supports_push) return 'This browser cannot receive push notifications.';

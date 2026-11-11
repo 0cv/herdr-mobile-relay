@@ -18,9 +18,9 @@
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
   // blockExplained: the parent already shows why sending is blocked, so the composer does not repeat dispatchBlocked.
-  let { agent, frame, readOnly = false, locked = false, dispatchBlocked = '', blockExplained = false, attachmentsBlocked = false, draftPersistenceAllowed = false, noEchoActive = false, noEchoPrompt = 'Password:',
+  let { agent, frame, readOnly = false, dispatchBlocked = '', blockExplained = false, attachmentsBlocked = false, draftPersistenceAllowed = false, noEchoActive = false, noEchoPrompt = 'Password:',
     placeholder = 'Type a reply…', submitLabel = 'Send prompt', submitAdapter, sending = $bindable(false), onsubmitted }:
-    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; locked?: boolean; dispatchBlocked?: string; blockExplained?: boolean; attachmentsBlocked?: boolean; draftPersistenceAllowed?: boolean; noEchoActive?: boolean; noEchoPrompt?: string;
+    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; dispatchBlocked?: string; blockExplained?: boolean; attachmentsBlocked?: boolean; draftPersistenceAllowed?: boolean; noEchoActive?: boolean; noEchoPrompt?: string;
       placeholder?: string; submitLabel?: string; submitAdapter?: ComposerSubmitAdapter; sending?: boolean; onsubmitted?: () => void } = $props();
   const connections = relayStore.connections;
   const connection = $derived($connections.get(agent.relay_id));
@@ -41,7 +41,7 @@
   const bridgeReady = $derived.by(() => {
     void piCapabilityTick;
     void connection;
-    return !readOnly && !locked && !$securityState.locked && visible && !submitAdapter && !noEchoActive
+    return !readOnly && !$securityState.locked && visible && !submitAdapter && !noEchoActive
       && !noEchoDraftTainted && draftPersistenceAllowed && dispatchBlocked === promptDispatchRestriction(agent)
       && relayStore.piPromptReady(agent, piCapability, frame);
   });
@@ -61,7 +61,7 @@
   let draftPersistenceError = $state(false);
   let visible = $state(document.visibilityState !== 'hidden');
   const slashCatalogIdentity = $derived(inputContextIdentity(agent));
-  const piProbeKey = $derived(visible && !$securityState.locked && !readOnly && !locked && piPromptTarget(agent)
+  const piProbeKey = $derived(visible && !$securityState.locked && !readOnly && piPromptTarget(agent)
     && connection?.status === 'connected' && connection.capabilities.includes('pi_prompt_unconfirmed')
     ? slashCatalogIdentity : '');
   $effect(() => {
@@ -119,8 +119,7 @@
     ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
     : -1);
 
-  const composerLocked = $derived(readOnly || locked);
-  const inputLocked = $derived(composerLocked || promptBlocked || attachmentsBlocked || noEchoActive || deliveryBlocked);
+  const inputLocked = $derived(readOnly || promptBlocked || attachmentsBlocked || noEchoActive || deliveryBlocked);
   const attachmentsLocked = $derived(inputLocked || piPromptTarget(agent) || sendingSecret || !targetRefForAgent(agent));
   const slashMenuOpen = $derived(!inputLocked && slashQuery !== null && dismissedSlashQuery !== composer);
   const secretMode = $derived(!readOnly && noEchoActive && Boolean(connection?.capabilities.includes('secret_input')));
@@ -238,7 +237,7 @@
     const submittedDraft = composer;
     const adapter = submitAdapter;
     const text = adapter?.filter ? submittedDraft : submittedDraft.replace(/[\r\n]+$/g, '');
-    if (!text || composerLocked || promptBlocked || deliveryBlocked || sending || uploadingAttachment || sendingSecret || noEchoActive) return;
+    if (!text || readOnly || promptBlocked || deliveryBlocked || sending || uploadingAttachment || sendingSecret || noEchoActive) return;
     const bridge = Boolean(dispatchBlocked && bridgeReady);
     if (bridge && (!validPiPromptText(text) || !piCapability || !frame)) {
       relayStore.showToast('Pi prompts must be text only and at most 100,000 bytes.', true);
@@ -618,12 +617,12 @@
         </svg>
       </Button>
       </div>
-      <div class:has-text={Boolean(composer)} class="composer-field">
+      <div class="composer-field">
         <textarea
           bind:this={composerElement}
           bind:value={composer}
           rows="1"
-          disabled={composerLocked}
+          disabled={readOnly}
           placeholder={placeholder}
           role="combobox"
           aria-label="Prompt"
@@ -643,7 +642,7 @@
         ></textarea>
         {#if composer}<button type="button" class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
-      <Button type="submit" size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || promptBlocked || deliveryBlocked || noEchoActive || sending || uploadingAttachment || !targetRefForAgent(agent)} aria-label={sending ? 'Submitting input' : submitLabel} >{sending ? '…' : '➤'}</Button>
+      <Button type="submit" size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || readOnly || promptBlocked || deliveryBlocked || noEchoActive || sending || uploadingAttachment || !targetRefForAgent(agent)} aria-label={sending ? 'Submitting input' : submitLabel} >{sending ? '…' : '➤'}</Button>
       <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
       <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </form>
@@ -653,7 +652,7 @@
     {#if !readOnly && piDelivery.uncertain}
       <div class="hint" role="status">
         <span>{piDelivery.error || (piDelivery.handed ? 'Sent to Pi — not confirmed' : 'Pi send not confirmed')}</span>
-        <button type="button" disabled={composerLocked || $securityState.locked} onclick={() => piDelivery.acknowledge()}>I checked — allow another send</button>
+        <button type="button" disabled={readOnly || $securityState.locked} onclick={() => piDelivery.acknowledge()}>I checked — allow another send</button>
       </div>
     {:else if bridgeReady && !piDelivery.pending}<p class="hint">Pi bridge: unconfirmed send, no terminal keys.</p>
     {:else if dispatchBlocked && !blockExplained && !readOnly && !piDelivery.pending}

@@ -124,11 +124,13 @@ it('shows one honest notice, clears once, fences through view/metadata/reconnect
   await submit();
   expect(commands('submit_prompt')).toHaveLength(0);
   view.unmount();
-  const second = render(PromptComposer, { agent, frame, draftPersistenceAllowed: true, dispatchBlocked: promptDispatchRestriction(agent) });
+  render(PromptComposer, { agent, frame, draftPersistenceAllowed: true, dispatchBlocked: promptDispatchRestriction(agent) });
   await tick();
-  await second.rerender({ locked: true });
+  securityState.update(state => ({ ...state, locked: true }));
+  await tick();
   expect(screen.getByRole('button', { name: 'I checked — allow another send' })).toBeDisabled();
-  await second.rerender({ locked: false });
+  securityState.update(state => ({ ...state, locked: false }));
+  await tick();
   relayStore.setHidden(true); relayStore.setHidden(false);
   socket.close(); socket.onclose?.();
   await vi.advanceTimersByTimeAsync(5000);

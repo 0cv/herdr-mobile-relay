@@ -621,8 +621,8 @@
 
   async function applyFrame(
     next: TerminalFrame,
-    preserve = true,
-    preserveLineEnds = preserve && !resizeSessionActive && !readOnly,
+    preserve: boolean,
+    preserveLineEnds: boolean,
   ) {
     if (terminalLayoutSuspended) return;
     const renderColumnCap = resizeLayoutActive
@@ -1541,10 +1541,8 @@
 
 
 <main
-  class:has-actions={inputLocked || nextBlocked}
   class:question-only={questionMode && !manualInput}
   class:find-open={findOpen}
-  class:reader={readOnly}
   class="terminal-view"
   aria-label={`${questionMode ? 'Questions' : 'Terminal'} for ${agent.project || agent.name || agent.agent || 'agent'}`}
 >
