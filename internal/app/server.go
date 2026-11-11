@@ -1780,11 +1780,19 @@ func (s *Server) handleTransition(
 			summary = "Agent started working"
 		}
 		if s.dispatcher != nil {
-			s.dispatcher.RecordTransitionActivity(
-				"working", "working", summary, paneID, status, revision,
-				map[string]any{"transition": "working", "transition_at": transitionAt},
-				agent, project, s.hostname, session, "",
-			)
+			s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+				Kind:           "working",
+				Status:         "working",
+				Summary:        summary,
+				PaneID:         paneID,
+				ExpectedStatus: status,
+				Revision:       revision,
+				Details:        map[string]any{"transition": "working", "transition_at": transitionAt},
+				Agent:          agent,
+				Project:        project,
+				Host:           s.hostname,
+				Session:        session,
+			})
 		}
 		return
 	}
@@ -1847,17 +1855,30 @@ func (s *Server) handleTransition(
 		if agentState.AttentionKind == question.AttentionQuestion {
 			activityKind = "question"
 		}
-		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
-			activityKind, "attention", command, paneID, status, agentState.StateRevision,
-			map[string]any{
+		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+			Kind:           activityKind,
+			Status:         "attention",
+			Summary:        command,
+			PaneID:         paneID,
+			ExpectedStatus: status,
+			Revision:       agentState.StateRevision,
+			Details: map[string]any{
 				"event_id":       eventID,
 				"attention_kind": agentState.AttentionKind,
 				"transition_at":  transitionAt,
 			},
-			agent, project, s.hostname, session, agentState.Prompt,
-			blockedEventID, paneGeneration,
-			string(agentState.AttentionKind), classifiedAttentionRevision,
-		) {
+			Agent:   agent,
+			Project: project,
+			Host:    s.hostname,
+			Session: session,
+			Extract: agentState.Prompt,
+			BlockedIdentity: &coordinator.BlockedTransitionIdentity{
+				EventID:           blockedEventID,
+				Generation:        paneGeneration,
+				AttentionKind:     string(agentState.AttentionKind),
+				AttentionRevision: classifiedAttentionRevision,
+			},
+		}) {
 			return
 		}
 		if !classifiedCurrent() {
@@ -1898,11 +1919,20 @@ func (s *Server) handleTransition(
 	if agent == "" {
 		summary = "Agent completed"
 	}
-	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
-		"finished", "completed", summary, paneID, status, revision,
-		map[string]any{"event_id": eventID, "transition_at": transitionAt},
-		agent, project, s.hostname, session, extract,
-	) {
+	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+		Kind:           "finished",
+		Status:         "completed",
+		Summary:        summary,
+		PaneID:         paneID,
+		ExpectedStatus: status,
+		Revision:       revision,
+		Details:        map[string]any{"event_id": eventID, "transition_at": transitionAt},
+		Agent:          agent,
+		Project:        project,
+		Host:           s.hostname,
+		Session:        session,
+		Extract:        extract,
+	}) {
 		return
 	}
 	if !transitionCurrent() {
@@ -2126,23 +2156,23 @@ func (s *Server) handleChatCompletion(
 	if agent.Agent == "" {
 		summary = "Agent completed"
 	}
-	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
-		"finished",
-		"completed",
-		summary,
-		agent.PaneID,
-		"blocked",
-		revision,
-		map[string]any{
+	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+		Kind:           "finished",
+		Status:         "completed",
+		Summary:        summary,
+		PaneID:         agent.PaneID,
+		ExpectedStatus: "blocked",
+		Revision:       revision,
+		Details: map[string]any{
 			"event_id":       eventID,
 			"attention_kind": agent.AttentionKind,
 		},
-		agent.Agent,
-		agent.Project,
-		s.hostname,
-		agent.Session,
-		agent.Prompt,
-	) {
+		Agent:   agent.Agent,
+		Project: agent.Project,
+		Host:    s.hostname,
+		Session: agent.Session,
+		Extract: agent.Prompt,
+	}) {
 		return
 	}
 	if !current() {

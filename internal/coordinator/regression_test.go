@@ -31,11 +31,20 @@ func TestTransitionActivityPreservesExtract(t *testing.T) {
 		_ = dispatcher.Close(context.Background())
 	})
 	revision := state.Revision("p1")
-	if !dispatcher.RecordTransitionActivity(
-		"blocked", "attention", "git push", "p1", "blocked", revision,
-		map[string]any{"event_id": "event-1"}, "Claude", "project", "host", "session",
-		"Allow command?\n$ git push",
-	) {
+	if !dispatcher.RecordTransitionActivity(TransitionActivity{
+		Kind:           "blocked",
+		Status:         "attention",
+		Summary:        "git push",
+		PaneID:         "p1",
+		ExpectedStatus: "blocked",
+		Revision:       revision,
+		Details:        map[string]any{"event_id": "event-1"},
+		Agent:          "Claude",
+		Project:        "project",
+		Host:           "host",
+		Session:        "session",
+		Extract:        "Allow command?\n$ git push",
+	}) {
 		t.Fatal("current transition activity was not committed")
 	}
 	recent := journal.Recent(1)

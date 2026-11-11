@@ -1015,64 +1015,67 @@ func (d *Dispatcher) RecordActivity(kind, status, summary, paneID, requestID str
 	d.recordActivity(kind, status, summary, paneID, requestID)
 }
 
+type TransitionActivity struct {
+	Kind            string
+	Status          string
+	Summary         string
+	PaneID          string
+	ExpectedStatus  string
+	Revision        int64
+	Details         map[string]any
+	Agent           string
+	Project         string
+	Host            string
+	Session         string
+	Extract         string
+	BlockedIdentity *BlockedTransitionIdentity
+}
+
+type BlockedTransitionIdentity struct {
+	EventID           string
+	Generation        int64
+	AttentionKind     string
+	AttentionRevision int64
+}
+
 // RecordTransitionActivity publishes only while the originating state
 // revision is still current. If the state advances during the durable append,
 // the worker tombstones and removes the stale record before it can be exposed.
-func (d *Dispatcher) RecordTransitionActivity(
-	kind string,
-	status string,
-	summary string,
-	paneID string,
-	expectedStatus string,
-	revision int64,
-	details map[string]any,
-	agent string,
-	project string,
-	host string,
-	session string,
-	extract string,
-	blockedIdentity ...any,
-) bool {
+func (d *Dispatcher) RecordTransitionActivity(transition TransitionActivity) bool {
 	if d.activityW == nil {
 		return false
 	}
 	d.activityOrder.Lock()
 	defer d.activityOrder.Unlock()
 	transitionCurrent := func() bool {
-		if kind == "working" {
+		if transition.Kind == "working" {
 			return true
 		}
-		if kind == "finished" {
-			return d.state.CompletionCurrent(paneID, revision)
+		if transition.Kind == "finished" {
+			return d.state.CompletionCurrent(transition.PaneID, transition.Revision)
 		}
-		if expectedStatus == "blocked" && len(blockedIdentity) == 4 {
-			eventID, eventOK := blockedIdentity[0].(string)
-			generation, generationOK := blockedIdentity[1].(int64)
-			attentionKind, attentionOK := blockedIdentity[2].(string)
-			attentionRevision, revisionOK := blockedIdentity[3].(int64)
-			if eventOK && generationOK && attentionOK && revisionOK {
-				return d.state.AttentionTransitionCurrent(
-					paneID,
-					eventID,
-					generation,
-					attentionKind,
-					attentionRevision,
-				)
-			}
+		if identity := transition.BlockedIdentity; transition.ExpectedStatus == "blocked" && identity != nil {
+			return d.state.AttentionTransitionCurrent(
+				transition.PaneID,
+				identity.EventID,
+				identity.Generation,
+				identity.AttentionKind,
+				identity.AttentionRevision,
+			)
 		}
-		return d.state.TransitionCurrent(paneID, expectedStatus, revision)
+		return d.state.TransitionCurrent(transition.PaneID, transition.ExpectedStatus, transition.Revision)
 	}
 	if !transitionCurrent() {
 		return false
 	}
-	entry := activity.NewEntry(kind, status, summary, paneID, agent, project, "")
-	entry.Host = host
-	entry.Session = session
-	entry.Details = details
-	if transitionAt, ok := details["transition_at"].(int64); ok && transitionAt > 0 {
+	entry := activity.NewEntry(transition.Kind, transition.Status, transition.Summary, transition.PaneID, transition.Agent, transition.Project, "")
+	entry.Host = transition.Host
+	entry.Session = transition.Session
+	entry.Details = transition.Details
+	if transitionAt, ok := transition.Details["transition_at"].(int64); ok && transitionAt > 0 {
 		entry.Timestamp = activity.MilliTimestamp(transitionAt)
 	}
-	entry.Extract = extract
+	entry.Extract = transition.Extract
 	committed, err := d.activityW.Commit(context.Background(), activity.ActivityCommitRequested{
 		Sequence: d.activitySequence.Add(1),
 		Entry:    entry,
