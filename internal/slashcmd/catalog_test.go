@@ -22,9 +22,6 @@ func TestSlashCommandLimitsMatchContract(t *testing.T) {
 	if limits.MaxCustomFiles != maxCustomFiles || limits.MaxEntries != maxEntries {
 		t.Fatalf("slash-command limits = %+v, want custom files %d and entries %d", limits, maxCustomFiles, maxEntries)
 	}
-	if maxWalkFiles != maxCustomFiles {
-		t.Fatalf("walk budget = %d, want shared custom-file budget %d", maxWalkFiles, maxCustomFiles)
-	}
 }
 
 func TestClaudeBuiltins(t *testing.T) {

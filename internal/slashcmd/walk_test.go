@@ -105,8 +105,8 @@ func TestWalkFileLimit(t *testing.T) {
 		os.WriteFile(name, []byte("cmd"), 0o644)
 	}
 	commands := walkCommandDir(dir, "personal")
-	if len(commands) > maxWalkFiles {
-		t.Errorf("got %d commands, limit is %d", len(commands), maxWalkFiles)
+	if len(commands) > maxCustomFiles {
+		t.Errorf("got %d commands, limit is %d", len(commands), maxCustomFiles)
 	}
 }
 
@@ -248,7 +248,7 @@ func TestScanSkillDirFollowsSymlinkedSkillDir(t *testing.T) {
 }
 
 // Following symlinks makes it possible for two entries to name one real skill.
-// scanSkillDirFormat already keys on the resolved path; this scanner must agree,
+// scanSkillDirFormatOptions already keys on the resolved path; this scanner must agree,
 // or the palette shows the same skill twice.
 func TestScanSkillDirDeduplicatesSymlinkToSameSkill(t *testing.T) {
 	root := t.TempDir()

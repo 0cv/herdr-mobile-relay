@@ -151,7 +151,6 @@ func CatalogForProfileWithSuppression(
 	var truncated bool
 
 	ctx := DiscoverContext{
-		ProfileID:      profileID,
 		AgentDir:       agentDir,
 		Cwd:            cwd,
 		Home:           home,

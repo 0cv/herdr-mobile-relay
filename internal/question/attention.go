@@ -704,7 +704,6 @@ func normalInputPrompt(text, agent string) bool {
 	}
 	lines := cleanLines(text)
 	if ompInputFramePrompt(lines, normalized) ||
-		piInputFramePrompt(lines, normalized) ||
 		openCodeInputPrompt(lines, normalized) ||
 		kimiInputFramePrompt(lines, normalized) {
 		return true
@@ -733,14 +732,6 @@ func normalInputPrompt(text, agent string) bool {
 // two full-width rules, with the context-usage status line at the bottom.
 func ompInputFramePrompt(lines []string, agent string) bool {
 	if !ompAskAgent(agent) {
-		return false
-	}
-	return ruleFramedStatusPrompt(lines)
-}
-
-func piInputFramePrompt(lines []string, agent string) bool {
-	agent = strings.ToLower(strings.TrimSpace(agent))
-	if agent != "pi" && !strings.HasPrefix(agent, "pi-") {
 		return false
 	}
 	return ruleFramedStatusPrompt(lines)

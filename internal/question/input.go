@@ -125,7 +125,7 @@ func planQoderMultiInput(interaction *Interaction, intent InputIntent) []InputSt
 		notesHandled = true
 	}
 	for index, option := range current.Options {
-		desired := containsInt(intent.Selected, index)
+		desired := slices.Contains(intent.Selected, index)
 		if option.Selected == desired {
 			continue
 		}
@@ -215,7 +215,7 @@ func planOpenCodeMultiInput(interaction *Interaction, intent InputIntent) []Inpu
 		current.NotesActive = false
 	}
 	for index, option := range current.Options {
-		desired := containsInt(intent.Selected, index)
+		desired := slices.Contains(intent.Selected, index)
 		if option.Selected == desired {
 			continue
 		}
@@ -262,7 +262,7 @@ func planOMPInput(interaction *Interaction, intent InputIntent) []InputStep {
 	current := *interaction
 	var steps []InputStep
 	for index, option := range current.Options {
-		desired := containsInt(intent.Selected, index)
+		desired := slices.Contains(intent.Selected, index)
 		if option.Selected == desired {
 			continue
 		}
@@ -317,7 +317,7 @@ func planClaudeInput(interaction *Interaction, intent InputIntent) []InputStep {
 	current := *interaction
 	var steps []InputStep
 	for index, option := range current.Options {
-		desired := containsInt(intent.Selected, index)
+		desired := slices.Contains(intent.Selected, index)
 		if option.Selected == desired {
 			continue
 		}
@@ -422,8 +422,4 @@ func openCodeNavigationKeys(interaction *Interaction, target Focus) []string {
 		keys[index] = key
 	}
 	return keys
-}
-
-func containsInt(values []int, target int) bool {
-	return slices.Contains(values, target)
 }

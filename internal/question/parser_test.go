@@ -1,7 +1,6 @@
 package question
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -482,29 +481,6 @@ func TestQuestionIdentityIgnoresSelections(t *testing.T) {
 	)
 	if initial == nil || selected == nil || initial.ID != selected.ID {
 		t.Fatalf("ids differ: %v, %v", initial, selected)
-	}
-}
-
-func TestApprovalDetailsUsesLastSequentialMenu(t *testing.T) {
-	summary, command, options := ApprovalDetails(`
-❯ rm -rf build-cache
-1. Old yes
-2. Old no
-
-Do you want to proceed?
-1. Yes, single permission
-2. Trust, always allow
-3. No (tab to edit)
-`)
-	if !strings.Contains(summary, "rm -rf build-cache") {
-		t.Fatalf("summary = %q", summary)
-	}
-	if command != "rm -rf build-cache" {
-		t.Fatalf("command = %q", command)
-	}
-	want := []string{"Yes, single permission", "Trust, always allow", "No (tab to edit)"}
-	if !reflect.DeepEqual(options, want) {
-		t.Fatalf("options = %#v, want %#v", options, want)
 	}
 }
 

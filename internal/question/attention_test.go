@@ -502,10 +502,6 @@ func TestClassifyUnknownAgentsWithoutFabricatedControls(t *testing.T) {
 			t.Fatalf("unknown-agent classification = %+v", got)
 		}
 	}
-	_, _, options := ApprovalDetails("")
-	if len(options) != 0 {
-		t.Fatalf("empty pane fabricated approval options: %#v", options)
-	}
 }
 
 func TestClassifyOpenCodeApprovalLikeLayoutsWithoutFabricatedControls(t *testing.T) {

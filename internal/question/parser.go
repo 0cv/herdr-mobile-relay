@@ -225,16 +225,6 @@ func LayoutHint(text string) bool {
 	return true
 }
 
-// ApprovalDetails extracts the display summary, command context, and final
-// sequential menu from a non-question approval pane.
-func ApprovalDetails(text string) (string, string, []string) {
-	summaryLines := paneSummaryLines(text)
-	summary := strings.Join(summaryLines, "\n")
-	options := approvalOptions(cleanLines(text))
-	command := approvalCommand(summaryLines)
-	return compact(summary, 500), compact(command, 240), options
-}
-
 func PaneSummary(text string) string {
 	return strings.Join(paneSummaryLines(text), "\n")
 }
@@ -308,51 +298,6 @@ func paneSummaryLines(text string) []string {
 		summaryLines = summaryLines[len(summaryLines)-12:]
 	}
 	return summaryLines
-}
-
-func approvalOptions(lines []string) []string {
-	var runs [][]string
-	var current []string
-	expected := 1
-	for _, line := range lines {
-		match := menuPattern.FindStringSubmatch(line)
-		if match == nil {
-			if len(current) > 0 {
-				runs = append(runs, current)
-				current = nil
-				expected = 1
-			}
-			continue
-		}
-		number, _ := strconv.Atoi(match[2])
-		label := strings.TrimSpace(match[3])
-		switch {
-		case number == 1:
-			if len(current) > 0 {
-				runs = append(runs, current)
-			}
-			current = []string{label}
-			expected = 2
-		case len(current) > 0 && number == expected:
-			current = append(current, label)
-			expected++
-		default:
-			if len(current) > 0 {
-				runs = append(runs, current)
-			}
-			current = nil
-			expected = 1
-		}
-	}
-	if len(current) > 0 {
-		runs = append(runs, current)
-	}
-	for index := len(runs) - 1; index >= 0; index-- {
-		if len(runs[index]) >= 2 {
-			return append([]string(nil), runs[index]...)
-		}
-	}
-	return nil
 }
 
 func approvalCommand(lines []string) string {
@@ -490,8 +435,7 @@ func parseOMP(text string) *Interaction {
 	focus := Focus{Kind: "option"}
 	for rowIndex, row := range rows {
 		label := row.label
-		if strings.EqualFold(label, "done selecting") ||
-			strings.Contains(strings.ToLower(label), "done selecting") {
+		if strings.Contains(strings.ToLower(label), "done selecting") {
 			if row.focus {
 				focus = Focus{Kind: "submit"}
 			}
@@ -760,9 +704,7 @@ func parseClaude(text string) *Interaction {
 	lines := cleanLines(text)
 	type row struct {
 		line     int
-		number   int
 		focus    bool
-		mark     string
 		label    string
 		selected bool
 	}
@@ -772,12 +714,9 @@ func parseClaude(text string) *Interaction {
 		if match == nil {
 			continue
 		}
-		number, _ := strconv.Atoi(match[2])
 		checkboxRows = append(checkboxRows, row{
 			line:     index,
-			number:   number,
 			focus:    match[1] != "",
-			mark:     strings.TrimSpace(match[3]),
 			label:    compact(match[4], 500),
 			selected: strings.TrimSpace(match[3]) != "",
 		})
@@ -836,7 +775,7 @@ func parseClaude(text string) *Interaction {
 			Question:       question,
 			Options:        options,
 			Other:          Other{Selected: otherItem.Selected, Text: otherText},
-			SubmitLabel:    defaultString(submitLabel, "Submit"),
+			SubmitLabel:    submitLabel,
 			CanChat:        chatIndex >= 0,
 			CanGoBack:      current > 1,
 			QuestionIndex:  current,
@@ -870,7 +809,6 @@ func parseClaude(text string) *Interaction {
 		label := compact(match[3], 500)
 		rows = append(rows, row{
 			line:     index,
-			number:   number,
 			focus:    match[1] != "",
 			label:    strings.TrimSpace(selectedPattern.ReplaceAllString(label, "")),
 			selected: selectedPattern.MatchString(label),
@@ -1198,7 +1136,6 @@ func parseQoder(text string) *Interaction {
 
 	type row struct {
 		line     int
-		number   int
 		focus    bool
 		label    string
 		selected bool
@@ -1213,7 +1150,6 @@ func parseQoder(text string) *Interaction {
 			}
 			checkboxRows = append(checkboxRows, row{
 				line:     index,
-				number:   number,
 				focus:    match[1] != "",
 				label:    compact(match[4], 500),
 				selected: strings.TrimSpace(match[3]) != "",
@@ -1230,10 +1166,9 @@ func parseQoder(text string) *Interaction {
 			continue
 		}
 		menuRows = append(menuRows, row{
-			line:   index,
-			number: number,
-			focus:  match[1] != "",
-			label:  compact(match[3], 500),
+			line:  index,
+			focus: match[1] != "",
+			label: compact(match[3], 500),
 		})
 		expected++
 	}
@@ -2046,11 +1981,4 @@ func title(value string) string {
 		return ""
 	}
 	return strings.ToUpper(value[:1]) + value[1:]
-}
-
-func defaultString(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
 }

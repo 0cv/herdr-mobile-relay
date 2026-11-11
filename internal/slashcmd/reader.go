@@ -10,28 +10,6 @@ type catalogReader struct {
 	truncated bool
 }
 
-func readSkillMetadata(path string) (map[string]string, bool) {
-	return newCatalogReader().readSkillMetadata(path)
-}
-
-func readCursorCommandFile(path string) ([]byte, bool) {
-	return newCatalogReader().readCursorCommandFile(path)
-}
-
-func readCursorSkillFile(root, skillDir string, project bool) ([]byte, bool) {
-	return newCatalogReader().readCursorSkillFile(root, skillDir, project)
-}
-
-func piProjectTrusted(agentDir, cwd, defaultTrust string) bool {
-	return newCatalogReader().piProjectTrusted(agentDir, cwd, defaultTrust)
-}
-
-func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, bool) {
-	reader := newCatalogReader()
-	commands, suppressed, truncated := reader.scanSkillDirBudget(dir, source, budget)
-	return commands, suppressed, truncated || reader.truncated
-}
-
 func discoverGenericSkills(dirs []string, format string) ([]Command, bool) {
 	return newCatalogReader().discoverGenericSkills(dirs, format)
 }

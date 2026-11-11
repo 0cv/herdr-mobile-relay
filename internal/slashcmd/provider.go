@@ -12,7 +12,6 @@ type Provider interface {
 }
 
 type DiscoverContext struct {
-	ProfileID      string
 	AgentDir       string
 	Cwd            string
 	Home           string
