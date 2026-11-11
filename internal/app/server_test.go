@@ -55,6 +55,24 @@ func testServerWithCacheDir(cacheDir string) *Server {
 	return New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
+func isAuditedWrite(action string) bool {
+	metadata, known := protocol.ClassifyAction(action)
+	return known && metadata.Audited
+}
+
+func isCoordinatorMutation(action string) bool {
+	metadata, known := protocol.ClassifyAction(action)
+	return known && metadata.Coordinated
+}
+
+func (s *Server) committedAgents() []*coordinator.AgentState {
+	return s.committedInventorySnapshot().agents
+}
+
+func (s *Server) committedInventoryStatus() map[string]any {
+	return s.committedInventorySnapshot().status
+}
+
 func publishInventoryForTest(t *testing.T, server *Server) {
 	t.Helper()
 	if err := server.publishCurrentInventory(context.Background()); err != nil {
@@ -2960,26 +2978,22 @@ func TestCommittedStateViewTracksSnapshotsAndDeltas(t *testing.T) {
 		defer cancel()
 		_ = s.hub.Shutdown(ctx)
 	})
-	s.broadcastCommitted(map[string]any{
-		"type": "agents",
-		"agents": []*coordinator.AgentState{{
-			PaneID: "pane-1", Status: "blocked", Project: "project",
-			BlockedEventID: "event-1", AttentionKind: question.AttentionApproval,
-			Options: []string{"Approve", "Deny"}, ApprovalFingerprint: "approval-fingerprint-1",
-		}},
-	})
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Status: "blocked", Project: "project",
+		BlockedEventID: "event-1", AttentionKind: question.AttentionApproval,
+		Options: []string{"Approve", "Deny"}, ApprovalFingerprint: "approval-fingerprint-1",
+	}}, s.state.RevisionCounter())
+	publishInventoryForTest(t, s)
 	s.broadcastCommitted(map[string]any{
 		"type": "agent_update", "pane_id": "pane-1", "status": "blocked", "project": "renamed",
+		"pane_revision": s.state.Revision("pane-1"),
 	})
 	agents := s.committedAgents()
-	if len(agents) != 1 || agents[0].Status != "blocked" ||
+	if len(agents) != 1 || agents[0].Status != "blocked" || agents[0].Project != "renamed" ||
 		agents[0].BlockedEventID != "event-1" ||
 		agents[0].ApprovalFingerprint != "approval-fingerprint-1" {
 		t.Fatalf("committed agents = %+v", agents)
 	}
-	s.broadcastCommitted(map[string]any{
-		"type": "inventory_status", "state": "ready", "stale": false,
-	})
 	inventory := s.committedInventoryStatus()
 	if inventory["state"] != "ready" || inventory["stale"] != false {
 		t.Fatalf("committed inventory = %+v", inventory)
@@ -2996,26 +3010,24 @@ func TestCommittedStateViewRejectsStalePerPaneUpdates(t *testing.T) {
 		defer cancel()
 		_ = s.hub.Shutdown(ctx)
 	})
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Status: "idle",
+	}}, s.state.RevisionCounter())
+	publishInventoryForTest(t, s)
+	revision := s.state.Revision("pane-1") + 2
 	s.broadcastCommitted(map[string]any{
-		"type": "agents",
-		"agents": []*coordinator.AgentState{{
-			PaneID: "pane-1", Status: "working", StateRevision: 12,
-		}},
+		"type": "agent_update", "pane_id": "pane-1", "status": "working",
+		"pane_revision": revision,
 	})
 	s.broadcastCommitted(map[string]any{
 		"type": "agent_update", "pane_id": "pane-1", "status": "blocked",
-		"event_id": "stale-event", "pane_revision": int64(11),
+		"event_id": "stale-event", "pane_revision": revision - 1,
 	})
-	s.broadcastCommitted(map[string]any{
-		"type": "agents",
-		"agents": []*coordinator.AgentState{{
-			PaneID: "pane-1", Status: "blocked", BlockedEventID: "stale-snapshot", StateRevision: 10,
-		}},
-	})
+	publishInventoryForTest(t, s)
 
 	agents := s.committedAgents()
 	if len(agents) != 1 || agents[0].Status != "working" ||
-		agents[0].StateRevision != 12 || agents[0].BlockedEventID != "" {
+		agents[0].StateRevision != revision || agents[0].BlockedEventID != "" {
 		t.Fatalf("reconnect snapshot regressed after stale messages: %+v", agents)
 	}
 }

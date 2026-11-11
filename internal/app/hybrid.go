@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"net/url"
@@ -61,7 +62,7 @@ type hybridTransport struct {
 	webrtc  *webrtclink.Manager
 	mapper  *portmap.Mapper
 	forced  bool
-	logger  signalLogger
+	logger  *slog.Logger
 	// newProber builds a reachability prober for one gateway origin, and is nil
 	// when the direct path cannot use one. The prober is built per self-test
 	// because it is pinned to a single origin: after a failover, probing the
@@ -79,14 +80,6 @@ type stunStatus struct {
 	configured bool
 	mapped     []netip.AddrPort
 	checkedAt  time.Time
-}
-
-// signalLogger is the subset of slog the hybrid transport needs, kept narrow so
-// tests can assert that no SDP ever reaches a log sink.
-type signalLogger interface {
-	Debug(msg string, args ...any)
-	Info(msg string, args ...any)
-	Warn(msg string, args ...any)
 }
 
 type signalBudget struct {

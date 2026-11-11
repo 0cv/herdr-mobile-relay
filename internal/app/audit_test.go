@@ -73,6 +73,29 @@ func TestAuditWriteDetailsRedactsSecretInput(t *testing.T) {
 	}
 }
 
+func TestAuditWriteDetailsBoundsWorkspaceIDs(t *testing.T) {
+	ids := []any{nil, 1, ""}
+	for range 40 {
+		ids = append(ids, strings.Repeat("界", 200))
+	}
+	details := auditWriteDetails(map[string]any{
+		"type":                   "workspace_reorder",
+		"workspace_ids":          ids,
+		"expected_workspace_ids": ids,
+	})
+	for _, key := range []string{"workspace_ids", "expected_workspace_ids"} {
+		values, ok := details[key].([]string)
+		if !ok || len(values) != 32 {
+			t.Fatalf("%s = %#v", key, details[key])
+		}
+		for _, value := range values {
+			if len([]rune(value)) != 160 {
+				t.Fatalf("%s entry length = %d, want 160", key, len([]rune(value)))
+			}
+		}
+	}
+}
+
 func TestCanonicalOperationAuditPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		typ, action, want string
