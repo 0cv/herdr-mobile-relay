@@ -3068,7 +3068,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const upload = relayStore.uploadAttachments({
+    const controller = relayStore.attachmentController({
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
@@ -3076,7 +3076,9 @@ describe('relay command store', () => {
       server_session_id: 'session-1',
       terminal_id: 'terminal-1',
       generation: 1,
-    }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    });
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const upload = controller.upload();
     await vi.waitFor(() => expect(socket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
 
     socket.serverClose();
@@ -3089,7 +3091,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const upload = relayStore.uploadAttachments({
+    const controller = relayStore.attachmentController({
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
@@ -3097,7 +3099,9 @@ describe('relay command store', () => {
       server_session_id: 'session-1',
       terminal_id: 'terminal-1',
       generation: 1,
-    }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    });
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const upload = controller.upload();
 
     const rejection = expect(upload).rejects.toMatchObject({ code: 'attachment_upload_failed' });
     await vi.advanceTimersByTimeAsync(60_000);
@@ -3112,7 +3116,7 @@ describe('relay command store', () => {
     fedoraSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     macSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'mac', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Fedora')!.id;
-    const upload = relayStore.uploadAttachments({
+    const controller = relayStore.attachmentController({
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
@@ -3120,7 +3124,9 @@ describe('relay command store', () => {
       server_session_id: 'session-1',
       terminal_id: 'terminal-1',
       generation: 1,
-    }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    });
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const upload = controller.upload();
     await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
     const begin = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_begin');
     macSocket.message({
@@ -4457,9 +4463,11 @@ describe('pending resource release through public consumers', () => {
     expect([pending.cleanup.mock.calls.length, pending.resolve.mock.calls.length, pending.reject.mock.calls.length]).toEqual(counts);
   }
 
-  it('public uploadAttachments preserves exact target/session/digests/progression and normal raw once-only release', async () => {
+  it('attachment upload preserves exact target/session/digests/progression and normal raw once-only release', async () => {
     const { socket } = endpoint();
-    const upload = relayStore.uploadAttachments(agent(), [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const controller = relayStore.attachmentController(agent());
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const upload = controller.upload();
     const begin = await uploadFrame(socket, 'upload_begin');
     ignoredUploadControls(begin);
     reply(begin, { result: beginResult() });
@@ -4556,9 +4564,13 @@ describe('pending resource release through public consumers', () => {
     const second = command();
     const third = command();
     const survivor = command('8872');
-    const upload = relayStore.uploadAttachments(agent(), [new File(['png'], 'shot.png', { type: 'image/png' })]).catch(error => error);
+    const controller = relayStore.attachmentController(agent());
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const upload = controller.upload().catch(error => error);
     const ownerUpload = await uploadFrame(socket, 'upload_begin');
-    const liveUpload = relayStore.uploadAttachments(agent('8872'), [new File(['png'], 'shot.png', { type: 'image/png' })]).catch(error => error);
+    const liveController = relayStore.attachmentController(agent('8872'));
+    liveController.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const liveUpload = liveController.upload().catch(error => error);
     const otherUpload = await uploadFrame(other.socket, 'upload_begin');
     const original = first.cleanup.getMockImplementation()!;
     first.cleanup.mockImplementation(function (this: Pending) {
@@ -4616,7 +4628,9 @@ describe('pending resource release through public consumers', () => {
     const frame = sent.at(-1)!;
     expect(frame).toEqual({ type: 'tab_reorder', insert_index: 2, request_id: expect.any(String), protocol: 3, client_id: expect.any(String) });
     const pending = observe(registries.pendingRequests, String(frame.request_id));
-    const upload = relayStore.uploadAttachments(agent(), [new File(['png'], 'shot.png', { type: 'image/png' })]).catch(error => error);
+    const controller = relayStore.attachmentController(agent());
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    const upload = controller.upload().catch(error => error);
     const uploadFrame = sent.find(frame => frame.type === 'upload_begin')!;
     expect(uploadFrame).toEqual({ type: 'upload_begin', target, files: [{ name: 'shot.png', media_type: 'image/png', bytes: 3 }], request_id: expect.any(String), protocol: 3, client_id: expect.any(String) });
     const pendingUpload = observe(registries.pendingUploads, String(uploadFrame.request_id));

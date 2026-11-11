@@ -925,16 +925,6 @@ export function terminalHtmlRows(
   });
 }
 
-export function terminalHtml(
-  text: string,
-  normalizeLightPalette = false,
-  preserveLineEnds = false,
-): string {
-  return terminalHtmlRows(text, normalizeLightPalette, preserveLineEnds)
-    .map((row) => row.html)
-    .join('');
-}
-
 // A divider drawn wider than the pane is reflowed by the terminal into a full
 // row plus a short remainder, and a physical-row read faithfully returns both.
 // They are one rule, so collapse the run into a single separator rather than

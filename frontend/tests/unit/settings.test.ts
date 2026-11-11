@@ -115,7 +115,6 @@ describe('settings relay status', () => {
       deployedVersion: APP_VERSION,
       deployedAssets: APP_ASSET_VERSION,
       upstreamVersion: APP_VERSION,
-      upstreamAssets: APP_ASSET_VERSION,
       checkedAt: 123,
       error: '',
     });
@@ -697,7 +696,6 @@ describe('settings relay status', () => {
       deployedVersion: APP_VERSION,
       deployedAssets: APP_ASSET_VERSION + 1,
       upstreamVersion: APP_VERSION,
-      upstreamAssets: APP_ASSET_VERSION + 1,
       checkedAt: 123,
       error: '',
     });
@@ -730,7 +728,6 @@ describe('settings relay status', () => {
       deployedVersion: APP_VERSION,
       deployedAssets: APP_ASSET_VERSION,
       upstreamVersion: '9.0.0',
-      upstreamAssets: 999,
       checkedAt: 123,
       error: '',
     });
@@ -809,7 +806,6 @@ describe('settings relay status', () => {
       deployedVersion: APP_VERSION,
       deployedAssets: APP_ASSET_VERSION,
       upstreamVersion: '9.0.0',
-      upstreamAssets: 999,
       checkedAt: 123,
       error: '',
     });

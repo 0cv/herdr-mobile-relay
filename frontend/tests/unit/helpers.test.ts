@@ -43,7 +43,7 @@ import {
   stripAnsi,
   TERMINAL_REPEATED_RUN_LIMIT,
   TERMINAL_SEPARATOR_TOKEN,
-  terminalHtml,
+  terminalHtmlRows,
   trimTrailingDecoration,
 } from '$lib/terminal';
 import { VirtualTerminalIndex } from '$lib/virtual-terminal';
@@ -187,7 +187,8 @@ describe('terminal rendering', () => {
     expect(ansi256Color(6)).toBe('#1abc9c');
     expect(ansi256Color(196)).toBe('rgb(255,0,0)');
     expect(ansiToHtml('\x1b[38;5;6mSearch\x1b[0m')).toMatch(/color:#1abc9c/);
-    const html = terminalHtml('<img src=x onerror=alert(1)> \x1b[1mready\x1b[0m');
+    const [row] = terminalHtmlRows('<img src=x onerror=alert(1)> \x1b[1mready\x1b[0m');
+    const html = row.html;
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img');
     expect(html).toContain('font-weight:700');

@@ -1,8 +1,6 @@
 import { IncrementalSha256 } from './incremental-sha256';
 import type { ApiError, TargetRef } from './types';
 
-export { IncrementalSha256 } from './incremental-sha256';
-
 export const DEFAULT_ATTACHMENT_MIME_TYPES = new Set([
   'application/json',
   'application/pdf',

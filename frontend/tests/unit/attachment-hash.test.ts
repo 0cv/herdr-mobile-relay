@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AttachmentBatchController, IncrementalSha256 } from '$lib/attachments';
+import { AttachmentBatchController } from '$lib/attachments';
+import { IncrementalSha256 } from '$lib/incremental-sha256';
 import type { AttachmentUploadCallbacks, UploadChunkRequest, UploadFinishRequest } from '$lib/attachments';
 
 const target = {
