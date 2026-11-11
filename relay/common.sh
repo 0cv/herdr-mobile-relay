@@ -1228,7 +1228,7 @@ prompt_gateway_subscriptions() {
     done
 }
 
-# The HTTPS base for the gateway's own endpoints: /healthz, /probe, /whoami.
+# The HTTPS base for the gateway's own endpoints: /healthz, /probe.
 gateway_http_base() {
     case "$1" in
         wss://*) printf 'https://%s\n' "${1#wss://}" ;;

@@ -248,7 +248,6 @@ func New(opts Options) (*Server, error) {
 	s.mux.HandleFunc("GET /relay", s.handleRelay)
 	s.mux.HandleFunc("GET /connect", s.handleConnect)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
-	s.mux.HandleFunc("GET /whoami", s.handleWhoami)
 	s.mux.HandleFunc("POST /probe", s.handleProbe)
 
 	if opts.STUNAddr != "" {
@@ -265,7 +264,7 @@ func New(opts Options) (*Server, error) {
 	return s, nil
 }
 
-// Handler returns the gateway routes: /relay, /connect, /healthz, /whoami and
+// Handler returns the gateway routes: /relay, /connect, /healthz and
 // /probe.
 func (s *Server) Handler() http.Handler { return s.mux }
 
@@ -405,14 +404,6 @@ func (s *Server) releaseClients(n int) {
 	if n > 0 {
 		s.clients.Add(-int64(n))
 	}
-}
-
-type whoamiResponse struct {
-	IP string `json:"ip"`
-}
-
-func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
-	writeJSONResponse(w, http.StatusOK, whoamiResponse{IP: s.clientIP(r)})
 }
 
 // clientIP is the address the gateway attributes this request to. A single

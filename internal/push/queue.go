@@ -171,11 +171,6 @@ func (q *durableQueue) removeSubscriptions(deviceID string, endpoints []string) 
 	}
 	return nil
 }
-func (q *durableQueue) replaceSubscriptions(deviceID string, endpoints []string, replacement Subscription) error {
-	q.process.Lock()
-	defer q.process.Unlock()
-	return q.replaceSubscriptionsWhileProcessing(deviceID, endpoints, replacement)
-}
 
 func (q *durableQueue) replaceSubscriptionsWhileProcessing(deviceID string, endpoints []string, replacement Subscription) error {
 	replace := make(map[string]bool, len(endpoints))
@@ -429,16 +424,6 @@ func (q *durableQueue) restorePrunedWhileProcessing(results []DeliveryResult, no
 type currentEventFunc func(PushEventKey) bool
 
 type queueSender func(context.Context, Subscription, []byte) error
-
-func (q *durableQueue) processDue(
-	ctx context.Context,
-	now time.Time,
-	current currentEventFunc,
-	send queueSender,
-	accepted func(PushEventKey, time.Time) error,
-) ([]DeliveryResult, error) {
-	return q.processDueWithRecovery(ctx, now, current, send, accepted, nil)
-}
 
 func (q *durableQueue) processDueWithRecovery(
 	ctx context.Context,

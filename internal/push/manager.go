@@ -215,16 +215,6 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 	return nil
 }
 
-// parseVAPIDPrivate handles both PEM-encoded EC private keys (Python format)
-// and raw base64url scalars (webpush-go format).
-func parseVAPIDPrivate(data string) (string, error) {
-	key, err := parseVAPIDPrivateKey(data)
-	if err != nil {
-		return "", err
-	}
-	return encodeVAPIDPrivate(key), nil
-}
-
 func parseVAPIDPrivateKey(data string) (*ecdsa.PrivateKey, error) {
 	data = strings.TrimSpace(data)
 	if !strings.HasPrefix(data, "-----BEGIN") {
@@ -265,16 +255,6 @@ func parseVAPIDPrivateKey(data string) (*ecdsa.PrivateKey, error) {
 		return nil, fmt.Errorf("VAPID private key must use P-256")
 	}
 	return key, nil
-}
-
-// parseVAPIDPublic handles both PEM-encoded EC public keys (Python format)
-// and raw base64url points (webpush-go format).
-func parseVAPIDPublic(data string) (string, error) {
-	key, err := parseVAPIDPublicKey(data)
-	if err != nil {
-		return "", err
-	}
-	return encodeVAPIDPublic(key), nil
 }
 
 func parseVAPIDPublicKey(data string) (*ecdsa.PublicKey, error) {
@@ -702,23 +682,6 @@ func (m *Manager) Resolve(ctx context.Context, key PushEventKey) error {
 		}
 	}
 	m.signal()
-	return nil
-}
-
-func (m *Manager) ResolvePane(ctx context.Context, target protocol.TargetRef, exceptEventID string) error {
-	m.mu.Lock()
-	keys := make([]PushEventKey, 0, len(m.active))
-	for key := range m.active {
-		if key.EventID != exceptEventID && sameTarget(key.Target(), target) {
-			keys = append(keys, key)
-		}
-	}
-	m.mu.Unlock()
-	for _, key := range keys {
-		if err := m.Resolve(ctx, key); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

@@ -280,13 +280,15 @@ func newGatewayHarnessWithBackoff(t *testing.T, maxClients int, backoffBase time
 
 	harness.gateway = newFakeGateway(t, relayID)
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:        harness.gateway.url,
-		RelayKey:   gatewayTestRelayKey,
-		MaxClients: maxClients,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		URLs:     []string{harness.gateway.url},
+		RelayKey: gatewayTestRelayKey,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if maxClients > 0 {
+		client.maxClients = maxClients
 	}
 	// Keep reconnects fast enough for a unit test while still exercising the
 	// real backoff path.
@@ -705,7 +707,7 @@ func TestGatewayLinkLossEvictsHubClients(t *testing.T) {
 	waitFor(t, "gateway connection cleanup", func() bool { return harness.client.Status().Clients == 0 })
 }
 
-func TestGatewayClientRequiresWebSocketURLAndRelayKey(t *testing.T) {
+func TestGatewayClientRequiresURLAndRelayKey(t *testing.T) {
 	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
@@ -715,18 +717,15 @@ func TestGatewayClientRequiresWebSocketURLAndRelayKey(t *testing.T) {
 		}
 	})
 
-	if _, err := NewGatewayClient(hub, GatewayOptions{URL: "", RelayKey: gatewayTestRelayKey}); err == nil {
+	if _, err := NewGatewayClient(hub, GatewayOptions{URLs: []string{""}, RelayKey: gatewayTestRelayKey}); err == nil {
 		t.Error("expected an error for an empty gateway url")
 	}
-	if _, err := NewGatewayClient(hub, GatewayOptions{URL: "https://gw.example.com", RelayKey: gatewayTestRelayKey}); err == nil {
-		t.Error("expected an error for a non-websocket gateway url")
-	}
-	if _, err := NewGatewayClient(hub, GatewayOptions{URL: "wss://gw.example.com"}); err == nil {
+	if _, err := NewGatewayClient(hub, GatewayOptions{URLs: []string{"wss://gw.example.com"}}); err == nil {
 		t.Error("expected an error for a missing relay key")
 	}
 
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:      "wss://gw.example.com/",
+		URLs:     []string{"wss://gw.example.com/"},
 		RelayKey: gatewayTestRelayKey,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -743,15 +742,12 @@ func TestGatewayClientRequiresWebSocketURLAndRelayKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.RelayID() != relayID {
-		t.Errorf("relay id = %q, want %q", client.RelayID(), relayID)
-	}
-	if status := (*GatewayClient)(nil).Status(); status.Enabled {
-		t.Error("nil gateway client reported an enabled gateway")
+	if client.relayID != relayID {
+		t.Errorf("relay id = %q, want %q", client.relayID, relayID)
 	}
 }
 
-func TestGatewayClientValidatesTheGatewayURLList(t *testing.T) {
+func TestGatewayClientNormalizesTheGatewayURLList(t *testing.T) {
 	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
@@ -761,23 +757,7 @@ func TestGatewayClientValidatesTheGatewayURLList(t *testing.T) {
 		}
 	})
 
-	_, err := NewGatewayClient(hub, GatewayOptions{
-		URLs:     []string{"wss://a.example.com", "https://b.example.com"},
-		RelayKey: gatewayTestRelayKey,
-	})
-	if err == nil || !strings.Contains(err.Error(), "https://b.example.com") {
-		t.Errorf("error = %v, want the offending list entry named", err)
-	}
-	if _, err := NewGatewayClient(hub, GatewayOptions{
-		URL:      "wss://b.example.com",
-		URLs:     []string{"wss://a.example.com", "wss://b.example.com"},
-		RelayKey: gatewayTestRelayKey,
-	}); err == nil {
-		t.Error("expected an error when the primary url is not the first list entry")
-	}
-
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:      "wss://a.example.com",
 		URLs:     []string{" wss://a.example.com/ ", "", "wss://b.example.com"},
 		RelayKey: gatewayTestRelayKey,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -815,7 +795,6 @@ func TestGatewayClientSelectsLowestLatencyAndKeepsOneRegistration(t *testing.T) 
 	fast := newFakeGatewayWithHealthDelay(t, relayID, 5*time.Millisecond)
 	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:       slow.url,
 		URLs:      []string{slow.url, fast.url},
 		Selection: config.GatewaySelectionLatency,
 		RelayKey:  gatewayTestRelayKey,
@@ -879,7 +858,6 @@ func TestGatewayClientFailsOverWhenPublicHealthBreaksButLinkStaysOpen(t *testing
 	backup := newFakeGateway(t, relayID)
 	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:       primary.url,
 		URLs:      []string{primary.url, backup.url},
 		Selection: config.GatewaySelectionOrdered,
 		RelayKey:  gatewayTestRelayKey,
@@ -1025,7 +1003,6 @@ func TestGatewayOrderedSelectionRegistersWithTheFirstEntry(t *testing.T) {
 	community := newFakeGatewayWithHealthDelay(t, relayID, 5*time.Millisecond)
 	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:       mine.url,
 		URLs:      []string{mine.url, community.url},
 		Selection: config.GatewaySelectionOrdered,
 		RelayKey:  gatewayTestRelayKey,
@@ -1169,7 +1146,6 @@ func TestGatewayClientFailsOverToTheNextGatewayURL(t *testing.T) {
 	gateway := newFakeGateway(t, relayID)
 	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:      deadURL,
 		URLs:     []string{deadURL, gateway.url},
 		RelayKey: gatewayTestRelayKey,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1452,7 +1428,7 @@ func TestRegisterLinkRegistrationProof(t *testing.T) {
 				defer cancel()
 				hub.Shutdown(ctx)
 			}()
-			client, err := NewGatewayClient(hub, GatewayOptions{URL: "ws" + strings.TrimPrefix(server.URL, "http"), RelayKey: gatewayTestRelayKey, RegistrationToken: token})
+			client, err := NewGatewayClient(hub, GatewayOptions{URLs: []string{"ws" + strings.TrimPrefix(server.URL, "http")}, RelayKey: gatewayTestRelayKey, RegistrationToken: token})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1483,7 +1459,7 @@ func TestRegisterLinkRegistrationProof(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !gatewaywire.VerifyRegistrationProof(token, client.RelayID(), nonce, proof) {
+				if !gatewaywire.VerifyRegistrationProof(token, client.relayID, nonce, proof) {
 					t.Fatal("invalid registration proof")
 				}
 			case <-ctx.Done():
@@ -1523,7 +1499,7 @@ func TestGatewayUnauthorizedUsesBackoff(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	client, err := NewGatewayClient(hub, GatewayOptions{URL: "ws" + strings.TrimPrefix(server.URL, "http"), RelayKey: gatewayTestRelayKey, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	client, err := NewGatewayClient(hub, GatewayOptions{URLs: []string{"ws" + strings.TrimPrefix(server.URL, "http")}, RelayKey: gatewayTestRelayKey, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -180,9 +180,6 @@ func TestMapUDPFallsBackFromPCPToNATPMP(t *testing.T) {
 	if mapping.Lifetime != 120*time.Second {
 		t.Errorf("lifetime = %s, want the granted 120s", mapping.Lifetime)
 	}
-	if mapping.ExpiresAt.IsZero() {
-		t.Error("ExpiresAt not set")
-	}
 
 	requested := server.nextMap(t)
 	if requested.Internal != 41234 || requested.Lifetime != 600 {

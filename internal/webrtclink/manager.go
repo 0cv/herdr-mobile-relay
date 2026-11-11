@@ -65,16 +65,7 @@ var (
 	// errNoSTUNServer reports address discovery with nothing to discover
 	// against: the gateway advertised no STUN port, or none has arrived yet.
 	errNoSTUNServer = errors.New("webrtclink: no stun server configured")
-	// errNoMappedAddress reports that address discovery ran and no address
-	// family answered, which is what a silent or unreachable STUN listener
-	// looks like.
-	errNoMappedAddress = errors.New("webrtclink: stun address discovery produced no mapping")
 )
-
-// stunFamilies are the networks address discovery probes independently. A
-// dual-stack relay has a mapping per family, and the IPv6 one is the easiest
-// direct path that exists: there is no NAT in front of it to traverse.
-var stunFamilies = [...]string{"udp4", "udp6"}
 
 // SessionKey identifies one negotiation: the relayed client that asked for the
 // upgrade and the request id it used for signaling.

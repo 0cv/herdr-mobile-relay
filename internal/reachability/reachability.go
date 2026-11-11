@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -116,27 +115,6 @@ func httpBase(gatewayURL string) (string, error) {
 		return "", fmt.Errorf("reachability: gateway url %q has no host", gatewayURL)
 	}
 	return scheme + "://" + rest, nil
-}
-
-type whoamiResponse struct {
-	IP string `json:"ip"`
-}
-
-// PublicIP asks the gateway which source address it sees for this host.
-func (p *Prober) PublicIP(ctx context.Context) (netip.Addr, error) {
-	if p.err != nil {
-		return netip.Addr{}, p.err
-	}
-
-	var payload whoamiResponse
-	if err := p.getJSON(ctx, "/whoami", &payload); err != nil {
-		return netip.Addr{}, err
-	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(payload.IP))
-	if err != nil {
-		return netip.Addr{}, fmt.Errorf("reachability: gateway reported malformed ip %q", payload.IP)
-	}
-	return addr.Unmap(), nil
 }
 
 type probeRequest struct {
@@ -265,14 +243,6 @@ func (p *Prober) requestProbe(ctx context.Context, externalPort uint16, token []
 		return "", errors.New("reachability: gateway declined to send the probe datagram")
 	}
 	return strings.TrimSpace(payload.ObservedIP), nil
-}
-
-func (p *Prober) getJSON(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+path, nil)
-	if err != nil {
-		return fmt.Errorf("reachability: build %s request: %w", path, err)
-	}
-	return p.do(req, out)
 }
 
 func (p *Prober) do(req *http.Request, out any) error {
