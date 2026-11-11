@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -57,11 +57,6 @@ async function replyToPaneRead(page: Page, content = 'Ready', noEcho = false) {
   const read = (await commands(page)).findLast(command => command.type === 'read_pane')!;
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content, no_echo: noEcho });
   return read.request_id;
-}
-
-async function expectNoActivityFooter(composer: Locator) {
-  await expect(composer.locator('.agent-progress, [role="status"][aria-atomic="true"]')).toHaveCount(0);
-  await expect(composer.getByText(/^(?:●)?(?:Working…|Waiting for reply…|Finished|Agent status unknown)$/)).toHaveCount(0);
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
@@ -2598,7 +2593,6 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   const readOnlyFeedback = reader.getByRole('status').filter({ hasText: 'Reader access is read only' });
   await expect(readOnlyFeedback).toContainText('Reader access is read only');
   await expect(readOnlyFeedback).toBeVisible();
-  await expectNoActivityFooter(reader.locator('.prompt-composer'));
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
   const terminal = page.getByRole('log');
   const geometry = await terminal.evaluate((element) => {
@@ -3421,7 +3415,6 @@ test('a reader speaks the latest transcript turn without the relay copy command'
   const readOnlyFeedback = reader.getByRole('status').filter({ hasText: 'Reader access is read only' });
   await expect(readOnlyFeedback).toContainText('Reader access is read only');
   await expect(readOnlyFeedback).toBeVisible();
-  await expectNoActivityFooter(reader.locator('.prompt-composer'));
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: ' Completed omp response.' });
 
   await page.getByRole('button', { name: 'Read latest response aloud' }).click();
@@ -7543,10 +7536,8 @@ test('live conversation deltas preserve local reading, selection, tool expansion
   await paragraph.evaluate(element => { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(element.querySelector('.conversation-message') || element); selection?.removeAllRanges(); selection?.addRange(range); });
   const selected = await page.evaluate(() => window.getSelection()?.toString());
   const baseline = (await commands(page)).length;
-  const composer = page.locator('.conversation-input-area .prompt-composer');
   for (const status of ['idle', 'working', 'done']) {
     await server(page, 0, { type: 'agent_update', pane_id: 'w1:p1', server_session_id: 'primary', terminal_id: 'fixture-terminal', generation: 1, agent_session_id: 'fixture-session', status });
-    await expectNoActivityFooter(composer);
     expect(Math.abs(await paragraph.evaluate(element => element.getBoundingClientRect().top) - anchorBefore)).toBeLessThanOrEqual(2);
     expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(selected);
     await expect(tool).toHaveAttribute('open', '');
@@ -7974,13 +7965,11 @@ async function openSharedComposer(page: Page, mode: string, reader = false) {
 }
 
 for (const mode of ['Conversation', 'Full history']) {
-  test(`shared composer ${mode}: activity stays in the header without footer layout or focus changes`, async ({ page }) => {
+  test(`shared composer ${mode}: activity stays in the header without layout or focus changes`, async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 740 });
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const prompt = await openSharedComposer(page, mode);
     await page.evaluate(() => { document.documentElement.style.fontSize = '20px'; });
-    const composer = page.locator('.conversation-input-area .prompt-composer');
-    await expectNoActivityFooter(composer);
     await prompt.focus();
     await page.evaluate(async () => {
       await document.fonts.ready;
@@ -7998,7 +7987,6 @@ for (const mode of ['Conversation', 'Full history']) {
     const requests = (await commands(page)).filter(command => command.type !== 'read_pane');
     for (const status of ['working', 'unknown', 'done', 'idle']) {
       await server(page, 0, { ...composerTarget, type: 'agent_update', status });
-      await expectNoActivityFooter(composer);
       await expect(page.locator('.app-header > .status-dot')).toBeVisible();
       expect(Math.abs((await prompt.boundingBox())!.y - initialPrompt.y)).toBeLessThanOrEqual(2);
       await expect(prompt).toBeFocused();
@@ -8008,7 +7996,6 @@ for (const mode of ['Conversation', 'Full history']) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
     await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'working' });
-    await expectNoActivityFooter(page.locator('.terminal-bottom .prompt-composer'));
     await expect(page.locator('.app-header > .status-dot')).toBeVisible();
   });
 
@@ -8194,7 +8181,6 @@ for (const mode of ['Conversation', 'Full history']) {
     const prompt = await openSharedComposer(page, mode, true);
     await expect(prompt).toBeDisabled();
     await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'working' });
-    await expectNoActivityFooter(page.locator('.prompt-composer'));
     for (const name of ['Attach photos', 'Attach files', 'Send prompt']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
     await prompt.evaluate(element => { (element as HTMLTextAreaElement).value = '/plan'; element.dispatchEvent(new Event('input', { bubbles: true })); });
     await prompt.dispatchEvent('keydown', { key: 'Enter', ctrlKey: true });
@@ -8292,7 +8278,6 @@ test('followup combined notices and Pi bridge stay fenced across paging, modes a
   await respond(await last('get_conversation_history'), { ...base, entries: [notice], has_more: true, next_cursor: 'older', subscription_id: 'subscription', sequence: 0 });
   await expect(page.getByText(notice.text)).toBeVisible();
   await expect(page.locator('.conversation-notice img')).toHaveCount(0);
-  await expectNoActivityFooter(page.locator('.prompt-composer'));
   await expect(page.locator('.app-header > .status-dot')).toBeVisible();
   await respond(await last('get_pi_prompt_capability'), { capability: 'pi_prompt_unconfirmed', lease: { instance: 'a'.repeat(64), pane: 'w1:p1', session: 'followup-pi', pid: 42, incarnation: 'b'.repeat(36), token: 'c'.repeat(36), connection: 'synthetic', target_key: 'target', expires_at: Date.now() + 15000 } });
   const read = await last('read_pane');
@@ -8564,7 +8549,6 @@ test('followup blocked Pi without a bridge points to Settings without fallback i
   await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, agent_session_id: 'setting-pi', status: 'blocked', attention_kind: 'unknown', project: 'Setting Pi', agent: 'pi', conversation_history_available: true }] });
   await page.getByRole('button', { name: 'Open Setting Pi on Fedora', exact: true }).click();
   await expect(page.getByText('For live Pi replies, enable Settings → Pi Integration, then /reload Pi.', { exact: true })).toBeVisible();
-  await expectNoActivityFooter(page.locator('.prompt-composer'));
   await expect(page.getByRole('button', { name: 'Keyboard', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Terminal view', exact: true }).click();

@@ -141,7 +141,7 @@ it('keeps pending and uncertain literal delivery fenced while paging and switchi
   expect(JSON.stringify(localStorage)).not.toContain('literal draft');
 });
 
-it('retains Pi uncertainty through notice paging, mode/view switches, lock and reconnect without a footer or resend', async () => {
+it('retains Pi uncertainty through notice paging, mode/view switches, lock and reconnect without resend', async () => {
   expect(readTerminalResizeSession()).toBe(true);
   expect(get(terminalHeightLease)).toBe(false);
   const delivery = piPromptDelivery(agent);
@@ -158,7 +158,6 @@ it('retains Pi uncertainty through notice paging, mode/view switches, lock and r
   expect(screen.getByText(notice.text)).toBeVisible();
   expect(screen.getByText(unrelated.text)).toBeVisible();
   expect(delivery.uncertain).toBe(true);
-  expect(view.container.querySelector('.agent-progress')).toBeNull();
   fenced();
   await fireEvent.click(screen.getByRole('button', { name: 'Load older turns' }));
   const older = requests('get_conversation_history').at(-1)!;

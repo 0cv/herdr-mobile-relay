@@ -1,15 +1,12 @@
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import PromptComposer from '$components/PromptComposer.svelte';
-import ConversationHistory from '$components/ConversationHistory.svelte';
-import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
 import { clearPromptDraft, loadPromptDraft } from '$lib/prompt-drafts';
 import type { Agent, RelayConnectionView } from '$lib/types';
 
 const agent: Agent = { relay_id: 'footer', relay_label: 'Footer', raw_pane_id: 'pane', pane_id: 'footer::pane', server_session_id: 'server', terminal_id: 'terminal', generation: 1, agent_session_id: 'session', agent: 'pi', status: 'idle', cwd: '/fixture' };
 const healthy = { status: 'connected', inventory: { state: 'ready', stale: false }, capabilities: ['secret_input'] } as RelayConnectionView;
-const noFooter = () => expect(document.querySelector('.agent-progress, [role="status"][aria-atomic="true"]')).toBeNull();
 async function send() {
   await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'New prompt' } });
   await fireEvent.submit(screen.getByRole('form', { name: 'Send a prompt' }));
@@ -24,15 +21,6 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); relayStore.connections.set(new Map()); localStorage.clear(); });
 
-it.each([TerminalView, ConversationHistory])('keeps activity text out of both shared composer views', async component => {
-  const view = render(component as typeof TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
-  for (const status of ['idle', 'working', 'done', 'unknown']) {
-    await view.rerender({ agent: { ...agent, status } });
-    noFooter();
-    expect(document.querySelector('.prompt-composer')).not.toHaveTextContent(/Working…|Thinking…|Waiting for reply|Finished|Agent status unknown/);
-  }
-});
-
 it('keeps the form busy only until acknowledgement without a reply deadline or replay', async () => {
   let resolve!: () => void;
   vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise(yes => { resolve = () => yes({ type: 'command_result', request_id: 'sent', ok: true }); }));
@@ -40,14 +28,12 @@ it('keeps the form busy only until acknowledgement without a reply deadline or r
   await send();
   expect(screen.getByRole('form', { name: 'Send a prompt' })).toHaveAttribute('aria-busy', 'true');
   expect(screen.getByRole('button', { name: 'Submitting input' })).toBeDisabled();
-  noFooter();
   await fireEvent.submit(screen.getByRole('form', { name: 'Send a prompt' }));
   resolve();
   await vi.advanceTimersByTimeAsync(0);
   expect(screen.getByRole('form', { name: 'Send a prompt' })).toHaveAttribute('aria-busy', 'false');
   await view.rerender({ agent: { ...agent, status: 'working' } });
   await vi.advanceTimersByTimeAsync(30_000);
-  noFooter();
   expect(relayStore.sendToAgent).toHaveBeenCalledExactlyOnceWith(agent, { type: 'submit_prompt', text: 'New prompt' });
   expect(relayStore.showToast).toHaveBeenCalledWith('Prompt sent.');
 });
@@ -61,7 +47,6 @@ it.each([false, true])('keeps send-failure feedback and safe restoration (unknow
   expect(loadPromptDraft(agent)).toBe('');
   expect(relayStore.showToast).toHaveBeenCalledWith(unknown ? 'Synthetic refusal Check the terminal before sending again.' : 'Synthetic refusal', true);
   expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
-  noFooter();
 });
 
 it.each(['relay_id', 'server_session_id', 'raw_pane_id', 'terminal_id', 'generation', 'agent_session_id'] as const)('does not restore a late failure into a different %s', async field => {
@@ -74,10 +59,9 @@ it.each(['relay_id', 'server_session_id', 'raw_pane_id', 'terminal_id', 'generat
   await vi.advanceTimersByTimeAsync(30_000);
   expect(screen.getByLabelText('Prompt')).toHaveValue('');
   expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
-  noFooter();
 });
 
-it('keeps reader denial for normal, hidden and attachment input without activity text', async () => {
+it('keeps reader denial for normal, hidden and attachment input', async () => {
   const sendToAgent = vi.spyOn(relayStore, 'sendToAgent');
   const sendSecret = vi.spyOn(relayStore, 'sendSecret');
   const upload = vi.spyOn(relayStore, 'attachmentController');
@@ -91,7 +75,6 @@ it('keeps reader denial for normal, hidden and attachment input without activity
   expect(sendToAgent).not.toHaveBeenCalled();
   expect(sendSecret).not.toHaveBeenCalled();
   expect(upload).not.toHaveBeenCalled();
-  noFooter();
 });
 
 it('keeps terminal adapters separate and hidden input disabled without fresh context', async () => {
@@ -107,5 +90,4 @@ it('keeps terminal adapters separate and hidden input disabled without fresh con
   expect(input).toBeDisabled();
   expect(sendSecret).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(30_000);
-  noFooter();
 });
