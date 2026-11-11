@@ -85,8 +85,7 @@ func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest
 	)
 	if err != nil {
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			message := "History request was cancelled."
-			return browseFailure("request_cancelled", message, browseErrorFor("request_cancelled", message, true)), nil
+			return browseRequestCancelled(), nil
 		}
 		return browseUnavailable("source_unavailable", "The conversation source could not be read."), nil
 	}
@@ -100,23 +99,21 @@ func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest
 	if err != nil {
 		if errors.Is(err, errClaudeChainCapacity) {
 			message := "Conversation history browsing is busy; try again shortly."
-			return browseFailure("index_capacity_exceeded", message, browseErrorFor("index_capacity_exceeded", message, true)), nil
+			return failPage("index_capacity_exceeded", message, true), nil
 		}
 		if errors.Is(err, errClaudeChainValidationPending) || errors.Is(err, errClaudeChainValidationStale) {
 			message := "Conversation history is being validated; try again shortly."
-			return browseFailure("validation_pending", message, browseErrorFor("validation_pending", message, true)), nil
+			return failPage("validation_pending", message, true), nil
 		}
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			message := "History request was cancelled."
-			return browseFailure("request_cancelled", message, browseErrorFor("request_cancelled", message, true)), nil
+			return browseRequestCancelled(), nil
 		}
 		if errors.Is(err, errClaudeChainLineageChanged) {
 			// The current request reports the replacement against the old
 			// snapshot. Retire that scope's unreferenced context and lineage so a
 			// subsequent latest request can establish a new identity and recover.
 			b.resetClaudeChainScope(browseScopeID(request.Scope))
-			message := "The conversation source changed while history was being browsed."
-			return browseFailure("source_changed", message, browseErrorFor("source_changed", message, false)), nil
+			return browseSourceChanged(), nil
 		}
 		return b.recordReadFailure(err), nil
 	}
@@ -141,22 +138,22 @@ func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest
 
 func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseRequest, cursor browseCursor) (BrowsePage, error) {
 	if cursor.ChainID == "" || cursor.Segment == nil || *cursor.Segment < 0 || cursor.SnapshotID == "" {
-		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+		return browseInvalidConversationCursor(), nil
 	}
 	boundary, err := parseBrowseOffset(cursor.Boundary)
 	if err != nil {
-		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+		return browseInvalidConversationCursor(), nil
 	}
 	requestBudget := newClaudeChainRequestBudget(b.options.RecentBytes)
 	chainContext := b.acquireClaudeChainByID(cursor.ChainID)
 	if chainContext == nil {
-		return browseFailure("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)), nil
+		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true), nil
 	}
 	defer b.releaseClaudeChainContext(chainContext)
 	segmentIndex := *cursor.Segment
 	view := b.claudeChainView(chainContext)
 	if cursor.Revision != view.publicRevision || cursor.SnapshotID != view.snapshotID || cursor.Scope != browseScopeID(request.Scope) || segmentIndex >= len(view.chain.Segments) {
-		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false)), nil
+		return browseInvalidSnapshotCursor(), nil
 	}
 	segment := view.chain.Segments[segmentIndex]
 	b.mu.Lock()
@@ -168,13 +165,13 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 		return b.claudeChainValidationPendingPage(chainContext, request.Cursor), nil
 	}
 	if lineageFailed {
-		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseSourceChanged(), nil
 	}
 	preparedSegment := segmentIndex < len(view.prepared) && view.prepared[segmentIndex]
 	if !preparedSegment {
 		if err := b.validateClaudeChainSegment(ctx, segment, requestBudget.validation); err != nil {
 			if ctx.Err() != nil {
-				return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+				return browseRequestCancelled(), nil
 			}
 			if errors.Is(err, errClaudeChainForegroundBudget) {
 				// The bounded recent projection below or the preparation worker
@@ -185,12 +182,12 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 			} else if errors.Is(err, errClaudeChainValidationPending) {
 				return b.claudeChainValidationPendingPage(chainContext, request.Cursor), nil
 			} else {
-				return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+				return browseSourceChanged(), nil
 			}
 		}
 	}
 	if preparedSegment && ctx.Err() != nil {
-		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseRequestCancelled(), nil
 	}
 	var recent recentProjection
 	recentTailExhausted := false
@@ -205,10 +202,10 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 			return b.claudeChainSourceFailure(ctx, err), nil
 		}
 		if boundary > int64(len(recent.Entries)) {
-			return browseFailure("invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false)), nil
+			return browseInvalidSnapshotCursor(), nil
 		}
 	} else if boundary > segment.CapturedEnd {
-		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false)), nil
+		return browseInvalidSnapshotCursor(), nil
 	}
 	if !cursor.ChainOffset && b.claudeChainSegmentPrepared(chainContext, segmentIndex) {
 		// Older cursors issued by a recent page use an entry-count boundary.
@@ -250,7 +247,7 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 						return b.claudeChainAdmissionFailure(request.Scope, chainContext, segmentIndex, boundary, true, *page), nil
 					}
 					if job == nil {
-						page := browseFailure("index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
+						page := failPage("index_failed", "History preparation could not be started.", true)
 						return b.claudeChainAdmissionFailure(request.Scope, chainContext, segmentIndex, boundary, true, page), nil
 					}
 				}
@@ -1680,19 +1677,19 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 func (b *Browser) claudeChainLatestValidationFailure(ctx context.Context, err error) BrowsePage {
 	if errors.Is(err, errClaudeChainValidationStale) {
 		message := "Conversation history advanced; try again shortly."
-		return browseFailure("validation_pending", message, browseErrorFor("validation_pending", message, true))
+		return failPage("validation_pending", message, true)
 	}
 	return b.claudeChainSourceFailure(ctx, err)
 }
 
 func (b *Browser) claudeChainSourceFailure(ctx context.Context, err error) BrowsePage {
 	if ctx != nil && ctx.Err() != nil {
-		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
+		return browseRequestCancelled()
 	}
 	if errors.Is(err, errRecentProjectionChanged) || err != nil {
-		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
+		return browseSourceChanged()
 	}
-	return browseFailure("source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true))
+	return failPage("source_unavailable", "The conversation source could not be read.", true)
 }
 
 func namespaceClaudeProjectedEntries(entries []projectedEntry, segment claudeSegment, anchor bool) []projectedEntry {
@@ -1792,7 +1789,7 @@ func (b *Browser) claudeChainPreparingPage(scope BrowseScope, chain *claudeChain
 	view := b.claudeChainView(chain)
 	cursor, err := b.claudeChainCursor(scope, chain, segment, boundary, byteBoundary)
 	if err != nil {
-		return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+		return browseContinuationFailed()
 	}
 	return BrowsePage{
 		Available: true, State: BrowsePreparing, Mode: BrowseSnapshot, Entries: []Entry{},
@@ -1883,7 +1880,7 @@ func (b *Browser) startClaudeChainJob(scope BrowseScope, chain *claudeChainConte
 		return nil, &page
 	}
 	if err != nil {
-		page := browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
+		page := browseSourceChanged()
 		return nil, &page
 	}
 	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
@@ -1891,7 +1888,7 @@ func (b *Browser) startClaudeChainJob(scope BrowseScope, chain *claudeChainConte
 			(segment.SourceModTime != 0 && source.info.ModTime().UnixNano() != segment.SourceModTime ||
 				segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken) {
 		source.close()
-		page := browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
+		page := browseSourceChanged()
 		return nil, &page
 	}
 	// A chain job indexes only the descriptor's captured end. The file may have
@@ -1936,7 +1933,7 @@ func (b *Browser) startClaudeChainJob(scope BrowseScope, chain *claudeChainConte
 
 func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequest, chain *claudeChainContext, segmentIndex int, boundary int64, byteBoundary bool, job *browseJob, budget *claudeChainRequestBudget) BrowsePage {
 	if !b.retainJob(job) {
-		return browseFailure("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
+		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
 	}
 	defer b.releaseJob(job)
 	job.mu.RLock()
@@ -1990,7 +1987,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 	b.mu.Lock()
 	if segmentIndex < 0 || segmentIndex >= len(chain.jobs) {
 		b.mu.Unlock()
-		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false))
+		return browseInvalidSnapshotCursor()
 	}
 	job := chain.jobs[segmentIndex]
 	b.mu.Unlock()
@@ -2005,7 +2002,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 		return b.claudeChainPageAt(ctx, scope, limit, chain, false, segmentIndex, len(recent.Entries), recent.Entries, budget, false)
 	}
 	if !b.retainJob(job) {
-		return browseFailure("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
+		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
 	}
 	defer b.releaseJob(job)
 	job.mu.RLock()
@@ -2025,17 +2022,17 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 			return b.claudeChainPreparingPage(scope, chain, segmentIndex, boundary, true)
 		}
 		if ctx.Err() != nil {
-			return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
+			return browseRequestCancelled()
 		}
-		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
+		return browseSourceChanged()
 	}
 	entries, hasMore, err := index.entriesBefore(boundary, limit)
 	if err != nil {
-		return browseFailure("index_failed", "The prepared conversation history could not be read.", browseErrorFor("index_failed", "The prepared conversation history could not be read.", true))
+		return failPage("index_failed", "The prepared conversation history could not be read.", true)
 	}
 	view := b.claudeChainView(chain)
 	if segmentIndex < 0 || segmentIndex >= len(view.chain.Segments) {
-		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false))
+		return browseInvalidSnapshotCursor()
 	}
 	entries = namespaceClaudeProjectedEntries(entries, view.chain.Segments[segmentIndex], segmentIndex == 0)
 	base := BrowsePage{Available: true, State: BrowseReady, Mode: BrowseSnapshot,
@@ -2056,7 +2053,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 			base.NextCursor, err = b.claudeChainCursor(scope, chain, segmentIndex, boundary, true)
 		}
 		if err != nil {
-			return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+			return browseContinuationFailed()
 		}
 	} else {
 		if budget == nil {
@@ -2069,7 +2066,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 		if hasNext {
 			base.NextCursor, err = b.claudeChainCursor(scope, chain, nextSegment, nextBoundary, nextIsOffset)
 			if err != nil {
-				return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+				return browseContinuationFailed()
 			}
 			base.HasMore = true
 		}
@@ -2093,7 +2090,7 @@ func mergeBrowseDiagnostics(left, right BrowseDiagnostics) BrowseDiagnostics {
 
 func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, budget *claudeChainRequestBudget) BrowsePage {
 	if chain == nil {
-		return browseFailure("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
+		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
 	}
 	if budget == nil {
 		budget = newClaudeChainRequestBudget(b.options.RecentBytes)
@@ -2134,7 +2131,7 @@ func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, 
 				Entries: []Entry{}, SourceRevision: view.publicRevision, Diagnostics: mergeBrowseDiagnostics(view.diagnostics, recent.Diagnostics)}
 			cursor, err := b.claudeChainCursor(scope, chain, index, segment.RecentStart, true)
 			if err != nil {
-				return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+				return browseContinuationFailed()
 			}
 			page.NextCursor, page.HasMore = cursor, cursor != ""
 			return page
@@ -2147,7 +2144,7 @@ func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, 
 func (b *Browser) claudeChainBudgetPage(scope BrowseScope, chain *claudeChainContext, segmentIndex int) BrowsePage {
 	view := b.claudeChainView(chain)
 	if segmentIndex < 0 || segmentIndex >= len(view.chain.Segments) {
-		return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+		return browseContinuationFailed()
 	}
 	segment := view.chain.Segments[segmentIndex]
 	// This segment was not read in the current latest request. A cached
@@ -2158,7 +2155,7 @@ func (b *Browser) claudeChainBudgetPage(scope BrowseScope, chain *claudeChainCon
 	boundary := segment.CapturedEnd
 	cursor, err := b.claudeChainCursor(scope, chain, segmentIndex, boundary, true)
 	if err != nil {
-		return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+		return browseContinuationFailed()
 	}
 	return BrowsePage{Available: true, State: BrowseReady, Mode: BrowseRecent, Entries: []Entry{},
 		SourceRevision: view.publicRevision, NextCursor: cursor, HasMore: cursor != "", Diagnostics: view.diagnostics,
@@ -2171,7 +2168,7 @@ func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limi
 	}
 	view := b.claudeChainView(chain)
 	if chain == nil || segmentIndex < 0 || segmentIndex >= len(view.chain.Segments) {
-		return browseFailure("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true))
+		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
 	}
 	if boundary < 0 {
 		boundary = len(entries)
