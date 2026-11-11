@@ -153,10 +153,6 @@ func (r *Reader) cursorRoots() []string { return agentroots.Cursor(r.home) }
 func (r *Reader) grokRoots() []string { return agentroots.Grok(r.home) }
 
 func Supported(agent string) bool {
-	return RecordedSupported(agent)
-}
-
-func RecordedSupported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
 		"pi", "picodingagent", "omp", "ohmypi", "cursor", "cursoragent",
@@ -186,12 +182,6 @@ func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) 
 // ReadFor resolves a pane conversation using the same cwd-aware locator as the
 // session-title resolver.
 func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
-}
-
-// read preserves the old package-local helper shape for tests and legacy
-// callers; public callers should use Read or ReadFor.
-func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
 	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
 }
 
@@ -234,19 +224,14 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
 	if isClaudeProvider(agent) {
-		return r.readClaudeChain(project.CWD, sessionID, location, before, limit)
+		return r.readClaudeChain(sessionID, location, before, limit)
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
 		return Page{}, fmt.Errorf("read conversation log: %w", err)
 	}
 	entries := parseTranscript(agent, text)
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	end := len(entries)
 	if before != "" {
 		for index := range entries {
@@ -269,8 +254,12 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 		FileTruncated: clipped,
 	}, nil
 }
-func unavailable(reason string) Page {
-	return unavailableCode("source_unavailable", reason)
+
+func clampPageLimit(limit int) int {
+	if limit < 1 {
+		return defaultPageSize
+	}
+	return min(limit, maxPageSize)
 }
 
 func unavailableCode(code, reason string) Page {
@@ -346,12 +335,6 @@ func (r *Reader) LocateWithProject(agent string, project ProjectContext, session
 	return location
 }
 
-// locate preserves the old package-local helper shape for tests and legacy
-// callers; public callers should use Locate or LocateWithProject.
-func (r *Reader) locate(agent, cwd, sessionID string) Location {
-	return r.locateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
-}
-
 func (r *Reader) locateWithProject(agent string, project ProjectContext, sessionID string) Location {
 	project = NormalizeProjectContext(agent, project)
 	switch normalizedAgent(agent) {
@@ -378,9 +361,6 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		return r.hermes.locate(project.CWD, sessionID)
 	case "agy", "antigravity", "antigravitycli":
 		return r.agy.locate(sessionID)
-	case "kimi", "kimicode":
-		_, location, _ := r.SelectKimiSession(project, sessionID)
-		return location
 	case "cursor", "cursoragent":
 		return findCursorSession(r.cursorRoots(), project, sessionID)
 	case "grok":
@@ -420,12 +400,6 @@ func safeSessionID(value string) bool {
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
-}
-
-func findProjectSession(roots []string, cwd, filename, preferredProjectName string) Location {
-	return findProjectSessionWithProject(roots, ProjectContext{CWD: cwd}, filename, func(string) string {
-		return preferredProjectName
-	})
 }
 
 // findProjectSessionWithProject keeps roots as the outer loop. Within one root

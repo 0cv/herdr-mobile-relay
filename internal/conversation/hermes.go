@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -149,17 +150,8 @@ func (r *hermesReader) readFromContext(ctx context.Context, database, sessionID,
 	return entries, hasMore, corrupt, rows[0], ""
 }
 
-func (r *hermesReader) query(database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
-	return r.queryContext(context.Background(), database, sessionID, before, limit)
-}
-
 func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	sessionHex := hex.EncodeToString([]byte(sessionID))
 	cursorCTE := "cursor AS (SELECT NULL AS logical_id WHERE 0)"
 	cursorFilter := ""
@@ -234,14 +226,8 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	if hasMore && len(rows) > 0 {
 		rows = rows[:len(rows)-1]
 	}
-	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
-		rows[left], rows[right] = rows[right], rows[left]
-	}
+	slices.Reverse(rows)
 	return rows, hasMore, ""
-}
-
-func (r *hermesReader) attachToolResults(database, sessionID string, entries []Entry) bool {
-	return r.attachToolResultsContext(context.Background(), database, sessionID, entries)
 }
 
 func (r *hermesReader) attachToolResultsContext(ctx context.Context, database, sessionID string, entries []Entry) bool {
@@ -295,10 +281,6 @@ func attachHermesToolRows(entries []Entry, rows []hermesToolRow) bool {
 		}
 	}
 	return corrupt
-}
-
-func (r *hermesReader) queryToolRows(database, sessionID string, callIDs []string) ([]hermesToolRow, string) {
-	return r.queryToolRowsContext(context.Background(), database, sessionID, callIDs)
 }
 
 func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessionID string, callIDs []string) ([]hermesToolRow, string) {
@@ -419,11 +401,6 @@ func hermesText(raw string) string {
 	return textValue(value)
 }
 
-func hermesTextHex(encoded string) string {
-	text, _ := hermesTextHexValue(encoded)
-	return text
-}
-
 func hermesTextHexValue(encoded string) (string, bool) {
 	if encoded == "" {
 		return "", false
@@ -462,12 +439,7 @@ func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) 
 			return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
 		}
 	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	location := r.Locate(agent, cwd, sessionID)
 	if location.Path == "" {
 		if _, code := r.hermes.databases(); code != "" {

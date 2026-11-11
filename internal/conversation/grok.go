@@ -710,12 +710,7 @@ func (r *Reader) readGrokFor(project ProjectContext, sessionID, before string, l
 	if !validGrokCursor(before) {
 		return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
 	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	location := r.LocateWithProject("grok", project, sessionID)
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil

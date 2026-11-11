@@ -91,7 +91,7 @@ func startCapacitySource(t *testing.T, b *Browser, home string, number int) *bro
 		source.close()
 		t.Fatal(err)
 	}
-	job, page := b.createJob(scope, source, 0, source.end, source.end, digest, false, "", 0)
+	job, page := b.createJob(scope, source, 0, source.end, source.end, digest, "", 0)
 	if page != nil || job == nil {
 		source.close()
 		t.Fatalf("admission: %+v", page)

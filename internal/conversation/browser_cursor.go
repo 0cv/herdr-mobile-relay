@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,17 +62,7 @@ func browseScopeID(scope BrowseScope) string {
 	}
 	data, _ := json.Marshal(normalized)
 	digest := sha256.Sum256(data)
-	return hexBrowse(digest[:])
-}
-
-func hexBrowse(value []byte) string {
-	const alphabet = "0123456789abcdef"
-	result := make([]byte, len(value)*2)
-	for index, item := range value {
-		result[index*2] = alphabet[item>>4]
-		result[index*2+1] = alphabet[item&0x0f]
-	}
-	return string(result)
+	return hex.EncodeToString(digest[:])
 }
 
 func encodeBrowseCursor(key [32]byte, cursor browseCursor) (string, error) {

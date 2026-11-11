@@ -31,7 +31,6 @@ type memoryProjector struct {
 	agent     string
 	revision  string
 	entries   []projectedEntry
-	byOffset  map[int64]int
 	pending   map[string]toolLocation
 	plan      *OMOTodoState
 	todoSeen  bool
@@ -41,7 +40,7 @@ type memoryProjector struct {
 func newMemoryProjector(agent, revision string) *memoryProjector {
 	return &memoryProjector{
 		agent: agent, revision: revision, entries: make([]projectedEntry, 0),
-		byOffset: make(map[int64]int), pending: make(map[string]toolLocation),
+		pending: make(map[string]toolLocation),
 	}
 }
 
@@ -130,7 +129,6 @@ func (p *memoryProjector) apply(record JSONLRecord) projectionResult {
 	}
 	entry := *result.Entry
 	calls := entry.Entry.Tools
-	p.byOffset[record.Start] = len(p.entries)
 	p.entries = append(p.entries, entry)
 	for toolIndex := range calls {
 		if id := toolAssociationID(calls[toolIndex]); id != "" {

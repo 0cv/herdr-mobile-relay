@@ -110,22 +110,7 @@ func isClaudeProvider(agent string) bool {
 // for descendants: root/project selection belongs to the anchor, and a new
 // global search could cross profiles or projects with duplicate session IDs.
 func resolveClaudeChain(ctx context.Context, anchor Location, anchorSessionID string) (claudeChain, error) {
-	return resolveClaudeChainWithObserver(ctx, anchor, anchorSessionID, nil)
-}
-
-func resolveClaudeChainWithObserver(ctx context.Context, anchor Location, anchorSessionID string, observe func(int64)) (claudeChain, error) {
-	var readObserver func(int64) error
-	if observe != nil {
-		readObserver = func(bytes int64) error {
-			observe(bytes)
-			return nil
-		}
-	}
-	return resolveClaudeChainWithReadObserver(ctx, anchor, anchorSessionID, readObserver)
-}
-
-func resolveClaudeChainWithReadObserver(ctx context.Context, anchor Location, anchorSessionID string, observe func(int64) error) (claudeChain, error) {
-	return resolveClaudeChainWithReadHooks(ctx, anchor, anchorSessionID, nil, observe)
+	return resolveClaudeChainWithReadHooks(ctx, anchor, anchorSessionID, nil, nil)
 }
 
 // resolveClaudeChainWithReadHooks separates reservation from observation. A
@@ -335,10 +320,6 @@ func inspectClaudeSegmentFooter(ctx context.Context, source fileSource, sessionI
 	return segment, "", "", nil
 }
 
-func readFileRangeObserved(ctx context.Context, file *os.File, start, end int64, observe func(int64) error) ([]byte, error) {
-	return readFileRangeObservedWithReserve(ctx, file, start, end, nil, observe)
-}
-
 func readFileRangeObservedWithReserve(ctx context.Context, file *os.File, start, end int64, reserve, observe func(int64) error) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -391,49 +372,6 @@ func claudeFooterBoundaryUninspectableBytes(footer []byte, maxRecordBytes int64)
 // readCapturedSegment reads at most limit bytes ending at a descriptor's
 // captured boundary. It is used by the legacy reader and deliberately verifies
 // the descriptor before reading, so an old chain never grows into a new leaf.
-func claudeFooterBoundaryUninspectable(file *os.File, start, end, maxRecordBytes int64) (bool, error) {
-	if file == nil || start <= 0 || end <= start {
-		return false, nil
-	}
-	var previous [1]byte
-	if _, err := file.ReadAt(previous[:], start-1); err != nil {
-		return false, err
-	}
-	if previous[0] == '\n' {
-		return false, nil
-	}
-	// The footer window begins inside a JSONL record. It is safe to skip a
-	// bounded prefix only when that record terminates inside the window; an
-	// unterminated or oversized boundary record makes the footer uninspectable.
-	buffer := make([]byte, 32*1024)
-	var scanned int64
-	for position := start; position < end; {
-		want := int64(len(buffer))
-		if remaining := end - position; want > remaining {
-			want = remaining
-		}
-		read, err := file.ReadAt(buffer[:want], position)
-		if read > 0 {
-			if newline := bytes.IndexByte(buffer[:read], '\n'); newline >= 0 {
-				lineBytes := scanned + int64(newline) + 1
-				if position+int64(newline)+1 >= end {
-					return true, nil
-				}
-				return lineBytes > maxRecordBytes, nil
-			}
-			scanned += int64(read)
-			position += int64(read)
-		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			return false, err
-		}
-		if read == 0 {
-			break
-		}
-	}
-	return true, nil
-}
-
 func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64) (string, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -501,7 +439,7 @@ func continuationDiagnostic(reason string) (bool, string) {
 	}
 }
 
-func (r *Reader) readClaudeChain(_ string, sessionID string, anchor Location, before string, limit int) (Page, error) {
+func (r *Reader) readClaudeChain(sessionID string, anchor Location, before string, limit int) (Page, error) {
 	chain, err := resolveClaudeChain(context.Background(), anchor, sessionID)
 	if err != nil {
 		return Page{}, fmt.Errorf("resolve Claude conversation chain: %w", err)
@@ -509,12 +447,7 @@ func (r *Reader) readClaudeChain(_ string, sessionID string, anchor Location, be
 	if len(chain.Segments) == 0 {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	groups := make([][]Entry, len(chain.Segments))
 	remaining := int64(maxConversationBytes)
 	clipped := false

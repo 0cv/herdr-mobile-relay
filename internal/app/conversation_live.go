@@ -20,7 +20,7 @@ import (
 const conversationFeedBytes = 2 * 1024 * 1024
 
 func supportsConversationActivity(agent string) bool {
-	return conversation.RecordedSupported(agent)
+	return conversation.Supported(agent)
 }
 
 type conversationBatch struct {
