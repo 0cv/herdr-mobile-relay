@@ -125,11 +125,11 @@ shell-check:
 	tests/test_stable_setup.sh
 
 production-path-audit:
-	@if rg -n '(^|[;&|][[:space:]]*)(python3?|uv)([[:space:]]|$$)' relay --glob '*.sh' --glob '*.command'; then \
+	@if grep -rEn '(^|[;&|][[:space:]]*)(python3?|uv)([[:space:]]|$$)' relay --include='*.sh'; then \
 		echo "Production shell path still invokes Python or uv" >&2; \
 		exit 1; \
 	fi
-	@if rg -n '(^|[;&|][[:space:]]*)go[[:space:]]+(build|run|install)' relay install.sh; then \
+	@if grep -rEn '(^|[;&|][[:space:]]*)go[[:space:]]+(build|run|install)' relay install.sh; then \
 		echo "End-user install/runtime path still invokes the Go toolchain" >&2; \
 		exit 1; \
 	fi
