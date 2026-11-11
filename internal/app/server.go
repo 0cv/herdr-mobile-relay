@@ -1734,7 +1734,7 @@ func (s *Server) handleTransition(
 	var conversationCwd string
 	conversationProject := conversation.ProjectContext{}
 	var blockedEventID string
-	var paneGeneration uint64
+	var paneGeneration int64
 	var blockedContentRevision int64
 	if agentExists {
 		if status != "working" || s.state.TransitionCurrent(paneID, status, revision) {
@@ -1752,7 +1752,7 @@ func (s *Server) handleTransition(
 		if !active || blockedEventID == "" {
 			return
 		}
-		paneGeneration = uint64(generation)
+		paneGeneration = generation
 	}
 	transitionCurrent := func() bool {
 		if status == "blocked" {

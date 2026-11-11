@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -334,24 +335,15 @@ func (r *CreateResult) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	r.PaneID = firstNonEmpty(wire.PaneID, wire.RootPane.ID, wire.Agent.PaneID)
-	r.TabID = firstNonEmpty(wire.TabID, wire.RootPane.TabID, wire.Tab.ID)
-	r.WorkspaceID = firstNonEmpty(
+	r.PaneID = cmp.Or(wire.PaneID, wire.RootPane.ID, wire.Agent.PaneID)
+	r.TabID = cmp.Or(wire.TabID, wire.RootPane.TabID, wire.Tab.ID)
+	r.WorkspaceID = cmp.Or(
 		wire.WorkspaceID,
 		wire.RootPane.WorkspaceID,
 		wire.Tab.WorkspaceID,
 		wire.Workspace.ID,
 	)
 	return nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 type AgentInfo struct {

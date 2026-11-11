@@ -213,14 +213,14 @@ func (d *Dispatcher) waitTestGate(ctx context.Context, paneID string, generation
 }
 
 func (d *Dispatcher) PruneSlots(active map[string]bool) {
-	generations := make(map[string]uint64, len(active))
+	generations := make(map[string]int64, len(active))
 	for paneID := range active {
-		generations[paneID] = uint64(d.state.Generation(paneID))
+		generations[paneID] = d.state.Generation(paneID)
 	}
 	d.ApplyTopology(active, generations)
 }
 
-func (d *Dispatcher) ApplyTopology(active map[string]bool, generations map[string]uint64) {
+func (d *Dispatcher) ApplyTopology(active map[string]bool, generations map[string]int64) {
 	d.scheduler.ApplyTopology(active, generations)
 	d.testGatesMu.Lock()
 	defer d.testGatesMu.Unlock()
@@ -240,7 +240,7 @@ func (d *Dispatcher) paneSessionCurrent(token WorkerToken, requestID, action str
 
 func (d *Dispatcher) paneSessionError(token WorkerToken) error {
 	generation, active := d.state.PaneSession(token.PaneID)
-	if uint64(generation) != token.Generation || (!active && !token.AllowAbsent) {
+	if generation != token.Generation || (!active && !token.AllowAbsent) {
 		return ErrPaneReplaced
 	}
 	return nil
@@ -275,7 +275,7 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	}
 	if paneID != "" {
 		generation, _ := d.state.PaneSession(paneID)
-		ctx = context.WithValue(ctx, paneSessionContextKey{}, uint64(generation))
+		ctx = context.WithValue(ctx, paneSessionContextKey{}, generation)
 	}
 
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
@@ -878,13 +878,13 @@ func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestI
 
 func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runner EffectRunner) *CommandResult {
 	if !options.RelayLevel {
-		admittedGeneration, captured := ctx.Value(paneSessionContextKey{}).(uint64)
+		admittedGeneration, captured := ctx.Value(paneSessionContextKey{}).(int64)
 		if !captured {
 			generation, _ := d.state.PaneSession(options.PaneID)
-			admittedGeneration = uint64(generation)
+			admittedGeneration = generation
 		}
 		generation, active := d.state.PaneSession(options.PaneID)
-		if uint64(generation) != admittedGeneration || !active {
+		if generation != admittedGeneration || !active {
 			return d.fail(options.RequestID, options.Action, options.PaneID, ErrPaneReplaced.Error())
 		}
 		options.PaneGeneration = admittedGeneration
@@ -1047,7 +1047,7 @@ func (d *Dispatcher) RecordTransitionActivity(
 		}
 		if expectedStatus == "blocked" && len(blockedIdentity) == 4 {
 			eventID, eventOK := blockedIdentity[0].(string)
-			generation, generationOK := blockedIdentity[1].(uint64)
+			generation, generationOK := blockedIdentity[1].(int64)
 			attentionKind, attentionOK := blockedIdentity[2].(string)
 			attentionRevision, revisionOK := blockedIdentity[3].(int64)
 			if eventOK && generationOK && attentionOK && revisionOK {

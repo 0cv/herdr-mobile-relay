@@ -87,16 +87,17 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time,
 					}
 					return check()
 				}
-				timer := time.NewTimer(duration)
-				defer timer.Stop()
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-effectCtx.Done():
-					return effectCtx.Err()
-				case <-timer.C:
-					return check()
+				waitCtx, cancel := context.WithCancel(effectCtx)
+				defer cancel()
+				stop := context.AfterFunc(ctx, cancel)
+				defer stop()
+				if err := contextDelay(waitCtx, duration); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return err
 				}
+				return check()
 			}
 			if deadline, ok := effectCtx.Deadline(); !ok || time.Until(deadline) < time.Duration(len(text))*300*time.Millisecond+time.Second {
 				return errors.New("insufficient time remaining for filter delivery")

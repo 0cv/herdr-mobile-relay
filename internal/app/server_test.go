@@ -3194,7 +3194,7 @@ func TestApprovalPushCanceledWhenAttentionIsReclassified(t *testing.T) {
 	if _, committed := s.state.CommitAttentionClassification(
 		"pane-1",
 		agent.BlockedEventID,
-		uint64(generation),
+		generation,
 		s.state.ContentRevision("pane-1"),
 		question.Classification{
 			Kind:   question.AttentionChat,

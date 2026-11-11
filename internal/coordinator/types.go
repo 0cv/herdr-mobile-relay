@@ -21,7 +21,7 @@ type Command struct {
 type WorkerToken struct {
 	OperationID OperationID
 	PaneID      string
-	Generation  uint64
+	Generation  int64
 	AllowAbsent bool
 	Deadline    time.Time
 }
@@ -44,7 +44,7 @@ type EffectResult struct {
 
 type EffectContinuation struct {
 	PaneID      string
-	Generation  uint64
+	Generation  int64
 	AllowAbsent bool
 	Deadline    time.Time
 	Runner      EffectRunner
@@ -61,7 +61,7 @@ var (
 type ScheduleOptions struct {
 	Command
 	RelayLevel     bool
-	PaneGeneration uint64
+	PaneGeneration int64
 	AllowAbsent    bool
 	LedgerKey      string
 	PayloadHash    string

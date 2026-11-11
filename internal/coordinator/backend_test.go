@@ -176,7 +176,7 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 		_, _ = dispatcher.scheduler.Execute(ctx, ScheduleOptions{Command: Command{
 			ID: dispatcher.scheduler.NextCommandID(), RequestID: "first", ReceivedAt: now,
 			Deadline: now.Add(5 * time.Second), Action: "submit_prompt", PaneID: "pane-1",
-		}, PaneGeneration: uint64(generation)}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
+		}, PaneGeneration: generation}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			select {
 			case <-release:

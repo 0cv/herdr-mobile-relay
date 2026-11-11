@@ -91,7 +91,7 @@ printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
 			})
 			agent, ok := state.Agent("pane-1")
 			generation, active := state.PaneSession("pane-1")
-			if !ok || !active || !state.PaneSessionCurrent("pane-1", uint64(generation)) ||
+			if !ok || !active || !state.PaneSessionCurrent("pane-1", generation) ||
 				agent.PaneID != "pane-1" || agent.RawPaneID != "pane-1" || agent.TerminalID != "terminal-1" ||
 				agent.TabID != "tab-1" || agent.WorkspaceID != "workspace-1" || agent.Agent != "claude" || agent.Status != "idle" {
 				t.Fatalf("invalid committed identity/session: %+v, %d, %v", agent, generation, active)

@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -81,7 +82,7 @@ func triageIdentity(agent *AgentState) string {
 		parts = append(parts, "terminal="+agent.TerminalID)
 	} else {
 		parts = append(parts,
-			"pane="+firstNonEmpty(agent.RawPaneID, agent.PaneID),
+			"pane="+cmp.Or(agent.RawPaneID, agent.PaneID),
 			"tab="+agent.TabID,
 			"workspace="+agent.WorkspaceID,
 		)
@@ -94,15 +95,6 @@ func triageIdentity(agent *AgentState) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func (s *State) applyTriageLocked(agent *AgentState) {
@@ -153,7 +145,7 @@ func (s *State) persistTriageLocked() {
 
 func (s *State) pruneTriageLocked(cutoff int64) {
 	for key, record := range s.triage {
-		if maxInt64(record.LastActiveAt, record.LastSeenAt) < cutoff {
+		if max(record.LastActiveAt, record.LastSeenAt) < cutoff {
 			delete(s.triage, key)
 		}
 	}
@@ -166,17 +158,10 @@ func (s *State) pruneTriageLocked(cutoff int64) {
 	}
 	ordered := make([]candidate, 0, len(s.triage))
 	for key, record := range s.triage {
-		ordered = append(ordered, candidate{key: key, ts: maxInt64(record.LastActiveAt, record.LastSeenAt)})
+		ordered = append(ordered, candidate{key: key, ts: max(record.LastActiveAt, record.LastSeenAt)})
 	}
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ts < ordered[j].ts })
 	for _, item := range ordered[:len(ordered)-triageStateLimit] {
 		delete(s.triage, item.key)
 	}
-}
-
-func maxInt64(left, right int64) int64 {
-	if left > right {
-		return left
-	}
-	return right
 }

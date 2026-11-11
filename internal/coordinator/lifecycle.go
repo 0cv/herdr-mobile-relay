@@ -152,8 +152,10 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		return StartResult{}, err
 	}
 	workspaceID := request.WorkspaceID
-	if workspaceID != "" && !workspaceExists(workspaces, workspaceID) {
-		return StartResult{}, errors.New("workspace is unavailable")
+	if workspaceID != "" {
+		if _, ok := workspaceByID(workspaces, workspaceID); !ok {
+			return StartResult{}, errors.New("workspace is unavailable")
+		}
 	}
 	if workspaceID == "" {
 		workspaceID = SelectWorkspaceForCwd(request.Cwd, inventory.Panes, workspaces, l.home)
@@ -285,7 +287,9 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID string, agentArgs []string) error {
 	wait := l.waitForRetry
 	if wait == nil {
-		wait = waitForAgentRetry
+		wait = func(ctx context.Context, delay time.Duration) bool {
+			return contextDelay(ctx, delay) == nil
+		}
 	}
 	return retryAgentStart(ctx, func() error {
 		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx), agentArgs...)
@@ -328,17 +332,6 @@ func retryAgentStart(ctx context.Context, start func() error, wait func(context.
 	}
 }
 
-func waitForAgentRetry(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
 // remainingTimeoutMS is the budget the caller still holds. Handing Herdr a
 // fixed timeout would let one attempt outlive the request, so a retry could
 // never run; it would also outlive the phone's own deadline.
@@ -376,15 +369,6 @@ func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, req
 		}
 	}
 	return profiles.PaneIdentity{}
-}
-
-func workspaceExists(workspaces []herdr.Workspace, workspaceID string) bool {
-	for _, workspace := range workspaces {
-		if workspace.ID == workspaceID {
-			return true
-		}
-	}
-	return false
 }
 
 func (l *Lifecycle) ResolveCwd(raw string) (string, error) {

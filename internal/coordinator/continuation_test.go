@@ -114,7 +114,7 @@ func TestContinuationInvalidationIsCachedWarning(t *testing.T) {
 			}()
 			<-ready
 			if mode == "replaced" {
-				s.ApplyTopology(map[string]bool{"pane": true}, map[string]uint64{"pane": 1})
+				s.ApplyTopology(map[string]bool{"pane": true}, map[string]int64{"pane": 1})
 			}
 			if mode == "shutdown" {
 				s.CancelInflight()

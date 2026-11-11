@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -136,7 +137,7 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 	d.recordActivity("approval", "approved", fmt.Sprintf("Approved option %d", payload.Index+1), paneID, requestID)
 	d.wake()
 	d.startWatcher(func(ctx context.Context) {
-		d.watchApproval(ctx, requestID, paneID, payload.EventID, uint64(generation))
+		d.watchApproval(ctx, requestID, paneID, payload.EventID, generation)
 	})
 	return result
 }
@@ -155,7 +156,7 @@ func approvalKeys(target, current int) []string {
 	return append(keys, "Enter")
 }
 
-func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, eventID string, generation uint64) {
+func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, eventID string, generation int64) {
 	ctx, cancel := context.WithTimeout(parent, approvalPollTimeout)
 	defer cancel()
 	ticker := time.NewTicker(approvalPollInterval)
@@ -174,7 +175,7 @@ func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, ev
 			)
 			return
 		case <-ticker.C:
-			if uint64(d.state.Generation(paneID)) != generation {
+			if d.state.Generation(paneID) != generation {
 				return
 			}
 			agent, ok := d.state.Agent(paneID)
@@ -266,7 +267,7 @@ func decodeQuestionPayload(message map[string]any) (questionPayload, error) {
 		}
 	}
 	sort.Ints(payload.Selected)
-	payload.Selected = uniqueInts(payload.Selected)
+	payload.Selected = slices.Compact(payload.Selected)
 	if len(payload.Selected) == 0 && payload.OtherText == "" && !payload.OtherSelected {
 		return payload, fmt.Errorf("choose an answer or enter an Other answer")
 	}
@@ -364,7 +365,7 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 				paneID,
 				interactionSnapshot(payload.InteractionID, submittedInteraction),
 				payload.Navigation,
-				uint64(d.state.Generation(paneID)),
+				d.state.Generation(paneID),
 			)
 		})
 	}
@@ -475,7 +476,7 @@ func (d *Dispatcher) executeQuestion(
 func (d *Dispatcher) sendQuestionKeys(ctx context.Context, paneID string, keys []string) error {
 	return d.sendQuestionKeysForSession(ctx, WorkerToken{
 		PaneID:      paneID,
-		Generation:  uint64(d.state.Generation(paneID)),
+		Generation:  d.state.Generation(paneID),
 		AllowAbsent: true,
 	}, paneID, keys)
 }
@@ -519,7 +520,7 @@ func (d *Dispatcher) watchQuestion(
 	ledgerKey, requestID, action, paneID string,
 	original *question.Interaction,
 	navigation string,
-	generation uint64,
+	generation int64,
 ) {
 	ctx, cancel := context.WithTimeout(parent, approvalPollTimeout)
 	defer cancel()
@@ -538,7 +539,7 @@ func (d *Dispatcher) watchQuestion(
 			})
 			return
 		case <-ticker.C:
-			if uint64(d.state.Generation(paneID)) != generation {
+			if d.state.Generation(paneID) != generation {
 				return
 			}
 			agent, ok := d.state.Agent(paneID)
@@ -585,7 +586,7 @@ func interactionSnapshot(interactionID string, stateInteraction *question.Intera
 
 func (d *Dispatcher) finishQuestionWatch(
 	ledgerKey string,
-	generation uint64,
+	generation int64,
 	requestID, action, paneID string,
 	original *question.Interaction,
 	navigation string,
@@ -657,7 +658,7 @@ func questionOperationLedgerKey(action, paneID, interactionID, requestID string)
 
 func (d *Dispatcher) commitAndBroadcastPhase(
 	ledgerKey string,
-	generation uint64,
+	generation int64,
 	requestID string,
 	action string,
 	paneID string,
@@ -675,7 +676,7 @@ func (d *Dispatcher) commitAndBroadcastPhase(
 	}
 }
 
-func (d *Dispatcher) commitAndBroadcastResult(ledgerKey string, generation uint64, result *CommandResult) bool {
+func (d *Dispatcher) commitAndBroadcastResult(ledgerKey string, generation int64, result *CommandResult) bool {
 	if !d.scheduler.UpdateLedgerResult(ledgerKey, generation, result) {
 		return false
 	}
@@ -702,17 +703,4 @@ func (d *Dispatcher) broadcastResult(result *CommandResult) {
 		message["data"] = result.Data
 	}
 	d.broadcast(message)
-}
-
-func uniqueInts(values []int) []int {
-	if len(values) < 2 {
-		return values
-	}
-	out := values[:1]
-	for _, value := range values[1:] {
-		if value != out[len(out)-1] {
-			out = append(out, value)
-		}
-	}
-	return out
 }
