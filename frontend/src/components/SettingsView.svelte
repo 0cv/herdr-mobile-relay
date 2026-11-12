@@ -87,6 +87,7 @@
   import { reloadRisk, reloadRiskMessage, type ReloadRisk } from '$lib/reload-guard';
   import {
     appUpdateStatus,
+    deployedAppTarget,
     CHECKOUT_UPDATE_COMMAND,
     beginUpdateProgress,
     checkAppUpdate,
@@ -156,11 +157,7 @@
   const pushTests = relayStore.pushTests;
   const appUpdate = appUpdateStatus;
   function appPhoneTarget(version: string) {
-    return {
-      version,
-      assets: $appUpdate.deployedVersion === version ? $appUpdate.deployedAssets : 0,
-      build: $appUpdate.deployedVersion === version ? ($appUpdate.deployedBuild || '') : '',
-    };
+    return deployedAppTarget($appUpdate, version);
   }
   let previousAppUpdate = $state<AppUpdateStatus | null>(null);
   let checkingUpdates = $state(false);
@@ -250,11 +247,7 @@
       return {
         kind: 'reload_app',
         targetVersion: $appUpdate.deployedVersion,
-        phoneTarget: {
-          version: $appUpdate.deployedVersion,
-          assets: $appUpdate.deployedAssets,
-          build: $appUpdate.deployedBuild || '',
-        },
+        phoneTarget: deployedAppTarget($appUpdate),
         description: `Load the verified phone app v${$appUpdate.deployedVersion}.`,
       };
     }

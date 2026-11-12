@@ -34,6 +34,17 @@ export interface PhoneAppTarget {
   build: string;
 }
 
+export function deployedAppTarget(
+  status: Pick<AppUpdateStatus, 'deployedVersion' | 'deployedAssets' | 'deployedBuild'>,
+  version = status.deployedVersion,
+): PhoneAppTarget {
+  return {
+    version,
+    assets: status.deployedVersion === version ? status.deployedAssets : 0,
+    build: status.deployedVersion === version ? (status.deployedBuild || '') : '',
+  };
+}
+
 export type PhoneUpdateState = 'publishing' | 'loading' | 'loaded' | 'failed';
 
 export interface UpdateProgressPlan {
@@ -129,11 +140,7 @@ export function observeAppUpstreamVersion(value: string): void {
   }
   appUpdateStatus.update((current) => {
     if (!current.deployedVersion) return current;
-    const state = appUpdateAvailable({
-      version: current.deployedVersion,
-      assets: current.deployedAssets,
-      build: current.deployedBuild,
-    })
+    const state = appUpdateAvailable(deployedAppTarget(current))
       ? 'reload-ready'
       : newerVersion(relayUpstreamVersion, current.deployedVersion)
         ? 'deployment-required'
@@ -503,13 +510,7 @@ function phoneTargetIsAtLeast(candidate: PhoneAppTarget, target: PhoneAppTarget)
 
 function requestedPhoneTarget(version: string, target: PhoneAppTarget | null): PhoneAppTarget {
   const status = get(appUpdateStatus);
-  const requested = target || (status.deployedVersion === version
-    ? {
-      version,
-      assets: status.deployedAssets,
-      build: status.deployedBuild || '',
-    }
-    : { version, assets: 0, build: '' });
+  const requested = target || deployedAppTarget(status, version);
   const pending = get(updateProgressPlan);
   if (pending?.phoneAppRequired && pending.phoneTarget
     && !phoneTargetIsAtLeast(requested, pending.phoneTarget)) {
@@ -569,11 +570,7 @@ export function reloadUpdatedSameOriginApp(
       setPhoneUpdateError(`The phone app release v${requested.version} did not become available at this origin before the verification deadline.`);
       return false;
     }
-    const actualTarget = {
-      version: status.deployedVersion,
-      assets: status.deployedAssets,
-      build: status.deployedBuild || '',
-    };
+    const actualTarget = deployedAppTarget(status);
     if (!automaticReloadWanted.some((wanted) => wanted())) return false;
     const risk = reloadRisk();
     if (risk) {
@@ -612,11 +609,7 @@ export async function importOrReload<T>(load: () => Promise<T>, stillWanted: () 
       throw error;
     }
     appUpdateStatus.set(status);
-    const deployed = {
-      version: status.deployedVersion,
-      assets: status.deployedAssets,
-      build: status.deployedBuild || '',
-    };
+    const deployed = deployedAppTarget(status);
     if (status.state === 'reload-ready' && stillWanted()) {
       if (await reloadUpdatedSameOriginApp(deployed.version, deployed, stillWanted)) {
         // The page is now navigating to the deployed build, so this load never finishes.

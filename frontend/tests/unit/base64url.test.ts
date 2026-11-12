@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { base64UrlDecode, base64UrlEncode } from '$lib/base64url';
+import { base64Decode, base64Encode, base64UrlDecode, base64UrlEncode } from '$lib/base64url';
 
 describe('base64url encoding', () => {
+  it('keeps standard base64 padding and alphabet', () => {
+    const bytes = Uint8Array.from([251, 255]);
+    expect(base64Encode(bytes)).toBe('+/8=');
+    expect(base64Encode(bytes.buffer)).toBe('+/8=');
+    expect(base64Decode('+/8=')).toEqual(bytes);
+    expect(base64Decode('')).toEqual(new Uint8Array());
+    expect(() => base64Decode('%')).toThrow();
+  });
+
   it('encodes and decodes canonical unpadded values', () => {
     const vectors: Array<[number[], string]> = [
       [[], ''],
@@ -23,6 +32,7 @@ describe('base64url encoding', () => {
     const value = new Uint8Array(new ArrayBuffer(100_000));
     for (let index = 0; index < value.length; index += 1) value[index] = index % 251;
     expect(base64UrlDecode(base64UrlEncode(value))).toEqual(value);
+    expect(base64Decode(base64Encode(value))).toEqual(value);
   });
 
   it.each(['a', 'A=', 'A+', 'a/b', '%'])('rejects malformed value %j', (value) => {

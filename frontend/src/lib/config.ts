@@ -1,3 +1,4 @@
+import { isAuthenticationSecret, isAuthenticationVersion, isInvitationId } from './device-auth';
 import { canRendezvous, RELAY_ID_LENGTH } from './gateway-credentials';
 import type { RelayConfig } from './types';
 
@@ -201,7 +202,7 @@ function isRelayId(value: unknown): value is string {
 }
 
 function isRendezvousKey(value: unknown): value is string {
-  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+  return isAuthenticationSecret(value);
 }
 
 export function loadRelayConfigs(): RelayConfig[] {
@@ -259,10 +260,9 @@ export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): Qui
   const version = Number(params.get('invite_version'));
   const expiresAt = Number(params.get('invite_expires'));
   if (
-    !/^[A-Za-z0-9_-]{16,128}$/.test(id)
-    || !/^[A-Za-z0-9_-]{43}$/.test(secret)
-    || !Number.isSafeInteger(version)
-    || version < 1
+    !isInvitationId(id)
+    || !isAuthenticationSecret(secret)
+    || !isAuthenticationVersion(version)
     || !Number.isSafeInteger(expiresAt)
     || expiresAt < 1
   ) return null;

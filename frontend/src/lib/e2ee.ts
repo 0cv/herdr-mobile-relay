@@ -1,8 +1,14 @@
 import { base64UrlDecode, base64UrlEncode, type Base64UrlBytes } from './base64url';
-import type {
-  DeviceEnrollmentResult,
-  RelayDeviceAuthentication,
+import {
+  isAuthenticationIdentifier,
+  isAuthenticationSecret,
+  isAuthenticationVersion,
+  isDeviceLocale,
+  isDeviceRole,
+  type DeviceEnrollmentResult,
+  type RelayDeviceAuthentication,
 } from './device-auth';
+import { isRecord } from './record';
 
 export const E2EE_SUBPROTOCOL = 'herdr-e2ee-v2';
 
@@ -313,14 +319,14 @@ function validatedDeviceLocale(value: unknown): string {
 }
 
 function validateAuthenticationId(value: unknown): string {
-  if (typeof value !== 'string' || !value || value.length > 256 || /[\u0000-\u001f\u007f]/.test(value)) {
+  if (!isAuthenticationIdentifier(value)) {
     throw new Error('Invalid device authentication id.');
   }
   return value;
 }
 
 function validateAuthenticationVersion(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+  if (!isAuthenticationVersion(value)) {
     throw new Error('Invalid device authentication version.');
   }
   return value;
@@ -342,14 +348,14 @@ function parseServerFinish(
     throw new Error('Relay unexpectedly replaced an enrolled device credential.');
   }
   if (credentialSecret !== undefined) {
-    if (typeof credentialSecret !== 'string' || base64UrlDecode(credentialSecret).byteLength !== AUTH_SECRET_BYTES) {
+    if (!isAuthenticationSecret(credentialSecret)) {
       throw new Error('Relay issued an invalid device credential.');
     }
   }
   const role = finish.role;
-  if (role !== 'reader' && role !== 'controller') throw new Error('Relay returned an invalid device role.');
+  if (!isDeviceRole(role)) throw new Error('Relay returned an invalid device role.');
   const locale = String(finish.locale ?? '');
-  if (!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(locale) || locale.length > 35) {
+  if (!isDeviceLocale(locale)) {
     throw new Error('Relay returned an invalid device locale.');
   }
   return {
@@ -407,7 +413,7 @@ function constantTimeEqual(left: Bytes, right: Bytes): boolean {
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new Error('Relay sent an invalid encrypted message.');
   }
   return value as Record<string, unknown>;

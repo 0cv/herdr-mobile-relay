@@ -1,3 +1,5 @@
+import { base64UrlDecode, base64UrlEncode } from './base64url';
+import { isRecord } from './record';
 import type { Agent, FrontendTargetRef, TargetRef } from './types';
 
 const ROUTE_PREFIX = 'r3.';
@@ -23,7 +25,7 @@ function validAgentSessionId(value: unknown): value is string {
 function normalizedTarget(value: unknown, frontend: true): FrontendTargetRef | null;
 function normalizedTarget(value: unknown, frontend?: false): TargetRef | null;
 function normalizedTarget(value: unknown, frontend = false): TargetRef | FrontendTargetRef | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!isRecord(value)) return null;
   const candidate = value as Record<string, unknown>;
   if (frontend && !isResourceId(candidate.relay_id)) return null;
   if (!isResourceId(candidate.server_session_id)
@@ -100,9 +102,7 @@ export function encodeTargetRoute(target: FrontendTargetRef): string | null {
     normalized.agent_session_id || '',
   ];
   const bytes = new TextEncoder().encode(JSON.stringify(tuple));
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return ROUTE_PREFIX + btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+  return ROUTE_PREFIX + base64UrlEncode(bytes);
 }
 
 export function decodeTargetRoute(token: string): FrontendTargetRef | null {
@@ -110,9 +110,7 @@ export function decodeTargetRoute(token: string): FrontendTargetRef | null {
   const encoded = token.slice(ROUTE_PREFIX.length);
   if (!encoded || !/^[A-Za-z0-9_-]+$/u.test(encoded)) return null;
   try {
-    const padded = encoded.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - encoded.length % 4) % 4);
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const bytes = base64UrlDecode(encoded);
     const tuple = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
     if (!Array.isArray(tuple) || tuple.length !== TARGET_TUPLE_LENGTH || tuple[0] !== 3) return null;
     return normalizeFrontendTargetRef({

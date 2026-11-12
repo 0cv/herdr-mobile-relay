@@ -1,3 +1,4 @@
+import { base64Decode } from './base64url';
 import { get, writable } from 'svelte/store';
 
 import { speakableText } from './markdown';
@@ -227,7 +228,7 @@ async function playRelayChunks(
       }
       const audio = String(result.data?.audio || '');
       if (!audio) throw new Error('The relay returned no audio.');
-      const bytes = Uint8Array.from(atob(audio), (char) => char.charCodeAt(0));
+      const bytes = base64Decode(audio);
       await playRelayBlob(new Blob([bytes], { type: 'audio/wav' }));
       if (generation !== speakGeneration) return;
     }

@@ -7,6 +7,7 @@ import type {
   NotificationTarget,
   RelayConnectionView,
 } from './types';
+import { isRecord } from './record';
 import { normalizeFrontendTargetRef } from './resource-id';
 
 export const RELAY_PROTOCOL_VERSION = 3;
@@ -34,11 +35,11 @@ export function parseWireSafeInteger(value: unknown): number | undefined {
 }
 
 export function parseApiError(value: unknown): ApiError | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!isRecord(value)) return null;
   const candidate = value as Record<string, unknown>;
   if (typeof candidate.code !== 'string' || !API_ERROR_CODE.test(candidate.code)) return null;
   if (candidate.args === undefined) return { code: candidate.code };
-  if (!candidate.args || typeof candidate.args !== 'object' || Array.isArray(candidate.args)) return null;
+  if (!isRecord(candidate.args)) return null;
   const entries = Object.entries(candidate.args);
   if (entries.length > 8) return null;
   const args: Record<string, ApiErrorArg> = {};
@@ -56,10 +57,10 @@ export function parseApiError(value: unknown): ApiError | null {
 }
 
 export function parseActionReceipt(value: unknown): ActionReceipt | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!isRecord(value)) return null;
   const envelope = value as Record<string, unknown>;
   const candidate = envelope.type === 'action_receipt' ? envelope.receipt : value;
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+  if (!isRecord(candidate)) return null;
   const receipt = candidate as Record<string, unknown>;
   if (typeof receipt.action_id !== 'string' || !ACTION_ID.test(receipt.action_id)) return null;
   if (typeof receipt.phase !== 'string' || !ACTION_RECEIPT_PHASES[receipt.phase as ActionReceiptPhase]) return null;
@@ -148,7 +149,7 @@ export function parseNotificationTarget(value: string): NotificationTarget | nul
 }
 
 export function parsePushOpenTarget(value: unknown, relayId: string): FrontendTargetRef | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || !relayId) return null;
+  if (!isRecord(value) || !relayId) return null;
   const target = value as Record<string, unknown>;
   return normalizeFrontendTargetRef({
     relay_id: relayId,

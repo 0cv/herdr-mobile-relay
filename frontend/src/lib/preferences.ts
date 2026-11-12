@@ -1,3 +1,4 @@
+import { isRecord } from './record';
 import { get, writable } from 'svelte/store';
 import {
   DEFAULT_AGENT_VIEW_KEY,
@@ -60,7 +61,7 @@ export function readPaneAgentViewOverrides(
     const raw = (storage || localStorage).getItem(PANE_AGENT_VIEW_OVERRIDES_KEY);
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    if (!isRecord(parsed)) return {};
     const overrides: Record<string, AgentView> = {};
     for (const [key, value] of Object.entries(parsed)) {
       if (parsePaneViewPreferenceKey(key) && isAgentView(value)) overrides[key] = value;
