@@ -172,8 +172,7 @@ transport_summary() {
     fi
     if [ -n "${CLOUDFLARED_CONFIG:-}" ] && [ -f "$CLOUDFLARED_CONFIG" ]; then
         printf 'Cloudflare tunnel %s\n' \
-            "$(sed -n 's/^[[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\(.*\)/\1/p' \
-                "$CLOUDFLARED_CONFIG" | head -1)"
+            "$(yaml_scalar hostname "$CLOUDFLARED_CONFIG")"
         return 0
     fi
     printf 'not chosen yet - choose a path\n'

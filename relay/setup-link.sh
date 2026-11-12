@@ -66,10 +66,7 @@ fi
 
 # The stable hostname: explicit argument wins, otherwise the first ingress
 # hostname in the cloudflared config the background service uses.
-TUNNEL_HOST="${1:-}"
-TUNNEL_HOST="${TUNNEL_HOST#https://}"
-TUNNEL_HOST="${TUNNEL_HOST#wss://}"
-TUNNEL_HOST="${TUNNEL_HOST%%/*}"
+TUNNEL_HOST="$(normalize_hostname "${1:-}")"
 if [ -z "$TUNNEL_HOST" ]; then
     CONFIG="${CLOUDFLARED_CONFIG:-$RELAY_CLOUDFLARED_CONFIG}"
     if [ ! -r "$CONFIG" ]; then
@@ -78,12 +75,16 @@ if [ -z "$TUNNEL_HOST" ]; then
         echo "  hostname directly: make setup-link HOST=relay-mac.yourdomain.com"
         exit 1
     fi
-    TUNNEL_HOST="$(sed -nE 's/^[[:space:]]*-?[[:space:]]*hostname:[[:space:]]*([^[:space:]#]+).*/\1/p' "$CONFIG" | head -1)"
+    TUNNEL_HOST="$(yaml_scalar hostname "$CONFIG")"
     if [ -z "$TUNNEL_HOST" ]; then
         echo "✗ No ingress hostname found in $CONFIG."
         echo "  Pass the hostname directly: make setup-link HOST=relay-mac.yourdomain.com"
         exit 1
     fi
+fi
+if ! valid_hostname "$TUNNEL_HOST"; then
+    echo "✗ Enter a valid hostname such as relay.example.com." >&2
+    exit 1
 fi
 
 HOST_LABEL="$(relay_host_label)"

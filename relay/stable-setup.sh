@@ -289,10 +289,7 @@ choose_hostname() {
                 fi
                 domain="$SELECTED_DOMAIN"
             fi
-            domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
-            domain="${domain#https://}"
-            domain="${domain%%/*}"
-            domain="${domain%.}"
+            domain="$(normalize_hostname "$domain")"
             if ! valid_hostname "$domain" || [[ "$domain" != *.* ]]; then
                 echo "✗ Enter a valid Cloudflare domain such as example.com." >&2
                 [ -z "${HERDR_STABLE_DOMAIN:-}" ] || return 1
@@ -303,11 +300,7 @@ choose_hostname() {
             candidate="${candidate:-$proposed}"
         fi
 
-        candidate="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')"
-        candidate="${candidate#https://}"
-        candidate="${candidate#wss://}"
-        candidate="${candidate%%/*}"
-        candidate="${candidate%.}"
+        candidate="$(normalize_hostname "$candidate")"
         if ! valid_hostname "$candidate" || [[ "$candidate" != *.* ]]; then
             echo "✗ Enter a valid full hostname such as relay-workstation.example.com." >&2
             [ -z "${HERDR_STABLE_HOSTNAME:-}" ] || return 1

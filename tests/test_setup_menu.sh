@@ -216,9 +216,12 @@ expect "$output" 'ACTION: tailscale-off.sh '
 [[ "$(printf '%s\n' "$output" | grep -c '^Tailscale$')" == 2 ]]
 
 printf "CLOUDFLARED_CONFIG='%s/cloudflared.yml'\n" "$WORK" > "$HERDR_RELAY_ENV"
-printf 'hostname: relay.example.test\n' > "$WORK/cloudflared.yml"
+printf 'hostname: "relay.example.test" # public hostname\n' > "$WORK/cloudflared.yml"
 output="$(menu 'q\n')"
 expect "$output" '  1. Cloudflare (active)'
+expect "$output" '  Phone path: Cloudflare tunnel relay.example.test'
+reject "$output" '"relay.example.test"'
+reject "$output" '# public hostname'
 output="$(HERDR_RELAY_BACKEND=hc menu 'q\n')"
 expect "$output" "Herdr TUI relay (phone shows $HOST)"
 reject "$output" 'Herdr app relay'

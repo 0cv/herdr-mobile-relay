@@ -9,6 +9,29 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 . "$REPO_DIR/relay/common.sh"
 
 (
+    for hostname in relay.example.test RELAY.EXAMPLE.TEST. \
+        HTTPS://RELAY.EXAMPLE.TEST./setup WSS://RELAY.EXAMPLE.TEST/path; do
+        normalized="$(normalize_hostname "$hostname")"
+        test "$normalized" = relay.example.test
+        valid_hostname "$normalized"
+    done
+    test -z "$(normalize_hostname '')"
+    for hostname in relay..example.test relay.-bad.test relay.bad-.test \
+        relay_example.test http://relay.example.test; do
+        if valid_hostname "$(normalize_hostname "$hostname")"; then
+            echo "invalid hostname was accepted: $hostname" >&2
+            exit 1
+        fi
+    done
+
+    config="$WORK_DIR/scalars.yml"
+    printf '%s\n' 'tunnel: "relay tunnel" # tunnel name' \
+        "  - hostname: 'relay.example.test' # public hostname" > "$config"
+    test "$(yaml_scalar tunnel "$config")" = 'relay tunnel'
+    test "$(yaml_scalar hostname "$config")" = relay.example.test
+)
+
+(
     require_positive_integer 3 Attempts
     for invalid in '' 0 -1 1.5 text; do
         if require_positive_integer "$invalid" Attempts >/dev/null 2>&1; then
@@ -1607,10 +1630,10 @@ mkdir -p "$MOVE_HOME/cloudflared" "$MOVE_BIN"
 export MOVE_ROUTE_LOG
 printf "HERDR_RELAY_TOKEN='move-token'\nCLOUDFLARED_CONFIG='%s'\n" "$MOVE_CONFIG" > "$MOVE_ENV"
 cat > "$MOVE_CONFIG" <<'EOF'
-tunnel: herdr-mobile-relay-fedora
+tunnel: 'herdr-mobile-relay-fedora' # existing tunnel
 credentials-file: /somewhere/creds.json
 ingress:
-  - hostname: relay-fedora.old.test
+  - hostname: "relay-fedora.old.test" # existing route
     service: http://localhost:8375
   - service: http_status:404
 EOF
@@ -1677,8 +1700,31 @@ YAML
 # are stubbed so the test observes the move itself.
 cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
 
+LINK_OUTPUT="$(
+    HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$WORK_DIR/readiness-helper" HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_PHONE_APP_URL=relay bash "$REPO_DIR/relay/setup-link.sh"
+)"
+grep -Fq 'relay=wss%3A%2F%2Frelay-fedora.old.test&' <<< "$LINK_OUTPUT"
+LINK_OUTPUT="$(
+    HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$WORK_DIR/readiness-helper" HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_PHONE_APP_URL=relay bash "$REPO_DIR/relay/setup-link.sh" \
+        'WSS://RELAY-FEDORA.OLD.TEST./setup'
+)"
+grep -Fq 'relay=wss%3A%2F%2Frelay-fedora.old.test&' <<< "$LINK_OUTPUT"
+
+if HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
+    HERDR_RELAY_ENV="$MOVE_ENV" HERDR_STABLE_HOSTNAME=relay.-bad.test \
+    bash "$REPO_DIR/relay/change-hostname.sh" > "$WORK_DIR/invalid-hostname" 2>&1; then
+    echo "an invalid unattended hostname was accepted" >&2
+    exit 1
+fi
+grep -Fq 'Enter a valid hostname' "$WORK_DIR/invalid-hostname"
+test ! -s "$MOVE_ROUTE_LOG"
+
 MOVE_OUTPUT="$(
-    printf 'relay-fedora.new.test\n' |
+    printf 'relay.-bad.test\nHTTPS://RELAY-FEDORA.NEW.TEST./setup\n' |
         HOME="$MOVE_HOME" \
         PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
@@ -1689,11 +1735,11 @@ MOVE_OUTPUT="$(
 grep -Fq 'tunnel route dns herdr-mobile-relay-fedora relay-fedora.new.test' "$MOVE_ROUTE_LOG" ||
     { echo "the new hostname was never routed to the existing tunnel" >&2
       printf '%s\n' "$MOVE_OUTPUT" >&2; exit 1; }
-grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" ||
+grep -Fq 'hostname: "relay-fedora.new.test" # existing route' "$MOVE_CONFIG" ||
     { echo "the ingress still serves the old hostname" >&2; exit 1; }
-grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
+grep -Fq 'hostname: "relay-fedora.old.test" # existing route' "$MOVE_CONFIG" ||
     { echo "the old hostname stopped serving before its record was deleted" >&2; exit 1; }
-grep -Fq 'tunnel: herdr-mobile-relay-fedora' "$MOVE_CONFIG" ||
+grep -Fq "tunnel: 'herdr-mobile-relay-fedora' # existing tunnel" "$MOVE_CONFIG" ||
     { echo "the move rewrote more than the hostname" >&2; exit 1; }
 test "$(cat "$MOVE_STATE_RECORD" 2>/dev/null)" = "relay-fedora.new.test" ||
     { echo "the recorded hostname was not updated" >&2; exit 1; }

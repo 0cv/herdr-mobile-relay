@@ -227,6 +227,16 @@ expand_config_path() {
     esac
     canonical_file_path "$path"
 }
+normalize_hostname() {
+    local hostname
+
+    hostname="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    hostname="${hostname#https://}"
+    hostname="${hostname#wss://}"
+    hostname="${hostname%%/*}"
+    printf '%s\n' "${hostname%.}"
+}
+
 valid_hostname() {
     local hostname="$1"
     local old_ifs
