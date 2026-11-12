@@ -192,6 +192,31 @@ let speakGeneration = 0;
 export type SpeechRequest = Promise<{ data?: Record<string, unknown> }> & { cancel?: () => void };
 export type SpeechSender = (text: string, language: string) => SpeechRequest;
 
+export async function toggleSpeech(
+  source: string | (() => Promise<{ text: string; failure: string }>),
+  languages: readonly string[],
+  send: SpeechSender,
+  onIssue: (message: string) => void,
+): Promise<void> {
+  if (get(speechState) === 'speaking') {
+    stopSpeech();
+    return;
+  }
+  const language = get(speechLanguage);
+  if (!languages.includes(language)) {
+    onIssue(`This relay has no ${speechLanguageLabel(language)} voice; install a Piper voice for it on that computer.`);
+    return;
+  }
+  armSpeechKeepalive(onIssue);
+  const { text, failure } = typeof source === 'string' ? { text: source, failure: '' } : await source();
+  if (!speakViaRelay(text, send, onIssue)) {
+    releaseSpeechKeepalive();
+    if (typeof source !== 'string' && !text.trim()) {
+      onIssue(failure || 'No completed agent response is available to read aloud.');
+    }
+  }
+}
+
 /**
  * Reads text with the relay's speech engine: fragments are synthesized on the
  * computer and played here as ordinary media, prefetching the next fragment

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import AppDialog from '$components/ui/AppDialog.svelte';
@@ -142,10 +143,9 @@
       relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(MANAGED_UPDATE_COMMAND);
+    if (await copyText(MANAGED_UPDATE_COMMAND)) {
       relayStore.showToast('Update command copied.');
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }

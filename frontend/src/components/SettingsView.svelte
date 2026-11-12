@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
   import { onMount } from 'svelte';
   import DeviceSettings from '$components/DeviceSettings.svelte';
   import PiIntegration from '$components/PiIntegration.svelte';
@@ -496,10 +497,9 @@
       relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(command);
+    if (await copyText(command)) {
       relayStore.showToast(`${installation} update command copied.`);
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }

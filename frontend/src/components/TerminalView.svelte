@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import PromptComposer from '$components/PromptComposer.svelte';
   import TerminalKeys, { type QueuedKeyCommand } from '$components/TerminalKeys.svelte';
@@ -30,14 +31,11 @@
     terminalSearchText,
   } from '$lib/terminal-find';
   import {
-    armSpeechKeepalive,
-    releaseSpeechKeepalive,
-    speakViaRelay,
+    toggleSpeech,
     speechEnabled,
     speechLanguage,
     speechLanguageLabel,
     speechState,
-    stopSpeech,
   } from '$lib/speech';
   import { interfaceSize, terminalHeightLease, terminalResizeSession, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
@@ -1147,33 +1145,17 @@
   }
 
   async function speakTerminalResponse() {
-    if ($speechState === 'speaking') {
-      stopSpeech();
-      return;
-    }
-    if (fetchingSpeechText) return;
-    const toast = (message: string) => relayStore.showToast(message, true);
-    // Checked before anything plays: unlocking audio for a language the relay
-    // cannot speak leaves the phone with a silent stream and no explanation.
-    if (!relaySpeechLanguages.includes($speechLanguage)) {
-      toast(`This relay has no ${speechLanguageLabel($speechLanguage)} voice; install a Piper voice for it on that computer.`);
-      return;
-    }
-    // Armed before the relay round trip: the tap's activation window does not
-    // survive the await, and audio started after it is autoplay-blocked.
-    armSpeechKeepalive(toast);
-    fetchingSpeechText = true;
+    if (fetchingSpeechText && $speechState !== 'speaking') return;
     try {
-      const { text, failure } = await latestAgentResponse();
-      const spoke = text.trim() && speakViaRelay(
-        text,
+      await toggleSpeech(
+        () => {
+          fetchingSpeechText = true;
+          return latestAgentResponse();
+        },
+        relaySpeechLanguages,
         (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
-        toast,
+        (message) => relayStore.showToast(message, true),
       );
-      if (!spoke) {
-        releaseSpeechKeepalive();
-        if (!text.trim()) toast(failure || 'No completed agent response is available to read aloud.');
-      }
     } finally {
       fetchingSpeechText = false;
     }
@@ -1215,17 +1197,9 @@
       : hasCompletedResponse
         ? 'Final response selected. Use your browser Copy command.'
         : 'Output selected. Use your browser Copy command.';
-    if (!navigator.clipboard?.writeText) {
-      target.value = text;
-      target.focus({ preventScroll: true });
-      target.select();
-      relayStore.showToast(selectedMessage);
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyText(text)) {
       relayStore.showToast(copiedMessage);
-    } catch {
+    } else {
       target.value = text;
       target.focus({ preventScroll: true });
       target.select();
@@ -1236,16 +1210,9 @@
   async function copyDisplayedAgentResponse() {
     const text = copiedAgentResponseText;
     if (!text.trim()) return;
-    if (!navigator.clipboard?.writeText) {
-      agentResponsePreviewElement.focus({ preventScroll: true });
-      agentResponsePreviewElement.select();
-      relayStore.showToast('Output selected. Use your browser Copy command.');
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyText(text)) {
       relayStore.showToast('Agent response copied.');
-    } catch {
+    } else {
       agentResponsePreviewElement.focus({ preventScroll: true });
       agentResponsePreviewElement.select();
       relayStore.showToast('Output selected. Use your browser Copy command.');

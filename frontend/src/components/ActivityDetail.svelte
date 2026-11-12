@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
   import { get } from 'svelte/store';
   import { onMount } from 'svelte';
   import Button from '$components/ui/Button.svelte';
@@ -46,10 +47,9 @@
       relayStore.showToast(`Clipboard access is unavailable. Select the ${extractLabel} manually.`, true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(activity.extract);
+    if (await copyText(activity.extract)) {
       relayStore.showToast(`${extractLabel[0].toLocaleUpperCase()}${extractLabel.slice(1)} copied.`);
-    } catch {
+    } else {
       relayStore.showToast(`Could not copy. Select the ${extractLabel} manually.`, true);
     }
   }

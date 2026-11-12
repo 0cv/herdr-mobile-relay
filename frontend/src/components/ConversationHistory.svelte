@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import PromptComposer from '$components/PromptComposer.svelte';
   import AgentInteraction from '$components/AgentInteraction.svelte';
@@ -24,14 +25,11 @@
     putConversationPreview,
   } from '$lib/conversation-cache';
   import {
-    armSpeechKeepalive,
-    releaseSpeechKeepalive,
-    speakViaRelay,
+    toggleSpeech as toggleResponseSpeech,
     speechEnabled,
     speechLanguage,
     speechLanguageLabel,
     speechState,
-    stopSpeech,
   } from '$lib/speech';
   import { fencedCodeText } from '$lib/markdown';
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
@@ -580,27 +578,12 @@
     demandOlder();
   }
   function toggleSpeech(text: string): void {
-    if ($speechState === 'speaking') {
-      stopSpeech();
-      return;
-    }
-    const toast = (message: string) => relayStore.showToast(message, true);
-    // Checked before anything plays: unlocking audio for a language the relay
-    // cannot speak leaves the phone with a silent stream and no explanation.
-    const languages = $connections.get(agent.relay_id)?.speechLanguages ?? [];
-    if (!languages.includes($speechLanguage)) {
-      toast(`This relay has no ${speechLanguageLabel($speechLanguage)} voice; install a Piper voice for it on that computer.`);
-      return;
-    }
-    // Armed inside the tap: the relay fetches audio before playing, and a
-    // play() after that round trip is autoplay-blocked.
-    armSpeechKeepalive(toast);
-    const spoke = speakViaRelay(
+    void toggleResponseSpeech(
       text,
+      $connections.get(agent.relay_id)?.speechLanguages ?? [],
       (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
-      toast,
+      (message) => relayStore.showToast(message, true),
     );
-    if (!spoke) releaseSpeechKeepalive();
   }
 
 
@@ -670,10 +653,9 @@
       relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(entry.text);
+    if (await copyText(entry.text)) {
       relayStore.showToast('Markdown copied.');
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
@@ -682,10 +664,9 @@
       relayStore.showToast('Clipboard access is unavailable while the app is locked.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(code);
+    if (await copyText(code)) {
       relayStore.showToast('Code copied.');
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
