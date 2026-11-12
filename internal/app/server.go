@@ -782,7 +782,7 @@ func (s *Server) Run(ctx context.Context) error {
 			if auditedWrite {
 				s.recordWriteAudit(client, msg, result)
 			}
-			s.hub.Send(client, commandResultMessage(result))
+			s.hub.Send(client, coordinator.CommandResultMessage(result))
 		case "check_update", "install_update", "deploy_app_update":
 			s.handleUpdate(ctx, client, inbound)
 		case "lease_pane_size", "release_pane_size":
@@ -926,7 +926,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case "clear_activities":
 			requestID, _ := msg["request_id"].(string)
 			s.dispatcher.HandleClearActivities(requestID, func(result *coordinator.CommandResult) {
-				s.hub.Send(client, commandResultMessage(result))
+				s.hub.Send(client, coordinator.CommandResultMessage(result))
 			})
 		case "upload_begin":
 			s.handleUploadBegin(client, inbound.RequestID, msg)
@@ -998,7 +998,7 @@ func (s *Server) Run(ctx context.Context) error {
 			if auditedWrite {
 				s.recordWriteAudit(client, msg, result)
 			}
-			s.hub.Send(client, commandResultMessage(result))
+			s.hub.Send(client, coordinator.CommandResultMessage(result))
 		case "list_directories":
 			requestID, _ := msg["request_id"].(string)
 			path, _ := msg["path"].(string)
@@ -1245,7 +1245,7 @@ func (s *Server) Run(ctx context.Context) error {
 				if auditedWrite {
 					s.recordWriteAudit(client, msg, result)
 				}
-				s.hub.Send(client, commandResultMessage(result))
+				s.hub.Send(client, coordinator.CommandResultMessage(result))
 				break
 			}
 			var result *coordinator.CommandResult
@@ -1257,7 +1257,7 @@ func (s *Server) Run(ctx context.Context) error {
 			if auditedWrite {
 				s.recordWriteAudit(client, msg, result)
 			}
-			s.hub.Send(client, commandResultMessage(result))
+			s.hub.Send(client, coordinator.CommandResultMessage(result))
 		}
 	})
 
@@ -3074,7 +3074,7 @@ func (s *Server) sendCommandResult(
 		PaneID:    paneID,
 		Data:      data,
 	}
-	s.hub.Send(client, commandResultMessage(result))
+	s.hub.Send(client, coordinator.CommandResultMessage(result))
 }
 
 func fitSlashCommandCatalog(catalog slashcmd.Catalog, requestID, action, paneID string) slashcmd.Catalog {
@@ -3110,7 +3110,7 @@ func trimSlashCatalog(catalog slashcmd.Catalog, count int) slashcmd.Catalog {
 }
 
 func slashCommandResultFits(catalog slashcmd.Catalog, requestID, action, paneID string) bool {
-	message := commandResultMessage(&coordinator.CommandResult{
+	message := coordinator.CommandResultMessage(&coordinator.CommandResult{
 		RequestID: requestID,
 		Action:    action,
 		OK:        true,
@@ -3141,23 +3141,7 @@ func (s *Server) sendAuditedCommandResult(
 		Data:      data,
 	}
 	s.recordWriteAudit(client, message, result)
-	s.hub.Send(client, commandResultMessage(result))
-}
-
-func commandResultMessage(result *coordinator.CommandResult) map[string]any {
-	message := map[string]any{
-		"type":       "command_result",
-		"request_id": result.RequestID,
-		"action":     result.Action,
-		"ok":         result.OK,
-		"phase":      result.Phase,
-		"error":      result.Error,
-		"pane_id":    result.PaneID,
-	}
-	if result.Data != nil {
-		message["data"] = result.Data
-	}
-	return message
+	s.hub.Send(client, coordinator.CommandResultMessage(result))
 }
 
 func (s *Server) watchJobStates(ctx context.Context) {
@@ -3795,17 +3779,7 @@ func cloneAgents(agents []*coordinator.AgentState) []*coordinator.AgentState {
 		if agent == nil {
 			continue
 		}
-		copy := *agent
-		copy.Options = append([]string(nil), agent.Options...)
-		if agent.Interaction != nil {
-			interaction := *agent.Interaction
-			interaction.Options = append([]question.Option(nil), agent.Interaction.Options...)
-			for optionIndex := range interaction.Options {
-				interaction.Options[optionIndex].Summary = append([]question.SummaryEntry(nil), agent.Interaction.Options[optionIndex].Summary...)
-			}
-			copy.Interaction = &interaction
-		}
-		result = append(result, &copy)
+		result = append(result, agent.Clone())
 	}
 	return result
 }
@@ -3819,7 +3793,7 @@ func mergeAgentSnapshot(current, incoming []*coordinator.AgentState) []*coordina
 	for index, agent := range merged {
 		if existing := currentByPane[agent.PaneID]; existing != nil &&
 			agent.StateRevision < existing.StateRevision {
-			merged[index] = cloneAgents([]*coordinator.AgentState{existing})[0]
+			merged[index] = existing.Clone()
 		}
 	}
 	return merged

@@ -1024,7 +1024,7 @@ func (s *State) Snapshot() []*AgentState {
 func (s *State) snapshotLocked() []*AgentState {
 	result := make([]*AgentState, 0, len(s.agents))
 	for _, a := range s.agents {
-		cp := cloneAgentState(a)
+		cp := a.Clone()
 		cp.StateRevision = s.revision[cp.PaneID]
 		cp.Generation = s.generation[cp.PaneID]
 		if doneStatuses[cp.Status] && s.ackDone[cp.PaneID] {
@@ -1066,7 +1066,7 @@ func (s *State) commitWorkspacesLocked(workspaces []herdr.Workspace) bool {
 	return true
 }
 
-func cloneAgentState(agent *AgentState) *AgentState {
+func (agent *AgentState) Clone() *AgentState {
 	if agent == nil {
 		return nil
 	}
@@ -1140,7 +1140,7 @@ func (s *State) Agent(paneID string) (*AgentState, bool) {
 	if !ok {
 		return nil, false
 	}
-	copy := cloneAgentState(agent)
+	copy := agent.Clone()
 	copy.StateRevision = s.revision[paneID]
 	copy.Generation = s.generation[paneID]
 	return copy, true

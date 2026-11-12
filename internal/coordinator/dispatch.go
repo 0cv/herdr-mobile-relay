@@ -41,6 +41,22 @@ type CommandResult struct {
 	replayed  bool
 }
 
+func CommandResultMessage(result *CommandResult) map[string]any {
+	message := map[string]any{
+		"type":       "command_result",
+		"request_id": result.RequestID,
+		"action":     result.Action,
+		"ok":         result.OK,
+		"phase":      result.Phase,
+		"error":      result.Error,
+		"pane_id":    result.PaneID,
+	}
+	if result.Data != nil {
+		message["data"] = result.Data
+	}
+	return message
+}
+
 type Dispatcher struct {
 	terminalTextKey  string
 	herdr            backend.Backend

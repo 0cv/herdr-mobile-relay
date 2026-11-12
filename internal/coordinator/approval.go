@@ -688,19 +688,5 @@ func (d *Dispatcher) broadcastResult(result *CommandResult) {
 	if d.broadcast == nil {
 		return
 	}
-	message := map[string]any{
-		"type":       "command_result",
-		"request_id": result.RequestID,
-		"action":     result.Action,
-		"ok":         result.OK,
-		"phase":      result.Phase,
-		"pane_id":    result.PaneID,
-	}
-	if result.Error != "" {
-		message["error"] = result.Error
-	}
-	if result.Data != nil {
-		message["data"] = result.Data
-	}
-	d.broadcast(message)
+	d.broadcast(CommandResultMessage(result))
 }
