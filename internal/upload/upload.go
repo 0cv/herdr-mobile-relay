@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -487,29 +488,28 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 	expires := m.now().Add(m.attachTTL)
 	result := FinishResult{Attachments: make([]Attachment, 0, len(current.files))}
 	created := make([]string, 0, len(current.files))
+	committed := false
+	defer func() {
+		if !committed {
+			for _, path := range created {
+				_ = m.root.Remove(path)
+			}
+		}
+	}()
 	pending := make([]*attachmentRecord, 0, len(current.files))
 	for _, item := range current.files {
 		ref, idErr := m.opaqueID(24)
 		if idErr != nil {
-			for _, path := range created {
-				_ = m.root.Remove(path)
-			}
 			return fail(idErr)
 		}
 		extension := canonicalExtension(item.spec.MediaType)
 		relPath := "objects/" + ref + extension
 		if closeErr := item.file.Close(); closeErr != nil {
 			item.file = nil
-			for _, path := range created {
-				_ = m.root.Remove(path)
-			}
 			return fail(failure("upload_staging_failed", nil))
 		}
 		item.file = nil
 		if renameErr := m.root.Rename(item.path, relPath); renameErr != nil {
-			for _, path := range created {
-				_ = m.root.Remove(path)
-			}
 			return fail(failure("upload_staging_failed", nil))
 		}
 		created = append(created, relPath)
@@ -522,9 +522,6 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 		result.Attachments = append(result.Attachments, attachment)
 	}
 	if syncErr := m.syncObjectsDirectory(); syncErr != nil {
-		for _, path := range created {
-			_ = m.root.Remove(path)
-		}
 		return fail(syncErr)
 	}
 	m.mu.Lock()
@@ -542,14 +539,12 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 	}
 	m.mu.Unlock()
 	if collision {
-		for _, path := range created {
-			_ = m.root.Remove(path)
-		}
 		return fail(failure("upload_staging_failed", nil))
 	}
 	if persistErr := m.persistAttachments(); persistErr != nil {
 		var published *attachmentIndexPublishedError
 		if errors.As(persistErr, &published) {
+			committed = true
 			return fail(persistErr)
 		}
 		m.mu.Lock()
@@ -557,11 +552,9 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 			delete(m.attachments, record.attachment.Ref)
 		}
 		m.mu.Unlock()
-		for _, path := range created {
-			_ = m.root.Remove(path)
-		}
 		return fail(persistErr)
 	}
+	committed = true
 	m.discardSession(current, true)
 	return result, nil
 }
@@ -1026,59 +1019,90 @@ func normalizeSpec(spec FileSpec, maxBytes int64) (FileSpec, error) {
 	if spec.Bytes < 1 || spec.Bytes > maxBytes {
 		return FileSpec{}, failure("upload_file_size_invalid", map[string]any{"max_bytes": maxBytes})
 	}
-	allowedExtensions, ok := allowedTypes[spec.MediaType]
+	mediaType, ok := mediaTypes[spec.MediaType]
 	if !ok {
 		return FileSpec{}, failure("upload_type_unsupported", nil)
 	}
 	extension := strings.ToLower(filepath.Ext(spec.Name))
-	if !allowedExtensions[extension] {
+	if !slices.Contains(mediaType.extensions, extension) {
 		return FileSpec{}, failure("upload_extension_mismatch", nil)
 	}
 	return spec, nil
 }
 
-var allowedTypes = map[string]map[string]bool{
-	"image/png":        {".png": true},
-	"image/jpeg":       {".jpg": true, ".jpeg": true},
-	"image/gif":        {".gif": true},
-	"image/webp":       {".webp": true},
-	"image/heic":       {".heic": true},
-	"image/heif":       {".heif": true},
-	"application/pdf":  {".pdf": true},
-	"application/json": {".json": true},
-	"text/csv":         {".csv": true},
-	"text/plain":       {".txt": true, ".text": true, ".log": true},
-	"text/markdown":    {".md": true, ".markdown": true},
-	"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   {".docx": true},
-	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         {".xlsx": true},
-	"application/vnd.openxmlformats-officedocument.presentationml.presentation": {".pptx": true},
-	"application/vnd.oasis.opendocument.text":                                   {".odt": true},
-	"application/vnd.oasis.opendocument.spreadsheet":                            {".ods": true},
-	"application/vnd.oasis.opendocument.presentation":                           {".odp": true},
+type mediaType struct {
+	extensions []string
+	validate   func(*sessionFile) bool
+}
+
+var mediaTypes = map[string]mediaType{
+	"image/png": {
+		extensions: []string{".png"},
+		validate: func(item *sessionFile) bool {
+			return len(item.prefix) >= 8 && string(item.prefix[:8]) == "\x89PNG\r\n\x1a\n"
+		},
+	},
+	"image/jpeg": {
+		extensions: []string{".jpg", ".jpeg"},
+		validate: func(item *sessionFile) bool {
+			return len(item.prefix) >= 3 && item.prefix[0] == 0xff && item.prefix[1] == 0xd8 && item.prefix[2] == 0xff
+		},
+	},
+	"image/gif": {
+		extensions: []string{".gif"},
+		validate: func(item *sessionFile) bool {
+			return len(item.prefix) >= 6 && (string(item.prefix[:6]) == "GIF87a" || string(item.prefix[:6]) == "GIF89a")
+		},
+	},
+	"image/webp": {
+		extensions: []string{".webp"},
+		validate: func(item *sessionFile) bool {
+			return len(item.prefix) >= 12 && string(item.prefix[:4]) == "RIFF" && string(item.prefix[8:12]) == "WEBP"
+		},
+	},
+	"image/heic": {extensions: []string{".heic"}, validate: validISOImageContent},
+	"image/heif": {extensions: []string{".heif"}, validate: validISOImageContent},
+	"application/pdf": {
+		extensions: []string{".pdf"},
+		validate: func(item *sessionFile) bool {
+			return len(item.prefix) >= 5 && string(item.prefix[:5]) == "%PDF-" && strings.Contains(string(item.suffix), "%%EOF")
+		},
+	},
+	"application/json": {
+		extensions: []string{".json"},
+		validate: func(item *sessionFile) bool {
+			return validTextContent(item) && validJSONContent(item.file)
+		},
+	},
+	"text/csv":      {extensions: []string{".csv"}, validate: validTextContent},
+	"text/plain":    {extensions: []string{".txt", ".text", ".log"}, validate: validTextContent},
+	"text/markdown": {extensions: []string{".md", ".markdown"}, validate: validTextContent},
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
+		extensions: []string{".docx"},
+		validate: func(item *sessionFile) bool {
+			return validDocumentContainer(item.file, item.spec.Bytes, "word/document.xml", "")
+		},
+	},
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+		extensions: []string{".xlsx"},
+		validate: func(item *sessionFile) bool {
+			return validDocumentContainer(item.file, item.spec.Bytes, "xl/workbook.xml", "")
+		},
+	},
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": {
+		extensions: []string{".pptx"},
+		validate: func(item *sessionFile) bool {
+			return validDocumentContainer(item.file, item.spec.Bytes, "ppt/presentation.xml", "")
+		},
+	},
+	"application/vnd.oasis.opendocument.text":         {extensions: []string{".odt"}, validate: validOpenDocumentContent},
+	"application/vnd.oasis.opendocument.spreadsheet":  {extensions: []string{".ods"}, validate: validOpenDocumentContent},
+	"application/vnd.oasis.opendocument.presentation": {extensions: []string{".odp"}, validate: validOpenDocumentContent},
 }
 
 func canonicalExtension(mediaType string) string {
-	extensions := map[string]string{
-		"image/png":        ".png",
-		"image/jpeg":       ".jpg",
-		"image/gif":        ".gif",
-		"image/webp":       ".webp",
-		"image/heic":       ".heic",
-		"image/heif":       ".heif",
-		"application/pdf":  ".pdf",
-		"application/json": ".json",
-		"text/csv":         ".csv",
-		"text/plain":       ".txt",
-		"text/markdown":    ".md",
-		"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   ".docx",
-		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         ".xlsx",
-		"application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-		"application/vnd.oasis.opendocument.text":                                   ".odt",
-		"application/vnd.oasis.opendocument.spreadsheet":                            ".ods",
-		"application/vnd.oasis.opendocument.presentation":                           ".odp",
-	}
-	if extension := extensions[mediaType]; extension != "" {
-		return extension
+	if spec, ok := mediaTypes[mediaType]; ok {
+		return spec.extensions[0]
 	}
 	return ".data"
 }
@@ -1194,42 +1218,19 @@ func bytesContainNUL(data []byte) bool {
 }
 
 func validateContent(item *sessionFile) error {
-	prefix := item.prefix
-	valid := false
-	switch item.spec.MediaType {
-	case "image/png":
-		valid = len(prefix) >= 8 && string(prefix[:8]) == "\x89PNG\r\n\x1a\n"
-	case "image/jpeg":
-		valid = len(prefix) >= 3 && prefix[0] == 0xff && prefix[1] == 0xd8 && prefix[2] == 0xff
-	case "image/gif":
-		valid = len(prefix) >= 6 && (string(prefix[:6]) == "GIF87a" || string(prefix[:6]) == "GIF89a")
-	case "image/webp":
-		valid = len(prefix) >= 12 && string(prefix[:4]) == "RIFF" && string(prefix[8:12]) == "WEBP"
-	case "image/heic", "image/heif":
-		valid = validISOImage(prefix)
-	case "application/pdf":
-		valid = len(prefix) >= 5 && string(prefix[:5]) == "%PDF-" && strings.Contains(string(item.suffix), "%%EOF")
-	case "application/json":
-		valid = validTextContent(item) && validJSONContent(item.file)
-	case "text/plain", "text/markdown", "text/csv":
-		valid = validTextContent(item)
-	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "word/document.xml", "")
-	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "xl/workbook.xml", "")
-	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "ppt/presentation.xml", "")
-	case "application/vnd.oasis.opendocument.text":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.text")
-	case "application/vnd.oasis.opendocument.spreadsheet":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.spreadsheet")
-	case "application/vnd.oasis.opendocument.presentation":
-		valid = validDocumentContainer(item.file, item.spec.Bytes, "", "application/vnd.oasis.opendocument.presentation")
-	}
-	if !valid {
+	mediaType, ok := mediaTypes[item.spec.MediaType]
+	if !ok || !mediaType.validate(item) {
 		return failure("upload_content_type_mismatch", map[string]any{"file_index": -1})
 	}
 	return nil
+}
+
+func validISOImageContent(item *sessionFile) bool {
+	return validISOImage(item.prefix)
+}
+
+func validOpenDocumentContent(item *sessionFile) bool {
+	return validDocumentContainer(item.file, item.spec.Bytes, "", item.spec.MediaType)
 }
 
 func validTextContent(item *sessionFile) bool {

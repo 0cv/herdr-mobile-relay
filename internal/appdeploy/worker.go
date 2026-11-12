@@ -88,9 +88,9 @@ func Run(ctx context.Context, jobPath string) error {
 	// thousands.
 	defer func() { _ = os.Remove(jobPath) }()
 	started := time.Now().UTC().Format(time.RFC3339)
-	statePath := filepath.Join(job.RuntimeDir, "app-deploy-state.json")
+	deployStatePath := statePath(job.RuntimeDir)
 	fail := func(deployErr error) error {
-		stateErr := writeState(statePath, State{
+		stateErr := writeState(deployStatePath, State{
 			State:          "failed",
 			TargetVersion:  job.Version,
 			TargetRevision: job.Revision,
@@ -134,14 +134,10 @@ func Run(ctx context.Context, jobPath string) error {
 		if deployErr != nil {
 			value.Error = safeError(deployErr)
 		}
-		_ = writeState(statePath, value)
+		_ = writeState(deployStatePath, value)
 	}
 	write("deploying", nil)
 
-	if err := verifyWebBundle(job); err != nil {
-		write("failed", err)
-		return err
-	}
 	// launchd (macOS) and systemd-run (Linux) hand the worker an
 	// inherited working directory the deploy does not own: on macOS that is the
 	// read-only filesystem root. Wrangler resolves its account config cache at
@@ -693,11 +689,15 @@ func verifyPublicWith(
 	client *http.Client,
 	retryDelay func(int) time.Duration,
 ) error {
+	targetDescriptor, err := verifiedTargetWebDescriptor(job)
+	if err != nil {
+		return err
+	}
 	client = publicClient(client, job.Origin)
 	nonce := time.Now().UnixNano()
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		retryable, err := checkPublicBundle(ctx, job, client, nonce, attempt)
+		retryable, err := checkPublicBundle(ctx, job, client, targetDescriptor, nonce, attempt)
 		if err == nil {
 			return nil
 		}
@@ -970,25 +970,31 @@ func checkCanonicalPublicBundle(
 	return false, fmt.Errorf("missing canonical public asset /%s returned HTTP 200", missingPath)
 }
 
+func fetchDecoded(
+	ctx context.Context,
+	client *http.Client,
+	origin, resource, cacheBust, acceptEncoding string,
+) ([]byte, bool, error) {
+	body, headers, err := fetchPublicResource(ctx, client, origin, resource, cacheBust, acceptEncoding)
+	if err != nil {
+		return nil, publicErrorRetryable(err), err
+	}
+	body, err = decodePublicRepresentation(body, headers)
+	return body, err != nil, err
+}
+
 func checkPublicBundle(
 	ctx context.Context,
 	job Job,
 	client *http.Client,
+	targetDescriptor release.WebDescriptor,
 	nonce int64,
 	attempt int,
 ) (bool, error) {
-	targetDescriptor, err := verifiedTargetWebDescriptor(job)
-	if err != nil {
-		return false, err
-	}
 	cacheBust := fmt.Sprintf("%s-%d-%d", job.Revision, nonce, attempt)
-	descriptorData, descriptorHeaders, err := fetchPublicResource(ctx, client, job.Origin, "release.json", cacheBust, "identity")
+	descriptorData, retryable, err := fetchDecoded(ctx, client, job.Origin, "release.json", cacheBust, "identity")
 	if err != nil {
-		return publicErrorRetryable(err), err
-	}
-	descriptorData, err = decodePublicRepresentation(descriptorData, descriptorHeaders)
-	if err != nil {
-		return true, err
+		return retryable, err
 	}
 	var rawDescriptor release.WebDescriptor
 	if err := json.Unmarshal(descriptorData, &rawDescriptor); err != nil {
@@ -1006,27 +1012,19 @@ func checkPublicBundle(
 	files := make(map[string][]byte, len(targetDescriptor.Files))
 	for _, name := range []string{"entry", "javascript", "stylesheet"} {
 		descriptorFile := targetDescriptor.Files[name]
-		identityBody, identityHeaders, fetchErr := fetchPublicResource(
+		identityBody, retryable, err := fetchDecoded(
 			ctx, client, job.Origin, descriptorFile.Path, cacheBust+"-"+name, "identity",
 		)
-		if fetchErr != nil {
-			return publicErrorRetryable(fetchErr), fetchErr
-		}
-		identityBody, decodeErr := decodePublicRepresentation(identityBody, identityHeaders)
-		if decodeErr != nil {
-			return true, decodeErr
+		if err != nil {
+			return retryable, err
 		}
 		files[descriptorFile.Path] = identityBody
 
-		compressedBody, compressedHeaders, fetchErr := fetchPublicResource(
+		compressedBody, retryable, err := fetchDecoded(
 			ctx, client, job.Origin, descriptorFile.Path, cacheBust+"-br-"+name, "br",
 		)
-		if fetchErr != nil {
-			return publicErrorRetryable(fetchErr), fetchErr
-		}
-		compressedBody, decodeErr = decodePublicRepresentation(compressedBody, compressedHeaders)
-		if decodeErr != nil {
-			return true, decodeErr
+		if err != nil {
+			return retryable, err
 		}
 		if publicDigest(compressedBody) != descriptorFile.SHA256 {
 			return true, fmt.Errorf("public representation for %s does not match its descriptor", name)
@@ -1035,28 +1033,20 @@ func checkPublicBundle(
 	if _, err := release.VerifyWebDescriptorData(descriptorData, files, job.Version); err != nil {
 		return true, errors.New("public web release descriptor verification failed")
 	}
-	versionData, versionHeaders, err := fetchPublicResource(
+	versionData, retryable, err := fetchDecoded(
 		ctx, client, job.Origin, "version.json", cacheBust+"-version", "identity",
 	)
 	if err != nil {
-		return publicErrorRetryable(err), err
-	}
-	versionData, err = decodePublicRepresentation(versionData, versionHeaders)
-	if err != nil {
-		return true, err
+		return retryable, err
 	}
 	if err := verifyPublicVersionMetadata(versionData, job, targetDescriptor); err != nil {
 		return true, fmt.Errorf("public web bundle identity: %w", err)
 	}
-	compressedVersionData, compressedVersionHeaders, err := fetchPublicResource(
+	compressedVersionData, retryable, err := fetchDecoded(
 		ctx, client, job.Origin, "version.json", cacheBust+"-version-br", "br",
 	)
 	if err != nil {
-		return publicErrorRetryable(err), err
-	}
-	compressedVersionData, err = decodePublicRepresentation(compressedVersionData, compressedVersionHeaders)
-	if err != nil {
-		return true, err
+		return retryable, err
 	}
 	if err := verifyPublicVersionMetadata(compressedVersionData, job, targetDescriptor); err != nil {
 		return true, fmt.Errorf("public compressed web bundle identity: %w", err)

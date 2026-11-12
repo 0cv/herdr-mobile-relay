@@ -568,6 +568,39 @@ func TestVerifyPublicRetriesUntilExpectedBundleIsPublished(t *testing.T) {
 	}
 }
 
+func TestVerifyPublicKeepsTargetDescriptorAcrossRetries(t *testing.T) {
+	targetRoot := t.TempDir()
+	publicRoot := t.TempDir()
+	writeWebReleaseFixture(t, targetRoot)
+	writeWebReleaseFixture(t, publicRoot)
+	var versionRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/version.json" && versionRequests.Add(1) == 1 {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"release_version":"1.2.2","revision":"old"}`))
+			return
+		}
+		webFixtureHandler(publicRoot, nil)(writer, request)
+	}))
+	defer server.Close()
+
+	job := Job{Origin: server.URL, WebRoot: targetRoot, Version: "1.2.3", Revision: "abc"}
+	retries := 0
+	err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration {
+		retries++
+		if err := os.Remove(filepath.Join(targetRoot, "release.json")); err != nil {
+			t.Fatal(err)
+		}
+		return 0
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retries != 1 {
+		t.Fatalf("retries = %d, want 1", retries)
+	}
+}
+
 func TestVerifyPublicTimesOutWithSanitizedIdentityFailure(t *testing.T) {
 	root := t.TempDir()
 	writeWebReleaseFixture(t, root)
@@ -713,7 +746,11 @@ func TestVerifyPublicBundlePinsTheLocallyVerifiedDescriptor(t *testing.T) {
 	defer server.Close()
 
 	job := Job{Origin: server.URL, WebRoot: targetRoot, Version: "1.2.3", Revision: "abc"}
-	retryable, err := checkPublicBundle(t.Context(), job, server.Client(), time.Now().UnixNano(), 0)
+	targetDescriptor, err := verifiedTargetWebDescriptor(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryable, err := checkPublicBundle(t.Context(), job, server.Client(), targetDescriptor, time.Now().UnixNano(), 0)
 	if !retryable || err == nil || !strings.Contains(err.Error(), "does not match the verified local target") {
 		t.Fatalf("checkPublicBundle() = %v, %v", retryable, err)
 	}
@@ -759,7 +796,11 @@ func TestVerifyPublicBundleChecksCompressedVersionMetadata(t *testing.T) {
 	defer server.Close()
 
 	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc"}
-	retryable, err := checkPublicBundle(t.Context(), job, server.Client(), time.Now().UnixNano(), 0)
+	targetDescriptor, err := verifiedTargetWebDescriptor(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryable, err := checkPublicBundle(t.Context(), job, server.Client(), targetDescriptor, time.Now().UnixNano(), 0)
 	if !retryable || err == nil || !strings.Contains(err.Error(), "compressed web bundle identity") {
 		t.Fatalf("checkPublicBundle() = %v, %v", retryable, err)
 	}
@@ -943,7 +984,11 @@ func TestVerifyPublicRedactsMalformedCanonicalRedirect(t *testing.T) {
 	defer server.Close()
 
 	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc"}
-	retryable, err := checkPublicBundle(t.Context(), job, publicClient(server.Client(), server.URL), 1, 0)
+	targetDescriptor, err := verifiedTargetWebDescriptor(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryable, err := checkPublicBundle(t.Context(), job, publicClient(server.Client(), server.URL), targetDescriptor, 1, 0)
 	if retryable || !errors.Is(err, errPublicCanonicalRedirect) || !strings.Contains(err.Error(), canonicalPath) || strings.Contains(err.Error(), "private-malformed-value") {
 		t.Fatalf("checkPublicBundle() = %v, %v", retryable, err)
 	}
@@ -1133,7 +1178,11 @@ func TestVerifyPublicRedactsMetadataAndEncodingDiagnostics(t *testing.T) {
 			defer server.Close()
 
 			job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc"}
-			retryable, err := checkPublicBundle(t.Context(), job, publicClient(server.Client(), server.URL), 1, 0)
+			targetDescriptor, err := verifiedTargetWebDescriptor(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retryable, err := checkPublicBundle(t.Context(), job, publicClient(server.Client(), server.URL), targetDescriptor, 1, 0)
 			if !retryable || err == nil {
 				t.Fatalf("checkPublicBundle() = %v, %v", retryable, err)
 			}

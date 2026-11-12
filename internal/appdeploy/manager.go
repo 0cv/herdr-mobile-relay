@@ -82,19 +82,7 @@ func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
 		manager.reason = originReason
 	}
 	if manager.reason == "" {
-		job := Job{
-			RuntimeDir: runtimeDir,
-			WebRoot:    webRoot,
-			Origin:     manager.origin,
-			Project:    manager.project,
-			Branch:     manager.branch,
-			Version:    version,
-			Revision:   revision,
-			WebHash:    manager.webHash,
-			NPXPath:    manager.npxPath,
-			NodeDir:    manager.nodeDir,
-		}
-		if err := validate(job); err != nil {
+		if err := validate(manager.job()); err != nil {
 			manager.reason = err.Error()
 		}
 	}
@@ -152,19 +140,7 @@ func runConfigured(
 		return err
 	}
 	jobPath := filepath.Join(runtimeDir, fmt.Sprintf("app-deploy-job-%d.json", time.Now().UnixNano()))
-	job := Job{
-		RuntimeDir: runtimeDir,
-		WebRoot:    webRoot,
-		Origin:     manager.origin,
-		Project:    manager.project,
-		Branch:     manager.branch,
-		Version:    version,
-		Revision:   revision,
-		WebHash:    manager.webHash,
-		NPXPath:    manager.npxPath,
-		NodeDir:    manager.nodeDir,
-	}
-	if err := writeManagerJSON(jobPath, job); err != nil {
+	if err := writeManagerJSON(jobPath, manager.job()); err != nil {
 		return err
 	}
 	return Run(ctx, jobPath)
@@ -190,7 +166,32 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 		return "", state, errors.New("The requested app deployment does not match this relay release and configured origin")
 	}
 	jobPath := filepath.Join(m.runtimeDir, fmt.Sprintf("app-deploy-job-%d.json", time.Now().UnixNano()))
-	job := Job{
+	if err := writeManagerJSON(jobPath, m.job()); err != nil {
+		return "", state, err
+	}
+	scheduled := State{
+		State:          "scheduled",
+		TargetVersion:  m.version,
+		TargetRevision: m.revision,
+		StartedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeState(statePath(m.runtimeDir), scheduled); err != nil {
+		_ = os.Remove(jobPath)
+		return "", state, err
+	}
+	_ = sweepWorkers(ctx)
+	if err := m.launch(ctx, jobPath); err != nil {
+		scheduled.State = "failed"
+		scheduled.Error = safeError(err)
+		_ = writeState(statePath(m.runtimeDir), scheduled)
+		_ = os.Remove(jobPath)
+		return "", m.public(scheduled), err
+	}
+	return filepath.Base(jobPath), m.public(scheduled), nil
+}
+
+func (m *Manager) job() Job {
+	return Job{
 		RuntimeDir: m.runtimeDir,
 		WebRoot:    m.webRoot,
 		Origin:     m.origin,
@@ -202,48 +203,36 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 		NPXPath:    m.npxPath,
 		NodeDir:    m.nodeDir,
 	}
-	if err := writeManagerJSON(jobPath, job); err != nil {
-		return "", state, err
+}
+
+func statePath(runtimeDir string) string {
+	return filepath.Join(runtimeDir, "app-deploy-state.json")
+}
+
+func readState(runtimeDir string) (State, error) {
+	data, err := os.ReadFile(statePath(runtimeDir))
+	if err != nil {
+		return State{}, err
 	}
-	scheduled := State{
-		State:          "scheduled",
-		TargetVersion:  m.version,
-		TargetRevision: m.revision,
-		StartedAt:      time.Now().UTC().Format(time.RFC3339),
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
+		return State{}, err
 	}
-	if err := writeState(filepath.Join(m.runtimeDir, "app-deploy-state.json"), scheduled); err != nil {
-		_ = os.Remove(jobPath)
-		return "", state, err
+	if !validDeployState(state.State) {
+		return State{}, errors.New("invalid app deployment state")
 	}
-	_ = sweepWorkers(ctx)
-	if err := m.launch(ctx, jobPath); err != nil {
-		scheduled.State = "failed"
-		scheduled.Error = safeError(err)
-		_ = writeState(filepath.Join(m.runtimeDir, "app-deploy-state.json"), scheduled)
-		_ = os.Remove(jobPath)
-		return "", m.public(scheduled), err
-	}
-	return filepath.Base(jobPath), m.public(scheduled), nil
+	return state, nil
 }
 
 func (m *Manager) loadState() PublicState {
-	state := State{State: "idle"}
-	statePath := filepath.Join(m.runtimeDir, "app-deploy-state.json")
-	data, err := os.ReadFile(statePath)
-	if err == nil {
-		var loaded State
-		if json.Unmarshal(data, &loaded) == nil && validDeployState(loaded.State) {
-			state = loaded
-		}
+	state, err := readState(m.runtimeDir)
+	if err != nil {
+		state = State{State: "idle"}
 	}
 	if state.State == "deploying" || scheduledStateExpired(state) {
 		recoverAppDeployState(m.runtimeDir, false)
-		data, err = os.ReadFile(statePath)
-		if err == nil {
-			var recovered State
-			if json.Unmarshal(data, &recovered) == nil && validDeployState(recovered.State) {
-				state = recovered
-			}
+		if recovered, err := readState(m.runtimeDir); err == nil {
+			state = recovered
 		}
 	}
 	return m.public(state)
@@ -373,13 +362,8 @@ func validDeployState(value string) bool {
 }
 
 func recoverAppDeployState(runtimeDir string, includeScheduled bool) {
-	statePath := filepath.Join(runtimeDir, "app-deploy-state.json")
-	data, err := os.ReadFile(statePath)
+	state, err := readState(runtimeDir)
 	if err != nil {
-		return
-	}
-	var state State
-	if json.Unmarshal(data, &state) != nil {
 		return
 	}
 	_, startedErr := time.Parse(time.RFC3339, state.StartedAt)
@@ -396,7 +380,7 @@ func recoverAppDeployState(runtimeDir string, includeScheduled bool) {
 	state.State = "failed"
 	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	state.Error = "App deployment worker stopped before completion"
-	_ = writeState(statePath, state)
+	_ = writeState(statePath(runtimeDir), state)
 }
 
 func scheduledStateExpired(state State) bool {
