@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -357,10 +358,7 @@ func (m *Manager) PublishMappedAddresses(mapped []netip.AddrPort) {
 	// Sessions already reserved captured the previous API. Trickle every
 	// mapping to them; session-level deduplication keeps repeated discovery from
 	// emitting the same candidate twice.
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
+	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 
 	for _, s := range live {
@@ -446,10 +444,7 @@ type SessionReport struct {
 // SessionReports snapshots every live session for status reporting.
 func (m *Manager) SessionReports() []SessionReport {
 	m.mu.Lock()
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
+	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 
 	reports := make([]SessionReport, 0, len(live))
@@ -539,10 +534,7 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closed = true
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
+	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 
 	for _, s := range live {
@@ -568,7 +560,13 @@ func (m *Manager) lookup(key SessionKey) *session {
 func (m *Manager) newSessionLocked(key SessionKey) *session {
 	// A DataChannel-only answer carries exactly one media section, mid "0";
 	// the first real local candidate confirms it.
-	s := &session{key: key, manager: m, sdpMid: "0"}
+	s := &session{
+		key:         key,
+		manager:     m,
+		sdpMid:      "0",
+		localTypes:  make(map[string]int, 4),
+		remoteTypes: make(map[string]int, 4),
+	}
 	s.ctx, s.cancel = context.WithCancel(m.baseCtx)
 	m.sessions[key] = s
 	return s
@@ -646,10 +644,7 @@ func (m *Manager) sweep() {
 // progress before now.
 func (m *Manager) sweepStalled(now time.Time) {
 	m.mu.Lock()
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
+	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 	for _, s := range live {
 		if conn := s.connection(); conn != nil && conn.stalled(now) {
@@ -748,26 +743,16 @@ func (s *session) handleSelectedPair(pair *webrtc.ICECandidatePair) {
 func (s *session) report() SessionReport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := SessionReport{
-		LocalTypes:     make(map[string]int, len(s.localTypes)),
-		RemoteTypes:    make(map[string]int, len(s.remoteTypes)),
+	return SessionReport{
+		LocalTypes:     maps.Clone(s.localTypes),
+		RemoteTypes:    maps.Clone(s.remoteTypes),
 		SelectedLocal:  s.selectedLocal,
 		SelectedRemote: s.selectedRemote,
 	}
-	for name, count := range s.localTypes {
-		out.LocalTypes[name] = count
-	}
-	for name, count := range s.remoteTypes {
-		out.RemoteTypes[name] = count
-	}
-	return out
 }
 
 // countTypeLocked tallies one candidate type. The caller must hold s.mu.
 func countTypeLocked(counts map[string]int, line string) map[string]int {
-	if counts == nil {
-		counts = make(map[string]int, 4)
-	}
 	counts[candidateType(line)]++
 	return counts
 }

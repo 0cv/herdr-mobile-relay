@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -263,10 +264,7 @@ func (p *PolicyEngine) Get(deviceID, locale string) DevicePolicy {
 
 func clonePolicy(policy DevicePolicy) DevicePolicy {
 	copyPolicy := policy
-	copyPolicy.Categories = make(map[Category]bool, len(policy.Categories))
-	for category, enabled := range policy.Categories {
-		copyPolicy.Categories[category] = enabled
-	}
+	copyPolicy.Categories = maps.Clone(policy.Categories)
 	return copyPolicy
 }
 
@@ -307,21 +305,7 @@ func (p *PolicyEngine) Decide(key PushEventKey, locale string, now time.Time) Po
 	return PolicyDecision{Deliver: true, DueAt: due}
 }
 func (p *PolicyEngine) Allows(key PushEventKey, locale string, now time.Time) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	policy, ok := p.state.Policies[key.DeviceID]
-	if !ok {
-		policy = DefaultDevicePolicy(key.DeviceID, locale)
-	}
-	if !policy.Categories[key.Category] {
-		return false
-	}
-	timedSnoozeActive := !policy.SnoozeUntil.IsZero() && now.Before(policy.SnoozeUntil)
-	if policy.Snoozed && policy.SnoozeUntil.IsZero() || timedSnoozeActive {
-		return false
-	}
-	viewed, viewedExists := p.viewedPanes[key.DeviceID]
-	return !viewedExists || !sameTarget(viewed, key.Target())
+	return p.Decide(key, locale, now).Deliver
 }
 
 func (p *PolicyEngine) MarkAccepted(key PushEventKey, acceptedAt time.Time) error {

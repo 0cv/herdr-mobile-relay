@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -399,24 +401,7 @@ func (h *Hub) SendByID(clientID string, message any) bool {
 }
 
 func (h *Hub) Broadcast(message any) {
-	data, kind, replaceable, err := encodeMessage(message)
-	if err != nil {
-		return
-	}
-	h.register.Lock()
-	defer h.register.Unlock()
-	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
-	h.mu.RUnlock()
-	for _, client := range clients {
-		if !h.push(client, data, kind, replaceable) {
-			h.slowClientEvictions.Add(1)
-			h.removeClient(client)
-		}
-	}
+	h.BroadcastPrepared(message, nil)
 }
 
 // BroadcastPrepared applies a logical state update under the same registration
@@ -434,10 +419,7 @@ func (h *Hub) BroadcastPrepared(message any, prepare func()) {
 		prepare()
 	}
 	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
 	h.mu.RUnlock()
 	h.pushPrepared(clients, []preparedMessage{{data: data, kind: kind, replaceable: replaceable}})
 }
@@ -470,10 +452,7 @@ func (h *Hub) BroadcastBatchPrepared(build func() (messages []any, commit func()
 		commit()
 	}
 	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
 	h.mu.RUnlock()
 	h.pushPrepared(clients, prepared)
 	return nil
@@ -488,16 +467,7 @@ func (h *Hub) SendBatchPrepared(client *ClientConn, build func() []any) bool {
 	}
 	h.register.Lock()
 	defer h.register.Unlock()
-	messages := build()
-	prepared, err := prepareMessages(messages)
-	if err != nil {
-		return false
-	}
-	if !h.clientRegistered(client) {
-		return false
-	}
-	h.pushPrepared([]*ClientConn{client}, prepared)
-	return true
+	return h.sendBatchPreparedLocked(client, build, true)
 }
 
 // SendBatchPreparedByID resolves the client and invokes its builder under the
@@ -515,9 +485,16 @@ func (h *Hub) SendBatchPreparedByID(clientID string, build func() []any) bool {
 	if client == nil {
 		return false
 	}
+	return h.sendBatchPreparedLocked(client, build, false)
+}
+
+func (h *Hub) sendBatchPreparedLocked(client *ClientConn, build func() []any, requireRegistered bool) bool {
 	messages := build()
 	prepared, err := prepareMessages(messages)
 	if err != nil {
+		return false
+	}
+	if requireRegistered && !h.clientRegistered(client) {
 		return false
 	}
 	h.pushPrepared([]*ClientConn{client}, prepared)
@@ -672,10 +649,7 @@ func (h *Hub) SetE2EEAuthResolver(resolver E2EEAuthResolver) {
 // to exercise the client's reconnect path rather than shut down the relay.
 func (h *Hub) DropConnections() {
 	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
 	pending := make(map[FrameConn]*ClientConn, len(h.pending))
 	for conn, client := range h.pending {
 		pending[conn] = client
@@ -690,11 +664,8 @@ func (h *Hub) DropConnections() {
 func (h *Hub) Shutdown(ctx context.Context) error {
 	h.mu.Lock()
 	h.closing = true
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-		delete(h.clients, client.id)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
+	clear(h.clients)
 	pending := h.pending
 	h.pending = make(map[FrameConn]*ClientConn)
 	h.mu.Unlock()

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -152,8 +153,8 @@ func (q *durableQueue) removeSubscriptions(deviceID string, endpoints []string) 
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	previousEntries := cloneQueueEntries(q.state.Entries)
-	previousDelivered := cloneDeliveredRecords(q.state.Delivered)
+	previousEntries := maps.Clone(q.state.Entries)
+	previousDelivered := maps.Clone(q.state.Delivered)
 	for id, entry := range q.state.Entries {
 		if entry.Subscription.DeviceID == deviceID && remove[entry.Subscription.Endpoint] {
 			delete(q.state.Entries, id)
@@ -184,8 +185,8 @@ func (q *durableQueue) replaceSubscriptionsWhileProcessing(deviceID string, endp
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	previousEntries := cloneQueueEntries(q.state.Entries)
-	previousDelivered := cloneDeliveredRecords(q.state.Delivered)
+	previousEntries := maps.Clone(q.state.Entries)
+	previousDelivered := maps.Clone(q.state.Delivered)
 	for id, entry := range q.state.Entries {
 		if entry.Subscription.DeviceID != deviceID || !replace[entry.Subscription.Endpoint] {
 			continue
@@ -214,22 +215,6 @@ func (q *durableQueue) replaceSubscriptionsWhileProcessing(deviceID string, endp
 		return err
 	}
 	return nil
-}
-
-func cloneQueueEntries(entries map[string]queueEntry) map[string]queueEntry {
-	cloned := make(map[string]queueEntry, len(entries))
-	for id, entry := range entries {
-		cloned[id] = entry
-	}
-	return cloned
-}
-
-func cloneDeliveredRecords(records map[string]deliveredRecord) map[string]deliveredRecord {
-	cloned := make(map[string]deliveredRecord, len(records))
-	for id, record := range records {
-		cloned[id] = record
-	}
-	return cloned
 }
 
 func (q *durableQueue) removeDevice(deviceID string) error {
@@ -596,7 +581,7 @@ func retryablePushError(err error) bool {
 		return false
 	}
 	var pe *pushError
-	if asPushError(err, &pe) {
+	if errors.As(err, &pe) {
 		return pe.statusCode == http.StatusRequestTimeout || pe.statusCode == http.StatusTooManyRequests || pe.statusCode >= 500
 	}
 	var networkError net.Error

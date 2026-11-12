@@ -839,6 +839,30 @@ func TestCandidateTypeIsClosedSet(t *testing.T) {
 	}
 }
 
+func TestSessionReportEmptyCandidateTypesAreObjects(t *testing.T) {
+	h := newHarness(t, 0, nil)
+	h.manager.mu.Lock()
+	h.manager.newSessionLocked(SessionKey{ClientID: "client-1", RequestID: "req-1"})
+	h.manager.mu.Unlock()
+
+	reports := h.manager.SessionReports()
+	if len(reports) != 1 {
+		t.Fatalf("reports = %d, want 1", len(reports))
+	}
+	for name, counts := range map[string]map[string]int{
+		"local_types":  reports[0].LocalTypes,
+		"remote_types": reports[0].RemoteTypes,
+	} {
+		encoded, err := json.Marshal(counts)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if string(encoded) != "{}" {
+			t.Errorf("%s = %s, want {}", name, encoded)
+		}
+	}
+}
+
 // A report must never carry an address: /healthz is unauthenticated.
 func TestSessionReportCarriesTypesOnly(t *testing.T) {
 	h := newHarness(t, 0, nil)
