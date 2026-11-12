@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 type piProvider struct{}
@@ -223,7 +225,7 @@ func resolvePiSkillScope(entries []string, base, home string) piSkillScope {
 			prefix = entry[0]
 			entry = strings.TrimSpace(entry[1:])
 		}
-		expanded := expandTilde(entry, home)
+		expanded := agentroots.ExpandTilde(entry, home)
 		if expanded == "" || strings.HasPrefix(expanded, "~") {
 			continue
 		}

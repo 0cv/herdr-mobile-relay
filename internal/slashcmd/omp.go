@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 // ompCommandFormat is the form Oh My Pi registers skills under. Verified against
@@ -253,7 +255,7 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// A project config may only expose skills that remain under that project;
 	// user-configured directories retain OMP's unrestricted personal behavior.
 	for _, configured := range settings.customDirectories {
-		dir := expandTilde(configured, ctx.Home)
+		dir := agentroots.ExpandTilde(configured, ctx.Home)
 		if strings.HasPrefix(dir, "~") {
 			continue
 		}
@@ -395,18 +397,6 @@ func (reader *catalogReader) settingsFileIn(dir string, names ...string) ([]byte
 		return data, true, true
 	}
 	return nil, found, false
-}
-
-// expandTilde resolves a leading "~" against home, matching how omp expands
-// customDirectories.
-func expandTilde(path, home string) string {
-	if path == "~" {
-		return home
-	}
-	if rest, ok := strings.CutPrefix(path, "~/"); ok {
-		return filepath.Join(home, rest)
-	}
-	return path
 }
 
 func init() {

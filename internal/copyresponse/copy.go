@@ -190,7 +190,7 @@ func Run(
 	}
 
 	copied, readErr := readClipboard(ctx)
-	if readErr == nil && !bytesEqualString(copied, sentinel) &&
+	if readErr == nil && string(copied) != sentinel &&
 		matchesCounts(copied, confirmedChars, confirmedLines) {
 		return Result{Text: string(copied), Source: "clipboard", Chars: utf8.RuneCount(copied), Lines: lineCount(copied)}, nil
 	}
@@ -340,7 +340,7 @@ func copiedResponseReady(
 		return false
 	}
 	copied, err := readClipboard(ctx)
-	if err == nil && !bytesEqualString(copied, sentinel) && matchesCounts(copied, chars, lines) {
+	if err == nil && string(copied) != sentinel && matchesCounts(copied, chars, lines) {
 		return true
 	}
 	_, ok = freshSecondaryResponse(
@@ -370,7 +370,7 @@ func freshSecondaryResponse(
 	secondary, err := os.ReadFile(path)
 	secondaryInfo, statErr := os.Stat(path)
 	if err != nil || statErr != nil ||
-		bytesEqualString(secondary, sentinel) || !matchesCounts(secondary, chars, lines) {
+		string(secondary) == sentinel || !matchesCounts(secondary, chars, lines) {
 		return nil, false
 	}
 	if !existed || !bytes.Equal(secondary, before) {
@@ -486,10 +486,6 @@ func newSentinel() (string, error) {
 		return "", err
 	}
 	return "herdr-mobile-relay-copy-" + hex.EncodeToString(data), nil
-}
-
-func bytesEqualString(data []byte, value string) bool {
-	return string(data) == value
 }
 
 // Negative counts mean the agent omitted that dimension; sentinel and freshness still guard the payload.

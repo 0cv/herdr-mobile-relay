@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 // openCodeBuiltins mirrors commands that are available in the stable OpenCode
@@ -136,7 +138,7 @@ func (reader *catalogReader) openCodeCommandDir(dir, source string, budget, visi
 			if !ok {
 				continue
 			}
-			description := compact(metadata["description"], 240)
+			description := textutil.Compact(metadata["description"], 240)
 			if description == "" {
 				description = "Custom OpenCode command"
 			}

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 const maxGitWalkDepth = 32
@@ -99,7 +101,7 @@ func (reader *catalogReader) walkDirBudget(dir, namespace, source string, out *[
 			Command:      fullName,
 			Description:  descriptionFrom(fm, data),
 			Source:       source,
-			ArgumentHint: compact(fm["argument-hint"], 120),
+			ArgumentHint: textutil.Compact(fm["argument-hint"], 120),
 		})
 	}
 }
@@ -133,9 +135,9 @@ func parseSkillMetadata(metadata map[string]string, dirName, namespace, source s
 	}
 	return &Command{
 		Command:      fullName,
-		Description:  compact(description, 240),
+		Description:  textutil.Compact(description, 240),
 		Source:       source,
-		ArgumentHint: compact(metadata["argument-hint"], 120),
+		ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
 	}, ""
 }
 
@@ -328,9 +330,9 @@ func (reader *catalogReader) scanSkillDirFormatOptions(dir, source, format strin
 		}
 		commands = append(commands, Command{
 			Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
-			Description:  compact(description, 240),
+			Description:  textutil.Compact(description, 240),
 			Source:       source,
-			ArgumentHint: compact(metadata["argument-hint"], 120),
+			ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
 		})
 	}
 	return commands, truncated
@@ -403,15 +405,15 @@ func (reader *catalogReader) skillCommandFromFile(path, fallbackName, source, fo
 	}
 	return &Command{
 		Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
-		Description:  compact(description, 240),
+		Description:  textutil.Compact(description, 240),
 		Source:       source,
-		ArgumentHint: compact(metadata["argument-hint"], 120),
+		ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
 	}
 }
 
 func descriptionFrom(fm map[string]string, data []byte) string {
 	if desc := fm["description"]; desc != "" {
-		return compact(desc, 120)
+		return textutil.Compact(desc, 120)
 	}
 	return extractFirstLineBytes(data)
 }
@@ -432,7 +434,7 @@ func extractFirstLineBytes(data []byte) string {
 		if trimmed == "" || strings.HasPrefix(trimmed, "---") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		return compact(trimmed, 120)
+		return textutil.Compact(trimmed, 120)
 	}
 	return ""
 }

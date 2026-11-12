@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 // kimiBuiltins mirrors the primary interactive TUI commands in standalone
@@ -79,7 +81,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	configDir := filepath.Join(ctx.Home, ".kimi-code")
-	if configured := expandTilde(strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")), ctx.Home); configured != "" &&
+	if configured := agentroots.ExpandTilde(strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")), ctx.Home); configured != "" &&
 		filepath.IsAbs(configured) {
 		configDir = configured
 	}
@@ -144,7 +146,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// Extra roots are lower precedence than project and user roots. Relative
 	// entries resolve from the project root; "~" resolves from the real home.
 	for _, dir := range settings.extraSkillDirs {
-		dir = expandTilde(dir, ctx.Home)
+		dir = agentroots.ExpandTilde(dir, ctx.Home)
 		if strings.HasPrefix(dir, "~") {
 			continue
 		}

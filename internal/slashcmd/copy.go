@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 type CopyProfile struct {
@@ -18,26 +20,26 @@ type CopyProfile struct {
 	SecondaryPath       string
 }
 
+const HermesPlaceholderPattern = `^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:` +
+	`ask anything, or type / for commands(?:…|\.\.\.)|` +
+	`summarize what's in this folder|` +
+	`draft a reply to the last email in my inbox|` +
+	`plan a feature, then build it step by step|` +
+	`find and fix a failing test|` +
+	`research this topic and write me a brief|` +
+	`what changed in this repo recently\?|` +
+	`turn these notes into a to-do list|` +
+	`explain this error and how to fix it|` +
+	`set a reminder or schedule a recurring task|` +
+	`type / to browse commands, or ctrl\+p for the palette` +
+	`)\s*$`
+
 var copyProfiles = map[string]CopyProfile{
 	"hermes": {
-		Confirmation:      regexp.MustCompile(`(?im)copied\s+assistant\s+response\s+#(?P<index>[0-9]+)\s+to\s+clipboard`),
-		Composer:          regexp.MustCompile(`(?m)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?P<text>.*?)\s*$`),
-		ComposerClearKeys: []string{"Escape", "Escape"},
-		ComposerPlaceholder: regexp.MustCompile(
-			`(?im)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:` +
-				`ask anything, or type / for commands(?:…|\.\.\.)|` +
-				`summarize what's in this folder|` +
-				`draft a reply to the last email in my inbox|` +
-				`plan a feature, then build it step by step|` +
-				`find and fix a failing test|` +
-				`research this topic and write me a brief|` +
-				`what changed in this repo recently\?|` +
-				`turn these notes into a to-do list|` +
-				`explain this error and how to fix it|` +
-				`set a reminder or schedule a recurring task|` +
-				`type / to browse commands, or ctrl\+p for the palette` +
-				`)\s*$`,
-		),
+		Confirmation:        regexp.MustCompile(`(?im)copied\s+assistant\s+response\s+#(?P<index>[0-9]+)\s+to\s+clipboard`),
+		Composer:            regexp.MustCompile(`(?m)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?P<text>.*?)\s*$`),
+		ComposerClearKeys:   []string{"Escape", "Escape"},
+		ComposerPlaceholder: regexp.MustCompile(`(?im)` + HermesPlaceholderPattern),
 	},
 	"claude": {
 		Confirmation: regexp.MustCompile(`(?im)copied\s+to\s+clipboard\s*\((?P<chars>[0-9]+)\s+characters?,\s*(?P<lines>[0-9]+)\s+lines?\)`),
@@ -87,8 +89,6 @@ var copyProfiles = map[string]CopyProfile{
 	},
 }
 
-var copyANSI = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-
 func CopyProfileFor(profileID, agent string) (CopyProfile, bool) {
 	for _, value := range []string{profileID, agent} {
 		key := strings.ToLower(strings.TrimSpace(value))
@@ -122,7 +122,7 @@ func CopyProfileFor(profileID, agent string) (CopyProfile, bool) {
 }
 
 func (p CopyProfile) CleanSnapshot(content string) string {
-	return copyANSI.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
+	return textutil.StripANSI(strings.ReplaceAll(content, "\r\n", "\n"))
 }
 
 func (p CopyProfile) MenuOpen(content string) bool {

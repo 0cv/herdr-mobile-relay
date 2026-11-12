@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 	"golang.org/x/text/collate"
 	"golang.org/x/text/language"
 )
@@ -357,9 +358,9 @@ func (reader *catalogReader) scanCursorCommandDirBudget(dir, source string, budg
 		}
 		commands = append(commands, Command{
 			Command:      "/" + cmdName,
-			Description:  compact(description, 120),
+			Description:  textutil.Compact(description, 120),
 			Source:       source,
-			ArgumentHint: compact(fm["argument-hint"], 120),
+			ArgumentHint: textutil.Compact(fm["argument-hint"], 120),
 		})
 	}
 	return commands, truncated
@@ -473,9 +474,9 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			}
 			add(Command{
 				Command:      command,
-				Description:  compact(description, 240),
+				Description:  textutil.Compact(description, 240),
 				Source:       source,
-				ArgumentHint: compact(metadata["argument-hint"], 120),
+				ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
 			})
 		}
 	}

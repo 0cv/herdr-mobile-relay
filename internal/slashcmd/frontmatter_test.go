@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 func TestFrontmatterBasic(t *testing.T) {
@@ -162,8 +164,8 @@ Body text that must not leak into the description.
 		t.Errorf("description = %q, want %q", fm["description"], want)
 	}
 	wantCompact := `Use when: User wants to run Archon workflows. Triggers: "use archon to", "run archon".`
-	if got := compact(fm["description"], 240); got != wantCompact {
-		t.Errorf("compact(description) = %q, want %q", got, wantCompact)
+	if got := textutil.Compact(fm["description"], 240); got != wantCompact {
+		t.Errorf("textutil.Compact(description) = %q, want %q", got, wantCompact)
 	}
 	if fm["name"] != "archon" {
 		t.Errorf("name = %q", fm["name"])
@@ -323,7 +325,7 @@ func TestReadSkillMetadataBlockScalarFromFile(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ok")
 	}
-	if got := compact(fm["description"], 240); got != "Ship the app to production." {
+	if got := textutil.Compact(fm["description"], 240); got != "Ship the app to production." {
 		t.Errorf("description = %q", got)
 	}
 }

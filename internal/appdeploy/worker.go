@@ -28,6 +28,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 	"github.com/andybalholm/brotli"
 )
 
@@ -42,8 +43,6 @@ const (
 	publicRequestTimeout      = 20 * time.Second
 	deploymentTimeout         = 15 * time.Minute
 )
-
-var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 var (
 	projectPattern             = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
@@ -1154,7 +1153,7 @@ func writeState(filename string, state State) error {
 }
 
 func compact(value string, limit int) string {
-	value = ansiEscapePattern.ReplaceAllString(value, "")
+	value = textutil.StripANSI(value)
 	value = strings.Join(strings.Fields(value), " ")
 	if len(value) <= limit {
 		return value
