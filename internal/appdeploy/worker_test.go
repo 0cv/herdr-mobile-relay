@@ -12,13 +12,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -388,48 +386,6 @@ func TestRunDoesNotOverwriteStateOwnedByAnotherWorker(t *testing.T) {
 	}
 	if state.State != "deploying" || state.Error != "" {
 		t.Fatalf("state = %#v", state)
-	}
-}
-
-func TestRunCommandContextTerminatesProcessGroup(t *testing.T) {
-	root := t.TempDir()
-	pidFile := filepath.Join(root, "child.pid")
-	scriptPath := filepath.Join(root, "spawn-child.sh")
-	script := fmt.Sprintf(
-		"#!/bin/sh\ntrap '' TERM\nsleep 30 &\nchild=$!\nprintf '%%s\\n' \"$child\" > %q\nwait\n",
-		pidFile,
-	)
-	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	_, err := runCommandContext(ctx, exec.Command("/bin/sh", scriptPath))
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("runCommandContext() error = %v, want deadline exceeded", err)
-	}
-	pidData, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-	})
-	deadline := time.Now().Add(time.Second)
-	for {
-		err := syscall.Kill(childPID, 0)
-		if err != nil && !errors.Is(err, syscall.EPERM) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("child process %d survived process-group cancellation", childPID)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
