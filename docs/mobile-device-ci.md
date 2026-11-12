@@ -391,9 +391,9 @@ This retires r37's automatic pre-lookup capture recipe only for the normal journ
 Old r37/run22 evidence and failures remain unchanged. Hosted run40004048167's
 diagnostic request prevented product lookup; removing it is not an underlying
 iOS/native fix or a passing real-device test. Run39971886984 failed final-Add
-lookup without this diagnostic, and its cause remains unknown. The standalone
-projection utility and hypothetical fixtures remain local regression tools,
-not observed native recovery or hosted qualification.
+lookup without this diagnostic, and its cause remains unknown. The hypothetical
+fixtures remain local installation regression tools, not observed native
+recovery or hosted qualification.
 
 The mobile device upload path withholds `RUNNER_TEMP/appium.log` on iOS, removes
 any stale copy from the artifact directory, and emits the small static

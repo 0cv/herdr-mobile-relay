@@ -718,7 +718,6 @@ export class AppiumClient {
       const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
       const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
       const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');
-      const confirmationCapture = commandPath === '/source' && timingScope?.label === 'ios-install-confirmation';
       const retainedInspection = commandPath === '/execute/sync' && body !== null && typeof body === 'object'
         && 'script' in body && body.script === 'mobile: inspectRetainedChromeTargets';
       const allowance = driverCommandAllowance(commandPath, method, body);
@@ -864,10 +863,6 @@ export class AppiumClient {
           timing.priorSettlementToDispatchMs = undefined;
           timing.phaseRemainingAtDispatchMs = null;
           timing.outcome = 'not-admitted';
-          if (confirmationCapture) {
-            if (this.history.at(-1)?.timing !== timing) this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, 'Confirmation source not admitted', timing);
-            throw error;
-          }
         }
         if (error instanceof WebDriverError) {
           checkDeadline();
@@ -876,8 +871,7 @@ export class AppiumClient {
         checkDeadline();
         const timedOut = isTimeoutError(error) || controller.signal.aborted || (enforceBudget && this.budget?.exhausted === true);
         const interrupted = response !== undefined;
-        const detail = confirmationCapture ? 'Confirmation source transport unavailable'
-          : retainedInspection ? 'Retained inspection transport failed' : error instanceof Error ? error.message : String(error);
+        const detail = retainedInspection ? 'Retained inspection transport failed' : error instanceof Error ? error.message : String(error);
         const failure = new WebDriverError({
           code: timedOut ? 'APPIUM_TIMEOUT' : interrupted ? 'APPIUM_INTERRUPTED' : 'APPIUM_HTTP',
           message: detail,
@@ -943,7 +937,7 @@ export class AppiumClient {
         return { value: undefined as T };
       }
       if (!response.ok || (commandValue as any)?.error) {
-        const detail = confirmationCapture ? 'Confirmation source refused' : retainedInspection ? 'Retained inspection refused'
+        const detail = retainedInspection ? 'Retained inspection refused'
           : typeof commandValue === 'object' ? JSON.stringify(commandValue) : String(commandValue || text);
         checkDeadline();
         timing.outcome = 'command-error';

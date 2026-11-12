@@ -19,9 +19,7 @@ import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
 import { stableTestIdentities } from './test-registry';
-import { iosConfirmationProjectionCases } from './ios-confirmation-capture';
 import { iosProviderHandoffCases } from './ios-provider-handoff';
-import { IOS_CONFIRMATION_CAPTURE_LIMITS } from '../support/ios-confirmation-capture';
 
 const origin = 'https://localhost:52101';
 const fixtureDir = fileURLToPath(new URL('./fixtures/ios/', import.meta.url));
@@ -36,7 +34,7 @@ type Request = { path: string; body: any; method: string; signal?: AbortSignal |
 type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
 const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([name, body]);
-tests.push(...iosConfirmationProjectionCases, ...iosProviderHandoffCases);
+tests.push(...iosProviderHandoffCases);
 
 async function within<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1626,7 +1624,6 @@ test('confirmation product-first proceeds directly from acknowledged row to fore
   const persisted = JSON.parse(await readFile(join(a.outputDir, 'confirmation-result.json'), 'utf8'));
   assert.match(persisted.proofKind, /Hypothetical.*not observed native recovery/u);
   assert.deepEqual(persisted.evidence.confirmationCapture, capture);
-  assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
   capture.acknowledgement.outcome = 'changed-copy';
   assert.equal((a.platform.evidenceSnapshot().confirmationCapture as any).acknowledgement.outcome, 'success');
 });
@@ -1670,7 +1667,6 @@ test('confirmation product-first never requests malformed private or oversized c
     assert.equal(capture.projection, undefined);
     assert.equal(a.observations.some(observation => observation.boundary === 'source'), false);
     assert.doesNotMatch(JSON.stringify(capture), /private|secret/u);
-    assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
   }
   const disabled = await confirmationReplay('product-first-not-readiness', { states: ['disabled'], after: boundary => boundary === 'enabled' ? 70_001 : 0 });
   assert.equal((disabled.platform.evidenceSnapshot().confirmationCapture as any).status, 'not-requested-product-first');
