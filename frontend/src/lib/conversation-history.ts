@@ -1,4 +1,4 @@
-import { cloneEntries, clonePlan } from './conversation-values';
+import { cloneDiagnostics, cloneEntries, clonePlan, estimateEntriesBytes } from './conversation-values';
 import { conversationEntries } from './conversation';
 import type { ConversationPreview } from './conversation-cache';
 import { targetRefForAgent, targetStoreKey } from './resource-id';
@@ -456,7 +456,8 @@ export class ConversationHistoryController {
       for (let pageNumber = 0; pageNumber < this.maxPagesPerDemand; pageNumber++) {
         if (!this.canContinue(demandEpoch, abort)) return;
         if (Date.now() - demandStartedAt >= HISTORY_ACTIVE_DEADLINE_MS) {
-          this.pauseWithError('History loading was paused after two minutes of active work. Continue to load more.', true, 'work_deadline');
+          const error = workDeadlineError();
+          this.pauseWithError(error.message, error.retryable, error.code);
           return;
         }
         const requestedCursor = demand === 'initial'
@@ -938,7 +939,7 @@ export class ConversationHistoryController {
   ): Promise<ConversationPage> {
     const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
     if (remaining <= 0) {
-      throw { error: { code: 'work_deadline', message: 'History loading was paused after two minutes of active work. Continue to load more.', retryable: true } };
+      throw { error: workDeadlineError() };
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
@@ -946,14 +947,14 @@ export class ConversationHistoryController {
       timer = setTimeout(() => {
         timedOut = true;
         abort.abort();
-        reject({ error: { code: 'work_deadline', message: 'History loading was paused after two minutes of active work. Continue to load more.', retryable: true } });
+        reject({ error: workDeadlineError() });
       }, remaining);
     });
     try {
       return await Promise.race([this.options.request({ ...this.agent }, request), timeout]);
     } catch (failure) {
       if (timedOut) {
-        throw { error: { code: 'work_deadline', message: 'History loading was paused after two minutes of active work. Continue to load more.', retryable: true } };
+        throw { error: workDeadlineError() };
       }
       throw failure;
     } finally {
@@ -967,7 +968,7 @@ export class ConversationHistoryController {
     if (startedAt !== undefined) {
       const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
       if (remaining <= 0) {
-        throw { error: { code: 'work_deadline', message: 'History loading was paused after two minutes of active work. Continue to load more.', retryable: true } };
+        throw { error: workDeadlineError() };
       }
       milliseconds = Math.min(milliseconds, remaining);
     }
@@ -1120,10 +1121,6 @@ function sharedEntryId(first: ConversationEntry[], second: ConversationEntry[]):
   return second.some((entry) => ids.has(entry.id));
 }
 
-function cloneDiagnostics(value: ConversationBrowseDiagnostics | undefined): ConversationBrowseDiagnostics | undefined {
-  return value ? { ...value } : undefined;
-}
-
 function mergeDiagnostics(
   previous: ConversationBrowseDiagnostics | undefined,
   next: ConversationBrowseDiagnostics | undefined,
@@ -1165,10 +1162,8 @@ function cloneState(state: ConversationHistoryControllerState): ConversationHist
   };
 }
 
-function estimateEntriesBytes(entries: ConversationEntry[]): number {
-  return entries.reduce((total, entry) => total + 96 + entry.id.length * 2 + entry.timestamp.length * 2 + entry.text.length * 2
-    + (entry.tools || []).reduce((tools, tool) => tools + 64 + (tool.id?.length || 0) * 2 + tool.name.length * 2
-      + (tool.input?.length || 0) * 2 + (tool.output?.length || 0) * 2, 0), 0);
+function workDeadlineError(): ConversationBrowseError {
+  return { code: 'work_deadline', message: 'History loading was paused after two minutes of active work. Continue to load more.', retryable: true };
 }
 
 function conversationError(value: unknown, fallback: string): ConversationBrowseError {

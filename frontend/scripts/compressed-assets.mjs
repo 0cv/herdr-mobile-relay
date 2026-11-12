@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { appScriptPattern, appStylePattern, lazyScriptPattern, releaseEntryPath } from './release-rules.ts';
 
 // Stable resources are compressed explicitly. The application entry resources
 // are digest-addressed, so discover their names instead of reintroducing a
@@ -20,15 +21,12 @@ export const compressedAssets = [
 export async function releaseCompressedAssets(root) {
   const assets = await readdir(join(root, 'assets'));
   const descriptor = JSON.parse(await readFile(join(root, 'release.json'), 'utf8'));
-  const entry = descriptor?.files?.entry?.path;
-  if (typeof entry !== 'string' || !entry.startsWith('builds/') || !entry.endsWith('/index.html')) {
-    throw new Error('release.json does not describe a build-specific entry');
-  }
+  const entry = releaseEntryPath(descriptor);
   const contentAddressed = assets
-    .filter((name) => /^(?:app-[a-f0-9]{64}\.(?:js|css))$/.test(name))
+    .filter((name) => appScriptPattern.test(name) || appStylePattern.test(name))
     .map((name) => `assets/${name}`);
   const lazyScripts = assets
-    .filter((name) => /^[A-Za-z0-9_.-]+-[0-9]+\.js$/.test(name))
+    .filter((name) => lazyScriptPattern.test(name))
     .map((name) => `assets/${name}`);
   return [...new Set([...compressedAssets, entry, ...contentAddressed, ...lazyScripts])];
 }

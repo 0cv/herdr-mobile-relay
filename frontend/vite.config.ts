@@ -6,10 +6,10 @@ import { defineConfig } from 'vitest/config';
 import versions from './build-versions.json' with { type: 'json' };
 import { assetIdentity as digest } from './scripts/asset-identity.mjs';
 import { pagesHeaders } from './scripts/pages-policy.ts';
+import { productVersionFromManifest } from './scripts/release-rules.ts';
 
 const manifest = readFileSync(fileURLToPath(new URL('../herdr-plugin.toml', import.meta.url)), 'utf8');
-const productVersion = manifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
-if (!productVersion) throw new Error('herdr-plugin.toml must declare a MAJOR.MINOR.PATCH version');
+const productVersion = productVersionFromManifest(manifest);
 const versionMetadata = `${JSON.stringify({ version: productVersion, assets: versions.assets })}\n`;
 const BUILD_ID_MARKER = '__HERDR_BUILD_ID__';
 
@@ -52,29 +52,36 @@ function compactReleaseStyleNames(source: string): string {
   return source;
 }
 
+function setupManifestSource(): string {
+  const manifest = JSON.parse(readFileSync(new URL('./public/manifest.webmanifest', import.meta.url), 'utf8'));
+  delete manifest.start_url;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
 function stableReleaseAssets(): Plugin {
-  const serveVersionMetadata = (
+  const serveReleaseMetadata = (
     request: { url?: string },
     response: { setHeader(name: string, value: string): void; end(body: string): void },
     next: () => void,
   ) => {
     const pathname = new URL(request.url || '/', 'http://vite.local').pathname;
-    if (pathname !== '/version.json') {
+    if (pathname !== '/version.json' && pathname !== '/setup.webmanifest') {
       next();
       return;
     }
-    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.setHeader('Content-Type', pathname === '/setup.webmanifest'
+      ? 'application/manifest+json; charset=utf-8' : 'application/json; charset=utf-8');
     response.setHeader('Cache-Control', 'no-cache, no-store');
-    response.end(versionMetadata);
+    response.end(pathname === '/setup.webmanifest' ? setupManifestSource() : versionMetadata);
   };
   return {
     name: 'stable-release-assets',
     enforce: 'post',
     configureServer(server) {
-      server.middlewares.use(serveVersionMetadata);
+      server.middlewares.use(serveReleaseMetadata);
     },
     configurePreviewServer(server) {
-      server.middlewares.use(serveVersionMetadata);
+      server.middlewares.use(serveReleaseMetadata);
     },
     generateBundle(_options, bundle: Bundle) {
       const appJavascript = Object.values(bundle).find(
@@ -173,6 +180,7 @@ function stableReleaseAssets(): Plugin {
         source: `/ /${entryPath} 302\n/index.html /${entryPath} 302\n`,
       });
       this.emitFile({ type: 'asset', fileName: '_headers', source: pagesHeaders() });
+      this.emitFile({ type: 'asset', fileName: 'setup.webmanifest', source: setupManifestSource() });
     },
   };
 }
