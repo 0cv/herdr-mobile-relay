@@ -3,11 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
-	"crypto/ecdh"
-	"crypto/hkdf"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -360,6 +356,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // Every logical frame — handshake JSON included — is fragmented and reassembled
 // exactly like the real phone does.
 type gatewayTestPhone struct {
+	t       *testing.T
 	link    *fakeGatewayLink
 	connID  uint32
 	session *e2eeSession
@@ -404,101 +401,25 @@ func (p *gatewayTestPhone) readFrame(t *testing.T) []byte {
 	}
 }
 
+func (p *gatewayTestPhone) ReadFrame(_ context.Context) ([]byte, error) {
+	return p.readFrame(p.t), nil
+}
+
+func (p *gatewayTestPhone) WriteFrame(_ context.Context, frame []byte) error {
+	p.send(p.t, frame)
+	return nil
+}
+
+func (p *gatewayTestPhone) Codec() FrameCodec {
+	return CodecBinary
+}
+
 func (p *gatewayTestPhone) handshake(t *testing.T, token string) {
 	t.Helper()
-	curve := ecdh.P256()
-	privateKey, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientNonce := make([]byte, e2eeNonceBytes)
-	if _, err := rand.Read(clientNonce); err != nil {
-		t.Fatal(err)
-	}
-	selector := E2EEAuthSelector{Kind: E2EEAuthCredential, ID: "credential-test", Version: 7}
-	binding := e2eeAuthBinding(selector)
-	clientPublic := privateKey.PublicKey().Bytes()
-	hello, err := json.Marshal(e2eeClientHello{
-		Type:        "e2ee_client_hello",
-		Version:     e2eeVersion,
-		AuthKind:    selector.Kind,
-		AuthID:      selector.ID,
-		AuthVersion: selector.Version,
-		Nonce:       base64.RawURLEncoding.EncodeToString(clientNonce),
-		PublicKey:   base64.RawURLEncoding.EncodeToString(clientPublic),
-		Proof: base64.RawURLEncoding.EncodeToString(
-			e2eeAuthTag([]byte(token), e2eeClientProofLabel, binding, clientNonce, clientPublic)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.send(t, hello)
-
-	frame := p.readFrame(t)
-	var serverHello e2eeServerHello
-	if err := json.Unmarshal(frame, &serverHello); err != nil {
-		t.Fatalf("decode server hello: %v", err)
-	}
-	serverNonce, err := decodeE2EEField(serverHello.Nonce, e2eeNonceBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverPublicBytes, err := decodeE2EEField(serverHello.PublicKey, e2eePublicKeyBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverProof, err := decodeE2EEField(serverHello.Proof, sha256.Size)
-	if err != nil {
-		t.Fatal(err)
-	}
-	transcript := e2eeTranscript(binding, clientNonce, clientPublic, serverNonce, serverPublicBytes)
-	if !hmac.Equal(serverProof, e2eeAuthTag([]byte(token), e2eeServerProofLabel, transcript)) {
-		t.Fatal("server proof did not authenticate over the gateway path")
-	}
-	serverPublic, err := curve.NewPublicKey(serverPublicBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sharedSecret, err := privateKey.ECDH(serverPublic)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keySalt := e2eeAuthTag([]byte(token), e2eeKeySaltLabel, transcript)
-	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 c2s", 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 s2c", 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, err := newE2EESession(clientKey, serverKey, e2eeClientDirection, e2eeServerDirection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session.codec = CodecBinary
-	p.session = session
-
-	finish, err := json.Marshal(e2eeClientFinish{Type: "e2ee_client_finish", Version: e2eeVersion})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealed, err := session.seal(finish)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.send(t, sealed)
-	serverFinish, err := session.open(p.readFrame(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var identity e2eeServerFinish
-	if err := json.Unmarshal(serverFinish, &identity); err != nil {
-		t.Fatal(err)
-	}
-	if identity.DeviceID != "device-test" || identity.CredentialID != selector.ID {
-		t.Fatalf("server finish = %#v", identity)
-	}
+	p.t = t
+	ctx, cancel := context.WithTimeout(t.Context(), gatewayTestTimeout)
+	defer cancel()
+	p.session, _, _ = testClientFrameE2EEHandshake(t, ctx, p, token, func() {})
 }
 
 func (p *gatewayTestPhone) sendMessage(t *testing.T, plaintext string) {

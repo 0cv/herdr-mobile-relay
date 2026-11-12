@@ -64,21 +64,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(gatewaywire.MaxFramePayload)
 
 	ctx := r.Context()
-	nonce, err := randomNonce()
-	if err != nil {
-		s.logger.Error("nonce generation failed", "error", err)
-		reject(ctx, conn, gatewaywire.CodeInternal, "gateway could not generate a challenge")
-		return
-	}
-	if err := writeJSON(ctx, conn, gatewaywire.ServerHello{
-		Type:     gatewaywire.TypeServerHello,
-		Proto:    gatewaywire.Proto,
-		Nonce:    nonce,
-		StunPort: s.stunPort,
-		Version:  s.opts.Version,
-		Revision: s.opts.Revision,
-	}); err != nil {
-		s.logger.Debug("client hello write failed", "error", err)
+	nonce, ok := s.sendServerHello(ctx, conn, "client")
+	if !ok {
 		return
 	}
 

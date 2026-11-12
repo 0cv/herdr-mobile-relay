@@ -25,10 +25,6 @@ import (
 )
 
 const (
-	// gatewayRelayPath is the multiplexed registration endpoint on a gateway.
-	gatewayRelayPath  = "/relay"
-	gatewayHealthPath = "/healthz"
-
 	gatewayDialTimeout  = 15 * time.Second
 	gatewayHelloTimeout = 10 * time.Second
 	// A registered WebSocket can survive while the gateway's public proxy stops
@@ -372,19 +368,15 @@ func (c *GatewayClient) applyConfiguredOrder(results []gatewayProbeResult) bool 
 // endpoint. This needs no ICMP privilege and includes DNS, TCP, TLS and HTTP in
 // the number used for cold selection.
 func measureGatewayRTT(ctx context.Context, base string) (time.Duration, error) {
-	target, err := url.Parse(base)
+	httpBase, err := gatewaywire.HTTPBase(base)
 	if err != nil {
 		return 0, err
 	}
-	switch target.Scheme {
-	case "ws":
-		target.Scheme = "http"
-	case "wss":
-		target.Scheme = "https"
-	default:
-		return 0, fmt.Errorf("unsupported gateway scheme %q", target.Scheme)
+	target, err := url.Parse(httpBase)
+	if err != nil {
+		return 0, err
 	}
-	target.Path = gatewayHealthPath
+	target.Path = gatewaywire.HealthPath
 	target.RawPath, target.RawQuery, target.Fragment = "", "", ""
 
 	transport := &http.Transport{
@@ -412,10 +404,8 @@ func measureGatewayRTT(ctx context.Context, base string) (time.Duration, error) 
 	if response.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("health returned HTTP %d", response.StatusCode)
 	}
-	var health struct {
-		OK bool `json:"ok"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&health); err != nil {
+	var health gatewaywire.HealthResponse
+	if err := json.NewDecoder(io.LimitReader(response.Body, gatewaywire.MaxHTTPResponseBytes)).Decode(&health); err != nil {
 		return 0, fmt.Errorf("decode health response: %w", err)
 	}
 	if !health.OK {
@@ -506,7 +496,7 @@ func (c *GatewayClient) nextBackoff(delay time.Duration) time.Duration {
 func (c *GatewayClient) runSession(ctx context.Context) (bool, error) {
 	base := c.CurrentURL()
 	dialCtx, cancelDial := context.WithTimeout(ctx, gatewayDialTimeout)
-	conn, _, err := websocket.Dial(dialCtx, base+gatewayRelayPath, &websocket.DialOptions{
+	conn, _, err := websocket.Dial(dialCtx, base+gatewaywire.RelayPath, &websocket.DialOptions{
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	cancelDial()

@@ -3,7 +3,6 @@ package webrtclink
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pion/ice/v4"
+	"github.com/pion/stun/v4"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/0cv/herdr-mobile-relay/internal/framing"
@@ -640,23 +640,16 @@ func startSTUNResponder(t *testing.T, portDelta int) string {
 // stunBindingSuccess encodes a binding success carrying only an IPv4
 // XOR-MAPPED-ADDRESS, which is all address discovery reads.
 func stunBindingSuccess(request []byte, ip net.IP, port int) ([]byte, bool) {
-	const bindingRequest, bindingSuccess, attrXORMappedAddress = 0x0001, 0x0101, 0x0020
 	v4 := ip.To4()
-	if len(request) < 20 || binary.BigEndian.Uint16(request[:2]) != bindingRequest || v4 == nil {
+	message := stun.Message{Raw: request}
+	if err := message.Decode(); err != nil || message.Type != stun.BindingRequest || v4 == nil {
 		return nil, false
 	}
-
-	reply := make([]byte, 0, 32)
-	reply = binary.BigEndian.AppendUint16(reply, bindingSuccess)
-	// One 4-byte attribute header plus its 8-byte IPv4 value.
-	reply = binary.BigEndian.AppendUint16(reply, 12)
-	reply = binary.BigEndian.AppendUint32(reply, stunMagicCookie)
-	reply = append(reply, request[8:20]...) // echo the transaction id
-	reply = binary.BigEndian.AppendUint16(reply, attrXORMappedAddress)
-	reply = binary.BigEndian.AppendUint16(reply, 8)
-	reply = append(reply, 0x00, 0x01) // reserved, address family IPv4
-	reply = binary.BigEndian.AppendUint16(reply, uint16(port)^(stunMagicCookie>>16))
-	return binary.BigEndian.AppendUint32(reply, binary.BigEndian.Uint32(v4)^stunMagicCookie), true
+	reply, err := stun.Build(&message, stun.BindingSuccess, &stun.XORMappedAddress{IP: v4, Port: port})
+	if err != nil {
+		return nil, false
+	}
+	return reply.Raw, true
 }
 
 // TestDiscoverMappedAddressRequiresSTUNServer keeps a relay whose gateway

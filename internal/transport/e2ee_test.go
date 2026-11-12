@@ -484,7 +484,11 @@ func testClientE2EEHandshake(t *testing.T, ctx context.Context, conn *websocket.
 func testClientFrameE2EEHandshake(
 	t *testing.T,
 	ctx context.Context,
-	conn FrameConn,
+	conn interface {
+		ReadFrame(context.Context) ([]byte, error)
+		WriteFrame(context.Context, []byte) error
+		Codec() FrameCodec
+	},
 	token string,
 	beforeFinish func(),
 ) (*e2eeSession, []byte, []byte) {
