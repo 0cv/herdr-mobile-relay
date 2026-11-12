@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 type Option struct {
@@ -64,7 +66,6 @@ type codexRow struct {
 }
 
 var (
-	ansiPattern           = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 	edgePattern           = regexp.MustCompile(`^[│|]\s*|\s*[│|]$`)
 	checkboxPattern       = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s*\[([^\]]*)\]\s*(.*?)\s*$`)
 	menuPattern           = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s+(.*?)\s*$`)
@@ -102,6 +103,7 @@ var (
 	responseStartPattern  = regexp.MustCompile(`^\s*[•●]\s+\S`)
 	responsePrefixPattern = regexp.MustCompile(`^\s*[•●]\s+`)
 
+	claudeActiveTabPattern   = regexp.MustCompile(`\x1b\[[^m]*48[^m]*m`)
 	claudeSessionRulePattern = regexp.MustCompile(`^─{3,} \S.* ─$`)
 	claudeTaskPanelPattern   = regexp.MustCompile(
 		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*)$`,
@@ -246,16 +248,10 @@ func LatestCompletedResponse(text string) string {
 	rawLines := strings.Split(strings.ReplaceAll(text, "\r", ""), "\n")
 	lines := make([]string, len(rawLines))
 	for index, line := range rawLines {
-		lines[index] = strings.TrimRight(ansiPattern.ReplaceAllString(line, ""), " \t")
+		lines[index] = strings.TrimRight(textutil.StripANSI(line), " \t")
 	}
 
-	end := -1
-	for index := len(lines) - 1; index >= 0; index-- {
-		if turnDurationPattern.MatchString(strings.TrimSpace(lines[index])) {
-			end = index
-			break
-		}
-	}
+	end := latestCompletedTurnLine(lines)
 	if end < 0 {
 		return ""
 	}
@@ -329,12 +325,7 @@ type ompOptionRow struct {
 
 func ompLayoutHint(text string) bool {
 	lines := cleanLines(text)
-	start := -1
-	for index, line := range lines {
-		if ompAskHeaderPattern.MatchString(line) {
-			start = index
-		}
-	}
+	start := lastLineMatching(lines, ompAskHeaderPattern)
 	if start < 0 {
 		return false
 	}
@@ -383,12 +374,7 @@ func ompCleanLines(text string) []string {
 func parseOMP(text string) *Interaction {
 	lines := ompCleanLines(text)
 	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	start := -1
-	for index, line := range lines {
-		if ompAskHeaderPattern.MatchString(line) {
-			start = index
-		}
-	}
+	start := lastLineMatching(lines, ompAskHeaderPattern)
 	if start < 0 {
 		return nil
 	}
@@ -410,7 +396,7 @@ func parseOMP(text string) *Interaction {
 			line:     index,
 			focus:    match[1] != "",
 			marker:   match[2],
-			label:    compact(match[3], 500),
+			label:    textutil.Compact(match[3], 500),
 			selected: ompMarkerSelected(match[2]),
 		})
 	}
@@ -557,7 +543,7 @@ func ompQuestion(lines []string, start, firstOption int) string {
 		if line == "" || ompBorderLine(line) {
 			continue
 		}
-		return compact(line, 1000)
+		return textutil.Compact(line, 1000)
 	}
 	return "OMP needs an answer"
 }
@@ -570,7 +556,7 @@ func ompDescription(lines []string, start, end int) string {
 		}
 		parts = append(parts, strings.TrimSpace(strings.TrimPrefix(line, "↳")))
 	}
-	return compact(strings.Join(parts, " "), 500)
+	return textutil.Compact(strings.Join(parts, " "), 500)
 }
 
 // ompTabIDs collects the question ids from the Ask header tab row, which
@@ -645,7 +631,7 @@ func ompPosition(lines, rawLines []string, askStart int, question string) (int, 
 				if lines[candidate] == "" || ompBorderLine(lines[candidate]) {
 					continue
 				}
-				prompt = compact(lines[candidate], 1000)
+				prompt = textutil.Compact(lines[candidate], 1000)
 				break
 			}
 			metaIDs = append(metaIDs, match[1])
@@ -717,7 +703,7 @@ func parseClaude(text string) *Interaction {
 		checkboxRows = append(checkboxRows, row{
 			line:     index,
 			focus:    match[1] != "",
-			label:    compact(match[4], 500),
+			label:    textutil.Compact(match[4], 500),
 			selected: strings.TrimSpace(match[3]) != "",
 		})
 	}
@@ -806,7 +792,7 @@ func parseClaude(text string) *Interaction {
 		if number != expected {
 			continue
 		}
-		label := compact(match[3], 500)
+		label := textutil.Compact(match[3], 500)
 		rows = append(rows, row{
 			line:     index,
 			focus:    match[1] != "",
@@ -906,7 +892,7 @@ func parseClaudeReview(text string, lines []string) *Interaction {
 			return nil
 		}
 		optionIndex := len(options)
-		options = append(options, Option{Index: optionIndex, Label: compact(match[3], 500)})
+		options = append(options, Option{Index: optionIndex, Label: textutil.Compact(match[3], 500)})
 		if match[1] != "" {
 			focus = Focus{Kind: "option", Index: optionIndex}
 		}
@@ -1019,7 +1005,7 @@ func parseCodex(text string) *Interaction {
 			questionParts = append(questionParts, line)
 		}
 	}
-	questionText := compact(strings.Join(questionParts, " "), 1000)
+	questionText := textutil.Compact(strings.Join(questionParts, " "), 1000)
 	if questionText == "" {
 		return nil
 	}
@@ -1065,7 +1051,7 @@ func parseCodex(text string) *Interaction {
 		trimmed := strings.TrimSpace(line)
 		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "›"))
 		if trimmed != "" {
-			notes = compact(trimmed, 20000)
+			notes = textutil.Compact(trimmed, 20000)
 		}
 	}
 	if notesActive {
@@ -1151,7 +1137,7 @@ func parseQoder(text string) *Interaction {
 			checkboxRows = append(checkboxRows, row{
 				line:     index,
 				focus:    match[1] != "",
-				label:    compact(match[4], 500),
+				label:    textutil.Compact(match[4], 500),
 				selected: strings.TrimSpace(match[3]) != "",
 			})
 			expected++
@@ -1168,7 +1154,7 @@ func parseQoder(text string) *Interaction {
 		menuRows = append(menuRows, row{
 			line:  index,
 			focus: match[1] != "",
-			label: compact(match[3], 500),
+			label: textutil.Compact(match[3], 500),
 		})
 		expected++
 	}
@@ -1216,7 +1202,7 @@ func parseQoder(text string) *Interaction {
 			strings.Contains(lower, "select all") {
 			continue
 		}
-		questionText = compact(candidate, 1000)
+		questionText = textutil.Compact(candidate, 1000)
 		break
 	}
 	if questionText == "" {
@@ -1258,7 +1244,7 @@ func parseQoder(text string) *Interaction {
 				noteLines = append(noteLines, strings.TrimSpace(line))
 			}
 		}
-		notes = compact(strings.Join(noteLines, " "), 20000)
+		notes = textutil.Compact(strings.Join(noteLines, " "), 20000)
 	}
 	interaction := &Interaction{
 		Kind:     kind,
@@ -1400,7 +1386,7 @@ func parseOpenCode(text string) *Interaction {
 			labelIndex = 4
 			selected = strings.TrimSpace(match[3]) != ""
 		}
-		label := compact(match[labelIndex], 500)
+		label := textutil.Compact(match[labelIndex], 500)
 		if selectedPattern.MatchString(label) {
 			selected = true
 			label = strings.TrimSpace(selectedPattern.ReplaceAllString(label, ""))
@@ -1429,7 +1415,7 @@ func parseOpenCode(text string) *Interaction {
 		if candidate == "" {
 			continue
 		}
-		questionText = compact(candidate, 1000)
+		questionText = textutil.Compact(candidate, 1000)
 		break
 	}
 	if questionText == "" {
@@ -1615,7 +1601,7 @@ func openCodePosition(rawLines, lines []string, footerIndex int) (int, int) {
 
 func openCodeTabs(line string) []string {
 	var labels []string
-	for _, label := range regexp.MustCompile(`\s{2,}`).Split(strings.TrimSpace(line), -1) {
+	for _, label := range columnGapPattern.Split(strings.TrimSpace(line), -1) {
 		label = strings.TrimSpace(label)
 		if label != "" {
 			labels = append(labels, label)
@@ -1631,12 +1617,12 @@ func openCodeActiveTab(raw string) string {
 			parts = append(parts, match[1])
 		}
 	}
-	return compact(strings.Join(parts, ""), 500)
+	return textutil.Compact(strings.Join(parts, ""), 500)
 }
 
 func cleanOpenCodeLine(line string) string {
 	line = strings.TrimRight(
-		ansiPattern.ReplaceAllString(strings.ReplaceAll(line, "\r", ""), ""),
+		textutil.StripANSI(strings.ReplaceAll(line, "\r", "")),
 		" \t",
 	)
 	trimmed := strings.TrimLeft(line, " \t")
@@ -1660,7 +1646,7 @@ func cleanLines(text string) []string {
 }
 
 func cleanLine(line string) string {
-	line = strings.TrimSpace(ansiPattern.ReplaceAllString(strings.ReplaceAll(line, "\r", ""), ""))
+	line = strings.TrimSpace(textutil.StripANSI(strings.ReplaceAll(line, "\r", "")))
 	for {
 		next := strings.TrimSpace(edgePattern.ReplaceAllString(line, ""))
 		if next == line {
@@ -1672,7 +1658,7 @@ func cleanLine(line string) string {
 
 func cleanCodexLine(line string) string {
 	line = strings.TrimRight(
-		ansiPattern.ReplaceAllString(strings.ReplaceAll(line, "\r", ""), ""),
+		textutil.StripANSI(strings.ReplaceAll(line, "\r", "")),
 		" \t",
 	)
 	for {
@@ -1694,7 +1680,7 @@ func description(lines []string, start, end int) string {
 		}
 		parts = append(parts, line)
 	}
-	return compact(strings.Join(parts, " "), 500)
+	return textutil.Compact(strings.Join(parts, " "), 500)
 }
 
 func prompt(lines []string, firstOption int) string {
@@ -1719,7 +1705,7 @@ func prompt(lines []string, firstOption int) string {
 	if end < 0 {
 		return "Claude Code needs an answer"
 	}
-	return compact(strings.Join(lines[start:end+1], " "), 1000)
+	return textutil.Compact(strings.Join(lines[start:end+1], " "), 1000)
 }
 
 func claudePosition(text string) (int, int) {
@@ -1728,7 +1714,7 @@ func claudePosition(text string) (int, int) {
 		if !strings.Contains(clean, "→") || !strings.Contains(strings.ToLower(clean), "submit") {
 			continue
 		}
-		active := regexp.MustCompile(`\x1b\[[^m]*48[^m]*m`).FindStringIndex(raw)
+		active := claudeActiveTabPattern.FindStringIndex(raw)
 		if active == nil {
 			return 0, 0
 		}
@@ -1880,7 +1866,7 @@ func codexParts(lines []string, item codexRow, end, descriptionColumn int) (stri
 			descriptions = append(descriptions, value)
 		}
 	}
-	return compact(strings.Join(labels, " "), 500), compact(strings.Join(descriptions, " "), 500)
+	return textutil.Compact(strings.Join(labels, " "), 500), textutil.Compact(strings.Join(descriptions, " "), 500)
 }
 
 func interactionID(interaction *Interaction) string {
@@ -1912,8 +1898,8 @@ func interactionID(interaction *Interaction) string {
 func summaryLines(entries []SummaryEntry, limit int) string {
 	parts := make([]string, 0, len(entries))
 	for index := range entries {
-		entries[index].Question = compact(entries[index].Question, limit)
-		entries[index].Answer = compact(entries[index].Answer, limit)
+		entries[index].Question = textutil.Compact(entries[index].Question, limit)
+		entries[index].Answer = textutil.Compact(entries[index].Answer, limit)
 		line := strconv.Itoa(index+1) + ". " + entries[index].Question
 		if entries[index].Answer != "" {
 			line += ": " + entries[index].Answer
@@ -1940,7 +1926,7 @@ const CustomAnswerPlaceholder = "custom answer"
 // SummaryKey normalizes a question so review summary entries can be matched
 // with the question views the free text was typed into.
 func SummaryKey(value string) string {
-	return strings.ToLower(compact(strings.TrimSuffix(strings.TrimSpace(value), "?"), 500))
+	return strings.ToLower(textutil.Compact(strings.TrimSuffix(strings.TrimSpace(value), "?"), 500))
 }
 
 // FillCustomAnswers replaces placeholder review answers with the recorded
@@ -1965,14 +1951,6 @@ func FillCustomAnswers(interaction *Interaction, answers map[string]string) {
 			option.Description = summaryLines(option.Summary, 1000)
 		}
 	}
-}
-func compact(value string, limit int) string {
-	value = strings.Join(strings.Fields(value), " ")
-	runes := []rune(value)
-	if len(runes) > limit {
-		return string(runes[:limit])
-	}
-	return value
 }
 
 func title(value string) string {

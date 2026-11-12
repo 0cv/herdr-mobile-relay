@@ -57,8 +57,6 @@ const (
 	// maxQueuedBytes bounds the per-phone outbound queue in bytes; a phone that
 	// exceeds it is dropped as too slow rather than stalling its siblings.
 	maxQueuedBytes = 4 << 20
-	// maxProbeBody bounds the /probe request body.
-	maxProbeBody = 1 << 10
 	// relayIDLogPrefix is how much of a relay id may ever reach a log line.
 	relayIDLogPrefix = 6
 )
@@ -245,10 +243,10 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 
-	s.mux.HandleFunc("GET /relay", s.handleRelay)
-	s.mux.HandleFunc("GET /connect", s.handleConnect)
-	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
-	s.mux.HandleFunc("POST /probe", s.handleProbe)
+	s.mux.HandleFunc("GET "+gatewaywire.RelayPath, s.handleRelay)
+	s.mux.HandleFunc("GET "+gatewaywire.ConnectPath, s.handleConnect)
+	s.mux.HandleFunc("GET "+gatewaywire.HealthPath, s.handleHealthz)
+	s.mux.HandleFunc("POST "+gatewaywire.ProbePath, s.handleProbe)
 
 	if opts.STUNAddr != "" {
 		if err := s.startSTUN(opts.STUNAddr); err != nil {
@@ -337,24 +335,9 @@ func (s *Server) idleSweepInterval() time.Duration {
 	return interval
 }
 
-type healthResponse struct {
-	OK            bool   `json:"ok"`
-	Relays        int    `json:"relays"`
-	Clients       int    `json:"clients"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
-	Protocol      int    `json:"protocol"`
-	Version       string `json:"version"`
-	Revision      string `json:"revision"`
-	// STUNPort tells an operator whether address discovery is live, and on
-	// which port. It is the same number both hellos advertise; 0 means
-	// disabled. Like every other field here it is a count or a setting, never
-	// an address, a relay id, or a byte total.
-	STUNPort int `json:"stun_port"`
-}
-
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	relays, clients := s.counts()
-	writeJSONResponse(w, http.StatusOK, healthResponse{
+	writeJSONResponse(w, http.StatusOK, gatewaywire.HealthResponse{
 		OK:            true,
 		Relays:        relays,
 		Clients:       clients,
@@ -458,6 +441,28 @@ func randomNonce() (string, error) {
 		return "", fmt.Errorf("gateway: read nonce: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(nonce), nil
+}
+
+func (s *Server) sendServerHello(ctx context.Context, conn *websocket.Conn, peer string) (string, bool) {
+	nonce, err := randomNonce()
+	if err != nil {
+		s.logger.Error("nonce generation failed", "error", err)
+		reject(ctx, conn, gatewaywire.CodeInternal, "gateway could not generate a challenge")
+		return "", false
+	}
+	if err := writeJSON(ctx, conn, gatewaywire.ServerHello{
+		Type:     gatewaywire.TypeServerHello,
+		Proto:    gatewaywire.Proto,
+		Nonce:    nonce,
+		StunPort: s.stunPort,
+		Version:  s.opts.Version,
+		Revision: s.opts.Revision,
+	}); err != nil {
+		s.logger.Debug(peer+" hello write failed", "error", err)
+		return "", false
+	}
+
+	return nonce, true
 }
 
 // writeJSON sends one JSON control message as a WebSocket text frame.

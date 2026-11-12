@@ -956,7 +956,7 @@ func TestHealthz(t *testing.T) {
 		t.Fatalf("get healthz: %v", err)
 	}
 	defer health.Body.Close()
-	var report healthResponse
+	var report gatewaywire.HealthResponse
 	if err := json.NewDecoder(health.Body).Decode(&report); err != nil {
 		t.Fatalf("decode healthz: %v", err)
 	}

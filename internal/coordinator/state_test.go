@@ -424,7 +424,7 @@ func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing
 		len(blocked.Options) != 0 || blocked.Interaction != nil {
 		t.Fatalf("initial blocked state = %+v, want unknown without controls", blocked)
 	}
-	generation := uint64(s.Generation("p1"))
+	generation := s.Generation("p1")
 	classification := question.Classification{
 		Kind:    question.AttentionApproval,
 		Command: "make check",
@@ -460,7 +460,7 @@ func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
 	if _, ok := s.CommitAttentionClassification(
 		"p1",
 		blocked.BlockedEventID,
-		uint64(s.Generation("p1")),
+		s.Generation("p1"),
 		s.ContentRevision("p1"),
 		question.Classification{
 			Kind:    question.AttentionApproval,
@@ -492,7 +492,7 @@ func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
 	if _, ok := s.CommitAttentionClassification(
 		"p1",
 		blocked.BlockedEventID,
-		uint64(s.Generation("p1")),
+		s.Generation("p1"),
 		s.ContentRevision("p1"),
 		question.Classification{
 			Kind:    question.AttentionApproval,
@@ -554,7 +554,7 @@ func TestAttentionRevisionIgnoresUnrelatedPollChanges(t *testing.T) {
 		ActivitySeq:   1,
 	}}, 0)
 	blocked, _ := s.Agent("p1")
-	generation := uint64(s.Generation("p1"))
+	generation := s.Generation("p1")
 	attentionRevision := s.AttentionRevision("p1")
 
 	s.CommitInventory([]*AgentState{{

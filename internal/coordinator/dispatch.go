@@ -41,6 +41,22 @@ type CommandResult struct {
 	replayed  bool
 }
 
+func CommandResultMessage(result *CommandResult) map[string]any {
+	message := map[string]any{
+		"type":       "command_result",
+		"request_id": result.RequestID,
+		"action":     result.Action,
+		"ok":         result.OK,
+		"phase":      result.Phase,
+		"error":      result.Error,
+		"pane_id":    result.PaneID,
+	}
+	if result.Data != nil {
+		message["data"] = result.Data
+	}
+	return message
+}
+
 type Dispatcher struct {
 	terminalTextKey  string
 	herdr            backend.Backend
@@ -213,14 +229,14 @@ func (d *Dispatcher) waitTestGate(ctx context.Context, paneID string, generation
 }
 
 func (d *Dispatcher) PruneSlots(active map[string]bool) {
-	generations := make(map[string]uint64, len(active))
+	generations := make(map[string]int64, len(active))
 	for paneID := range active {
-		generations[paneID] = uint64(d.state.Generation(paneID))
+		generations[paneID] = d.state.Generation(paneID)
 	}
 	d.ApplyTopology(active, generations)
 }
 
-func (d *Dispatcher) ApplyTopology(active map[string]bool, generations map[string]uint64) {
+func (d *Dispatcher) ApplyTopology(active map[string]bool, generations map[string]int64) {
 	d.scheduler.ApplyTopology(active, generations)
 	d.testGatesMu.Lock()
 	defer d.testGatesMu.Unlock()
@@ -240,7 +256,7 @@ func (d *Dispatcher) paneSessionCurrent(token WorkerToken, requestID, action str
 
 func (d *Dispatcher) paneSessionError(token WorkerToken) error {
 	generation, active := d.state.PaneSession(token.PaneID)
-	if uint64(generation) != token.Generation || (!active && !token.AllowAbsent) {
+	if generation != token.Generation || (!active && !token.AllowAbsent) {
 		return ErrPaneReplaced
 	}
 	return nil
@@ -275,7 +291,7 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	}
 	if paneID != "" {
 		generation, _ := d.state.PaneSession(paneID)
-		ctx = context.WithValue(ctx, paneSessionContextKey{}, uint64(generation))
+		ctx = context.WithValue(ctx, paneSessionContextKey{}, generation)
 	}
 
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
@@ -878,13 +894,13 @@ func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestI
 
 func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runner EffectRunner) *CommandResult {
 	if !options.RelayLevel {
-		admittedGeneration, captured := ctx.Value(paneSessionContextKey{}).(uint64)
+		admittedGeneration, captured := ctx.Value(paneSessionContextKey{}).(int64)
 		if !captured {
 			generation, _ := d.state.PaneSession(options.PaneID)
-			admittedGeneration = uint64(generation)
+			admittedGeneration = generation
 		}
 		generation, active := d.state.PaneSession(options.PaneID)
-		if uint64(generation) != admittedGeneration || !active {
+		if generation != admittedGeneration || !active {
 			return d.fail(options.RequestID, options.Action, options.PaneID, ErrPaneReplaced.Error())
 		}
 		options.PaneGeneration = admittedGeneration
@@ -1015,64 +1031,67 @@ func (d *Dispatcher) RecordActivity(kind, status, summary, paneID, requestID str
 	d.recordActivity(kind, status, summary, paneID, requestID)
 }
 
+type TransitionActivity struct {
+	Kind            string
+	Status          string
+	Summary         string
+	PaneID          string
+	ExpectedStatus  string
+	Revision        int64
+	Details         map[string]any
+	Agent           string
+	Project         string
+	Host            string
+	Session         string
+	Extract         string
+	BlockedIdentity *BlockedTransitionIdentity
+}
+
+type BlockedTransitionIdentity struct {
+	EventID           string
+	Generation        int64
+	AttentionKind     string
+	AttentionRevision int64
+}
+
 // RecordTransitionActivity publishes only while the originating state
 // revision is still current. If the state advances during the durable append,
 // the worker tombstones and removes the stale record before it can be exposed.
-func (d *Dispatcher) RecordTransitionActivity(
-	kind string,
-	status string,
-	summary string,
-	paneID string,
-	expectedStatus string,
-	revision int64,
-	details map[string]any,
-	agent string,
-	project string,
-	host string,
-	session string,
-	extract string,
-	blockedIdentity ...any,
-) bool {
+func (d *Dispatcher) RecordTransitionActivity(transition TransitionActivity) bool {
 	if d.activityW == nil {
 		return false
 	}
 	d.activityOrder.Lock()
 	defer d.activityOrder.Unlock()
 	transitionCurrent := func() bool {
-		if kind == "working" {
+		if transition.Kind == "working" {
 			return true
 		}
-		if kind == "finished" {
-			return d.state.CompletionCurrent(paneID, revision)
+		if transition.Kind == "finished" {
+			return d.state.CompletionCurrent(transition.PaneID, transition.Revision)
 		}
-		if expectedStatus == "blocked" && len(blockedIdentity) == 4 {
-			eventID, eventOK := blockedIdentity[0].(string)
-			generation, generationOK := blockedIdentity[1].(uint64)
-			attentionKind, attentionOK := blockedIdentity[2].(string)
-			attentionRevision, revisionOK := blockedIdentity[3].(int64)
-			if eventOK && generationOK && attentionOK && revisionOK {
-				return d.state.AttentionTransitionCurrent(
-					paneID,
-					eventID,
-					generation,
-					attentionKind,
-					attentionRevision,
-				)
-			}
+		if identity := transition.BlockedIdentity; transition.ExpectedStatus == "blocked" && identity != nil {
+			return d.state.AttentionTransitionCurrent(
+				transition.PaneID,
+				identity.EventID,
+				identity.Generation,
+				identity.AttentionKind,
+				identity.AttentionRevision,
+			)
 		}
-		return d.state.TransitionCurrent(paneID, expectedStatus, revision)
+		return d.state.TransitionCurrent(transition.PaneID, transition.ExpectedStatus, transition.Revision)
 	}
 	if !transitionCurrent() {
 		return false
 	}
-	entry := activity.NewEntry(kind, status, summary, paneID, agent, project, "")
-	entry.Host = host
-	entry.Session = session
-	entry.Details = details
-	if transitionAt, ok := details["transition_at"].(int64); ok && transitionAt > 0 {
+	entry := activity.NewEntry(transition.Kind, transition.Status, transition.Summary, transition.PaneID, transition.Agent, transition.Project, "")
+	entry.Host = transition.Host
+	entry.Session = transition.Session
+	entry.Details = transition.Details
+	if transitionAt, ok := transition.Details["transition_at"].(int64); ok && transitionAt > 0 {
 		entry.Timestamp = activity.MilliTimestamp(transitionAt)
 	}
-	entry.Extract = extract
+	entry.Extract = transition.Extract
 	committed, err := d.activityW.Commit(context.Background(), activity.ActivityCommitRequested{
 		Sequence: d.activitySequence.Add(1),
 		Entry:    entry,

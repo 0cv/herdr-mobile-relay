@@ -1,5 +1,10 @@
 package seqmatch
 
+import (
+	"cmp"
+	"slices"
+)
+
 // Match represents a matching block: a[i:i+Size] == b[j:j+Size].
 type Match struct {
 	A    int
@@ -84,7 +89,12 @@ func (m *Matcher) GetMatchingBlocks() []Match {
 		}
 	}
 
-	sortMatches(blocks)
+	slices.SortFunc(blocks, func(a, b Match) int {
+		if order := cmp.Compare(a.A, b.A); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.B, b.B)
+	})
 
 	// Merge adjacent blocks
 	var merged []Match
@@ -104,33 +114,4 @@ func (m *Matcher) GetMatchingBlocks() []Match {
 	}
 	merged = append(merged, Match{la, lb, 0})
 	return merged
-}
-
-func sortMatches(matches []Match) {
-	// Insertion sort — blocks are typically few (< 50)
-	for i := 1; i < len(matches); i++ {
-		key := matches[i]
-		j := i - 1
-		for j >= 0 && compareMatch(matches[j], key) > 0 {
-			matches[j+1] = matches[j]
-			j--
-		}
-		matches[j+1] = key
-	}
-}
-
-func compareMatch(a, b Match) int {
-	if a.A != b.A {
-		if a.A < b.A {
-			return -1
-		}
-		return 1
-	}
-	if a.B != b.B {
-		if a.B < b.B {
-			return -1
-		}
-		return 1
-	}
-	return 0
 }

@@ -374,7 +374,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 		// quotes, so the documented syntax would otherwise silently degrade
 		// to a relative path. Expand it ourselves, before the absolute-path
 		// check below, so a home-relative entry is not rejected as relative.
-		base = expandTilde(base, home)
+		base = ExpandTilde(base, home)
 		// Anything still relative here would join against the relay's
 		// working directory instead of the caller's intended root, which
 		// produces the exact missing-history symptom this package exists to
@@ -407,7 +407,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 
 	// The home default is a fallback, even when it was also named explicitly.
 	// Remove its earlier occurrence and append it once at the end.
-	homeRoot := filepath.Clean(filepath.Join(expandTilde(strings.TrimSpace(homeBase), home), leaf))
+	homeRoot := filepath.Clean(filepath.Join(ExpandTilde(strings.TrimSpace(homeBase), home), leaf))
 	if filepath.IsAbs(homeRoot) {
 		filtered := roots[:0]
 		for _, root := range roots {
@@ -420,7 +420,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 	return roots
 }
 
-// expandTilde expands a leading "~" or "~/" against home, the same shorthand a
+// ExpandTilde expands a leading "~" or "~/" against home, the same shorthand a
 // shell would expand before a program ever saw the value. It exists only
 // because this package reads its input straight from the environment of a
 // launchd/systemd service, which is never a shell, so nothing upstream has
@@ -431,7 +431,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 // are deliberately left untouched rather than guessed at - they fall through
 // unchanged and are then rejected as relative by the same guard, like any
 // other relative entry.
-func expandTilde(path, home string) string {
+func ExpandTilde(path, home string) string {
 	if path == "~" {
 		return home
 	}

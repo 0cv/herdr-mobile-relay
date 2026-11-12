@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -71,7 +72,6 @@ type State struct {
 	revision           map[string]int64
 	contentRev         map[string]int64
 	attentionRev       map[string]int64
-	prevStatus         map[string]string
 	topologyGen        int64
 	revCounter         int64
 	unseenDone         map[string]bool
@@ -125,7 +125,6 @@ func NewState(logger *slog.Logger) *State {
 		revision:           make(map[string]int64),
 		contentRev:         make(map[string]int64),
 		attentionRev:       make(map[string]int64),
-		prevStatus:         make(map[string]string),
 		unseenDone:         make(map[string]bool),
 		ackDone:            make(map[string]bool),
 		finishedNotif:      make(map[string]bool),
@@ -297,11 +296,11 @@ func (s *State) PaneSession(paneID string) (int64, bool) {
 	return s.generation[paneID], active
 }
 
-func (s *State) PaneSessionCurrent(paneID string, generation uint64) bool {
+func (s *State) PaneSessionCurrent(paneID string, generation int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, active := s.agents[paneID]
-	return active && uint64(s.generation[paneID]) == generation
+	return active && s.generation[paneID] == generation
 }
 
 func (s *State) BumpGeneration(paneID string) {
@@ -317,19 +316,19 @@ func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
 	return agent != nil && agent.Status == status && s.revision[paneID] == revision
 }
 
-func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation uint64) bool {
+func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	agent := s.agents[paneID]
 	return agent != nil &&
 		agent.Status == "blocked" &&
 		agent.BlockedEventID == eventID &&
-		uint64(s.generation[paneID]) == generation
+		s.generation[paneID] == generation
 }
 
 func (s *State) AttentionTransitionCurrent(
 	paneID, eventID string,
-	generation uint64,
+	generation int64,
 	attentionKind string,
 	attentionRevision int64,
 ) bool {
@@ -339,7 +338,7 @@ func (s *State) AttentionTransitionCurrent(
 	return agent != nil &&
 		agent.Status == "blocked" &&
 		agent.BlockedEventID == eventID &&
-		uint64(s.generation[paneID]) == generation &&
+		s.generation[paneID] == generation &&
 		string(agent.AttentionKind) == attentionKind &&
 		s.attentionRev[paneID] == attentionRevision
 }
@@ -486,7 +485,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.sessionDiscoveries, incoming.PaneID)
 			if existing.SessionID == "" && incoming.SessionID != "" && existing.TerminalID != "" && existing.TerminalID == incoming.TerminalID {
 				s.sessionDiscoveries[incoming.PaneID] = sessionDiscovery{
-					generation: uint64(s.generation[incoming.PaneID]),
+					generation: s.generation[incoming.PaneID],
 					terminalID: incoming.TerminalID,
 					sessionID:  incoming.SessionID,
 				}
@@ -497,7 +496,6 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.sessionDiscoveries, incoming.PaneID)
 			topologyChanged = true
 			s.generation[incoming.PaneID]++
-			delete(s.prevStatus, incoming.PaneID)
 			delete(s.unseenDone, incoming.PaneID)
 			delete(s.ackDone, incoming.PaneID)
 			delete(s.finishedNotif, incoming.PaneID)
@@ -571,14 +569,14 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			s.attentionRev[incoming.PaneID]++
 		}
 
-		prev := s.prevStatus[incoming.PaneID]
+		prev := ""
 		previousAttention := question.AttentionKind("")
 		if existing != nil {
+			prev = existing.Status
 			previousAttention = existing.AttentionKind
 		}
 		s.revision[incoming.PaneID] = s.revCounter
 		s.agents[incoming.PaneID] = &cp
-		s.prevStatus[incoming.PaneID] = cp.Status
 		s.registerTransition(incoming.PaneID, prev, cp.Status, previousAttention)
 		if !exists && (doneStatuses[cp.Status] || cp.Status == "idle") {
 			if cp.LastActiveAt > cp.LastSeenAt {
@@ -608,7 +606,6 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.revision, id)
 			delete(s.contentRev, id)
 			delete(s.attentionRev, id)
-			delete(s.prevStatus, id)
 			delete(s.unseenDone, id)
 			delete(s.ackDone, id)
 			delete(s.finishedNotif, id)
@@ -720,7 +717,6 @@ func (s *State) CommitEventForSession(
 	if !blockedDetailsEqual(&before, a) {
 		s.attentionRev[paneID]++
 	}
-	s.prevStatus[paneID] = status
 	s.registerTransition(paneID, prev, status, previousAttention)
 	if !preservesChatCompletion(prev, status, previousAttention) {
 		s.syncAttentionCompletionLocked(paneID, previousAttention, a.AttentionKind)
@@ -892,7 +888,7 @@ func preservesChatCompletion(
 // event and pane generation that were read remain current.
 func (s *State) CommitAttentionClassification(
 	paneID, eventID string,
-	generation uint64,
+	generation int64,
 	contentRevision int64,
 	classification question.Classification,
 ) (*AgentState, bool) {
@@ -901,7 +897,7 @@ func (s *State) CommitAttentionClassification(
 	agent := s.agents[paneID]
 	if agent == nil || agent.Status != "blocked" ||
 		agent.BlockedEventID != eventID ||
-		uint64(s.generation[paneID]) != generation ||
+		s.generation[paneID] != generation ||
 		s.contentRev[paneID] != contentRevision {
 		return nil, false
 	}
@@ -945,7 +941,7 @@ func applyAttentionClassification(
 	changed := agent.AttentionKind != classification.Kind ||
 		agent.Prompt != classification.Prompt ||
 		agent.Command != classification.Command ||
-		!stringSlicesEqual(agent.Options, options) ||
+		!slices.Equal(agent.Options, options) ||
 		agent.ApprovalFingerprint != nextApprovalFingerprint ||
 		!interactionsEqual(agent.Interaction, nextInteraction) ||
 		agent.QuestionLayout != nextQuestionLayout ||
@@ -961,18 +957,6 @@ func applyAttentionClassification(
 	return changed
 }
 
-func stringSlicesEqual(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
-
 func blockedDetailsEqual(left, right *AgentState) bool {
 	if left == nil || right == nil {
 		return left == right
@@ -981,7 +965,7 @@ func blockedDetailsEqual(left, right *AgentState) bool {
 		left.AttentionKind == right.AttentionKind &&
 		left.Prompt == right.Prompt &&
 		left.Command == right.Command &&
-		stringSlicesEqual(left.Options, right.Options) &&
+		slices.Equal(left.Options, right.Options) &&
 		left.ApprovalFingerprint == right.ApprovalFingerprint &&
 		interactionsEqual(left.Interaction, right.Interaction) &&
 		left.QuestionLayout == right.QuestionLayout &&
@@ -1003,7 +987,7 @@ func (s *State) AcknowledgePane(paneID string) bool {
 	if !exists {
 		return false
 	}
-	agent.LastSeenAt = maxInt64(time.Now().UnixMilli(), agent.LastActiveAt)
+	agent.LastSeenAt = max(time.Now().UnixMilli(), agent.LastActiveAt)
 	if s.unseenDone[paneID] || doneStatuses[agent.Status] {
 		delete(s.unseenDone, paneID)
 		s.ackDone[paneID] = true
@@ -1040,7 +1024,7 @@ func (s *State) Snapshot() []*AgentState {
 func (s *State) snapshotLocked() []*AgentState {
 	result := make([]*AgentState, 0, len(s.agents))
 	for _, a := range s.agents {
-		cp := cloneAgentState(a)
+		cp := a.Clone()
 		cp.StateRevision = s.revision[cp.PaneID]
 		cp.Generation = s.generation[cp.PaneID]
 		if doneStatuses[cp.Status] && s.ackDone[cp.PaneID] {
@@ -1082,7 +1066,7 @@ func (s *State) commitWorkspacesLocked(workspaces []herdr.Workspace) bool {
 	return true
 }
 
-func cloneAgentState(agent *AgentState) *AgentState {
+func (agent *AgentState) Clone() *AgentState {
 	if agent == nil {
 		return nil
 	}
@@ -1102,17 +1086,15 @@ func cloneAgentState(agent *AgentState) *AgentState {
 func (s *State) Workspace(workspaceID string) (herdr.Workspace, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, workspace := range s.workspaces {
-		if workspace.ID == workspaceID {
-			copy := workspace
-			if workspace.Worktree != nil {
-				worktree := *workspace.Worktree
-				copy.Worktree = &worktree
-			}
-			return copy, true
-		}
+	workspace, ok := workspaceByID(s.workspaces, workspaceID)
+	if !ok {
+		return herdr.Workspace{}, false
 	}
-	return herdr.Workspace{}, false
+	if workspace.Worktree != nil {
+		worktree := *workspace.Worktree
+		workspace.Worktree = &worktree
+	}
+	return workspace, true
 }
 
 func cloneWorkspaces(workspaces []herdr.Workspace) []herdr.Workspace {
@@ -1158,7 +1140,7 @@ func (s *State) Agent(paneID string) (*AgentState, bool) {
 	if !ok {
 		return nil, false
 	}
-	copy := cloneAgentState(agent)
+	copy := agent.Clone()
 	copy.StateRevision = s.revision[paneID]
 	copy.Generation = s.generation[paneID]
 	return copy, true

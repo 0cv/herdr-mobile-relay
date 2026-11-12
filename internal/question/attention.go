@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 type AttentionKind string
@@ -71,27 +74,15 @@ type approvalMenuRow struct {
 }
 
 var (
-	approvalFooterPattern = regexp.MustCompile(
+	positiveApprovalPattern = regexp.MustCompile(`\b(?:yes|allow|approve|proceed|trust)\b`)
+	negativeApprovalPattern = regexp.MustCompile(`\b(?:no|deny|reject|cancel|exit)\b`)
+	approvalFooterPattern   = regexp.MustCompile(
 		`(?i)(?:enter\s+(?:to\s+)?(?:select|confirm)|` +
 			`(?:esc|escape)\s+(?:to\s+)?(?:cancel|reject|deny|exit)|` +
 			`(?:↑/↓|up/down).*(?:navigate|select)|tab\s+to\s+(?:edit|amend))`,
 	)
-	normalPromptPattern      = regexp.MustCompile(`(?i)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:$|(?:ask|describe|type|send|use)\b.*)$`)
-	hermesPlaceholderPattern = regexp.MustCompile(
-		`(?i)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:` +
-			`ask anything, or type / for commands(?:…|\.\.\.)|` +
-			`summarize what's in this folder|` +
-			`draft a reply to the last email in my inbox|` +
-			`plan a feature, then build it step by step|` +
-			`find and fix a failing test|` +
-			`research this topic and write me a brief|` +
-			`what changed in this repo recently\?|` +
-			`turn these notes into a to-do list|` +
-			`explain this error and how to fix it|` +
-			`set a reminder or schedule a recurring task|` +
-			`type / to browse commands, or ctrl\+p for the palette` +
-			`)\s*$`,
-	)
+	normalPromptPattern         = regexp.MustCompile(`(?i)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:$|(?:ask|describe|type|send|use)\b.*)$`)
+	hermesPlaceholderPattern    = regexp.MustCompile(`(?i)` + slashcmd.HermesPlaceholderPattern)
 	hermesApprovalPromptPattern = regexp.MustCompile(`(?i)^\s*⚠\x{fe0f}?(?:\s+[❯›>])?\s*$`)
 	hermesSpinnerLinePattern    = regexp.MustCompile(
 		`^\s*💻\s+.+\(\s*(?:\d+(?:\.\d+)?s|\d+m\d+s)(?:\s*·\s*[↓↑]\s+\S+\s+tok)?\)\s*$`,
@@ -118,7 +109,7 @@ func Classify(text, agent string) Classification {
 	if isAgyAgent(agent) {
 		// ANSI styling can precede or split the focus marker and menu number.
 		// Normalize only after removing it, before any dialog parser runs.
-		text = ansiPattern.ReplaceAllString(text, "")
+		text = textutil.StripANSI(text)
 		text = agyMenuFocusPattern.ReplaceAllString(text, "${1}❯ ${2}")
 	}
 	structuredControls := Supports(agent)
@@ -126,7 +117,7 @@ func Classify(text, agent string) Classification {
 	if !structuredControls && !inputReady {
 		return Classification{
 			Kind:   AttentionUnknown,
-			Prompt: compact(PaneSummary(text), 500),
+			Prompt: textutil.Compact(PaneSummary(text), 500),
 		}
 	}
 	if structuredControls {
@@ -146,8 +137,8 @@ func Classify(text, agent string) Classification {
 			}
 			return Classification{
 				Kind:           AttentionApproval,
-				Prompt:         compact(strings.Join(summaryLines, "\n"), 500),
-				Command:        compact(command, 240),
+				Prompt:         textutil.Compact(strings.Join(summaryLines, "\n"), 500),
+				Command:        textutil.Compact(command, 240),
 				Options:        options,
 				ApprovalFocus:  focus,
 				approvalSource: approvalDialogSource(text, agent),
@@ -166,7 +157,7 @@ func Classify(text, agent string) Classification {
 	}
 	return Classification{
 		Kind:   AttentionUnknown,
-		Prompt: compact(PaneSummary(text), 500),
+		Prompt: textutil.Compact(PaneSummary(text), 500),
 	}
 }
 
@@ -188,7 +179,7 @@ func approvalSummaryLines(text, agent string) []string {
 			continue
 		}
 		if match := menuPattern.FindStringSubmatch(line); match != nil {
-			label := compact(match[3], 500)
+			label := textutil.Compact(match[3], 500)
 			if isHermes && hermesApprovalAuxiliaryOption(label) {
 				continue
 			}
@@ -444,7 +435,7 @@ func ompToolApprovalDetails(lines []string) ([]string, int, string) {
 			focus = len(options)
 			row = strings.TrimSpace(strings.TrimPrefix(row, m))
 		}
-		options = append(options, compact(row, 500))
+		options = append(options, textutil.Compact(row, 500))
 	}
 	if len(options) < 2 || !approvalLabels([]approvalMenuRow{
 		{label: options[0]}, {label: options[len(options)-1]},
@@ -468,12 +459,7 @@ func ompToolApprovalDetails(lines []string) ([]string, int, string) {
 // ompPlanApprovalDetails detects the OMP plan-review action menu, which uses
 // unnumbered focus-marker rows instead of the shared numbered approval menus.
 func ompPlanApprovalDetails(lines []string) ([]string, int) {
-	header := -1
-	for index, line := range lines {
-		if ompPlanMenuPattern.MatchString(line) {
-			header = index
-		}
-	}
+	header := lastLineMatching(lines, ompPlanMenuPattern)
 	if header < 0 {
 		return nil, 0
 	}
@@ -494,7 +480,7 @@ func ompPlanApprovalDetails(lines []string) ([]string, int) {
 			focus = len(options)
 			line = strings.TrimSpace(strings.TrimPrefix(line, marker))
 		}
-		options = append(options, compact(line, 500))
+		options = append(options, textutil.Compact(line, 500))
 	}
 	if end < 0 || len(options) < 2 {
 		return nil, 0
@@ -530,7 +516,7 @@ func latestApprovalMenu(lines []string) []approvalMenuRow {
 			continue
 		}
 		number, _ := strconv.Atoi(match[2])
-		label := compact(match[3], 500)
+		label := textutil.Compact(match[3], 500)
 		switch {
 		case number == 1:
 			flush()
@@ -635,8 +621,8 @@ func approvalHeader(agent, header string) bool {
 func approvalLabels(rows []approvalMenuRow) bool {
 	first := strings.ToLower(rows[0].label)
 	last := strings.ToLower(rows[len(rows)-1].label)
-	positive := regexp.MustCompile(`\b(?:yes|allow|approve|proceed|trust)\b`).MatchString(first)
-	negative := regexp.MustCompile(`\b(?:no|deny|reject|cancel|exit)\b`).MatchString(last)
+	positive := positiveApprovalPattern.MatchString(first)
+	negative := negativeApprovalPattern.MatchString(last)
 	return positive && negative
 }
 

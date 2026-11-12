@@ -476,7 +476,7 @@ Do you want to proceed?
 func TestQuestionIdentityIgnoresSelections(t *testing.T) {
 	initial := Parse(multiQuestionView, "claude")
 	selected := Parse(
-		stringReplace(multiQuestionView, "1. [✓] Remove", "1. [ ] Remove"),
+		strings.Replace(multiQuestionView, "1. [✓] Remove", "1. [ ] Remove", 1),
 		"claude",
 	)
 	if initial == nil || selected == nil || initial.ID != selected.ID {
@@ -539,15 +539,6 @@ func TestLatestCompletedResponseRequiresCompletedTurn(t *testing.T) {
 	if got := LatestCompletedResponse(claude); got != "The implementation is ready.\nIt works." {
 		t.Fatalf("LatestCompletedResponse() = %q, want complete Claude response", got)
 	}
-}
-
-func stringReplace(value, old, replacement string) string {
-	for index := 0; index+len(old) <= len(value); index++ {
-		if value[index:index+len(old)] == old {
-			return value[:index] + replacement + value[index+len(old):]
-		}
-	}
-	return value
 }
 
 func TestChromePatternBoxDrawing(t *testing.T) {

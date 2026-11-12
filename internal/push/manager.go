@@ -1049,27 +1049,11 @@ func (e *pushError) Error() string {
 // must not destroy an otherwise valid subscription.
 func isTerminalError(err error) bool {
 	var pe *pushError
-	if ok := asPushError(err, &pe); ok {
+	if errors.As(err, &pe) {
 		switch pe.statusCode {
 		case http.StatusNotFound, http.StatusGone:
 			return true
 		}
-	}
-	return false
-}
-
-func asPushError(err error, target **pushError) bool {
-	for err != nil {
-		if pe, ok := err.(*pushError); ok {
-			*target = pe
-			return true
-		}
-		type unwrapper interface{ Unwrap() error }
-		u, ok := err.(unwrapper)
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
 	}
 	return false
 }

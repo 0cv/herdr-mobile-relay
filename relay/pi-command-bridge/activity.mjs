@@ -121,6 +121,18 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
   const capabilities = { source: 'pi_events', active_branch: true };
   let state = incomplete ? 'incomplete' : 'ready';
   function revision() { return `${incarnation}:${epoch}`; }
+  function markIncomplete() {
+    reset = true;
+    state = 'incomplete';
+    incompleteTurn = true;
+  }
+  function resetLive() {
+    toolEntryId = undefined;
+    toolAssistantId = undefined;
+    liveTools.clear();
+    liveToolBytes = 0;
+    toolsDirty = false;
+  }
   function reconcile(captureNewPrompt = false) {
     if (!pendingCommits.length && !captureNewPrompt && manager.getLeafId() === observedLeaf) return;
     let recoveredBoundary = pendingCommits.length > 0;
@@ -128,7 +140,7 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
     const finalized = new Map();
     for (const boundary of pendingCommits) {
       const assistant = manager.getEntry(boundary.messageEntryId);
-      if (assistant?.type !== 'message' || assistant.message?.role !== 'assistant') { reset = true; state = 'incomplete'; incompleteTurn = true; recoveredBoundary = false; }
+      if (assistant?.type !== 'message' || assistant.message?.role !== 'assistant') { markIncomplete(); recoveredBoundary = false; }
       else {
         finalized.set(assistant.id, assistant);
         if (['error', 'aborted'].includes(assistant.message.stopReason)) incompleteTurn = true;
@@ -136,7 +148,7 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
       if (boundary.liveId) { removed.add(boundary.liveId); dirty.delete(boundary.liveId); if (activeId === boundary.liveId) { activeId = undefined; activeEntry = undefined; } }
       if (boundary.toolLiveId) {
         removed.add(boundary.toolLiveId); dirty.delete(boundary.toolLiveId);
-        if (toolEntryId === boundary.toolLiveId) { toolEntryId = undefined; toolAssistantId = undefined; liveTools.clear(); liveToolBytes = 0; toolsDirty = false; }
+        if (toolEntryId === boundary.toolLiveId) resetLive();
       }
       for (const id of boundary.toolResultEntryIds) {
         const entry = manager.getEntry(id);
@@ -152,7 +164,7 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
       added.unshift(entry);
       next = entry.parentId;
     }
-    if (next !== observedLeaf && next) { reset = true; state = 'incomplete'; incompleteTurn = true; recoveredBoundary = false; }
+    if (next !== observedLeaf && next) { markIncomplete(); recoveredBoundary = false; }
     observedLeaf = manager.getLeafId();
     for (const entry of finalized.values()) if (!added.some(item => item.id === entry.id)) queue(activityEntry(entry, manager, results));
     for (const entry of added) queue(activityEntry(entry, manager, results));
@@ -188,14 +200,12 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
     if (toolEntryId) removed.add(toolEntryId);
     activeId = undefined;
     activeEntry = undefined;
-    toolEntryId = undefined;
-    toolAssistantId = undefined;
-    liveTools.clear(); liveToolBytes = 0; toolsDirty = false;
+    resetLive();
   }
   function toolEntry() { return { id: toolEntryId, role: 'assistant', timestamp: '', text: '', tools: [...liveTools.values()] }; }
   function updateTool(type, event) {
     if (typeof event.toolCallId !== 'string' || typeof event.toolName !== 'string') return;
-    if (!liveTools.has(event.toolCallId) && liveTools.size >= ACTIVITY_LIMITS.tools) { reset = true; state = 'incomplete'; incompleteTurn = true; statusDirty = true; return; }
+    if (!liveTools.has(event.toolCallId) && liveTools.size >= ACTIVITY_LIMITS.tools) { markIncomplete(); statusDirty = true; return; }
     if (!toolAssistantId) {
       let next = manager.getLeafId();
       for (let count = 0; next && count < ACTIVITY_LIMITS.pageEntries; count++) {
@@ -224,7 +234,7 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
     const bytes = Buffer.byteLength(JSON.stringify(tool));
     const nextBytes = liveToolBytes + bytes - (previous ? Buffer.byteLength(JSON.stringify(previous)) : 0);
     if (nextBytes > ACTIVITY_LIMITS.frameBytes / 2 - 8192) {
-      reset = true; state = 'incomplete'; incompleteTurn = true; statusDirty = true; return;
+      markIncomplete(); statusDirty = true; return;
     }
     liveTools.set(event.toolCallId, tool); liveToolBytes = nextBytes; toolsDirty = true;
     state = lateJoin || incompleteTurn ? 'incomplete' : 'generating';
@@ -233,7 +243,7 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
     if (!entry) return;
     dirty.set(entry.id, entry);
     if (dirty.size > ACTIVITY_LIMITS.pageEntries || [...dirty.values()].reduce((size, item) => size + Buffer.byteLength(JSON.stringify(item)), 0) > ACTIVITY_LIMITS.frameBytes - 8192) {
-      dirty.clear(); removed.clear(); reset = true; state = 'incomplete'; incompleteTurn = true;
+      dirty.clear(); removed.clear(); markIncomplete();
     }
   }
   function page(cursor = '', limit = ACTIVITY_LIMITS.pageEntries) {
@@ -286,9 +296,9 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
     listen(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     event(type, event, ctx) {
       if (closed) return;
-      if (ctx && ctx.sessionManager.getSessionId() !== manager.getSessionId()) { state = 'incomplete'; incompleteTurn = true; reset = true; emit(); return; }
+      if (ctx && ctx.sessionManager.getSessionId() !== manager.getSessionId()) { markIncomplete(); emit(); return; }
       if (type === 'session_tree') {
-        epoch++; sequence = 0; cursors.clear(); dirty.clear(); removed.clear(); activeId = undefined; activeEntry = undefined; toolEntryId = undefined; toolAssistantId = undefined; liveTools.clear(); liveToolBytes = 0; toolsDirty = false;
+        epoch++; sequence = 0; cursors.clear(); dirty.clear(); removed.clear(); activeId = undefined; activeEntry = undefined; resetLive();
         observedLeaf = manager.getLeafId(); capturedPrompt = undefined; pendingCommits = []; incompleteTurn = false; lateJoin = false; state = 'ready'; reset = true; emit(); return;
       }
       if (type === 'message_start' && event.message?.role === 'assistant') {
@@ -304,17 +314,17 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
       if (['tool_execution_start', 'tool_execution_update', 'tool_execution_end'].includes(type)) updateTool(type, event);
       if (type === 'turn_end') {
         pendingCommits.push({ messageEntryId: event.messageEntryId, liveId: activeId, toolLiveId: toolEntryId, toolResultEntryIds: (event.toolResultEntryIds || []).slice(0, ACTIVITY_LIMITS.tools) });
-        if (pendingCommits.length > 64) { pendingCommits = []; reset = true; state = 'incomplete'; incompleteTurn = true; }
+        if (pendingCommits.length > 64) { pendingCommits = []; markIncomplete(); }
         statusDirty = true;
       }
       if (type === 'session_compact' || type === 'agent_settled') {
         if (type === 'session_compact') queue(activityEntry(event.compactionEntry, manager));
         reconcile();
-        if (type === 'agent_settled' && (activeId || toolEntryId)) { clearLive(); reset = true; incompleteTurn = true; }
+        if (type === 'agent_settled' && (activeId || toolEntryId)) { clearLive(); markIncomplete(); }
         state = lateJoin || incompleteTurn ? 'incomplete' : 'ready'; statusDirty = true; emit();
       }
     },
-    close() { if (closed) return; closed = true; clearInterval(timer); listeners.clear(); dirty.clear(); removed.clear(); cursors.clear(); pendingCommits = []; liveTools.clear(); liveToolBytes = 0; toolsDirty = false; activeEntry = undefined; toolEntryId = undefined; },
+    close() { if (closed) return; closed = true; clearInterval(timer); listeners.clear(); dirty.clear(); removed.clear(); cursors.clear(); pendingCommits = []; activeEntry = undefined; resetLive(); },
   };
 }
 

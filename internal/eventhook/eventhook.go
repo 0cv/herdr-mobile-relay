@@ -1,6 +1,7 @@
 package eventhook
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -99,8 +100,8 @@ func Build(data EventData) (Payload, error) {
 	if err != nil {
 		return Payload{}, fmt.Errorf("resolve Herdr socket path: %w", err)
 	}
-	tabLabel := first(data.TabLabel, data.TabName, data.Label)
-	agent := first(data.Agent, data.DisplayAgent)
+	tabLabel := cmp.Or(data.TabLabel, data.TabName, data.Label)
+	agent := cmp.Or(data.Agent, data.DisplayAgent)
 	hostname, _ := os.Hostname()
 	if short, _, found := strings.Cut(hostname, "."); found {
 		hostname = short
@@ -153,13 +154,4 @@ func loadEnvironment() {
 			_ = os.Setenv(key, value)
 		}
 	}
-}
-
-func first(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

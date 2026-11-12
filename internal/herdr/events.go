@@ -3,6 +3,7 @@ package herdr
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -887,8 +888,8 @@ func (c *SessionCache) setPane(snapshot SnapshotPane) bool {
 	pane := paneToInventoryPane(snapshot)
 	if exists {
 		pane.Agent = previous.Agent
-		pane.Name = firstNonEmpty(pane.Name, previous.Name)
-		pane.Session = firstNonEmpty(pane.Session, previous.Session)
+		pane.Name = cmp.Or(pane.Name, previous.Name)
+		pane.Session = cmp.Or(pane.Session, previous.Session)
 		pane.SessionRaw = previous.SessionRaw
 		if pane.StateChangeSeq == 0 {
 			pane.StateChangeSeq = previous.StateChangeSeq
@@ -914,13 +915,13 @@ func paneTopologyChanged(previous, current Pane) bool {
 
 func (c *SessionCache) applyAgent(agent SnapshotAgent) {
 	pane := c.panes[agent.PaneID]
-	pane.ID = firstNonEmpty(agent.PaneID, pane.ID)
-	pane.TerminalID = firstNonEmpty(agent.TerminalID, pane.TerminalID)
-	pane.WorkspaceID = firstNonEmpty(agent.WorkspaceID, pane.WorkspaceID)
-	pane.TabID = firstNonEmpty(agent.TabID, pane.TabID)
+	pane.ID = cmp.Or(agent.PaneID, pane.ID)
+	pane.TerminalID = cmp.Or(agent.TerminalID, pane.TerminalID)
+	pane.WorkspaceID = cmp.Or(agent.WorkspaceID, pane.WorkspaceID)
+	pane.TabID = cmp.Or(agent.TabID, pane.TabID)
 	pane.Focused = agent.Focused
-	pane.Cwd = firstNonEmpty(agent.Cwd, pane.Cwd)
-	pane.ForegroundCwd = firstNonEmpty(agent.ForegroundCwd, pane.ForegroundCwd)
+	pane.Cwd = cmp.Or(agent.Cwd, pane.Cwd)
+	pane.ForegroundCwd = cmp.Or(agent.ForegroundCwd, pane.ForegroundCwd)
 	pane.Agent = agent.Agent
 	pane.Name = agent.Name
 	pane.Status = agent.Status

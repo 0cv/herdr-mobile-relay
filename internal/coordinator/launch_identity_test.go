@@ -33,7 +33,7 @@ func TestLaunchIdentityRequiresUnbrokenTerminalDiscovery(t *testing.T) {
 			if identity.Valid != want {
 				t.Fatalf("identity = %+v, want valid %v", identity, want)
 			}
-			if want && identity.Generation != uint64(state.Generation("pane")) {
+			if want && identity.Generation != state.Generation("pane") {
 				t.Fatal("identity did not follow proven discovery")
 			}
 		})

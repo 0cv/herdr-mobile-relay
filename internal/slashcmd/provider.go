@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 type Provider interface {
@@ -38,12 +40,12 @@ func selectedAgentDir(ctx DiscoverContext, configName, listEnv, singleEnv string
 		return filepath.Clean(ctx.AgentDir)
 	}
 	for _, candidate := range filepath.SplitList(os.Getenv(listEnv)) {
-		candidate = expandTilde(candidate, ctx.Home)
+		candidate = agentroots.ExpandTilde(candidate, ctx.Home)
 		if filepath.IsAbs(candidate) {
 			return filepath.Clean(candidate)
 		}
 	}
-	candidate := expandTilde(os.Getenv(singleEnv), ctx.Home)
+	candidate := agentroots.ExpandTilde(os.Getenv(singleEnv), ctx.Home)
 	if filepath.IsAbs(candidate) {
 		return filepath.Clean(candidate)
 	}

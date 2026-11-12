@@ -390,7 +390,7 @@ func TestSTUNPortIsAdvertisedOnBothHelloPaths(t *testing.T) {
 		}
 	}
 
-	var report healthResponse
+	var report gatewaywire.HealthResponse
 	fetchHealthz(t, h, &report)
 	if report.STUNPort != port {
 		t.Fatalf("healthz reports stun port %d, want %d", report.STUNPort, port)
@@ -414,7 +414,7 @@ func TestSTUNDisabledStartsNoListener(t *testing.T) {
 		}
 	}
 
-	var report healthResponse
+	var report gatewaywire.HealthResponse
 	fetchHealthz(t, h, &report)
 	if report.STUNPort != 0 {
 		t.Fatalf("healthz reports stun port %d, want 0", report.STUNPort)
@@ -440,7 +440,7 @@ func readServerHello(t *testing.T, h *harness, route string) controlMessage {
 	return hello
 }
 
-func fetchHealthz(t *testing.T, h *harness, into *healthResponse) {
+func fetchHealthz(t *testing.T, h *harness, into *gatewaywire.HealthResponse) {
 	t.Helper()
 	response, err := http.Get(h.url + "/healthz")
 	if err != nil {

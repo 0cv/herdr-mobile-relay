@@ -613,6 +613,40 @@ func TestFinishRollbackDoesNotPublishPartialRecords(t *testing.T) {
 	}
 }
 
+func TestFinishRemovesObjectsWhenIndexCannotBePublished(t *testing.T) {
+	now := time.Now()
+	manager := newTestManager(t, &now)
+	target := uploadTarget(1)
+	data := []byte("attachment")
+	begin := beginOne(t, manager, target, "note.txt", "text/plain", int64(len(data)))
+	sendChunk(t, manager, target, begin.UploadID, 0, 0, data)
+	indexPath := filepath.Join(manager.rootPath, attachmentIndexFilename)
+	if err := os.Remove(indexPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(indexPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := manager.Finish(FinishRequest{
+		Target: target, UploadID: begin.UploadID,
+		Files: []FileDigest{{FileIndex: 0, SHA256: digestFor(data)}},
+	})
+	if errorCode(t, err) != "upload_metadata_unavailable" {
+		t.Fatalf("finish error = %v", err)
+	}
+	if len(manager.attachments) != 0 {
+		t.Fatalf("published attachments after failure = %d", len(manager.attachments))
+	}
+	objects, err := os.ReadDir(filepath.Join(manager.rootPath, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 0 {
+		t.Fatalf("objects after failure = %v", objects)
+	}
+}
+
 func TestExactFilenameAndIndexedExpirySurviveCleanup(t *testing.T) {
 	now := time.Now()
 	manager := newTestManager(t, &now)

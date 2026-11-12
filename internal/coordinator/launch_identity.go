@@ -1,19 +1,19 @@
 package coordinator
 
 type LaunchIdentity struct {
-	Generation uint64
+	Generation int64
 	TerminalID string
 	SessionID  string
 	Valid      bool
 }
 
 type launchSnapshot struct {
-	generations map[string]uint64
+	generations map[string]int64
 	terminals   map[string]string
 }
 
 type sessionDiscovery struct {
-	generation uint64
+	generation int64
 	terminalID string
 	sessionID  string
 }
@@ -21,9 +21,9 @@ type sessionDiscovery struct {
 func (s *State) beginLaunch() launchSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	snapshot := launchSnapshot{generations: make(map[string]uint64, len(s.generation)), terminals: make(map[string]string, len(s.agents))}
+	snapshot := launchSnapshot{generations: make(map[string]int64, len(s.generation)), terminals: make(map[string]string, len(s.agents))}
 	for pane, generation := range s.generation {
-		snapshot.generations[pane] = uint64(generation)
+		snapshot.generations[pane] = generation
 	}
 	for pane, agent := range s.agents {
 		snapshot.terminals[pane] = agent.TerminalID
@@ -34,7 +34,7 @@ func (s *State) beginLaunch() launchSnapshot {
 func (s *State) launchIdentityCurrent(pane string, identity LaunchIdentity) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if !identity.Valid || uint64(s.generation[pane]) != identity.Generation {
+	if !identity.Valid || s.generation[pane] != identity.Generation {
 		return ErrPaneReplaced
 	}
 	if agent := s.agents[pane]; agent != nil && identity.TerminalID != "" && agent.TerminalID != identity.TerminalID {
@@ -47,7 +47,7 @@ func (s *State) finishLaunch(snapshot launchSnapshot, pane string) LaunchIdentit
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	baseline := snapshot.generations[pane]
-	generation := uint64(s.generation[pane])
+	generation := s.generation[pane]
 	identity := LaunchIdentity{Generation: baseline}
 	agent := s.agents[pane]
 	if agent != nil {

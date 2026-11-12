@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 type hermesProvider struct{}
@@ -66,9 +69,9 @@ func parseHermesSkillMetadata(metadata map[string]string, dirName, source string
 	}
 	return &Command{
 		Command:      "/" + slug,
-		Description:  compact(description, 240),
+		Description:  textutil.Compact(description, 240),
 		Source:       source,
-		ArgumentHint: compact(metadata["argument-hint"], 120),
+		ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
 	}
 }
 
@@ -148,7 +151,7 @@ func (reader *catalogReader) hermesHome(ctx DiscoverContext) string {
 	}
 	defaultHome := filepath.Join(ctx.Home, ".hermes")
 	if envHome != "" {
-		envHome = expandTilde(envHome, ctx.Home)
+		envHome = agentroots.ExpandTilde(envHome, ctx.Home)
 		if filepath.IsAbs(envHome) {
 			return filepath.Clean(envHome)
 		}

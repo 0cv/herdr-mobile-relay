@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/gatewaywire"
 	"github.com/0cv/herdr-mobile-relay/internal/portmap"
 )
 
@@ -41,14 +42,8 @@ const (
 	probeLifetime = 2 * time.Minute
 	// releaseTimeout bounds handing the temporary mapping back.
 	releaseTimeout = 3 * time.Second
-	// tokenBytes is the size of the probe token the gateway echoes over UDP.
-	tokenBytes = 32
 	// maxDatagram bounds a single read from the probe socket.
 	maxDatagram = 1500
-	// maxResponseBytes bounds a gateway JSON response.
-	maxResponseBytes = 4 << 10
-	// minProbePort mirrors the gateway's refusal to probe privileged ports.
-	minProbePort = 1024
 	// maxMapWait bounds the port-mapping half of a self-test.
 	maxMapWait = 8 * time.Second
 )
@@ -83,7 +78,7 @@ func NewProber(gatewayURL string, logger *slog.Logger) *Prober {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	base, err := httpBase(gatewayURL)
+	base, err := gatewaywire.HTTPBase(gatewayURL)
 	return &Prober{
 		base:   base,
 		err:    err,
@@ -91,40 +86,6 @@ func NewProber(gatewayURL string, logger *slog.Logger) *Prober {
 		logger: logger,
 		mapUDP: portmap.MapUDP,
 	}
-}
-
-// httpBase converts a gateway WebSocket base URL into its HTTP origin.
-func httpBase(gatewayURL string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(gatewayURL), "/")
-	if trimmed == "" {
-		return "", errors.New("reachability: gateway url is empty")
-	}
-	scheme, rest, ok := strings.Cut(trimmed, "://")
-	if !ok {
-		return "", fmt.Errorf("reachability: gateway url %q has no scheme", gatewayURL)
-	}
-	switch strings.ToLower(scheme) {
-	case "wss", "https":
-		scheme = "https"
-	case "ws", "http":
-		scheme = "http"
-	default:
-		return "", fmt.Errorf("reachability: gateway url scheme %q unsupported", scheme)
-	}
-	if rest == "" {
-		return "", fmt.Errorf("reachability: gateway url %q has no host", gatewayURL)
-	}
-	return scheme + "://" + rest, nil
-}
-
-type probeRequest struct {
-	Port  uint16 `json:"port"`
-	Token string `json:"token"`
-}
-
-type probeResponse struct {
-	Sent       bool   `json:"sent"`
-	ObservedIP string `json:"observed_ip"`
 }
 
 // SelfTest proves or disproves inbound UDP reachability. A test that simply
@@ -174,7 +135,7 @@ func (p *Prober) SelfTest(ctx context.Context, timeout time.Duration) (Result, e
 		}
 	}
 
-	token := make([]byte, tokenBytes)
+	token := make([]byte, gatewaywire.ProbeTokenBytes)
 	if _, err := rand.Read(token); err != nil {
 		result.CheckedAt = time.Now()
 		return result, fmt.Errorf("reachability: generate probe token: %w", err)
@@ -217,25 +178,25 @@ func (p *Prober) release(ctx context.Context, mapping *portmap.Mapping) {
 // returns the source address the gateway observed.
 func (p *Prober) requestProbe(ctx context.Context, externalPort uint16, token []byte) (string, error) {
 	// The gateway refuses privileged ports outright.
-	if externalPort < minProbePort {
-		return "", fmt.Errorf("reachability: external port %d is below the gateway minimum %d", externalPort, minProbePort)
+	if externalPort < gatewaywire.MinProbePort {
+		return "", fmt.Errorf("reachability: external port %d is below the gateway minimum %d", externalPort, gatewaywire.MinProbePort)
 	}
 
-	body, err := json.Marshal(probeRequest{
-		Port:  externalPort,
+	body, err := json.Marshal(gatewaywire.ProbeRequest{
+		Port:  int(externalPort),
 		Token: base64.RawURLEncoding.EncodeToString(token),
 	})
 	if err != nil {
 		return "", fmt.Errorf("reachability: encode probe request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base+"/probe", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base+gatewaywire.ProbePath, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("reachability: build probe request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	var payload probeResponse
+	var payload gatewaywire.ProbeResponse
 	if err := p.do(req, &payload); err != nil {
 		return "", err
 	}
@@ -252,7 +213,7 @@ func (p *Prober) do(req *http.Request, out any) error {
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, gatewaywire.MaxHTTPResponseBytes))
 	if err != nil {
 		return fmt.Errorf("reachability: read %s response: %w", req.URL.Path, err)
 	}

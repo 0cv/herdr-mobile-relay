@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -96,6 +97,10 @@ func TestAppendRejectsSymlinkReplacement(t *testing.T) {
 	if err := os.Symlink(outside, logger.path); err != nil {
 		t.Fatal(err)
 	}
+	if file, err := logger.openAppendFile(); err == nil {
+		_ = file.Close()
+		t.Fatal("opening a symlink unexpectedly succeeded")
+	}
 	if err := logger.Append(Record{Stage: "attempt", Action: "send_text", ClientID: "phone"}); err == nil {
 		t.Fatal("append through a symlink unexpectedly succeeded")
 	}
@@ -105,6 +110,35 @@ func TestAppendRejectsSymlinkReplacement(t *testing.T) {
 	}
 	if string(data) != "unchanged" {
 		t.Fatalf("outside file changed to %q", data)
+	}
+}
+
+func TestOpenAppendFileRejectsFIFO(t *testing.T) {
+	for _, withReader := range []bool{false, true} {
+		name := "without reader"
+		if withReader {
+			name = "with reader"
+		}
+		t.Run(name, func(t *testing.T) {
+			logger, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(logger.path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if withReader {
+				reader, err := os.OpenFile(logger.path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reader.Close()
+			}
+			if file, err := logger.openAppendFile(); err == nil {
+				_ = file.Close()
+				t.Fatal("opening a FIFO unexpectedly succeeded")
+			}
+		})
 	}
 }
 

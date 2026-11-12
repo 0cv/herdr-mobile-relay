@@ -46,13 +46,15 @@ func NewPoller(client backend.Backend, state *State, interval time.Duration, log
 		hostname = hostname[:idx]
 	}
 	return &Poller{
-		client:             client,
-		state:              state,
-		interval:           interval,
-		wakeup:             make(chan struct{}, 1),
-		eventReconnectWait: waitForEventReconnect,
-		logger:             logger,
-		hostname:           hostname,
+		client:   client,
+		state:    state,
+		interval: interval,
+		wakeup:   make(chan struct{}, 1),
+		eventReconnectWait: func(ctx context.Context) bool {
+			return contextDelay(ctx, idlePollInterval) == nil
+		},
+		logger:   logger,
+		hostname: hostname,
 	}
 }
 
@@ -107,7 +109,7 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-p.wakeup:
-			stopPollTimer(timer)
+			timer.Stop()
 			if ctx.Err() != nil {
 				return
 			}
@@ -115,7 +117,7 @@ func (p *Poller) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			resetPollTimer(timer, p.nextPollInterval())
+			timer.Reset(p.nextPollInterval())
 		case <-timer.C:
 			if ctx.Err() != nil {
 				return
@@ -124,7 +126,7 @@ func (p *Poller) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			resetPollTimer(timer, p.nextPollInterval())
+			timer.Reset(p.nextPollInterval())
 		}
 	}
 }
@@ -341,17 +343,6 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())
 }
 
-func waitForEventReconnect(ctx context.Context) bool {
-	timer := time.NewTimer(idlePollInterval)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
 func (p *Poller) handleTopologyStale() {
 	p.topologyRetries++
 	if p.topologyRetries <= maxImmediateTopologyPolls {
@@ -386,20 +377,6 @@ func (p *Poller) recordPollFailure() {
 func (p *Poller) resetPollFailures() {
 	p.pollRetryFailures = 0
 	p.consecutiveFailures.Store(0)
-}
-
-func stopPollTimer(timer *time.Timer) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-}
-
-func resetPollTimer(timer *time.Timer, delay time.Duration) {
-	stopPollTimer(timer)
-	timer.Reset(delay)
 }
 
 // currentInterval keeps the reconcile poll slow while the event stream is

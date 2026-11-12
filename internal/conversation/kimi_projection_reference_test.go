@@ -6,265 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"strings"
-	"time"
 	"unicode/utf8"
 )
 
-type referenceKimiProjection struct {
-	entries     []Entry
-	code        string
-	diagnostics BrowseDiagnostics
-	mutation    string
-	complete    []byte
-}
-
-type referenceKimiRecord struct {
-	raw    map[string]any
-	bytes  []byte
-	offset int
-}
-
-func referenceKimiJSONBounded(raw []byte) bool {
-	depth, quoted, escaped := 0, false, false
-	for _, c := range raw {
-		if quoted {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				quoted = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			quoted = true
-		case '{', '[':
-			depth++
-			if depth > 32 {
-				return false
-			}
-		case '}', ']':
-			depth--
-		}
-	}
-	return true
-}
-
-func referenceKimiInteger(value any) (int, bool) {
-	n, ok := value.(float64)
-	return int(n), ok && n >= 0 && n <= maxKimiRecords && n == float64(int(n))
-}
-
-func referenceKimiSwitchTimes(records ...map[string]any) bool {
-	var expected float64
-	for i, record := range records {
-		stamp, exists := record["time"]
-		if !exists {
-			if i > 0 && expected != 0 {
-				return false
-			}
-			continue
-		}
-		n, ok := stamp.(float64)
-		if !ok || n <= 0 || n > 253402300799999 || n != float64(int64(n)) {
-			return false
-		}
-		if i == 0 {
-			expected = n
-		} else if n != expected {
-			return false
-		}
-	}
-	return true
-}
-
-func referenceKimiKnownRecord(raw map[string]any) bool {
-	switch stringValue(raw["type"]) {
-	case "", "metadata", "context.append_message", "context.undo", "context.undone", "context.clear", "context.apply_compaction", "agent.switched", "agent.message.appended", "agent.turn.started", "agent.turn.ended", "human.message.appended", "human.turn.started", "human.turn.ended", "turn.prompt", "turn.steer", "turn.ended", "forked":
-		return true
-	case "context.append_loop_event":
-		event, _ := raw["event"].(map[string]any)
-		switch stringValue(event["type"]) {
-		case "step.begin", "content.part", "tool.call", "tool.result", "step.end":
-			return true
-		}
-	}
-	return false
-}
-
-func referenceKimiChain(records []referenceKimiRecord) ([]int, string) {
-	type branch struct {
-		base  string
-		cut   int
-		start int
-		end   int
-	}
-	branches := map[string]branch{"main": {start: 1, end: len(records)}}
-	active := "main"
-	activeLines := []int{}
-	for i := 0; i < len(records); i++ {
-		r := records[i].raw
-		if stringValue(r["type"]) != "agent.switched" {
-			activeLines = append(activeLines, i)
-			continue
-		}
-		if len(branches) >= 128 || i+2 >= len(records) {
-			return nil, "source_corrupt"
-		}
-		name := stringValue(r["branch"])
-		base, _ := r["base"].(map[string]any)
-		baseName := stringValue(base["branch"])
-		prior, exists := branches[baseName]
-		cut, cutOK := referenceKimiInteger(base["line"])
-		legacy, legacyOK := referenceKimiInteger(r["legacyUndoLine"])
-		turns, turnsOK := referenceKimiInteger(r["turns"])
-		_, duplicate := branches[name]
-		undo, undone := records[i+1].raw, records[i+2].raw
-		count, countOK := referenceKimiInteger(undo["count"])
-		undoneTurns, undoneOK := referenceKimiInteger(undone["turns"])
-		_, fromOK := referenceKimiInteger(undone["fromTurnId"])
-		if name == "" || len(name) > 128 || duplicate || !exists || !cutOK || cut < prior.start || cut > min(prior.end, i) || !legacyOK || legacy != i+2 || !turnsOK || turns == 0 || !countOK || count != turns || !undoneOK || undoneTurns != turns || !fromOK || stringValue(r["reason"]) != "undo" || stringValue(r["agentId"]) != "main" || stringValue(undo["type"]) != "context.undo" || stringValue(undone["type"]) != "context.undone" || stringValue(undo["agentId"]) != "main" || stringValue(undone["agentId"]) != "main" || !referenceKimiSwitchTimes(r, undo, undone) {
-			return nil, "source_corrupt"
-		}
-		ancestor, ceiling, onChain := active, i, false
-		for depth := 0; depth < 128; depth++ {
-			if ancestor == baseName {
-				onChain = cut <= ceiling
-				break
-			}
-			parent := branches[ancestor]
-			if parent.base == "" {
-				break
-			}
-			ancestor, ceiling = parent.base, parent.cut
-		}
-		anchors, valid := referenceKimiAnchorLines(records, activeLines)
-		removed := 0
-		for _, line := range anchors {
-			if line+1 > cut {
-				removed++
-			}
-		}
-		if !onChain || !valid || removed != turns {
-			return nil, "source_corrupt"
-		}
-		kept := activeLines[:0]
-		for _, line := range activeLines {
-			if line+1 <= cut {
-				kept = append(kept, line)
-			}
-		}
-		activeLines = kept
-		old := branches[active]
-		old.end = i
-		branches[active] = old
-		branches[name] = branch{base: baseName, cut: cut, start: i + 3, end: len(records)}
-		active = name
-		i += 2
-	}
-	chain := []int{}
-	var walk func(string, int, int) bool
-	walk = func(name string, end, depth int) bool {
-		if depth > 128 {
-			return false
-		}
-		b, ok := branches[name]
-		if !ok || end > b.end || end < b.start {
-			return false
-		}
-		if b.base != "" && !walk(b.base, b.cut, depth+1) {
-			return false
-		}
-		for line := b.start; line <= end; line++ {
-			typeName := stringValue(records[line-1].raw["type"])
-			if typeName != "agent.switched" && !(line == b.start && name != "main") {
-				chain = append(chain, line-1)
-			}
-		}
-		return true
-	}
-	if !walk(active, len(records), 0) {
-		return nil, "source_corrupt"
-	}
-	return chain, ""
-}
-
-func referenceKimiAnchorLines(records []referenceKimiRecord, lines []int) ([]int, bool) {
-	anchors := []int{}
-	for _, line := range lines {
-		raw := records[line].raw
-		switch stringValue(raw["type"]) {
-		case "context.append_message":
-			message, _ := raw["message"].(map[string]any)
-			visible, anchor := referenceKimiHuman(message)
-			if stringValue(message["role"]) == "user" && visible && anchor {
-				anchors = append(anchors, line)
-			}
-		case "context.undo":
-			count, ok := referenceKimiInteger(raw["count"])
-			if !ok || count == 0 || count > len(anchors) {
-				return nil, false
-			}
-			anchors = anchors[:len(anchors)-count]
-		case "context.clear":
-			anchors = nil
-		case "context.apply_compaction":
-			kept := 0
-			if value, exists := raw["keptUserMessageCount"]; exists {
-				var ok bool
-				kept, ok = referenceKimiInteger(value)
-				if !ok || kept > len(anchors) {
-					return nil, false
-				}
-			}
-			anchors = anchors[len(anchors)-kept:]
-		}
-	}
-	return anchors, true
-}
-
-func referenceKimiText(value any) string {
-	if text, ok := value.(string); ok {
-		return text
-	}
-	parts, _ := value.([]any)
-	texts := []string{}
-	for _, raw := range parts {
-		part, _ := raw.(map[string]any)
-		meta, _ := part["meta"].(map[string]any)
-		if stringValue(part["type"]) == "text" && stringValue(meta["source"]) != "user prompt submit hook" {
-			texts = append(texts, stringValue(part["text"]))
-		}
-	}
-	return strings.Join(texts, "\n")
-}
-
-func referenceKimiHuman(message map[string]any) (bool, bool) {
-	origin, exists := message["origin"]
-	if !exists || origin == nil {
-		return true, true
-	}
-	object, ok := origin.(map[string]any)
-	if !ok || stringValue(object["kind"]) != "user" {
-		return false, false
-	}
-	inTurn, _ := object["inTurn"].(bool)
-	return true, !inTurn
-}
-
-func referenceKimiTimestamp(raw map[string]any) string {
-	stamp, ok := raw["time"].(float64)
-	if !ok || stamp <= 0 || stamp > 253402300799999 {
-		return ""
-	}
-	return time.UnixMilli(int64(stamp)).UTC().Format(time.RFC3339Nano)
-}
-
-func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProjection {
-	result := referenceKimiProjection{entries: []Entry{}}
+func referenceProjectKimi(ctx context.Context, data []byte) kimiProjection {
+	result := kimiProjection{entries: []Entry{}}
 	if len(data) > maxConversationBytes {
 		result.code = "output_limit"
 		return result
@@ -275,7 +21,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 		result.diagnostics.ContinuationIncomplete = true
 		result.diagnostics.ContinuationReason = "Kimi is persisting an incomplete journal record."
 	}
-	records := []referenceKimiRecord{}
+	records := []kimiRecord{}
 	mutation := sha256.New()
 	for offset := 0; offset < end; {
 		if ctx.Err() != nil {
@@ -293,7 +39,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 			result.code = "output_limit"
 			return result
 		}
-		if !utf8.Valid(raw) || !referenceKimiJSONBounded(raw) || !json.Valid(raw) {
+		if !utf8.Valid(raw) || !kimiJSONBounded(raw) || !json.Valid(raw) {
 			result.code = "source_corrupt"
 			return result
 		}
@@ -303,11 +49,11 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 			return result
 		}
 		object, _ := value.(map[string]any)
-		if !referenceKimiKnownRecord(object) {
+		if !kimiKnownRecord(object) {
 			result.code = "unsupported_structure"
 			return result
 		}
-		records = append(records, referenceKimiRecord{object, raw, start})
+		records = append(records, kimiRecord{object, raw, start})
 		switch stringValue(object["type"]) {
 		case "context.undo", "context.undone", "agent.switched", "context.clear", "context.apply_compaction":
 			fmt.Fprintln(mutation, start, string(raw))
@@ -328,7 +74,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 		result.code = "unsupported_structure"
 		return result
 	}
-	chain, code := referenceKimiChain(records)
+	chain, code := kimiChain(records)
 	if code != "" {
 		result.code = code
 		return result
@@ -338,9 +84,9 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 	pending := make(map[string]toolLocation)
 	anchors := []int{}
 	contextSeen, humanSeen := false, false
-	add := func(record referenceKimiRecord, role, text string) int {
+	add := func(record kimiRecord, role, text string) int {
 		text, truncated := clampText(sanitizeText(text), maxEntryBytes)
-		entry := Entry{ID: browserEntryID("kimi", int64(record.offset), record.bytes), Role: role, Text: text, Timestamp: referenceKimiTimestamp(record.raw), Truncated: truncated}
+		entry := Entry{ID: browserEntryID("kimi", int64(record.offset), record.bytes), Role: role, Text: text, Timestamp: kimiTimestamp(record.raw), Truncated: truncated}
 		result.entries = append(result.entries, entry)
 		return len(result.entries) - 1
 	}
@@ -396,13 +142,13 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 			role := stringValue(message["role"])
 			if role == "tool" {
 				failed, _ := message["isError"].(bool)
-				settle(stringValue(message["toolCallId"]), referenceKimiText(message["content"]), failed)
+				settle(stringValue(message["toolCallId"]), kimiText(message["content"]), failed)
 				continue
 			}
 			if role != "user" && role != "assistant" {
 				continue
 			}
-			visible, anchor := referenceKimiHuman(message)
+			visible, anchor := kimiHuman(message)
 			if !visible {
 				continue
 			}
@@ -410,7 +156,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 				anchors = append(anchors, len(result.entries))
 				clear(pending)
 			}
-			text := referenceKimiText(message["content"])
+			text := kimiText(message["content"])
 			if role == "user" && text == "" {
 				text = "[Non-text input omitted]"
 			}
@@ -446,7 +192,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 					continue
 				}
 				if stringValue(event["type"]) == "content.part" {
-					text := referenceKimiText([]any{event["part"]})
+					text := kimiText([]any{event["part"]})
 					if text != "" {
 						body := result.entries[entry].Text
 						if body != "" {
@@ -473,7 +219,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 					break
 				}
 				failed, _ := value["isError"].(bool)
-				settle(stringValue(event["toolCallId"]), referenceKimiText(value["output"]), failed)
+				settle(stringValue(event["toolCallId"]), kimiText(value["output"]), failed)
 			case "step.end":
 				id := stringValue(event["uuid"])
 				if _, exists := steps[id]; !exists || closed[id] {
@@ -485,7 +231,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 				result.code = "unsupported_structure"
 			}
 		case "context.undo":
-			count, valid := referenceKimiInteger(raw["count"])
+			count, valid := kimiInteger(raw["count"])
 			if !valid || count == 0 || count > len(anchors) {
 				result.code = "source_corrupt"
 				break
@@ -500,7 +246,7 @@ func referenceProjectKimi(ctx context.Context, data []byte) referenceKimiProject
 			if typeName == "context.apply_compaction" {
 				if value, exists := raw["keptUserMessageCount"]; exists {
 					var valid bool
-					kept, valid = referenceKimiInteger(value)
+					kept, valid = kimiInteger(value)
 					if !valid || kept > len(anchors) {
 						result.code = "source_corrupt"
 						break

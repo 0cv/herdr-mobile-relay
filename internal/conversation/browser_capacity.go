@@ -275,6 +275,6 @@ func capacityFailurePage(code string) *BrowsePage {
 	if code == "index_storage_unavailable" {
 		message = "Older history cannot be prepared on this computer right now."
 	}
-	page := browseFailure(code, message, browseErrorFor(code, message, true))
+	page := failPage(code, message, true)
 	return &page
 }

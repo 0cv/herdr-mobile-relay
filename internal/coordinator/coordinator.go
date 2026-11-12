@@ -21,12 +21,12 @@ const (
 
 type InFlightOperation struct {
 	OperationID OperationID
-	Generation  uint64
+	Generation  int64
 	cancel      context.CancelFunc
 }
 
 type PaneSlot struct {
-	Generation uint64
+	Generation int64
 	Queue      []*scheduledOperation
 	InFlight   *InFlightOperation
 }
@@ -51,7 +51,7 @@ type scheduledOperation struct {
 	runner     EffectRunner
 	sequence   uint64
 	operation  OperationID
-	generation uint64
+	generation int64
 	waiters    []scheduleWaiter
 	index      int
 	cancel     context.CancelFunc
@@ -77,7 +77,7 @@ type completionEvent struct {
 
 type ledgerPhaseUpdate struct {
 	key        string
-	generation uint64
+	generation int64
 	result     *CommandResult
 	response   chan bool
 }
@@ -96,7 +96,7 @@ type ledgerReplayResponse struct {
 
 type topologyUpdate struct {
 	active      map[string]bool
-	generations map[string]uint64
+	generations map[string]int64
 	response    chan struct{}
 }
 
@@ -104,7 +104,7 @@ type ledgerEntry struct {
 	payloadHash string
 	operation   *scheduledOperation
 	result      *CommandResult
-	generation  uint64
+	generation  int64
 	paneID      string
 	createdAt   time.Time
 }
@@ -153,7 +153,7 @@ type Scheduler struct {
 	metricsMu sync.RWMutex
 	metrics   SchedulerMetrics
 
-	generationCurrent func(string, uint64) bool
+	generationCurrent func(string, int64) bool
 }
 
 func NewScheduler(capacity int) *Scheduler {
@@ -180,7 +180,7 @@ func NewScheduler(capacity int) *Scheduler {
 // owner. A pane disappearance advances its slot generation before this method
 // returns, so queued work from the old pane session cannot reach a replacement
 // that later reuses the same pane ID.
-func (s *Scheduler) ApplyTopology(active map[string]bool, paneGenerations ...map[string]uint64) bool {
+func (s *Scheduler) ApplyTopology(active map[string]bool, paneGenerations ...map[string]int64) bool {
 	if s.closed.Load() {
 		return false
 	}
@@ -190,7 +190,7 @@ func (s *Scheduler) ApplyTopology(active map[string]bool, paneGenerations ...map
 			snapshot[paneID] = true
 		}
 	}
-	generations := make(map[string]uint64)
+	generations := make(map[string]int64)
 	if len(paneGenerations) > 0 {
 		for paneID, generation := range paneGenerations[0] {
 			generations[paneID] = generation
@@ -210,7 +210,7 @@ func (s *Scheduler) ApplyTopology(active map[string]bool, paneGenerations ...map
 	}
 }
 
-func (s *Scheduler) SetGenerationCurrent(fn func(string, uint64) bool) {
+func (s *Scheduler) SetGenerationCurrent(fn func(string, int64) bool) {
 	s.generationCurrent = fn
 }
 
@@ -282,7 +282,7 @@ func (s *Scheduler) ExecuteAdmitted(
 // UpdateLedgerPhase synchronously applies a confirmation-watch result through
 // the scheduler owner. A false return means the operation was invalidated by a
 // generation change, pruned, or the scheduler is closing.
-func (s *Scheduler) UpdateLedgerPhase(key string, generation uint64, phase string) bool {
+func (s *Scheduler) UpdateLedgerPhase(key string, generation int64, phase string) bool {
 	result := &CommandResult{OK: phase == "confirmed", Phase: phase}
 	return s.UpdateLedgerResult(key, generation, result)
 }
@@ -290,7 +290,7 @@ func (s *Scheduler) UpdateLedgerPhase(key string, generation uint64, phase strin
 // UpdateLedgerResult replaces the accepted ledger result with the complete
 // terminal confirmation result. Replays must preserve data and errors, not only
 // the terminal phase.
-func (s *Scheduler) UpdateLedgerResult(key string, generation uint64, result *CommandResult) bool {
+func (s *Scheduler) UpdateLedgerResult(key string, generation int64, result *CommandResult) bool {
 	if key == "" || s.closed.Load() {
 		return false
 	}
@@ -393,18 +393,11 @@ func (s *Scheduler) run() {
 	var stopAck chan struct{}
 
 	timer := time.NewTimer(time.Hour)
-	if !timer.Stop() {
-		<-timer.C
-	}
+	timer.Stop()
 	defer timer.Stop()
 
 	resetTimer := func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
+		timer.Stop()
 		for deadlines.Len() > 0 && deadlines[0].index < 0 {
 			heap.Pop(&deadlines)
 		}
@@ -873,7 +866,7 @@ func (s *Scheduler) run() {
 	}
 }
 
-func (s *Scheduler) start(op *scheduledOperation, generation uint64) context.CancelFunc {
+func (s *Scheduler) start(op *scheduledOperation, generation int64) context.CancelFunc {
 	token := WorkerToken{
 		OperationID: op.operation,
 		PaneID:      op.options.PaneID,

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/gatewaywire"
 	"github.com/0cv/herdr-mobile-relay/internal/portmap"
 )
 
@@ -42,20 +43,20 @@ func (g *fakeGateway) routes(t *testing.T) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
-		var req probeRequest
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxResponseBytes))
+		var req gatewaywire.ProbeRequest
+		body, err := io.ReadAll(io.LimitReader(r.Body, gatewaywire.MaxHTTPResponseBytes))
 		if err != nil || json.Unmarshal(body, &req) != nil {
 			http.Error(w, `{"error":"bad_request"}`, http.StatusBadRequest)
 			return
 		}
 		token, err := base64.RawURLEncoding.DecodeString(req.Token)
-		if err != nil || len(token) != tokenBytes {
+		if err != nil || len(token) != gatewaywire.ProbeTokenBytes {
 			g.record(0, req.Token, "malformed token")
 			http.Error(w, `{"error":"bad_token"}`, http.StatusBadRequest)
 			return
 		}
-		if req.Port < minProbePort {
-			g.record(req.Port, req.Token, "invalid port")
+		if req.Port < gatewaywire.MinProbePort {
+			g.record(uint16(req.Port), req.Token, "invalid port")
 			http.Error(w, `{"error":"invalid_port"}`, http.StatusBadRequest)
 			return
 		}
@@ -65,10 +66,10 @@ func (g *fakeGateway) routes(t *testing.T) http.Handler {
 			http.Error(w, `{"error":"no_source"}`, http.StatusInternalServerError)
 			return
 		}
-		g.record(req.Port, req.Token, "")
+		g.record(uint16(req.Port), req.Token, "")
 
 		if g.send {
-			conn, err := net.Dial("udp", net.JoinHostPort(host, itoa(req.Port)))
+			conn, err := net.Dial("udp", net.JoinHostPort(host, itoa(uint16(req.Port))))
 			if err != nil {
 				http.Error(w, `{"error":"dial"}`, http.StatusInternalServerError)
 				return
@@ -81,7 +82,7 @@ func (g *fakeGateway) routes(t *testing.T) http.Handler {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(probeResponse{Sent: true, ObservedIP: host})
+		json.NewEncoder(w).Encode(gatewaywire.ProbeResponse{Sent: true, ObservedIP: host})
 	})
 	return mux
 }
@@ -118,7 +119,7 @@ func TestHTTPBase(t *testing.T) {
 		{in: "  http://gw.example.com  ", want: "http://gw.example.com"},
 	}
 	for _, tc := range tests {
-		got, err := httpBase(tc.in)
+		got, err := gatewaywire.HTTPBase(tc.in)
 		if err != nil {
 			t.Fatalf("httpBase(%q): %v", tc.in, err)
 		}
@@ -128,7 +129,7 @@ func TestHTTPBase(t *testing.T) {
 	}
 
 	for _, bad := range []string{"", "   ", "gw.example.com", "ftp://gw.example.com", "wss://"} {
-		if got, err := httpBase(bad); err == nil {
+		if got, err := gatewaywire.HTTPBase(bad); err == nil {
 			t.Errorf("httpBase(%q) = %q, want an error", bad, got)
 		}
 	}
@@ -194,8 +195,8 @@ func TestSelfTestReachableWithPortMapping(t *testing.T) {
 	if len(failures) != 0 {
 		t.Fatalf("gateway rejected the request: %v", failures)
 	}
-	if decoded, err := base64.RawURLEncoding.DecodeString(tokens[0]); err != nil || len(decoded) != tokenBytes {
-		t.Fatalf("token %q is not %d unpadded base64url bytes", tokens[0], tokenBytes)
+	if decoded, err := base64.RawURLEncoding.DecodeString(tokens[0]); err != nil || len(decoded) != gatewaywire.ProbeTokenBytes {
+		t.Fatalf("token %q is not %d unpadded base64url bytes", tokens[0], gatewaywire.ProbeTokenBytes)
 	}
 }
 

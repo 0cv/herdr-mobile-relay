@@ -167,7 +167,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 	})
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 0},
+		map[string]int64{"pane-1": 0},
 	) {
 		t.Fatal("initial topology was not applied")
 	}
@@ -210,7 +210,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 	}
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 2},
+		map[string]int64{"pane-1": 2},
 	) {
 		t.Fatal("replacement topology was not applied")
 	}
@@ -331,7 +331,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 	})
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 0},
+		map[string]int64{"pane-1": 0},
 	) {
 		t.Fatal("initial topology was not applied")
 	}
@@ -367,7 +367,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 1},
+		map[string]int64{"pane-1": 1},
 	) {
 		t.Fatal("replacement generation was not applied")
 	}
@@ -389,7 +389,7 @@ func TestSchedulerRejectsOperationAdmittedBeforeReplacementTopology(t *testing.T
 
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 1},
+		map[string]int64{"pane-1": 1},
 	) {
 		t.Fatal("replacement topology was not applied")
 	}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 func (reader *catalogReader) discoverGenericSkills(dirs []string, commandFormat string) ([]Command, bool) {
@@ -60,9 +62,9 @@ func (reader *catalogReader) discoverGenericSkills(dirs []string, commandFormat 
 			}
 			commands = append(commands, Command{
 				Command:      "/" + strings.TrimPrefix(strings.Replace(commandFormat, "{name}", name, 1), "/"),
-				Description:  compact(description, 240),
+				Description:  textutil.Compact(description, 240),
 				Source:       source,
-				ArgumentHint: compact(metadata["argument-hint"], 120),
+				ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
 			})
 		}
 		if truncated {
@@ -79,13 +81,4 @@ func userInvocable(metadata map[string]string) bool {
 	default:
 		return true
 	}
-}
-
-func compact(value string, limit int) string {
-	value = strings.Join(strings.Fields(value), " ")
-	runes := []rune(value)
-	if len(runes) > limit {
-		return string(runes[:limit])
-	}
-	return value
 }
