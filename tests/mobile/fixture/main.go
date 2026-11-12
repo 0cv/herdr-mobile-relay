@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -109,24 +108,16 @@ type responseFault struct {
 	Path       string    `json:"path"`
 	Kind       string    `json:"kind"`
 	Remaining  int       `json:"remaining"`
-	Barrier    string    `json:"barrier,omitempty"`
 	LifetimeMs int       `json:"lifetime_ms,omitempty"`
 	ExpiresAt  time.Time `json:"-"`
-	key        string
-	admitted   bool
-	inFlight   int
 }
 
 type releaseRouter struct {
 	mu                 sync.RWMutex
 	old                *web.Handler
-	oldRoot            string
-	oldScript          string
-	oldStyle           string
 	candidate          *web.Handler
 	active             string
 	faults             map[string]*responseFault
-	barriers           map[string]chan struct{}
 	requests           []requestRecord
 	requestCounts      map[string]int
 	actions            []faultAction
@@ -147,10 +138,8 @@ func newReleaseRouter(oldRoot, candidateRoot string) (*releaseRouter, error) {
 		return nil, fmt.Errorf("open candidate web root: %w", err)
 	}
 	return &releaseRouter{
-		old: old, candidate: candidate, active: "old", oldRoot: oldRoot,
-		oldScript: releaseAsset(oldRoot, "script", "/assets/app.js"),
-		oldStyle:  releaseAsset(oldRoot, "style", "/assets/app.css"),
-		faults:    make(map[string]*responseFault), barriers: make(map[string]chan struct{}),
+		old: old, candidate: candidate, active: "old",
+		faults:   make(map[string]*responseFault),
 		requests: make([]requestRecord, 0, maxRequestRecords), requestCounts: make(map[string]int),
 		actions: make([]faultAction, 0, maxFaultEvents), repairPolicies: make(map[string]*repairPolicy),
 	}, nil
@@ -170,7 +159,7 @@ func (r *releaseRouter) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	sequence := r.record(record)
 	tracked := &responseRecorder{ResponseWriter: w, policy: policy, digest: sha256.New()}
 	if fault != nil {
-		r.applyFault(tracked, request, fault, handler)
+		r.applyFault(tracked, request, fault)
 	} else if handler != nil {
 		handler.ServeHTTP(tracked, request)
 	} else {
@@ -207,15 +196,10 @@ func (r *releaseRouter) route(method, path string) (string, *web.Handler, *respo
 	}
 	if fault != nil && fault.Remaining != 0 {
 		copy := *fault
-		copy.key = key
-		copy.admitted = true
 		r.recordFaultActionLocked("fault_consumed", fault, "", r.requestCounts[path])
 		if fault.Remaining > 0 {
 			fault.Remaining--
-			if fault.Kind == "stall" {
-				fault.inFlight++
-				copy.Remaining = fault.Remaining
-			} else if fault.Remaining == 0 {
+			if fault.Remaining == 0 {
 				delete(r.faults, key)
 				r.recordFaultActionLocked("fault_exhausted", fault, "", r.requestCounts[path])
 			}
@@ -284,15 +268,7 @@ func (w *responseRecorder) Flush() {
 	}
 }
 
-func (w *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hijacker, ok := w.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, errors.New("response writer cannot hijack")
-	}
-	return hijacker.Hijack()
-}
-
-func (r *releaseRouter) applyFault(w http.ResponseWriter, request *http.Request, fault *responseFault, handler *web.Handler) {
+func (r *releaseRouter) applyFault(w http.ResponseWriter, request *http.Request, fault *responseFault) {
 	switch fault.Kind {
 	case "missing":
 		http.NotFound(w, request)
@@ -310,86 +286,11 @@ func (r *releaseRouter) applyFault(w http.ResponseWriter, request *http.Request,
 		w.Header().Set("Content-Type", fixtureResourceMIME(request.URL.Path))
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "export const fixturePoison = 'not the canonical module';")
-	case "old":
-		if r.serveOldAsset(w, request) {
-			return
-		}
-		r.mu.RLock()
-		old := r.old
-		r.mu.RUnlock()
-		if old == nil {
-			http.Error(w, "old release is unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		old.ServeHTTP(w, request)
-	case "drop":
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "connection drop is unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		connection, _, err := hijacker.Hijack()
-		if err == nil {
-			_ = connection.Close()
-		}
-	case "stall":
-		defer r.finishFault(fault)
-		barrier := r.barrier(fault.Barrier)
-		select {
-		case <-barrier:
-			invalidated, _ := r.invalidationState()
-			if invalidated {
-				http.Error(w, "fixture fault lifetime expired; test invalidated", http.StatusServiceUnavailable)
-				return
-			}
-			if handler != nil {
-				handler.ServeHTTP(w, request)
-			}
-		case <-request.Context().Done():
-		}
 	case "expired":
 		http.Error(w, "fixture fault lifetime expired; test invalidated", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "unknown fixture fault", http.StatusInternalServerError)
 	}
-}
-
-func (r *releaseRouter) serveOldAsset(w http.ResponseWriter, request *http.Request) bool {
-	if !strings.HasPrefix(request.URL.Path, "/assets/") {
-		return false
-	}
-	asset := ""
-	contentType := ""
-	switch {
-	case strings.HasSuffix(request.URL.Path, ".js"):
-		asset, contentType = r.oldScript, "application/javascript; charset=utf-8"
-	case strings.HasSuffix(request.URL.Path, ".css"):
-		asset, contentType = r.oldStyle, "text/css; charset=utf-8"
-	default:
-		return false
-	}
-	data, err := os.ReadFile(filepath.Join(r.oldRoot, strings.TrimPrefix(asset, "/")))
-	if err != nil {
-		http.NotFound(w, request)
-		return true
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", contentType)
-	_, _ = w.Write(data)
-	return true
-}
-
-func releaseAsset(root, field, fallback string) string {
-	data, err := os.ReadFile(filepath.Join(root, "version.json"))
-	if err == nil {
-		var metadata map[string]any
-		if json.Unmarshal(data, &metadata) == nil {
-			if value, ok := metadata[field].(string); ok && strings.HasPrefix(value, "/") && safeFixturePath(value[1:]) {
-				return value
-			}
-		}
-	}
-	return fallback
 }
 
 func safeFixturePath(value string) bool {
@@ -407,7 +308,7 @@ func (r *releaseRouter) activate(release string) error {
 }
 
 func (r *releaseRouter) addFault(fault responseFault) error {
-	supported := fault.Kind == "missing" || fault.Kind == "corrupt" || fault.Kind == "old" || fault.Kind == "drop" || fault.Kind == "stall"
+	supported := fault.Kind == "missing" || fault.Kind == "corrupt"
 	supported = supported || fault.Kind == "immutable-html" || fault.Kind == "immutable-corrupt"
 	if !supported {
 		return errors.New("unsupported fixture fault")
@@ -427,9 +328,6 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	}
 	if fault.Remaining < -1 || fault.Remaining > maxFaultResponses {
 		return errors.New("fault response count is outside the fixture limit")
-	}
-	if fault.Kind == "stall" && fault.Barrier == "" {
-		return errors.New("stall faults require a barrier")
 	}
 	if fault.Kind == "immutable-html" || fault.Kind == "immutable-corrupt" {
 		if (!strings.HasPrefix(fault.Path, "/assets/") && !strings.HasPrefix(fault.Path, "/builds/")) || fixtureResourceMIME(fault.Path) == "application/octet-stream" {
@@ -464,14 +362,6 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	}
 	if len(r.actions) >= maxFaultEvents {
 		return errors.New("fixture fault accounting limit reached")
-	}
-	if fault.Kind == "stall" {
-		if len(fault.Barrier) > 128 || !validFaultLabel(fault.Barrier) {
-			return errors.New("stall barrier must be a short safe label")
-		}
-		if _, ok := r.barriers[fault.Barrier]; !ok {
-			r.barriers[fault.Barrier] = make(chan struct{})
-		}
 	}
 	copy := fault
 	r.faults[key] = &copy
@@ -592,52 +482,6 @@ func (r *releaseRouter) invalidationState() (bool, string) {
 	defer r.mu.Unlock()
 	r.invalidateExpiredLocked(time.Now())
 	return r.invalidated, r.invalidationReason
-}
-
-func (r *releaseRouter) releaseBarrier(name string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.invalidateExpiredLocked(time.Now())
-	barrier, ok := r.barriers[name]
-	if !ok {
-		return fmt.Errorf("barrier %q is not declared", name)
-	}
-	select {
-	case <-barrier:
-	default:
-		close(barrier)
-	}
-	return nil
-}
-
-func (r *releaseRouter) finishFault(fault *responseFault) {
-	if fault == nil || !fault.admitted || fault.key == "" || fault.Kind != "stall" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	active := r.faults[fault.key]
-	if active == nil || active.ID != fault.ID || active.Generation != fault.Generation {
-		return
-	}
-	if active.inFlight > 0 {
-		active.inFlight--
-	}
-	if active.Remaining == 0 && active.inFlight == 0 {
-		delete(r.faults, fault.key)
-		r.recordFaultActionLocked("fault_exhausted", active, "", r.requestCounts[active.Path])
-	}
-}
-
-func (r *releaseRouter) barrier(name string) <-chan struct{} {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if channel, ok := r.barriers[name]; ok {
-		return channel
-	}
-	channel := make(chan struct{})
-	r.barriers[name] = channel
-	return channel
 }
 
 func (r *releaseRouter) record(record requestRecord) uint64 {
@@ -996,7 +840,6 @@ type fixture struct {
 	appURL          string
 	controlURL      string
 	controlSecret   string
-	certificate     string
 	setupURLs       []string
 	candidate       string
 	old             string
@@ -1035,15 +878,13 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if (request.URL.Path == "/activate" || request.URL.Path == "/fault" || request.URL.Path == "/fault/clear" || request.URL.Path == "/fault/release" || request.URL.Path == "/fault/repair" || request.URL.Path == "/barrier/release" || request.URL.Path == "/relay/drop" || request.URL.Path == "/shutdown") && request.Method != http.MethodPost {
+	if (request.URL.Path == "/activate" || request.URL.Path == "/fault" || request.URL.Path == "/fault/clear" || request.URL.Path == "/fault/repair" || request.URL.Path == "/relay/drop" || request.URL.Path == "/shutdown") && request.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	switch request.URL.Path {
 	case "/state":
 		writeJSON(w, f.snapshot())
-	case "/setup":
-		writeJSON(w, map[string]any{"app_url": f.appURL, "setup_urls": f.setupURLs, "ca_certificate": f.certificate})
 	case "/activate":
 		var payload struct {
 			Release string `json:"release"`
@@ -1068,7 +909,7 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
-	case "/fault/clear", "/fault/release":
+	case "/fault/clear":
 		var payload struct {
 			ID         string `json:"id"`
 			Generation string `json:"generation"`
@@ -1101,13 +942,6 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
-	case "/barrier/release":
-		name := request.URL.Query().Get("name")
-		if err := f.router.releaseBarrier(name); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		writeJSON(w, map[string]any{"ok": true})
 	case "/relay/drop":
 		name := request.URL.Query().Get("name")
 		for _, relay := range f.relays {
@@ -1118,8 +952,6 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 			}
 		}
 		http.Error(w, "unknown relay", http.StatusNotFound)
-	case "/requests":
-		writeJSON(w, f.router.snapshotRequests())
 	case "/shutdown":
 		writeJSON(w, map[string]any{"ok": true})
 		go f.shutdown()
@@ -1201,7 +1033,7 @@ func run(options fixtureOptions) error {
 
 	fixture := &fixture{
 		router: router, appServer: appServer, appListener: appTLS,
-		appURL: appOrigin, certificate: certificatePath, candidate: options.candidate, old: options.oldRoot,
+		appURL: appOrigin, candidate: options.candidate, old: options.oldRoot,
 	}
 	for _, name := range []string{"alpha", "beta"} {
 		relay, relayErr := newScriptedRelay(name, releaseVersion(options.candidate), appOrigin, options.runDir, certificate)
