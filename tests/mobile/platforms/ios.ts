@@ -1089,7 +1089,7 @@ export class IOSPlatform implements MobilePlatform {
     try {
       await this.launchInstalledAppObserved();
     } catch (error) {
-      this.launchObservation.freeze(error, this.driver.snapshot());
+      this.launchObservation.freeze(this.driver.snapshot());
       throw error;
     }
   }

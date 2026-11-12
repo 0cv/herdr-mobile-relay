@@ -290,19 +290,6 @@ export function assertUpdateProgressClosed(evidence: UpdateCompletionEvidence): 
   }
 }
 
-export function assertUpgradeDidNotComplete(
-  acknowledged: boolean,
-  runtime: RuntimeIdentity,
-  target: BundleIdentity,
-): void {
-  if (!acknowledged) return;
-  try {
-    assertRunningIdentity(runtime, target);
-  } catch (error) {
-    throw oracleError('PREMATURE_PHONE_COMPLETION', error instanceof Error ? error.message : String(error));
-  }
-}
-
 export function assertCredentialIdentityPreserved(
   before: RelayAuthEvidence,
   after: RelayAuthEvidence,

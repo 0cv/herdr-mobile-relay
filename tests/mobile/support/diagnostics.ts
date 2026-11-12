@@ -67,16 +67,6 @@ export function sanitizeValue(value: unknown, key = ''): unknown {
   return value;
 }
 
-export function assertNoKnownSecret(text: string, secrets: readonly string[]): void {
-  const normalized = text.replaceAll('\\/', '/');
-  for (const secret of secrets) {
-    if (!secret) continue;
-    if (normalized.includes(secret) || normalized.includes(encodeURIComponent(secret))) {
-      throw new Error('DIAGNOSTIC_SECRET: evidence contains a generated secret');
-    }
-  }
-}
-
 export async function writeSanitizedJson(filename: string, value: unknown, signal?: AbortSignal): Promise<void> {
   const content = `${JSON.stringify(sanitizeValue(value), null, 2)}\n`;
   if (Buffer.byteLength(content) > MAX_DIAGNOSTIC_BYTES) throw new Error('DIAGNOSTIC_LIMIT: JSON evidence exceeds the limit');

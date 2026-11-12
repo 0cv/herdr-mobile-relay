@@ -58,7 +58,6 @@ export class IOSLaunchObservation {
   private click: Boundary | null = null;
   private page: number | null = null;
   private remainingMs: number | null = null;
-  originalFatal?: unknown;
   private queryRevoked = false;
   failure?: Readonly<IOSLaunchFailure>;
 
@@ -96,14 +95,13 @@ export class IOSLaunchObservation {
       || after.dispatchedOrdinal !== before.dispatchedOrdinal + 1 || after.sessionGeneration !== before.sessionGeneration) return;
     this.click = after;
   }
-  freeze(error: unknown, snapshot: WebDriverSnapshot): void {
+  freeze(snapshot: WebDriverSnapshot): void {
     if (this.invocation !== 1 || this.failure || this.stage === 'attachment' || this.stage === 'complete') return;
     const last = snapshot.lastCommand?.timing;
     const unresolved = !last || last.settlementMs === undefined || (last.sent && !last.completed)
       || last.sessionGeneration !== this.click?.sessionGeneration;
     const eligible = this.taps === 1 && this.click !== null && !unresolved
       && (this.stage === 'provider' || this.stage === 'foreground');
-    this.originalFatal = error;
     this.failure = Object.freeze({ eligible, reason: eligible ? 'single-acknowledged-tap' : 'launch-not-eligible',
       invocation: this.invocation, taps: this.taps, stage: this.stage, bundle: 'com.apple.webapp',
       readiness: this.tap ? 'ready' : 'unavailable', page: this.page, remainingMs: this.remainingMs,

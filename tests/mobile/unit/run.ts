@@ -15,7 +15,7 @@ import {
   type BundleIdentity,
   type BundleExpectation,
 } from '../support/artifacts';
-import { assertNoKnownSecret, redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
+import { redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
 import { parseTimingScale, PhaseBudget, timingScale } from '../support/budget';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
@@ -44,7 +44,6 @@ import {
   assertRunningIdentity,
   assertStandalone,
   assertStandaloneOwnership,
-  assertUpgradeDidNotComplete,
   isRuntimeIdentityNotReady,
   isQualificationFatal,
   QualificationFailureLatch,
@@ -82,6 +81,16 @@ let selectedIOSIds: readonly string[] | undefined;
 let explicitSelection = false;
 function test(name: string, body: () => Promise<TestOutcome>): void {
   tests.push([name, body]);
+}
+
+function assertNoKnownSecret(text: string, secrets: readonly string[]): void {
+  const normalized = text.replaceAll('\\/', '/');
+  for (const secret of secrets) {
+    if (!secret) continue;
+    if (normalized.includes(secret) || normalized.includes(encodeURIComponent(secret))) {
+      throw new Error('DIAGNOSTIC_SECRET: evidence contains a generated secret');
+    }
+  }
 }
 
 const legacyExpected: BundleExpectation = {
@@ -1559,18 +1568,7 @@ test('oracle observes phone completion instead of only runtime readiness', async
   }), /PHONE_COMPLETION_EVIDENCE_MISSING/);
 });
 
-test('oracle rejects premature completion and relay installs', async () => {
-  const identity: RuntimeIdentity = {
-    url: 'https://localhost/', origin: 'https://localhost', standalone: true, provider: 'test',
-    version: '0.20.8', assets: 361, build: '', entry: '/index.html',
-    script: '/assets/app.js', style: '/assets/app.css', requiredAssetsReady: true, applicationInitialized: true,
-  };
-  const target: BundleIdentity = {
-    version: '0.20.10', assets: 363, build: 'a'.repeat(64), entry: '/builds/a/index.html',
-    script: '/assets/app-a.js', style: '/assets/app-b.css', scriptSha256: 'a'.repeat(64),
-    styleSha256: 'b'.repeat(64), webHash: 'c'.repeat(64), descriptor: true,
-  };
-  assert.throws(() => assertUpgradeDidNotComplete(true, identity, target), /PREMATURE_PHONE_COMPLETION/);
+test('oracle rejects relay installs and deploys', async () => {
   assert.doesNotThrow(() => assertNoRelayInstall(0));
   assert.throws(() => assertNoRelayInstall(1), /UNEXPECTED_RELAY_INSTALL/);
   assert.doesNotThrow(() => assertNoRelayDeploy(0));
