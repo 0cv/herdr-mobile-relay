@@ -935,7 +935,7 @@ func (s *Scheduler) replyNotStarted(op *scheduledOperation) {
 func notStartedResult(op *scheduledOperation) *CommandResult {
 	return &CommandResult{
 		RequestID: op.options.RequestID,
-		Action:    string(op.options.Kind),
+		Action:    op.options.Action,
 		OK:        false,
 		Phase:     "not_started",
 		Error:     "command was not sent; retry is safe",
@@ -955,7 +955,7 @@ func (s *Scheduler) replyStale(op *scheduledOperation, ledger map[string]*ledger
 	}
 	result := &CommandResult{
 		RequestID: op.options.RequestID,
-		Action:    string(op.options.Kind),
+		Action:    op.options.Action,
 		OK:        false,
 		Phase:     phase,
 		Error:     publicError,

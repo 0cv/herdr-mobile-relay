@@ -278,6 +278,8 @@ fi
 # or per-IP and cannot bound total memory.
 for KNOB in HERDR_GATEWAY_MAX_RELAYS HERDR_GATEWAY_MAX_CLIENTS; do
     grep -Fq "$KNOB" "$BUNDLE_DIR/.env" || fail ".env lost the $KNOB ceiling"
+    grep -Fq "$KNOB: \${$KNOB:-" "$BUNDLE_DIR/docker-compose.yml" ||
+        fail "compose file does not pass the $KNOB ceiling"
 done
 grep -Fq 'UDP 3478' "$BUNDLE_DIR/README.md" ||
     fail "bundle README does not mention UDP 3478"

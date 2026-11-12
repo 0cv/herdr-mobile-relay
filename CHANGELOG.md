@@ -5,6 +5,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Failed commands now keep the correct action name in results and activity,
+  including prompts rejected because their agent session changed.
+- Release bundles now include `relay/rotate-token.sh`, so the documented
+  key-rotation command works from an installed release.
+- Self-hosted gateways deployed with the generated Compose bundle now honor
+  `HERDR_GATEWAY_MAX_RELAYS` and `HERDR_GATEWAY_MAX_CLIENTS` from `.env`, so
+  operators can change the gateway-wide connection limits.
+
 ## [0.25.1] - 2026-11-10
 
 ### Fixed

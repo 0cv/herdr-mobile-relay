@@ -111,7 +111,7 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "clear", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandClear, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "agent_clear", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			<-release
@@ -131,7 +131,7 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.ExecuteAdmitted(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "prompt", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			promptRan <- struct{}{}
 			return EffectResult{Result: completed("prompt", "prompt", "pane-1", nil)}
@@ -146,8 +146,8 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 		t.Fatalf("clear result = %+v", result)
 	}
 	result := <-promptResult
-	if result == nil || result.OK || result.Error != "pane session was replaced" {
-		t.Fatalf("queued prompt result = %+v, want stale generation failure", result)
+	if result == nil || result.OK || result.Error != "pane session was replaced" || result.Action != "submit_prompt" {
+		t.Fatalf("queued prompt result = %+v, want stale submit_prompt failure", result)
 	}
 	select {
 	case <-promptRan:
@@ -179,7 +179,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "first", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			<-release
@@ -196,7 +196,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.ExecuteAdmitted(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "queued", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			queuedRan <- struct{}{}
 			return EffectResult{Result: completed("queued", "prompt", "pane-1", nil)}
@@ -232,7 +232,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 	freshRan := false
 	result, err := scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 		ID: scheduler.NextCommandID(), RequestID: "fresh", ReceivedAt: now,
-		Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+		Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 	}, PaneGeneration: 2}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 		freshRan = true
 		return EffectResult{Result: completed("fresh", "prompt", "pane-1", nil)}
@@ -342,7 +342,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 		now := time.Now()
 		_, _ = scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "first", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			<-release
@@ -357,7 +357,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.ExecuteAdmitted(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "queued", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			return EffectResult{Result: completed("queued", "prompt", "pane-1", nil)}
 		}), func() { close(admitted) })
@@ -400,7 +400,7 @@ func TestSchedulerRejectsOperationAdmittedBeforeReplacementTopology(t *testing.T
 		Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "stale-admission",
 			ReceivedAt: now, Deadline: now.Add(time.Second),
-			Kind: CommandPrompt, PaneID: "pane-1",
+			Action: "submit_prompt", PaneID: "pane-1",
 		},
 		// The dispatcher captured generation zero before replacement, but its
 		// scheduler ingress was handled after topology advanced to one.

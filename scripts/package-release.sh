@@ -71,39 +71,11 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     cp "$REPO_DIR/LICENSE" "$STAGE/LICENSE"
     cp "$REPO_DIR/README.md" "$STAGE/README.md"
     cp -R "$REPO_DIR/relay/pi-command-bridge" "$STAGE/relay/pi-command-bridge"
-    for WRAPPER in \
-        change-hostname.sh \
-        common.sh \
-        configure-app-deploy.sh \
-        gateway-deploy.sh \
-        herdr-mobile-relay-service.sh \
-        install-service.sh \
-        install-systemd-user-service.sh \
-        native-install-transaction.sh \
-        plugin-change-hostname.sh \
-        plugin-choose-transport.sh \
-        plugin-configure-app-deploy.sh \
-        plugin-install-service.sh \
-        plugin-on-event.sh \
-        plugin-quick-start.sh \
-        plugin-setup-link.sh \
-        plugin-setup-menu.sh \
-        plugin-stable-teardown.sh \
-        plugin-status.sh \
-        pi-commands.sh \
-        service.sh \
-        setup-link.sh \
-        setup.sh \
-        speech-voices.sh \
-        stable-setup.sh \
-        stable-teardown.sh \
-        start.sh \
-        tailscale-off.sh \
-        tailscale-setup.sh \
-        uninstall.sh \
-        uninstall-service.sh \
-        uninstall-systemd-user-service.sh; do
-        cp "$REPO_DIR/relay/$WRAPPER" "$STAGE/relay/$WRAPPER"
+    for WRAPPER in "$REPO_DIR"/relay/*.sh; do
+        case "${WRAPPER##*/}" in
+            dev-tunnel.sh|dev-pi-commands.sh|open-plugin-pane.sh|plugin-build.sh) continue ;;
+        esac
+        cp "$WRAPPER" "$STAGE/relay/"
     done
     "$WORK_DIR/release-tool" release-manifest "$STAGE" "$VERSION" "$REVISION" "$TARGET" >/dev/null
     # This host tool cannot execute cross-built binaries; native CI verifies each extracted executable.

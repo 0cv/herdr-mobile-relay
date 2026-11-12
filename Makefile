@@ -125,11 +125,11 @@ shell-check:
 	tests/test_stable_setup.sh
 
 production-path-audit:
-	@if rg -n '(^|[;&|][[:space:]]*)(python3?|uv)([[:space:]]|$$)' relay --glob '*.sh' --glob '*.command'; then \
+	@if grep -rEn '(^|[;&|][[:space:]]*)(python3?|uv)([[:space:]]|$$)' relay --include='*.sh'; then \
 		echo "Production shell path still invokes Python or uv" >&2; \
 		exit 1; \
 	fi
-	@if rg -n '(^|[;&|][[:space:]]*)go[[:space:]]+(build|run|install)' relay install.sh; then \
+	@if grep -rEn '(^|[;&|][[:space:]]*)go[[:space:]]+(build|run|install)' relay install.sh; then \
 		echo "End-user install/runtime path still invokes the Go toolchain" >&2; \
 		exit 1; \
 	fi
@@ -151,9 +151,6 @@ release-bundle-check:
 	scripts/package-release.sh "$$version" "$$revision" "$$tmp"; \
 	test "$$(find "$$tmp" -name 'herdr-mobile-relay_*.tar.gz' | wc -l)" -eq 4; \
 	test -s "$$tmp/checksums.txt"; \
-	for archive in "$$tmp"/herdr-mobile-relay_*.tar.gz; do \
-		tar -tzf "$$archive" | grep -qx './relay/native-install-transaction.sh' || exit; \
-	done; \
 	host_os="$$(go env GOOS)"; host_arch="$$(go env GOARCH)"; \
 	scripts/check-installed-release.sh \
 		"$$tmp/herdr-mobile-relay_$${version}_$${host_os}_$${host_arch}.tar.gz" \

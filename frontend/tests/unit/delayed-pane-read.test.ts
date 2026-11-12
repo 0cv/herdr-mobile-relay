@@ -734,7 +734,7 @@ describe('delayed pane read lifetime', () => {
           lifetimeRejected(producer, await lifetimeOutcome);
           expect(lifetimeClock.allocations, 'L07_NO_HEALTH_LATE_ALLOCATION').toHaveLength(0);
           relayStore.setHidden(false);
-          relayStore.revalidateConnections();
+          relayStore.revalidateConnections(2_000);
           const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
           expect(lifetimeReplacement.owner, 'SETUP_HEALTH_RECOVERY_NEW_OWNER').not.toBe(lifetimeFixture.owner);
           expect(Date.now() - lifetimeConnectedAt, 'SETUP_RECOVERY_BEFORE_FINALLY_DELAY').toBe(130_000);

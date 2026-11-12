@@ -127,6 +127,33 @@ func TestBackendRefusesUnsupportedAgentLaunch(t *testing.T) {
 	}
 }
 
+func TestPromptNotStartedKeepsAction(t *testing.T) {
+	for _, reason := range []string{"expired", "closed"} {
+		t.Run(reason, func(t *testing.T) {
+			client := &recordingBackend{}
+			state := NewState(testLogger())
+			state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "codex"}}, state.RevisionCounter())
+			dispatcher := NewDispatcher(client, state, nil, testLogger())
+			defer dispatcher.Close(context.Background())
+			message := map[string]any{
+				"action": "submit_prompt", "request_id": "prompt", "pane_id": "pane-1", "text": "hello",
+			}
+			if reason == "expired" {
+				message["_server_received_at"] = time.Now().Add(-2 * commandDeadline).Format(time.RFC3339Nano)
+			} else if err := dispatcher.scheduler.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			result := dispatcher.Handle(context.Background(), message)
+			if result.OK || result.Phase != "not_started" || result.Action != "submit_prompt" {
+				t.Fatalf("prompt result = %+v, want not-started submit_prompt", result)
+			}
+			if client.prompts.Load() != 0 {
+				t.Fatal("prompt reached the backend")
+			}
+		})
+	}
+}
+
 func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -148,7 +175,7 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 		now := time.Now()
 		_, _ = dispatcher.scheduler.Execute(ctx, ScheduleOptions{Command: Command{
 			ID: dispatcher.scheduler.NextCommandID(), RequestID: "first", ReceivedAt: now,
-			Deadline: now.Add(5 * time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(5 * time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}, PaneGeneration: uint64(generation)}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			select {
@@ -166,15 +193,9 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	admitted := make(chan struct{})
 	results := make(chan *CommandResult, 1)
 	go func() {
-		now := time.Now()
-		result, _ := dispatcher.scheduler.ExecuteAdmitted(ctx, ScheduleOptions{Command: Command{
-			ID: dispatcher.scheduler.NextCommandID(), RequestID: "queued", ReceivedAt: now,
-			Deadline: now.Add(5 * time.Second), Kind: CommandPrompt, PaneID: "pane-1",
-		}, PaneGeneration: uint64(generation)}, EffectFunc(func(ctx context.Context, _ WorkerToken) EffectResult {
-			_ = client.Prompt(ctx, "pane-1", "hello")
-			return EffectResult{Result: completed("queued", "prompt", "pane-1", nil)}
-		}), func() { close(admitted) })
-		results <- result
+		results <- dispatcher.HandleAdmitted(ctx, map[string]any{
+			"action": "submit_prompt", "request_id": "queued", "pane_id": "pane-1", "text": "hello",
+		}, func() { close(admitted) })
 	}()
 	select {
 	case <-admitted:
@@ -188,8 +209,8 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	}
 	select {
 	case result := <-results:
-		if result == nil || result.OK || result.Error != "pane session was replaced" {
-			t.Fatalf("queued target result = %+v", result)
+		if result == nil || result.OK || result.Error != "pane session was replaced" || result.Action != "submit_prompt" {
+			t.Fatalf("queued target result = %+v, want stale submit_prompt failure", result)
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
