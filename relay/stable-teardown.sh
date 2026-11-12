@@ -12,35 +12,6 @@ ENV_FILE="$(canonical_file_path "$ENV_FILE")"
 refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}"
 
-state_command() {
-    "$(relay_binary)" stable-state "$@"
-}
-
-state_get() {
-    state_command get "$STATE_FILE" "$1"
-}
-
-state_update() {
-    state_command update "$STATE_FILE" "$@"
-}
-
-dns_has_record() {
-    local hostname="$1"
-    local record_type
-    local response
-
-    for record_type in A AAAA CNAME; do
-        if ! response="$(curl -fsS --max-time 5 -H 'accept: application/dns-json' \
-            "https://cloudflare-dns.com/dns-query?name=$hostname&type=$record_type" 2>/dev/null)"; then
-            return 2
-        fi
-        if printf '%s' "$response" | grep -q '"Answer"'; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 recover_state_from_config() {
     local config
     local port

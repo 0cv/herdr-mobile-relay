@@ -31,18 +31,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-state_command() {
-    "$(relay_binary)" stable-state "$@"
-}
-
-state_get() {
-    state_command get "$STATE_FILE" "$1"
-}
-
-state_update() {
-    state_command update "$STATE_FILE" "$@"
-}
-
 rerun_command() {
     if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
         echo "herdr plugin action invoke install-service --plugin herdr-mobile-relay.events"
@@ -134,23 +122,6 @@ service_file_present() {
 }
 
 
-
-dns_has_record() {
-    local hostname="$1"
-    local record_type
-    local response
-
-    for record_type in A AAAA CNAME; do
-        if ! response="$(curl -fsS --max-time 5 -H 'accept: application/dns-json' \
-            "https://cloudflare-dns.com/dns-query?name=$hostname&type=$record_type" 2>/dev/null)"; then
-            return 2
-        fi
-        if printf '%s' "$response" | grep -q '"Answer"'; then
-            return 0
-        fi
-    done
-    return 1
-}
 
 select_cloudflare_domain() {
     local cert_zone
@@ -602,13 +573,10 @@ fi
 load_relay_env "$ENV_FILE"
 ORIGIN_CERT="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
 PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
-case "$PORT" in
-    ""|*[!0-9]*|0)
-        echo "✗ HERDR_RELAY_PORT must be a positive integer." >&2
-        fail_resumable
-        exit 1
-        ;;
-esac
+if ! require_positive_integer "$PORT" "✗ HERDR_RELAY_PORT"; then
+    fail_resumable
+    exit 1
+fi
 
 PREVIOUS_STAGE="$(state_get stage)"
 STATE_CREATED_CONFIG="$(state_get created_config)"

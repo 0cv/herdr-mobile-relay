@@ -48,6 +48,33 @@ relay_release_root() {
 }
 
 
+state_command() {
+    "$(relay_binary)" stable-state "$@"
+}
+
+state_get() {
+    state_command get "$STATE_FILE" "$1"
+}
+
+state_update() {
+    state_command update "$STATE_FILE" "$@"
+}
+
+wait_for_exit() {
+    local pid="$1"
+    local attempts="$2"
+    local attempt
+    for ((attempt = 0; attempt < attempts; attempt++)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        sleep 1
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 relay_binary() {
     local binary
     local common_dir
@@ -367,6 +394,25 @@ relogin_for_cloudflare_zone() {
     fi
 }
 
+dns_has_record() {
+    local hostname="$1"
+    local record_type
+    local response
+    shift
+    [ "$#" -gt 0 ] || set -- A AAAA CNAME
+
+    for record_type in "$@"; do
+        if ! response="$(curl -fsS --max-time 5 -H 'accept: application/dns-json' \
+            "https://cloudflare-dns.com/dns-query?name=$hostname&type=$record_type" 2>/dev/null)"; then
+            return 2
+        fi
+        if printf '%s' "$response" | grep -q '"Answer"'; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 hostname_in_zone() {
     case "$1" in
         "$2" | *".$2") return 0 ;;
@@ -410,6 +456,20 @@ installed_service_env_file() {
             fi
             ;;
     esac
+}
+
+adopt_installed_service_env() {
+    local service_env
+
+    [ -z "${HERDR_RELAY_ENV:-}" ] || return 0
+    service_env="$(installed_service_env_file)" || return 1
+    [ -n "$service_env" ] || return 0
+    export HERDR_RELAY_ENV="$service_env"
+    if [ "${1:-}" = announce ]; then
+        echo "Reusing the installed relay configuration:"
+        echo "  $service_env"
+        echo ""
+    fi
 }
 
 update_launchd_release_paths() {
@@ -648,30 +708,28 @@ menu_item() {
     printf '  %s. %s\n' "$key" "$title"
 }
 
-generate_token() {
+generate_random_id() {
+    local label="$1"
+    local removed_characters="$2"
+
     if command -v openssl >/dev/null 2>&1; then
         openssl rand -hex 16
         return
     fi
     if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-'
+        uuidgen | tr '[:upper:]' '[:lower:]' | tr -d "$removed_characters"
         return
     fi
-    echo "Cannot generate a relay token: install openssl or uuidgen." >&2
+    echo "Cannot generate a relay $label: install openssl or uuidgen." >&2
     return 1
 }
 
+generate_token() {
+    generate_random_id token '-'
+}
+
 generate_instance_id() {
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -hex 16
-        return
-    fi
-    if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr '[:upper:]' '[:lower:]'
-        return
-    fi
-    echo "Cannot generate a relay instance ID: install openssl or uuidgen." >&2
-    return 1
+    generate_random_id "instance ID" ''
 }
 
 env_file_value() {
@@ -694,8 +752,6 @@ set_env_value_atomic() {
     local env_file="$1"
     local key="$2"
     local value="$3"
-    local directory
-    local temp_file
 
     case "$value" in
         *"'"*)
@@ -704,13 +760,24 @@ set_env_value_atomic() {
             ;;
     esac
 
+    rewrite_env_value_atomic "$env_file" "$key" "$value"
+}
+
+rewrite_env_value_atomic() {
+    local env_file="$1"
+    local key="$2"
+    local directory
+    local temp_file
+
     directory="$(dirname "$env_file")"
     mkdir -p "$directory"
     temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
     if [ -f "$env_file" ]; then
         grep -v "^${key}=" "$env_file" > "$temp_file" || true
     fi
-    printf "%s='%s'\n" "$key" "$value" >> "$temp_file"
+    if [ "$#" -eq 3 ]; then
+        printf "%s='%s'\n" "$key" "$3" >> "$temp_file"
+    fi
     chmod 600 "$temp_file"
     mv "$temp_file" "$env_file"
 }
@@ -720,44 +787,26 @@ remove_env_value_if_equals_atomic() {
     local key="$2"
     local expected="$3"
     local current
-    local directory
-    local temp_file
 
     if [ ! -f "$env_file" ]; then
         return
     fi
-    current="$(
-        set -a
-        # shellcheck source=/dev/null
-        . "$env_file"
-        set +a
-        printf '%s\n' "${!key-}"
-    )"
+    current="$(env_file_value "$env_file" "$key")"
     if [ "$current" != "$expected" ]; then
         return
     fi
 
-    directory="$(dirname "$env_file")"
-    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
-    grep -v "^${key}=" "$env_file" > "$temp_file" || true
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$env_file"
+    rewrite_env_value_atomic "$env_file" "$key"
 }
 
 remove_env_value_atomic() {
     local env_file="$1"
     local key="$2"
-    local directory
-    local temp_file
 
     if [ ! -f "$env_file" ] || ! grep -q "^${key}=" "$env_file"; then
         return
     fi
-    directory="$(dirname "$env_file")"
-    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
-    grep -v "^${key}=" "$env_file" > "$temp_file" || true
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$env_file"
+    rewrite_env_value_atomic "$env_file" "$key"
 }
 
 persist_github_token() {
@@ -855,6 +904,15 @@ load_relay_env() {
     resolve_relay_instance
 }
 
+require_positive_integer() {
+    case "$1" in
+        ""|*[!0-9]*|0)
+            echo "$2 must be a positive integer." >&2
+            return 1
+            ;;
+    esac
+}
+
 wait_for_relay_health() {
     local port="${1:-$RELAY_DEFAULT_PORT}"
     local attempts="${2:-15}"
@@ -897,12 +955,7 @@ wait_for_relay_health() {
         return 1
     fi
 
-    case "$attempts" in
-        ""|*[!0-9]*|0)
-            echo "Health-check attempts must be a positive integer." >&2
-            return 1
-            ;;
-    esac
+    require_positive_integer "$attempts" "Health-check attempts" || return 1
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/readyz" 2>/dev/null)" &&
@@ -955,12 +1008,7 @@ wait_for_gateway_registration() {
         return 1
     fi
 
-    case "$attempts" in
-        ""|*[!0-9]*|0)
-            echo "Gateway registration attempts must be a positive integer." >&2
-            return 1
-            ;;
-    esac
+    require_positive_integer "$attempts" "Gateway registration attempts" || return 1
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null)"; then
@@ -996,8 +1044,6 @@ wait_for_relay_release_health() {
     local expected_revision="$5"
     local expected_web_hash="$6"
     local expected_instance="${7:-${HERDR_RELAY_INSTANCE_ID:-}}"
-    local health
-    local attempt
 
     [ -n "$expected_version" ] &&
         [ -n "$expected_revision" ] &&
@@ -1006,24 +1052,8 @@ wait_for_relay_release_health() {
             return 1
         }
 
-    case "$attempts" in
-        ""|*[!0-9]*|0)
-            echo "Health-check attempts must be a positive integer." >&2
-            return 1
-            ;;
-    esac
-
-    for ((attempt = 1; attempt <= attempts; attempt++)); do
-        if health="$(wait_for_relay_health "$port" 1 0 "$expected_instance" "$expected_version" "$expected_revision" "$expected_web_hash")"; then
-            printf '%s\n' "$health"
-            return 0
-        fi
-        if [ "$attempt" -lt "$attempts" ]; then
-            sleep "$delay"
-        fi
-    done
-
-    return 1
+    require_positive_integer "$attempts" "Health-check attempts" || return 1
+    wait_for_relay_health "$port" "$attempts" "$delay" "$expected_instance" "$expected_version" "$expected_revision" "$expected_web_hash"
 }
 
 report_inventory_failure() {
@@ -1239,17 +1269,7 @@ gateway_http_base() {
 # relay environment, so a typo or a dead host fails during setup rather than at
 # the first phone connection.
 gateway_answers_healthz() {
-    local body
-
-    if ! body="$(
-        curl --fail --silent --show-error \
-            --connect-timeout 3 \
-            --max-time 8 \
-            "$(gateway_http_base "$1")/healthz" 2>/dev/null
-    )"; then
-        return 1
-    fi
-    printf '%s\n' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
+    gateway_healthz_ms "$1" >/dev/null
 }
 
 # Round-trip milliseconds for a gateway's /healthz, or failure when it does not

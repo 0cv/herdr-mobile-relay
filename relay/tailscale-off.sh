@@ -5,10 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
-if [ -z "${HERDR_RELAY_ENV:-}" ]; then
-    SERVICE_ENV="$(installed_service_env_file)"
-    [ -z "$SERVICE_ENV" ] || export HERDR_RELAY_ENV="$SERVICE_ENV"
-fi
+adopt_installed_service_env
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 assert_service_env_matches "$ENV_FILE"
 RELAY_TAILSCALE_PORT="$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
