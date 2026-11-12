@@ -10,6 +10,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
+    "noUnusedLocals": true,
     "paths": {
       "$components/*": ["./src/components/*"],
       "$lib/*": ["./src/lib/*"]

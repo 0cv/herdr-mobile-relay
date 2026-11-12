@@ -100,20 +100,16 @@ export function formatToolPayload(raw: string): string {
  * A first line longer than the character budget is cut mid-line rather than
  * dropped, so the preview is never empty.
  */
-export function clampPayload(
-  text: string,
-  maxLines: number = maxPayloadLines,
-  maxChars: number = maxPayloadChars,
-): { preview: string; clamped: boolean } {
+export function clampPayload(text: string): { preview: string; clamped: boolean } {
   const lines = text.split('\n');
-  if (text.length <= maxChars && lines.length <= maxLines) return { preview: text, clamped: false };
+  if (text.length <= maxPayloadChars && lines.length <= maxPayloadLines) return { preview: text, clamped: false };
   const head: string[] = [];
   let used = 0;
   for (const line of lines) {
-    if (head.length >= maxLines) break;
-    if (head.length && used + line.length + 1 > maxChars) break;
-    head.push(line.length > maxChars ? line.slice(0, maxChars) : line);
-    used += Math.min(line.length, maxChars) + 1;
+    if (head.length >= maxPayloadLines) break;
+    if (head.length && used + line.length + 1 > maxPayloadChars) break;
+    head.push(line.length > maxPayloadChars ? line.slice(0, maxPayloadChars) : line);
+    used += Math.min(line.length, maxPayloadChars) + 1;
   }
   return { preview: head.join('\n'), clamped: true };
 }

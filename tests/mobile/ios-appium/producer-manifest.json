@@ -26,7 +26,7 @@
     "package.json": "411655cf66e7af8ea5727a8ae54afa4b23a63335622287fc6ef68a8296a8ffb2",
     "test.ts": "7689663c4f485f909f54b33393fa1581123f0e6291bc9d367e9ab4a14c11e315",
     "evidence.ts": "7f6af712afee7d4d5f6c9789c7b3fd0305c26d77fbeef00619a7b702b7e254a5",
-    "../unit/ios-producer.ts": "d92a2c7d064ed47bd16601baf636ab61f3252c3b7f79089346f69ae600491859"
+    "../unit/ios-producer.ts": "d1aac3940d9361e86f1e4a013f82553154cd1a9f412cc9e88bd4a601e704eb78"
   },
   "packages": {
     "appium": {

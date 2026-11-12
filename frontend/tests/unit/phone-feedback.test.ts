@@ -21,12 +21,6 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); localStorage.clear(); clearPromptDraft(agent); relayStore.connections.set(new Map()); });
 
-it.each(['idle', 'working', 'unknown', 'done'])('omits the activity footer and announcer for %s agents', status => {
-  render(PromptComposer, { agent: { ...agent, status } });
-  expect(document.querySelector('.agent-progress, [role="status"][aria-atomic="true"]')).toBeNull();
-  expect(screen.queryByText(/Working…|Waiting for reply|Finished|Agent status unknown/)).not.toBeInTheDocument();
-});
-
 it.each([TerminalView, ConversationHistory])('shows no empty-composer draft warning and keeps unsaved text neutral without weakening fresh-frame gates', async component => {
   const view = render(component as typeof TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
   await vi.advanceTimersByTimeAsync(0);

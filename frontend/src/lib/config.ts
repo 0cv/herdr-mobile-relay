@@ -17,9 +17,7 @@ export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 export const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
 export const PUSH_ENABLED_KEY = 'herdr_push_enabled';
 export const PUSH_FINISHED_KEY = 'herdr_push_finished';
-export const PUSH_CLIENT_KEY = 'herdr_push_client_id';
 export const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
-export const HANDLED_NOTIFICATION_ACTIONS_KEY = 'herdr_handled_notification_actions';
 export const DEFAULT_AGENT_VIEW_KEY = 'herdr_default_agent_view';
 export const PANE_AGENT_VIEW_OVERRIDES_KEY = 'herdr_pane_agent_view_overrides';
 export const HIDDEN_SERVERS_KEY = 'herdr_hidden_servers';
@@ -206,8 +204,8 @@ function isRendezvousKey(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
 
-export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[] {
-  const raw = storage.getItem(RELAYS_KEY);
+export function loadRelayConfigs(): RelayConfig[] {
+  const raw = localStorage.getItem(RELAYS_KEY);
   if (raw) {
     try {
       const parsed: unknown = JSON.parse(raw);
@@ -222,19 +220,19 @@ export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[]
       // Fall through to the legacy single-relay keys.
     }
   }
-  const url = storage.getItem('herdr_relay_url') || '';
+  const url = localStorage.getItem('herdr_relay_url') || '';
   if (!url) return [];
   const relay = normalizeRelayConfig({
     url,
-    token: storage.getItem('herdr_relay_token') || '',
+    token: localStorage.getItem('herdr_relay_token') || '',
     label: relayLabelFromUrl(url),
   });
-  storage.setItem(RELAYS_KEY, JSON.stringify([relay]));
+  localStorage.setItem(RELAYS_KEY, JSON.stringify([relay]));
   return [relay];
 }
 
-export function saveRelayConfigs(relays: RelayConfig[], storage: Storage = localStorage): void {
-  storage.setItem(RELAYS_KEY, JSON.stringify(relays));
+export function saveRelayConfigs(relays: RelayConfig[]): void {
+  localStorage.setItem(RELAYS_KEY, JSON.stringify(relays));
 }
 export interface QuickSetupInvitation {
   id: string;

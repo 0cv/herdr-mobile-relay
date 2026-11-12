@@ -101,7 +101,7 @@ fi
 # lack DNS-over-HTTPS keep the system-resolver behavior.
 PUBLIC_CURL_ARGS=()
 if curl --help all 2>/dev/null | grep -q -- '--doh-url'; then
-    PUBLIC_CURL_ARGS=(--doh-url "${HERDR_DOH_URL:-https://cloudflare-dns.com/dns-query}")
+    PUBLIC_CURL_ARGS=(--doh-url "https://cloudflare-dns.com/dns-query")
 fi
 
 public_curl() {

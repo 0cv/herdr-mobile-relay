@@ -26,7 +26,6 @@
     connected,
     canAdminister,
     canInvite = true,
-    busy = false,
     onRename,
     onInvite,
     onRevoke,
@@ -41,7 +40,6 @@
     connected: boolean;
     canAdminister: boolean;
     canInvite?: boolean;
-    busy?: boolean;
     onRename: DeviceIntentHandler<RenameDeviceIntent>;
     onInvite: DeviceIntentHandler<CreateInvitationIntent, string>;
     onRevoke: DeviceIntentHandler<RevokeDeviceIntent>;
@@ -81,7 +79,6 @@
     return () => { current = false; };
   });
 
-  const disabled = $derived(busy || actionBusy);
   const currentDevice = $derived(devices.find((device) => device.deviceId === currentDeviceId));
   const sortedDevices = $derived([...devices].sort((left, right) => {
     if (left.deviceId === currentDeviceId) return -1;
@@ -233,7 +230,7 @@
         <Button
           variant="secondary"
           size="sm"
-          disabled={disabled || !connected || !canInvite}
+          disabled={actionBusy || !connected || !canInvite}
           title={canInvite ? 'Invite another device' : 'This computer has no address an invitation could carry'}
           onclick={beginInvite}
         >
@@ -300,10 +297,10 @@
               </div>
               {#if canAdminister}
                 <div class="device-actions">
-                  <Button variant="ghost" size="sm" disabled={disabled || !connected} onclick={() => beginRename(device)}>
+                  <Button variant="ghost" size="sm" disabled={actionBusy || !connected} onclick={() => beginRename(device)}>
                     Rename
                   </Button>
-                  <Button variant="danger" size="sm" disabled={disabled || !connected} onclick={() => beginRevoke(device)}>
+                  <Button variant="danger" size="sm" disabled={actionBusy || !connected} onclick={() => beginRevoke(device)}>
                     Revoke
                   </Button>
                 </div>
@@ -318,10 +315,10 @@
 
     <div class="danger-actions">
       {#if currentDeviceId}
-        <Button variant="secondary" disabled={disabled} onclick={beginForget}>Forget This Browser</Button>
+        <Button variant="secondary" disabled={actionBusy} onclick={beginForget}>Forget This Browser</Button>
       {/if}
       {#if canAdminister}
-        <Button variant="danger" disabled={disabled || !connected || devices.length === 0} onclick={beginReset}>
+        <Button variant="danger" disabled={actionBusy || !connected || devices.length === 0} onclick={beginReset}>
           Reset All Devices
         </Button>
       {/if}
@@ -334,8 +331,8 @@
     <label for={`rename-device-name-${relayId}`}>Device name</label>
     <input bind:this={nameInput} id={`rename-device-name-${relayId}`} bind:value={name} maxlength="64" autocomplete="off" required />
     <div class="dialog-actions">
-      <Button type="submit" disabled={disabled}>Save</Button>
-      <Button variant="ghost" disabled={disabled} onclick={() => { renameOpen = false; }}>Cancel</Button>
+      <Button type="submit" disabled={actionBusy}>Save</Button>
+      <Button variant="ghost" disabled={actionBusy} onclick={() => { renameOpen = false; }}>Cancel</Button>
     </div>
   </form>
 </AppDialog>
@@ -351,8 +348,8 @@
     </select>
     <p class="hint">The generated link carries the one-use secret in its URL fragment. Share it only with the intended device.</p>
     <div class="dialog-actions">
-      <Button type="submit" disabled={disabled || !connected}>Create Invitation</Button>
-      <Button variant="ghost" disabled={disabled} onclick={() => { inviteOpen = false; }}>Cancel</Button>
+      <Button type="submit" disabled={actionBusy || !connected}>Create Invitation</Button>
+      <Button variant="ghost" disabled={actionBusy} onclick={() => { inviteOpen = false; }}>Cancel</Button>
     </div>
   </form>
 </AppDialog>
@@ -361,8 +358,8 @@
   <div class="form-stack">
     <p class="warning" role="alert">This immediately closes that device's relay connection and removes its push endpoints and pending authorization.</p>
     <div class="dialog-actions">
-      <Button variant="danger" disabled={disabled || !connected} onclick={confirmRevoke}>Confirm Revoke</Button>
-      <button class="safe-cancel" bind:this={safeButton} disabled={disabled} onclick={() => { revokeOpen = false; }}>Cancel</button>
+      <Button variant="danger" disabled={actionBusy || !connected} onclick={confirmRevoke}>Confirm Revoke</Button>
+      <button class="safe-cancel" bind:this={safeButton} disabled={actionBusy} onclick={() => { revokeOpen = false; }}>Cancel</button>
     </div>
   </div>
 </AppDialog>
@@ -373,8 +370,8 @@
     <label for={`reset-device-confirmation-${relayId}`}>Type RESET to continue</label>
     <input id={`reset-device-confirmation-${relayId}`} bind:value={resetConfirmation} autocomplete="off" />
     <div class="dialog-actions">
-      <Button variant="danger" disabled={disabled || !connected || resetConfirmation !== 'RESET'} onclick={confirmReset}>Confirm Reset</Button>
-      <button class="safe-cancel" bind:this={safeButton} disabled={disabled} onclick={() => { resetOpen = false; }}>Cancel</button>
+      <Button variant="danger" disabled={actionBusy || !connected || resetConfirmation !== 'RESET'} onclick={confirmReset}>Confirm Reset</Button>
+      <button class="safe-cancel" bind:this={safeButton} disabled={actionBusy} onclick={() => { resetOpen = false; }}>Cancel</button>
     </div>
   </div>
 </AppDialog>
@@ -387,8 +384,8 @@
       <p class="warning" role="alert">Connect to the relay to revoke this browser. Its local credential has not been erased, because offline erasure would leave an active credential behind.</p>
     {/if}
     <div class="dialog-actions">
-      <Button variant="danger" disabled={disabled || !connected} onclick={confirmForget}>Confirm Forget</Button>
-      <button class="safe-cancel" bind:this={safeButton} disabled={disabled} onclick={() => { forgetOpen = false; }}>Cancel</button>
+      <Button variant="danger" disabled={actionBusy || !connected} onclick={confirmForget}>Confirm Forget</Button>
+      <button class="safe-cancel" bind:this={safeButton} disabled={actionBusy} onclick={() => { forgetOpen = false; }}>Cancel</button>
     </div>
   </div>
 </AppDialog>

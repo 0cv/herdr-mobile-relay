@@ -707,7 +707,6 @@ async function main(): Promise<void> {
       appiumUrl: process.env.APPIUM_URL || 'http://127.0.0.1:4723',
       outputDir,
       certificate: fixtureInfo.ca_certificate,
-      setupUrl: fixtureInfo.setup_urls[0],
       deviceId: process.env.MOBILE_PLATFORM === 'android' ? process.env.ANDROID_SERIAL : process.env.IOS_SIMULATOR_UDID,
       budget,
       diagnostics,

@@ -148,7 +148,6 @@ describe('release updates', () => {
       state: 'deployment-required',
       deployedVersion: APP_VERSION,
       upstreamVersion: available,
-      upstreamAssets: 0,
       checkedAt: 123,
     });
     expect(get(appUpdateStatus).state).toBe('deployment-required');

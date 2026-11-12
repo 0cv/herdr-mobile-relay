@@ -153,7 +153,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     await client.create({ capabilities: {} });
     const budget = new PhaseBudget('inspection-regression', { timeoutMs: 90_000, recoveryLimit: 0 });
     client.setBudget(budget);
-    const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://inspection.invalid', outputDir: '/tmp', certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget });
+    const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://inspection.invalid', outputDir: '/tmp', certificate: '', deviceId: 'emulator-5554', budget });
     Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
       retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([bootstrap, installed], bootstrap, installed, startedAt).original } });
     const mutatedClicks: string[] = [];

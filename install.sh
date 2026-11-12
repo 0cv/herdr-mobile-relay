@@ -401,7 +401,7 @@ main() {
         fetch "$archive_url" "$archive_path" ||
             fatal "release archive download failed"
     else
-        base_url=${HERDR_RELEASE_BASE_URL:-"https://github.com/${REPO}/releases/download/${tag}"}
+        base_url="https://github.com/${REPO}/releases/download/${tag}"
         fetch "$base_url/checksums.txt" "$checksums_path" ||
             fatal "required checksums.txt download failed"
         fetch "$base_url/$archive" "$archive_path" ||

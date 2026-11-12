@@ -58,7 +58,7 @@ SSH_CONTROL_DIR=""
 REMOTE_SUDO=""
 # Seconds to wait for the gateway on the server, then for its first certificate.
 # A small server compiling the gateway and a slow ACME round trip both live here.
-REMOTE_HEALTH_TIMEOUT="${HERDR_GATEWAY_DEPLOY_HEALTH_TIMEOUT:-120}"
+REMOTE_HEALTH_TIMEOUT=120
 PUBLIC_HEALTH_TIMEOUT="${HERDR_GATEWAY_DEPLOY_PUBLIC_TIMEOUT:-240}"
 
 
@@ -70,8 +70,8 @@ gateway_source_revision() {
     git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown\n'
 }
 
-GATEWAY_BUILD_VERSION="${HERDR_GATEWAY_DEPLOY_VERSION:-$(gateway_source_version)}"
-GATEWAY_BUILD_REVISION="${HERDR_GATEWAY_DEPLOY_REVISION:-$(gateway_source_revision)}"
+GATEWAY_BUILD_VERSION="$(gateway_source_version)"
+GATEWAY_BUILD_REVISION="$(gateway_source_revision)"
 GATEWAY_BUILD_VERSION="${GATEWAY_BUILD_VERSION:-dev}"
 GATEWAY_BUILD_REVISION="${GATEWAY_BUILD_REVISION:-unknown}"
 have_tty() {

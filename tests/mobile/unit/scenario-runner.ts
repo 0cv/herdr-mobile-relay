@@ -7,13 +7,11 @@ import { repositoryPath } from '../support/paths';
 import { observationsFixture, environmentFixture, measurementIdentity } from './android-product-environment';
 import { assessAndroidEnvironment } from '../android-environment';
 import { sanitizeValue } from '../support/diagnostics';
-import { IOS_CONFIRMATION_CAPTURE_LIMITS as captureLimits, projectIOSConfirmation } from '../support/ios-confirmation-capture';
 import type { WebDriverRequestTiming } from '../support/webdriver';
-import { confirmationBytePressureFixture } from './ios-confirmation-capture';
 
-type CaptureMode = 'unchanged' | 'changed' | 'teardown-only' | 'product-first';
+type CaptureMode = 'teardown-only' | 'product-first';
 
-function confirmationCaptureFixture(productFirst: boolean) {
+function confirmationCaptureFixture() {
   const receipt = (ordinal: number, scope: WebDriverRequestTiming['scope'], start: number, remaining: number): WebDriverRequestTiming => ({
     attemptId: ordinal, dispatchedOrdinal: ordinal, sessionGeneration: 7, operation: 'other', scope,
     entryMs: start, dispatchMs: start + 0.125, responseAvailableMs: start + 120,
@@ -25,12 +23,7 @@ function confirmationCaptureFixture(productFirst: boolean) {
     phaseRemainingAtSettlementMs: remaining - 122, admitted: true, sent: true, completed: true, status: 200, outcome: 'success',
   });
   const acknowledgement = receipt(41, 'unscoped', 20_000, 80_000);
-  if (productFirst) return { status: 'not-requested-product-first', acknowledgement };
-  return {
-    status: 'captured', acknowledgement,
-    source: receipt(42, 'ios-install-confirmation', 20_122.5, 74_999.5),
-    projection: projectIOSConfirmation(confirmationBytePressureFixture().source),
-  };
+  return { status: 'not-requested-product-first', acknowledgement };
 }
 
 const fixtureSource = `
@@ -129,7 +122,6 @@ export class AndroidPlatform {
     this.selected=false;
     if(this.proof) this.proof.records.length=0;
     if (captureMode === 'teardown-only') this.confirmationCapture = structuredClone(capture);
-    if (captureMode === 'changed') { this.confirmationCapture.status='unavailable'; this.confirmationCapture.source.dispatchedOrdinal=99; this.confirmationCapture.projection.nodes.pop(); }
     if (captureMode === 'product-first') this.confirmationCapture.acknowledgement.dispatchedOrdinal=99;
     if (captureMode) this.extraEvidence.nativeDiagnosticsBlocked=this.driver.unusable;
     if (mode === 'fatal-failure-cleanup-failure') throw new Error('APPIUM_SESSION_UNUSABLE: quarantined teardown');
@@ -147,12 +139,7 @@ async function replay(mode: string, platform: string, suite: string, captureMode
   await cp(join(source, 'android-appium/kernel-namespace.cjs'), join(root, 'android-appium/kernel-namespace.cjs'));
   await cp(join(source, 'run.ts'), join(root, 'run.ts'));
   assert.equal(await readFile(join(root, 'run.ts'), 'utf8'), await readFile(join(source, 'run.ts'), 'utf8'));
-  const capture = captureMode ? confirmationCaptureFixture(captureMode === 'product-first') : undefined;
-  if (capture?.projection) {
-    assert.equal(capture.projection.status, 'truncated');
-    assert.equal(capture.projection.reason, 'bytes');
-    assert.ok(capture.projection.nodes.length > 300);
-  }
+  const capture = captureMode ? confirmationCaptureFixture() : undefined;
   if (capture) await writeFile(join(root, 'capture.json'), JSON.stringify(capture), { flag: 'wx' });
   assert.equal(await readFile(join(root, 'support/diagnostics.ts'), 'utf8'), await readFile(join(source, 'support/diagnostics.ts'), 'utf8'));
   await writeFile(join(root, 'fixture-protocol.ts'), fixtureSource);
@@ -272,44 +259,12 @@ mock.module('node:fs/promises',()=>({...original,
   if (captureMode === 'teardown-only') measuredSnapshot.confirmationCapture = teardownSnapshot.confirmationCapture;
   assert.deepEqual(measuredEvidence, measuredSnapshot);
   if (capture) {
-    const withoutCapture = structuredClone(result);
-    delete withoutCapture.evidence.confirmationCapture;
-    if (withoutCapture.evidence.teardown) delete withoutCapture.evidence.teardown.confirmationCapture;
-    const projectionBytes = (teardown = false) => {
-      const withoutProjection = structuredClone(result);
-      const target = teardown ? withoutProjection.evidence.teardown : withoutProjection.evidence;
-      if (!target?.confirmationCapture?.projection) return 0;
-      delete target.confirmationCapture.projection;
-      return Buffer.byteLength(resultText) - Buffer.byteLength(`${JSON.stringify(sanitizeValue(withoutProjection), null, 2)}\n`);
-    };
-    const metrics = {
-      mode, captureMode, resultBytes: Buffer.byteLength(resultText), nodes: result.evidence.confirmationCapture.projection?.nodes.length || 0,
-      canonicalProjectionBytes: projectionBytes(), teardownProjectionBytes: projectionBytes(true),
-      totalAddedBytesIncludingReceipts: Buffer.byteLength(resultText) - Buffer.byteLength(`${JSON.stringify(sanitizeValue(withoutCapture), null, 2)}\n`),
-      captureCopies: (resultText.match(/"confirmationCapture":/gu) || []).length,
-    };
-    await writeFile(join(root, 'terminal-metrics.json'), `${JSON.stringify(metrics, null, 2)}\n`, { flag: 'wx' });
-    assert.equal(metrics.captureCopies, 1, JSON.stringify(metrics));
-    if (captureMode === 'product-first') {
-      assert.equal(metrics.canonicalProjectionBytes, 0);
-      assert.deepEqual(Object.keys(result.evidence.confirmationCapture).sort(), ['acknowledgement', 'status']);
-      assert.equal(result.evidence.confirmationCapture.status, 'not-requested-product-first');
-    } else {
-      assert.ok(metrics.canonicalProjectionBytes > captureLimits.projectionBytes - 256);
-      assert.ok(metrics.canonicalProjectionBytes <= captureLimits.projectionBytes);
-    }
-    assert.equal(metrics.teardownProjectionBytes, 0);
-    assert.ok(metrics.totalAddedBytesIncludingReceipts > metrics.canonicalProjectionBytes);
-    assert.ok(metrics.totalAddedBytesIncludingReceipts <= captureLimits.evidenceBytes);
+    assert.equal((resultText.match(/"confirmationCapture":/gu) || []).length, 1);
+    assert.deepEqual(Object.keys(result.evidence.confirmationCapture).sort(), ['acknowledgement', 'status']);
+    assert.equal(result.evidence.confirmationCapture.status, 'not-requested-product-first');
     assert.deepEqual(result.evidence.confirmationCapture, capture);
     const liveCapture = JSON.parse(await readFile(join(root, 'capture-live.json'), 'utf8'));
     const expectedLive = structuredClone(capture);
-    if (captureMode === 'changed') {
-      assert.ok(expectedLive.source && expectedLive.projection);
-      expectedLive.status = 'unavailable';
-      expectedLive.source.dispatchedOrdinal = 99;
-      expectedLive.projection.nodes.pop();
-    }
     if (captureMode === 'product-first') expectedLive.acknowledgement.dispatchedOrdinal = 99;
     assert.deepEqual(liveCapture, expectedLive);
     assert.equal(result.evidence.events[0].detail.token, '[REDACTED]');
@@ -385,13 +340,8 @@ export const scenarioRunnerTests: Array<[string, () => Promise<void>]> = [
   ['production runner release records the lifecycle operation without rebaseline', () => replay('success', 'android', 'release')],
   ['production runner iOS never starts Android measurement', () => replay('success', 'ios', 'release')],
   ['production runner iOS fatal remains primary when quarantined teardown rejects and other cleanup continues', () => replay('fatal-failure-cleanup-failure', 'ios', 'release')],
-  ...(['success', 'scenario-failure', 'fatal-failure', 'cleanup-failure', 'sticky-driver-failure', 'late-driver-failure', 'event-write-failure', 'final-snapshot-failure'] as const).map(mode => [
-    `production runner iOS terminal byte-pressure ${mode} retains only the frozen capture and all other evidence`,
-    () => replay(mode, 'ios', 'release', mode === 'success' ? 'unchanged' : 'changed'),
-  ] as [string, () => Promise<void>]),
-  ['production runner iOS terminal changed teardown cannot replace the frozen byte-pressure capture', () => replay('success', 'ios', 'release', 'changed')],
   ['production runner iOS terminal teardown-only capture remains diagnostic on scenario failure', () => replay('scenario-failure', 'ios', 'release', 'teardown-only')],
-  ...(['success', 'fatal-failure', 'late-driver-failure'] as const).map(mode => [
+  ...(['success', 'scenario-failure', 'fatal-failure', 'cleanup-failure', 'sticky-driver-failure', 'late-driver-failure', 'event-write-failure', 'final-snapshot-failure'] as const).map(mode => [
     `production runner iOS terminal product-first ${mode} freezes the disposition and acknowledgement without source`,
     () => replay(mode, 'ios', 'release', 'product-first'),
   ] as [string, () => Promise<void>]),

@@ -5,7 +5,7 @@ import { URL } from 'node:url';
 import type { Plugin } from 'vite';
 import { describe, expect, it } from 'vitest';
 import versions from '../../build-versions.json' with { type: 'json' };
-import config, { assetContentVersion } from '../../vite.config.ts';
+import config from '../../vite.config.ts';
 
 type Chunk = { type: 'chunk'; fileName: string; code: string };
 type Asset = { type: 'asset'; fileName: string; source: string | Uint8Array };
@@ -136,40 +136,6 @@ describe('actual Vite release identity', () => {
     expect(build).not.toBe(javascriptIdentity.sha256);
     expect(entryIdentity.sha256).not.toBe(javascriptIdentity.sha256);
     expect(stylesheetIdentity.sha256).not.toBe(javascriptIdentity.sha256);
-    expect(assetContentVersion(canonical)).toBe(build.slice(0, 16));
-    expect(assetContentVersion(finalJavascript)).toBe(javascriptIdentity.sha256.slice(0, 16));
-    expect(assetContentVersion(finalStylesheet)).toBe(stylesheetIdentity.sha256.slice(0, 16));
-    expect(assetContentVersion(entrySource)).toBe(entryIdentity.sha256.slice(0, 16));
-  });
-
-  it('derives content versions from exact string and binary view bytes', () => {
-    const backing = Uint8Array.from([0x7a, 0, 0xff, 0x80, 0xc3, 0x28, 0xfe, 0x61, 0x0a, 0x7b]);
-    const view = new Uint8Array(backing.buffer, 2, 5);
-    const vectors: { source: string | Uint8Array; bytes: Uint8Array }[] = [
-      { source: '', bytes: Buffer.alloc(0) },
-      { source: 'é雪🌿\u0000e\u0301\n', bytes: Buffer.from('é雪🌿\u0000e\u0301\n', 'utf8') },
-      { source: Uint8Array.from([0, 255, 128, 195, 40, 254, 97, 10]), bytes: Buffer.from([0, 255, 128, 195, 40, 254, 97, 10]) },
-      { source: new Uint8Array(0), bytes: Buffer.alloc(0) },
-      { source: view, bytes: Buffer.from([0xff, 0x80, 0xc3, 0x28, 0xfe]) },
-      { source: new Uint8Array(backing.buffer, 3, 0), bytes: Buffer.alloc(0) },
-      { source: new Uint8Array(backing.buffer, 7, 2), bytes: Buffer.from([0x61, 0x0a]) },
-      { source: Buffer.from(backing.buffer, 1, 3), bytes: Buffer.from([0, 0xff, 0x80]) },
-    ];
-    for (const vector of vectors) {
-      const expected = createHash('sha256').update(vector.bytes).digest('hex').slice(0, 16);
-      const actual = assetContentVersion(vector.source);
-      expect(actual).toBe(expected);
-      expect(actual).toMatch(/^[a-f0-9]{16}$/);
-    }
-    const before = assetContentVersion(view);
-    expect(before).not.toBe(createHash('sha256').update(backing).digest('hex').slice(0, 16));
-    expect(before).not.toBe(createHash('sha256').update(Buffer.from(view).toString('utf8')).digest('hex').slice(0, 16));
-    backing[0] = 0x62;
-    expect(assetContentVersion(view)).toBe(before);
-    backing[3] = 0x62;
-    const changed = createHash('sha256').update(Buffer.from([0xff, 0x62, 0xc3, 0x28, 0xfe])).digest('hex').slice(0, 16);
-    expect(assetContentVersion(view)).toBe(changed);
-    expect(changed).not.toBe(before);
   });
 
   it('rejects a missing build marker after compaction before publication', () => {

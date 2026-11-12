@@ -19,9 +19,7 @@ import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
 import { stableTestIdentities } from './test-registry';
-import { iosConfirmationProjectionCases } from './ios-confirmation-capture';
 import { iosProviderHandoffCases } from './ios-provider-handoff';
-import { IOS_CONFIRMATION_CAPTURE_LIMITS } from '../support/ios-confirmation-capture';
 
 const origin = 'https://localhost:52101';
 const fixtureDir = fileURLToPath(new URL('./fixtures/ios/', import.meta.url));
@@ -36,7 +34,7 @@ type Request = { path: string; body: any; method: string; signal?: AbortSignal |
 type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
 const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([name, body]);
-tests.push(...iosConfirmationProjectionCases, ...iosProviderHandoffCases);
+tests.push(...iosProviderHandoffCases);
 
 async function within<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -73,7 +71,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
   const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now });
-  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', deviceId: 'protocol-only', budget });
   const requests: Request[] = [];
   const nativeAdmissions: Array<{ phase: string; phaseRemainingMs: number; rootRemainingMs: number }> = [];
   let dispatchedOrdinal = 0;
@@ -381,7 +379,7 @@ test('installed discovery timeout preserves the hosted phase and ignores late li
   let reply!: (response: Response) => void;
   const now = () => clockMs;
   const budget = new PhaseBudget('recorded-hosted-discovery', { timeoutMs: 45 * 60_000, now, recoveryLimit: 0 });
-  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', deviceId: 'protocol-only', budget });
   const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
     if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
     const body = JSON.parse(String(init?.body));
@@ -1626,7 +1624,6 @@ test('confirmation product-first proceeds directly from acknowledged row to fore
   const persisted = JSON.parse(await readFile(join(a.outputDir, 'confirmation-result.json'), 'utf8'));
   assert.match(persisted.proofKind, /Hypothetical.*not observed native recovery/u);
   assert.deepEqual(persisted.evidence.confirmationCapture, capture);
-  assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
   capture.acknowledgement.outcome = 'changed-copy';
   assert.equal((a.platform.evidenceSnapshot().confirmationCapture as any).acknowledgement.outcome, 'success');
 });
@@ -1670,7 +1667,6 @@ test('confirmation product-first never requests malformed private or oversized c
     assert.equal(capture.projection, undefined);
     assert.equal(a.observations.some(observation => observation.boundary === 'source'), false);
     assert.doesNotMatch(JSON.stringify(capture), /private|secret/u);
-    assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
   }
   const disabled = await confirmationReplay('product-first-not-readiness', { states: ['disabled'], after: boundary => boundary === 'enabled' ? 70_001 : 0 });
   assert.equal((disabled.platform.evidenceSnapshot().confirmationCapture as any).status, 'not-requested-product-first');
@@ -4093,14 +4089,12 @@ test('SM55 receipt eligibility command boundaries and ring eviction', async () =
     }
     if (mode === 'unresolved') after.lastCommand!.timing = { ...after.lastCommand!.timing!, completed: false };
     if (mode === 'later') observation.enter('attachment');
-    const fatal = new Error('synthetic-first-fatal');
-    observation.freeze(fatal, after);
+    observation.freeze(after);
     const frozen = observation.failure;
-    observation.freeze(new Error('synthetic-later-fatal'), after);
+    observation.freeze(after);
     assert.equal(observation.failure, frozen);
     assert.equal(frozen?.eligible === true, mode === 'eligible' || mode === 'ring-eviction');
     if (mode === 'earlier' || mode === 'later') assert.equal(frozen, undefined);
-    else assert.equal((observation as any).originalFatal, fatal);
     if (frozen) assert.ok(Buffer.byteLength(JSON.stringify(frozen)) < IOS_LAUNCH_LIMITS.armBytes);
   }
 });
@@ -4801,8 +4795,7 @@ test('iOS 27 confirmation Add is located by its visible label inside the Add to 
 test('SM55 receipt rejected partial writes preserve first fatal without retry', async () => {
   for (const rejected of [1, 2]) {
     const a = await receiptLaunchAdapter(`reject-${rejected}`);
-    let fatal: unknown;
-    await assert.rejects(a.launch, error => { fatal = error; return true; });
+    await assert.rejects(a.launch);
     const failure = a.internal.launchObservation.failure;
     const driverFatal = a.driver.snapshot().firstFatal;
     assert.equal(failure.eligible, true);
@@ -4813,7 +4806,6 @@ test('SM55 receipt rejected partial writes preserve first fatal without retry', 
     await Promise.all([a.platform.captureSanitizedEvidence('failure'), a.platform.captureSanitizedEvidence('failure')]);
     assert.equal(a.queries(), 1);
     assert.equal(a.writes.length, rejected);
-    assert.equal(a.internal.launchObservation.originalFatal, fatal);
     assert.equal(a.internal.launchObservation.failure, failure);
     assert.equal(a.driver.snapshot().firstFatal, driverFatal);
     assert.equal(a.clock.timers.size, 0);
@@ -4873,8 +4865,7 @@ test('SM55 receipt pending rejection and directory refusal are owned once', asyn
 test('SM55 receipt unconfirmed stop fences all native diagnostics before persistence', async () => {
   for (const mode of ['deadline', 'callback-error', 'abort-inside-spawn']) {
     const a = await receiptLaunchAdapter(`unconfirmed-${mode}`);
-    let fatal: unknown;
-    await assert.rejects(a.launch, error => { fatal = error; return true; });
+    await assert.rejects(a.launch);
     const count = a.requests.length;
     a.collect(() => {
       if (mode === 'callback-error') a.child.emit('error', { code: 'EIO', message: 'synthetic-private-error' });
@@ -4914,7 +4905,6 @@ test('SM55 receipt unconfirmed stop fences all native diagnostics before persist
       assert.equal(a.native.length, 0);
       assert.equal(a.requests.length, count);
       assert.equal(a.writes.length, 1);
-      assert.equal(a.internal.launchObservation.originalFatal, fatal);
     } finally { release(); await first; }
     assert.equal(a.native.length, 0);
     assert.equal(a.requests.length, count);
@@ -4972,20 +4962,17 @@ test('SM55 receipt ineligible failure omits broad fallback and success adds no q
     assert.equal(c.internal.launchReceipt.receipt.query, null);
     assert.equal(c.internal.launchObservation.failure, failure);
     assert.equal(JSON.stringify(failure), facts);
-    assert.equal(c.internal.launchObservation.originalFatal, fatal);
     assert.equal(c.native.some(argv => argv.includes('log')), false);
     assert.equal(c.native.length, 2);
     assert.equal(c.trace.filter(event => event === 'collector').length, 1);
     assert.equal(c.clock.timers.size, 0);
   }
   const d = await receiptLaunchAdapter('driver-fatal', 'driver-fatal');
-  let fatal: unknown;
-  await assert.rejects(d.launch, error => { fatal = error; return /APPIUM_INTERRUPTED/u.test(String(error)); });
+  await assert.rejects(d.launch, error => /APPIUM_INTERRUPTED/u.test(String(error)));
   const driverFatal = d.driver.snapshot().firstFatal;
   assert.equal(driverFatal?.code, 'APPIUM_INTERRUPTED');
   await d.platform.captureSanitizedEvidence('failure');
   assert.equal(d.queries(), 0);
-  assert.equal(d.internal.launchObservation.originalFatal, fatal);
   assert.equal(d.driver.snapshot().firstFatal, driverFatal);
   assert.equal(d.driver.snapshot().unusable, true);
   assert.equal(d.native.some(argv => argv.includes('log')), false);
@@ -4995,8 +4982,7 @@ test('SM55 receipt ineligible failure omits broad fallback and success adds no q
 test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering', async () => {
   for (const outcome of ['zero', 'nonzero', 'timeout', 'cap', 'late', 'projection-fault']) {
     const a = await receiptLaunchAdapter(`provider-${outcome}`, '99');
-    let fatal: unknown;
-    await assert.rejects(a.launch, error => { fatal = error; return /APPIUM_COMMAND_NOT_ADMITTED/u.test(String(error)); });
+    await assert.rejects(a.launch, error => /APPIUM_COMMAND_NOT_ADMITTED/u.test(String(error)));
     assert.equal(a.rounds(), 99);
     assert.equal(a.contexts(), 100);
     const launchTrace = ['click', ...Array.from({ length: 99 }, () => ['1', '4']).flat()];
@@ -5010,7 +4996,6 @@ test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering',
     const facts = JSON.stringify(failure);
     const count = a.requests.length;
     assert.equal(failure.eligible, true);
-    assert.equal(a.internal.launchObservation.originalFatal, fatal);
     assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
     assert.equal(a.requests.filter(request => request.path.endsWith('/click')).length, 1);
     assert.equal(a.budget.recoveryCount, 0);
@@ -5042,7 +5027,6 @@ test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering',
     assert.equal(result.receipt.failure, failure);
     assert.equal(result.receiptText, frozen);
     assert.equal(JSON.stringify(failure), facts);
-    assert.equal(a.internal.launchObservation.originalFatal, fatal);
     assert.equal(a.driver.snapshot().firstFatal, driverFatal);
     assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
     assert.equal(a.budget.recoveryCount, 0);

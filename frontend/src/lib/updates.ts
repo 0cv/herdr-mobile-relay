@@ -61,11 +61,7 @@ export const appUpdateStatus = writable<AppUpdateStatus>({
   deployedVersion: '',
   deployedAssets: 0,
   deployedBuild: '',
-  deployedEntry: '',
-  deployedScript: '',
-  deployedStyle: '',
   upstreamVersion: APP_VERSION,
-  upstreamAssets: 0,
   checkedAt: 0,
   error: '',
 });
@@ -146,7 +142,6 @@ export function observeAppUpstreamVersion(value: string): void {
       ...current,
       state,
       upstreamVersion: relayUpstreamVersion,
-      upstreamAssets: 0,
       error: '',
     };
   });
@@ -244,11 +239,7 @@ function appStatusFromMetadata(deployed: AppOriginMetadata, checkedAt: number): 
     deployedVersion: deployed.version,
     deployedAssets: deployed.assets,
     deployedBuild: deployed.build,
-    deployedEntry: deployed.entry,
-    deployedScript: deployed.script,
-    deployedStyle: deployed.style,
     upstreamVersion: relayUpstreamVersion,
-    upstreamAssets: 0,
     checkedAt,
     error: '',
   };
@@ -887,18 +878,6 @@ export function acknowledgePhoneUpdate(): boolean {
     // The acknowledgement remains useful in memory when storage is blocked.
   }
   return true;
-}
-
-export function markPhoneUpdatePublishing(): void {
-  const plan = get(updateProgressPlan);
-  if (!plan?.phoneAppRequired) return;
-  saveUpdateProgress({ ...plan, phoneState: 'publishing', phoneError: '' });
-}
-
-export function markPhoneUpdateLoading(): void {
-  const plan = get(updateProgressPlan);
-  if (!plan?.phoneAppRequired) return;
-  saveUpdateProgress({ ...plan, phoneState: 'loading', phoneError: '' });
 }
 
 export function setPhoneUpdateError(error: unknown): void {

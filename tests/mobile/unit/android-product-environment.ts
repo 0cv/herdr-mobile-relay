@@ -208,7 +208,7 @@ async function platformObservationControl(): Promise<ProductObservations> {
     return response(null);
   });
   await client.create({ capabilities: {}, budget });
-  const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://recorder.invalid', outputDir: tmpdir(), certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget });
+  const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://recorder.invalid', outputDir: tmpdir(), certificate: '', deviceId: 'emulator-5554', budget });
   const seam = platform as any;
   seam.driver = client;
   seam.retainedOwner = { ...retainedFixture([handle], handle, handle, startedAt).original, driver: client, assertSession: client.retainSessionOwner() };

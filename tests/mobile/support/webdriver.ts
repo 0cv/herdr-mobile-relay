@@ -578,14 +578,6 @@ export class AppiumClient {
     return { width: rect.width, height: rect.height };
   }
 
-  async back(timeoutMs?: number): Promise<void> {
-    await this.command('/back', 'POST', undefined, timeoutMs);
-  }
-
-  async performActions(actions: unknown[], timeoutMs?: number): Promise<void> {
-    await this.command('/actions', 'POST', { actions }, timeoutMs);
-  }
-
   async mobile(command: string, args: Record<string, unknown> = {}, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<unknown> {
     return this.command('/execute/sync', 'POST', { script: `mobile: ${command}`, args }, timeoutMs, policy);
   }
@@ -726,7 +718,6 @@ export class AppiumClient {
       const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
       const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
       const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');
-      const confirmationCapture = commandPath === '/source' && timingScope?.label === 'ios-install-confirmation';
       const retainedInspection = commandPath === '/execute/sync' && body !== null && typeof body === 'object'
         && 'script' in body && body.script === 'mobile: inspectRetainedChromeTargets';
       const allowance = driverCommandAllowance(commandPath, method, body);
@@ -872,10 +863,6 @@ export class AppiumClient {
           timing.priorSettlementToDispatchMs = undefined;
           timing.phaseRemainingAtDispatchMs = null;
           timing.outcome = 'not-admitted';
-          if (confirmationCapture) {
-            if (this.history.at(-1)?.timing !== timing) this.recordCommand(operation, path, method, startedAt, operationTimeoutMs, false, 'Confirmation source not admitted', timing);
-            throw error;
-          }
         }
         if (error instanceof WebDriverError) {
           checkDeadline();
@@ -884,8 +871,7 @@ export class AppiumClient {
         checkDeadline();
         const timedOut = isTimeoutError(error) || controller.signal.aborted || (enforceBudget && this.budget?.exhausted === true);
         const interrupted = response !== undefined;
-        const detail = confirmationCapture ? 'Confirmation source transport unavailable'
-          : retainedInspection ? 'Retained inspection transport failed' : error instanceof Error ? error.message : String(error);
+        const detail = retainedInspection ? 'Retained inspection transport failed' : error instanceof Error ? error.message : String(error);
         const failure = new WebDriverError({
           code: timedOut ? 'APPIUM_TIMEOUT' : interrupted ? 'APPIUM_INTERRUPTED' : 'APPIUM_HTTP',
           message: detail,
@@ -951,7 +937,7 @@ export class AppiumClient {
         return { value: undefined as T };
       }
       if (!response.ok || (commandValue as any)?.error) {
-        const detail = confirmationCapture ? 'Confirmation source refused' : retainedInspection ? 'Retained inspection refused'
+        const detail = retainedInspection ? 'Retained inspection refused'
           : typeof commandValue === 'object' ? JSON.stringify(commandValue) : String(commandValue || text);
         checkDeadline();
         timing.outcome = 'command-error';
@@ -1155,10 +1141,6 @@ export function accessibility(value: string): Locator {
   return { using: 'accessibility id', value };
 }
 
-export function accessibilityPrefix(value: string): Locator {
-  return { using: 'xpath', value: `//*[@aria-label and starts-with(@aria-label,${xpathLiteral(value)})]` };
-}
-
 export function ariaLabel(value: string): Locator {
   return { using: 'xpath', value: `//*[@aria-label=${xpathLiteral(value)}]` };
 }
@@ -1179,17 +1161,4 @@ export async function delay(milliseconds: number, budget?: PhaseBudget): Promise
     return;
   }
   await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
-
-export async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean, timeoutMs = 30_000, budget?: PhaseBudget): Promise<T> {
-  const phase = budget || new PhaseBudget('wait', { timeoutMs, recoveryLimit: 0 });
-  const deadline = Date.now() + Math.min(timeoutMs, phase.remainingMs);
-  let last: T | undefined;
-  while (!phase.exhausted && Date.now() < deadline) {
-    phase.assertAvailable('poll');
-    last = await read();
-    if (ready(last)) return last;
-    await delay(250, phase);
-  }
-  throw new Error(`APPIUM_WAIT: condition was not met before the deadline (${last === undefined ? 'no value' : 'last value observed'})`);
 }

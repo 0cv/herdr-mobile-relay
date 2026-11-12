@@ -405,7 +405,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       await writeFile(join(root, 'adb'), '#!/bin/sh\nif [ "$1" = devices ]; then printf "emulator-5554\\tdevice\\n"; fi\n', { mode: 0o700 });
       process.env.ADB = join(root, 'adb');
       process.env.MOBILE_DEVICE_OWNERSHIP_FILE = join(root, 'owned');
-      const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+      const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
       platform.driver.create = async () => { operations.push('first session'); throw new Error('startup session failure'); };
       platform.driver.close = async () => {};
       await assert.rejects(platform.startFreshDevice(), /startup session failure/u);
@@ -451,7 +451,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
         ].join('\n'), { mode: 0o700 });
         process.env.ADB = join(root, 'adb');
         process.env.MOBILE_DEVICE_OWNERSHIP_FILE = join(root, 'owned');
-        const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+        const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
         const adbCalls = async () => (await readFile(log, 'utf8')).trim().split('\n');
         const marks: number[] = [];
         platform.driver.create = async () => {
@@ -478,7 +478,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
     }
   }],
   ['Native startup finalizes Android diagnostics when session teardown fails', async () => {
-    const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: '/unused', appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+    const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', outputDir: '/unused', appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
     let finalized = false;
     const internals = platform as unknown as { startupLog: { finish(): Promise<void> } };
     internals.startupLog = { async finish() { finalized = true; } };

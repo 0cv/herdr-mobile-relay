@@ -89,7 +89,7 @@ async function replay(test: Replay): Promise<void> {
       throw error;
     }
   };
-  const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://fixture.test', setupUrl: 'https://fixture.test/setup',
+  const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://fixture.test',
     outputDir: root, appiumUrl: 'http://startup.invalid', certificate: '/unused', budget, diagnostics });
   Object.assign(platform, { driver: client, ...(!test.publicEntry ? { setupAttempted: true, lifecycleActive: true } : {}) });
   const setup = platform as unknown as { createSetupSession(options: SessionOptions): Promise<void>; prepareFreshDevice(): Promise<void> };

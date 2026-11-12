@@ -46,7 +46,7 @@ export async function runAndroidSocketRegressions(): Promise<void> {
     });
     await client.create({ capabilities: androidChromeCapabilities('emulator-5554', true) });
     const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp',
-      certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('socket-test', { timeoutMs: 90_000, recoveryLimit: 0 }) });
+      certificate: '', deviceId: 'emulator-5554', budget: new PhaseBudget('socket-test', { timeoutMs: 90_000, recoveryLimit: 0 }) });
     Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
       retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([bootstrap, installed], bootstrap, installed, startedAt).original } });
     await platform.attachToInstalledView();

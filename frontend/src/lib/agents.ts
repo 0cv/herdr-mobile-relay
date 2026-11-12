@@ -96,11 +96,6 @@ export function agentLastActiveAt(agent: Partial<Agent> | null | undefined): num
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-export function agentLastSeenAt(agent: Partial<Agent> | null | undefined): number {
-  const value = Number(agent?.last_seen_at);
-  return Number.isFinite(value) && value > 0 ? value : 0;
-}
-
 export function agentActivitySeq(agent: Partial<Agent> | null | undefined): number {
   const value = Number(agent?.activity_seq);
   return Number.isSafeInteger(value) && value > 0 ? value : 0;

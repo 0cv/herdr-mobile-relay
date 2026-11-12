@@ -37,35 +37,6 @@ export interface ActionReceipt {
 }
 
 
-export interface DeviceContext {
-  device_id: string;
-  credential_id: string;
-  role: 'reader' | 'controller' | 'bootstrap';
-  locale: string;
-  credential_version: number;
-}
-
-export interface OpaquePage<T> {
-  items: T[];
-  next_cursor?: string;
-  truncated: boolean;
-  generated_at: string;
-}
-
-export interface ActionReceiptMessage {
-  type: 'action_receipt';
-  request_id?: string;
-  receipt: ActionReceipt;
-  detail?: string;
-}
-
-export interface ApiErrorMessage {
-  type: 'error';
-  request_id?: string;
-  error: ApiError;
-  detail?: string;
-}
-
 export type AgentInventoryState = 'starting' | 'ready' | 'error';
 
 export interface AgentInventoryStatus {
@@ -589,11 +560,7 @@ export interface AppUpdateStatus {
   deployedVersion: string;
   deployedAssets: number;
   deployedBuild?: string;
-  deployedEntry?: string;
-  deployedScript?: string;
-  deployedStyle?: string;
   upstreamVersion: string;
-  upstreamAssets: number;
   checkedAt: number;
   error: string;
 }

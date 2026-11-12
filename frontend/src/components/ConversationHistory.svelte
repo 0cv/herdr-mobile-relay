@@ -92,8 +92,8 @@
   const requestPhase = $derived(historyState?.requestPhase ?? 'initial');
   const preparationPolls = $derived(historyState?.preparationPolls ?? 0);
   const error = $derived(historyState?.error?.message || '');
-  const errorCode = $derived(historyState?.errorCode ?? '');
-  const errorRetryable = $derived(historyState?.errorRetryable ?? false);
+  const errorCode = $derived(historyState?.error?.code ?? '');
+  const errorRetryable = $derived(historyState?.error?.retryable ?? false);
   const loadingOlder = $derived(requestPhase === 'older');
   const loading = $derived(!entries.length && !previewVisible && requestPhase === 'initial');
   let liveEntries = $state<ConversationEntry[]>([]);

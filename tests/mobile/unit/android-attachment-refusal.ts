@@ -57,7 +57,7 @@ export async function runAndroidAttachmentRefusalRegressions(): Promise<void> {
         });
         await client.create({ capabilities: {} });
         const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://attachment.invalid', outputDir: root,
-          certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
+          certificate: '', deviceId: 'emulator-5554' });
         Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
           retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([bootstrap, installed], bootstrap, installed, startedAt).original } });
         let first: unknown;

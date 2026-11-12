@@ -3201,12 +3201,6 @@ class RelayStore {
     });
   }
 
-  async uploadAttachments(agent: Agent, files: FileList | readonly File[]) {
-    const controller = this.attachmentController(agent);
-    controller.select(files);
-    return controller.upload();
-  }
-
   private attachmentUploadCallbacks(relayId: string): AttachmentUploadCallbacks {
     return {
       begin: (request, signal) => this.sendUploadRequest<UploadBeginResult>(

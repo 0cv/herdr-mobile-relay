@@ -88,8 +88,8 @@ describe('ConversationHistoryController', () => {
       controller.start();
       await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
       controller.demandOlder();
-      await vi.waitFor(() => expect(controller.state.errorCode).toBe(code));
-      expect(controller.state.errorRetryable).toBe(retryable);
+      await vi.waitFor(() => expect(controller.state.error?.code).toBe(code));
+      expect(controller.state.error?.retryable).toBe(retryable);
       expect(controller.state.entries).toEqual(retained);
       expect(controller.state.nextCursor).toBe('older');
       expect(controller.state.hasMore).toBe(true);
@@ -102,13 +102,13 @@ describe('ConversationHistoryController', () => {
       await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
       expect(request.mock.calls[2][1]).toMatchObject({ cursor: 'older', retry: true });
       await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toEqual(['u1', 'a1', 'u2', 'a2']));
-      expect(controller.state.errorCode).toBe('');
+      expect(controller.state.error).toBeNull();
     } finally {
       controller.cancel();
     }
   });
 
-  it('keeps native cursor traversal working without a total and clears a stale head count', async () => {
+  it('keeps native cursor traversal working without a total', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(page({ mode: 'native', total: 4, sourceRevision: 'db', entries: [entry('u2', 'user'), entry('a2', 'assistant')], hasMore: true, nextCursor: 'older' }))
       .mockResolvedValueOnce(page({ mode: 'native', total: null, sourceRevision: 'db', entries: [entry('u2', 'user'), entry('a2', 'assistant')], hasMore: true, nextCursor: 'older' }))
@@ -116,17 +116,14 @@ describe('ConversationHistoryController', () => {
     const controller = new ConversationHistoryController(agent(), { request });
     controller.start();
     await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
-    expect(controller.state.total).toBe(4);
     controller.refresh();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
-    expect(controller.state.total).toBeNull();
     controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
     await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
     expect(controller.state.entries.map(({ id }) => id)).toEqual(['u1', 'a1', 'u2', 'a2']);
     expect(controller.state.hasMore).toBe(false);
-    expect(controller.state.total).toBeNull();
     controller.cancel();
   });
 
@@ -399,7 +396,6 @@ describe('ConversationHistoryController', () => {
     });
     controller.start();
     await vi.waitFor(() => expect(controller.state.error?.message).toBe('temporary read failure'));
-    expect(controller.state.initialOutcome).toBe('error');
     expect(controller.state.authoritative).toBe(false);
     controller.retry();
     await vi.waitFor(() => expect(controller.state.error).toBeNull());
@@ -767,23 +763,16 @@ describe('conversation clone values through history', () => {
       const graphs: Graph[] = [
         { entries: source.entries, plan: source.plan },
         { entries: first.entries, plan: first.omoPlan },
-        { entries: first.lastPage!.entries, plan: first.lastPage!.omoPlan },
         { entries: second.entries, plan: second.omoPlan },
-        { entries: second.lastPage!.entries, plan: second.lastPage!.omoPlan },
         { entries: callback.entries, plan: callback.omoPlan },
-        { entries: callback.lastPage!.entries, plan: callback.lastPage!.omoPlan },
         { entries: saved[0].entries, plan: saved[0].plan },
       ];
       for (const graph of graphs) expectValues(graph, source.sentinels);
       expectIndependent(graphs);
-      expect(first.lastPage).not.toBe(recorded);
-      expect(first.lastPage).not.toBe(second.lastPage);
-      expect(callback.lastPage).not.toBe(first.lastPage);
       expect(JSON.stringify(recorded)).toBe(before);
       for (const graph of graphs) mutate(graph);
       const fresh = controller.state;
       expectValues({ entries: fresh.entries, plan: fresh.omoPlan }, source.sentinels);
-      expectValues({ entries: fresh.lastPage!.entries, plan: fresh.lastPage!.omoPlan }, source.sentinels);
     } finally {
       controller.cancel();
     }

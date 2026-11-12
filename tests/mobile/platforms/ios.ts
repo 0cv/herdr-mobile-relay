@@ -1089,7 +1089,7 @@ export class IOSPlatform implements MobilePlatform {
     try {
       await this.launchInstalledAppObserved();
     } catch (error) {
-      this.launchObservation.freeze(error, this.driver.snapshot());
+      this.launchObservation.freeze(this.driver.snapshot());
       throw error;
     }
   }
@@ -1907,17 +1907,6 @@ export class IOSPlatform implements MobilePlatform {
     return undefined;
   }
 
-  private async clickNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<void> {
-    if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
-    const findTimeout = deadline - Date.now();
-    if (findTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
-    const element = await this.findNativeScrollable(locators, description, findTimeout);
-    const clickTimeout = deadline - Date.now();
-    if (clickTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to click control`);
-    await this.driver.click(element, clickTimeout);
-  }
-
   private async findNativeMatches(locators: Locator[], timeoutMs: number): Promise<string[]> {
     const deadline = Date.now() + timeoutMs;
     const matches: string[] = [];
@@ -2547,10 +2536,5 @@ export class IOSPlatform implements MobilePlatform {
   private failOwnership(code: string, detail: string): never {
     this.ownershipFailure ||= qualificationFatal(code, detail, 'ownership');
     throw this.ownershipFailure;
-  }
-
-  private async currentForegroundPackage(): Promise<string> {
-    const info = await this.driver.activeAppInfo();
-    return String(info?.bundleId || info?.bundleID || '');
   }
 }

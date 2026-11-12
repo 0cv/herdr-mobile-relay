@@ -1,6 +1,6 @@
 import { cloneEntries, clonePlan } from './conversation-values';
 import { registerConversationCacheClearer } from './conversation-cache-control';
-import type { ConversationBrowseDiagnostics, ConversationBrowseMode, ConversationEntry, OmoTodoState } from './types';
+import type { ConversationBrowseDiagnostics, ConversationEntry, OmoTodoState } from './types';
 
 /** Maximum number of conversation identities retained in the in-memory preview. */
 export const CONVERSATION_CACHE_MAX_IDENTITIES = 6;
@@ -20,7 +20,6 @@ export interface ConversationPreview {
   savedAt: number;
   sourceRevision: string;
   historical: boolean;
-  mode?: ConversationBrowseMode;
   diagnostics?: ConversationBrowseDiagnostics;
   plan?: OmoTodoState | null;
   entries: ConversationEntry[];
@@ -96,14 +95,9 @@ export function putConversationPreview(preview: ConversationPreview, now = Date.
   if (!candidate) return false;
   const bytes = estimatePreviewBytes(candidate);
   if (bytes > limits.itemBytes || bytes > limits.totalBytes) return false;
-  const previous = cache.get(candidate.identity);
   cache.set(candidate.identity, { preview: candidate, bytes, lastUsed: now });
-  evictToLimits(now, previous?.bytes || 0);
+  evictToLimits(now);
   return cache.has(candidate.identity);
-}
-
-export function deleteConversationPreview(identity: string): void {
-  cache.delete(identity);
 }
 
 export function clearConversationPreviews(): void {
@@ -166,17 +160,13 @@ function boundedPreview(input: ConversationPreview): ConversationPreview | null 
     savedAt: Number.isFinite(input.savedAt) ? input.savedAt : Date.now(),
     sourceRevision: input.sourceRevision || '',
     historical: input.historical === true,
-    ...(input.mode ? { mode: input.mode } : {}),
     ...(input.diagnostics ? { diagnostics: cloneDiagnostics(input.diagnostics) } : {}),
     ...(input.plan ? { plan: clonePlan(input.plan) } : {}),
     entries: keptEntries,
   };
 }
 
-function evictToLimits(now: number, replacedBytes: number): void {
-  // `replacedBytes` is intentionally unused in the map scan below; retaining it
-  // in the signature documents that a replacement is not double-counted.
-  void replacedBytes;
+function evictToLimits(now: number): void {
   for (const [identity, record] of cache) {
     if (now - record.preview.savedAt >= limits.ttlMs) cache.delete(identity);
   }
