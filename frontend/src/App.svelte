@@ -15,7 +15,8 @@
   import WorkspaceManager from '$components/WorkspaceManager.svelte';
   import Button from '$components/ui/Button.svelte';
   import Toast from '$components/ui/Toast.svelte';
-  import { agentOpeningView, hasConversationHistory } from '$lib/agent-view';
+  import { agentOpeningRoute } from '$lib/agent-navigation';
+  import { hasConversationHistory } from '$lib/agent-view';
   import { activityForNotification } from '$lib/activity';
   import {
     agentContextLabel,
@@ -29,11 +30,7 @@
     hostLabel,
   } from '$lib/agents';
   import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
-  import {
-    defaultAgentView,
-    initializePreferences,
-    paneAgentViewOverrides,
-  } from '$lib/preferences';
+  import { initializePreferences } from '$lib/preferences';
   import { initializeSpeech, stopSpeech } from '$lib/speech';
   import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
   import { parsePushOpenTarget, RELAY_PROTOCOL_VERSION } from '$lib/protocol';
@@ -454,12 +451,7 @@
     if (relayStore.deviceCredential(agent.relay_id)?.role !== 'reader') {
       void relayStore.acknowledgePane(agent);
     }
-    navigate(agentOpeningView(
-      agent,
-      get(connections).get(agent.relay_id),
-      get(defaultAgentView),
-      get(paneAgentViewOverrides),
-    ));
+    navigate(agentOpeningRoute(agent));
   }
 
   function makeInitialPageHandler(openingRoute: Extract<ViewState, { view: 'history' }>): (page: ConversationPage) => void {

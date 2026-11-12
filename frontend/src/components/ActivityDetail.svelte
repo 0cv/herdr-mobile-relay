@@ -1,18 +1,16 @@
 <script lang="ts">
   import { copyText } from '$lib/clipboard';
-  import { get } from 'svelte/store';
   import { onMount } from 'svelte';
   import Button from '$components/ui/Button.svelte';
-  import { agentOpeningView } from '$lib/agent-view';
+  import CopyIcon from '$components/ui/CopyIcon.svelte';
+  import { agentOpeningRoute } from '$lib/agent-navigation';
   import { activityTone } from '$lib/activity';
   import { clientPaneId } from '$lib/agents';
   import { navigate, replaceView } from '$lib/router';
-  import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
   import { relayStore } from '$lib/store';
 
   const activities = relayStore.activities;
   const agents = relayStore.agents;
-  const connections = relayStore.connections;
 
   let { key }: { key: string } = $props();
 
@@ -33,12 +31,7 @@
   function goToThread() {
     if (!activity?.pane_id || !agent) return;
     void relayStore.acknowledgePane(agent);
-    navigate(agentOpeningView(
-      agent,
-      get(connections).get(agent.relay_id),
-      get(defaultAgentView),
-      get(paneAgentViewOverrides),
-    ));
+    navigate(agentOpeningRoute(agent));
   }
 
   async function copyExtract() {
@@ -82,10 +75,7 @@
     <section class="activity-extract" aria-label={`Captured ${extractLabel}`}>
       {#if activity.extract}
         <Button variant="ghost" size="icon" class="copy-extract" title={extractAction} aria-label={extractAction} onclick={copyExtract}>
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
+          <CopyIcon />
         </Button>
         <pre>{activity.extract}</pre>
       {:else}

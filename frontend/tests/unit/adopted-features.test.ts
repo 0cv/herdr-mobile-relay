@@ -6,7 +6,7 @@ import { safeExternalUrl } from '$lib/rich-output';
 import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
 import { escapeHtml, linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
-import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
+import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -127,6 +127,37 @@ describe('workspace navigation', () => {
       workspaceIds: ['work-1', 'work-2'],
     });
     expect(trees[1].workspace.workspace_id).toBe('work-3');
+  });
+
+  it('selects workspaces with their repository and unoccupied children across relays', () => {
+    const repo = { repo_key: 'repo-key', repo_name: 'mobile', repo_root: '/home/user/mobile' };
+    const parent = workspace({ worktree: { ...repo, checkout_path: '/home/user/mobile', is_linked_worktree: false } });
+    const child = workspace({ workspace_id: 'child', worktree: { ...repo, checkout_path: '/worktrees/child', is_linked_worktree: true } });
+    const emptyChild = workspace({ workspace_id: 'empty-child', worktree: { ...child.worktree! } });
+    const orphan = workspace({ relay_id: 'relay-b', workspace_id: 'orphan', worktree: { ...child.worktree! } });
+    const unkeyed = workspace({ workspace_id: 'unkeyed', worktree: { ...child.worktree!, repo_key: '' } });
+    const shell = workspace({ workspace_id: 'shell' });
+    const records = [parent, child, emptyChild, orphan, unkeyed, shell];
+    const parentAgent = agent({ workspace_id: parent.workspace_id });
+    const childAgent = agent({ workspace_id: child.workspace_id, pane_id: 'relay-a::child' });
+
+    expect(workspaceRecordsFor([childAgent], [parentAgent, childAgent], records, false)).toEqual([parent, child]);
+    expect(workspaceRecordsFor([parentAgent], [parentAgent, childAgent], records, false)).toEqual([parent, emptyChild]);
+    expect(workspaceRecordsFor([], [parentAgent, childAgent], records, true)).toEqual([orphan, unkeyed, shell]);
+    expect(workspaceRecordsFor([], [], records, false)).toEqual([]);
+    expect(workspaceRecordsFor([], [], records, true)).toEqual(records);
+  });
+
+  it('keeps repository selection and nesting stable when a repository is open twice', () => {
+    const repo = { repo_key: 'repo-key', repo_name: 'mobile', repo_root: '/home/user/mobile' };
+    const first = workspace({ worktree: { ...repo, checkout_path: '/home/user/mobile', is_linked_worktree: false } });
+    const second = workspace({ ...first, workspace_id: 'second' });
+    const child = workspace({ workspace_id: 'child', worktree: { ...repo, checkout_path: '/worktrees/child', is_linked_worktree: true } });
+    const childAgent = agent({ workspace_id: child.workspace_id });
+    const records = [first, second, child];
+
+    expect(workspaceRecordsFor([childAgent], [childAgent], records, false)).toEqual([first, child]);
+    expect(relayWorkspaceTrees(records).map(tree => tree.workspaceIds)).toEqual([[first.workspace_id], [second.workspace_id, child.workspace_id]]);
   });
 
   it('shows workspace provenance and worktree paths only when informative', () => {

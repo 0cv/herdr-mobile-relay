@@ -8,6 +8,7 @@ import {
   tabName,
 } from './agents';
 import type { Agent, RelayWorkspace, WorkspaceWorktree } from './types';
+import { pathBase } from './paths';
 
 export interface WorkspaceTab {
   id: string;
@@ -49,11 +50,6 @@ export interface WorkspaceGroupTree {
   workspace: WorkspaceGroup;
   children: WorkspaceGroup[];
   aggregate: WorkspaceGroup;
-}
-
-function pathBase(path: string): string {
-  const normalized = path.replace(/[\\/]+$/, '');
-  return normalized.split(/[\\/]/).filter(Boolean).at(-1) || '';
 }
 
 /**
@@ -98,7 +94,7 @@ export function homeRelativePath(path: string, home: string): string {
 
 export function workspaceIdentity(agent: Agent): string {
   const identity = String(agent.workspace_id || agent.cwd || agent.raw_pane_id || agent.pane_id);
-  return `${agent.relay_id}\u0000${identity}`;
+  return workspaceKey(agent.relay_id, identity);
 }
 
 function groupLabel(agents: Agent[]): string {
@@ -119,7 +115,7 @@ function groupCwd(agents: Agent[]): string {
 export function workspaceGroups(agents: Agent[], workspaces: RelayWorkspace[] = []): WorkspaceGroup[] {
   const grouped = new Map<string, { agents: Agent[]; workspace: RelayWorkspace | null }>();
   for (const workspace of workspaces) {
-    const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
+    const key = workspaceKey(workspace.relay_id, workspace.workspace_id);
     grouped.set(key, { agents: [], workspace });
   }
   for (const agent of agents) {
@@ -182,29 +178,79 @@ export function workspaceGroups(agents: Agent[], workspaces: RelayWorkspace[] = 
     || left.host.localeCompare(right.host, undefined, { sensitivity: 'base' }));
 }
 
-export function relayWorkspaceTrees(workspaces: RelayWorkspace[]): RelayWorkspaceTree[] {
-  const parentByRepo = new Map<string, RelayWorkspace>();
+export function workspaceKey(relayId: string, workspaceId: string): string {
+  return `${relayId}\u0000${workspaceId}`;
+}
+
+function repositoryWorkspaces(workspaces: RelayWorkspace[]): Map<string, RelayWorkspace[]> {
+  const parents = new Map<string, RelayWorkspace[]>();
   for (const workspace of workspaces) {
     const worktree = workspace.worktree;
     if (worktree && !worktree.is_linked_worktree && worktree.repo_key) {
-      parentByRepo.set(`${workspace.relay_id}\u0000${worktree.repo_key}`, workspace);
+      const key = workspaceKey(workspace.relay_id, worktree.repo_key);
+      const matches = parents.get(key) || [];
+      matches.push(workspace);
+      parents.set(key, matches);
     }
   }
+  return parents;
+}
+
+export function workspaceRecordsFor(
+  visible: Agent[],
+  agents: Agent[],
+  workspaces: RelayWorkspace[],
+  includeEmpty: boolean,
+): RelayWorkspace[] {
+  const visibleKeys = new Set(visible.map(workspaceIdentity));
+  const occupiedKeys = new Set(agents.map(workspaceIdentity));
+  const parents = repositoryWorkspaces(workspaces);
+  const selected = new Set(workspaces.filter((workspace) => {
+    const key = workspaceKey(workspace.relay_id, workspace.workspace_id);
+    const worktree = workspace.worktree;
+    const hasParent = worktree?.repo_key && parents.has(workspaceKey(workspace.relay_id, worktree.repo_key));
+    return visibleKeys.has(key) || (includeEmpty && !occupiedKeys.has(key)
+      && (worktree?.is_linked_worktree !== true || !hasParent));
+  }).map((workspace) => workspaceKey(workspace.relay_id, workspace.workspace_id)));
+  for (const workspace of workspaces) {
+    const key = workspaceKey(workspace.relay_id, workspace.workspace_id);
+    const worktree = workspace.worktree;
+    if (!worktree?.repo_key) continue;
+    if (worktree.is_linked_worktree && selected.has(key)) {
+      const parent = parents.get(workspaceKey(workspace.relay_id, worktree.repo_key))?.[0];
+      if (parent) selected.add(workspaceKey(parent.relay_id, parent.workspace_id));
+    } else if (!worktree.is_linked_worktree && selected.has(key)) {
+      for (const child of workspaces) {
+        const childKey = workspaceKey(child.relay_id, child.workspace_id);
+        if (child.relay_id === workspace.relay_id
+          && child.worktree?.repo_key === worktree.repo_key
+          && child.worktree.is_linked_worktree
+          && !occupiedKeys.has(childKey)) {
+          selected.add(childKey);
+        }
+      }
+    }
+  }
+  return workspaces.filter((workspace) => selected.has(workspaceKey(workspace.relay_id, workspace.workspace_id)));
+}
+
+export function relayWorkspaceTrees(workspaces: RelayWorkspace[]): RelayWorkspaceTree[] {
+  const parents = repositoryWorkspaces(workspaces);
   const children = new Map<string, RelayWorkspace[]>();
   const childIDs = new Set<string>();
   for (const workspace of workspaces) {
     const worktree = workspace.worktree;
     if (!worktree?.is_linked_worktree || !worktree.repo_key) continue;
-    const parent = parentByRepo.get(`${workspace.relay_id}\u0000${worktree.repo_key}`);
+    const parent = parents.get(workspaceKey(workspace.relay_id, worktree.repo_key))?.at(-1);
     if (!parent || parent.workspace_id === workspace.workspace_id) continue;
-    const key = `${parent.relay_id}\u0000${parent.workspace_id}`;
+    const key = workspaceKey(parent.relay_id, parent.workspace_id);
     children.set(key, [...(children.get(key) || []), workspace]);
-    childIDs.add(`${workspace.relay_id}\u0000${workspace.workspace_id}`);
+    childIDs.add(workspaceKey(workspace.relay_id, workspace.workspace_id));
   }
   return workspaces
-    .filter((workspace) => !childIDs.has(`${workspace.relay_id}\u0000${workspace.workspace_id}`))
+    .filter((workspace) => !childIDs.has(workspaceKey(workspace.relay_id, workspace.workspace_id)))
     .map((workspace) => {
-      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
+      const key = workspaceKey(workspace.relay_id, workspace.workspace_id);
       const nested = (children.get(key) || []).sort((left, right) =>
         left.number - right.number || left.label.localeCompare(right.label));
       return {
@@ -231,13 +277,13 @@ export function workspaceGroupTrees(groups: WorkspaceGroup[]): WorkspaceGroupTre
     worktree: group.worktree,
   }));
   const groupByID = new Map(groups.map((group) => [
-    `${group.relayId}\u0000${group.workspaceId}`,
+    workspaceKey(group.relayId, group.workspaceId),
     group,
   ]));
   return relayWorkspaceTrees(workspaces).map((tree) => {
-    const workspace = groupByID.get(`${tree.workspace.relay_id}\u0000${tree.workspace.workspace_id}`)!;
+    const workspace = groupByID.get(workspaceKey(tree.workspace.relay_id, tree.workspace.workspace_id))!;
     const children = tree.children
-      .map((child) => groupByID.get(`${child.relay_id}\u0000${child.workspace_id}`))
+      .map((child) => groupByID.get(workspaceKey(child.relay_id, child.workspace_id)))
       .filter((child): child is WorkspaceGroup => Boolean(child));
     const all = [workspace, ...children];
     return {

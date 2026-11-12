@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { pathBase } from '$lib/paths';
   import { createReorderHold } from '$lib/reorder-hold';
   import { displacedSlot, insertionSlot, slotGap, type ReorderSlot } from '$lib/reorder-geometry';
   import { tick } from 'svelte';
+  import { createDirectoryLoader } from '$lib/directory-loader';
   import DirectoryPicker from '$components/DirectoryPicker.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
@@ -58,7 +60,6 @@
     gap: number;
   } | null>(null);
   let pendingWorkspaceOrder = $state<{ relayId: string; order: string[] } | null>(null);
-  let directoryLoadGeneration = 0;
   let worktreeLoadGeneration = 0;
   const cancelWorkspaceReorders = new Set<() => void>();
 
@@ -114,7 +115,7 @@
     worktreeWorkspaceId = '';
     worktreeOpen = false;
     worktreeListing = null;
-    if (workspaceManagementAvailable) void loadDirectory('');
+    if (workspaceManagementAvailable) void directoryLoader.load('');
   });
 
   $effect(() => {
@@ -158,26 +159,17 @@
   function isReadOnly(relay: string): boolean {
     return readOnlyRelayIds.has(relay);
   }
-  function pathBase(path: string): string {
-    return path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).at(-1) || 'workspace';
-  }
 
-  async function loadDirectory(path: string) {
-    const loadRelayId = relayId;
-    const generation = ++directoryLoadGeneration;
-    if (!loadRelayId || !connection?.capabilities.includes('directory_browser')) return;
-    try {
-      const listing = await relayStore.listDirectories(loadRelayId, path);
-      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
+  const directoryLoader = createDirectoryLoader(
+    () => ({ relayId, connection }),
+    (listing) => {
       if (listing.current.path) {
         cwd = listing.current.path;
-        if (!label) label = pathBase(cwd);
+        if (!label) label = pathBase(cwd) || 'workspace';
       }
-    } catch (caught) {
-      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
-      setStatus((caught as Error).message, true);
-    }
-  }
+    },
+    (caught) => setStatus((caught as Error).message, true),
+  );
 
   function setStatus(message: string, failed = false) {
     status = message;
@@ -197,7 +189,7 @@
 
   function openCreateWorkspace() {
     if (isReadOnly(relayId)) return;
-    label ||= pathBase(cwd);
+    label ||= pathBase(cwd) || 'workspace';
     directoryOpen = false;
     createOpen = true;
   }
@@ -756,15 +748,14 @@
 >
   <form class="form-stack" onsubmit={createWorkspace}>
     <span id="workspace-cwd-label" class="field-label">Working Directory</span>
-    <div class:open={directoryOpen} class="directory-browser" aria-labelledby="workspace-cwd-label">
-      <DirectoryPicker
-        {connection}
-        {cwd}
-        listId="workspace-directory-list"
-        bind:open={directoryOpen}
-        onselect={loadDirectory}
-      />
-    </div>
+    <DirectoryPicker
+      labelId="workspace-cwd-label"
+      {connection}
+      {cwd}
+      listId="workspace-directory-list"
+      bind:open={directoryOpen}
+      onselect={directoryLoader.load}
+    />
     <label for="workspace-label">Label</label>
     <input id="workspace-label" bind:value={label} maxlength="128" required autocomplete="off" />
     <div class="button-row">

@@ -1,9 +1,9 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { get } from 'svelte/store';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { agentOpeningView, isAgentView, paneViewPreferenceKey } from '$lib/agent-view';
+  import { agentOpeningRoute } from '$lib/agent-navigation';
+  import { isAgentView, paneViewPreferenceKey } from '$lib/agent-view';
   import { displayName, hostLabel, sessionName, tabName } from '$lib/agents';
   import { defaultAgentView, paneAgentViewOverrides, setPaneAgentView } from '$lib/preferences';
   import { replaceView } from '$lib/router';
@@ -165,12 +165,7 @@
       });
       open = false;
       if (replacement) {
-        replaceView(agentOpeningView(
-          replacement,
-          get(connections).get(replacement.relay_id),
-          get(defaultAgentView),
-          get(paneAgentViewOverrides),
-        ));
+        replaceView(agentOpeningRoute(replacement));
       }
     } catch (error) {
       relayStore.showToast((error as Error).message, true);

@@ -75,31 +75,37 @@
     close();
   }
 
+  function capturePointer(event: PointerEvent) {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) return;
+    try {
+      target.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic events and older webviews may not register an active pointer.
+    }
+  }
+
+  function releasePointer(event: PointerEvent) {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement) || !target.hasPointerCapture(event.pointerId)) return;
+    try {
+      target.releasePointerCapture(event.pointerId);
+    } catch {
+      // The pointer can be released by the browser before this handler runs.
+    }
+  }
+
   function startSidebarSwipe(event: PointerEvent) {
     if (event.pointerType !== 'touch' || !event.isPrimary) return;
     sidebarSwipe = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-    const target = event.currentTarget;
-    if (target instanceof HTMLElement) {
-      try {
-        target.setPointerCapture(event.pointerId);
-      } catch {
-        // Synthetic events and older webviews may not register an active pointer.
-      }
-    }
+    capturePointer(event);
   }
 
   function finishSidebarSwipe(event: PointerEvent) {
     if (!sidebarSwipe || sidebarSwipe.pointerId !== event.pointerId) return;
     const start = sidebarSwipe;
     sidebarSwipe = null;
-    const target = event.currentTarget;
-    if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId)) {
-      try {
-        target.releasePointerCapture(event.pointerId);
-      } catch {
-        // The pointer can be released by the browser before this handler runs.
-      }
-    }
+    releasePointer(event);
     const horizontal = start.x - event.clientX;
     const vertical = Math.abs(start.y - event.clientY);
     if (horizontal < 48 || horizontal < vertical * 1.25) return;
@@ -129,14 +135,7 @@
   function startDiffPinch(event: PointerEvent) {
     if (event.pointerType !== 'touch' || diffPointers.size >= 2) return;
     diffPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    const target = event.currentTarget;
-    if (target instanceof HTMLElement) {
-      try {
-        target.setPointerCapture(event.pointerId);
-      } catch {
-        // Synthetic events and older webviews may not register an active pointer.
-      }
-    }
+    capturePointer(event);
     const distance = diffPointerDistance();
     if (distance > 0) diffPinch = { distance, zoom: diffZoom };
   }
@@ -153,14 +152,7 @@
 
   function finishDiffPinch(event: PointerEvent) {
     if (!diffPointers.delete(event.pointerId)) return;
-    const target = event.currentTarget;
-    if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId)) {
-      try {
-        target.releasePointerCapture(event.pointerId);
-      } catch {
-        // The browser may release capture before pointerup reaches this handler.
-      }
-    }
+    releasePointer(event);
     diffPinch = null;
   }
 
@@ -223,36 +215,19 @@
     }
   }
 
-  async function showFile(path: string) {
+  async function showPreview(path: string, kind: 'file' | 'diff') {
     if (!agent) return;
     const current = ++previewGeneration;
     selectedPath = path;
     preview = null;
-    previewKind = 'file';
+    previewKind = kind;
     resetDiffZoom();
     error = '';
     previewLoading = true;
     try {
-      const next = await relayStore.loadWorkspaceFile(agent, path);
-      if (current === previewGeneration) preview = next;
-    } catch (loadError) {
-      if (current === previewGeneration) error = (loadError as Error).message;
-    } finally {
-      if (current === previewGeneration) previewLoading = false;
-    }
-  }
-
-  async function showDiff(path: string) {
-    if (!agent) return;
-    const current = ++previewGeneration;
-    selectedPath = path;
-    preview = null;
-    previewKind = 'diff';
-    resetDiffZoom();
-    error = '';
-    previewLoading = true;
-    try {
-      const next = await relayStore.loadWorkspaceGitDiff(agent, path);
+      const next = await (kind === 'file'
+        ? relayStore.loadWorkspaceFile(agent, path)
+        : relayStore.loadWorkspaceGitDiff(agent, path));
       if (current === previewGeneration) preview = next;
     } catch (loadError) {
       if (current === previewGeneration) error = (loadError as Error).message;
@@ -344,7 +319,7 @@
               {#if entry.kind === 'directory'}
                 <div class="workspace-directory" style={`--path-depth: ${pathDepth(entry.path)}`} title={entry.path}>▸ {entry.name}</div>
               {:else}
-                <button class:active={selectedPath === entry.path && previewKind === 'file'} style={`--path-depth: ${pathDepth(entry.path)}`} type="button" title={entry.path} onclick={() => showFile(entry.path)}>{entry.name}</button>
+                <button class:active={selectedPath === entry.path && previewKind === 'file'} style={`--path-depth: ${pathDepth(entry.path)}`} type="button" title={entry.path} onclick={() => showPreview(entry.path, 'file')}>{entry.name}</button>
               {/if}
             {:else}
               <p class="workspace-message">No matching files.</p>
@@ -352,7 +327,7 @@
           {:else if git?.available}
             {#if git.truncated}<p class="workspace-notice">Changed-file list is truncated.</p>{/if}
             {#each filteredChanges as changed (changed.path)}
-              <button class:active={selectedPath === changed.path && previewKind === 'diff'} type="button" title={changed.path} onclick={() => showDiff(changed.path)}>
+              <button class:active={selectedPath === changed.path && previewKind === 'diff'} type="button" title={changed.path} onclick={() => showPreview(changed.path, 'diff')}>
                 <span>{changed.path}</span><em>{statusLabel(changed.status)}</em>
               </button>
             {:else}

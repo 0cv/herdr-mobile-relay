@@ -7,6 +7,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Empty conversations now show their explanation once instead of repeating it
+  above the message list.
 - Failed commands now keep the correct action name in results and activity,
   including prompts rejected because their agent session changed.
 - Release bundles now include `relay/rotate-token.sh`, so the documented
