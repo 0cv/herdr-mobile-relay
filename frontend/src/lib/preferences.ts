@@ -72,53 +72,71 @@ export function readPaneAgentViewOverrides(
   }
 }
 
-function savedTheme(): Theme {
-  const value = localStorage.getItem(THEME_KEY);
-  return THEMES.includes(value as Theme) ? value as Theme : 'nord';
+function savedChoice<T extends string | number>(value: unknown, choices: readonly T[], fallback: T): T {
+  return choices.includes(value as T) ? value as T : fallback;
 }
 
-function savedInterfaceSize(): InterfaceSize {
-  const value = localStorage.getItem(INTERFACE_SIZE_KEY) || localStorage.getItem(LEGACY_FONT_KEY);
-  return INTERFACE_SIZES.includes(value as InterfaceSize) ? value as InterfaceSize : 'compact';
+function persistedPreference<T>(
+  key: string,
+  initialValue: T,
+  serialize: (value: T) => string | null = String,
+) {
+  const store = writable(initialValue);
+  function persist(value: T): void {
+    const serialized = serialize(value);
+    if (serialized === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, serialized);
+  }
+  return {
+    store,
+    persist,
+    set(value: T): void {
+      persist(value);
+      store.set(value);
+    },
+  };
 }
 
-
-function savedTerminalHistoryLines(): TerminalHistoryLines {
-  const value = Number(localStorage.getItem(TERMINAL_HISTORY_KEY));
-  return TERMINAL_HISTORY_OPTIONS.includes(value as TerminalHistoryLines)
-    ? value as TerminalHistoryLines
-    : 1_000;
-}
-
-function savedTerminalRefreshInterval(): TerminalRefreshInterval {
-  const value = Number(localStorage.getItem(TERMINAL_REFRESH_KEY));
-  return TERMINAL_REFRESH_OPTIONS.includes(value as TerminalRefreshInterval)
-    ? value as TerminalRefreshInterval
-    : 250;
-}
-
-// Mixed by default: one card per workspace with a state dot reads better than
-// three state sections once workspaces carry worktrees, and agents needing
-// input stay on top in both layouts.
-function savedHomeLayout(): HomeLayout {
-  const value = localStorage.getItem(HOME_LAYOUT_KEY);
-  return HOME_LAYOUTS.includes(value as HomeLayout) ? value as HomeLayout : 'mixed';
-}
-
-
-export const defaultAgentView = writable<AgentView>(readDefaultAgentView());
-export const paneAgentViewOverrides = writable<PaneAgentViewOverrides>(readPaneAgentViewOverrides());
-export const theme = writable<Theme>(savedTheme());
-export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
-export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
-export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
-export const homeLayout = writable<HomeLayout>(savedHomeLayout());
-export const hiddenServers = writable<string[]>(readHiddenServers());
-export const terminalResizeSession = writable<boolean>(readTerminalResizeSession());
-export const terminalHeightLease = writable<boolean>(
+const defaultAgentViewPreference = persistedPreference(DEFAULT_AGENT_VIEW_KEY, readDefaultAgentView());
+const paneAgentViewPreference = persistedPreference(
+  PANE_AGENT_VIEW_OVERRIDES_KEY,
+  readPaneAgentViewOverrides(),
+  (value) => Object.keys(value).length ? JSON.stringify(value) : null,
+);
+export const defaultAgentView = defaultAgentViewPreference.store;
+export const paneAgentViewOverrides = paneAgentViewPreference.store;
+const themePreference = persistedPreference<Theme>(
+  THEME_KEY,
+  savedChoice(localStorage.getItem(THEME_KEY), THEMES, 'nord'),
+);
+export const theme = themePreference.store;
+const interfaceSizePreference = persistedPreference<InterfaceSize>(
+  INTERFACE_SIZE_KEY,
+  savedChoice(localStorage.getItem(INTERFACE_SIZE_KEY) || localStorage.getItem(LEGACY_FONT_KEY), INTERFACE_SIZES, 'compact'),
+);
+export const interfaceSize = interfaceSizePreference.store;
+export const { store: terminalHistoryLines, set: setTerminalHistoryLines } = persistedPreference<TerminalHistoryLines>(
+  TERMINAL_HISTORY_KEY,
+  savedChoice(Number(localStorage.getItem(TERMINAL_HISTORY_KEY)), TERMINAL_HISTORY_OPTIONS, 1_000),
+);
+export const { store: terminalRefreshInterval, set: setTerminalRefreshInterval } = persistedPreference<TerminalRefreshInterval>(
+  TERMINAL_REFRESH_KEY,
+  savedChoice(Number(localStorage.getItem(TERMINAL_REFRESH_KEY)), TERMINAL_REFRESH_OPTIONS, 250),
+);
+export const { store: homeLayout, set: setHomeLayout } = persistedPreference<HomeLayout>(
+  HOME_LAYOUT_KEY,
+  savedChoice(localStorage.getItem(HOME_LAYOUT_KEY), HOME_LAYOUTS, 'mixed'),
+);
+const hiddenServersPreference = persistedPreference(HIDDEN_SERVERS_KEY, readHiddenServers(), JSON.stringify);
+export const hiddenServers = hiddenServersPreference.store;
+const terminalResizeSessionPreference = persistedPreference(TERMINAL_RESIZE_SESSION_KEY, readTerminalResizeSession());
+export const terminalResizeSession = terminalResizeSessionPreference.store;
+export const { store: terminalHeightLease, set: setTerminalHeightLease } = persistedPreference(
+  TERMINAL_HEIGHT_LEASE_KEY,
   localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',
 );
-export const terminalWakeLock = writable<boolean>(
+export const { store: terminalWakeLock, set: setTerminalWakeLock } = persistedPreference(
+  TERMINAL_WAKE_LOCK_KEY,
   localStorage.getItem(TERMINAL_WAKE_LOCK_KEY) === 'true',
 );
 
@@ -131,7 +149,7 @@ function applyTheme(value: Theme): void {
 export function setDefaultAgentView(value: AgentView): 'saved' | 'unavailable' {
   if (!isAgentView(value)) return 'unavailable';
   try {
-    localStorage.setItem(DEFAULT_AGENT_VIEW_KEY, value);
+    defaultAgentViewPreference.persist(value);
   } catch {
     return 'unavailable';
   }
@@ -154,8 +172,7 @@ export function setPaneAgentView(
     || Object.entries(next).some(([entryKey, entryValue]) => current[entryKey] !== entryValue);
   if (!changed) return 'saved';
   try {
-    if (Object.keys(next).length) localStorage.setItem(PANE_AGENT_VIEW_OVERRIDES_KEY, JSON.stringify(next));
-    else localStorage.removeItem(PANE_AGENT_VIEW_OVERRIDES_KEY);
+    paneAgentViewPreference.persist(next);
   } catch {
     return 'unavailable';
   }
@@ -175,7 +192,7 @@ function readHiddenServers(): string[] {
 function saveHiddenServers(next: string[]): void {
   hiddenServers.set(next);
   try {
-    localStorage.setItem(HIDDEN_SERVERS_KEY, JSON.stringify(next));
+    hiddenServersPreference.persist(next);
   } catch {
     // Without storage the store still applies the choice until the app reloads.
   }
@@ -206,8 +223,7 @@ export function clearPaneAgentViewOverridesForRelay(relayId: string): 'saved' | 
   }
   if (!changed) return 'saved';
   try {
-    if (Object.keys(next).length) localStorage.setItem(PANE_AGENT_VIEW_OVERRIDES_KEY, JSON.stringify(next));
-    else localStorage.removeItem(PANE_AGENT_VIEW_OVERRIDES_KEY);
+    paneAgentViewPreference.persist(next);
   } catch {
     return 'unavailable';
   }
@@ -216,55 +232,27 @@ export function clearPaneAgentViewOverridesForRelay(relayId: string): 'saved' | 
 }
 
 export function setTheme(value: Theme): void {
-  localStorage.setItem(THEME_KEY, value);
+  themePreference.persist(value);
   applyTheme(value);
   theme.set(value);
 }
 
 export function setInterfaceSize(value: InterfaceSize): void {
-  localStorage.setItem(INTERFACE_SIZE_KEY, value);
-  interfaceSize.set(value);
+  interfaceSizePreference.set(value);
   document.documentElement.dataset.interfaceSize = value;
-}
-
-
-export function setTerminalHistoryLines(value: TerminalHistoryLines): void {
-  localStorage.setItem(TERMINAL_HISTORY_KEY, String(value));
-  terminalHistoryLines.set(value);
-}
-
-export function setTerminalRefreshInterval(value: TerminalRefreshInterval): void {
-  localStorage.setItem(TERMINAL_REFRESH_KEY, String(value));
-  terminalRefreshInterval.set(value);
 }
 
 export function setTerminalResizeSession(value: boolean): 'saved' | 'unavailable' {
   // Turning off remains effective locally even if persistence is unavailable.
   if (!value) terminalResizeSession.set(false);
   try {
-    localStorage.setItem(TERMINAL_RESIZE_SESSION_KEY, String(value));
+    terminalResizeSessionPreference.persist(value);
   } catch {
     return 'unavailable';
   }
   terminalResizeSession.set(value);
   return 'saved';
 }
-
-export function setTerminalHeightLease(value: boolean): void {
-  localStorage.setItem(TERMINAL_HEIGHT_LEASE_KEY, String(value));
-  terminalHeightLease.set(value);
-}
-export function setTerminalWakeLock(value: boolean): void {
-  localStorage.setItem(TERMINAL_WAKE_LOCK_KEY, String(value));
-  terminalWakeLock.set(value);
-}
-
-
-export function setHomeLayout(value: HomeLayout): void {
-  localStorage.setItem(HOME_LAYOUT_KEY, value);
-  homeLayout.set(value);
-}
-
 
 export function initializePreferences(): void {
   theme.subscribe(applyTheme)();
