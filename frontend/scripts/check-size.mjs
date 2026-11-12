@@ -1,6 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { constants, gzipSync } from 'node:zlib';
+import { appScriptPattern, appStylePattern, releaseEntryPath } from './release-rules.ts';
 
 // Release guard, not a platform limit: catch accidental bootstrap growth.
 // Push-only notification art loads inside the service worker, not the page.
@@ -88,14 +89,11 @@ const limitKiB = 170;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
-const appScript = assetNames.find((name) => /^app-[a-f0-9]{64}\.js$/.test(name));
-const appStyle = assetNames.find((name) => /^app-[a-f0-9]{64}\.css$/.test(name));
+const appScript = assetNames.find((name) => appScriptPattern.test(name));
+const appStyle = assetNames.find((name) => appStylePattern.test(name));
 if (!appScript || !appStyle) throw new Error('content-addressed app assets are missing');
 const descriptor = JSON.parse(await readFile(join(root, 'release.json'), 'utf8'));
-const entry = descriptor?.files?.entry?.path;
-if (typeof entry !== 'string' || !entry.startsWith('builds/') || !entry.endsWith('/index.html')) {
-  throw new Error('release.json does not describe a build-specific entry');
-}
+const entry = releaseEntryPath(descriptor);
 const files = ['index.html', 'herdr-bootstrap.js', entry, `assets/${appScript}`, `assets/${appStyle}`];
 let totalRaw = 0;
 let totalGzip = 0;

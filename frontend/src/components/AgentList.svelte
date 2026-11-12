@@ -9,7 +9,7 @@
     agentLastActiveAt,
     agentStatusGroup,
     agentStatusTone,
-    approvalButtonTone,
+    approvalButtonVariant,
     approvalOptions,
     approvalPromptPreview,
     displayName,
@@ -22,7 +22,7 @@
   import { answerFailureToast, returnedInteraction } from '$lib/questions';
   import { relayStore, type CommandError } from '$lib/store';
   import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
-  import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
+  import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents: allAgents,
@@ -111,11 +111,11 @@
   const mixedLayout = $derived($homeLayout === 'mixed');
   const doneWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     doneAgents,
-    workspaceRecordsFor(doneAgents, false),
+    workspaceRecordsFor(doneAgents, agents, workspaces, false),
   )));
   const workingWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     workingAgents,
-    workspaceRecordsFor(workingAgents, false),
+    workspaceRecordsFor(workingAgents, agents, workspaces, false),
   )));
   const idleAgents = $derived(backgroundAgents.filter((agent) => {
     const group = agentStatusGroup(agent);
@@ -123,60 +123,11 @@
   }));
   const idleWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     idleAgents,
-    workspaceRecordsFor(idleAgents, true),
+    workspaceRecordsFor(idleAgents, agents, workspaces, true),
   )));
   const mixedWorkspaces = $derived(mixedLayout
-    ? workspaceGroupTrees(workspaceGroups(backgroundAgents, workspaceRecordsFor(backgroundAgents, true)))
+    ? workspaceGroupTrees(workspaceGroups(backgroundAgents, workspaceRecordsFor(backgroundAgents, agents, workspaces, true)))
     : []);
-
-  function workspaceRecordsFor(visible: Agent[], includeEmpty: boolean): RelayWorkspace[] {
-    const visibleKeys = new Set(visible.map((agent) => workspaceIdentity(agent)));
-    const occupiedKeys = new Set(agents.map((agent) => workspaceIdentity(agent)));
-    // A linked worktree whose repository workspace is not open on the same
-    // relay has no parent card to nest under (relayWorkspaceTrees renders it
-    // top-level), so an empty one must stay visible in its own right.
-    const orphanLinkedWorktree = (workspace: RelayWorkspace): boolean => {
-      const worktree = workspace.worktree;
-      if (worktree?.is_linked_worktree !== true) return false;
-      if (!worktree.repo_key) return true;
-      return !workspaces.some((candidate) => (
-        candidate.relay_id === workspace.relay_id
-        && candidate.worktree?.repo_key === worktree.repo_key
-        && candidate.worktree.is_linked_worktree === false
-      ));
-    };
-    const selected = new Set(workspaces.filter((workspace) => {
-      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
-      const unoccupiedTopLevel = includeEmpty
-        && !occupiedKeys.has(key)
-        && (workspace.worktree?.is_linked_worktree !== true || orphanLinkedWorktree(workspace));
-      return visibleKeys.has(key) || unoccupiedTopLevel;
-    }).map((workspace) => `${workspace.relay_id}\u0000${workspace.workspace_id}`));
-    for (const workspace of workspaces) {
-      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
-      const worktree = workspace.worktree;
-      if (!worktree?.repo_key) continue;
-      if (worktree.is_linked_worktree && selected.has(key)) {
-        const parent = workspaces.find((candidate) => (
-          candidate.relay_id === workspace.relay_id
-          && candidate.worktree?.repo_key === worktree.repo_key
-          && candidate.worktree.is_linked_worktree === false
-        ));
-        if (parent) selected.add(`${parent.relay_id}\u0000${parent.workspace_id}`);
-      } else if (!worktree.is_linked_worktree && selected.has(key)) {
-        for (const child of workspaces) {
-          const childKey = `${child.relay_id}\u0000${child.workspace_id}`;
-          if (child.relay_id === workspace.relay_id
-            && child.worktree?.repo_key === worktree.repo_key
-            && child.worktree.is_linked_worktree
-            && !occupiedKeys.has(childKey)) {
-            selected.add(childKey);
-          }
-        }
-      }
-    }
-    return workspaces.filter((workspace) => selected.has(`${workspace.relay_id}\u0000${workspace.workspace_id}`));
-  }
 
   $effect(() => {
     if (!pendingTabOrder) return;
@@ -552,7 +503,7 @@
             {:else}
               {#each options as option, index (`${index}:${option}`)}
                 <Button
-                  variant={approvalButtonTone(option, index, options.length) === 'deny' ? 'danger' : approvalButtonTone(option, index, options.length) === 'trust' ? 'trust' : 'default'}
+                  variant={approvalButtonVariant(option, index, options.length)}
                   size="sm"
                   disabled={!inventoryReady}
                   title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}

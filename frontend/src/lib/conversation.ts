@@ -1,3 +1,4 @@
+import { isRecord } from './record';
 import type { ConversationEntry, ConversationTool } from '$lib/types';
 
 /** Preview budget for a single tool payload, in rendered lines. */
@@ -77,7 +78,7 @@ export function formatToolPayload(raw: string): string {
   } catch {
     return raw;
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return raw;
+  if (!isRecord(parsed)) return raw;
   const fields = Object.entries(parsed as Record<string, unknown>);
   if (!fields.length) return raw;
   return fields

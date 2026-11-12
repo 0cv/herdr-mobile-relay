@@ -51,21 +51,6 @@ load_relay_env "$ENV_FILE"
 RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-$RELAY_UPDATER_TOKEN_FILE}
 unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
-wait_for_exit() {
-    local pid="$1"
-    local attempts="$2"
-    local attempt
-    for ((attempt = 0; attempt < attempts; attempt++)); do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            wait "$pid" 2>/dev/null || true
-            return 0
-        fi
-        sleep 1
-    done
-    kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-}
-
 RELAY_BIN="$(relay_binary)"
 if [ "$HERDR_RELAY_BACKEND" = herdr ] && ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
     echo "✗ herdr is required. Install Herdr, then run Quick Start again."
@@ -254,9 +239,7 @@ elif command -v cloudflared >/dev/null 2>&1; then
     DNS_READY=""
     DNS_DEADLINE=$((SECONDS + 45))
     while [ "$SECONDS" -lt "$DNS_DEADLINE" ]; do
-        if curl -fsS --max-time 5 -H 'accept: application/dns-json' \
-                "https://cloudflare-dns.com/dns-query?name=$TUNNEL_HOST&type=A" 2>/dev/null \
-                | grep -q '"Answer"'; then
+        if dns_has_record "$TUNNEL_HOST" A; then
             DNS_READY=1
             break
         fi

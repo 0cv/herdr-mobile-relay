@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
   import { tick } from 'svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
@@ -208,11 +209,10 @@
   }
   async function copyInvitationLink(): Promise<void> {
     if (!invitationLink) return;
-    try {
-      await navigator.clipboard.writeText(invitationLink);
+    if (await copyText(invitationLink)) {
       status = 'Invitation link copied.';
       error = false;
-    } catch {
+    } else {
       status = 'Copy failed. Select and copy the invitation link manually.';
       error = true;
     }

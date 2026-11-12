@@ -1,3 +1,4 @@
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { IncrementalSha256 } from './incremental-sha256';
 import type { ApiError, TargetRef } from './types';
 
@@ -209,12 +210,6 @@ function validFilename(value: string): boolean {
 
 function validLimit(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
-}
-
-function hex(bytes: Uint8Array): string {
-  let output = '';
-  for (const byte of bytes) output += byte.toString(16).padStart(2, '0');
-  return output;
 }
 
 function issueFrom(error: unknown, fallback: AttachmentIssue['code']): AttachmentIssue {
@@ -456,7 +451,7 @@ export class AttachmentBatchController {
           const bytes = new Uint8Array(await file.slice(offset, offset + begin.chunk_bytes).arrayBuffer());
           if (run !== this.epoch) return [];
           // The worker owns the whole-file hash; chunks stay on the UI thread only for transport.
-          const chunkSha256 = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+          const chunkSha256 = bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
           const response = await this.callbacks.chunk({
             target: this.target,
             upload_id: begin.upload_id,

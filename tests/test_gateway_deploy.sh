@@ -108,10 +108,12 @@ cat > "$STUB_DIR/curl" <<'EOF'
 #!/bin/sh
 # The public /healthz probe. Answers only once the stub server is "started", so
 # the script cannot record a gateway URL it never reached.
-for argument in "$@"; do
-    case "$argument" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) shift; exec > "$1" ;;
         *"/healthz") [ -f "$STUB_STATE/started" ] || exit 7 ;;
     esac
+    shift
 done
 printf '{"ok":true,"relays":0,"clients":0,"uptime_seconds":1}\n'
 EOF
@@ -429,10 +431,12 @@ grep -Fq 'did not' "$OUTPUT" || fail "unverified deployment printed no diagnosis
 rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
 cat > "$STUB_DIR/curl" <<'EOF'
 #!/bin/sh
-for argument in "$@"; do
-    case "$argument" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) shift; exec > "$1" ;;
         *"/healthz") [ -f "$STUB_STATE/started" ] || exit 7 ;;
     esac
+    shift
 done
 printf '{"ok":true,"relays":0,"clients":0,"uptime_seconds":1,"stun_port":3478}\n'
 EOF

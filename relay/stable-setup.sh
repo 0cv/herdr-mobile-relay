@@ -31,18 +31,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-state_command() {
-    "$(relay_binary)" stable-state "$@"
-}
-
-state_get() {
-    state_command get "$STATE_FILE" "$1"
-}
-
-state_update() {
-    state_command update "$STATE_FILE" "$@"
-}
-
 rerun_command() {
     if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
         echo "herdr plugin action invoke install-service --plugin herdr-mobile-relay.events"
@@ -60,7 +48,7 @@ fail_resumable() {
     echo "Setup state was preserved in: $STATE_FILE" >&2
     echo "Rerun exactly:" >&2
     echo "  $(rerun_command)" >&2
-    return 1
+    exit 1
 }
 
 confirm_cloudflare_creation() {
@@ -95,10 +83,8 @@ confirm_existing_config_reuse() {
     echo "  Config:   $CONFIG"
     echo "  Tunnel:   $TUNNEL_NAME ($TUNNEL_UUID)"
     echo "  Hostname: $CONFIG_HOST"
-    set +e
-    dns_has_record "$CONFIG_HOST"
-    EXISTING_CONFIG_DNS_STATUS=$?
-    set -e
+    EXISTING_CONFIG_DNS_STATUS=0
+    dns_has_record "$CONFIG_HOST" || EXISTING_CONFIG_DNS_STATUS=$?
     case "$EXISTING_CONFIG_DNS_STATUS" in
         1) echo "  DNS:      no public record currently exists" ;;
         2) echo "  DNS:      could not be verified" ;;
@@ -134,23 +120,6 @@ service_file_present() {
 }
 
 
-
-dns_has_record() {
-    local hostname="$1"
-    local record_type
-    local response
-
-    for record_type in A AAAA CNAME; do
-        if ! response="$(curl -fsS --max-time 5 -H 'accept: application/dns-json' \
-            "https://cloudflare-dns.com/dns-query?name=$hostname&type=$record_type" 2>/dev/null)"; then
-            return 2
-        fi
-        if printf '%s' "$response" | grep -q '"Answer"'; then
-            return 0
-        fi
-    done
-    return 1
-}
 
 select_cloudflare_domain() {
     local cert_zone
@@ -253,10 +222,8 @@ reconcile_dns_route_state() {
        [ -n "$RELAY_HOSTNAME" ] &&
        [ -n "$cert_zone" ] &&
        ! hostname_in_zone "$RELAY_HOSTNAME" "$cert_zone"; then
-        set +e
-        dns_has_record "$RELAY_HOSTNAME"
-        intended_status=$?
-        set -e
+        intended_status=0
+        dns_has_record "$RELAY_HOSTNAME" || intended_status=$?
         if [ "$intended_status" -eq 2 ]; then
             echo "✗ Could not verify the recorded hostname $RELAY_HOSTNAME." >&2
             return 1
@@ -269,10 +236,8 @@ reconcile_dns_route_state() {
     if [ -z "$MISROUTED_HOSTNAME" ]; then
         return
     fi
-    set +e
-    dns_has_record "$MISROUTED_HOSTNAME"
-    stray_status=$?
-    set -e
+    stray_status=0
+    dns_has_record "$MISROUTED_HOSTNAME" || stray_status=$?
     if [ "$stray_status" -ne 1 ]; then
         state_update \
             "stage=route_mismatch" \
@@ -318,10 +283,7 @@ choose_hostname() {
                 fi
                 domain="$SELECTED_DOMAIN"
             fi
-            domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
-            domain="${domain#https://}"
-            domain="${domain%%/*}"
-            domain="${domain%.}"
+            domain="$(normalize_hostname "$domain")"
             if ! valid_hostname "$domain" || [[ "$domain" != *.* ]]; then
                 echo "✗ Enter a valid Cloudflare domain such as example.com." >&2
                 [ -z "${HERDR_STABLE_DOMAIN:-}" ] || return 1
@@ -332,11 +294,7 @@ choose_hostname() {
             candidate="${candidate:-$proposed}"
         fi
 
-        candidate="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')"
-        candidate="${candidate#https://}"
-        candidate="${candidate#wss://}"
-        candidate="${candidate%%/*}"
-        candidate="${candidate%.}"
+        candidate="$(normalize_hostname "$candidate")"
         if ! valid_hostname "$candidate" || [[ "$candidate" != *.* ]]; then
             echo "✗ Enter a valid full hostname such as relay-workstation.example.com." >&2
             [ -z "${HERDR_STABLE_HOSTNAME:-}" ] || return 1
@@ -350,10 +308,8 @@ choose_hostname() {
             continue
         fi
 
-        set +e
-        dns_has_record "$candidate"
-        dns_status=$?
-        set -e
+        dns_status=0
+        dns_has_record "$candidate" || dns_status=$?
         if [ "$dns_status" -eq 2 ]; then
             echo "✗ Could not query Cloudflare DNS-over-HTTPS for $candidate." >&2
             return 1
@@ -469,10 +425,8 @@ wait_for_public_dns() {
 
     printf '▸ Waiting up to %s seconds for public DNS' "$timeout"
     while true; do
-        set +e
-        dns_has_record "$RELAY_HOSTNAME"
-        status=$?
-        set -e
+        status=0
+        dns_has_record "$RELAY_HOSTNAME" || status=$?
         if [ "$status" -eq 0 ]; then
             echo " ✓"
             return
@@ -602,13 +556,7 @@ fi
 load_relay_env "$ENV_FILE"
 ORIGIN_CERT="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
 PORT="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
-case "$PORT" in
-    ""|*[!0-9]*|0)
-        echo "✗ HERDR_RELAY_PORT must be a positive integer." >&2
-        fail_resumable
-        exit 1
-        ;;
-esac
+require_positive_integer "$PORT" "✗ HERDR_RELAY_PORT" || fail_resumable
 
 PREVIOUS_STAGE="$(state_get stage)"
 STATE_CREATED_CONFIG="$(state_get created_config)"
@@ -619,10 +567,7 @@ fi
 
 if [ "$STATE_CREATED_CONFIG" != true ] && [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
     CONFIG="$(canonical_file_path "$CONFIG")"
-    if ! validate_tunnel_config "$CONFIG" "$PORT"; then
-        fail_resumable
-        exit 1
-    fi
+    validate_tunnel_config "$CONFIG" "$PORT" || fail_resumable
     if [ "$(state_get existing_config_reuse_confirmed)" != true ]; then
         if ! confirm_existing_config_reuse; then
             [ "$STATE_WAS_PRESENT" = true ] || rm -f "$STATE_FILE"
@@ -635,17 +580,14 @@ if [ "$STATE_CREATED_CONFIG" != true ] && [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; 
         fi
         state_update "existing_config_reuse_confirmed=true"
     else
-        set +e
-        dns_has_record "$CONFIG_HOST"
-        EXISTING_CONFIG_DNS_STATUS=$?
-        set -e
+        EXISTING_CONFIG_DNS_STATUS=0
+        dns_has_record "$CONFIG_HOST" || EXISTING_CONFIG_DNS_STATUS=$?
     fi
     if [ "$EXISTING_CONFIG_DNS_STATUS" -eq 1 ]; then
         echo "✗ The existing config points to $CONFIG_HOST, but that hostname has no public DNS record." >&2
         echo "  Stable setup will not silently recreate an old route." >&2
         echo "  Choose Change Tunnel Hostname, or restore its DNS record explicitly." >&2
         fail_resumable
-        exit 1
     fi
     echo "▸ Reusing confirmed Cloudflare tunnel config without modifying it: $CONFIG"
     RELAY_HOSTNAME="$CONFIG_HOST"
@@ -688,22 +630,13 @@ else
     CONFIG="$(canonical_file_path "$CONFIG")"
     CREDENTIALS_PATH="$(canonical_file_path "$CREDENTIALS_PATH")"
 
-    if ! reconcile_dns_route_state; then
-        fail_resumable
-        exit 1
-    fi
+    reconcile_dns_route_state || fail_resumable
 
     if [ "$CREATED_DNS" != true ] && [ "$PREVIOUS_STAGE" != routing_dns ]; then
-        if ! ensure_tunnel_management; then
-            fail_resumable
-            exit 1
-        fi
+        ensure_tunnel_management || fail_resumable
     fi
     if [ "$CREATED_DNS" != true ]; then
-        if ! choose_hostname "$RELAY_HOSTNAME" "$PREVIOUS_STAGE"; then
-            fail_resumable
-            exit 1
-        fi
+        choose_hostname "$RELAY_HOSTNAME" "$PREVIOUS_STAGE" || fail_resumable
         if [ "$DNS_ROUTE_NEEDS_IDENTITY_PROOF" = true ]; then
             DNS_ROUTE_ATTEMPTED=true
         else
@@ -719,14 +652,10 @@ else
     elif [ -z "$RELAY_HOSTNAME" ]; then
         echo "✗ Recorded DNS stage has no hostname." >&2
         fail_resumable
-        exit 1
     fi
 
     if [ -z "$TUNNEL_UUID" ]; then
-        if ! ensure_tunnel_management; then
-            fail_resumable
-            exit 1
-        fi
+        ensure_tunnel_management || fail_resumable
         if [ -f "$CREDENTIALS_PATH" ]; then
             case "$PREVIOUS_STAGE" in
                 creating_tunnel|tunnel_created|config_written|routing_dns|dns_routed|installing_service|waiting_for_dns|waiting_for_https|complete)
@@ -734,7 +663,6 @@ else
                 *)
                     echo "✗ Refusing to adopt an unowned credentials file: $CREDENTIALS_PATH" >&2
                     fail_resumable
-                    exit 1
                     ;;
             esac
             TUNNEL_UUID="$(state_command credential-id "$CREDENTIALS_PATH")"
@@ -751,12 +679,8 @@ else
                 echo "✗ An unrecorded Cloudflare tunnel already uses the name $TUNNEL_NAME." >&2
                 echo "  The wizard will not adopt or replace it." >&2
                 fail_resumable
-                exit 1
             fi
-            if ! confirm_cloudflare_creation; then
-                fail_resumable
-                exit 1
-            fi
+            confirm_cloudflare_creation || fail_resumable
             mkdir -p "$(dirname "$CREDENTIALS_PATH")"
             chmod 700 "$(dirname "$CREDENTIALS_PATH")"
             state_update "stage=creating_tunnel"
@@ -765,12 +689,10 @@ else
             if ! cloudflared tunnel create --output json --credentials-file "$CREDENTIALS_PATH" "$TUNNEL_NAME" > "$CREATE_OUTPUT"; then
                 echo "✗ Cloudflare tunnel creation failed." >&2
                 fail_resumable
-                exit 1
             fi
             if [ ! -f "$CREDENTIALS_PATH" ]; then
                 echo "✗ cloudflared did not write the requested credentials file: $CREDENTIALS_PATH" >&2
                 fail_resumable
-                exit 1
             fi
             chmod 600 "$CREDENTIALS_PATH"
             TUNNEL_UUID="$(state_command create-id "$CREATE_OUTPUT")"
@@ -778,7 +700,6 @@ else
             if [ "$TUNNEL_UUID" != "$CREDENTIAL_TUNNEL_UUID" ]; then
                 echo "✗ Created tunnel UUID does not match its credentials file." >&2
                 fail_resumable
-                exit 1
             fi
             state_update \
                 "stage=tunnel_created" \
@@ -791,19 +712,16 @@ else
     if [ ! -r "$CREDENTIALS_PATH" ]; then
         echo "✗ Recorded tunnel credentials are not readable: $CREDENTIALS_PATH" >&2
         fail_resumable
-        exit 1
     fi
     CREDENTIAL_TUNNEL_UUID="$(state_command credential-id "$CREDENTIALS_PATH")"
     if [ "$TUNNEL_UUID" != "$CREDENTIAL_TUNNEL_UUID" ]; then
         echo "✗ Recorded tunnel UUID does not match $CREDENTIALS_PATH." >&2
         fail_resumable
-        exit 1
     fi
 
     if [ -e "$CONFIG" ] && [ "$STATE_CREATED_CONFIG" != true ] && [ "$PREVIOUS_STAGE" != writing_config ]; then
         echo "✗ Refusing to overwrite an unowned Cloudflare config: $CONFIG" >&2
         fail_resumable
-        exit 1
     fi
     state_update \
         "stage=writing_config" \
@@ -832,19 +750,13 @@ else
         state_update "env_config_added_by_wizard=true"
     fi
 
-    if ! validate_tunnel_config "$CONFIG" "$PORT"; then
-        fail_resumable
-        exit 1
-    fi
+    validate_tunnel_config "$CONFIG" "$PORT" || fail_resumable
     # Validation may resolve a name through cert.pem; generated resources keep
     # the deterministic wizard-owned name recorded before the list call.
     TUNNEL_NAME="$(state_get tunnel_name)"
 
     if [ "$CREATED_DNS" != true ] && [ "$DNS_ROUTE_NEEDS_IDENTITY_PROOF" != true ]; then
-        if ! ensure_tunnel_management; then
-            fail_resumable
-            exit 1
-        fi
+        ensure_tunnel_management || fail_resumable
         state_update "stage=routing_dns" "dns_route_attempted=true"
         echo "▸ Routing $RELAY_HOSTNAME to tunnel $TUNNEL_UUID..."
         if ! ROUTE_OUTPUT="$(cloudflared tunnel route dns "$TUNNEL_UUID" "$RELAY_HOSTNAME" 2>&1)"; then
@@ -853,7 +765,6 @@ else
             echo "  The domain must belong to the zone selected during cloudflared tunnel login." >&2
             echo "  A conflicting DNS record must be removed or another hostname selected." >&2
             fail_resumable
-            exit 1
         fi
         printf '%s\n' "$ROUTE_OUTPUT"
         ROUTED_NAME="$(cloudflare_routed_hostname "$ROUTE_OUTPUT")"
@@ -862,7 +773,6 @@ else
             echo "✗ Cloudflare returned success without naming the routed hostname." >&2
             echo "  Setup will not assume that the requested DNS record was created." >&2
             fail_resumable
-            exit 1
         fi
         if [ "$ROUTED_NAME" != "$RELAY_HOSTNAME" ]; then
             state_update \
@@ -873,7 +783,6 @@ else
             echo "  Delete $ROUTED_NAME in Cloudflare DNS, then rerun setup." >&2
             echo "  The tunnel and local config were preserved." >&2
             fail_resumable
-            exit 1
         fi
         state_update \
             "stage=dns_routed" \
@@ -882,32 +791,19 @@ else
     fi
 fi
 
-if ! install_service; then
-    fail_resumable
-    exit 1
-fi
+install_service || fail_resumable
 
 LOCAL_HEALTH_FILE="$WORK_DIR/local-health.json"
 if ! wait_for_relay_health "$PORT" 1 0 "$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)" > "$LOCAL_HEALTH_FILE"; then
     echo "✗ The installed service is not reachable on 127.0.0.1:$PORT." >&2
     fail_resumable
-    exit 1
 fi
-if ! wait_for_agent_readiness; then
-    fail_resumable
-    exit 1
-fi
+wait_for_agent_readiness || fail_resumable
 
 state_update "stage=waiting_for_dns"
-if ! wait_for_public_dns; then
-    fail_resumable
-    exit 1
-fi
+wait_for_public_dns || fail_resumable
 state_update "stage=waiting_for_https"
-if ! wait_for_public_health; then
-    fail_resumable
-    exit 1
-fi
+wait_for_public_health || fail_resumable
 
 if [ "$DNS_ROUTE_NEEDS_IDENTITY_PROOF" = true ]; then
     state_update "created_dns=true"

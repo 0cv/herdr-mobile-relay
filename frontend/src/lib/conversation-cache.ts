@@ -1,4 +1,4 @@
-import { cloneEntries, clonePlan } from './conversation-values';
+import { cloneDiagnostics, cloneEntries, clonePlan, estimateEntriesBytes } from './conversation-values';
 import { registerConversationCacheClearer } from './conversation-cache-control';
 import type { ConversationBrowseDiagnostics, ConversationEntry, OmoTodoState } from './types';
 
@@ -192,10 +192,6 @@ function clonePreview(preview: ConversationPreview, entryLimit: number): Convers
   };
 }
 
-function cloneDiagnostics(diagnostics: ConversationBrowseDiagnostics): ConversationBrowseDiagnostics {
-  return { ...diagnostics };
-}
-
 /** Conservative UTF-16 heap accounting, not a serialized wire-size estimate. */
 function estimatePreviewBytes(preview: ConversationPreview): number {
   return estimateEntriesBytes(preview.entries)
@@ -204,14 +200,6 @@ function estimatePreviewBytes(preview: ConversationPreview): number {
     + estimateString(preview.sourceRevision)
     + estimateObjectBytes(preview.diagnostics)
     + estimateObjectBytes(preview.plan);
-}
-
-function estimateEntriesBytes(entries: ConversationEntry[]): number {
-  return entries.reduce((total, entry) => total + 96 + estimateString(entry.id)
-    + estimateString(entry.timestamp) + estimateString(entry.text)
-    + (entry.tools || []).reduce((toolTotal, tool) => toolTotal + 64
-      + estimateString(tool.id) + estimateString(tool.name) + estimateString(tool.input)
-      + estimateString(tool.output), 0), 0);
 }
 
 function estimateString(value: unknown): number {

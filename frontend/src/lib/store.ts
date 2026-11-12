@@ -1,5 +1,7 @@
 import { get, writable } from 'svelte/store';
-import { base64UrlEncode } from './base64url';
+import { bytesToHex } from '@noble/hashes/utils.js';
+import { base64Encode, base64UrlEncode } from './base64url';
+import { isRecord } from './record';
 import { releasePendingResources, resetPendingDeadline, registerPendingOperation } from './pending-operations';
 import { dispatchFlag } from './composer';
 import { inputContextIdentity } from './input-target-state';
@@ -34,6 +36,10 @@ import { SLASH_COMMAND_MAX_ENTRIES } from './slash-command-limits';
 import {
   BrowserDeviceCredentialStore,
   commitDeviceEnrollment,
+  isAuthenticationSecret,
+  isAuthenticationVersion,
+  isDeviceRole,
+  isInvitationId,
   type RelayDeviceCredential,
   type RelayInvitation,
   type CreateInvitationIntent,
@@ -207,15 +213,15 @@ function normalizeAgentInventory(
   };
 }
 function normalizeHerdrStatus(value: unknown): HerdrStatus {
-  const status = value && typeof value === 'object' && !Array.isArray(value)
+  const status = isRecord(value)
     ? value as Record<string, unknown>
     : {};
   const features: Record<string, HerdrStatus['features'][string]> = {};
-  const rawFeatures = status.features && typeof status.features === 'object' && !Array.isArray(status.features)
+  const rawFeatures = isRecord(status.features)
     ? status.features as Record<string, unknown>
     : {};
   for (const [name, rawFeature] of Object.entries(rawFeatures).slice(0, 64)) {
-    if (!rawFeature || typeof rawFeature !== 'object' || Array.isArray(rawFeature)) continue;
+    if (!isRecord(rawFeature)) continue;
     const feature = rawFeature as Record<string, unknown>;
     const state = String(feature.state || '');
     if (!['supported', 'unsupported', 'unknown'].includes(state)) continue;
@@ -237,18 +243,18 @@ function normalizeHerdrStatus(value: unknown): HerdrStatus {
 }
 
 function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (!isRecord(value)) return undefined;
   const state = value as Record<string, unknown>;
   let remainingTasks = 1_000;
   const phases = (Array.isArray(state.phases) ? state.phases : [])
     .slice(0, 128)
     .flatMap((candidate) => {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+      if (!isRecord(candidate)) return [];
       const phase = candidate as Record<string, unknown>;
       const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
         .slice(0, remainingTasks)
         .flatMap((item) => {
-          if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+          if (!isRecord(item)) return [];
           const task = item as Record<string, unknown>;
           const status = String(task.status || '');
           const content = String(task.content || '').slice(0, 4_096);
@@ -319,7 +325,7 @@ function browseCount(value: unknown): number {
 }
 
 function browseRecord(value: unknown, required = false): Record<string, any> | null {
-  const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null;
+  const record = isRecord(value) ? value as Record<string, any> : null;
   if (!record && required) invalidBrowse();
   return record;
 }
@@ -1958,7 +1964,7 @@ class RelayStore {
         const role = record.role;
         const pairedAt = Date.parse(String(record.paired_at || ''));
         const lastSeenAt = Date.parse(String(record.last_seen_at || ''));
-        if (!deviceId || !credentialId || (role !== 'reader' && role !== 'controller') || !Number.isFinite(pairedAt)) {
+        if (!deviceId || !credentialId || !isDeviceRole(role) || !Number.isFinite(pairedAt)) {
           return [];
         }
         return [{
@@ -2008,10 +2014,9 @@ class RelayStore {
     const version = Number(invitation?.version);
     const secret = String(invitation?.secret || '');
     const expiresAt = Date.parse(String(invitation?.expires_at || ''));
-    if (!/^[A-Za-z0-9_-]{16,128}$/.test(id)
-      || !Number.isSafeInteger(version)
-      || version < 1
-      || !/^[A-Za-z0-9_-]{43}$/.test(secret)
+    if (!isInvitationId(id)
+      || !isAuthenticationVersion(version)
+      || !isAuthenticationSecret(secret)
       || !Number.isFinite(expiresAt)) {
       throw new CommandError('Relay returned an invalid device invitation');
     }
@@ -3210,7 +3215,7 @@ class RelayStore {
         relayId,
         'upload_chunk',
         'upload_chunk_result',
-        { ...request, data: standardBase64Encode(request.data) },
+        { ...request, data: base64Encode(request.data) },
         signal,
       ),
       finish: (request, signal) => this.sendUploadRequest<UploadFinishResult>(
@@ -3290,7 +3295,7 @@ class RelayStore {
       pending.reject(error);
       return;
     }
-    if (!message.result || typeof message.result !== 'object' || Array.isArray(message.result)) {
+    if (!isRecord(message.result)) {
       const error = new CommandError('Relay returned an invalid attachment upload result.');
       error.code = 'attachment_invalid_response';
       pending.reject(error);
@@ -3379,7 +3384,7 @@ function commandRequestId(): string {
   if (crypto.randomUUID) return crypto.randomUUID();
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+  return bytesToHex(bytes);
 }
 
 function runningAsInstalledApp(): boolean {
@@ -3395,14 +3400,6 @@ export function pushClientId(): string {
   value = crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   localStorage.setItem('herdr_push_client_id', value);
   return value;
-}
-
-function standardBase64Encode(bytes: Uint8Array): string {
-  let binary = '';
-  for (let offset = 0; offset < bytes.byteLength; offset += 32_768) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
-  }
-  return btoa(binary);
 }
 
 export const relayStore = new RelayStore();

@@ -37,17 +37,8 @@ fi
 
 # The ingress carries the hostname the tunnel answers on; the tunnel line names
 # the tunnel that has to learn the new route.
-current_hostname() {
-    sed -n 's/^[[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
-        "$CONFIG" | head -1
-}
-
-tunnel_reference() {
-    sed -n 's/^[[:space:]]*tunnel:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$CONFIG" | head -1
-}
-
-CURRENT_HOSTNAME="$(current_hostname)"
-TUNNEL="$(tunnel_reference)"
+CURRENT_HOSTNAME="$(yaml_scalar hostname "$CONFIG")"
+TUNNEL="$(yaml_scalar tunnel "$CONFIG")"
 if [ -z "$TUNNEL" ]; then
     echo "✗ $CONFIG names no tunnel, so there is nothing to route." >&2
     exit 1
@@ -66,8 +57,8 @@ echo "own pace."
 echo ""
 
 NEW_HOSTNAME="${HERDR_STABLE_HOSTNAME:-}"
-if [ -z "$NEW_HOSTNAME" ]; then
-    while true; do
+while true; do
+    if [ -z "$NEW_HOSTNAME" ]; then
         if ! read -r -p "New hostname, or q to cancel: " NEW_HOSTNAME; then
             echo "" >&2
             exit 1
@@ -79,13 +70,15 @@ if [ -z "$NEW_HOSTNAME" ]; then
                 ;;
             '') continue ;;
         esac
-        if printf '%s' "$NEW_HOSTNAME" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' &&
-            printf '%s' "$NEW_HOSTNAME" | grep -Fq .; then
-            break
-        fi
-        echo "✗ Enter a bare hostname such as relay.example.com."
-    done
-fi
+    fi
+    NEW_HOSTNAME="$(normalize_hostname "$NEW_HOSTNAME")"
+    if valid_hostname "$NEW_HOSTNAME" && [[ "$NEW_HOSTNAME" == *.* ]]; then
+        break
+    fi
+    echo "✗ Enter a valid hostname such as relay.example.com." >&2
+    [ -z "${HERDR_STABLE_HOSTNAME:-}" ] || exit 1
+    NEW_HOSTNAME=""
+done
 if [ "$NEW_HOSTNAME" = "$CURRENT_HOSTNAME" ]; then
     echo "✓ $NEW_HOSTNAME is already the hostname. Nothing to do."
     exit 0
@@ -214,9 +207,9 @@ if [ -n "$CURRENT_HOSTNAME" ]; then
     if ! awk -v current="$CURRENT_HOSTNAME" -v replacement="$NEW_HOSTNAME" '
         !moved && /^[[:space:]]*-[[:space:]]*hostname:[[:space:]]*/ {
             start = index($0, current)
-            if (start > 0 && substr($0, start) == current) {
+            if (start > 0) {
                 previous = $0
-                next_rule = substr($0, 1, start - 1) replacement
+                next_rule = substr($0, 1, start - 1) replacement substr($0, start + length(current))
                 if ((getline service) <= 0) exit 2
                 print next_rule
                 print service

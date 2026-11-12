@@ -8,6 +8,143 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 
+(
+    for hostname in relay.example.test RELAY.EXAMPLE.TEST. \
+        HTTPS://RELAY.EXAMPLE.TEST./setup WSS://RELAY.EXAMPLE.TEST/path; do
+        normalized="$(normalize_hostname "$hostname")"
+        test "$normalized" = relay.example.test
+        valid_hostname "$normalized"
+    done
+    test -z "$(normalize_hostname '')"
+    for hostname in relay..example.test relay.-bad.test relay.bad-.test \
+        relay_example.test http://relay.example.test; do
+        if valid_hostname "$(normalize_hostname "$hostname")"; then
+            echo "invalid hostname was accepted: $hostname" >&2
+            exit 1
+        fi
+    done
+
+    config="$WORK_DIR/scalars.yml"
+    printf '%s\n' 'tunnel: "relay tunnel" # tunnel name' \
+        "  - hostname: 'relay.example.test' # public hostname" > "$config"
+    test "$(yaml_scalar tunnel "$config")" = 'relay tunnel'
+    test "$(yaml_scalar hostname "$config")" = relay.example.test
+)
+
+(
+    require_positive_integer 3 Attempts
+    for invalid in '' 0 -1 1.5 text; do
+        if require_positive_integer "$invalid" Attempts >/dev/null 2>&1; then
+            echo "invalid attempt count was accepted: $invalid" >&2
+            exit 1
+        fi
+    done
+
+    env_file="$WORK_DIR/atomic/relay.env"
+    set_env_value_atomic "$env_file" FIRST original
+    set_env_value_atomic "$env_file" SECOND retained
+    set_env_value_atomic "$env_file" FIRST ''
+    test "$(env_file_value "$env_file" FIRST)" = ''
+    test "$(env_file_value "$env_file" SECOND)" = retained
+    remove_env_value_if_equals_atomic "$env_file" SECOND different
+    test "$(env_file_value "$env_file" SECOND)" = retained
+    remove_env_value_if_equals_atomic "$env_file" FIRST ''
+    ! grep -q '^FIRST=' "$env_file"
+    remove_env_value_atomic "$env_file" SECOND
+    test ! -s "$env_file"
+    private_owned_file "$env_file"
+    remove_env_value_atomic "$WORK_DIR/missing.env" FIRST
+    test ! -e "$WORK_DIR/missing.env"
+    if set_env_value_atomic "$env_file" FIRST "can't" >/dev/null 2>&1; then
+        echo "an unquotable environment value was accepted" >&2
+        exit 1
+    fi
+    test ! -s "$env_file"
+)
+
+(
+    installed_service_env_file() { printf '%s\n' "$WORK_DIR/installed.env"; }
+    export HERDR_RELAY_ENV="$WORK_DIR/explicit.env"
+    adopt_installed_service_env announce
+    test "$HERDR_RELAY_ENV" = "$WORK_DIR/explicit.env"
+    unset HERDR_RELAY_ENV
+    adopt_installed_service_env
+    test "$HERDR_RELAY_ENV" = "$WORK_DIR/installed.env"
+    unset HERDR_RELAY_ENV
+    adopt_installed_service_env announce > "$WORK_DIR/adopt-output"
+    grep -Fq 'Reusing the installed relay configuration:' "$WORK_DIR/adopt-output"
+    test "$HERDR_RELAY_ENV" = "$WORK_DIR/installed.env"
+    unset HERDR_RELAY_ENV
+    installed_service_env_file() { return 0; }
+    adopt_installed_service_env
+    test -z "${HERDR_RELAY_ENV:-}"
+)
+
+(
+    command() {
+        if [ "$1" = -v ] && [ "$2" = openssl ]; then
+            return 1
+        fi
+        builtin command "$@"
+    }
+    uuidgen() { printf 'ABCDEF01-2345-6789-ABCD-EF0123456789\n'; }
+    test "$(generate_token)" = abcdef0123456789abcdef0123456789
+    test "$(generate_instance_id)" = abcdef01-2345-6789-abcd-ef0123456789
+)
+
+(
+    curl() {
+        printf '%s\n' "${@: -1}" >> "$WORK_DIR/dns-requests"
+        [ "$dns_mode" != unavailable ] || return 7
+        if [ "$dns_mode" = answer ] && [[ "${@: -1}" = *type=CNAME ]]; then
+            printf '{"Answer":[]}\n'
+        else
+            printf '{}\n'
+        fi
+    }
+    dns_mode=answer
+    dns_has_record relay.example.test
+    test "$(wc -l < "$WORK_DIR/dns-requests" | tr -d ' ')" = 3
+    if dns_has_record relay.example.test A; then
+        echo "an A-only probe accepted a CNAME response" >&2
+        exit 1
+    else
+        test "$?" -eq 1
+    fi
+    dns_mode=unavailable
+    if dns_has_record relay.example.test; then
+        echo "a failed DNS request was accepted" >&2
+        exit 1
+    else
+        test "$?" -eq 2
+    fi
+)
+
+(
+    curl() {
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = --output ]; then
+                shift
+                printf '%s\n' "$gateway_body" > "$1"
+            fi
+            shift
+        done
+        printf '%s' "$gateway_seconds"
+        return "$gateway_status"
+    }
+    gateway_body='{"ok":true}'
+    gateway_seconds=0.012
+    gateway_status=0
+    test "$(gateway_healthz_ms wss://gateway.example.test)" = 12
+    test -z "$(gateway_answers_healthz wss://gateway.example.test)"
+    gateway_seconds=''
+    gateway_answers_healthz wss://gateway.example.test
+    gateway_body='{"ok":false}'
+    ! gateway_answers_healthz wss://gateway.example.test
+    gateway_status=7
+    ! gateway_answers_healthz wss://gateway.example.test
+)
+
 id() {
     if [ "${1:-}" = "-u" ]; then
         printf '0\n'
@@ -1493,10 +1630,10 @@ mkdir -p "$MOVE_HOME/cloudflared" "$MOVE_BIN"
 export MOVE_ROUTE_LOG
 printf "HERDR_RELAY_TOKEN='move-token'\nCLOUDFLARED_CONFIG='%s'\n" "$MOVE_CONFIG" > "$MOVE_ENV"
 cat > "$MOVE_CONFIG" <<'EOF'
-tunnel: herdr-mobile-relay-fedora
+tunnel: 'herdr-mobile-relay-fedora' # existing tunnel
 credentials-file: /somewhere/creds.json
 ingress:
-  - hostname: relay-fedora.old.test
+  - hostname: "relay-fedora.old.test" # existing route
     service: http://localhost:8375
   - service: http_status:404
 EOF
@@ -1563,8 +1700,31 @@ YAML
 # are stubbed so the test observes the move itself.
 cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
 
+LINK_OUTPUT="$(
+    HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$WORK_DIR/readiness-helper" HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_PHONE_APP_URL=relay bash "$REPO_DIR/relay/setup-link.sh"
+)"
+grep -Fq 'relay=wss%3A%2F%2Frelay-fedora.old.test&' <<< "$LINK_OUTPUT"
+LINK_OUTPUT="$(
+    HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$WORK_DIR/readiness-helper" HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_PHONE_APP_URL=relay bash "$REPO_DIR/relay/setup-link.sh" \
+        'WSS://RELAY-FEDORA.OLD.TEST./setup'
+)"
+grep -Fq 'relay=wss%3A%2F%2Frelay-fedora.old.test&' <<< "$LINK_OUTPUT"
+
+if HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
+    HERDR_RELAY_ENV="$MOVE_ENV" HERDR_STABLE_HOSTNAME=relay.-bad.test \
+    bash "$REPO_DIR/relay/change-hostname.sh" > "$WORK_DIR/invalid-hostname" 2>&1; then
+    echo "an invalid unattended hostname was accepted" >&2
+    exit 1
+fi
+grep -Fq 'Enter a valid hostname' "$WORK_DIR/invalid-hostname"
+test ! -s "$MOVE_ROUTE_LOG"
+
 MOVE_OUTPUT="$(
-    printf 'relay-fedora.new.test\n' |
+    printf 'relay.-bad.test\nHTTPS://RELAY-FEDORA.NEW.TEST./setup\n' |
         HOME="$MOVE_HOME" \
         PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
@@ -1575,11 +1735,11 @@ MOVE_OUTPUT="$(
 grep -Fq 'tunnel route dns herdr-mobile-relay-fedora relay-fedora.new.test' "$MOVE_ROUTE_LOG" ||
     { echo "the new hostname was never routed to the existing tunnel" >&2
       printf '%s\n' "$MOVE_OUTPUT" >&2; exit 1; }
-grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" ||
+grep -Fq 'hostname: "relay-fedora.new.test" # existing route' "$MOVE_CONFIG" ||
     { echo "the ingress still serves the old hostname" >&2; exit 1; }
-grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
+grep -Fq 'hostname: "relay-fedora.old.test" # existing route' "$MOVE_CONFIG" ||
     { echo "the old hostname stopped serving before its record was deleted" >&2; exit 1; }
-grep -Fq 'tunnel: herdr-mobile-relay-fedora' "$MOVE_CONFIG" ||
+grep -Fq "tunnel: 'herdr-mobile-relay-fedora' # existing tunnel" "$MOVE_CONFIG" ||
     { echo "the move rewrote more than the hostname" >&2; exit 1; }
 test "$(cat "$MOVE_STATE_RECORD" 2>/dev/null)" = "relay-fedora.new.test" ||
     { echo "the recorded hostname was not updated" >&2; exit 1; }

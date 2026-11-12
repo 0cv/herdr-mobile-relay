@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { URL } from 'node:url';
-import type { Plugin } from 'vite';
+import { createServer, type Plugin } from 'vite';
 import { describe, expect, it } from 'vitest';
 import versions from '../../build-versions.json' with { type: 'json' };
 import config from '../../vite.config.ts';
@@ -91,12 +91,15 @@ describe('actual Vite release identity', () => {
       script_sha256: javascriptIdentity.sha256,
       style_sha256: stylesheetIdentity.sha256,
     };
+    const setupManifest = JSON.parse(readFileSync(new URL('../../public/manifest.webmanifest', import.meta.url), 'utf8'));
+    delete setupManifest.start_url;
     const bootstrap = '<!doctype html><script src="/herdr-bootstrap.js"></script>\n';
     const expected: Record<string, string> = {
       [entryPath]: entrySource,
       'herdr-bootstrap.js': `const e = new URL(window.__HERDR_ENTRY__ || "/${entryPath}", location);\n  e.search = location.search;\n  e.hash = location.hash;\n  location.replace(e);\n`,
       'release.json': `${JSON.stringify(descriptor, null, 2)}\n`,
       'version.json': `${JSON.stringify(version)}\n`,
+      'setup.webmanifest': `${JSON.stringify(setupManifest, null, 2)}\n`,
       '_redirects': `/ /${entryPath} 302\n/index.html /${entryPath} 302\n`,
       '_headers': '/herdr-bootstrap.js\n  Cache-Control: no-cache, no-store\n\n/manifest-loader.js\n  Cache-Control: no-cache, no-store\n\n/manifest.webmanifest\n  Cache-Control: no-cache, no-store\n\n/setup.webmanifest\n  Cache-Control: no-cache, no-store\n\n/sw.js\n  Cache-Control: no-cache, no-store\n\n/version.json\n  Cache-Control: no-cache, no-store\n\n/release.json\n  Cache-Control: no-cache, no-store\n\n/\n  Cache-Control: no-cache, no-store\n\n/index.html\n  Cache-Control: no-cache, no-store\n\n/404.html\n  Cache-Control: no-store\n\n/404\n  Cache-Control: no-store\n\n/builds/*\n  Cache-Control: no-cache\n\n/assets/*\n  Cache-Control: no-cache\n',
     };
@@ -109,7 +112,7 @@ describe('actual Vite release identity', () => {
       'index.html': { type: 'asset', fileName: 'index.html', source: bootstrap },
     });
     expect(f.emitted.map(asset => asset.fileName)).toEqual([
-      entryPath, 'herdr-bootstrap.js', 'release.json', 'version.json', '_redirects', '_headers',
+      entryPath, 'herdr-bootstrap.js', 'release.json', 'version.json', '_redirects', '_headers', 'setup.webmanifest',
     ]);
     const actual: Record<string, string | Uint8Array> = {};
     for (const asset of f.emitted) {
@@ -136,6 +139,27 @@ describe('actual Vite release identity', () => {
     expect(build).not.toBe(javascriptIdentity.sha256);
     expect(entryIdentity.sha256).not.toBe(javascriptIdentity.sha256);
     expect(stylesheetIdentity.sha256).not.toBe(javascriptIdentity.sha256);
+  });
+
+  it('serves the generated setup manifest during development', async () => {
+    const plugin = config.plugins?.find((item): item is Plugin => item !== null
+      && typeof item === 'object' && !Array.isArray(item)
+      && 'name' in item && item.name === 'stable-release-assets');
+    const server = await createServer({ configFile: false, plugins: [plugin], server: { host: '127.0.0.1', port: 0 } });
+    try {
+      await server.listen();
+      const address = server.httpServer?.address();
+      if (!address || typeof address === 'string') throw new Error('Missing dev server address');
+      const response = await fetch(`http://127.0.0.1:${address.port}/setup.webmanifest?setup=1`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('application/manifest+json; charset=utf-8');
+      expect(response.headers.get('cache-control')).toBe('no-cache, no-store');
+      const manifest = JSON.parse(readFileSync(new URL('../../public/manifest.webmanifest', import.meta.url), 'utf8'));
+      delete manifest.start_url;
+      expect(await response.json()).toEqual(manifest);
+    } finally {
+      await server.close();
+    }
   });
 
   it('rejects a missing build marker after compaction before publication', () => {

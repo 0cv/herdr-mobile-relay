@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { copyText } from '$lib/clipboard';
+  import { onMount, tick, untrack } from 'svelte';
   import PromptComposer from '$components/PromptComposer.svelte';
   import AgentInteraction from '$components/AgentInteraction.svelte';
   import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
@@ -9,6 +10,7 @@
   import ConversationMessage from '$components/ConversationMessage.svelte';
   import OmoPlan from '$components/OmoPlan.svelte';
   import Button from '$components/ui/Button.svelte';
+  import CopyIcon from '$components/ui/CopyIcon.svelte';
   import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import { agentNeedsResponse, attentionKind, displayName, questionInteraction } from '$lib/agents';
   import { conversationEntries, pendingQuestionEntryId } from '$lib/conversation';
@@ -24,14 +26,11 @@
     putConversationPreview,
   } from '$lib/conversation-cache';
   import {
-    armSpeechKeepalive,
-    releaseSpeechKeepalive,
-    speakViaRelay,
+    toggleSpeech as toggleResponseSpeech,
     speechEnabled,
     speechLanguage,
     speechLanguageLabel,
     speechState,
-    stopSpeech,
   } from '$lib/speech';
   import { fencedCodeText } from '$lib/markdown';
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
@@ -186,6 +185,7 @@
     : liveState === 'unavailable' ? 'Live events unavailable — recorded history only.'
     : '');
   const historyBusy = $derived(requestPhase !== 'idle');
+  const historyDamaged = $derived(Boolean(diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records));
   const historyStatusText = $derived.by(() => {
     if (pausedReason) return pausedReason;
     if (latestGapOutstanding) return 'Checking for new messages…';
@@ -195,16 +195,9 @@
     if (requestPhase === 'older') return 'Loading earlier messages…';
     if (requestPhase === 'initial' && !entries.length) return 'Loading conversation…';
     if (beginningReached && entries.length) {
-      return diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records
+      return historyDamaged
         ? 'Beginning of available history reached.'
         : 'Beginning of conversation reached.';
-    }
-    if (authoritative && !entries.length
-      && (diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records || diagnostics?.continuation_incomplete)) {
-      return 'No readable conversation messages are available in the loaded history.';
-    }
-    if (authoritative && entries.length && !modeEntries.length && mode === 'conversation') {
-      return 'No user prompts or agent answers are recorded in the available history.';
     }
     return '';
   });
@@ -215,7 +208,7 @@
       return 'No user prompts or agent answers are recorded in the available history.';
     }
     if (!entries.length) {
-      return diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records || diagnostics?.continuation_incomplete
+      return historyDamaged || diagnostics?.continuation_incomplete
         ? 'No readable conversation messages are available in the loaded history.'
         : 'No conversation messages have been recorded yet.';
     }
@@ -263,8 +256,7 @@
     }, refreshIntervalMs);
     const syncHistoryVisibility = () => {
       paneVisible = document.visibilityState !== 'hidden';
-      if (document.visibilityState === 'hidden' || $securityState.locked) { liveReader?.pause(); historyController?.pause(); }
-      else { liveReader?.resume(); historyController?.resume(); }
+      syncActive();
     };
     const selectionChanged = () => { if (selectionInHistory()) suspendFollowing(); };
     document.addEventListener('visibilitychange', syncHistoryVisibility);
@@ -272,6 +264,8 @@
     return () => {
       mounted = false;
       controllerReady = false;
+      messageStates.clear();
+      if (pinPendingTimer) clearTimeout(pinPendingTimer);
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = undefined;
       document.removeEventListener('visibilitychange', syncHistoryVisibility);
@@ -368,11 +362,19 @@
     historyController.setAgent(currentAgent);
   });
 
+  function syncActive() {
+    if ($securityState.locked || document.visibilityState === 'hidden') {
+      liveReader?.pause();
+      historyController?.pause();
+    } else {
+      liveReader?.resume();
+      historyController?.resume();
+    }
+  }
+
   $effect(() => {
-    const locked = $securityState.locked;
     if (!controllerReady || !historyController) return;
-    if (locked || document.visibilityState === 'hidden') { liveReader?.pause(); historyController.pause(); }
-    else { liveReader?.resume(); historyController.resume(); }
+    syncActive();
   });
 
   $effect(() => {
@@ -516,17 +518,9 @@
     if (next.requestPhase === 'idle' && wasLoadingOlder) pendingAnchor = null;
   }
 
-  function cancelHistoryRequests() {
-    historyController?.cancel();
-  }
-
   function requestLatest() {
     sourceChangedNotice = '';
     historyController?.returnToLatest();
-  }
-
-  function reloadHistory() {
-    requestLatest();
   }
 
   function continuePreparation() {
@@ -576,31 +570,13 @@
     historyController.demandOlder();
   }
 
-  function loadOlder() {
-    demandOlder();
-  }
   function toggleSpeech(text: string): void {
-    if ($speechState === 'speaking') {
-      stopSpeech();
-      return;
-    }
-    const toast = (message: string) => relayStore.showToast(message, true);
-    // Checked before anything plays: unlocking audio for a language the relay
-    // cannot speak leaves the phone with a silent stream and no explanation.
-    const languages = $connections.get(agent.relay_id)?.speechLanguages ?? [];
-    if (!languages.includes($speechLanguage)) {
-      toast(`This relay has no ${speechLanguageLabel($speechLanguage)} voice; install a Piper voice for it on that computer.`);
-      return;
-    }
-    // Armed inside the tap: the relay fetches audio before playing, and a
-    // play() after that round trip is autoplay-blocked.
-    armSpeechKeepalive(toast);
-    const spoke = speakViaRelay(
+    void toggleResponseSpeech(
       text,
+      $connections.get(agent.relay_id)?.speechLanguages ?? [],
       (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
-      toast,
+      (message) => relayStore.showToast(message, true),
     );
-    if (!spoke) releaseSpeechKeepalive();
   }
 
 
@@ -670,10 +646,9 @@
       relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(entry.text);
+    if (await copyText(entry.text)) {
       relayStore.showToast('Markdown copied.');
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
@@ -682,22 +657,12 @@
       relayStore.showToast('Clipboard access is unavailable while the app is locked.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(code);
+    if (await copyText(code)) {
       relayStore.showToast('Code copied.');
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
-
-
-  onDestroy(() => {
-    messageStates.clear();
-    liveReader?.stop();
-    if (pinPendingTimer) clearTimeout(pinPendingTimer);
-    cancelHistoryRequests();
-  });
-
 </script>
 
 <main class="conversation-page" aria-labelledby="conversation-title">
@@ -735,12 +700,12 @@
     {#if sourceChangedNotice}
       <p class="conversation-warning error" role="alert">
         {sourceChangedNotice}
-        <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
+        <Button variant="secondary" size="sm" onclick={requestLatest}>Reload history</Button>
       </p>
     {/if}
     {#if hasMore && !sourceChangedNotice && preparationPolls < maxPreparationPolls && browseState !== 'preparing'}
       <div class="conversation-older">
-        <Button variant="secondary" size="sm" disabled={loadingOlder || preparationPolls >= maxPreparationPolls} onclick={loadOlder}>
+        <Button variant="secondary" size="sm" disabled={loadingOlder || preparationPolls >= maxPreparationPolls} onclick={demandOlder}>
           {loadingOlder ? 'Loading…' : browseState === 'failed' ? 'Retry loading' : 'Load older turns'}
         </Button>
       </div>
@@ -758,7 +723,7 @@
     {#if diagnostics?.continuation_incomplete}
       <p class="conversation-warning error" role="status">
         {continuationMessage()}
-        <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
+        <Button variant="secondary" size="sm" onclick={requestLatest}>Reload history</Button>
       </p>
     {/if}
     {#if diagnostics?.oversized_records}
@@ -834,10 +799,7 @@
                     title="Copy Markdown"
                     onclick={() => copyMarkdown(entry)}
                   >
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
+                    <CopyIcon />
                   </Button>
                 {/if}
                 {#if code}

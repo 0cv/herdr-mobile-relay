@@ -1,5 +1,6 @@
 import type { Agent, AttentionKind, QuestionInteraction } from './types';
 import { stripAnsi } from './terminal';
+import { pathBase } from './paths';
 
 const MENU_LINE_RE = /^\s*[❯›]?\s*\d+\.\s+.+$/;
 const COMMAND_LINE_RE = /^\s*(?:[$>❯›])\s+(.+?)\s*$/;
@@ -79,7 +80,7 @@ export function sessionName(agent: Partial<Agent>): string {
 export function agentContextLabel(agent: Partial<Agent>): string {
   const name = tabName(agent);
   if (name && name !== agent.project) return name;
-  return String(agent.cwd || '').split(/[\\/]/).filter(Boolean).pop() || '';
+  return pathBase(String(agent.cwd || ''));
 }
 
 export function displayName(agent: Partial<Agent>): string {
@@ -144,6 +145,11 @@ export function approvalButtonTone(option: string, index: number, total: number)
   if (index === total - 1 || /\b(no|deny|reject|cancel|exit)\b/.test(value)) return 'deny';
   if (/\b(always|trust|don't ask|dont ask|configure|edit|amend)\b/.test(value)) return 'trust';
   return 'approve';
+}
+
+export function approvalButtonVariant(option: string, index: number, total: number): 'danger' | 'trust' | 'default' {
+  const tone = approvalButtonTone(option, index, total);
+  return tone === 'deny' ? 'danger' : tone === 'trust' ? 'trust' : 'default';
 }
 
 export function approvalPromptPreview(agent: Partial<Agent> | null | undefined): string {

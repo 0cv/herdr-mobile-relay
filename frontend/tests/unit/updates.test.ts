@@ -12,6 +12,7 @@ import {
   beginUpdateProgress,
   appUpdateStatus,
   cacheBustedAppUrl,
+  deployedAppTarget,
   checkAppUpdate,
   initializeAppUpdates,
   clearPendingRelayUpdate,
@@ -48,6 +49,15 @@ describe('release updates', () => {
     delete document.documentElement.dataset.herdrLoadTimedOut;
     delete document.documentElement.dataset.herdrCssReady;
     vi.restoreAllMocks();
+  });
+
+  it('uses deployed assets only for the requested deployed version', () => {
+    const status = { deployedVersion: '1.2.3', deployedAssets: 7, deployedBuild: 'build-id' };
+    expect(deployedAppTarget(status)).toEqual({ version: '1.2.3', assets: 7, build: 'build-id' });
+    expect(deployedAppTarget(status, '1.2.4')).toEqual({ version: '1.2.4', assets: 0, build: '' });
+    expect(deployedAppTarget({ ...status, deployedBuild: undefined })).toEqual({
+      version: '1.2.3', assets: 7, build: '',
+    });
   });
 
   it('compares only strict semantic versions', () => {

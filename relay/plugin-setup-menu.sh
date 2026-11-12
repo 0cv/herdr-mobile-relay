@@ -14,7 +14,6 @@ unset HERDR_RELAY_BACKEND
 # never inherits the Herdr TUI pane's configuration.
 select_instance() {
     local backend="$1"
-    local service_env
 
     if [ "$backend" = hc ]; then
         unset HERDR_RELAY_ENV HERDR_PLUGIN_CONFIG_DIR HERDR_RELAY_PORT HERDR_RELAY_PLUGIN_PORT \
@@ -23,10 +22,7 @@ select_instance() {
     fi
     export HERDR_RELAY_BACKEND="$backend"
     resolve_relay_instance
-    if [ -z "${HERDR_RELAY_ENV:-}" ]; then
-        service_env="$(installed_service_env_file)"
-        [ -z "$service_env" ] || export HERDR_RELAY_ENV="$service_env"
-    fi
+    adopt_installed_service_env
     ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
     load_relay_env "$ENV_FILE"
 }
@@ -176,8 +172,7 @@ transport_summary() {
     fi
     if [ -n "${CLOUDFLARED_CONFIG:-}" ] && [ -f "$CLOUDFLARED_CONFIG" ]; then
         printf 'Cloudflare tunnel %s\n' \
-            "$(sed -n 's/^[[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\(.*\)/\1/p' \
-                "$CLOUDFLARED_CONFIG" | head -1)"
+            "$(yaml_scalar hostname "$CLOUDFLARED_CONFIG")"
         return 0
     fi
     printf 'not chosen yet - choose a path\n'

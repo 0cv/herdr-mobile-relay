@@ -7,6 +7,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Cloudflare setup links, status, and hostname changes now read quoted tunnel
+  hostnames and trailing comments correctly. Hostname changes also accept pasted
+  HTTPS or WebSocket URLs and reject invalid domain labels before routing.
+- Empty conversations now show their explanation once instead of repeating it
+  above the message list.
 - Failed commands now keep the correct action name in results and activity,
   including prompts rejected because their agent session changed.
 - Release bundles now include `relay/rotate-token.sh`, so the documented
