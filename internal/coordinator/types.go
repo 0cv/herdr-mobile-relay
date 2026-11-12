@@ -8,17 +8,14 @@ import (
 
 type CommandID uint64
 type OperationID uint64
-type ClientID string
 
 type Command struct {
 	ID         CommandID
-	ClientID   ClientID
 	RequestID  string
 	ReceivedAt time.Time
 	Deadline   time.Time
 	Action     string
 	PaneID     string
-	Payload    any
 }
 
 type WorkerToken struct {
@@ -26,36 +23,7 @@ type WorkerToken struct {
 	PaneID      string
 	Generation  uint64
 	AllowAbsent bool
-	Revision    uint64
 	Deadline    time.Time
-}
-
-type EffectKind string
-
-const (
-	EffectPrompt   EffectKind = "prompt"
-	EffectKeys     EffectKind = "keys"
-	EffectText     EffectKind = "text"
-	EffectApproval EffectKind = "approval"
-	EffectQuestion EffectKind = "question"
-	EffectRename   EffectKind = "rename"
-	EffectStop     EffectKind = "stop"
-	EffectClear    EffectKind = "clear"
-	EffectStart    EffectKind = "start"
-)
-
-type EffectInput interface {
-	effectInput()
-}
-
-type Effect struct {
-	Token WorkerToken
-	Kind  EffectKind
-	Input EffectInput
-}
-
-type WorkerEvent interface {
-	workerEvent()
 }
 
 type EffectRunner interface {

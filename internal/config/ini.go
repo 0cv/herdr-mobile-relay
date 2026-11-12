@@ -76,13 +76,3 @@ func (ini *INI) Get(section, key string) (string, bool) {
 	v, ok := sec[strings.ToLower(key)]
 	return v, ok
 }
-
-func (ini *INI) SectionNames() []string {
-	names := make([]string, 0, len(ini.Sections))
-	for name := range ini.Sections {
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
-}

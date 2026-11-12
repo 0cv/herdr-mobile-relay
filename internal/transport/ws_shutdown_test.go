@@ -13,6 +13,12 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 )
 
+func (h *Hub) CloseAll() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = h.Shutdown(ctx)
+}
+
 func TestHubShutdownBoundsBlockedOnConnect(t *testing.T) {
 	for _, transport := range []string{TransportWebSocket, TransportGateway, TransportWebRTC} {
 		for _, mode := range []string{"deadline", "cancellation", "close-all", "cooperative"} {

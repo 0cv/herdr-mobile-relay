@@ -203,7 +203,7 @@ func (d *Dispatcher) HandleWorkspaceClose(
 		if current.Worktree != nil && current.Worktree.IsLinkedWorktree {
 			return d.workspaceCloseRefusal(requestID, action, "workspace_group_primary_required", groupIDs)
 		}
-		if !validExpectedWorkspaceIDs(expectedWorkspaceIDs, primaryID) {
+		if !validWorkspaceGroupIDs(expectedWorkspaceIDs, primaryID) {
 			return d.workspaceCloseRefusal(requestID, action, "workspace_group_consent_invalid", groupIDs)
 		}
 		if !sameWorkspaceIDSet(expectedWorkspaceIDs, groupIDs) {
@@ -239,9 +239,6 @@ func (d *Dispatcher) workspaceCloseRefusal(
 	requestID, action, code string, workspaceIDs []string,
 ) *CommandResult {
 	public := herdr.RefusalMessage(code)
-	if code == "workspace_group_consent_invalid" {
-		public = "Workspace group confirmation is invalid; confirm again"
-	}
 	data := map[string]any{"code": code}
 	if len(workspaceIDs) > 0 {
 		data["workspace_ids"] = workspaceIDs
@@ -301,10 +298,6 @@ func validWorkspaceGroupIDs(ids []string, primaryID string) bool {
 	}
 	_, ok := seen[primaryID]
 	return ok
-}
-
-func validExpectedWorkspaceIDs(expected []string, primaryID string) bool {
-	return validWorkspaceGroupIDs(expected, primaryID)
 }
 
 func sameWorkspaceIDSet(left, right []string) bool {
@@ -514,9 +507,6 @@ func (d *Dispatcher) failTopologyErr(requestID, action, paneID string, err error
 			"workspace_group_primary_required", "workspace_group_consent_invalid",
 			"workspace_group_validation_unavailable":
 			public = herdr.RefusalMessage(cliErr.Code)
-			if cliErr.Code == "workspace_group_consent_invalid" {
-				public = "Workspace group confirmation is invalid; confirm again"
-			}
 		}
 		if public == "" {
 			public = "Herdr refused the command"

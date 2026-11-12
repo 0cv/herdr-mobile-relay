@@ -151,7 +151,7 @@ func runTunnelCommand(t *testing.T, input, command, argument string) (string, er
 	if err != nil {
 		t.Fatal(err)
 	}
-	runErr := Run([]string{command, inputFile, argument}, stdout, stdout)
+	runErr := Run([]string{command, inputFile, argument}, stdout)
 	if err := stdout.Close(); err != nil {
 		t.Fatal(err)
 	}

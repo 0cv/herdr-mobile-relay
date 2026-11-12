@@ -109,12 +109,12 @@ func TestNewManagerDerivesMissingPythonPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsedPublic, err := parseVAPIDPublic(string(publicPEM))
+	parsedPublic, err := parseVAPIDPublicKey(string(publicPEM))
 	if err != nil {
 		t.Fatalf("parse derived public key: %v", err)
 	}
-	if parsedPublic != wantPublic {
-		t.Fatalf("persisted public key = %q, want %q", parsedPublic, wantPublic)
+	if encodeVAPIDPublic(parsedPublic) != wantPublic {
+		t.Fatalf("persisted public key = %q, want %q", encodeVAPIDPublic(parsedPublic), wantPublic)
 	}
 	if info, err := os.Stat(privatePath); err != nil {
 		t.Fatal(err)
@@ -539,11 +539,11 @@ func TestParseVAPIDPrivatePadsScalarTo32Bytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	value, err := parseVAPIDPrivate(string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded})))
+	parsed, err := parseVAPIDPrivateKey(string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	scalar, err := base64.RawURLEncoding.DecodeString(value)
+	scalar, err := base64.RawURLEncoding.DecodeString(encodeVAPIDPrivate(parsed))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,11 +742,11 @@ func TestQueueCancellationWaitsForInFlightDelivery(t *testing.T) {
 	release := make(chan struct{})
 	processed := make(chan error, 1)
 	go func() {
-		_, processErr := queue.processDue(t.Context(), now, func(PushEventKey) bool { return true }, func(context.Context, Subscription, []byte) error {
+		_, processErr := queue.processDueWithRecovery(t.Context(), now, func(PushEventKey) bool { return true }, func(context.Context, Subscription, []byte) error {
 			close(started)
 			<-release
 			return nil
-		}, nil)
+		}, nil, nil)
 		processed <- processErr
 	}()
 	<-started

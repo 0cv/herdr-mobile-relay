@@ -73,12 +73,6 @@ type Metrics struct {
 	ConnectedByTransport  map[string]int `json:"connected_by_transport,omitempty"`
 }
 
-type ConnectedIdentity struct {
-	ClientID  string `json:"client_id"`
-	Transport string `json:"transport"`
-	AuthenticatedIdentity
-}
-
 type Hub struct {
 	cfg             *config.Config
 	logger          *slog.Logger
@@ -593,22 +587,6 @@ func (h *Hub) ClientCount() int {
 	return len(h.clients)
 }
 
-func (h *Hub) ConnectedIdentities() []ConnectedIdentity {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	identities := make([]ConnectedIdentity, 0, len(h.clients))
-	for _, client := range h.clients {
-		identity, authenticated := client.Identity()
-		if !authenticated {
-			continue
-		}
-		identities = append(identities, ConnectedIdentity{
-			ClientID: client.id, Transport: client.transport, AuthenticatedIdentity: identity,
-		})
-	}
-	return identities
-}
-
 // DisconnectCredential closes every connection authenticated with the
 // credential at or below throughVersion. The version fence also closes the
 // completion-to-registration race; a later reset may reconnect at a higher
@@ -707,12 +685,6 @@ func (h *Hub) DropConnections() {
 	for _, client := range clients {
 		client.conn.Close(CloseGoingAway, "connection dropped")
 	}
-}
-
-func (h *Hub) CloseAll() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = h.Shutdown(ctx)
 }
 
 func (h *Hub) Shutdown(ctx context.Context) error {

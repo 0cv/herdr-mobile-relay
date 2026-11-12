@@ -74,7 +74,6 @@ type Journal struct {
 	path          string
 	tombstonePath string
 	dir           string
-	bytes         int64
 }
 
 func OpenJournal(cacheDir string) (*Journal, error) {
@@ -152,7 +151,6 @@ func (j *Journal) load() error {
 		needsCompact = true
 	}
 	j.entries = retained
-	j.bytes = retainedBytes
 	if needsCompact {
 		if err := j.compactLocked(); err != nil {
 			return fmt.Errorf("compact activity journal: %w", err)
@@ -208,7 +206,6 @@ func (j *Journal) Append(entry Entry) error {
 		return closeErr
 	}
 	j.entries = append(j.entries, entry)
-	j.bytes += int64(len(data))
 	return nil
 }
 
@@ -340,7 +337,6 @@ func (j *Journal) compactEntriesLocked(entries []Entry) error {
 		_ = temp.Close()
 		return err
 	}
-	var bytesWritten int64
 	for _, entry := range entries {
 		data, err := encodeEntry(entry)
 		if err != nil {
@@ -356,7 +352,6 @@ func (j *Journal) compactEntriesLocked(entries []Entry) error {
 			_ = temp.Close()
 			return io.ErrShortWrite
 		}
-		bytesWritten += int64(written)
 	}
 	if err := temp.Sync(); err != nil {
 		_ = temp.Close()
@@ -372,7 +367,6 @@ func (j *Journal) compactEntriesLocked(entries []Entry) error {
 		return err
 	}
 	j.entries = append([]Entry(nil), entries...)
-	j.bytes = bytesWritten
 	return nil
 }
 

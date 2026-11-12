@@ -446,9 +446,6 @@
     if (update.state === 'succeeded') {
       return { label: 'Update installed', detail: `Running v${update.current_version}`, warning: false };
     }
-    if (update.state === 'rolled_back') {
-      return { label: 'Update rolled back', detail: update.error, warning: true };
-    }
     if (update.state === 'failed') {
       return { label: 'Update operation failed', detail: update.error, warning: true };
     }

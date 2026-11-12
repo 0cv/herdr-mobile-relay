@@ -39,10 +39,9 @@ func (key recentProjectionKey) string() string {
 }
 
 type recentProjection struct {
-	Entries      []projectedEntry
-	Diagnostics  BrowseDiagnostics
-	Plan         *OMOTodoState
-	accountedFor int64
+	Entries     []projectedEntry
+	Diagnostics BrowseDiagnostics
+	Plan        *OMOTodoState
 }
 
 type recentProjectionCacheEntry struct {
@@ -107,7 +106,6 @@ func (cache *recentProjectionCache) put(key string, value recentProjection, now 
 	if bytes < 1 || (cache.itemBytes > 0 && bytes > cache.itemBytes) || (cache.totalLimit > 0 && bytes > cache.totalLimit) {
 		return false
 	}
-	copyValue.accountedFor = bytes
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if previous, ok := cache.entries[key]; ok {
@@ -178,10 +176,9 @@ func (cache *recentProjectionCache) evictLocked(now time.Time) {
 
 func cloneRecentProjection(value recentProjection) recentProjection {
 	copyValue := recentProjection{
-		Entries:      make([]projectedEntry, len(value.Entries)),
-		Diagnostics:  value.Diagnostics,
-		Plan:         cloneTodo(value.Plan),
-		accountedFor: value.accountedFor,
+		Entries:     make([]projectedEntry, len(value.Entries)),
+		Diagnostics: value.Diagnostics,
+		Plan:        cloneTodo(value.Plan),
 	}
 	for index, entry := range value.Entries {
 		copyValue.Entries[index] = projectedEntry{Offset: entry.Offset, Entry: cloneConversationEntry(entry.Entry)}

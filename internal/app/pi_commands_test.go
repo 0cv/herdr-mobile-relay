@@ -74,7 +74,7 @@ func TestEnrichPiSessions(t *testing.T) {
 		_ = json.NewEncoder(conn).Encode(request)
 	}()
 	processes := &fixtureProcesses{pid: os.Getpid()}
-	s := &Server{cfg: &config.Config{Backend: "hc", SocketPath: socket}, herdrC: &discoveryBackend{fixtureProcesses: processes}, sessions: session.NewResolver(t.TempDir())}
+	s := &Server{cfg: &config.Config{Backend: "hc", SocketPath: socket}, herdrC: &discoveryBackend{fixtureProcesses: processes}, sessions: session.NewResolverWithReader(t.TempDir(), nil)}
 	check := func(terminal, want string) {
 		t.Helper()
 		a := &coordinator.AgentState{PaneID: "pane", TerminalID: terminal, Agent: "pi"}

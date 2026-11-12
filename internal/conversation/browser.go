@@ -111,15 +111,18 @@ type BrowsePage struct {
 	recordedPending []string
 }
 
+const (
+	browseResponseBytes      = 2 * 1024 * 1024
+	browseQueuedPreparations = 4
+)
+
 type BrowserOptions struct {
 	CapacityObserver     func(CapacityEvent)
 	RecentBytes          int64
 	MaxRecordBytes       int64
 	DefaultPageSize      int
 	MaxPageSize          int
-	ResponseBytes        int
 	ActiveWorkers        int
-	QueuedPreparations   int
 	InterestLease        time.Duration
 	SnapshotTTL          time.Duration
 	SnapshotQuota        int64
@@ -137,9 +140,7 @@ func DefaultBrowserOptions() BrowserOptions {
 		MaxRecordBytes:       16 * 1024 * 1024,
 		DefaultPageSize:      defaultPageSize,
 		MaxPageSize:          maxPageSize,
-		ResponseBytes:        2 * 1024 * 1024,
 		ActiveWorkers:        1,
-		QueuedPreparations:   4,
 		InterestLease:        30 * time.Second,
 		SnapshotTTL:          15 * time.Minute,
 		SnapshotQuota:        512 * 1024 * 1024,
@@ -150,62 +151,6 @@ func DefaultBrowserOptions() BrowserOptions {
 		RecentCacheBytes:     64 * 1024 * 1024,
 		RecentCacheTTL:       60 * time.Second,
 	}
-}
-
-func (o BrowserOptions) normalized() BrowserOptions {
-	defaults := DefaultBrowserOptions()
-	if o.RecentBytes < 1 {
-		o.RecentBytes = defaults.RecentBytes
-	}
-	if o.MaxRecordBytes < 1 {
-		o.MaxRecordBytes = defaults.MaxRecordBytes
-	}
-	if o.DefaultPageSize < 1 {
-		o.DefaultPageSize = defaults.DefaultPageSize
-	}
-	if o.MaxPageSize < 1 {
-		o.MaxPageSize = defaults.MaxPageSize
-	}
-	if o.MaxPageSize < o.DefaultPageSize {
-		o.MaxPageSize = o.DefaultPageSize
-	}
-	if o.ResponseBytes < 1024 {
-		o.ResponseBytes = defaults.ResponseBytes
-	}
-	if o.ActiveWorkers < 1 {
-		o.ActiveWorkers = defaults.ActiveWorkers
-	}
-	if o.QueuedPreparations < 1 {
-		o.QueuedPreparations = defaults.QueuedPreparations
-	}
-	if o.InterestLease < time.Millisecond {
-		o.InterestLease = defaults.InterestLease
-	}
-	if o.SnapshotTTL < time.Millisecond {
-		o.SnapshotTTL = defaults.SnapshotTTL
-	}
-	if o.SnapshotQuota < 1 {
-		o.SnapshotQuota = defaults.SnapshotQuota
-	}
-	if o.AggregateQuota < 1 {
-		o.AggregateQuota = defaults.AggregateQuota
-	}
-	if o.CursorTTL < time.Second {
-		o.CursorTTL = defaults.CursorTTL
-	}
-	if o.RecentCacheEntries < 1 {
-		o.RecentCacheEntries = defaults.RecentCacheEntries
-	}
-	if o.RecentCacheItemBytes < 1 {
-		o.RecentCacheItemBytes = defaults.RecentCacheItemBytes
-	}
-	if o.RecentCacheBytes < 1 {
-		o.RecentCacheBytes = defaults.RecentCacheBytes
-	}
-	if o.RecentCacheTTL < time.Millisecond {
-		o.RecentCacheTTL = defaults.RecentCacheTTL
-	}
-	return o
 }
 
 type fileSource struct {
@@ -348,7 +293,7 @@ func NewBrowser(reader *Reader, cacheRoot string, options BrowserOptions) (*Brow
 	if err != nil {
 		return nil, fmt.Errorf("create conversation browser key: %w", err)
 	}
-	options = options.normalized()
+	options.MaxPageSize = max(options.MaxPageSize, options.DefaultPageSize)
 	cacheErr := ensureBrowserCacheRoot(cacheRoot)
 	if cacheErr == nil {
 		cleanupBrowserCache(cacheRoot)
@@ -485,8 +430,8 @@ func (b *Browser) scheduler() {
 		select {
 		case <-b.ctx.Done():
 			return
-		case job := <-b.done:
-			b.finishJob(job)
+		case <-b.done:
+			b.finishJob()
 		case <-b.wake:
 		case now := <-ticker.C:
 			b.evictExpired(now)
@@ -514,7 +459,7 @@ func (b *Browser) launchQueued() {
 	}
 }
 
-func (b *Browser) finishJob(job *browseJob) {
+func (b *Browser) finishJob() {
 	b.mu.Lock()
 	if b.active > 0 {
 		b.active--
@@ -670,7 +615,7 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	b.mu.Lock()
 	if b.closing {
 		b.mu.Unlock()
-		return browseFailure(true, "index_failed", "Conversation history browsing is shutting down.", browseErrorFor("index_failed", "Conversation history browsing is shutting down.", true)), nil
+		return browseFailure("index_failed", "Conversation history browsing is shutting down.", browseErrorFor("index_failed", "Conversation history browsing is shutting down.", true)), nil
 	}
 	b.readWG.Add(1)
 	b.mu.Unlock()
@@ -679,7 +624,7 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", &BrowseError{Code: "request_cancelled", Message: "History request was cancelled.", Retryable: true}), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", &BrowseError{Code: "request_cancelled", Message: "History request was cancelled.", Retryable: true}), nil
 	}
 	request.Scope = normalizeBrowseScope(request.Scope)
 	request.Limit = b.limit(request.Limit)
@@ -746,9 +691,9 @@ func browseUnavailable(code, reason string) BrowsePage {
 	}
 }
 
-func browseFailure(available bool, code, reason string, failure *BrowseError) BrowsePage {
+func browseFailure(code, reason string, failure *BrowseError) BrowsePage {
 	return BrowsePage{
-		Available: available, ReasonCode: code, Reason: reason, Entries: []Entry{}, State: BrowseFailed,
+		Available: true, ReasonCode: code, Reason: reason, Entries: []Entry{}, State: BrowseFailed,
 		Mode: BrowseRecent, Diagnostics: BrowseDiagnostics{}, Error: failure,
 	}
 }
@@ -767,7 +712,7 @@ func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo b
 	cursor, err := decodeBrowseCursor(b.key, request.Cursor, request.Scope)
 	if err != nil {
 		code, reason := browseCursorError(err)
-		return browseFailure(true, code, reason, browseErrorFor(code, reason, code == "cursor_expired")), nil
+		return browseFailure(code, reason, browseErrorFor(code, reason, code == "cursor_expired")), nil
 	}
 	switch cursor.Mode {
 	case "recent":
@@ -778,11 +723,11 @@ func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo b
 		return b.readSnapshotCursorPage(ctx, request, cursor)
 	case "chain":
 		if !isClaudeProvider(request.Scope.Provider) {
-			return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+			return browseFailure("invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
 		}
 		return b.readClaudeChainCursorPage(ctx, request, cursor)
 	default:
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
 	}
 }
 
@@ -828,15 +773,6 @@ func captureFileSource(location Location) (fileSource, error) {
 // hook is called with bytes actually returned by the source read.
 func captureFileSourceWithObserver(location Location, observe func(int64) error) (fileSource, error) {
 	return captureFileSourceWithHooks(location, nil, observe)
-}
-
-// captureFileSourceWithReserve lets bounded foreground callers reserve the
-// requested anchor before ReadAt. A post-read observer still receives the
-// actual bytes; reserving first prevents a large filesystem read from
-// overshooting the remaining request allowance before the callback can reject
-// it.
-func captureFileSourceWithReserve(location Location, reserve func(int64) error, observe func(int64) error) (fileSource, error) {
-	return captureFileSourceWithHooks(location, reserve, observe)
 }
 
 func captureFileSourceWithHooks(location Location, reserve func(int64) error, observe func(int64) error) (fileSource, error) {
@@ -899,14 +835,6 @@ func openContainedConversationFile(location Location) (*os.File, os.FileInfo, er
 	}
 	closeFile = false
 	return file, info, nil
-}
-
-func fileRevision(file *os.File, info os.FileInfo) (string, error) {
-	return fileRevisionWithObserver(file, info, nil)
-}
-
-func fileRevisionWithObserver(file *os.File, info os.FileInfo, observe func(int64) error) (string, error) {
-	return fileRevisionWithReservation(file, info, nil, observe)
 }
 
 func fileRevisionWithReservation(file *os.File, info os.FileInfo, reserve func(int64) error, observe func(int64) error) (string, error) {
@@ -996,14 +924,6 @@ func fileChangeToken(info os.FileInfo) string {
 	return fmt.Sprintf("mtime=%d", info.ModTime().UnixNano())
 }
 
-func writeFileRange(ctx context.Context, file *os.File, start, end int64, output io.Writer) error {
-	return writeFileRangeChecked(ctx, file, start, end, output, nil)
-}
-
-func writeFileRangeChecked(ctx context.Context, file *os.File, start, end int64, output io.Writer, checkpoint func() error) error {
-	return writeFileRangeObserved(ctx, file, start, end, output, checkpoint, nil)
-}
-
 func writeFileRangeObserved(ctx context.Context, file *os.File, start, end int64, output io.Writer, checkpoint func() error, observe func(int64) error) error {
 	if start < 0 || end < start {
 		return errors.New("invalid file range")
@@ -1049,11 +969,7 @@ func writeFileRangeObserved(ctx context.Context, file *os.File, start, end int64
 }
 
 func fileRangeDigest(ctx context.Context, file *os.File, start, end int64) (string, error) {
-	return fileRangeDigestChecked(ctx, file, start, end, nil)
-}
-
-func fileRangeDigestChecked(ctx context.Context, file *os.File, start, end int64, checkpoint func() error) (string, error) {
-	return fileRangeDigestObserved(ctx, file, start, end, checkpoint, nil)
+	return fileRangeDigestObserved(ctx, file, start, end, nil, nil)
 }
 
 func fileRangeDigestObserved(ctx context.Context, file *os.File, start, end int64, checkpoint func() error, observe func(int64) error) (string, error) {
@@ -1090,9 +1006,9 @@ func (b *Browser) readRecentFilePage(ctx context.Context, request BrowseRequest,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
-			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+			return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 		}
-		return browseFailure(true, "source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true)), nil
+		return browseFailure("source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true)), nil
 	}
 	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, source.end, digest, omo)
 	if err != nil {
@@ -1123,26 +1039,26 @@ func fileSourceReason(code string, omo bool) string {
 
 func (b *Browser) recordReadFailure(err error) BrowsePage {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
 	}
 	if errors.Is(err, errJSONLSourceTruncated) || errors.Is(err, errRecentProjectionChanged) {
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
 	}
-	return browseFailure(true, "source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true))
+	return browseFailure("source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true))
 }
 
 func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseRequest, cursor browseCursor, omo bool) (BrowsePage, error) {
 	start, err := parseBrowseOffset(cursor.RangeStart)
 	if err != nil {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
 	}
 	end, err := parseBrowseOffset(cursor.RangeEnd)
 	if err != nil || end < start || cursor.RangeDigest == "" {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
 	}
 	boundary, err := parseBrowseOffset(cursor.Boundary)
 	if err != nil || boundary > end {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
 	}
 	source, code := b.sourceFor(request.Scope, omo)
 	if code != "" {
@@ -1150,7 +1066,7 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 	}
 	defer source.close()
 	if source.revision != cursor.Revision || source.end < end {
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
 	digest, err := fileRangeDigestObserved(ctx, source.file, start, end, nil, func(bytes int64) error {
 		b.observePhysicalRead(bytes)
@@ -1158,12 +1074,12 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 	})
 	if err != nil {
 		if ctx.Err() != nil {
-			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+			return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 		}
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
 	if digest != cursor.RangeDigest {
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
 	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, end, digest, omo)
 	if err != nil {
@@ -1202,7 +1118,7 @@ func (b *Browser) memoryPage(
 	potentialOlder := start > 0 || rangeStart > 0
 	base := BrowsePage{
 		Available: true, State: BrowseReady, Mode: BrowseRecent,
-		SourceRevision: source.revision, Entries: []Entry{}, Diagnostics: diagnostics, OMOPlan: boundTodoPlan(plan, b.options.ResponseBytes/4),
+		SourceRevision: source.revision, Entries: []Entry{}, Diagnostics: diagnostics, OMOPlan: boundTodoPlan(plan, browseResponseBytes/4),
 	}
 	if rangeStart == 0 {
 		total := len(entries)
@@ -1236,21 +1152,21 @@ func (b *Browser) memoryPage(
 		base.HasMore = true
 		cursor, err := b.recentCursor(scope, source, rangeStart, rangeEnd, rangeDigest, fitted[0].Offset)
 		if err != nil {
-			return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+			return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
 		}
 		base.NextCursor = cursor
 	} else if potentialOlder && len(fitted) > 0 {
 		base.HasMore = true
 		cursor, err := next(fitted[0].Offset)
 		if err != nil {
-			return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+			return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
 		}
 		base.NextCursor = cursor
 	} else if potentialOlder {
 		base.HasMore = true
 		cursor, err := next(boundary)
 		if err != nil {
-			return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
+			return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true))
 		}
 		base.NextCursor = cursor
 	}
@@ -1287,7 +1203,7 @@ func browseOmissions(original, fitted []projectedEntry) (int, int) {
 }
 
 func (b *Browser) enforcePageBudget(page BrowsePage) BrowsePage {
-	for b.pageSize(page) > b.options.ResponseBytes && len(page.Entries) > 0 {
+	for b.pageSize(page) > browseResponseBytes && len(page.Entries) > 0 {
 		index := len(page.Entries) - 1
 		entry := page.Entries[index]
 		if len(entry.Tools) > 0 {
@@ -1304,7 +1220,7 @@ func (b *Browser) enforcePageBudget(page BrowsePage) BrowsePage {
 		}
 		page.Entries[index] = entry
 	}
-	if b.pageSize(page) > b.options.ResponseBytes {
+	if b.pageSize(page) > browseResponseBytes {
 		if page.OMOPlan != nil {
 			page.Diagnostics.OmittedPayloads++
 		}
@@ -1329,12 +1245,12 @@ func (b *Browser) fitProjected(base BrowsePage, entries []projectedEntry, next f
 			page.NextCursor = cursor
 			page.HasMore = true
 		}
-		if b.pageSize(page) <= b.options.ResponseBytes {
+		if b.pageSize(page) <= browseResponseBytes {
 			return candidate, omitted
 		}
 	}
 	last := entries[len(entries)-1]
-	last.Entry = boundBrowseEntry(last.Entry, b.options.ResponseBytes)
+	last.Entry = boundBrowseEntry(last.Entry, browseResponseBytes)
 	page := base
 	page.Entries = []Entry{last.Entry}
 	if next != nil {
@@ -1416,15 +1332,15 @@ func (b *Browser) prepareCursor(scope BrowseScope, source fileSource, start, end
 func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cursor browseCursor, omo bool) (BrowsePage, error) {
 	start, err := parseBrowseOffset(cursor.RangeStart)
 	if err != nil {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
 	}
 	end, err := parseBrowseOffset(cursor.RangeEnd)
 	if err != nil || end < start || cursor.RangeDigest == "" {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
 	}
 	boundary, err := parseBrowseOffset(cursor.Boundary)
 	if err != nil || boundary > end {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
 	}
 	source, code := b.sourceFor(request.Scope, omo)
 	if code != "" {
@@ -1437,29 +1353,29 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 		}
 	}()
 	if source.revision != cursor.Revision || source.end < end {
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
 	anchorDigest, err := fileRangeDigest(ctx, source.file, start, end)
 	if err != nil {
 		if ctx.Err() != nil {
-			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+			return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 		}
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
 	if anchorDigest != cursor.RangeDigest {
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
 	if cursor.JobID != "" {
 		job := b.job(cursor.JobID)
 		if job == nil {
-			return browseFailure(true, "cursor_expired", "This preparation cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This preparation cursor has expired. Start browsing again from the latest messages.", true)), nil
+			return browseFailure("cursor_expired", "This preparation cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This preparation cursor has expired. Start browsing again from the latest messages.", true)), nil
 		}
 		if !b.jobMatches(job, request.Scope, source, start, end, boundary, cursor.RangeDigest) {
-			return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+			return browseFailure("invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
 		}
 		return b.continueJob(ctx, request, job)
 	}
-	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, omo, "", -1)
+	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, "", -1)
 	if page != nil {
 		return *page, nil
 	}
@@ -1540,9 +1456,9 @@ type claudeChainJobBinding struct {
 	observedRanges []claudeRangeEvidence
 }
 
-func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, omo bool, chainContextID string, chainSegment int, bindings ...claudeChainJobBinding) (*browseJob, *BrowsePage) {
+func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, chainContextID string, chainSegment int, bindings ...claudeChainJobBinding) (*browseJob, *BrowsePage) {
 	if b.cacheErr != nil {
-		page := browseFailure(true, "index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
+		page := browseFailure("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
 		return nil, &page
 	}
 	b.observeCapacityOperation("admission", nil, false)
@@ -1558,7 +1474,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	b.mu.Lock()
 	if b.closing {
 		b.mu.Unlock()
-		page := browseFailure(true, "index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
+		page := browseFailure("index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
 		return nil, &page
 	}
 	if id := b.dedup[dedupKey]; id != "" {
@@ -1573,24 +1489,24 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	}
 	if b.closing {
 		b.mu.Unlock()
-		page := browseFailure(true, "index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
+		page := browseFailure("index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
 		return nil, &page
 	}
-	if len(b.queue) >= b.options.QueuedPreparations {
+	if len(b.queue) >= browseQueuedPreparations {
 		b.mu.Unlock()
-		page := browseFailure(true, "index_busy", "Another history preparation is already queued. Try again shortly.", browseErrorFor("index_busy", "Another history preparation is already queued. Try again shortly.", true))
+		page := browseFailure("index_busy", "Another history preparation is already queued. Try again shortly.", browseErrorFor("index_busy", "Another history preparation is already queued. Try again shortly.", true))
 		return nil, &page
 	}
 	id, err := randomIdentifier()
 	if err != nil {
 		b.mu.Unlock()
-		page := browseFailure(true, "index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
+		page := browseFailure("index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
 		return nil, &page
 	}
 	snapshotID, err := randomIdentifier()
 	if err != nil {
 		b.mu.Unlock()
-		page := browseFailure(true, "index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
+		page := browseFailure("index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
 		return nil, &page
 	}
 	b.mu.Unlock()
@@ -1604,7 +1520,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	}
 	index, err := openSnapshotIndex(b.cacheRoot, snapshotID, metadata)
 	if err != nil {
-		page := browseFailure(true, "index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
+		page := browseFailure("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
 		return nil, &page
 	}
 	if code := b.ensureCapacity(request, index, "admission", false); code != "" {
@@ -1615,7 +1531,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	if b.closing {
 		b.mu.Unlock()
 		_ = index.remove()
-		page := browseFailure(true, "index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
+		page := browseFailure("index_failed", "Older history preparation is shutting down.", browseErrorFor("index_failed", "Older history preparation is shutting down.", true))
 		return nil, &page
 	}
 	var binding claudeChainJobBinding
@@ -1640,7 +1556,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	if err != nil {
 		b.mu.Unlock()
 		_ = index.remove()
-		page := browseFailure(true, "index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
+		page := browseFailure("index_failed", "History preparation could not be started.", browseErrorFor("index_failed", "History preparation could not be started.", true))
 		return nil, &page
 	}
 	job.queued = true
@@ -1674,7 +1590,7 @@ func (b *Browser) renewJob(job *browseJob) {
 
 func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *browseJob) (BrowsePage, error) {
 	if !b.retainJob(job) {
-		return browseFailure(true, "cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", true)), nil
+		return browseFailure("cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", true)), nil
 	}
 	defer b.releaseJob(job)
 	job.mu.RLock()
@@ -1777,7 +1693,7 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*c
 		}
 	}()
 	b.mu.Lock()
-	if b.closing || len(b.queue) >= b.options.QueuedPreparations {
+	if b.closing || len(b.queue) >= browseQueuedPreparations {
 		b.mu.Unlock()
 		return false
 	}
@@ -1871,18 +1787,18 @@ func (b *Browser) preparingPage(job *browseJob, cursor string) BrowsePage {
 func (b *Browser) readSnapshotCursorPage(ctx context.Context, request BrowseRequest, cursor browseCursor) (BrowsePage, error) {
 	boundary, err := parseBrowseOffset(cursor.Boundary)
 	if err != nil || cursor.JobID == "" || cursor.SnapshotID == "" {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid.", browseErrorFor("invalid_cursor", "This history cursor is invalid.", false)), nil
 	}
 	job := b.acquireJob(cursor.JobID)
 	if job == nil {
-		return browseFailure(true, "cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", true)), nil
+		return browseFailure("cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", browseErrorFor("cursor_expired", "This snapshot cursor has expired. Start browsing again from the latest messages.", true)), nil
 	}
 	defer b.releaseJob(job)
 	job.mu.RLock()
 	matches := job.snapshotID == cursor.SnapshotID && job.state == BrowseReady && job.source.revision == cursor.Revision && boundary <= job.boundary
 	job.mu.RUnlock()
 	if !matches {
-		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false)), nil
+		return browseFailure("invalid_cursor", "This history cursor is invalid for the requested snapshot.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested snapshot.", false)), nil
 	}
 	return b.readSnapshotPageAt(ctx, request.Scope, request.Limit, job, boundary)
 }
@@ -1917,22 +1833,22 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 		return b.continueJob(ctx, BrowseRequest{Scope: scope, Limit: limit}, job)
 	}
 	if index == nil {
-		return browseFailure(true, "index_failed", "The prepared conversation history is no longer available.", browseErrorFor("index_failed", "The prepared conversation history is no longer available.", true)), nil
+		return browseFailure("index_failed", "The prepared conversation history is no longer available.", browseErrorFor("index_failed", "The prepared conversation history is no longer available.", true)), nil
 	}
 	if err := b.validateSnapshotJob(ctx, job, source); err != nil {
 		if ctx.Err() != nil {
-			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+			return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 		}
-		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
 	entries, hasMore, err := index.entriesBefore(boundary, limit)
 	if err != nil {
-		return browseFailure(true, "index_failed", "The prepared conversation history could not be read.", browseErrorFor("index_failed", "The prepared conversation history could not be read.", true)), nil
+		return browseFailure("index_failed", "The prepared conversation history could not be read.", browseErrorFor("index_failed", "The prepared conversation history could not be read.", true)), nil
 	}
 	base := BrowsePage{
 		Available: true, State: BrowseReady, Mode: BrowseSnapshot, SourceRevision: revision,
 		SnapshotID: snapshotID, Entries: []Entry{}, HasMore: hasMore, Diagnostics: diagnostics,
-		OMOPlan: boundTodoPlan(plan, b.options.ResponseBytes/4),
+		OMOPlan: boundTodoPlan(plan, browseResponseBytes/4),
 	}
 	baseTotal := total
 	base.Total = &baseTotal
@@ -1951,7 +1867,7 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 			base.NextCursor = jobCursor
 		}
 		if err != nil {
-			return browseFailure(true, "index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true)), nil
+			return browseFailure("index_failed", "History continuation could not be created.", browseErrorFor("index_failed", "History continuation could not be created.", true)), nil
 		}
 	} else {
 		base.NextCursor = ""
@@ -2579,10 +2495,10 @@ func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, pro
 		cursor, err = decodeBrowseCursor(b.key, request.Cursor, request.Scope)
 		if err != nil {
 			code, reason := browseCursorError(err)
-			return browseFailure(true, code, reason, browseErrorFor(code, reason, code == "cursor_expired")), nil
+			return browseFailure(code, reason, browseErrorFor(code, reason, code == "cursor_expired")), nil
 		}
 		if cursor.Mode != "native" || cursor.Revision == "" || cursor.NativeBefore == "" {
-			return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+			return browseFailure("invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
 		}
 	}
 	before := ""
@@ -2603,7 +2519,7 @@ func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, pro
 func (b *Browser) readAgyNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
 	const unavailable = "Antigravity conversation history is unavailable."
 	if ctx.Err() != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 	}
 	location, locateCode := b.reader.agy.locateContext(request.Scope.SessionID)
 	if locateCode != "" {
@@ -2611,14 +2527,14 @@ func (b *Browser) readAgyNative(ctx context.Context, request BrowseRequest, curs
 	}
 	entries, hasMore, corrupt, metadata, code := b.reader.agy.readFromContext(ctx, location.Path, before, request.Limit)
 	if ctx.Err() != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 	}
 	if code != "" {
 		return nativeFailure(code, unavailable), nil
 	}
 	revision := nativeDatabaseRevision(location.Path, metadata.SchemaVersion, "agy")
 	if cursor.Revision != "" && cursor.Revision != revision {
-		return browseFailure(true, "source_changed", "The Antigravity database changed while history was being browsed.", browseErrorFor("source_changed", "The Antigravity database changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The Antigravity database changed while history was being browsed.", browseErrorFor("source_changed", "The Antigravity database changed while history was being browsed.", false)), nil
 	}
 	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, fmt.Sprint(metadata.OldestIdx), revision, cursor), nil
 }
@@ -2626,7 +2542,7 @@ func (b *Browser) readAgyNative(ctx context.Context, request BrowseRequest, curs
 func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
 	entries, hasMore, corrupt, metadata, code := b.reader.openCode.readContext(ctx, request.Scope.SessionID, before, request.Limit)
 	if ctx.Err() != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 	}
 	if code != "" {
 		return nativeFailure(code, "OpenCode conversation history is unavailable."), nil
@@ -2634,7 +2550,7 @@ func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest,
 	// The session ID is authoritative for OpenCode; see readOpenCode.
 	revision := nativeOpenCodeRevision(metadata)
 	if cursor.Revision != "" && cursor.Revision != revision {
-		return browseFailure(true, "source_changed", "The OpenCode database changed while history was being browsed.", browseErrorFor("source_changed", "The OpenCode database changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The OpenCode database changed while history was being browsed.", browseErrorFor("source_changed", "The OpenCode database changed while history was being browsed.", false)), nil
 	}
 	page := b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, metadata.MessageID, revision, cursor)
 	page.recordedPending = metadata.pendingIDs
@@ -2643,11 +2559,11 @@ func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest,
 
 func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
 	if ctx.Err() != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 	}
 	location, locateCode := b.reader.hermes.locateContext(ctx, request.Scope.CWD, request.Scope.SessionID)
 	if ctx.Err() != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 	}
 	if locateCode != "" || location.Path == "" {
 		if locateCode == "" {
@@ -2657,7 +2573,7 @@ func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, c
 	}
 	entries, hasMore, corrupt, metadata, code := b.reader.hermes.readFromContext(ctx, location.Path, request.Scope.SessionID, before, request.Limit)
 	if ctx.Err() != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 	}
 	if code != "" {
 		return nativeFailure(code, "Hermes conversation history is unavailable."), nil
@@ -2667,7 +2583,7 @@ func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, c
 	}
 	revision := nativeHermesRevision(location.Path, metadata)
 	if cursor.Revision != "" && cursor.Revision != revision {
-		return browseFailure(true, "source_changed", "The Hermes database changed while history was being browsed.", browseErrorFor("source_changed", "The Hermes database changed while history was being browsed.", false)), nil
+		return browseFailure("source_changed", "The Hermes database changed while history was being browsed.", browseErrorFor("source_changed", "The Hermes database changed while history was being browsed.", false)), nil
 	}
 	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, fmt.Sprint(metadata.MessageID), revision, cursor), nil
 }
@@ -2677,9 +2593,9 @@ func nativeFailure(code, reason string) BrowsePage {
 		return browseUnavailable(code, reason)
 	}
 	if code == "source_corrupt" {
-		return browseFailure(true, code, reason, browseErrorFor(code, reason, false))
+		return browseFailure(code, reason, browseErrorFor(code, reason, false))
 	}
-	return browseFailure(true, code, reason, browseErrorFor(code, reason, code == "output_limit" || code == "query_failed"))
+	return browseFailure(code, reason, browseErrorFor(code, reason, code == "output_limit" || code == "query_failed"))
 }
 
 func nativeOpenCodeRevision(metadata openCodeRow) string {
@@ -2735,12 +2651,12 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 		if page.HasMore {
 			page.NextCursor, _ = cursorFor(candidate[0].Entry)
 		}
-		if b.pageSize(page) <= b.options.ResponseBytes {
+		if b.pageSize(page) <= browseResponseBytes {
 			selected, omitted = candidate, from
 			break
 		}
 		if from == len(projected)-1 {
-			selected, omitted = []projectedEntry{{Offset: candidate[0].Offset, Entry: boundBrowseEntry(candidate[0].Entry, b.options.ResponseBytes)}}, from
+			selected, omitted = []projectedEntry{{Offset: candidate[0].Offset, Entry: boundBrowseEntry(candidate[0].Entry, browseResponseBytes)}}, from
 		}
 	}
 	toolsOmitted, payloadsOmitted := browseOmissions(projected, selected)
@@ -2756,7 +2672,7 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 		var err error
 		base.NextCursor, err = cursorFor(anchor)
 		if err != nil {
-			return browseFailure(true, "source_corrupt", "The native conversation cursor was not available.", browseErrorFor("source_corrupt", "The native conversation cursor was not available.", false))
+			return browseFailure("source_corrupt", "The native conversation cursor was not available.", browseErrorFor("source_corrupt", "The native conversation cursor was not available.", false))
 		}
 	}
 	return b.enforcePageBudget(base)

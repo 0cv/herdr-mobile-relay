@@ -338,31 +338,3 @@ func collectJSONLRecordsBytes(ctx context.Context, data []byte, start int64, sta
 	}
 	return records, overSized, nil
 }
-
-func collectJSONLRecords(
-	ctx context.Context,
-	file *os.File,
-	start, end, maxBytes int64,
-	progress func(JSONLRecordProgress),
-) ([]JSONLRecord, int, error) {
-	reader, err := NewJSONLRecordReader(ctx, file, start, end, maxBytes, progress)
-	if err != nil {
-		return nil, 0, err
-	}
-	records := make([]JSONLRecord, 0)
-	overSized := 0
-	for {
-		record, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			return records, overSized, nil
-		}
-		if err != nil {
-			return nil, overSized, err
-		}
-		if record.Oversized {
-			overSized++
-			continue
-		}
-		records = append(records, record)
-	}
-}

@@ -169,8 +169,6 @@ func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
 		UpstreamRevision:  nextTestRevision,
 		TargetVersion:     "0.10.1",
 		TargetRevision:    nextTestRevision,
-		Mode:              "plugin",
-		Eligible:          true,
 		CanInstall:        true,
 	}); err != nil {
 		t.Fatal(err)
@@ -208,18 +206,18 @@ func TestManagerEligibilityRequiresReleasedBuildAndHerdr(t *testing.T) {
 		version:  "1.2.3",
 		revision: currentTestRevision,
 	}
-	if eligible, mode, reason := manager.eligibility(); !eligible || mode != "plugin" || reason != "" {
-		t.Fatalf("eligible build rejected: eligible=%v mode=%q reason=%q", eligible, mode, reason)
+	if eligible, reason := manager.eligibility(); !eligible || reason != "" {
+		t.Fatalf("eligible build rejected: eligible=%v reason=%q", eligible, reason)
 	}
 
 	manager.version = "v1.2.3-dev"
-	if eligible, _, reason := manager.eligibility(); eligible || !strings.Contains(reason, "released") {
+	if eligible, reason := manager.eligibility(); eligible || !strings.Contains(reason, "released") {
 		t.Fatalf("development build accepted: eligible=%v reason=%q", eligible, reason)
 	}
 
 	manager.version = "1.2.3"
 	manager.herdrBin = filepath.Join(t.TempDir(), "missing-herdr")
-	if eligible, _, reason := manager.eligibility(); eligible || !strings.Contains(reason, "unavailable") {
+	if eligible, reason := manager.eligibility(); eligible || !strings.Contains(reason, "unavailable") {
 		t.Fatalf("missing Herdr accepted: eligible=%v reason=%q", eligible, reason)
 	}
 }
@@ -388,8 +386,6 @@ func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
 		AvailableRevision: shortRevision(nextTestRevision),
 		TargetVersion:     "1.2.4",
 		TargetRevision:    nextTestRevision,
-		Mode:              "plugin",
-		Eligible:          true,
 		CanInstall:        true,
 	}
 	manager.metadata = releaseMetadata{Version: "1.2.4", Revision: nextTestRevision}
@@ -452,8 +448,6 @@ func TestManagerSweepsFinishedWorkersBeforeLaunchAndOnCheck(t *testing.T) {
 		AvailableVersion: "1.2.4",
 		TargetVersion:    "1.2.4",
 		TargetRevision:   nextTestRevision,
-		Mode:             "plugin",
-		Eligible:         true,
 		CanInstall:       true,
 	}
 	manager.metadata = releaseMetadata{Version: "1.2.4", Revision: nextTestRevision}

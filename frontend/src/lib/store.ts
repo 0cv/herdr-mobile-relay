@@ -1447,7 +1447,7 @@ class RelayStore {
       if (connection.update.available_version) {
         connection.gatewayAvailableVersion = connection.update.available_version;
       }
-      if (['failed', 'rolled_back'].includes(connection.update.state)) {
+      if (connection.update.state === 'failed') {
         clearPendingRelayUpdate(relayId);
       }
       this.emitConnections();

@@ -144,10 +144,6 @@ func (c *EventClient) dial(ctx context.Context, network, address string) (net.Co
 	return (&net.Dialer{}).DialContext(ctx, network, address)
 }
 
-func (c *EventClient) SetWorkspaceReorderedProbe(probe func() bool) {
-	c.supportsWorkspaceReordered = probe
-}
-
 func (c *EventClient) SetWorkspaceReorderedCapability(
 	shouldAttempt func() bool,
 	supported func(),
@@ -190,10 +186,6 @@ func (c *EventClient) Bootstrap(ctx context.Context) (*EventStream, SessionSnaps
 		return nil, SessionSnapshot{}, nil, err
 	}
 	return stream, snapshot, stream.drain(), nil
-}
-
-func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
-	return c.subscribeWith(ctx, c.shouldSubscribeWorkspaceReordered())
 }
 
 type eventSubscriptionError struct {

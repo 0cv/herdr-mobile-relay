@@ -549,7 +549,6 @@ export type RelayUpdateState =
   | 'restarting'
   | 'succeeded'
   | 'failed'
-  | 'rolled_back'
   | 'unsupported';
 
 export interface RelayUpdateStatus {
@@ -563,7 +562,6 @@ export interface RelayUpdateStatus {
   upstream_revision: string;
   checked_at: number;
   can_install: boolean;
-  mode: string;
   reason: string;
   error: string;
 }

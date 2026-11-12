@@ -88,7 +88,7 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 	}
 
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, "approval", paneID, approvalDeadline, payload),
+		Command:     d.command(ctx, receivedAt, requestID, "approval", paneID, approvalDeadline),
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
@@ -311,7 +311,7 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 		return replay
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, action, paneID, questionDeadline, payload),
+		Command:     d.command(ctx, receivedAt, requestID, action, paneID, questionDeadline),
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {

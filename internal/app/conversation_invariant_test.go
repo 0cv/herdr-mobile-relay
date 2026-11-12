@@ -92,7 +92,7 @@ func TestTitleAndTranscriptAgreeForANonDefaultProfile(t *testing.T) {
 	const cwd = "/work/app"
 	writeClaudeTranscript(t, filepath.Join(profile, "projects", "-work-app", invariantSession+".jsonl"), "Profile Title")
 
-	title := session.NewResolver(home).SessionName("claude", cwd, invariantSession)
+	title := session.NewResolverWithReader(home, nil).SessionName("claude", cwd, invariantSession)
 	page, err := conversation.NewReader(home).ReadFor("claude", cwd, invariantSession, "", 80)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestTitleAndTranscriptAgreeForTheHomeDefault(t *testing.T) {
 	const cwd = "/work/app"
 	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Home Title")
 
-	title := session.NewResolver(home).SessionName("claude", cwd, invariantSession)
+	title := session.NewResolverWithReader(home, nil).SessionName("claude", cwd, invariantSession)
 	page, err := conversation.NewReader(home).ReadFor("claude", cwd, invariantSession, "", 80)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestTitleAndTranscriptFailTogetherWhenNoRootHasTheSession(t *testing.T) {
 		}
 	}
 
-	title := session.NewResolver(home).SessionName("claude", "/work/app", invariantSession)
+	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
 	page, err := conversation.NewReader(home).ReadFor("claude", "/work/app", invariantSession, "", 80)
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestLegacyConfigDirDoesNotSplitTitleFromTranscript(t *testing.T) {
 
 	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Home Title")
 
-	title := session.NewResolver(home).SessionName("claude", "/work/app", invariantSession)
+	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
 	page, err := conversation.NewReader(home).ReadFor("claude", "/work/app", invariantSession, "", 80)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestTitleAndTranscriptComeFromTheSameRootForADuplicateSessionID(t *testing.
 		filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"),
 		"Second Root Title", "second root answer")
 
-	title := session.NewResolver(home).SessionName("claude", "/work/app", invariantSession)
+	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
 	page, err := conversation.NewReader(home).ReadFor("claude", "/work/app", invariantSession, "", 80)
 	if err != nil {
 		t.Fatal(err)

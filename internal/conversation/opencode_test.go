@@ -32,7 +32,7 @@ func TestOpenCodeQueryPagesNewestMessagesThenRestoresChronologicalOrder(t *testi
 	}
 	reader := newOpenCodeReader(t.TempDir())
 	reader.binary = sqlite
-	rows, hasMore, code := reader.query(database, "ses_ordering", "", maxPageSize)
+	rows, hasMore, code := reader.queryContext(context.Background(), database, "ses_ordering", "", maxPageSize)
 	if code != "" {
 		t.Fatalf("query code = %q", code)
 	}
@@ -43,12 +43,12 @@ func TestOpenCodeQueryPagesNewestMessagesThenRestoresChronologicalOrder(t *testi
 		t.Fatalf("query range = %q through %q", rows[0].MessageID, rows[len(rows)-1].MessageID)
 	}
 	reader.binary = filepath.Join(t.TempDir(), "missing-sqlite")
-	cached, cachedMore, code := reader.query(database, "ses_ordering", "", maxPageSize)
+	cached, cachedMore, code := reader.queryContext(context.Background(), database, "ses_ordering", "", maxPageSize)
 	if code != "" || !cachedMore || len(cached) != maxPageSize {
 		t.Fatalf("cached query returned %d rows, hasMore %v, code %q", len(cached), cachedMore, code)
 	}
 	reader.binary = sqlite
-	older, olderMore, code := reader.query(database, "ses_ordering", rows[0].MessageID, maxPageSize)
+	older, olderMore, code := reader.queryContext(context.Background(), database, "ses_ordering", rows[0].MessageID, maxPageSize)
 	if code != "" || !olderMore || len(older) != maxPageSize {
 		t.Fatalf("older page returned %d rows, more %v, code %q", len(older), olderMore, code)
 	}
@@ -76,7 +76,7 @@ INSERT INTO part VALUES('part-one','message-one','{"type":"text","text":"hello"}
 	}
 	reader := newOpenCodeReader(t.TempDir())
 	reader.binary = sqlite
-	rows, hasMore, code := reader.query(database, "ses_parser", "", defaultPageSize)
+	rows, hasMore, code := reader.queryContext(context.Background(), database, "ses_parser", "", defaultPageSize)
 	if code != "" || hasMore {
 		t.Fatalf("query code = %q, hasMore = %v", code, hasMore)
 	}

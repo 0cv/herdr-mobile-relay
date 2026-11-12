@@ -47,17 +47,6 @@ func newSocketAPIClient(path string) *socketAPIClient {
 	return &socketAPIClient{path: path}
 }
 
-func (c *socketAPIClient) available(ctx context.Context) bool {
-	if c == nil || c.path == "" {
-		return false
-	}
-	checkCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-	defer cancel()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.connect(checkCtx) == nil
-}
-
 type socketAPIEnvelope struct {
 	ID     string          `json:"id"`
 	Result json.RawMessage `json:"result"`

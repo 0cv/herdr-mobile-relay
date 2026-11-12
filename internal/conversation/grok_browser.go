@@ -21,7 +21,7 @@ func (b *Browser) readGrokNative(ctx context.Context, request BrowseRequest, cur
 	}
 	projection, revision, digest, end, err := captureGrokUpdates(ctx, location, cursor)
 	if ctx.Err() != nil {
-		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+		return browseFailure("request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
 	}
 	if errors.Is(err, errGrokSourceChanged) || err == nil && cursor.Revision != "" && cursor.Revision != revision {
 		return nativeFailure("source_changed", changed), nil

@@ -352,7 +352,7 @@ func waitForEventReconnect(ctx context.Context) bool {
 	}
 }
 
-func (p *Poller) handleTopologyStale(_ ...map[string]any) {
+func (p *Poller) handleTopologyStale() {
 	p.topologyRetries++
 	if p.topologyRetries <= maxImmediateTopologyPolls {
 		p.Wake()

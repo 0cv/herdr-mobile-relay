@@ -20,14 +20,14 @@ func TestTopologyStaleRepollsAreBounded(t *testing.T) {
 	poller := NewPoller(nil, state, time.Second, testLogger())
 
 	for retry := 0; retry < maxImmediateTopologyPolls; retry++ {
-		poller.handleTopologyStale(state.InventoryStatus())
+		poller.handleTopologyStale()
 		select {
 		case <-poller.wakeup:
 		default:
 			t.Fatalf("retry %d did not request an immediate repoll", retry+1)
 		}
 	}
-	poller.handleTopologyStale(state.InventoryStatus())
+	poller.handleTopologyStale()
 	select {
 	case <-poller.wakeup:
 		t.Fatal("topology churn requested an unbounded immediate repoll")

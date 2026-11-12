@@ -179,7 +179,7 @@ func run(args []string) (int, error) {
 		if len(args) == 0 {
 			return 2, errors.New("stable-state requires an operation")
 		}
-		return status(stablestate.Run(args, os.Stdout, os.Stderr))
+		return status(stablestate.Run(args, os.Stdout))
 	case "speech-voices":
 		err := speech.Run(context.Background(), args, os.Stdout, os.Stderr)
 		if errors.Is(err, speech.ErrUsage) {

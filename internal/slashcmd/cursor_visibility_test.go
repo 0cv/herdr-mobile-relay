@@ -15,7 +15,7 @@ func TestCursorOmitsConditionalBuiltins(t *testing.T) {
 	for _, suppressed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("suppressed=%v", suppressed), func(t *testing.T) {
 			t.Setenv("CURSOR_AGENT_PERSIST_SESSION", "relay-session")
-			catalog := CatalogForProfileWithSuppression("cursor", "cursor", t.TempDir(), t.TempDir(), nil, "", "", "", suppressed)
+			catalog := CatalogForProfileWithSuppression("cursor", "cursor", t.TempDir(), t.TempDir(), nil, "", "", suppressed)
 			for _, name := range cursorConditionalBuiltinNames {
 				if containsCommand(catalog, "/"+name) {
 					t.Errorf("conditional builtin /%s was published", name)
@@ -52,7 +52,7 @@ func TestCursorConditionalBuiltinNamesAreNotReserved(t *testing.T) {
 					}
 					want = append(want, Command{"/" + name, "Custom command", source, ""})
 				}
-				catalog := CatalogForProfile("cursor", "cursor", cwd, home, skillDirs, "/{name}", "", "")
+				catalog := CatalogForProfile("cursor", "cursor", cwd, home, skillDirs, "/{name}", "")
 				assertCursorCustomCommands(t, catalog, want...)
 			})
 		}

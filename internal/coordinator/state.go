@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -95,7 +94,6 @@ type State struct {
 	pendingInventory   []*AgentState
 	pendingEvents      map[string]pendingEvent
 	topologyRetries    uint64
-	blockedEventSeq    uint64
 	customAnswers      map[string]map[string]string
 }
 
@@ -223,12 +221,6 @@ func (s *State) MarkInventoryFailure(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastAttemptAt = time.Now().UTC()
-	if err == nil {
-		s.inventoryReady = false
-		s.inventoryErrorCode = ""
-		s.inventoryMessage = ""
-		return
-	}
 	s.inventoryReady = false
 	var cliErr *herdr.CLIError
 	if errors.As(err, &cliErr) && cliErr.Code == "server_not_running" {
@@ -296,16 +288,6 @@ func (s *State) Generation(paneID string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.generation[paneID]
-}
-
-func (s *State) PaneGenerations() map[string]uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	generations := make(map[string]uint64, len(s.generation))
-	for paneID, generation := range s.generation {
-		generations[paneID] = uint64(generation)
-	}
-	return generations
 }
 
 func (s *State) PaneSession(paneID string) (int64, bool) {
@@ -782,11 +764,8 @@ func (s *State) applyBlockedCycleLocked(agent, existing *AgentState) {
 
 func (s *State) newBlockedEventIDLocked() string {
 	var value [12]byte
-	if _, err := rand.Read(value[:]); err == nil {
-		return base64.RawURLEncoding.EncodeToString(value[:])
-	}
-	s.blockedEventSeq++
-	return fmt.Sprintf("blocked-%d-%d", time.Now().UnixNano(), s.blockedEventSeq)
+	rand.Read(value[:])
+	return base64.RawURLEncoding.EncodeToString(value[:])
 }
 
 func clearBlockedDetails(agent *AgentState) {
@@ -1103,12 +1082,6 @@ func (s *State) commitWorkspacesLocked(workspaces []herdr.Workspace) bool {
 	return true
 }
 
-func (s *State) Workspaces() []herdr.Workspace {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return cloneWorkspaces(s.workspaces)
-}
-
 func cloneAgentState(agent *AgentState) *AgentState {
 	if agent == nil {
 		return nil
@@ -1240,7 +1213,6 @@ func (s *State) RegisterFinishedNotification(paneID string) bool {
 
 func (s *State) RegisterFinishedNotificationForTransition(
 	paneID string,
-	_ string,
 	revision int64,
 ) bool {
 	s.mu.Lock()
@@ -1254,20 +1226,4 @@ func (s *State) RegisterFinishedNotificationForTransition(
 	}
 	s.finishedNotif[paneID] = true
 	return true
-}
-
-func (s *State) LastUpdatedAt() time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var latest int64
-	for _, a := range s.agents {
-		if a.UpdatedAt > latest {
-			latest = a.UpdatedAt
-		}
-	}
-	if latest == 0 {
-		return time.Time{}
-	}
-	return time.UnixMilli(latest)
 }

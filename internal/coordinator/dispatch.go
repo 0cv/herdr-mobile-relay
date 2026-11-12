@@ -45,7 +45,6 @@ type Dispatcher struct {
 	terminalTextKey  string
 	herdr            backend.Backend
 	state            *State
-	journal          *activity.Journal
 	activityW        *activity.Worker
 	activityOrder    sync.Mutex
 	activitySequence atomic.Uint64
@@ -77,12 +76,6 @@ type admissionContextKey struct{}
 
 type paneSessionContextKey struct{}
 
-type paneSessionAdmission struct {
-	generation  uint64
-	active      bool
-	allowAbsent bool
-}
-
 type paneRead struct {
 	done chan struct{}
 	read herdr.PaneRead
@@ -95,9 +88,8 @@ func NewDispatcher(client backend.Backend, state *State, journal *activity.Journ
 		terminalTextKey: rand.Text(),
 		herdr:           client,
 		state:           state,
-		journal:         journal,
 		logger:          logger,
-		scheduler:       NewScheduler(defaultHerdrCapacity, logger),
+		scheduler:       NewScheduler(defaultHerdrCapacity),
 		testGates:       make(map[string]chan struct{}),
 		reads:           make(map[string]*paneRead),
 		watcherCtx:      watcherCtx,
@@ -282,11 +274,8 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.fail(requestID, "", paneID, operationErr.Error())
 	}
 	if paneID != "" {
-		generation, active := d.state.PaneSession(paneID)
-		ctx = context.WithValue(ctx, paneSessionContextKey{}, paneSessionAdmission{
-			generation: uint64(generation),
-			active:     active,
-		})
+		generation, _ := d.state.PaneSession(paneID)
+		ctx = context.WithValue(ctx, paneSessionContextKey{}, uint64(generation))
 	}
 
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
@@ -400,7 +389,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 		requiresEnter = isQoderAgent(agent.Agent)
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, text),
+		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if err := d.deliverPrompt(effectCtx, token, text, requiresEnter); err != nil {
 			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
@@ -444,7 +433,7 @@ func (d *Dispatcher) handleKeys(ctx context.Context, receivedAt time.Time, reque
 		return d.fail(requestID, action, paneID, "Keys and agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, keys),
+		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
@@ -472,7 +461,7 @@ func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, reque
 		return d.fail(requestID, action, paneID, "Text and agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline, text),
+		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
@@ -502,7 +491,7 @@ func (d *Dispatcher) handleInput(ctx context.Context, receivedAt time.Time, requ
 		return d.fail(requestID, "send_input", paneID, "Valid text or keys and an agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, "send_input", paneID, commandDeadline, input),
+		Command: d.command(ctx, receivedAt, requestID, "send_input", paneID, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "send_input"); stale != nil {
 			return EffectResult{Result: stale}
@@ -544,9 +533,7 @@ func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, req
 		}
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		// The payload stands in for the secret: nothing that reaches the
-		// scheduler, its ledger or its logs may carry the secret itself.
-		Command: d.command(ctx, receivedAt, requestID, "send_secret", paneID, commandDeadline, len(runes)),
+		Command: d.command(ctx, receivedAt, requestID, "send_secret", paneID, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
 			return EffectResult{Result: stale}
@@ -580,7 +567,7 @@ func (d *Dispatcher) handleStop(ctx context.Context, receivedAt time.Time, reque
 		return d.fail(requestID, "agent_stop", paneID, "Agent is required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, "agent_stop", paneID, commandDeadline, nil),
+		Command:     d.command(ctx, receivedAt, requestID, "agent_stop", paneID, commandDeadline),
 		LedgerKey:   "stop\x00" + paneID + "\x00" + requestID,
 		PayloadHash: hashPayload(struct{}{}),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
@@ -617,7 +604,7 @@ func (d *Dispatcher) handleTabRename(ctx context.Context, receivedAt time.Time, 
 		return d.fail(requestID, "agent_rename", paneID, "Tab is unavailable")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, "agent_rename", paneID, commandDeadline, label),
+		Command: d.command(ctx, receivedAt, requestID, "agent_rename", paneID, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "agent_rename"); stale != nil {
 			return EffectResult{Result: stale}
@@ -647,7 +634,7 @@ func (d *Dispatcher) handleTabReorder(ctx context.Context, receivedAt time.Time,
 		return d.fail(requestID, "tab_reorder", paneID, "Tab is unavailable")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, "tab_reorder", paneID, commandDeadline, insertIndex),
+		Command: d.command(ctx, receivedAt, requestID, "tab_reorder", paneID, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "tab_reorder"); stale != nil {
 			return EffectResult{Result: stale}
@@ -719,7 +706,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		budget += commandDeadline
 	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, "agent_start", "", budget, request),
+		Command:     d.command(ctx, receivedAt, requestID, "agent_start", "", budget),
 		RelayLevel:  true,
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
@@ -839,7 +826,7 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	}
 
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:   d.command(ctx, receivedAt, requestID, "agent_clear", paneID, agentStartDeadline, request),
+		Command:   d.command(ctx, receivedAt, requestID, "agent_clear", paneID, agentStartDeadline),
 		LedgerKey: "clear\x00" + paneID + "\x00" + requestID,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
@@ -873,7 +860,7 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	return result
 }
 
-func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestID, action, paneID string, budget time.Duration, payload any) Command {
+func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestID, action, paneID string, budget time.Duration) Command {
 	deadline := receivedAt.Add(budget)
 	id, _ := ctx.Value(receiptContextKey{}).(CommandID)
 	if id == 0 {
@@ -886,24 +873,21 @@ func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestI
 		Deadline:   deadline,
 		Action:     action,
 		PaneID:     paneID,
-		Payload:    payload,
 	}
 }
 
 func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runner EffectRunner) *CommandResult {
 	if !options.RelayLevel {
-		admission, captured := ctx.Value(paneSessionContextKey{}).(paneSessionAdmission)
+		admittedGeneration, captured := ctx.Value(paneSessionContextKey{}).(uint64)
 		if !captured {
-			generation, active := d.state.PaneSession(options.PaneID)
-			admission = paneSessionAdmission{generation: uint64(generation), active: active}
+			generation, _ := d.state.PaneSession(options.PaneID)
+			admittedGeneration = uint64(generation)
 		}
 		generation, active := d.state.PaneSession(options.PaneID)
-		if uint64(generation) != admission.generation ||
-			(!active && !admission.allowAbsent) {
+		if uint64(generation) != admittedGeneration || !active {
 			return d.fail(options.RequestID, options.Action, options.PaneID, ErrPaneReplaced.Error())
 		}
-		options.PaneGeneration = admission.generation
-		options.AllowAbsent = admission.allowAbsent
+		options.PaneGeneration = admittedGeneration
 	}
 	admitted, _ := ctx.Value(admissionContextKey{}).(func())
 	checkedRunner := EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
@@ -1074,13 +1058,6 @@ func (d *Dispatcher) RecordTransitionActivity(
 					attentionKind,
 					attentionRevision,
 				)
-			}
-		}
-		if expectedStatus == "blocked" && len(blockedIdentity) == 2 {
-			eventID, eventOK := blockedIdentity[0].(string)
-			generation, generationOK := blockedIdentity[1].(uint64)
-			if eventOK && generationOK {
-				return d.state.BlockedTransitionCurrent(paneID, eventID, generation)
 			}
 		}
 		return d.state.TransitionCurrent(paneID, expectedStatus, revision)
@@ -1275,18 +1252,6 @@ func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any
 	return map[string]any{"type": "pane_probe", "pane_id": paneID, "content": string(content), "format": format}
 }
 
-func (d *Dispatcher) HandleGetActivity(message map[string]any) map[string]any {
-	limit := intValue(message["limit"], 500)
-	if limit < 1 || limit > 500 {
-		limit = 500
-	}
-	var entries []activity.Entry
-	if d.journal != nil {
-		entries = d.journal.Recent(limit)
-	}
-	return map[string]any{"type": "activity_history", "activities": entries}
-}
-
 func (d *Dispatcher) HandleClearActivities(
 	requestID string,
 	deliver func(*CommandResult),
@@ -1312,14 +1277,6 @@ func (d *Dispatcher) HandleClearActivities(
 		d.broadcast(map[string]any{"type": "activity_history", "activities": []any{}})
 	}
 	return finish(completed(requestID, "clear_activities", "", nil))
-}
-
-func ResultToJSON(result *CommandResult) []byte {
-	data, _ := json.Marshal(struct {
-		Type string `json:"type"`
-		*CommandResult
-	}{Type: "command_result", CommandResult: result})
-	return data
 }
 
 func stringValue(message map[string]any, key string) string {

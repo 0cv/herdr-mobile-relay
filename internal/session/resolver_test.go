@@ -762,3 +762,13 @@ func writeCodexRollout(t *testing.T, codexDir, sessionID string) {
 		t.Fatal(err)
 	}
 }
+
+func NewResolver(home string) *Resolver {
+	return NewResolverWithReader(home, conversation.NewReader(home))
+}
+
+func (r *Resolver) claudeRoots() []string { return agentroots.Claude(r.home) }
+
+func (r *Resolver) piRoots() []string { return agentroots.Pi(r.home) }
+
+func (r *Resolver) ompRoots() []string { return agentroots.OMP(r.home) }

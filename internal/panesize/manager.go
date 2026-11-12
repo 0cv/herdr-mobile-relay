@@ -210,7 +210,7 @@ type Manager struct {
 // provider, `ps` for the shell's TTY, and direct winsize ioctls. It is
 // available only on darwin and linux.
 func NewManager(provider Provider, logger *slog.Logger) *Manager {
-	m := newManager(provider, psTTYResolver{}, ioctlTerminalOps{}, LeaseTTL, ReleaseGrace, time.Now, logger)
+	m := newManager(provider, psTTYResolver{}, ioctlTerminalOps{}, time.Now, logger)
 	m.available = platformSupported && provider != nil
 	return m
 }
@@ -224,15 +224,13 @@ func NewManagerWith(
 	now func() time.Time,
 	logger *slog.Logger,
 ) *Manager {
-	return newManager(provider, resolver, ops, LeaseTTL, ReleaseGrace, now, logger)
+	return newManager(provider, resolver, ops, now, logger)
 }
 
 func newManager(
 	provider Provider,
 	resolver TTYResolver,
 	ops TerminalOps,
-	ttl time.Duration,
-	grace time.Duration,
 	now func() time.Time,
 	logger *slog.Logger,
 ) *Manager {
@@ -245,8 +243,8 @@ func newManager(
 		ops:       ops,
 		available: true,
 		opTimeout: operationTimeout,
-		ttl:       ttl,
-		grace:     grace,
+		ttl:       LeaseTTL,
+		grace:     ReleaseGrace,
 		now:       now,
 		logger:    logger,
 		panes:     make(map[string]*paneState),

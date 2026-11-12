@@ -853,3 +853,11 @@ func marshalTestJSONBatch(values ...any) ([]byte, error) {
 	}
 	return payload, nil
 }
+
+func (c *EventClient) SetWorkspaceReorderedProbe(probe func() bool) {
+	c.supportsWorkspaceReordered = probe
+}
+
+func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
+	return c.subscribeWith(ctx, c.shouldSubscribeWorkspaceReordered())
+}

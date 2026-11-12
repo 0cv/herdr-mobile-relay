@@ -94,6 +94,13 @@ check: backend-check frontend-check web-release-check cross-build release-bundle
 
 go-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './frontend/node_modules/*'))"
+	@for os in linux darwin; do \
+		output="$$(go run -exec "env GOOS=$$os" golang.org/x/tools/cmd/deadcode@v0.52.0 -test ./cmd/... ./internal/... ./tests/blackbox ./tests/mobile/fixture)" || exit; \
+		if [ -n "$$output" ]; then \
+			printf 'Unreachable Go functions (GOOS=%s):\n%s\n' "$$os" "$$output" >&2; \
+			exit 1; \
+		fi; \
+	done
 	go vet ./...
 	# Keep subprocess-based lifecycle tests deterministic when package work is busy.
 	go test -p 1 ./...

@@ -170,7 +170,7 @@ hosts that explicitly want containerized WebKit. Directly invoking
 use the package script or Make target instead.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
-failure injection, and process-control traces for black-box tests.
+response barriers, and process-control traces for black-box tests.
 
 Installed-PWA device CI is documented in `docs/mobile-device-ci.md`. Its host-only
 check does not replace the real Android Home Screen or iOS Home Screen runs;

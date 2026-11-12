@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
@@ -76,12 +75,7 @@ func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error)
 		}
 		return unavailableCode(code, reason), nil
 	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	end := len(entries)
 	if before != "" {
 		found := false
@@ -104,20 +98,6 @@ func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error)
 		Available: true, Entries: append([]Entry(nil), entries[start:end]...),
 		HasMore: start > 0, Total: len(entries), FileTruncated: clipped, SourceCorrupt: plan.ReasonCode == "source_corrupt", OMOPlan: &plan,
 	}, nil
-}
-
-// ReadOMOTodoState returns the latest valid native senpi.todo-state row for one
-// exact OMO session. Invalid later rows cannot erase an earlier valid v2 state.
-func (r *Reader) ReadOMOTodoState(cwd, sessionID string) OMOTodoState {
-	location, identity, code := r.locateOMO(cwd, strings.TrimSpace(sessionID))
-	if code != "" {
-		return OMOTodoState{ReasonCode: code, Phases: []OMOTodoPhase{}}
-	}
-	_, plan, _, code := r.loadOMO(location, identity, cwd)
-	if code != "" {
-		return OMOTodoState{ReasonCode: code, Phases: []OMOTodoPhase{}}
-	}
-	return plan
 }
 
 func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([]Entry, OMOTodoState, bool, string) {
@@ -277,15 +257,6 @@ func safeOMOIdentity(value string) bool {
 	return true
 }
 
-func verifyOMOIdentity(path string, expected omoIdentity, requestedCWD string) bool {
-	file, err := openConversationSource(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	return verifyOMOIdentityFile(file, expected, requestedCWD)
-}
-
 func verifyOMOIdentityFile(file *os.File, expected omoIdentity, requestedCWD string) bool {
 	if file == nil {
 		return false
@@ -397,14 +368,4 @@ func validOMOTodoStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func parseOMOTimestamp(name string) (time.Time, bool) {
-	parts := omoFilename.FindStringSubmatch(name)
-	if len(parts) != 2 {
-		return time.Time{}, false
-	}
-	value := strings.SplitN(strings.TrimSuffix(name, ".jsonl"), "_", 2)[0]
-	parsed, err := time.Parse("2006-01-02T15-04-05-000Z", value)
-	return parsed, err == nil
 }

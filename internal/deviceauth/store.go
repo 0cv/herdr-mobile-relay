@@ -97,14 +97,6 @@ type diskState struct {
 
 type Option func(*Store)
 
-func WithClock(now func() time.Time) Option {
-	return func(store *Store) { store.now = now }
-}
-
-func WithRandom(reader io.Reader) Option {
-	return func(store *Store) { store.random = reader }
-}
-
 // WithBootstrapReenrollment lets every process start mint a fresh one-use
 // bootstrap invitation even when devices are already enrolled. The quick
 // tunnel serves the phone app from a hostname that changes on every launch,
@@ -138,9 +130,6 @@ func Open(dir string, options ...Option) (*Store, error) {
 	}
 	for _, option := range options {
 		option(store)
-	}
-	if store.now == nil || store.random == nil {
-		return nil, errors.New("device store requires clock and random source")
 	}
 	if err := protectDirectory(dir); err != nil {
 		return nil, err

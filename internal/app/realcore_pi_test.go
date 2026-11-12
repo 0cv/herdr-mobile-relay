@@ -102,7 +102,7 @@ func TestRealCorePiDiscovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s := &Server{cfg: &config.Config{Backend: "hc", SocketPath: socket}, herdrC: client, sessions: session.NewResolver(root)}
+			s := &Server{cfg: &config.Config{Backend: "hc", SocketPath: socket}, herdrC: client, sessions: session.NewResolverWithReader(root, nil)}
 			a := &coordinator.AgentState{PaneID: address, TerminalID: address, Agent: "pi"}
 			var pid, size int
 			var discoveryErr error

@@ -38,7 +38,7 @@ func TestCancelledCommandDoesNotLeakGroup(t *testing.T) {
 	defer cancel()
 	result := make(chan struct{})
 	go func() {
-		_, _ = c.run(ctx, 30*time.Second, "send-text", "--pane", "p1", "x")
+		_, _ = c.runCommand(ctx, "send-text", "--pane", "p1", "x")
 		close(result)
 	}()
 

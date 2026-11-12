@@ -341,7 +341,7 @@ func (reader *catalogReader) scanPiSkillTree(path, source string, patterns []str
 			return nil, false
 		}
 		seenFiles[real] = true
-		command := reader.skillCommandFromFile(real, strings.TrimSuffix(filepath.Base(real), filepath.Ext(real)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
+		command := reader.skillCommandFromFile(real, strings.TrimSuffix(filepath.Base(real), filepath.Ext(real)), source, ompCommandFormat, budget, skillScanOptions{})
 		if command == nil {
 			return nil, false
 		}
@@ -358,7 +358,7 @@ func (reader *catalogReader) scanPiSkillTree(path, source string, patterns []str
 			return nil, false
 		}
 		seenFiles[skillFile] = true
-		command := reader.skillCommandFromFile(skillFile, filepath.Base(real), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
+		command := reader.skillCommandFromFile(skillFile, filepath.Base(real), source, ompCommandFormat, budget, skillScanOptions{})
 		if command == nil {
 			return nil, false
 		}
@@ -405,7 +405,7 @@ func (reader *catalogReader) scanPiSkillTree(path, source string, patterns []str
 			continue
 		}
 		seenFiles[realFile] = true
-		if command := reader.skillCommandFromFile(realFile, strings.TrimSuffix(name, filepath.Ext(name)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true}); command != nil {
+		if command := reader.skillCommandFromFile(realFile, strings.TrimSuffix(name, filepath.Ext(name)), source, ompCommandFormat, budget, skillScanOptions{}); command != nil {
 			commands = append(commands, *command)
 		}
 	}

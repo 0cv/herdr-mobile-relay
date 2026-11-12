@@ -88,7 +88,7 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	truncated := false
-	budget := maxWalkFiles
+	budget := maxCustomFiles
 
 	// Hermes resolves project skills from the nearest trusted Git root, not
 	// from the process working directory.

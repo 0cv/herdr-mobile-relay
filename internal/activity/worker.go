@@ -15,22 +15,12 @@ type ActivityCommitted struct {
 	Entry    Entry
 }
 
-type ActivityCommitFailed struct {
-	Sequence uint64
-	Err      error
-}
-
 type ActivityClearRequested struct {
 	Sequence uint64
 }
 
 type ActivityCleared struct {
 	Sequence uint64
-}
-
-type ActivityClearFailed struct {
-	Sequence uint64
-	Err      error
 }
 
 type ActivityDiscardRequested struct {
@@ -41,12 +31,6 @@ type ActivityDiscardRequested struct {
 type ActivityDiscarded struct {
 	Sequence uint64
 	ID       string
-}
-
-type ActivityDiscardFailed struct {
-	Sequence uint64
-	ID       string
-	Err      error
 }
 
 type workerRequest struct {

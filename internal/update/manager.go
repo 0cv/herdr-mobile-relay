@@ -20,7 +20,6 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/launchd"
-	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
 const canonicalAPI = "https://api.github.com/repos/0cv/herdr-mobile-relay"
@@ -159,7 +158,6 @@ func (m *Manager) Check(ctx context.Context) State {
 	if err != nil {
 		m.state.State = "failed"
 		m.state.CanInstall = false
-		m.state.Eligible = false
 		m.state.Error = safeError(err)
 		m.state.CheckedAt = time.Now().Unix()
 		_ = writeState(m.statePath(), m.state)
@@ -167,7 +165,7 @@ func (m *Manager) Check(ctx context.Context) State {
 	}
 	m.metadata = metadata
 	newer := NewerVersion(metadata.Version, m.version)
-	eligible, mode, reason := m.eligibility()
+	eligible, reason := m.eligibility()
 	m.state = State{
 		State:            "current",
 		CurrentVersion:   m.version,
@@ -175,9 +173,6 @@ func (m *Manager) Check(ctx context.Context) State {
 		UpstreamVersion:  metadata.Version,
 		UpstreamRevision: metadata.Revision,
 		CheckedAt:        time.Now().Unix(),
-		Target:           relayrelease.CurrentTarget(),
-		Mode:             mode,
-		Eligible:         eligible,
 		CanInstall:       newer && eligible,
 		Reason:           "",
 	}
@@ -245,7 +240,6 @@ func (m *Manager) Schedule(
 	}
 	m.state.State = "scheduled"
 	m.state.CanInstall = false
-	m.state.Eligible = true
 	m.state.Reason = ""
 	m.state.Error = ""
 	m.state.StartedAt = time.Now().UTC().Format(time.RFC3339)
@@ -480,18 +474,18 @@ func (m *Manager) token() string {
 	return ""
 }
 
-func (m *Manager) eligibility() (bool, string, string) {
+func (m *Manager) eligibility() (bool, string) {
 	if !semverPattern.MatchString(m.version) || !validRevision(m.revision) {
-		return false, "unsupported", "Managed updates require a released relay build"
+		return false, "Managed updates require a released relay build"
 	}
 	if !filepath.IsAbs(m.herdrBin) {
-		return false, "unsupported", "Managed updates require an absolute Herdr executable path"
+		return false, "Managed updates require an absolute Herdr executable path"
 	}
 	info, err := os.Stat(m.herdrBin)
 	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
-		return false, "unsupported", "The Herdr executable is unavailable"
+		return false, "The Herdr executable is unavailable"
 	}
-	return true, "plugin", ""
+	return true, ""
 }
 
 func updateWorkerJob(
@@ -548,7 +542,6 @@ func (m *Manager) loadState() State {
 			State:           "checking",
 			CurrentVersion:  m.version,
 			CurrentRevision: m.revision,
-			Target:          relayrelease.CurrentTarget(),
 		}
 	}
 	var state State
@@ -557,7 +550,6 @@ func (m *Manager) loadState() State {
 			State:           "checking",
 			CurrentVersion:  m.version,
 			CurrentRevision: m.revision,
-			Target:          relayrelease.CurrentTarget(),
 		}
 	}
 	state.CurrentVersion = m.version
@@ -567,8 +559,6 @@ func (m *Manager) loadState() State {
 		state.TargetVersion == m.version &&
 		strings.EqualFold(state.TargetRevision, m.revision) {
 		state.CanInstall = false
-		state.Eligible = true
-		state.Mode = "plugin"
 		state.Error = ""
 		if state.FinishedAt == "" {
 			state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
@@ -597,9 +587,6 @@ func (m *Manager) loadState() State {
 				UpstreamVersion:  upstreamVersion,
 				UpstreamRevision: upstreamRevision,
 				CheckedAt:        state.CheckedAt,
-				Target:           relayrelease.CurrentTarget(),
-				Mode:             state.Mode,
-				Eligible:         state.Eligible,
 			}
 		}
 	}
@@ -622,8 +609,6 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 		state.State = "succeeded"
 		state.CurrentVersion = m.version
 		state.CurrentRevision = m.revision
-		state.Mode = "plugin"
-		state.Eligible = true
 		state.CanInstall = false
 		state.Error = ""
 		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
@@ -707,8 +692,7 @@ func parseSemver(value string) ([3]int, bool) {
 func validState(value string) bool {
 	switch value {
 	case "current", "checking", "available", "blocked", "scheduled", "preparing",
-		"deploying_app", "installing", "restarting", "recovering", "succeeded",
-		"failed", "rolled_back", "unsupported":
+		"deploying_app", "installing", "restarting", "succeeded", "failed":
 		return true
 	default:
 		return false
@@ -717,7 +701,7 @@ func validState(value string) bool {
 
 func transientUpdateState(value string) bool {
 	switch value {
-	case "scheduled", "preparing", "deploying_app", "installing", "restarting", "recovering":
+	case "scheduled", "preparing", "deploying_app", "installing", "restarting":
 		return true
 	default:
 		return false

@@ -9,7 +9,7 @@ import (
 
 func TestKimiBuiltinCatalog(t *testing.T) {
 	isolateAgentEnv(t)
-	catalog := CatalogForProfile("kimi", "kimi", t.TempDir(), "/nonexistent", nil, "", "0.36.1", "")
+	catalog := CatalogForProfile("kimi", "kimi", t.TempDir(), "/nonexistent", nil, "", "")
 	if catalog.Truncated {
 		t.Fatal("Kimi builtins should not be truncated")
 	}
@@ -126,7 +126,7 @@ func (f kimiFixture) config(t *testing.T, content string) {
 }
 
 func (f kimiFixture) catalog(cwd string) Catalog {
-	return CatalogForProfile("kimi", "kimi", cwd, f.home, nil, "", "0.36.1", "")
+	return CatalogForProfile("kimi", "kimi", cwd, f.home, nil, "", "")
 }
 
 func TestKimiDiscoversProjectKimiSkills(t *testing.T) {
@@ -276,7 +276,7 @@ func TestKimiINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "Ship the service")
 
 	catalog := CatalogForProfile("kimi", "kimi", f.repo, f.home,
-		[]string{explicit}, "skill:{name}", "", "")
+		[]string{explicit}, "skill:{name}", "")
 	if _, ok := commandByName(catalog, "/skill:explicit"); !ok {
 		t.Fatal("an INI-configured skill directory must be scanned")
 	}
@@ -406,7 +406,7 @@ func TestKimiEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
 	writeSkill(t, filepath.Join(scratch, ".kimi-code", "skills"), "leak-kimi", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.36.1", "")
+	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "")
 	if _, ok := commandByName(catalog, "/skill:leak-kimi"); ok {
 		t.Fatal("empty ctx.Home must not make Kimi scan the service's own working directory")
 	}
@@ -425,7 +425,7 @@ func TestKimiEmptyHomeDoesNotReadServiceWorkingDirectoryConfig(t *testing.T) {
 		fmt.Sprintf("extra_skill_dirs = [%q]\n", extra))
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.36.1", "")
+	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "")
 	if _, ok := commandByName(catalog, "/skill:leak-kimi-config"); ok {
 		t.Fatal("empty ctx.Home must not make Kimi read a config.toml from the service's own working directory")
 	}

@@ -102,8 +102,8 @@ never falls back to the `HERDR_*` values, so Pi registers only with the core rel
 
 The relay does not read the core's `socket` setting in `config.toml`.
 
-`HERDR_SOCKET_PATH` is ignored on core. Explicit port and
-`HERDR_RELAY_SERVICE_NAME` values win. If `HERDR_RELAY_ENV` is set, its containing
+`HERDR_SOCKET_PATH` is ignored on core. Explicit port values win.
+If `HERDR_RELAY_ENV` is set, its containing
 directory becomes the runtime directory, regardless of `HERDR_PLUGIN_CONFIG_DIR`.
 
 Do **not** share these with the TUI instance:

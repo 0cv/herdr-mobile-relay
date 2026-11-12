@@ -38,7 +38,11 @@ func TestOMOTodoProjectionKeepsHeadIdentityWhenTranscriptTailIsClipped(t *testin
 		t.Fatal(err)
 	}
 
-	state := NewReader(home).ReadOMOTodoState(cwd, sessionID)
+	page, err := NewReader(home).readOMO(cwd, sessionID, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := *page.OMOPlan
 	if !state.Available || !state.Truncated || len(state.Phases) != 1 || len(state.Phases[0].Tasks) != 1 {
 		t.Fatalf("projected OMO state = %#v", state)
 	}
@@ -91,7 +95,11 @@ func TestOMOWithoutTodoIsAvailableAndOversizedRowsAreSkipped(t *testing.T) {
 	if err = file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	state := reader.ReadOMOTodoState(cwd, sessionID)
+	page, err = reader.readOMO(cwd, sessionID, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := *page.OMOPlan
 	if !state.Available || len(state.Phases) != 1 || state.Phases[0].Tasks[0].Content != "Ship" {
 		t.Fatalf("state after cache invalidation = %#v", state)
 	}

@@ -89,14 +89,9 @@ type GatewayStatus struct {
 
 // GatewayOptions configures the outbound registration.
 type GatewayOptions struct {
-	// URL is the gateway base, for example wss://gw.example.com. It is the
-	// first entry of the candidate list, and must be the first element of URLs
-	// when both are set.
-	URL string
 	// URLs is the gateway candidate list. At startup the relay probes every
 	// entry concurrently and registers with one healthy entry; Selection
 	// decides which, and list order remains the fallback when probes fail.
-	// URL stays for single-gateway callers.
 	URLs []string
 	// Selection is config.GatewaySelectionOrdered or
 	// config.GatewaySelectionLatency. Empty means ordered: a caller that did
@@ -107,9 +102,7 @@ type GatewayOptions struct {
 	RelayKey string
 	// RegistrationToken is the optional shared gateway registration secret.
 	RegistrationToken string
-	// MaxClients bounds the phone connections accepted through the gateway.
-	MaxClients int
-	Logger     *slog.Logger
+	Logger            *slog.Logger
 }
 
 // GatewayClient maintains one outbound WebSocket registration to a blind
@@ -184,10 +177,6 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxClients := opts.MaxClients
-	if maxClients <= 0 {
-		maxClients = gatewayDefaultMaxClients
-	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -199,7 +188,7 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 		relayID:           relayID,
 		rendezvousKey:     rendezvousKey,
 		registrationToken: opts.RegistrationToken,
-		maxClients:        maxClients,
+		maxClients:        gatewayDefaultMaxClients,
 		logger:            logger,
 		backoffBase:       gatewayBackoffBase,
 		backoffMax:        gatewayBackoffMax,
@@ -210,12 +199,7 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 	}, nil
 }
 
-// gatewayURLs normalizes the configured endpoints into a validated candidate
-// list. URLs wins over URL so a caller that fills both can never end up dialing
-// an endpoint the list does not name, and the two must agree on the first
-// candidate.
 func gatewayURLs(opts GatewayOptions) ([]string, error) {
-	primary := strings.TrimRight(strings.TrimSpace(opts.URL), "/")
 	list := make([]string, 0, len(opts.URLs))
 	for _, raw := range opts.URLs {
 		if entry := strings.TrimRight(strings.TrimSpace(raw), "/"); entry != "" {
@@ -223,22 +207,7 @@ func gatewayURLs(opts GatewayOptions) ([]string, error) {
 		}
 	}
 	if len(list) == 0 {
-		if primary == "" {
-			return nil, errors.New("gateway url is required")
-		}
-		list = append(list, primary)
-	} else if primary != "" && list[0] != primary {
-		return nil, fmt.Errorf("gateway url %q must be the first entry of the gateway url list, got %q",
-			primary, list[0])
-	}
-	for _, entry := range list {
-		parsed, err := url.Parse(entry)
-		if err != nil {
-			return nil, fmt.Errorf("invalid gateway url %q: %w", entry, err)
-		}
-		if parsed.Host == "" || (parsed.Scheme != "ws" && parsed.Scheme != "wss") {
-			return nil, fmt.Errorf("invalid gateway url %q: want ws:// or wss:// base url", entry)
-		}
+		return nil, errors.New("gateway url is required")
 	}
 	return list, nil
 }
@@ -247,9 +216,6 @@ func gatewayURLs(opts GatewayOptions) ([]string, error) {
 // its next attempt will dial. Status output and address discovery follow it, so
 // a failover is visible instead of pointing at a gateway we left behind.
 func (c *GatewayClient) CurrentURL() string {
-	if c == nil {
-		return ""
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.urls[c.active]
@@ -302,11 +268,8 @@ func (c *GatewayClient) latencyRanked() bool {
 }
 
 // Selection reports the rule in force, so status output can answer "why that
-// gateway" without the log. A nil client has no gateway to pick.
+// gateway" without the log.
 func (c *GatewayClient) Selection() string {
-	if c == nil {
-		return ""
-	}
 	if c.latencyRanked() {
 		return config.GatewaySelectionLatency
 	}
@@ -461,27 +424,17 @@ func measureGatewayRTT(ctx context.Context, base string) (time.Duration, error) 
 	return time.Since(started), nil
 }
 
-// RelayID returns the public rendezvous identifier the phone pairs against.
-func (c *GatewayClient) RelayID() string { return c.relayID }
-
 // STUNPort reports the address-discovery port the gateway last advertised, or
 // 0 when discovery is unavailable. The caller pairs it with the gateway host
 // it configured; the gateway never supplies a host.
 func (c *GatewayClient) STUNPort() int {
-	if c == nil {
-		return 0
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.stunPort
 }
 
-// Status snapshots the registration for relay status output. A nil client
-// reports a disabled gateway, so callers can hold an unset gateway.
+// Status snapshots the registration for relay status output.
 func (c *GatewayClient) Status() GatewayStatus {
-	if c == nil {
-		return GatewayStatus{}
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ordered := c.activeFirstLocked()

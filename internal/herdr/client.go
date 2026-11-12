@@ -634,16 +634,6 @@ func (c *Client) AgentGet(ctx context.Context, paneID string) (*AgentInfo, error
 	return &result, nil
 }
 
-func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
-	var result struct {
-		ProcessInfo PaneProcessInfo `json:"process_info"`
-	}
-	if err := c.runResult(ctx, &result, "pane", "process-info", "--pane", paneID); err != nil {
-		return nil, fmt.Errorf("herdr pane process info: %w", err)
-	}
-	return &result.ProcessInfo, nil
-}
-
 // PaneGet asks the running Herdr server for one pane over a fresh socket
 // request. Unlike the agent inventory it also covers plain shell panes, and it
 // carries the terminal incarnation (terminal_id) a pane-size lease is bound to.
@@ -736,10 +726,6 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 	return read.Content, nil
 }
 
-func (c *Client) SupportsRealtimePane(ctx context.Context) bool {
-	return c.SupportsPaneRead()
-}
-
 func (c *Client) Close() error {
 	return c.api.close()
 }
@@ -790,11 +776,6 @@ func (c *Client) StopPane(ctx context.Context, paneID string) error {
 func (c *Client) RenameAgent(ctx context.Context, paneID, name string) error {
 	_, err := c.runCommand(ctx, "agent", "rename", paneID, name)
 	return err
-}
-
-// RenamePane is retained as a compatibility alias for callers being migrated.
-func (c *Client) RenamePane(ctx context.Context, paneID, name string) error {
-	return c.RenameAgent(ctx, paneID, name)
 }
 
 // StartAgent starts kind in paneID. agentArgs, when given, are the started
@@ -848,14 +829,6 @@ func (c *Client) runResult(ctx context.Context, result any, args ...string) erro
 		return fmt.Errorf("malformed result envelope: %w", err)
 	}
 	return nil
-}
-
-// run is retained for package-level process-boundary tests. Production callers
-// carry their own absolute deadline and use runCommand.
-func (c *Client) run(parent context.Context, timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-	return c.runCommand(ctx, args...)
 }
 
 type dispatchCheckKey struct{}

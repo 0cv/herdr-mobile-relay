@@ -68,7 +68,7 @@ func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
 }
 
 func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -682,7 +682,7 @@ func TestUnchangedQuestionNavigationReturnsReplayableError(t *testing.T) {
 }
 
 func TestSchedulerEvictsOldCompletedLedgerEntries(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
+	scheduler := NewScheduler(1)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

@@ -64,8 +64,6 @@ type Mapping struct {
 	Method string
 	// Lifetime is the lifetime the router granted.
 	Lifetime time.Duration
-	// ExpiresAt is when the mapping lapses unless it is renewed.
-	ExpiresAt time.Time
 
 	owner   *client
 	gateway netip.Addr

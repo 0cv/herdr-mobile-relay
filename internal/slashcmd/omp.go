@@ -20,8 +20,7 @@ type ompProvider struct{}
 
 func (p *ompProvider) ID() string { return "omp" }
 
-// ompBuiltins mirrors the primary TUI commands in OMP 17.1.7. AgentVersion is
-// available in DiscoverContext for adding a clean version cutover when needed.
+// ompBuiltins mirrors the primary TUI commands in OMP 17.1.7.
 var ompBuiltins = []Command{
 	{"/settings", "Open settings menu", "builtin", ""},
 	{"/setup", "Open provider setup", "builtin", "[providers]"},
@@ -155,9 +154,8 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				continue
 			}
 			options := skillScanOptions{
-				boundary:           boundary,
-				requireDescription: true,
-				respectEnabled:     true,
+				boundary:       boundary,
+				respectEnabled: true,
 			}
 			cmds, trunc := reader.scanSkillDirFormatOptions(dir, scope, ompCommandFormat, &budget, options)
 			allowed := cmds[:0]
@@ -290,7 +288,7 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	return commands, truncated || reader.truncated
 }
 func (reader *catalogReader) scanExtensionSkillPath(extension ompExtensionDir, budget *int, apply func([]Command), truncated *bool, settings ompSkillSettings) {
-	options := skillScanOptions{requireDescription: true, respectEnabled: true}
+	options := skillScanOptions{respectEnabled: true}
 	commands, trunc := reader.scanSkillPathFormatOptions(extension.path, extension.source, ompCommandFormat, budget, options)
 	allowed := commands[:0]
 	for _, command := range commands {

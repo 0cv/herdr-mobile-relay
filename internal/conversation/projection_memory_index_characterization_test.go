@@ -776,3 +776,11 @@ func pmClosed(t *testing.T) {
 		}
 	}
 }
+
+func (s *snapshotIndex) applyRecord(agent, revision string, record JSONLRecord) (projectionResult, error) {
+	results, err := s.applyRecords(agent, revision, []JSONLRecord{record})
+	if len(results) == 0 {
+		return projectionResult{}, err
+	}
+	return results[0], err
+}

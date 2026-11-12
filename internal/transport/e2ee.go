@@ -138,10 +138,6 @@ type E2EEAuthResolver interface {
 	IsE2EEAuthRejected(error) bool
 }
 
-func isE2EEAuthRejected(resolver E2EEAuthResolver, err error) bool {
-	return resolver.IsE2EEAuthRejected(err)
-}
-
 type e2eeClientHello struct {
 	Type        string       `json:"type"`
 	Version     int          `json:"version"`
@@ -221,7 +217,7 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	secret, err := resolver.ResolveE2EESecret(ctx, clientHello.selector)
 	if err != nil {
 		clear(secret)
-		if isE2EEAuthRejected(resolver, err) {
+		if resolver.IsE2EEAuthRejected(err) {
 			return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: client proof did not authenticate", ErrDeviceAuthRejected)
 		}
 		return nil, AuthenticatedIdentity{}, fmt.Errorf("resolve device authentication: %w", err)
@@ -238,7 +234,7 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	clear(wantClientProof)
 	if !proofAuthenticated {
 		_, completeErr := resolver.CompleteE2EEAuth(ctx, clientHello.selector, false)
-		if completeErr != nil && !isE2EEAuthRejected(resolver, completeErr) {
+		if completeErr != nil && !resolver.IsE2EEAuthRejected(completeErr) {
 			return nil, AuthenticatedIdentity{}, fmt.Errorf("record rejected device authentication: %w", completeErr)
 		}
 		return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: client proof did not authenticate", ErrDeviceAuthRejected)
@@ -309,7 +305,7 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	authResult, err := resolver.CompleteE2EEAuth(ctx, clientHello.selector, true)
 	if err != nil {
 		clear(authResult.CredentialSecret)
-		if isE2EEAuthRejected(resolver, err) {
+		if resolver.IsE2EEAuthRejected(err) {
 			return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: device authentication is no longer valid", ErrDeviceAuthRejected)
 		}
 		return nil, AuthenticatedIdentity{}, fmt.Errorf("complete device authentication: %w", err)

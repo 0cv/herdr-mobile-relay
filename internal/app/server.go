@@ -481,16 +481,6 @@ func (s *Server) disconnectCredentials(credentials []deviceauth.Credential) {
 		s.hub.DisconnectCredential(credential.CredentialID, credential.Version)
 	}
 }
-func pushPlatformForUserAgent(userAgent string) push.Platform {
-	lower := strings.ToLower(userAgent)
-	if strings.Contains(lower, "iphone") || strings.Contains(lower, "ipad") || strings.Contains(lower, "ipod") {
-		return push.PlatformIOS
-	}
-	if strings.Contains(lower, "android") && (strings.Contains(lower, "chrome") || strings.Contains(lower, "chromium")) {
-		return push.PlatformAndroidChromium
-	}
-	return push.PlatformOther
-}
 
 type pushPolicyWire struct {
 	Categories  map[push.Category]bool `json:"categories"`
@@ -1032,11 +1022,10 @@ func (s *Server) Run(ctx context.Context) error {
 			home, _ := os.UserHomeDir()
 			profileID := s.profiles.ResolvePane(paneID, agent)
 			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
-			agentVersion := s.profiles.AgentVersion(profileID)
 			location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
 			agentDir := locatedAgentDir(home, agent, location)
 			catalog := slashcmd.CatalogForProfileWithSuppression(
-				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
+				profileID, agent, cwd, home, skillDirs, commandFormat, agentDir, suppressNative,
 			)
 			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
 				catalog.Status = "partial"
@@ -1551,10 +1540,6 @@ func (s *Server) handlePaneSizeCommand(client *transport.ClientConn, inbound pro
 	s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, map[string]any{"columns": columns, "rows": rows})
 }
 
-func (s *Server) effectiveCapabilities() []string {
-	return s.effectiveCapabilitiesFor(s.herdrC.CapabilityStatus())
-}
-
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
 	if s.cfg.Backend == "hc" {
@@ -1909,7 +1894,7 @@ func (s *Server) handleTransition(
 		s.broadcastBlockedAttention(agentState)
 		return
 	}
-	if !s.state.RegisterFinishedNotificationForTransition(paneID, status, revision) {
+	if !s.state.RegisterFinishedNotificationForTransition(paneID, revision) {
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
@@ -2142,7 +2127,7 @@ func (s *Server) handleChatCompletion(
 		return s.state.CompletionCurrent(agent.PaneID, revision)
 	}
 	if !current() ||
-		!s.state.RegisterFinishedNotificationForTransition(agent.PaneID, "blocked", revision) {
+		!s.state.RegisterFinishedNotificationForTransition(agent.PaneID, revision) {
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), agent.PaneID)
@@ -2962,37 +2947,6 @@ func (s *Server) writePIDFile() error {
 	return os.WriteFile(s.pidFilePath(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 }
 
-func (s *Server) publicInventoryStatus() map[string]any {
-	return s.state.InventoryStatus()
-}
-
-func (s *Server) publicJobState(filename, defaultState string) map[string]any {
-	result := map[string]any{
-		"state":            defaultState,
-		"current_version":  s.version,
-		"current_revision": s.revision,
-	}
-	data, err := os.ReadFile(filepath.Join(s.cfg.RuntimeDir, filename))
-	if err != nil {
-		return result
-	}
-	var raw map[string]any
-	if json.Unmarshal(data, &raw) != nil {
-		return result
-	}
-	allowed := []string{
-		"state", "current_version", "current_revision", "available_version",
-		"available_revision", "target_version", "target_revision", "checked_at",
-		"mode", "eligible", "reason", "error", "started_at", "finished_at",
-	}
-	for _, key := range allowed {
-		if value, ok := raw[key]; ok {
-			result[key] = value
-		}
-	}
-	return result
-}
-
 // preparePaneResponse annotates a pane frame with everything the phone needs
 // to decide what it may offer the operator. The no-echo flag is computed last,
 // on the content the phone will actually render, so full reads, deltas and the
@@ -3261,11 +3215,6 @@ func serializedState(value any) string {
 	data, _ := json.Marshal(value)
 	return string(data)
 }
-func isAuditedWrite(action string) bool {
-	metadata, known := protocol.ClassifyAction(action)
-	return known && metadata.Audited
-}
-
 func (s *Server) recordWriteAudit(
 	client *transport.ClientConn,
 	message map[string]any,
@@ -3281,11 +3230,8 @@ func (s *Server) recordWriteAudit(
 	requestID, _ := message["request_id"].(string)
 	paneID, _ := message["pane_id"].(string)
 	if paneID == "" {
-		switch target := message["target"].(type) {
-		case map[string]any:
+		if target, ok := message["target"].(map[string]any); ok {
 			paneID, _ = target["pane_id"].(string)
-		case protocol.TargetRef:
-			paneID = target.PaneID
 		}
 	}
 	clientID, _ := message["client_id"].(string)
@@ -3391,29 +3337,7 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	if closeGroup, ok := message["close_group"].(bool); ok {
 		details["close_group"] = closeGroup
 	}
-	workspaceIDs := make([]string, 0, 8)
-	switch values := message["workspace_ids"].(type) {
-	case []any:
-		for _, value := range values {
-			workspaceID, valid := value.(string)
-			if valid && workspaceID != "" {
-				workspaceIDs = append(workspaceIDs, boundedAuditString(workspaceID, 160))
-			}
-			if len(workspaceIDs) == 32 {
-				break
-			}
-		}
-	case []string:
-		for _, workspaceID := range values {
-			if workspaceID != "" {
-				workspaceIDs = append(workspaceIDs, boundedAuditString(workspaceID, 160))
-			}
-			if len(workspaceIDs) == 32 {
-				break
-			}
-		}
-	}
-	if len(workspaceIDs) > 0 {
+	if workspaceIDs := auditWorkspaceIDList(message["workspace_ids"]); len(workspaceIDs) > 0 {
 		details["workspace_ids"] = workspaceIDs
 	}
 	if expectedWorkspaceIDs := auditWorkspaceIDList(message["expected_workspace_ids"]); len(expectedWorkspaceIDs) > 0 {
@@ -3427,13 +3351,6 @@ func auditWriteDetails(message map[string]any) map[string]any {
 			if !valid {
 				continue
 			}
-			keys = append(keys, boundedAuditString(key, 64))
-			if len(keys) == 32 {
-				break
-			}
-		}
-	case []string:
-		for _, key := range values {
 			keys = append(keys, boundedAuditString(key, 64))
 			if len(keys) == 32 {
 				break
@@ -3454,15 +3371,6 @@ func auditWriteDetails(message map[string]any) map[string]any {
 				break
 			}
 		}
-	case []int:
-		for _, value := range values {
-			if value >= 0 {
-				indices = append(indices, int64(value))
-			}
-			if len(indices) == 128 {
-				break
-			}
-		}
 	}
 	if len(indices) > 0 {
 		details["selected_indices"] = indices
@@ -3476,15 +3384,6 @@ func auditWorkspaceIDList(value any) []string {
 	case []any:
 		for _, item := range values {
 			if id, ok := item.(string); ok && id != "" {
-				ids = append(ids, boundedAuditString(id, 160))
-			}
-			if len(ids) == 32 {
-				break
-			}
-		}
-	case []string:
-		for _, id := range values {
-			if id != "" {
 				ids = append(ids, boundedAuditString(id, 160))
 			}
 			if len(ids) == 32 {
@@ -3525,11 +3424,6 @@ func auditInteger(value any) (int64, bool) {
 	}
 	return 0, false
 }
-func isCoordinatorMutation(action string) bool {
-	metadata, known := protocol.ClassifyAction(action)
-	return known && metadata.Coordinated
-}
-
 func (s *Server) storePhoneAppOrigin(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("origin is required")
@@ -3603,7 +3497,7 @@ func (s *Server) writeSupportSnapshot() {
 		WebHash:          webHash,
 		WebVersion:       webVersion,
 		Readiness:        readiness,
-		Inventory:        s.publicInventoryStatus(),
+		Inventory:        s.state.InventoryStatus(),
 		Components: map[string]string{
 			"http":        "running",
 			"poller":      "running",
@@ -3824,24 +3718,6 @@ func (s *Server) broadcastCommitted(message any) {
 	}
 	messageType, _ := envelope["type"].(string)
 	switch messageType {
-	case "agents":
-		var agents []*coordinator.AgentState
-		data, err := json.Marshal(envelope["agents"])
-		if err != nil {
-			s.recordSafeError("agent snapshot broadcast was malformed", err)
-			return
-		}
-		if err := json.Unmarshal(data, &agents); err != nil {
-			s.recordSafeError("agent snapshot broadcast was malformed", err)
-			return
-		}
-		s.projectAgentResources(agents)
-		envelope["agents"] = agents
-		s.hub.BroadcastPrepared(message, func() {
-			s.stateViewMu.Lock()
-			s.agentView = mergeAgentSnapshot(s.agentView, agents)
-			s.stateViewMu.Unlock()
-		})
 	case "agent_update", "blocked":
 		paneID, _ := envelope["pane_id"].(string)
 		if paneID == "" {
@@ -3875,14 +3751,6 @@ func (s *Server) broadcastCommitted(message any) {
 				}
 			}
 			s.agentView = agents
-			s.stateViewMu.Unlock()
-		})
-	case "inventory_status":
-		status := cloneStringMap(envelope)
-		delete(status, "type")
-		s.hub.BroadcastPrepared(message, func() {
-			s.stateViewMu.Lock()
-			s.inventoryView = status
 			s.stateViewMu.Unlock()
 		})
 	case "activity":
@@ -3923,18 +3791,6 @@ func (s *Server) broadcastCommitted(message any) {
 	default:
 		s.hub.Broadcast(message)
 	}
-}
-
-func (s *Server) committedAgents() []*coordinator.AgentState {
-	return s.committedInventorySnapshot().agents
-}
-
-func (s *Server) committedWorkspaces() []herdr.Workspace {
-	return s.committedInventorySnapshot().workspaces
-}
-
-func (s *Server) committedInventoryStatus() map[string]any {
-	return s.committedInventorySnapshot().status
 }
 
 func cloneAgents(agents []*coordinator.AgentState) []*coordinator.AgentState {
@@ -3981,10 +3837,8 @@ func deltaRevision(delta map[string]any) int64 {
 		return number
 	case float64:
 		return int64(number)
-	default:
-		// Revision-less legacy/internal deltas remain applicable.
-		return int64(^uint64(0) >> 1)
 	}
+	return 0
 }
 
 func cloneStringMap(values map[string]any) map[string]any {

@@ -3,7 +3,6 @@ package coordinator
 import (
 	"container/heap"
 	"context"
-	"log/slog"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -22,9 +21,7 @@ const (
 
 type InFlightOperation struct {
 	OperationID OperationID
-	CommandID   CommandID
 	Generation  uint64
-	StartedAt   time.Time
 	cancel      context.CancelFunc
 }
 
@@ -47,10 +44,6 @@ type SchedulerMetrics struct {
 	LatencySamples      uint64 `json:"latency_samples"`
 	LatencyTotalMicros  uint64 `json:"latency_total_micros"`
 	LatencyMaxMicros    uint64 `json:"latency_max_micros"`
-}
-
-type scheduleRequest struct {
-	operation *scheduledOperation
 }
 
 type scheduledOperation struct {
@@ -142,10 +135,9 @@ func (h *deadlineHeap) Pop() any {
 }
 
 type Scheduler struct {
-	logger   *slog.Logger
 	capacity int
 
-	ingress        chan scheduleRequest
+	ingress        chan *scheduledOperation
 	completions    chan completionEvent
 	ledger         chan ledgerPhaseUpdate
 	replays        chan ledgerReplayQuery
@@ -164,14 +156,13 @@ type Scheduler struct {
 	generationCurrent func(string, uint64) bool
 }
 
-func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
+func NewScheduler(capacity int) *Scheduler {
 	if capacity <= 0 {
 		capacity = defaultHerdrCapacity
 	}
 	s := &Scheduler{
-		logger:         logger,
 		capacity:       capacity,
-		ingress:        make(chan scheduleRequest, coordinatorIngressCapacity),
+		ingress:        make(chan *scheduledOperation, coordinatorIngressCapacity),
 		completions:    make(chan completionEvent, coordinatorCompletionCapacity),
 		ledger:         make(chan ledgerPhaseUpdate, coordinatorLedgerCapacity),
 		replays:        make(chan ledgerReplayQuery, coordinatorLedgerCapacity),
@@ -263,7 +254,7 @@ func (s *Scheduler) ExecuteAdmitted(
 	}
 
 	select {
-	case s.ingress <- scheduleRequest{operation: op}:
+	case s.ingress <- op:
 		s.observeIngress()
 		if admitted != nil {
 			admitted()
@@ -483,9 +474,7 @@ func (s *Scheduler) run() {
 				inUse++
 				slot.InFlight = &InFlightOperation{
 					OperationID: op.operation,
-					CommandID:   op.options.ID,
 					Generation:  slot.Generation,
-					StartedAt:   now,
 				}
 				slot.InFlight.cancel = s.start(op, slot.Generation)
 				progress = true
@@ -717,8 +706,7 @@ func (s *Scheduler) run() {
 		}
 
 		select {
-		case request := <-s.ingress:
-			op := request.operation
+		case op := <-s.ingress:
 			pruneLedger(time.Now())
 			if stopping {
 				s.reply(op, nil, ErrClosed)

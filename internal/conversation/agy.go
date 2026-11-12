@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -118,12 +119,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 		}
 		cursor = value
 	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	cursorFilter := ""
 	if cursor >= 0 {
 		cursorFilter = fmt.Sprintf(" AND idx < %d", cursor)
@@ -147,9 +143,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 		meta.SchemaVersion = rows[0].SchemaVersion
 		meta.OldestIdx = rows[len(rows)-1].Idx
 	}
-	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
-		rows[left], rows[right] = rows[right], rows[left]
-	}
+	slices.Reverse(rows)
 	entries, corrupt := parseAgyRows(rows)
 	if len(rows) > 0 && len(entries) > 0 {
 		if toolCorrupt := r.attachToolResults(ctx, database, rows[0].Idx, rows[len(rows)-1].Idx, entries); toolCorrupt {

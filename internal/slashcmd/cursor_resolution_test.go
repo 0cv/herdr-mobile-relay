@@ -43,7 +43,7 @@ func TestCursorBuiltinCollisionsIgnoreCase(t *testing.T) {
 			cursorSkill(t, skillRoot, "HeLP", "HeLP", "Custom help")
 			cursorSkill(t, skillRoot, "clear-cache", "clear-cache", "Clear cache")
 
-			catalog := CatalogForProfile("cursor", "cursor", cwd, home, skillDirs, "/{name}", "", "")
+			catalog := CatalogForProfile("cursor", "cursor", cwd, home, skillDirs, "/{name}", "")
 			for _, name := range []string{"/clear", "/help"} {
 				if commandSource(catalog, name) != "builtin" {
 					t.Errorf("%s lost its builtin", name)
@@ -63,7 +63,7 @@ func TestCursorCommandSkillCollisionsIgnoreCase(t *testing.T) {
 	writeFile(t, filepath.Join(cwd, ".cursor", "commands", "Review.md"), "Command review\n")
 	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "review", "review", "Native skill")
 	cursorSkill(t, extra, "REVIEW", "REVIEW", "Configured skill")
-	catalog := CatalogForProfile("cursor", "cursor", cwd, home, []string{extra}, "/{name}", "", "")
+	catalog := CatalogForProfile("cursor", "cursor", cwd, home, []string{extra}, "/{name}", "")
 	assertCursorCustomCommands(t, catalog, Command{"/Review", "Command review", "project", ""})
 }
 

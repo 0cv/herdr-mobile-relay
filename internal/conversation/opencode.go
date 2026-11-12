@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -174,10 +175,6 @@ func (r *openCodeReader) storeQuery(key string, stamp openCodeFileStamp, rows []
 	r.cache[key] = openCodeCacheEntry{
 		stamp: stamp, rows: append([]openCodeRow(nil), rows...), hasMore: hasMore,
 	}
-}
-
-func (r *openCodeReader) query(database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
-	return r.queryContext(context.Background(), database, sessionID, before, limit)
 }
 
 func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
@@ -373,9 +370,7 @@ func (r *openCodeReader) runRows(ctx context.Context, database, query string, li
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, false, "source_corrupt"
 	}
-	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
-		rows[left], rows[right] = rows[right], rows[left]
-	}
+	slices.Reverse(rows)
 	for index := range rows {
 		rows[index].V2 = v2
 		if v2 {
@@ -415,12 +410,7 @@ func (r *openCodeReader) runRows(ctx context.Context, database, query string, li
 // by session ID alone.
 func (r *Reader) readOpenCode(sessionID, before string, limit int) (Page, error) {
 	sessionID = strings.TrimSpace(sessionID)
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	entries, hasMore, corrupt, metadata, code := r.openCode.read(sessionID, before, limit)
 	if code != "" {
 		return unavailableCode(code, "OpenCode conversation history is unavailable."), nil
