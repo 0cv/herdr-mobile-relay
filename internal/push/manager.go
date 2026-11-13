@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
@@ -180,8 +181,20 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 			}
 		}
 
-		if err := os.Chmod(privPath, 0o600); err != nil {
-			return fmt.Errorf("protect VAPID private key: %w", err)
+		info, err := os.Stat(privPath)
+		if err != nil {
+			return fmt.Errorf("stat VAPID private key: %w", err)
+		}
+		if info.Mode().Perm()&^0o600 != 0 {
+			if err := os.Chmod(privPath, info.Mode().Perm()&0o600); err != nil {
+				return fmt.Errorf("protect VAPID private key: %w", err)
+			}
+		}
+		privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+		if err != nil {
+			m.logger.Warn("encode loaded VAPID private key", "error", err)
+		} else {
+			m.rewriteLoadedFile(privPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}))
 		}
 		m.vapidPrivate = encodeVAPIDPrivate(privateKey)
 		m.vapidPublic = encodeVAPIDPublic(derivedPublic)
@@ -370,10 +383,26 @@ func (m *Manager) load() error {
 		return err
 	}
 	m.subscriptions = keepValidPushSubscriptions(m.subscriptions)
+	data, err = encodeSubscriptions(m.subscriptions)
+	if err != nil {
+		m.logger.Warn("encode loaded subscriptions", "error", err)
+	} else {
+		m.rewriteLoadedFile(m.path, data)
+	}
 	return nil
 }
 
-func (m *Manager) persist(subscriptions []Subscription) error {
+func (m *Manager) rewriteLoadedFile(filename string, data []byte) {
+	info, err := os.Stat(filename)
+	if err == nil {
+		_, err = atomicfile.Replace(filepath.Dir(filename), filename, "."+filepath.Base(filename)+".*", data, info.Mode().Perm())
+	}
+	if err != nil {
+		m.logger.Warn("rewrite loaded push file", "path", filename, "error", err)
+	}
+}
+
+func encodeSubscriptions(subscriptions []Subscription) ([]byte, error) {
 	pf := pythonFile{Subscriptions: make([]pythonSubscription, 0, len(subscriptions))}
 	for _, sub := range subscriptions {
 		var ps pythonSubscription
@@ -391,9 +420,16 @@ func (m *Manager) persist(subscriptions []Subscription) error {
 
 	data, err := json.MarshalIndent(pf, "", "  ")
 	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func (m *Manager) persist(subscriptions []Subscription) error {
+	data, err := encodeSubscriptions(subscriptions)
+	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
 	return atomicWrite(m.path, data, 0o600)
 }
 

@@ -1,7 +1,6 @@
 package push
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,17 +156,6 @@ func newPolicyEngine(path string) (*PolicyEngine, error) {
 	if err == nil {
 		if err := json.Unmarshal(data, &p.state); err != nil {
 			return nil, fmt.Errorf("decode push policies: %w", err)
-		}
-		var rawState struct {
-			Policies map[string]json.RawMessage `json:"policies"`
-		}
-		if json.Unmarshal(data, &rawState) == nil {
-			for deviceID, policy := range p.state.Policies {
-				if !bytes.Contains(rawState.Policies[deviceID], []byte(`"update_once"`)) {
-					policy.UpdateOnce = true
-					p.state.Policies[deviceID] = policy
-				}
-			}
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read push policies: %w", err)

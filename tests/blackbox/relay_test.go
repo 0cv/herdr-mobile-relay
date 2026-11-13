@@ -64,10 +64,7 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 	scenarioPath := filepath.Join(tmpDir, "scenario.json")
 	os.WriteFile(scenarioPath, []byte(scenario), 0o644)
 
-	// Create a minimal web root
-	webDir := filepath.Join(tmpDir, "web")
-	os.MkdirAll(webDir, 0o755)
-	os.WriteFile(filepath.Join(webDir, "index.html"), []byte("<html>test</html>"), 0o644)
+	webDir := filepath.Join(repoRoot(t), "web")
 
 	env := &TestEnv{
 		fakeBin:        fakeBin,
