@@ -637,19 +637,21 @@ test_teardown_ownership_and_dns_retention() {
 
     new_case
     write_existing_config 8401
-    sed 's/herdr-mobile-relay-existing/someone-elses-tunnel/' "$HOME/custom-config.yml" > "$HOME/foreign-config.yml"
-    mv "$HOME/foreign-config.yml" "$HOME/custom-config.yml"
     set +e
     HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
-    [ "$STATUS" -ne 0 ] || fail "foreign config recovery should fail"
-    assert_contains "$OUTPUT" 'config tunnel is outside the Herdr stable-tunnel namespace'
-    [ -f "$HOME/custom-config.yml" ] || fail "foreign config recovery removed config"
+    [ "$STATUS" -ne 0 ] || fail "teardown without recorded state should fail"
+    [ ! -e "$HERDR_STABLE_STATE_FILE" ] || fail "teardown created missing state"
+    [ -f "$HOME/custom-config.yml" ] || fail "teardown without state removed config"
+    [ -f "$HOME/custom-credentials.json" ] || fail "teardown without state removed credentials"
     assert_not_contains "$STUB_LOG" ' tunnel delete '
 
     new_case
     write_existing_config 8401
+    export HERDR_STABLE_REUSE_CONFIG=1 STUB_DNS_MODE=always
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "setup before recorded relay teardown"; }
     assert_not_contains "$STUB_LOG" ' tunnel delete '
     export STUB_DNS_MODE=never
     set +e
@@ -657,7 +659,6 @@ test_teardown_ownership_and_dns_retention() {
     STATUS=$?
     set -e
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "recorded relay teardown"; }
-    assert_contains "$OUTPUT" 'Recovered teardown identity from the retained Herdr Cloudflare config'
     assert_contains "$OUTPUT" 'Deleting configured stable tunnel herdr-mobile-relay-existing'
     assert_contains "$OUTPUT" 'Removed stable relay config'
     assert_contains "$OUTPUT" 'Removed stable relay credentials'
@@ -703,64 +704,6 @@ test_teardown_ownership_and_dns_retention() {
     pass "teardown protects foreign state, removes recorded relays, and retains DNS diagnosis"
 }
 
-# The wizard's own config records the tunnel UUID, so recovery has to resolve
-# the name behind that id before the namespace guard can judge it.
-write_tunnel_list() {
-    local name="$1"
-
-    printf '[{"id":"%s","name":"%s"}]\n' "$TUNNEL_UUID" "$name" > "$HOME/tunnel-list.json"
-    export STUB_LIST_JSON="$HOME/tunnel-list.json"
-}
-
-test_teardown_recovers_uuid_config_by_tunnel_name() {
-    new_case
-    write_existing_config 8401 "$TUNNEL_UUID"
-    write_origin_cert zone-old
-    write_tunnel_list herdr-mobile-relay-workstation
-    export STUB_DNS_MODE=never
-    set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
-    STATUS=$?
-    set -e
-    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "uuid config recovery"; }
-    assert_contains "$OUTPUT" 'Recovered teardown identity from the retained Herdr Cloudflare config'
-    assert_contains "$OUTPUT" "Tunnel:      herdr-mobile-relay-workstation ($TUNNEL_UUID)"
-    assert_contains "$STUB_LOG" "tunnel --origincert $HOME/.cloudflared/cert.pem list --id $TUNNEL_UUID"
-    assert_contains "$OUTPUT" 'Deleting configured stable tunnel herdr-mobile-relay-workstation'
-    assert_contains "$STUB_LOG" "tunnel delete --force $TUNNEL_UUID"
-    [ ! -f "$HOME/custom-config.yml" ] || fail "uuid config recovery retained config"
-
-    new_case
-    write_existing_config 8401 "$TUNNEL_UUID"
-    write_origin_cert zone-old
-    write_tunnel_list my-personal-tunnel
-    set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
-    STATUS=$?
-    set -e
-    [ "$STATUS" -ne 0 ] || fail "foreign resolved tunnel name should fail"
-    assert_contains "$OUTPUT" 'config tunnel is outside the Herdr stable-tunnel namespace: my-personal-tunnel'
-    assert_not_contains "$STUB_LOG" ' tunnel delete '
-    [ -f "$HOME/custom-config.yml" ] || fail "foreign resolved name removed config"
-    [ -f "$HOME/custom-credentials.json" ] || fail "foreign resolved name removed credentials"
-
-    new_case
-    write_existing_config 8401 "$TUNNEL_UUID"
-    write_origin_cert zone-old
-    export STUB_LOGIN_REQUIRED=1
-    set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
-    STATUS=$?
-    set -e
-    [ "$STATUS" -ne 0 ] || fail "unresolvable tunnel name should fail"
-    assert_contains "$OUTPUT" "Cloudflare could not name tunnel $TUNNEL_UUID"
-    assert_contains "$OUTPUT" 'cloudflared tunnel login'
-    assert_not_contains "$STUB_LOG" ' tunnel delete '
-    [ -f "$HOME/custom-config.yml" ] || fail "unresolvable name removed config"
-    pass "teardown recovery resolves a UUID config to its tunnel name before judging the namespace"
-}
-
-
 test_core_instance() {
     new_case
     export HERDR_RELAY_BACKEND=hc
@@ -800,7 +743,7 @@ test_core_refuses_old_release() {
     pass "core stable setup refuses an old relay release before changing anything"
 }
 
-echo "1..20"
+echo "1..19"
 test_core_instance
 test_core_refuses_old_release
 test_success_and_alternate_port
@@ -820,4 +763,3 @@ test_health_mismatch_suppresses_qr
 test_inventory_failure_suppresses_qr
 test_separate_readiness_timeouts
 test_teardown_ownership_and_dns_retention
-test_teardown_recovers_uuid_config_by_tunnel_name

@@ -204,13 +204,6 @@ legacy_root_entry_allowed() {
         config:device-auth|config:push|config:cloudflared)
             [ -d "$entry_path" ] && [ ! -L "$entry_path" ]
             ;;
-        cache:activity.jsonl|cache:activity.tombstones|cache:post-install.sh|cache:post-install.log|\
-        cache:approval-verification*|cache:notification-approval-fix-test-*)
-            [ -f "$entry_path" ] && [ ! -L "$entry_path" ]
-            ;;
-        cache:claude-history|cache:uploads|cache:push)
-            [ -d "$entry_path" ] && [ ! -L "$entry_path" ]
-            ;;
         *)
             return 1
             ;;
@@ -223,20 +216,12 @@ validate_legacy_root() {
     [ -d "$legacy_root" ] && [ ! -L "$legacy_root" ] || return 1
     [ -z "$(find "$legacy_root" -type l -print -quit)" ] || return 1
     found=false
-    cache_state=false
-    cache_waiter_script=false
-    cache_waiter_log=false
     for legacy_entry in "$legacy_root"/* "$legacy_root"/.[!.]* "$legacy_root"/..?*; do
         [ -e "$legacy_entry" ] || continue
         legacy_name=${legacy_entry##*/}
         [ "$legacy_name" != ".herdr-mobile-relay-installation" ] || continue
         legacy_root_entry_allowed "$root_kind" "$legacy_name" "$legacy_entry" || return 1
         found=true
-        case "$legacy_name" in
-            activity.jsonl|claude-history|uploads) cache_state=true ;;
-            post-install.sh) cache_waiter_script=true ;;
-            post-install.log) cache_waiter_log=true ;;
-        esac
     done
     [ "$found" = true ] || return 1
     if [ "$root_kind" = config ]; then
@@ -245,10 +230,6 @@ validate_legacy_root() {
         [ -n "$legacy_env" ] || [ ! -f "$legacy_root/.env" ] || legacy_env="$legacy_root/.env"
         [ -n "$legacy_env" ] || return 1
         grep -q '^HERDR_RELAY_TOKEN=' "$legacy_env" || return 1
-    elif [ "$root_kind" = cache ]; then
-        [ "$cache_state" = true ] ||
-            { [ "$cache_waiter_script" = true ] && [ "$cache_waiter_log" = true ]; } ||
-            return 1
     fi
 }
 
@@ -277,9 +258,9 @@ write_install_sentinel() {
             fatal "installation root is not a directory: $sentinel_root"
         if [ -n "$(find "$sentinel_root" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
             case "$root_kind" in
-                config|cache)
+                config)
                     validate_legacy_root "$sentinel_root" "$root_kind" ||
-                        fatal "refusing to claim nonempty directory without a validated Python 0.8.6 layout: $sentinel_root"
+                        fatal "refusing to claim nonempty directory without a validated relay config layout: $sentinel_root"
                     ;;
                 *)
                     fatal "refusing to claim nonempty directory without an ownership sentinel: $sentinel_root"
@@ -304,39 +285,10 @@ prepare_install_roots() {
     release_root=$1
     config_root=$2
     cache_root=$3
-    legacy_cache="$HOME/.cache/herdr-mobile-relay"
 
     write_install_sentinel "$release_root" new
     write_install_sentinel "$config_root" config
-
-    if [ "$cache_root" != "$legacy_cache" ] &&
-       [ -d "$legacy_cache" ] &&
-       [ ! -e "$legacy_cache/.herdr-mobile-relay-installation" ]; then
-        validate_legacy_root "$legacy_cache" cache ||
-            fatal "legacy Python cache has unexpected contents: $legacy_cache"
-        if [ -e "$cache_root" ]; then
-            [ -d "$cache_root" ] || fatal "cache destination is not a directory: $cache_root"
-            if [ -n "$(find "$cache_root" -mindepth 1 -maxdepth 1 -print -quit)" ] &&
-               [ ! -f "$cache_root/.herdr-mobile-relay-installation" ]; then
-                validate_legacy_root "$cache_root" cache ||
-                    fatal "cannot migrate the Python cache into unowned destination: $cache_root"
-            fi
-        else
-            mkdir -p "$cache_root"
-        fi
-        for legacy_entry in "$legacy_cache"/* "$legacy_cache"/.[!.]* "$legacy_cache"/..?*; do
-            [ -e "$legacy_entry" ] || continue
-            legacy_name=${legacy_entry##*/}
-            [ ! -e "$cache_root/$legacy_name" ] ||
-                fatal "legacy Python cache entry already exists at destination: $legacy_name"
-            mv "$legacy_entry" "$cache_root/$legacy_name" ||
-                fatal "could not migrate legacy Python cache entry: $legacy_name"
-        done
-        rmdir "$legacy_cache" ||
-            fatal "could not remove migrated legacy Python cache root"
-        info "Migrated Python cache from $legacy_cache to $cache_root"
-    fi
-    write_install_sentinel "$cache_root" cache
+    write_install_sentinel "$cache_root" new
 }
 
 main() {

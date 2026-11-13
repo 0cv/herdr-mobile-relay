@@ -6,14 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 LABEL="$RELAY_LAUNCHD_LABEL"
-LEGACY_LABEL="com.herdr-remote.service"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 LOG_DIR="$RELAY_LOG_DIR"
-if [ "$HERDR_RELAY_BACKEND" = hc ]; then
-    LEGACY_LABEL=""
-    LEGACY_PLIST=""
-fi
 . "$SCRIPT_DIR/native-install-transaction.sh"
 
 require_user_service_context
@@ -31,7 +25,7 @@ if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
     exit 1
 fi
 
-native_install_begin launchd "$PLIST" "$LEGACY_PLIST" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
+native_install_begin launchd "$PLIST" "$ENV_FILE" "$LABEL"
 if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
     ensure_relay_env "$ENV_FILE" ""
 else
@@ -95,9 +89,6 @@ native_stage="$(mktemp "$(dirname "$PLIST")/.herdr-service.XXXXXX")"
 cp "$STAGED_PLIST" "$native_stage"
 chmod 600 "$native_stage"
 mv -f "$native_stage" "$PLIST"
-if [ "$native_legacy_active" = true ]; then
-    launchctl bootout "gui/$UID" "$LEGACY_PLIST"
-fi
 reload_launchd_service_definition "$PLIST" "$LABEL"
 
 echo "Installed and started $LABEL"
@@ -120,5 +111,5 @@ if ! HEALTH="$(wait_for_relay_health "$PORT" 15 1 "$INSTANCE")"; then
     exit 1
 fi
 verify_public_readiness "$ENV_FILE" "$HEALTH"
-native_install_commit
+native_committed=true
 echo "Relay readiness: $HEALTH"

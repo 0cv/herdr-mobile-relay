@@ -259,7 +259,6 @@ case "$(uname -s)" in
     Linux)
         if command -v systemctl >/dev/null 2>&1; then
             services=("$RELAY_SYSTEMD_LABEL")
-            [ "$HERDR_RELAY_BACKEND" != herdr ] || services+=(herdr-remote.service)
             for svc in "${services[@]}"; do
                 if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
                     echo "" >&2
@@ -272,7 +271,6 @@ case "$(uname -s)" in
         ;;
     Darwin)
         services=("$RELAY_LAUNCHD_LABEL")
-        [ "$HERDR_RELAY_BACKEND" != herdr ] || services+=(com.herdr-remote.service)
         for label in "${services[@]}"; do
             if launchctl list 2>/dev/null | awk '{print $NF}' | grep -Fxq "$label"; then
                 echo "" >&2

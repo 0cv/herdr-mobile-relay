@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- Support for upgrading installs older than 0.20.0. Uninstall them before
+  installing this version, then pair every phone again.
+
 ### Fixed
 
 - Cloudflare setup links, status, and hostname changes now read quoted tunnel
