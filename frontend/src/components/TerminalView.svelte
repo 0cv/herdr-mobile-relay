@@ -129,7 +129,6 @@
   let wideGridOffsetsPane = '';
   let lastFormat = '';
   let lastContent = '';
-  let lastPreserveLayout = false;
   let lastPreserveLineEnds = false;
   let lastRenderColumnCap = 0;
   let findOpen = $state(false);
@@ -325,7 +324,7 @@
       const next = frame;
       if (!next || next.paneId !== agent.pane_id) return;
       lastContent = '';
-      void applyFrame(next, lastPreserveLayout, lastPreserveLineEnds);
+      void applyFrame(next, lastPreserveLineEnds);
     });
   });
 
@@ -333,7 +332,6 @@
     if (questionMode || terminalLayoutSuspended) return;
     const next = frame;
     const matchingFrame = next?.paneId === agent.pane_id ? next : undefined;
-    const preserve = true;
     // Keyed to the session, not to resizeLayoutActive, on purpose: a relay that
     // can lease will repaint this pane at the phone's width, so trailing padding
     // measured at the desktop width is stale whether or not the width has landed
@@ -366,7 +364,7 @@
       });
       if (cachedFrame) {
         historyTruncated = Boolean(cachedFrame.truncated);
-        untrack(() => { void applyFrame(cachedFrame, preserve, preserveLineEnds) });
+        untrack(() => { void applyFrame(cachedFrame, preserveLineEnds) });
         return;
       }
       if (renderedRows.length) return;
@@ -390,7 +388,7 @@
     }
     if (resizeSessionActive && lastLeasedColumns > 0) renderedResizeColumns = lastLeasedColumns;
     historyTruncated = Boolean(matchingFrame.truncated);
-    untrack(() => { void applyFrame(matchingFrame, preserve, preserveLineEnds) });
+    untrack(() => { void applyFrame(matchingFrame, preserveLineEnds) });
   });
 
   $effect(() => {
@@ -619,21 +617,19 @@
 
   async function applyFrame(
     next: TerminalFrame,
-    preserve: boolean,
     preserveLineEnds: boolean,
   ) {
     if (terminalLayoutSuspended) return;
     const renderColumnCap = resizeLayoutActive
       ? lastLeasedColumns
       : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0);
-    const layoutChanged = preserve !== lastPreserveLayout
-      || preserveLineEnds !== lastPreserveLineEnds
+    const layoutChanged = preserveLineEnds !== lastPreserveLineEnds
       || renderColumnCap !== lastRenderColumnCap;
     if (next.content === lastContent && next.format === lastFormat && !layoutChanged) return;
     const rendered = renderTerminalContent(
       next.content,
       next.format,
-      preserve,
+      true,
       preserveLineEnds,
       // Cap box-drawing rows at the width in force. A fixed-grid row is a run
       // of fixed-width cells with no wrap opportunity between them, so past
@@ -673,7 +669,6 @@
     renderedHtml = rendered.html;
     renderedRows = rendered.rows;
     lastFormat = next.format;
-    lastPreserveLayout = preserve;
     lastPreserveLineEnds = preserveLineEnds;
     lastRenderColumnCap = renderColumnCap;
     const nextTop = resetVirtualRows(
@@ -779,7 +774,6 @@
     const width = terminalElement?.clientWidth
       || Math.round(window.visualViewport?.width || window.innerWidth);
     const layoutSignature = [
-      lastPreserveLayout ? 'preserve' : 'readable',
       resizeLayoutActive ? 'resize' : 'fixed',
       lastPreserveLineEnds ? 'line-ends' : 'wrapped',
       lastLeasedColumns || renderedResizeColumns,
@@ -810,8 +804,7 @@
       // Rows wrap in the two regimes that have a width to wrap at: engaged
       // (the leased width, fixed grids excepted) and pending (the container).
       // A relay that cannot lease keeps every row on one line.
-      const wraps = (!lastPreserveLayout
-        || (resizeLayoutPending && !row.wideGrid)
+      const wraps = ((resizeLayoutPending && !row.wideGrid)
         || (resizeLayoutActive && !row.fixedGrid && !row.wideGrid))
         ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
         : 1;
@@ -828,7 +821,7 @@
       nextTop = terminalScreenOffset() + virtualIndex.offset(anchorIndex) + anchorOffset;
     }
 
-    if (!lastPreserveLayout || resizeLayoutPending) virtualContentColumns = 0;
+    if (resizeLayoutPending) virtualContentColumns = 0;
     else {
       virtualContentColumns = terminalScreenColumns(
         renderedRows,
@@ -1558,7 +1551,7 @@
   <div class="term-wrap">
   <div
     class:resize-layout={resizeLayoutActive} class:resize-pending={resizeLayoutPending}
-    class="term-content preserve-layout"
+    class="term-content"
     style={terminalContentStyle}
     bind:this={terminalElement}
     role="log"
