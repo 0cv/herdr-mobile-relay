@@ -51,7 +51,7 @@ the same request ID replay that result.
 
 ## Profile ownership and installation recovery
 
-Clear and Restart start a replacement with the agent's launch profile. A
+Clear starts a replacement with the agent's launch profile. A
 verified association between the profile and the terminal, pane, tab and
 workspace identities wins; otherwise the profile matching the agent's reported
 name (including aliases) is used. The replacement runs that profile's command,
@@ -66,8 +66,8 @@ and removed profiles are not verified. Confirmed disappearance or terminal
 replacement invalidates the association. Read-only access and explicitly
 requested stop operations do not need a profile.
 
-A corrupt ownership store disables verified associations, so Clear and Restart
-use the reported agent name. Preserve the store for inspection and restore a
+A corrupt ownership store disables verified associations, so Clear uses the
+reported agent name. Preserve the store for inspection and restore a
 trusted backup while the relay is stopped. If no backup exists, an operator can
 explicitly archive the damaged file and restart with an empty store; only new,
 verified launches establish ownership again. Do not copy records to a

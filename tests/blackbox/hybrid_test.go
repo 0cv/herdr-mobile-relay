@@ -532,7 +532,7 @@ func TestGatewayPathControlsRelay(t *testing.T) {
 		}
 
 		p.sendMessage(ctx, map[string]any{
-			"type":              "send_text",
+			"type":              "submit_prompt",
 			"protocol":          3,
 			"request_id":        "gw-1",
 			"pane_id":           "pane-1",

@@ -34,6 +34,29 @@ func TestDecodeCanonicalOperation(t *testing.T) {
 	}
 }
 
+func TestInputAndLifecycleActionClassification(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		known  bool
+	}{
+		{"send_text", false},
+		{"agent_restart", false},
+		{"send_input", true},
+		{"submit_prompt", true},
+		{"agent_clear", true},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			metadata, known := ClassifyAction(tc.action)
+			if known != tc.known {
+				t.Fatalf("ClassifyAction(%q) known = %v, want %v", tc.action, known, tc.known)
+			}
+			if known && (metadata.Class != ActionMutating || !metadata.Coordinated || !metadata.Audited) {
+				t.Fatalf("mutation metadata = %+v", metadata)
+			}
+		})
+	}
+}
+
 func TestEveryInboundFixtureDecodesAsV3Action(t *testing.T) {
 	root := filepath.Join("..", "..", "contracts", "fixtures", "inbound")
 	entries, err := os.ReadDir(root)

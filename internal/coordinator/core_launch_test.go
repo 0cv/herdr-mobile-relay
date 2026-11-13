@@ -109,8 +109,8 @@ func TestCoreLaunchReusesWorkspaceAndHermesArgs(t *testing.T) {
 	}
 }
 
-func TestCoreClearAndRestart(t *testing.T) {
-	for _, action := range []string{"agent_clear", "agent_restart", "agent_clear_without_launch_record", "agent_restart_without_launch_record"} {
+func TestCoreClear(t *testing.T) {
+	for _, action := range []string{"agent_clear", "agent_clear_without_launch_record"} {
 		t.Run(action, func(t *testing.T) {
 			f, old := newClearFixture(t, launchFixtureOptions{})
 			action, unrecorded := strings.CutSuffix(action, "_without_launch_record")
