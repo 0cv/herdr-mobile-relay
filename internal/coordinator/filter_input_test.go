@@ -161,7 +161,7 @@ func TestFilterDelivery(t *testing.T) {
 			}()
 			client := herdr.NewClient("unused", socket)
 			d := NewDispatcher(client, state, nil, testLogger())
-			result := d.Handle(ctx, map[string]any{"action": "send_filter_text", "pane_id": "pane-1", "text": tc.text})
+			result := d.Handle(ctx, map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": tc.text})
 			if result.Phase != tc.phase {
 				t.Errorf("result = %+v, want phase %s", result, tc.phase)
 			}

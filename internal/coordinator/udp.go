@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net"
-	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -18,7 +17,6 @@ type UDPEvent struct {
 	WorkspaceID string `json:"workspace_id"`
 	Status      string `json:"status"`
 	Agent       string `json:"agent"`
-	UpdatedAt   string `json:"updated_at"`
 }
 
 type UDPListener struct {
@@ -112,14 +110,12 @@ func (l *UDPListener) Run(ctx context.Context) {
 		}
 		l.received.Add(1)
 
-		updatedAt := parseUpdatedAt(event.UpdatedAt)
-
 		committed := l.state.CommitEventForSession(
 			event.PaneID,
 			event.TabID,
 			event.WorkspaceID,
 			event.Status,
-			updatedAt,
+			time.Now().UnixMilli(),
 		)
 		l.logger.Debug("udp event committed",
 			"pane", event.PaneID,
@@ -147,17 +143,4 @@ func (l *UDPListener) Metrics() UDPMetrics {
 
 func (l *UDPListener) Close() error {
 	return l.conn.Close()
-}
-
-func parseUpdatedAt(s string) int64 {
-	if s == "" {
-		return time.Now().UnixMilli()
-	}
-	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return n
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UnixMilli()
-	}
-	return time.Now().UnixMilli()
 }

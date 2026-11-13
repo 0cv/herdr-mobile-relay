@@ -16,15 +16,12 @@ func TestDecodeCanonicalOperation(t *testing.T) {
 		want    string
 		invalid bool
 	}{
-		{"matching", map[string]any{"type": "send_secret", "action": "send_secret"}, "send_secret", false},
-		{"conflict", map[string]any{"type": "refresh_agents", "action": "send_secret"}, "", true},
-		{"reverse conflict", map[string]any{"type": "send_secret", "action": "refresh_agents"}, "", true},
 		{"type only", map[string]any{"type": "send_secret"}, "send_secret", false},
-		{"action only", map[string]any{"action": "send_secret"}, "send_secret", false},
-		{"legacy", map[string]any{"type": "command", "action": "send_secret"}, "send_secret", false},
+		{"type determines action", map[string]any{"type": "send_secret", "action": "refresh_agents"}, "send_secret", false},
+		{"action only", map[string]any{"action": "send_secret"}, "", true},
+		{"command envelope", map[string]any{"type": "command", "action": "send_secret"}, "command", false},
 		{"missing", map[string]any{}, "", true},
 		{"unknown", map[string]any{"type": "unknown"}, "unknown", false},
-		{"bare command", map[string]any{"type": "command"}, "command", false},
 		{"nonstring type", map[string]any{"type": 1, "action": "send_secret"}, "", true},
 		{"nonstring action ignored", map[string]any{"type": "send_secret", "action": 1}, "send_secret", false},
 	} {
@@ -68,10 +65,9 @@ func TestEveryInboundFixtureDecodesAsV3Action(t *testing.T) {
 	}
 }
 
-func TestCommandEnvelopeCannotBypassProtocolGate(t *testing.T) {
+func TestUnversionedActionCannotBypassProtocolGate(t *testing.T) {
 	message, err := DecodeMap(map[string]any{
-		"type":       "command",
-		"action":     "agent_stop",
+		"type":       "agent_stop",
 		"request_id": "unversioned",
 		"pane_id":    "pane-1",
 	})
@@ -134,7 +130,7 @@ func TestPushConfigFixtureHasRequiredCutoverFields(t *testing.T) {
 
 func TestDecodeFailureUsesStableError(t *testing.T) {
 	response := DecodeFailureResponse(map[string]any{
-		"type": "command", "action": "agent_start", "request_id": "r1",
+		"type": "agent_start", "request_id": "r1",
 	})
 	apiError, ok := response["error"].(ApiError)
 	if response["type"] != "error" || response["request_id"] != "r1" || !ok ||
@@ -192,8 +188,7 @@ func TestDeviceAndReceiptJSON(t *testing.T) {
 
 func TestInboundDecodesCompositeScope(t *testing.T) {
 	raw := map[string]any{
-		"type":              "command",
-		"action":            "submit_prompt",
+		"type":              "submit_prompt",
 		"protocol":          Version,
 		"request_id":        "request-1",
 		"action_id":         "action-1",

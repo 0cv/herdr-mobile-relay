@@ -102,7 +102,7 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 	}
 
 	prompt := dispatcher.Handle(ctx, map[string]any{
-		"action":     "submit_prompt",
+		"type":       "submit_prompt",
 		"request_id": "prompt",
 		"pane_id":    "pane-1",
 		"text":       "continue",

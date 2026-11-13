@@ -96,39 +96,33 @@ func TestAuditWriteDetailsBoundsWorkspaceIDs(t *testing.T) {
 	}
 }
 
-func TestCanonicalOperationAuditPolicy(t *testing.T) {
+func TestAuditUsesDirectActionType(t *testing.T) {
 	for _, tc := range []struct {
-		typ, action, want string
-		write             bool
+		typ, action string
+		write       bool
 	}{
-		{"send_secret", "", "send_secret", true},
-		{"send_secret", "send_secret", "send_secret", true},
-		{"command", "send_secret", "send_secret", true},
-		{"", "send_secret", "send_secret", true},
-		{"refresh_agents", "", "refresh_agents", false},
-		{"refresh_agents", "send_secret", "", false},
-		{"send_secret", "refresh_agents", "", false},
-		{"submit_prompt", "send_secret", "", false},
+		{"send_secret", "", true},
+		{"send_secret", "refresh_agents", true},
+		{"command", "send_secret", false},
+		{"", "send_secret", false},
+		{"refresh_agents", "send_secret", false},
 	} {
 		message := map[string]any{"type": tc.typ, "action": tc.action, "text": "fixture", "keys": []any{"f", "Enter"}}
 		operation := auditAction(message)
-		if operation != tc.want || isAuditedWrite(operation) != tc.write {
+		if operation != tc.typ || isAuditedWrite(operation) != tc.write {
 			t.Fatalf("%q/%q: operation=%q, audited=%v", tc.typ, tc.action, operation, isAuditedWrite(operation))
 		}
-		details := auditWriteDetails(message)
-		if tc.want == "refresh_agents" {
+		if !tc.write {
 			continue
 		}
+		details := auditWriteDetails(message)
 		for _, key := range []string{"payload_sha256", "payload_bytes", "keys", "text"} {
 			if _, exists := details[key]; exists {
 				t.Fatalf("%q/%q retained %s", tc.typ, tc.action, key)
 			}
 		}
-		if tc.want == "" && len(details) != 0 {
-			t.Fatalf("ambiguous input retained details: %#v", details)
-		}
-		if tc.want == "send_secret" && details["text_bytes"] != len("fixture") {
-			t.Fatalf("legacy/canonical secret shape missing: %#v", details)
+		if details["text_bytes"] != len("fixture") {
+			t.Fatalf("secret shape missing: %#v", details)
 		}
 	}
 }

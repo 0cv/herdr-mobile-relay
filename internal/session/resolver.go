@@ -85,10 +85,6 @@ func (r *Resolver) SessionNameWithProject(agent string, project conversation.Pro
 }
 
 func sessionCacheKey(agent string, project conversation.ProjectContext, sessionID string) string {
-	if project.ForegroundCWD == "" {
-		// Preserve the pane-only key for existing callers and cache tests.
-		return agent + "|" + project.CWD + "|" + sessionID
-	}
 	return agent + "|" + project.CWD + "|" + project.ForegroundCWD + "|" + sessionID
 }
 

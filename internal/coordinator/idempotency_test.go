@@ -38,7 +38,7 @@ func TestDuplicateAgentStartCreatesOnePane(t *testing.T) {
 			defer wg.Done()
 			<-start
 			results[i] = f.dispatcher.Handle(f.ctx, map[string]any{
-				"action": "agent_start", "request_id": "same-req",
+				"type": "agent_start", "request_id": "same-req",
 				"profile_id": "claude", "name": "proj", "cwd": f.cwd,
 			})
 		}()
@@ -54,7 +54,7 @@ func TestDuplicateAgentStartCreatesOnePane(t *testing.T) {
 func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
 	f := newLaunchFixture(t)
 	message := map[string]any{
-		"action": "agent_start", "request_id": "same-req",
+		"type": "agent_start", "request_id": "same-req",
 		"profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello",
 	}
 	first := f.dispatcher.Handle(f.ctx, message)
@@ -132,7 +132,7 @@ func TestAgentStopRetryDoesNotCloseOrBumpTwice(t *testing.T) {
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, state.RevisionCounter())
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
 	message := map[string]any{
-		"action": "agent_stop", "request_id": "stop-1", "pane_id": "pane-1",
+		"type": "agent_stop", "request_id": "stop-1", "pane_id": "pane-1",
 	}
 	first := d.Handle(context.Background(), message)
 	second := d.Handle(context.Background(), message)
@@ -163,7 +163,7 @@ func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
 	)
 
 	result := d.Handle(context.Background(), map[string]any{
-		"action": "agent_rename", "request_id": "rename-1", "pane_id": "pane-1", "name": "123",
+		"type": "agent_rename", "request_id": "rename-1", "pane_id": "pane-1", "name": "123",
 	})
 	if !result.OK {
 		t.Fatalf("numeric rename failed: %+v", result)
@@ -228,7 +228,7 @@ func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
 	defer client.Close()
 	dispatcher := NewDispatcher(client, state, nil, testLogger())
 	result := dispatcher.Handle(context.Background(), map[string]any{
-		"action": "tab_reorder", "request_id": "move-1", "pane_id": "pane-1", "insert_index": 2,
+		"type": "tab_reorder", "request_id": "move-1", "pane_id": "pane-1", "insert_index": 2,
 	})
 	if !result.OK {
 		t.Fatalf("tab reorder failed: %+v", result)
@@ -237,7 +237,7 @@ func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
 		t.Fatal(serverErr)
 	}
 	invalid := dispatcher.Handle(context.Background(), map[string]any{
-		"action": "tab_reorder", "request_id": "move-invalid", "pane_id": "pane-1", "insert_index": 1.5,
+		"type": "tab_reorder", "request_id": "move-invalid", "pane_id": "pane-1", "insert_index": 1.5,
 	})
 	if invalid.OK || invalid.Error != "Tab position is invalid" {
 		t.Fatalf("fractional tab position accepted: %+v", invalid)
@@ -266,7 +266,7 @@ func TestApprovalRetryAfterStatusChangeReturnsStoredPhase(t *testing.T) {
 		}
 	})
 	message := map[string]any{
-		"action": "respond", "request_id": "approval-1", "pane_id": "pane-1",
+		"type": "respond", "request_id": "approval-1", "pane_id": "pane-1",
 		"event_id": eventID, "approval_fingerprint": fingerprint, "choice": choice,
 		"index": float64(0), "total": float64(2),
 	}
@@ -316,7 +316,7 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 
 	answer := func() *CommandResult {
 		return d.Handle(context.Background(), map[string]any{
-			"action":           "answer_question",
+			"type":             "answer_question",
 			"request_id":       "q",
 			"pane_id":          "pane-1",
 			"interaction_id":   interaction.ID,
@@ -328,7 +328,7 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 	answer() // duplicate: retry or a second client on the same interaction
 
 	conflict := d.Handle(context.Background(), map[string]any{
-		"action":           "answer_question",
+		"type":             "answer_question",
 		"request_id":       "q",
 		"pane_id":          "pane-1",
 		"interaction_id":   interaction.ID,
@@ -414,7 +414,7 @@ func TestQuestionWatcherWaitsThroughTransientUnparseableFrames(t *testing.T) {
 				t.Fatal("initial question did not parse")
 			}
 			message := map[string]any{
-				"action":         test.action,
+				"type":           test.action,
 				"request_id":     "transition",
 				"pane_id":        "pane-1",
 				"interaction_id": interaction.ID,
@@ -549,7 +549,7 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 	defer cancel()
 	navigate := func(requestID string, interaction *question.Interaction) *CommandResult {
 		return d.Handle(ctx, map[string]any{
-			"action":         "navigate_question",
+			"type":           "navigate_question",
 			"request_id":     requestID,
 			"pane_id":        "pane-1",
 			"interaction_id": interaction.ID,
@@ -588,7 +588,7 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 	}
 
 	answer := d.Handle(ctx, map[string]any{
-		"action":           "answer_question",
+		"type":             "answer_question",
 		"request_id":       "answer-1",
 		"pane_id":          "pane-1",
 		"interaction_id":   first.ID,
@@ -605,7 +605,7 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 	awaitUpdate("previous-2", "navigated")
 
 	changedAnswer := d.Handle(ctx, map[string]any{
-		"action":           "answer_question",
+		"type":             "answer_question",
 		"request_id":       "answer-2",
 		"pane_id":          "pane-1",
 		"interaction_id":   first.ID,
@@ -656,7 +656,7 @@ func TestUnchangedQuestionNavigationReturnsReplayableError(t *testing.T) {
 		}
 	})
 	message := map[string]any{
-		"action":         "navigate_question",
+		"type":           "navigate_question",
 		"request_id":     "unchanged",
 		"pane_id":        "pane-1",
 		"interaction_id": interaction.ID,

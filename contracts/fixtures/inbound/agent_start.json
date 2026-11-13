@@ -1,6 +1,5 @@
 {
-  "type": "command",
-  "action": "agent_start",
+  "type": "agent_start",
   "request_id": "req-004",
   "protocol": 3,
   "profile_id": "claude",

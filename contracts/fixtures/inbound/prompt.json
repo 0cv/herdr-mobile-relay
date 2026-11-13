@@ -1,6 +1,5 @@
 {
-  "type": "command",
-  "action": "submit_prompt",
+  "type": "submit_prompt",
   "request_id": "req-001",
   "protocol": 3,
   "pane_id": "pane-1",

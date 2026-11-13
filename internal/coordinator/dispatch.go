@@ -17,7 +17,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
-	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const (
@@ -280,15 +279,12 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	if sequence := uint64Value(message["_server_sequence"]); sequence != 0 {
 		ctx = context.WithValue(ctx, receiptContextKey{}, CommandID(sequence))
 	}
-	action, operationErr := protocol.ResolveOperation(stringValue(message, "type"), stringValue(message, "action"))
+	action := stringValue(message, "type")
 	requestID := stringValue(message, "request_id")
 	if requestID == "" {
 		requestID = fmt.Sprintf("req-%d", receivedAt.UnixNano())
 	}
 	paneID := stringValue(message, "pane_id")
-	if operationErr != nil {
-		return d.fail(requestID, "", paneID, operationErr.Error())
-	}
 	if paneID != "" {
 		generation, _ := d.state.PaneSession(paneID)
 		ctx = context.WithValue(ctx, paneSessionContextKey{}, generation)

@@ -475,7 +475,7 @@ func TestUDPEventTriggersBroadcast(t *testing.T) {
 
 	// Send a UDP event to the plugin port
 	udpAddr := fmt.Sprintf("127.0.0.1:%d", env.pluginPort)
-	event := fmt.Sprintf(`{"type":"agent_event","socket_path":%q,"pane_id":"pane-1","status":"blocked","updated_at":"2026-07-22T12:00:00Z"}`, env.socketPath)
+	event := fmt.Sprintf(`{"type":"agent_event","socket_path":%q,"pane_id":"pane-1","status":"blocked"}`, env.socketPath)
 	udpConn, err := net.Dial("udp", udpAddr)
 	if err != nil {
 		t.Fatalf("udp dial: %v", err)

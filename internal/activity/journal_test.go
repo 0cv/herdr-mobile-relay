@@ -9,6 +9,20 @@ import (
 	"testing"
 )
 
+func TestMilliTimestampRequiresMilliseconds(t *testing.T) {
+	var stamp MilliTimestamp
+	if err := json.Unmarshal([]byte("1700000000123"), &stamp); err != nil || stamp != 1700000000123 {
+		t.Fatalf("timestamp = %d, error = %v", stamp, err)
+	}
+	encoded, err := json.Marshal(stamp)
+	if err != nil || string(encoded) != "1700000000123" {
+		t.Fatalf("encoded timestamp = %s, error = %v", encoded, err)
+	}
+	if err := json.Unmarshal([]byte(`"2023-11-14T22:13:20Z"`), &stamp); err == nil {
+		t.Fatal("string timestamp was accepted")
+	}
+}
+
 func TestAppendAndRecent(t *testing.T) {
 	dir := t.TempDir()
 	j, err := OpenJournal(dir)

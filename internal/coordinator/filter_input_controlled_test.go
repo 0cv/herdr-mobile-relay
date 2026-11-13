@@ -175,7 +175,7 @@ func TestFilterDelayedRepaintConfirmsWithoutResending(t *testing.T) {
 		}
 		return ctx.Err()
 	}
-	result := d.Handle(context.Background(), map[string]any{"action": "send_filter_text", "pane_id": "pane-1", "text": "gr"})
+	result := d.Handle(context.Background(), map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": "gr"})
 	if !result.OK {
 		t.Fatalf("delayed repaint: %+v", result)
 	}
@@ -198,7 +198,7 @@ func TestFilterReadFailureAfterPrefixIsUnknown(t *testing.T) {
 	d, fake := newControlledFilterDispatcher(t)
 	fake.failReadsAfterWrite = true
 	d.testFilterWait = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
-	result := d.Handle(context.Background(), map[string]any{"action": "send_filter_text", "pane_id": "pane-1", "text": "grok"})
+	result := d.Handle(context.Background(), map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": "grok"})
 	assertFilterUnknown(t, result)
 	want := []filterSocketWrite{{"pane-1", "pane.send_keys", "g"}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
@@ -223,7 +223,7 @@ func TestFilterSchedulerDeadlineAfterPrefixIsUnknown(t *testing.T) {
 	results := make(chan *CommandResult, 1)
 	go func() {
 		results <- d.Handle(context.Background(), map[string]any{
-			"action": "send_filter_text", "pane_id": "pane-1", "text": "gr",
+			"type": "send_filter_text", "pane_id": "pane-1", "text": "gr",
 			"_server_received_at": receivedAt.Format(time.RFC3339Nano),
 		})
 	}()
@@ -283,7 +283,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 	}
 	filterResult := make(chan *CommandResult, 1)
 	go func() {
-		filterResult <- d.Handle(context.Background(), map[string]any{"action": "send_filter_text", "pane_id": "pane-1", "text": "gr"})
+		filterResult <- d.Handle(context.Background(), map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": "gr"})
 	}()
 	select {
 	case <-entered:
@@ -294,7 +294,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 	sameCtx := context.WithValue(context.Background(), admissionContextKey{}, func() { close(admitted) })
 	sameResult := make(chan *CommandResult, 1)
 	go func() {
-		sameResult <- d.Handle(sameCtx, map[string]any{"action": "send_input", "pane_id": "pane-1", "text": "same"})
+		sameResult <- d.Handle(sameCtx, map[string]any{"type": "send_input", "pane_id": "pane-1", "text": "same"})
 	}()
 	select {
 	case <-admitted:
@@ -303,7 +303,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 	}
 	otherResult := make(chan *CommandResult, 1)
 	go func() {
-		otherResult <- d.Handle(context.Background(), map[string]any{"action": "send_input", "pane_id": "pane-2", "text": "other"})
+		otherResult <- d.Handle(context.Background(), map[string]any{"type": "send_input", "pane_id": "pane-2", "text": "other"})
 	}()
 	if result := receiveFilterResult(t, otherResult); !result.OK {
 		t.Fatalf("other pane blocked: %+v", result)

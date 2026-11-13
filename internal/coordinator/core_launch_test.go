@@ -120,7 +120,7 @@ func TestCoreClearAndRestart(t *testing.T) {
 			b := &coreLaunchBackend{Backend: f.dispatcher.herdr, inventoryWorkspace: old.WorkspaceID, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID}}
 			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
 			message := clearMessage()
-			message["action"] = action
+			message["type"] = action
 			result := f.dispatcher.Handle(f.ctx, message)
 			if !result.OK || !reflect.DeepEqual(b.calls, []string{"run", "kill:" + old.PaneID}) {
 				t.Fatalf("result=%+v calls=%v", result, b.calls)
@@ -185,7 +185,7 @@ func TestCoreLaunchPromptAndReplay(t *testing.T) {
 				b.promptErr = herdr.ErrDispatchedUnknown
 			}
 			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
-			message := map[string]any{"action": "agent_start", "request_id": "core-launch", "profile_id": "claude", "name": "fixture", "cwd": f.cwd, "prompt": "hello"}
+			message := map[string]any{"type": "agent_start", "request_id": "core-launch", "profile_id": "claude", "name": "fixture", "cwd": f.cwd, "prompt": "hello"}
 			result := f.dispatcher.Handle(f.ctx, message)
 			wantPhase := "completed"
 			wantCalls := []string{"run", "prompt"}

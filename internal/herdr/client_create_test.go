@@ -44,16 +44,13 @@ func TestTabCreateParsesHerdr075NestedResult(t *testing.T) {
 	}
 }
 
-func TestCreateResultKeepsFlatCompatibility(t *testing.T) {
+func TestCreateRequiresNestedRootPane(t *testing.T) {
 	bin := writeResultScript(t, `{"result":{"pane_id":"pane-flat","tab_id":"tab-flat","workspace_id":"workspace-flat"}}`)
 	client := NewClient(bin, filepath.Join(t.TempDir(), "herdr.sock"))
 
 	result, err := client.TabCreate(context.Background(), "workspace-flat", "/home/user/project", "agent")
-	if err != nil {
-		t.Fatalf("TabCreate() error = %v", err)
-	}
-	if result.PaneID != "pane-flat" || result.TabID != "tab-flat" || result.WorkspaceID != "workspace-flat" {
-		t.Fatalf("TabCreate() = %#v, want flat identifiers", result)
+	if result != nil || !errors.Is(err, ErrCreatedTargetUnknown) {
+		t.Fatalf("TabCreate() = %#v, %v, want ErrCreatedTargetUnknown", result, err)
 	}
 }
 

@@ -1,6 +1,5 @@
 {
-  "type": "command",
-  "action": "send_keys",
+  "type": "send_keys",
   "request_id": "req-002",
   "protocol": 3,
   "pane_id": "pane-1",

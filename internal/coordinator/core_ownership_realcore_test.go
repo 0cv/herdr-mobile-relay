@@ -54,7 +54,7 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 	poller := NewPoller(client, state, time.Hour, testLogger())
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
-	result := d.Handle(ctx, map[string]any{"action": "agent_start", "request_id": "launch", "profile_id": "fixture", "name": "fixture", "cwd": cwd})
+	result := d.Handle(ctx, map[string]any{"type": "agent_start", "request_id": "launch", "profile_id": "fixture", "name": "fixture", "cwd": cwd})
 	if !result.OK {
 		t.Fatalf("launch: %+v", result)
 	}
@@ -119,7 +119,7 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 		t.Fatalf("labels changed: %+v %+v %v", pane, observed, err)
 	}
 	for _, action := range []string{"agent_clear", "agent_restart"} {
-		result = d.Handle(ctx, map[string]any{"action": action, "request_id": action, "pane_id": old})
+		result = d.Handle(ctx, map[string]any{"type": action, "request_id": action, "pane_id": old})
 		if !result.OK {
 			t.Fatalf("%s: %+v", action, result)
 		}

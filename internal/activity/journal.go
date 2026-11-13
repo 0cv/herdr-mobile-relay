@@ -30,18 +30,6 @@ func (t MilliTimestamp) MarshalJSON() ([]byte, error) {
 }
 
 func (t *MilliTimestamp) UnmarshalJSON(data []byte) error {
-	if len(data) > 0 && data[0] == '"' {
-		var s string
-		if err := json.Unmarshal(data, &s); err != nil {
-			return err
-		}
-		parsed, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			return err
-		}
-		*t = MilliTimestamp(parsed.UnixMilli())
-		return nil
-	}
 	var n int64
 	if err := json.Unmarshal(data, &n); err != nil {
 		return err

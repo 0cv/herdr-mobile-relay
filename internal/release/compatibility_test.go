@@ -7,14 +7,31 @@ import (
 	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
-func TestValidateUpgradeCompatibilityTreatsLegacyReleaseAsE2EEV1(t *testing.T) {
-	legacy := Manifest{}
-	target := Manifest{
+func TestValidateUpgradeCompatibilityRequiresDeclaredTransports(t *testing.T) {
+	complete := Manifest{
 		AppTransports:   []string{relayprotocol.EncryptedWebSocketSubprotocol},
 		RelayTransports: []string{relayprotocol.EncryptedWebSocketSubprotocol},
 	}
-	if err := ValidateUpgradeCompatibility(legacy, target); err == nil || !strings.Contains(err.Error(), "bridge release") {
-		t.Fatalf("compatibility error = %v", err)
+	for _, owner := range []string{"current", "target"} {
+		for _, missing := range []string{"app", "relay", "both"} {
+			t.Run(owner+"/"+missing, func(t *testing.T) {
+				incomplete := complete
+				if missing != "relay" {
+					incomplete.AppTransports = nil
+				}
+				if missing != "app" {
+					incomplete.RelayTransports = nil
+				}
+				current, target := complete, incomplete
+				if owner == "current" {
+					current, target = incomplete, complete
+				}
+				err := ValidateUpgradeCompatibility(current, target)
+				if err == nil || !strings.Contains(err.Error(), owner+" release does not declare") {
+					t.Fatalf("compatibility error = %v", err)
+				}
+			})
+		}
 	}
 }
 
