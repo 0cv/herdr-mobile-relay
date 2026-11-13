@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,19 +17,59 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
+	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
+
+const fixtureScript = "window.fixture = true;"
+const fixtureStyle = "body{}"
+
+var fixtureScriptPath = "/assets/app-" + fixtureDigest(fixtureScript) + ".js"
+var fixtureStylePath = "/assets/app-" + fixtureDigest(fixtureStyle) + ".css"
+
+func fixtureDigest(data string) string {
+	digest := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(digest[:])
+}
+
+func fixtureDescriptorFile(path, data string) relayrelease.WebDescriptorFile {
+	digest := sha256.Sum256([]byte(data))
+	return relayrelease.WebDescriptorFile{
+		Path:      strings.TrimPrefix(path, "/"),
+		SHA256:    hex.EncodeToString(digest[:]),
+		Integrity: "sha256-" + base64.StdEncoding.EncodeToString(digest[:]),
+	}
+}
 
 func fixtureWebRoot(t *testing.T, version string, marker string) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "assets"), 0o755); err != nil {
+	script := fixtureDescriptorFile(fixtureScriptPath, fixtureScript)
+	style := fixtureDescriptorFile(fixtureStylePath, fixtureStyle)
+	entryPath := "builds/" + version + "-1-0123456789abcdef/index.html"
+	entry := "<html>" + marker + `<link rel="stylesheet" href="` + fixtureStylePath + `" integrity="` + style.Integrity + `"><script src="` + fixtureScriptPath + `" integrity="` + script.Integrity + `"></script></html>`
+	descriptor := relayrelease.WebDescriptor{
+		Schema:  relayrelease.WebDescriptorSchema,
+		Version: version,
+		Assets:  1,
+		Build:   strings.Repeat("a", 64),
+		Entry:   "/" + entryPath,
+		Files: map[string]relayrelease.WebDescriptorFile{
+			"entry":      fixtureDescriptorFile(entryPath, entry),
+			"javascript": script,
+			"stylesheet": style,
+		},
+	}
+	descriptorData, err := json.Marshal(descriptor)
+	if err != nil {
 		t.Fatal(err)
 	}
 	files := map[string]string{
 		"index.html":           "<html>" + marker + "</html>",
-		"assets/app.js":        "window.fixture = '" + marker + "';",
-		"assets/app.css":       "body{}",
+		entryPath:              entry,
+		script.Path:            fixtureScript,
+		style.Path:             fixtureStyle,
+		"release.json":         string(descriptorData),
 		"version.json":         `{"version":"` + version + `","assets":1}`,
 		"manifest-loader.js":   "",
 		"manifest.webmanifest": "{}",
@@ -34,7 +77,11 @@ func fixtureWebRoot(t *testing.T, version string, marker string) string {
 		"sw.js":                "",
 	}
 	for name, contents := range files {
-		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(contents), 0o644); err != nil {
+		filename := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, []byte(contents), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -49,8 +96,13 @@ func TestReleaseRouterSwapKeepsOriginAndChangesBundle(t *testing.T) {
 	defer router.close()
 
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	firstRedirect := httptest.NewRecorder()
+	router.ServeHTTP(firstRedirect, request)
+	if firstRedirect.Code != http.StatusTemporaryRedirect || firstRedirect.Header().Get("Location") != "/builds/0.20.8-1-0123456789abcdef/index.html" {
+		t.Fatalf("old redirect = %d %#v", firstRedirect.Code, firstRedirect.Header())
+	}
 	first := httptest.NewRecorder()
-	router.ServeHTTP(first, request)
+	router.ServeHTTP(first, httptest.NewRequest(http.MethodGet, firstRedirect.Header().Get("Location"), nil))
 	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "old") {
 		t.Fatalf("old response = %d %q", first.Code, first.Body.String())
 	}
@@ -60,13 +112,18 @@ func TestReleaseRouterSwapKeepsOriginAndChangesBundle(t *testing.T) {
 	if err := router.activate("candidate"); err != nil {
 		t.Fatal(err)
 	}
+	secondRedirect := httptest.NewRecorder()
+	router.ServeHTTP(secondRedirect, httptest.NewRequest(http.MethodGet, "/", nil))
+	if secondRedirect.Code != http.StatusTemporaryRedirect || secondRedirect.Header().Get("Location") != "/builds/0.20.10-1-0123456789abcdef/index.html" {
+		t.Fatalf("candidate redirect = %d %#v", secondRedirect.Code, secondRedirect.Header())
+	}
 	second := httptest.NewRecorder()
-	router.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/", nil))
+	router.ServeHTTP(second, httptest.NewRequest(http.MethodGet, secondRedirect.Header().Get("Location"), nil))
 	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), "candidate") {
 		t.Fatalf("candidate response = %d %q", second.Code, second.Body.String())
 	}
 	requests := router.snapshotRequests()
-	if len(requests) != 2 || requests[0].Release != "old" || requests[1].Release != "candidate" {
+	if len(requests) != 4 || requests[0].Release != "old" || requests[1].Release != "old" || requests[2].Release != "candidate" || requests[3].Release != "candidate" {
 		t.Fatalf("requests = %#v", requests)
 	}
 }
@@ -77,7 +134,7 @@ func TestReleaseRouterExpiredFaultCannotBeCleared(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer router.close()
-	if err := router.addFault(responseFault{ID: "short-lived", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.js", Kind: "missing", Remaining: -1, LifetimeMs: 1}); err != nil {
+	if err := router.addFault(responseFault{ID: "short-lived", Generation: "generation-1", Method: http.MethodGet, Path: fixtureScriptPath, Kind: "missing", Remaining: -1, LifetimeMs: 1}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -100,7 +157,7 @@ func TestReleaseRouterPersistentFaultRequiresExplicitClear(t *testing.T) {
 	if err := router.activate("candidate"); err != nil {
 		t.Fatal(err)
 	}
-	if err := router.addFault(responseFault{ID: "candidate-style", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.css", Kind: "missing", Remaining: -1}); err != nil {
+	if err := router.addFault(responseFault{ID: "candidate-style", Generation: "generation-1", Method: http.MethodGet, Path: fixtureStylePath, Kind: "missing", Remaining: -1}); err != nil {
 		t.Fatal(err)
 	}
 	responses := make(chan int, 4)
@@ -110,7 +167,7 @@ func TestReleaseRouterPersistentFaultRequiresExplicitClear(t *testing.T) {
 		go func() {
 			defer group.Done()
 			response := httptest.NewRecorder()
-			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.css", nil))
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, fixtureStylePath, nil))
 			responses <- response.Code
 		}()
 	}
@@ -132,7 +189,7 @@ func TestReleaseRouterPersistentFaultRequiresExplicitClear(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.css", nil))
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, fixtureStylePath, nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("cleared fault response = %d", response.Code)
 	}
@@ -144,12 +201,12 @@ func TestReleaseRouterFaultExpiryInvalidatesFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer router.close()
-	if err := router.addFault(responseFault{ID: "short-lived", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.js", Kind: "missing", Remaining: -1, LifetimeMs: 1}); err != nil {
+	if err := router.addFault(responseFault{ID: "short-lived", Generation: "generation-1", Method: http.MethodGet, Path: fixtureScriptPath, Kind: "missing", Remaining: -1, LifetimeMs: 1}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
 	response := httptest.NewRecorder()
-	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, fixtureScriptPath, nil))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expired fault status = %d, body = %q", response.Code, response.Body.String())
 	}
@@ -250,8 +307,8 @@ func TestImmutableFaultsServeDistinctHTMLAndCorruptResponses(t *testing.T) {
 		contentType string
 		body        string
 	}{
-		{id: "html-poison", path: "/assets/app.js", kind: "immutable-html", contentType: "text/html; charset=utf-8", body: string(immutableHTML)},
-		{id: "corrupt-poison", path: "/assets/app.css", kind: "immutable-corrupt", contentType: "text/css; charset=utf-8", body: "export const fixturePoison = 'not the canonical module';"},
+		{id: "html-poison", path: fixtureScriptPath, kind: "immutable-html", contentType: "text/html; charset=utf-8", body: string(immutableHTML)},
+		{id: "corrupt-poison", path: fixtureStylePath, kind: "immutable-corrupt", contentType: "text/css; charset=utf-8", body: "export const fixturePoison = 'not the canonical module';"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.id, func(t *testing.T) {
@@ -287,7 +344,7 @@ func TestImmutableFaultFiniteConsumptionAndExhaustionAreRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer router.close()
-	fault := responseFault{ID: "finite", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.js", Kind: "immutable-html", Remaining: 2}
+	fault := responseFault{ID: "finite", Generation: "generation-1", Method: http.MethodGet, Path: fixtureScriptPath, Kind: "immutable-html", Remaining: 2}
 	if err := router.addFault(fault); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +386,7 @@ func TestImmutableFaultGenerationAndExplicitRepairAreIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer router.close()
-	fault := responseFault{ID: "same-fault", Generation: "generation-2", Method: http.MethodGet, Path: "/assets/app.js", Kind: "immutable-corrupt", Remaining: -1}
+	fault := responseFault{ID: "same-fault", Generation: "generation-2", Method: http.MethodGet, Path: fixtureScriptPath, Kind: "immutable-corrupt", Remaining: -1}
 	if err := router.addFault(responseFault{ID: fault.ID, Generation: "generation-1", Method: fault.Method, Path: fault.Path, Kind: fault.Kind, Remaining: -1}); err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +442,7 @@ func TestImmutablePersistentFaultExpiresAndInvalidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer router.close()
-	fault := responseFault{ID: "persistent-poison", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.js", Kind: "immutable-html", Remaining: -1, LifetimeMs: 20}
+	fault := responseFault{ID: "persistent-poison", Generation: "generation-1", Method: http.MethodGet, Path: fixtureScriptPath, Kind: "immutable-html", Remaining: -1, LifetimeMs: 20}
 	if err := router.addFault(fault); err != nil {
 		t.Fatal(err)
 	}
@@ -418,11 +475,11 @@ func TestFaultControlsEnforceLifetimeCountAndResourceBounds(t *testing.T) {
 	}
 	defer router.close()
 	invalid := []responseFault{
-		{Path: "/assets/app.js", Kind: "immutable-html", Remaining: maxFaultResponses + 1},
-		{Path: "/assets/app.js", Kind: "immutable-corrupt", Remaining: -2},
-		{Path: "/assets/app.js", Kind: "immutable-html", Remaining: 1, LifetimeMs: int(maxFaultLifetime/time.Millisecond) + 1},
+		{Path: fixtureScriptPath, Kind: "immutable-html", Remaining: maxFaultResponses + 1},
+		{Path: fixtureScriptPath, Kind: "immutable-corrupt", Remaining: -2},
+		{Path: fixtureScriptPath, Kind: "immutable-html", Remaining: 1, LifetimeMs: int(maxFaultLifetime/time.Millisecond) + 1},
 		{Path: "/index.html", Kind: "immutable-html", Remaining: 1},
-		{Path: "/assets/app.js?cache=bypass", Kind: "immutable-corrupt", Remaining: 1},
+		{Path: fixtureScriptPath + "?cache=bypass", Kind: "immutable-corrupt", Remaining: 1},
 	}
 	for _, fault := range invalid {
 		if err := router.addFault(fault); err == nil {
