@@ -159,19 +159,6 @@ func TestNewManagerRejectsUnsafeVAPIDLayouts(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid private only", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "vapid_private.pem"), []byte("not-a-key\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := NewManager(dir, testLogger()); err == nil || !strings.Contains(err.Error(), "parse VAPID private key") {
-			t.Fatalf("NewManager error = %v, want invalid-private error", err)
-		}
-		if _, err := os.Stat(filepath.Join(dir, "vapid_public.pem")); !os.IsNotExist(err) {
-			t.Fatalf("public key created for invalid private key: %v", err)
-		}
-	})
-
 	t.Run("mismatched pair", func(t *testing.T) {
 		dir := t.TempDir()
 		privatePEM, _ := testVAPIDKeyPair(t)

@@ -7,6 +7,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The relay now starts even if old push keys or subscriptions cannot be parsed.
+  If push notifications stop after updating, turning Push Notifications off and
+  on in Settings restores them.
 - Interface sizes saved before 0.10.0 and never changed now reset to the
   default. Sizes saved by newer app builds are unchanged.
 - Relay status and `/healthz` now report `gateway.stun.mapped` as a single address

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
@@ -152,11 +150,23 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 	if privMissing && !pubMissing {
 		return fmt.Errorf("VAPID private key is missing while public key exists")
 	}
+	var privateKey *ecdsa.PrivateKey
+	var publicKey *ecdsa.PublicKey
 	if !privMissing {
-		privateKey, err := parseVAPIDPrivateKey(string(privData))
+		var err error
+		privateKey, err = parseVAPIDPrivateKey(string(privData))
 		if err != nil {
-			return fmt.Errorf("parse VAPID private key: %w", err)
+			m.logger.Warn("parse VAPID private key; generating new key pair", "error", err)
 		}
+	}
+	if !pubMissing {
+		var err error
+		publicKey, err = parseVAPIDPublicKey(string(pubData))
+		if err != nil {
+			m.logger.Warn("parse VAPID public key; generating new key pair", "error", err)
+		}
+	}
+	if privateKey != nil && (pubMissing || publicKey != nil) {
 		derivedPublic := deriveVAPIDPublic(privateKey)
 
 		if pubMissing {
@@ -170,10 +180,6 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 			}
 			m.logger.Info("derived missing VAPID public key from existing private key")
 		} else {
-			publicKey, err := parseVAPIDPublicKey(string(pubData))
-			if err != nil {
-				return fmt.Errorf("parse VAPID public key: %w", err)
-			}
 			if publicKey.X.Cmp(derivedPublic.X) != 0 || publicKey.Y.Cmp(derivedPublic.Y) != 0 {
 				return fmt.Errorf("VAPID public key does not match private key")
 			}
@@ -187,12 +193,6 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 			if err := os.Chmod(privPath, info.Mode().Perm()&0o600); err != nil {
 				return fmt.Errorf("protect VAPID private key: %w", err)
 			}
-		}
-		privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
-		if err != nil {
-			m.logger.Warn("encode loaded VAPID private key", "error", err)
-		} else {
-			m.rewriteLoadedFile(privPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}))
 		}
 		m.vapidPrivate = encodeVAPIDPrivate(privateKey)
 		m.vapidPublic = encodeVAPIDPublic(derivedPublic)
@@ -227,40 +227,18 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 }
 
 func parseVAPIDPrivateKey(data string) (*ecdsa.PrivateKey, error) {
-	data = strings.TrimSpace(data)
-	if !strings.HasPrefix(data, "-----BEGIN") {
-		scalar, err := base64.RawURLEncoding.DecodeString(data)
-		if err != nil {
-			return nil, fmt.Errorf("decode private scalar: %w", err)
-		}
-		curve := elliptic.P256()
-		d := new(big.Int).SetBytes(scalar)
-		if d.Sign() <= 0 || d.Cmp(curve.Params().N) >= 0 {
-			return nil, fmt.Errorf("private scalar is outside the P-256 range")
-		}
-		x, y := curve.ScalarBaseMult(d.Bytes())
-		return &ecdsa.PrivateKey{
-			PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y},
-			D:         d,
-		}, nil
-	}
-
 	block, _ := pem.Decode([]byte(data))
 	if block == nil {
 		return nil, fmt.Errorf("invalid PEM block")
 	}
 
-	key, err := x509.ParseECPrivateKey(block.Bytes)
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		pkcs8Key, err2 := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err2 != nil {
-			return nil, fmt.Errorf("parse EC key: %v (pkcs8: %v)", err, err2)
-		}
-		ecKey, ok := pkcs8Key.(*ecdsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("not an EC private key")
-		}
-		key = ecKey
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	key, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("not an EC private key")
 	}
 	if key.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("VAPID private key must use P-256")
@@ -269,19 +247,6 @@ func parseVAPIDPrivateKey(data string) (*ecdsa.PrivateKey, error) {
 }
 
 func parseVAPIDPublicKey(data string) (*ecdsa.PublicKey, error) {
-	data = strings.TrimSpace(data)
-	if !strings.HasPrefix(data, "-----BEGIN") {
-		point, err := base64.RawURLEncoding.DecodeString(data)
-		if err != nil {
-			return nil, fmt.Errorf("decode public point: %w", err)
-		}
-		x, y := elliptic.Unmarshal(elliptic.P256(), point)
-		if x == nil || y == nil {
-			return nil, fmt.Errorf("invalid P-256 public point")
-		}
-		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
-	}
-
 	block, _ := pem.Decode([]byte(data))
 	if block == nil {
 		return nil, fmt.Errorf("invalid PEM block")
@@ -355,48 +320,26 @@ func (m *Manager) load() error {
 		return fmt.Errorf("read subscriptions: %w", err)
 	}
 
-	// Try the Python wrapper format first: {"subscriptions":[...]}
 	var pf pythonFile
-	if err := json.Unmarshal(data, &pf); err == nil && pf.Subscriptions != nil {
-		m.subscriptions = make([]Subscription, 0, len(pf.Subscriptions))
-		for _, ps := range pf.Subscriptions {
-			var sub Subscription
-			sub.Endpoint = ps.Subscription.Endpoint
-			sub.Keys.P256dh = ps.Subscription.Keys.P256dh
-			sub.Keys.Auth = ps.Subscription.Keys.Auth
-			sub.DeviceID = ps.DeviceID
-			sub.Locale = ps.Locale
-			sub.Platform = ps.Platform
-			sub.UserAgent = ps.UserAgent
-			sub.ClientID = ps.ClientID
-			m.subscriptions = append(m.subscriptions, sub)
-		}
-		m.subscriptions = keepValidPushSubscriptions(m.subscriptions)
+	if err := json.Unmarshal(data, &pf); err != nil {
+		m.logger.Warn("parse subscriptions; starting with no subscriptions", "error", err)
 		return nil
 	}
-
-	// Fallback: flat array (legacy Go format)
-	if err := json.Unmarshal(data, &m.subscriptions); err != nil {
-		return err
+	m.subscriptions = make([]Subscription, 0, len(pf.Subscriptions))
+	for _, ps := range pf.Subscriptions {
+		var sub Subscription
+		sub.Endpoint = ps.Subscription.Endpoint
+		sub.Keys.P256dh = ps.Subscription.Keys.P256dh
+		sub.Keys.Auth = ps.Subscription.Keys.Auth
+		sub.DeviceID = ps.DeviceID
+		sub.Locale = ps.Locale
+		sub.Platform = ps.Platform
+		sub.UserAgent = ps.UserAgent
+		sub.ClientID = ps.ClientID
+		m.subscriptions = append(m.subscriptions, sub)
 	}
 	m.subscriptions = keepValidPushSubscriptions(m.subscriptions)
-	data, err = encodeSubscriptions(m.subscriptions)
-	if err != nil {
-		m.logger.Warn("encode loaded subscriptions", "error", err)
-	} else {
-		m.rewriteLoadedFile(m.path, data)
-	}
 	return nil
-}
-
-func (m *Manager) rewriteLoadedFile(filename string, data []byte) {
-	info, err := os.Stat(filename)
-	if err == nil {
-		_, err = atomicfile.Replace(filepath.Dir(filename), filename, "."+filepath.Base(filename)+".*", data, info.Mode().Perm())
-	}
-	if err != nil {
-		m.logger.Warn("rewrite loaded push file", "path", filename, "error", err)
-	}
 }
 
 func encodeSubscriptions(subscriptions []Subscription) ([]byte, error) {
