@@ -1,21 +1,121 @@
 package coordinator
 
-// Verification tests for lifecycle generations (§9.5). Unlike the red tests,
-// these are expected to PASS — they lock the implemented behavior against
-// regression. They drive the interleaving deterministically by holding the
-// pane FIFO slot while a Clear/Stop bumps the generation.
-// Helpers testLogger/recordingHerdr live in sibling *_test.go files.
-
 import (
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
+
+type blockedStopBackend struct {
+	backend.Backend
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockedStopBackend) StopPane(ctx context.Context, _ string) error {
+	close(b.entered)
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type blockedCapabilityBackend struct {
+	backend.Backend
+	entered chan struct{}
+	release chan struct{}
+	blocked atomic.Bool
+}
+
+func (b *blockedCapabilityBackend) CapabilityStatus() herdr.ServerStatus {
+	if b.blocked.CompareAndSwap(false, true) {
+		close(b.entered)
+		<-b.release
+	}
+	return b.Backend.CapabilityStatus()
+}
+
+func generationResult(t *testing.T, ctx context.Context, results <-chan *CommandResult) *CommandResult {
+	t.Helper()
+	select {
+	case result := <-results:
+		if result == nil {
+			t.Fatal("command returned no result")
+		}
+		return result
+	case <-ctx.Done():
+		t.Fatal("command did not finish: ", ctx.Err())
+		return nil
+	}
+}
+
+func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, message map[string]any) *CommandResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	client := &blockedStopBackend{Backend: d.herdr, entered: make(chan struct{}), release: make(chan struct{})}
+	d.herdr = client
+	t.Cleanup(func() {
+		cleanupCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := d.Close(cleanupCtx); err != nil {
+			t.Error(err)
+		}
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	stopped := make(chan *CommandResult, 1)
+	go func() {
+		stopped <- d.Handle(ctx, map[string]any{
+			"type": "agent_stop", "request_id": "stop", "pane_id": "pane-1",
+		})
+	}()
+	select {
+	case <-client.entered:
+	case <-ctx.Done():
+		t.Fatal("stop did not reach backend: ", ctx.Err())
+	}
+
+	admitted := make(chan struct{})
+	results := make(chan *CommandResult, 1)
+	go func() {
+		results <- d.HandleAdmitted(ctx, message, func() { close(admitted) })
+	}()
+	select {
+	case <-admitted:
+	case <-ctx.Done():
+		t.Fatal("mutation was not admitted: ", ctx.Err())
+	}
+	fence, err := d.scheduler.Execute(ctx, ScheduleOptions{RelayLevel: true, Command: Command{
+		ID: d.scheduler.NextCommandID(), RequestID: "fence", ReceivedAt: time.Now(), Deadline: time.Now().Add(time.Second),
+	}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
+		return EffectResult{Result: completed("fence", "fence", "", nil)}
+	}))
+	if err != nil || fence == nil || !fence.OK {
+		t.Fatalf("scheduler fence: result=%+v err=%v", fence, err)
+	}
+	select {
+	case result := <-results:
+		t.Fatalf("mutation did not wait for stop: %+v", result)
+	default:
+	}
+
+	close(client.release)
+	if result := generationResult(t, ctx, stopped); !result.OK {
+		t.Fatalf("stop failed: %+v", result)
+	}
+	return generationResult(t, ctx, results)
+}
 
 // §9.5: a mutation that captured generation N must abort — without sending any
 // input — if a Clear/Stop advances the generation while it was queued.
@@ -24,29 +124,15 @@ func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
 	record := filepath.Join(dir, "sends.log")
 	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 
-	// Occupy the pane FIFO so the prompt captures the generation and then queues.
-	slot := d.paneSlot("pane-1")
-	slot <- struct{}{}
-
-	resCh := make(chan *CommandResult, 1)
-	go func() {
-		resCh <- d.Handle(context.Background(), map[string]any{
-			"type": "submit_prompt", "request_id": "p", "pane_id": "pane-1", "text": "hi",
-		})
-	}()
-
-	time.Sleep(100 * time.Millisecond) // prompt is now parked on slot.Lock(), gen captured
-
-	// A Clear commits while the prompt is queued.
-	d.state.BumpGeneration("pane-1")
-	<-slot
-
-	res := <-resCh
+	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, d.state.RevisionCounter())
+	res := mutationQueuedBehindStop(t, d, map[string]any{
+		"type": "submit_prompt", "request_id": "p", "pane_id": "pane-1", "text": "hi",
+	})
 	if res.OK || res.Error != "pane session was replaced" {
 		t.Fatalf("prompt dispatched after generation advanced: ok=%v phase=%q err=%q "+
 			"(§9.5: input must not land on a replaced session)", res.OK, res.Phase, res.Error)
 	}
-	if data, _ := os.ReadFile(record); strings.Contains(string(data), "send-text") {
+	if data, _ := os.ReadFile(record); len(data) != 0 {
 		t.Fatalf("prompt sent input to herdr despite a stale generation:\n%s", data)
 	}
 }
@@ -62,22 +148,11 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
-	slot := d.paneSlot("pane-1")
-	slot <- struct{}{}
-
-	resCh := make(chan *CommandResult, 1)
-	go func() {
-		resCh <- d.Handle(context.Background(), map[string]any{
-			"type": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
-			"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
-		})
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	d.state.BumpGeneration("pane-1")
-	<-slot
-
-	if first := <-resCh; first.Error != "pane session was replaced" {
+	first := mutationQueuedBehindStop(t, d, map[string]any{
+		"type": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
+		"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
+	})
+	if first.OK || first.Error != "pane session was replaced" {
 		t.Fatalf("precondition: first approval err=%q, want stale-generation abort", first.Error)
 	}
 
@@ -243,46 +318,46 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 }
 
 func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(
-		herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")),
-		NewState(testLogger()),
-		nil,
-		testLogger(),
-	)
-	t.Cleanup(func() {
-		_ = d.Close(context.Background())
-	})
-	d.state.CommitInventory([]*AgentState{{
-		PaneID: "pane-1", RawPaneID: "raw-old", TerminalID: "terminal-old", Status: "working",
-	}}, d.state.RevisionCounter())
+	f, old := newClearFixture(t, launchFixtureOptions{})
+	d := f.dispatcher
 	d.state.CommitInventory(nil, d.state.RevisionCounter())
+	if got := d.Handle(f.ctx, map[string]any{
+		"type": "submit_prompt", "pane_id": old.PaneID, "text": "must not cross sessions",
+	}); got.OK || got.Error != ErrPaneReplaced.Error() {
+		t.Fatalf("absent prompt result = %+v, want replaced-session failure", got)
+	}
 
-	// Hold the pre-scheduler test gate so the replacement appears after Handle
-	// captured the pane's absence but before prompt scheduling.
-	slot := d.paneSlot("pane-1")
-	slot <- struct{}{}
-	result := make(chan *CommandResult, 1)
-	go func() {
-		result <- d.Handle(context.Background(), map[string]any{
-			"type": "submit_prompt", "request_id": "absent-prompt",
-			"pane_id": "pane-1", "text": "must not cross sessions",
-		})
+	client := &blockedCapabilityBackend{Backend: d.herdr, entered: make(chan struct{}), release: make(chan struct{})}
+	d.herdr = client
+	defer func() {
+		select {
+		case <-client.release:
+		default:
+			close(client.release)
+		}
 	}()
-	time.Sleep(20 * time.Millisecond)
+	results := make(chan *CommandResult, 1)
+	go func() {
+		results <- d.Handle(f.ctx, clearMessage())
+	}()
+	select {
+	case <-client.entered:
+	case <-f.ctx.Done():
+		t.Fatal("clear did not reach backend: ", f.ctx.Err())
+	}
 	d.state.CommitInventory([]*AgentState{{
-		PaneID: "pane-1", RawPaneID: "raw-new", TerminalID: "terminal-new", Status: "working",
+		PaneID: old.PaneID, RawPaneID: old.PaneID, TerminalID: "terminal-replacement",
+		TabID: old.TabID, WorkspaceID: old.WorkspaceID, Agent: "claude", Status: "working", Cwd: f.cwd,
 	}}, d.state.RevisionCounter())
-	<-slot
+	close(client.release)
 
-	if got := <-result; got.OK || got.Error != ErrPaneReplaced.Error() {
-		t.Fatalf("absence-window prompt result = %+v, want replaced-session failure", got)
+	if got := generationResult(t, f.ctx, results); got.OK || got.Error != ErrPaneReplaced.Error() {
+		t.Fatalf("absence-window clear result = %+v, want replaced-session failure", got)
 	}
-	if data, _ := os.ReadFile(record); len(data) != 0 {
-		t.Fatalf("absence-window prompt reached replacement pane:\n%s", data)
+	if calls := clearCalls(t, f); calls != "" {
+		t.Fatalf("absence-window command reached replacement pane:\n%s", calls)
 	}
-	if generation := d.state.Generation("pane-1"); generation != 2 {
+	if generation := d.state.Generation(old.PaneID); generation != 2 {
 		t.Fatalf("replacement generation = %d, want distinct epoch 2", generation)
 	}
 }

@@ -1182,17 +1182,6 @@ func (s *State) TopologyRetryCount() uint64 {
 	return s.topologyRetries
 }
 
-func (s *State) RegisterFinishedNotification(paneID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.finishedNotif[paneID] {
-		return false
-	}
-	s.finishedNotif[paneID] = true
-	return true
-}
-
 func (s *State) RegisterFinishedNotificationForTransition(
 	paneID string,
 	revision int64,
