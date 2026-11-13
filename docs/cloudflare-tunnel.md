@@ -91,11 +91,6 @@ validated Herdr stable state. Historical `created_by_wizard` flags do not
 authorize the operation: a relay previously adopted from an existing config is
 still the configured relay and is removed. The state ownership marker, service
 environment match, and Herdr tunnel-name namespace protect unrelated resources.
-If an older teardown cleared state after preserving every resource, the action
-can recover the teardown identity from the retained config. Recovery needs a
-config whose `tunnel:` entry is a `herdr-mobile-relay-*` name, a loopback relay
-origin on the configured port, a hostname, and credentials matching that tunnel;
-otherwise it refuses without deleting anything.
 
 `cloudflared` cannot dependably delete a DNS route. If the record remains,
 teardown preserves its diagnostic state and names the exact record to remove

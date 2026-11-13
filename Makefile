@@ -5,12 +5,6 @@ endif
 
 WEB_PROJECT ?= herdr-0cv
 WEB_ORIGIN ?= https://$(WEB_PROJECT).pages.dev
-ifeq ($(origin WEB_PROJECT),file)
-ifeq ($(WEB_PROJECT),herdr-mobile-relay)
-$(warning WEB_PROJECT=herdr-mobile-relay is the retired default; using herdr-0cv)
-WEB_PROJECT := herdr-0cv
-endif
-endif
 WEB_BRANCH ?= main
 WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)

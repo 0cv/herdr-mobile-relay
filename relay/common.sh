@@ -341,29 +341,6 @@ cloudflared_origin_cert() {
     printf '%s\n' "$HOME/.cloudflared/cert.pem"
 }
 
-# The Cloudflare name of a tunnel UUID. A generated config records the UUID as
-# its `tunnel:` scalar, so anything that reasons about the tunnel *name* — the
-# Herdr namespace guard above all — has to ask Cloudflare which name the id was
-# created with. Fails when the certificate cannot authorize the lookup, when
-# Cloudflare refuses it, or when the id names no live tunnel.
-cloudflared_tunnel_name_by_id() {
-    local uuid="$1"
-    local origin_cert="$2"
-    local list_output
-    local name
-
-    [ -r "$origin_cert" ] || return 1
-    list_output="$(mktemp "${TMPDIR:-/tmp}/herdr-tunnel-list.XXXXXX")" || return 1
-    if ! cloudflared tunnel --origincert "$origin_cert" list --id "$uuid" --output json > "$list_output"; then
-        rm -f "$list_output"
-        return 1
-    fi
-    name="$("$(relay_binary)" stable-state tunnel-name-by-id "$list_output" "$uuid")" || name=""
-    rm -f "$list_output"
-    [ -n "$name" ] || return 1
-    printf '%s\n' "$name"
-}
-
 cloudflare_cert_zone_name() {
     local origin_cert="$1"
     local payload
@@ -891,9 +868,6 @@ ensure_relay_env() {
     else
         persist_github_token "$env_file" "$release_token"
     fi
-    # Migrate older installs that exposed the token to the complete service
-    # process tree. Only the credential-file path remains in relay.env.
-    remove_env_value_atomic "$env_file" GH_TOKEN
 }
 
 load_relay_env() {

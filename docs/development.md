@@ -83,8 +83,8 @@ Gateway mode does not require a Cloudflare URL.
 If rollback cannot be confirmed, its private recovery directory remains under
 `$XDG_STATE_HOME/herdr-mobile-relay/recovery` (default
 `~/.local/state/herdr-mobile-relay/recovery`). The `state` file identifies the
-original paths and activation settings; `0`, `1`, and `2` contain any previous
-current definition, legacy definition and environment file. A
+original paths and activation settings; `0` and `1` contain any previous
+definition and environment file. A
 `previous-ready.json` file, when present, records the previous verified runtime
 identity. Inspect the native manager and these files before attempting another
 installation; a retained directory means restoration is uncertain, not healthy.

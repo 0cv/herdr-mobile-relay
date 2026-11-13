@@ -112,14 +112,14 @@ validate_migration_source() {
     case "$PLATFORM" in
         Linux)
             [ "$(systemd_field "$SERVICE_FILE" Environment)" = "$source_env" ] &&
-                [[ "$(systemd_field "$SERVICE_FILE" ExecStart)" =~ /herdr-(mobile-relay|remote)-service\.sh$ ]] || {
+                [[ "$(systemd_field "$SERVICE_FILE" ExecStart)" =~ /herdr-mobile-relay-service\.sh$ ]] || {
                     echo "herdr-mobile-relay: refusing to migrate an unrecognized systemd service" >&2
                     return 1
                 }
             ;;
         Darwin)
             grep -F '<string>com.herdr-mobile-relay.service</string>' "$SERVICE_FILE" >/dev/null &&
-                grep -E '<string>.*herdr-(mobile-relay|remote)-service\.sh</string>' \
+                grep -E '<string>.*herdr-mobile-relay-service\.sh</string>' \
                     "$SERVICE_FILE" >/dev/null || {
                     echo "herdr-mobile-relay: refusing to migrate an unrecognized launchd service" >&2
                     return 1
@@ -132,12 +132,12 @@ recognized_service_definition() {
     case "$PLATFORM" in
         Linux)
             [[ "$(systemd_field "$SERVICE_FILE" Environment)" = /* ]] &&
-                [[ "$(systemd_field "$SERVICE_FILE" ExecStart)" =~ /herdr-(mobile-relay|remote)-service\.sh$ ]]
+                [[ "$(systemd_field "$SERVICE_FILE" ExecStart)" =~ /herdr-mobile-relay-service\.sh$ ]]
             ;;
         Darwin)
             grep -F '<string>com.herdr-mobile-relay.service</string>' "$SERVICE_FILE" >/dev/null &&
                 grep -F '<key>HERDR_RELAY_ENV</key>' "$SERVICE_FILE" >/dev/null &&
-                grep -E '<string>.*herdr-(mobile-relay|remote)-service\.sh</string>' \
+                grep -E '<string>.*herdr-mobile-relay-service\.sh</string>' \
                     "$SERVICE_FILE" >/dev/null
             ;;
         *) return 1 ;;
