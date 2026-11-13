@@ -377,7 +377,7 @@ func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
 
 	messages := []map[string]any{
 		{"type": "send_keys", "request_id": "keys", "pane_id": "missing", "keys": []any{"Enter"}},
-		{"type": "send_text", "request_id": "text", "pane_id": "missing", "text": "text"},
+		{"type": "send_input", "request_id": "text", "pane_id": "missing", "text": "text"},
 		{"type": "agent_stop", "request_id": "stop", "pane_id": "missing"},
 		{"type": "agent_rename", "request_id": "rename", "pane_id": "missing", "name": "new-name"},
 		{"type": "agent_clear", "request_id": "clear", "pane_id": "missing"},

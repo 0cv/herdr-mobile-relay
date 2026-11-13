@@ -47,7 +47,6 @@ type AgentState struct {
 	Options                      []string               `json:"options,omitempty"`
 	ApprovalFingerprint          string                 `json:"approval_fingerprint,omitempty"`
 	Interaction                  *question.Interaction  `json:"interaction,omitempty"`
-	QuestionLayout               bool                   `json:"question_layout,omitempty"`
 	InteractionID                string                 `json:"-"`
 	SessionID                    string                 `json:"-"`
 	SessionKind                  string                 `json:"-"`
@@ -772,7 +771,6 @@ func clearBlockedDetails(agent *AgentState) {
 	agent.Options = nil
 	agent.ApprovalFingerprint = ""
 	agent.Interaction = nil
-	agent.QuestionLayout = false
 	agent.InteractionID = ""
 }
 
@@ -784,7 +782,6 @@ func copyBlockedDetails(destination, source *AgentState) {
 	destination.Options = append([]string(nil), source.Options...)
 	destination.ApprovalFingerprint = source.ApprovalFingerprint
 	destination.Interaction = source.Interaction
-	destination.QuestionLayout = source.QuestionLayout
 	destination.InteractionID = source.InteractionID
 }
 
@@ -924,7 +921,6 @@ func applyAttentionClassification(
 ) bool {
 	options := append([]string(nil), classification.Options...)
 	nextInteraction := classification.Interaction
-	nextQuestionLayout := classification.QuestionLayout
 	nextInteractionID := ""
 	nextApprovalFingerprint := question.ApprovalFingerprint(classification)
 	if classification.Kind != question.AttentionApproval {
@@ -933,7 +929,6 @@ func applyAttentionClassification(
 	}
 	if classification.Kind != question.AttentionQuestion {
 		nextInteraction = nil
-		nextQuestionLayout = false
 	}
 	if nextInteraction != nil {
 		nextInteractionID = nextInteraction.ID
@@ -944,7 +939,6 @@ func applyAttentionClassification(
 		!slices.Equal(agent.Options, options) ||
 		agent.ApprovalFingerprint != nextApprovalFingerprint ||
 		!interactionsEqual(agent.Interaction, nextInteraction) ||
-		agent.QuestionLayout != nextQuestionLayout ||
 		agent.InteractionID != nextInteractionID
 	agent.AttentionKind = classification.Kind
 	agent.Prompt = classification.Prompt
@@ -952,7 +946,6 @@ func applyAttentionClassification(
 	agent.Options = options
 	agent.ApprovalFingerprint = nextApprovalFingerprint
 	agent.Interaction = nextInteraction
-	agent.QuestionLayout = nextQuestionLayout
 	agent.InteractionID = nextInteractionID
 	return changed
 }
@@ -968,7 +961,6 @@ func blockedDetailsEqual(left, right *AgentState) bool {
 		slices.Equal(left.Options, right.Options) &&
 		left.ApprovalFingerprint == right.ApprovalFingerprint &&
 		interactionsEqual(left.Interaction, right.Interaction) &&
-		left.QuestionLayout == right.QuestionLayout &&
 		left.InteractionID == right.InteractionID
 }
 

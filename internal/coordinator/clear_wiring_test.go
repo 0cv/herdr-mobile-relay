@@ -148,7 +148,7 @@ func (b *clearInventoryBackend) GetInventory(ctx context.Context) (*herdr.Invent
 	return &herdr.Inventory{Panes: []herdr.Pane{b.pane}}, nil
 }
 
-func TestClearThenRestartDoesNotReuseTarget(t *testing.T) {
+func TestRepeatedClearDoesNotReuseTarget(t *testing.T) {
 	f, old := newClearFixture(t, launchFixtureOptions{})
 	cleared := f.dispatcher.Handle(f.ctx, clearMessage())
 	if !cleared.OK {
@@ -161,12 +161,12 @@ func TestClearThenRestartDoesNotReuseTarget(t *testing.T) {
 	}
 	b := &clearInventoryBackend{Backend: f.dispatcher.herdr, pane: pane}
 	f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
-	restarted := f.dispatcher.Handle(f.ctx, map[string]any{"type": "agent_restart", "request_id": "restart", "pane_id": old.PaneID})
-	if !restarted.OK {
-		t.Fatalf("restart: %+v", restarted)
+	clearedAgain := f.dispatcher.Handle(f.ctx, map[string]any{"type": "agent_clear", "request_id": "clear-again", "pane_id": old.PaneID})
+	if !clearedAgain.OK {
+		t.Fatalf("clear again: %+v", clearedAgain)
 	}
-	if restarted.Data.(map[string]any)["pane_id"] == old.PaneID || strings.Count(clearCalls(t, f), "agent start") != 2 {
-		t.Fatalf("restart reused its target: %+v", restarted)
+	if clearedAgain.Data.(map[string]any)["pane_id"] == old.PaneID || strings.Count(clearCalls(t, f), "agent start") != 2 {
+		t.Fatalf("clear reused its target: %+v", clearedAgain)
 	}
 }
 

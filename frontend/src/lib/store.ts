@@ -172,7 +172,6 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   clarify_question: true,
   submit_prompt: true,
   send_keys: true,
-  send_text: true,
   send_input: true,
   send_terminal_text: true,
   send_filter_text: true,
@@ -182,7 +181,6 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   tab_reorder: true,
   agent_stop: true,
   agent_clear: true,
-  agent_restart: true,
   workspace_create: true,
   workspace_rename: true,
   workspace_reorder: true,
@@ -2896,7 +2894,6 @@ class RelayStore {
           status: interaction ? 'blocked' : 'working',
           attention_kind: interaction ? 'question' : undefined,
           interaction,
-          question_layout: Boolean(interaction),
         }
       : item);
     this.publishAgents('pane content interaction');

@@ -251,8 +251,6 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handlePrompt(ctx, receivedAt, requestID, paneID, message)
 	case "send_keys":
 		return d.handleKeys(ctx, receivedAt, requestID, paneID, message)
-	case "send_text":
-		return d.handleText(ctx, receivedAt, requestID, paneID, message)
 	case "send_filter_text":
 		return d.handleFilterText(ctx, receivedAt, requestID, paneID, message)
 	case "send_input":
@@ -277,7 +275,7 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleTabReorder(ctx, receivedAt, requestID, paneID, message)
 	case "acknowledge_pane":
 		return d.handleAcknowledge(requestID, paneID)
-	case "agent_start", "agent_clear", "agent_restart":
+	case "agent_start", "agent_clear":
 		if !d.herdr.CapabilityStatus().Supports(herdr.FeatureAgentLaunch) {
 			return d.fail(requestID, action, paneID, "This backend does not support launching agents")
 		}
@@ -415,29 +413,6 @@ func (d *Dispatcher) handleKeys(ctx context.Context, receivedAt time.Time, reque
 	return result
 }
 
-func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
-	const action = "send_text"
-	text := stringValue(message, "text")
-	if paneID == "" || text == "" {
-		return d.fail(requestID, action, paneID, "Text and agent are required")
-	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if err := d.herdr.SendText(effectCtx, paneID, text); err != nil {
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
-		}
-		return EffectResult{Result: completed(requestID, action, paneID, nil)}
-	}))
-	if result.OK {
-		d.recordActivityWithExtract(action, "sent", "Text inserted", text, paneID, requestID)
-		d.wake()
-	}
-	return result
-}
 func (d *Dispatcher) handleInput(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
 	var keys []string
 	var err error
@@ -475,7 +450,7 @@ func (d *Dispatcher) handleInput(ctx context.Context, receivedAt time.Time, requ
 
 // handleSecret answers a terminal prompt that reads with echo disabled — a
 // sudo password, an ssh passphrase, a smartcard PIN. The secret travels as one
-// key per rune plus Enter rather than through send_text: Herdr wraps sent text
+// key per rune plus Enter rather than through SendText: Herdr wraps sent text
 // in a bracketed paste whenever the pane enables it, and a reader using termios
 // noecho takes the paste markers as part of the secret. The single SendKeys
 // call keeps the whole secret plus its submission atomic.
@@ -1184,7 +1159,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	response := map[string]any{
 		"type": "pane_content", "pane_id": paneID, "content": string(content),
 		"format": format, "truncated": read.Truncated, "viewport_only": terminalColumns > 0,
-		"interaction": nil, "question_layout": false,
+		"interaction": nil,
 	}
 	if terminalRows := intValue(message["terminal_rows"], 0); terminalRows > 0 {
 		response["viewport_rows"] = terminalRows

@@ -267,7 +267,6 @@ export interface Agent {
   approval_fingerprint?: string;
   options?: string[];
   interaction?: QuestionInteraction | null;
-  question_layout?: boolean;
   event_id?: string;
   attention_kind?: AttentionKind;
   attention_capable?: boolean;
@@ -578,9 +577,6 @@ export interface CommandResult {
 export interface NotificationTarget {
   pane_id: string;
   host: string;
-  action: 'approve' | 'deny' | '';
-  index: number | null;
-  total: number | null;
   notification_id: string;
 }
 

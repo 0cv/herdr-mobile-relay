@@ -23,9 +23,7 @@ func (s *Server) validateUploadTarget(target protocol.TargetRef) error {
 	return nil
 }
 func (s *Server) expandPromptAttachmentReferences(action string, message map[string]any, target *protocol.TargetRef) error {
-	switch action {
-	case "send_text", "submit_prompt":
-	default:
+	if action != "submit_prompt" {
 		return nil
 	}
 	for _, field := range []string{"text", "prompt"} {

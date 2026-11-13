@@ -118,10 +118,10 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 	if err != nil || pane.TabID != observed.TabID || pane.WorkspaceID != observed.WorkspaceID {
 		t.Fatalf("labels changed: %+v %+v %v", pane, observed, err)
 	}
-	for _, action := range []string{"agent_clear", "agent_restart"} {
-		result = d.Handle(ctx, map[string]any{"type": action, "request_id": action, "pane_id": old})
+	for _, requestID := range []string{"clear-first", "clear-second"} {
+		result = d.Handle(ctx, map[string]any{"type": "agent_clear", "request_id": requestID, "pane_id": old})
 		if !result.OK {
-			t.Fatalf("%s: %+v", action, result)
+			t.Fatalf("%s: %+v", requestID, result)
 		}
 		data := result.Data.(map[string]any)
 		replacement := data["pane_id"].(string)

@@ -130,9 +130,9 @@ describe('protocol and setup parsing', () => {
       host: 'app.example.com',
     } as Location)).toBeNull();
 
-    const encoded = encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', host: 'Fedora', action: 'approve', index: 0, total: 3 }));
-    expect(parseNotificationTarget(encoded)).toMatchObject({ pane_id: 'w1:p1', action: 'approve', index: 0, total: 3 });
-    expect(parseNotificationTarget(encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', action: 'approve', index: 9, total: 3 })))).toBeNull();
+    const encoded = encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', host: 'Fedora', notification_id: 'event-1' }));
+    expect(parseNotificationTarget(encoded)).toEqual({ pane_id: 'w1:p1', host: 'Fedora', notification_id: 'event-1' });
+    expect(parseNotificationTarget(encodeURIComponent(JSON.stringify({ host: 'Fedora' })))).toBeNull();
     expect(parseNotificationTarget('%not-json')).toBeNull();
     expect(stateFromLocation({ hash: '#pane=%invalid' } as Location)).toEqual({ view: 'agents' });
     expect(stateFromLocation({ hash: '#history=relay%3A%3Apane-1' } as Location)).toEqual({
@@ -586,7 +586,7 @@ describe('agent state and sorting', () => {
     };
     const question = agent({
       status: 'blocked', attention_kind: 'question', attention_capable: true,
-      interaction: first, question_layout: true,
+      interaction: first,
     });
     const responding = new Set([question.pane_id]);
     const misses = new Map<string, number>();
@@ -600,7 +600,7 @@ describe('agent state and sorting', () => {
     )[0];
     expect(working).toMatchObject({
       status: 'blocked', attention_kind: 'question',
-      interaction: first, question_layout: true,
+      interaction: first,
     });
 
     const chat = mergeAgentList(
@@ -612,7 +612,7 @@ describe('agent state and sorting', () => {
     )[0];
     expect(chat).toMatchObject({
       status: 'blocked', attention_kind: 'question',
-      interaction: first, question_layout: true,
+      interaction: first,
     });
 
     const nextQuestion = mergeAgentList(
@@ -620,14 +620,14 @@ describe('agent state and sorting', () => {
       'relay',
       [agent({
         status: 'blocked', attention_kind: 'question', attention_capable: true,
-        interaction: second, question_layout: true,
+        interaction: second,
       })],
       misses,
       responding,
     )[0];
     expect(nextQuestion).toMatchObject({
       status: 'blocked', attention_kind: 'question',
-      interaction: second, question_layout: true,
+      interaction: second,
     });
   });
 
@@ -638,21 +638,21 @@ describe('agent state and sorting', () => {
     };
     const question = agent({
       status: 'blocked', attention_kind: 'question', attention_capable: true,
-      interaction, question_layout: true,
+      interaction,
     });
     const approval = agent({
       status: 'blocked', attention_kind: 'approval', attention_capable: true,
-      options: ['Approve', 'Reject'], interaction: null, question_layout: false,
+      options: ['Approve', 'Reject'], interaction: null,
     });
     expect(mergeAgentDetails(question, approval)).toMatchObject({
       status: 'blocked', attention_kind: 'approval',
-      options: ['Approve', 'Reject'], interaction: null, question_layout: false,
+      options: ['Approve', 'Reject'], interaction: null,
     });
 
     const sparse = agent({ status: 'blocked', attention_capable: true });
-    expect(mergeAgentDetails(question, sparse)).toMatchObject({
-      interaction, question_layout: true,
-    });
+    expect(mergeAgentDetails(question, sparse)).toMatchObject({ interaction });
+    expect(mergeAgentDetails(question, { ...sparse, interaction: null }).interaction).toBeNull();
+    expect(mergeAgentDetails(question, { ...sparse, attention_kind: 'unknown' }).interaction).toBeUndefined();
   });
 
   it('uses terminal-only fallback for relays without attention classification', () => {
@@ -665,7 +665,7 @@ describe('agent state and sorting', () => {
     expect(normalized).toMatchObject({
       attention_kind: 'unknown',
       attention_capable: false,
-      question_layout: false,
+      interaction: null,
     });
     expect(normalized.options).toBeUndefined();
     expect(approvalOptions(normalized)).toEqual([]);

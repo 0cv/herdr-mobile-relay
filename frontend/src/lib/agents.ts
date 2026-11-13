@@ -205,7 +205,6 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
       options: undefined,
       approval_fingerprint: undefined,
       interaction: null,
-      question_layout: false,
     };
   }
   const kind = capable ? attentionKind(agent) || 'unknown' : 'unknown';
@@ -220,7 +219,6 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
   }
   if (kind !== 'question') {
     next.interaction = null;
-    next.question_layout = false;
   }
   return next;
 }
@@ -236,7 +234,6 @@ function retainBlockedDetails(previous: Agent, next: Agent): Agent {
     options: previous.options,
     approval_fingerprint: previous.approval_fingerprint,
     interaction: previous.interaction,
-    question_layout: previous.question_layout,
   };
 }
 
@@ -282,7 +279,6 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
   const blocked = rawBlocked(next);
   const hasAttentionKind = Object.prototype.hasOwnProperty.call(next, 'attention_kind');
   const hasInteraction = Object.prototype.hasOwnProperty.call(next, 'interaction');
-  const hasQuestionLayout = Object.prototype.hasOwnProperty.call(next, 'question_layout');
   return {
     ...previous,
     ...next,
@@ -300,7 +296,6 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
     command: blocked && !hasAttentionKind ? (next.command ?? previous.command) : next.command,
     options: blocked && !hasAttentionKind ? (next.options ?? previous.options) : next.options,
     interaction: blocked && !hasAttentionKind && !hasInteraction ? previous.interaction : next.interaction,
-    question_layout: blocked && !hasAttentionKind && !hasQuestionLayout ? previous.question_layout : next.question_layout,
   };
 }
 

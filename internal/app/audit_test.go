@@ -129,9 +129,9 @@ func TestAuditUsesDirectActionType(t *testing.T) {
 
 func TestAuditedWriteSetCoversRemoteAgentMutations(t *testing.T) {
 	for _, action := range []string{
-		"submit_prompt", "send_keys", "send_text", "respond", "answer_question",
+		"submit_prompt", "send_keys", "send_input", "respond", "answer_question",
 		"navigate_question", "clarify_question", "agent_stop", "agent_rename",
-		"tab_reorder", "agent_start", "agent_clear", "agent_restart", "workspace_create",
+		"tab_reorder", "agent_start", "agent_clear", "workspace_create",
 		"workspace_rename", "workspace_reorder", "workspace_close", "worktree_create",
 		"worktree_open", "worktree_remove", "upload_begin", "upload_chunk",
 		"upload_finish", "upload_cancel", "send_secret", "send_terminal_text",

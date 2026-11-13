@@ -90,7 +90,7 @@ Control herdr-app and herdr-core (`hc`) agents from your phone through a second
 relay, shown as `<hostname> (core)` beside the Herdr TUI relay.
 Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
 
-- Available: agents, status, screens, prompts, keys, secrets, start/stop/clear/restart,
+- Available: agents, status, screens, prompts, keys, secrets, start/stop/clear,
   tab and workspace rename and reorder, and **Resize Session**.
 - **Conversation** supports Pi, Claude Code, Codex, Cursor, Omp, OpenCode, Hermes,
   Qoder, agy, Grok and Kimi, with the session setup described in the guide.

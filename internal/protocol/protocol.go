@@ -86,7 +86,6 @@ var actionCatalog = map[string]ActionMetadata{
 	"acknowledge_pane":           mutateAction("acknowledge_pane", true, false),
 	"agent_clear":                mutateAction("agent_clear", true, true),
 	"agent_rename":               mutateAction("agent_rename", true, true),
-	"agent_restart":              mutateAction("agent_restart", true, true),
 	"agent_start":                mutateAction("agent_start", true, true),
 	"agent_stop":                 mutateAction("agent_stop", true, true),
 	"answer_question":            mutateAction("answer_question", true, true),
@@ -132,7 +131,6 @@ var actionCatalog = map[string]ActionMetadata{
 	"send_secret":                mutateAction("send_secret", true, true),
 	"reset_devices":              mutateAction("reset_devices", false, true),
 	"revoke_device":              mutateAction("revoke_device", false, true),
-	"send_text":                  mutateAction("send_text", true, true),
 	"speak_text":                 readAction("speak_text"),
 	"speech_voice_install":       mutateAction("speech_voice_install", false, true),
 	"speech_voice_remove":        mutateAction("speech_voice_remove", false, true),
@@ -223,7 +221,6 @@ type Inbound struct {
 	Data                 string          `json:"data,omitempty"`
 	ClientID             string          `json:"client_id,omitempty"`
 	ReplaceEndpoints     []string        `json:"replace_endpoints,omitempty"`
-	NotifyFinished       bool            `json:"notify_finished,omitempty"`
 	Endpoints            []string        `json:"endpoints,omitempty"`
 	Origin               string          `json:"origin,omitempty"`
 	ExpectedOrigin       string          `json:"expected_origin,omitempty"`

@@ -109,7 +109,7 @@ func (b *recordingBackend) StopPane(context.Context, string) error {
 }
 
 func TestBackendRefusesUnsupportedAgentLaunch(t *testing.T) {
-	for _, action := range []string{"agent_start", "agent_clear", "agent_restart"} {
+	for _, action := range []string{"agent_start", "agent_clear"} {
 		t.Run(action, func(t *testing.T) {
 			client := &recordingBackend{}
 			dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())

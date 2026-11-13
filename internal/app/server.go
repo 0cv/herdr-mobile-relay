@@ -102,16 +102,13 @@ type Server struct {
 	home         string
 	logger       *slog.Logger
 
-	state          *coordinator.State
-	hub            *transport.Hub
-	poller         *coordinator.Poller
-	udp            *coordinator.UDPListener
-	journal        *activity.Journal
-	auditLog       *audit.Logger
-	pushM          *push.Manager
-	transitionPush interface {
-		Send(context.Context, []byte)
-	}
+	state               *coordinator.State
+	hub                 *transport.Hub
+	poller              *coordinator.Poller
+	udp                 *coordinator.UDPListener
+	journal             *activity.Journal
+	auditLog            *audit.Logger
+	pushM               *push.Manager
 	transitionBroadcast interface {
 		Broadcast(any)
 	}
@@ -1205,7 +1202,6 @@ func (s *Server) Run(ctx context.Context) error {
 				var sub push.Subscription
 				if json.Unmarshal(inbound.Subscription, &sub) == nil {
 					sub.ClientID = inbound.ClientID
-					sub.NotifyFinished = inbound.NotifyFinished
 					sub.DeviceID = identity.DeviceID
 					sub.Locale = identity.Locale
 					// The authenticated connection does not currently carry a
@@ -1892,12 +1888,6 @@ func (s *Server) handleTransition(
 		}
 		if s.pushM != nil {
 			s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
-		} else if s.transitionPush != nil {
-			payload := push.BuildAttentionPayload(
-				agent, project, command, eventID, paneID, s.hostname,
-				string(agentState.AttentionKind), len(agentState.Options),
-			)
-			s.sendTransitionPush(ctx, payload, classifiedCurrent)
 		}
 		if !classifiedCurrent() {
 			return
@@ -1944,42 +1934,7 @@ func (s *Server) handleTransition(
 		} else if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
 			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
 		}
-	} else if s.transitionPush != nil {
-		payload := push.BuildFinishedPayload(agent, project, paneID, s.hostname, eventID)
-		s.sendTransitionPush(ctx, payload, transitionCurrent)
 	}
-}
-
-func (s *Server) sendTransitionPush(
-	ctx context.Context,
-	payload []byte,
-	transitionCurrent func() bool,
-) {
-	pushCtx, cancel := context.WithCancel(ctx)
-	finished := make(chan struct{})
-	watcherDone := make(chan struct{})
-	go func() {
-		defer close(watcherDone)
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-finished:
-				return
-			case <-pushCtx.Done():
-				return
-			case <-ticker.C:
-				if !transitionCurrent() {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	s.transitionPush.Send(pushCtx, payload)
-	close(finished)
-	cancel()
-	<-watcherDone
 }
 
 const (
@@ -2057,7 +2012,6 @@ func setAgentAttention(
 	agent.Options = nil
 	agent.ApprovalFingerprint = ""
 	agent.Interaction = nil
-	agent.QuestionLayout = false
 	agent.InteractionID = ""
 	switch classification.Kind {
 	case question.AttentionApproval:
@@ -2065,7 +2019,6 @@ func setAgentAttention(
 		agent.ApprovalFingerprint = question.ApprovalFingerprint(classification)
 	case question.AttentionQuestion:
 		agent.Interaction = classification.Interaction
-		agent.QuestionLayout = classification.QuestionLayout
 		if agent.Interaction != nil {
 			agent.InteractionID = agent.Interaction.ID
 			if state != nil {
@@ -2089,7 +2042,6 @@ func classificationFromAgent(agent *coordinator.AgentState) question.Classificat
 		Options:          append([]string(nil), agent.Options...),
 		ApprovalIdentity: agent.ApprovalFingerprint,
 		Interaction:      agent.Interaction,
-		QuestionLayout:   agent.QuestionLayout,
 	}
 }
 
@@ -2126,7 +2078,6 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 		"approval_fingerprint": agent.ApprovalFingerprint,
 		"interaction":          agent.Interaction,
 		"interaction_id":       agent.InteractionID,
-		"question_layout":      agent.QuestionLayout,
 		"pane_revision":        agent.StateRevision,
 	}
 	if s.transitionBroadcast == s.hub {
@@ -2180,15 +2131,6 @@ func (s *Server) handleChatCompletion(
 	}
 	if s.pushM != nil {
 		s.publishAgentPush(ctx, agent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
-	} else if s.transitionPush != nil {
-		payload := push.BuildFinishedPayload(
-			agent.Agent,
-			agent.Project,
-			agent.PaneID,
-			s.hostname,
-			eventID,
-		)
-		s.sendTransitionPush(ctx, payload, current)
 	}
 }
 
@@ -2968,7 +2910,6 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 	response["command"] = classification.Command
 	response["options"] = classification.Options
 	response["interaction"] = classification.Interaction
-	response["question_layout"] = classification.QuestionLayout
 	if interaction := classification.Interaction; interaction != nil {
 		if text := strings.TrimSpace(interaction.Other.Text); text != "" {
 			s.state.RecordCustomAnswer(paneID, interaction.Question, text)
@@ -3027,7 +2968,6 @@ func paneFrameFingerprint(response map[string]any) string {
 		response["command"],
 		response["options"],
 		response["interaction"],
-		response["question_layout"],
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -3876,9 +3816,6 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 			}
 		}
 	}
-	if value, exists := delta["question_layout"]; exists {
-		agent.QuestionLayout, _ = value.(bool)
-	}
 	if agent.Status != "blocked" {
 		agent.AttentionKind = ""
 		agent.Prompt = ""
@@ -3886,7 +3823,6 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 		agent.Options = nil
 		agent.ApprovalFingerprint = ""
 		agent.Interaction = nil
-		agent.QuestionLayout = false
 	} else {
 		if agent.AttentionKind != question.AttentionApproval {
 			agent.Options = nil
@@ -3894,7 +3830,6 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 		}
 		if agent.AttentionKind != question.AttentionQuestion {
 			agent.Interaction = nil
-			agent.QuestionLayout = false
 		}
 	}
 	if value, exists := delta["tab_number"]; exists {

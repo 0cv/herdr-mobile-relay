@@ -48,10 +48,10 @@ describe('notification deep links', () => {
     const state = stateFromLocation({ hash });
     expect(state).toEqual({
       view: 'notification',
-      target: { ...target, action: '', index: null, total: null, notification_id: '' },
+      target: { ...target, notification_id: '' },
     });
     expect(viewUrl(state)).toBe(`#notify=${encodeURIComponent(JSON.stringify({
-      ...target, action: '', index: null, total: null, notification_id: '',
+      ...target, notification_id: '',
     }))}`);
     expect(stateFromLocation({ hash: viewUrl(state) })).toEqual(state);
   });

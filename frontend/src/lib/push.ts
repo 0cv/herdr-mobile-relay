@@ -26,7 +26,6 @@ export interface PushSubscribePayload extends Record<string, unknown> {
   subscription: PushSubscriptionJSON;
   client_id: string;
   replace_endpoints: string[];
-  notify_finished: boolean;
   user_agent: string;
 }
 
@@ -176,7 +175,6 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
       subscription: subscription.toJSON(),
       client_id: `${pushClientId()}:${relayId}`,
       replace_endpoints: [...new Set(replaced)],
-      notify_finished: finishedNotificationsEnabled(),
       user_agent: navigator.userAgent,
     };
     if (!relayStore.sendRaw(relayId, payload)) {
