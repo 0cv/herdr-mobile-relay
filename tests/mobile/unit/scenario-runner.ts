@@ -63,11 +63,10 @@ globalThis.fetch = async (input, init) => {
   return Response.json(url.pathname === '/state' ? state : {});
 };
 export const observations = ${JSON.stringify(observationsFixture())};
-export const releaseObservations = ${JSON.stringify(observationsFixture(measurementIdentity({suite:'release'}), '42', {id:'cold-1',measurementId:'android-test',packageName:'com.android.chrome',pid:'42',processes:{'42':'com.android.chrome'},command:['shell','am','force-stop','--user','0','com.android.chrome'],succeeded:true}))};
 export const assessment = ${JSON.stringify(assessAndroidEnvironment(environmentFixture(), measurementIdentity()))};
 `;
 const platformSource = `
-import { trace, mode, origin, state, identity, observations, releaseObservations, captureMode, capture, recordSnapshot } from '../fixture-protocol';
+import { trace, mode, origin, state, identity, observations, captureMode, capture, recordSnapshot } from '../fixture-protocol';
 export class AndroidPlatform {
   name = process.env.MOBILE_PLATFORM;
   selected = true; driver = { unusable:false }; cold = false;
@@ -79,7 +78,7 @@ export class AndroidPlatform {
       safariNavigation:{lastDiscovery:'expected-origin-context'}, events:[{phase:'fixture',detail:{token:'synthetic-secret'}}] } : {};
     if (captureMode) Object.assign(this.driver, { sessionGeneration:7, selectedContext:'NATIVE_APP', commands:[], lastCommand:{operation:'close'} });
   }
-  activateProductRecorder(identity) { this.template = structuredClone(identity.suite === 'release' ? releaseObservations : observations); this.template.identity = identity; this.proof = structuredClone(this.template); this.proof.records = this.proof.records.slice(0,1); trace('recorder:activate'); }
+  activateProductRecorder(identity) { this.template = structuredClone(observations); this.template.identity = identity; this.proof = structuredClone(this.template); this.proof.records = this.proof.records.slice(0,1); trace('recorder:activate'); }
   productCheckpoint(name) { this.proof.records = structuredClone(this.template.records.slice(0,this.template.records.findIndex(record=>record.kind==='checkpoint'&&record.name===name)+1)); }
   async startFreshDevice() { trace('fresh:begin'); if (mode.includes('fresh-failure')) throw new Error('FRESH_FAILED: original'); trace('fresh:end'); }
   async observeGmsStage(stage) {
@@ -131,7 +130,7 @@ export class AndroidPlatform {
 `;
 export const runnerProtocolCases = ['success', 'component-drift', 'unknown-relation', 'gms-out-of-order', 'gms-missing-post-begin', 'fresh-failure', 'baseline-failure', 'baseline-failure-cleanup-failure', 'scenario-failure', 'fatal-failure', 'fatal-failure-cleanup-failure', 'post-failure', 'scenario-failure-post-failure', 'recovery-failure-post-failure', 'scenario-failure-post-failure-cleanup-failure', 'cleanup-failure', 'shutdown-failure', 'fixture-stop-failure', 'reverse-acquire-failure', 'reverse-remove-failure', 'fixture-log-failure', 'private-failure', 'event-write-failure', 'result-write-failure', 'sticky-driver-failure', 'late-driver-failure'] as const;
 
-async function replay(mode: string, platform: string, suite: string, captureMode?: CaptureMode): Promise<void> {
+async function replay(mode: string, platform: string, captureMode?: CaptureMode): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'herdr-scenario-protocol-'));
   const source = process.env.MOBILE_RUN_TEST_SOURCE || repositoryPath('tests/mobile');
   await mkdir(join(root, 'platforms')); await mkdir(join(root, 'android-appium'));
@@ -230,10 +229,10 @@ mock.module('node:fs/promises',()=>({...original,
     version: candidate ? '0.21.0' : '0.20.10', assets: candidate ? 370 : 363, build: (candidate ? 'd' : 'e').repeat(64), entry: candidate ? '/new/index.html' : '/old/index.html', script: candidate ? '/new.js' : '/old.js', style: candidate ? '/new.css' : '/old.css', scriptSha256: candidate ? 'new-script' : 'old-script', styleSha256: candidate ? 'new-style' : 'old-style', webHash: (candidate ? 'c' : 'f').repeat(64), descriptor: true } });
   await writeFile(join(root, 'bundles.json'), JSON.stringify({ schema: 1, baselines: [bundle(false)], candidate: bundle(true) }));
   const traceFile = join(root, 'trace.log');
-  const child = spawnSync(process.execPath, ['--preload', join(root, 'preload.ts'), join(root, 'run.ts'), '--bundle-set', join(root, 'bundles.json'), '--output', join(root, 'output'), '--private-output', join(root, 'private'), '--suite', suite], {
+  const child = spawnSync(process.execPath, ['--preload', join(root, 'preload.ts'), join(root, 'run.ts'), '--bundle-set', join(root, 'bundles.json'), '--output', join(root, 'output'), '--private-output', join(root, 'private')], {
     env: { ...process.env, MOBILE_PLATFORM: platform, MOBILE_SOURCE_RUN_HEAD_SHA: 'b'.repeat(40), GITHUB_RUN_ID: '35556703407', GITHUB_RUN_ATTEMPT: '2', ANDROID_SERIAL: 'emulator-protocol', RUN_PROTOCOL_CASE: mode, RUN_PROTOCOL_TRACE: traceFile, RUN_PROTOCOL_CAPTURE: captureMode || '', RUN_PROTOCOL_CAPTURE_FILE: join(root, 'capture.json'), RUN_PROTOCOL_SNAPSHOTS: join(root, 'snapshots.jsonl'), RUN_PROTOCOL_LIVE_CAPTURE: join(root, 'capture-live.json') }, encoding: 'utf8', timeout: 20_000,
   });
-  await writeFile(join(root, 'command.json'), JSON.stringify({ mode, platform, suite, captureMode, status: child.status, stdout: child.stdout, stderr: child.stderr, error: String(child.error || '') }, null, 2));
+  await writeFile(join(root, 'command.json'), JSON.stringify({ mode, platform, captureMode, status: child.status, stdout: child.stdout, stderr: child.stderr, error: String(child.error || '') }, null, 2));
   assert.equal(child.error, undefined);
   const events = (await readFile(traceFile, 'utf8')).trim().split('\n');
   const before = (first: string, last: string) => assert.ok(events.includes(first) && events.includes(last) && events.indexOf(first) < events.indexOf(last), `${mode}: ${first} before ${last}: ${events}`);
@@ -305,6 +304,12 @@ mock.module('node:fs/promises',()=>({...original,
     assert.equal(events.includes('measurement:gms:after-initial-installed-app-launch'), false);
     before('measurement:gms:after-browser-install', 'measurement:gms:finalize');
   }
+  if (mode === 'success') {
+    assert.equal(result.lifecycle_launch_count, 1);
+    assert.equal(events.filter(event => event === 'terminate').length, 1);
+    before('background', 'keyboard');
+    before('keyboard', 'terminate');
+  }
   if (mode === 'success' && platform === 'android') {
     const stages = ['after-device-start','before-measurement-begin','after-setup-url','after-browser-install','after-initial-installed-app-launch'];
     for (let index = 1; index < stages.length; index++) before('measurement:gms:' + stages[index - 1], 'measurement:gms:' + stages[index]);
@@ -336,13 +341,12 @@ mock.module('node:fs/promises',()=>({...original,
   if (!failed) { assert.equal(result.product.status,'PASS'); assert.equal(result.finalization.status,'PASS'); assert.equal(result.evidence.selectedInstalledWindowValid,true); assert.equal(result.evidence.teardown.selectedInstalledWindowValid,false); if(platform==='android')assert.ok(result.evidence.productObservations.records.length>0); }
 }
 export const scenarioRunnerTests: Array<[string, () => Promise<void>]> = [
-  ...runnerProtocolCases.map(mode => [`production runner Android ${mode} preserves the preparation/measurement/cleanup contract`, () => replay(mode, 'android', 'smoke')] as [string, () => Promise<void>]),
-  ['production runner release records the lifecycle operation without rebaseline', () => replay('success', 'android', 'release')],
-  ['production runner iOS never starts Android measurement', () => replay('success', 'ios', 'release')],
-  ['production runner iOS fatal remains primary when quarantined teardown rejects and other cleanup continues', () => replay('fatal-failure-cleanup-failure', 'ios', 'release')],
-  ['production runner iOS terminal teardown-only capture remains diagnostic on scenario failure', () => replay('scenario-failure', 'ios', 'release', 'teardown-only')],
+  ...runnerProtocolCases.map(mode => [`production runner Android ${mode} preserves the preparation/measurement/cleanup contract`, () => replay(mode, 'android')] as [string, () => Promise<void>]),
+  ['production runner iOS never starts Android measurement', () => replay('success', 'ios')],
+  ['production runner iOS fatal remains primary when quarantined teardown rejects and other cleanup continues', () => replay('fatal-failure-cleanup-failure', 'ios')],
+  ['production runner iOS terminal teardown-only capture remains diagnostic on scenario failure', () => replay('scenario-failure', 'ios', 'teardown-only')],
   ...(['success', 'scenario-failure', 'fatal-failure', 'cleanup-failure', 'sticky-driver-failure', 'late-driver-failure', 'event-write-failure', 'final-snapshot-failure'] as const).map(mode => [
     `production runner iOS terminal product-first ${mode} freezes the disposition and acknowledgement without source`,
-    () => replay(mode, 'ios', 'release', 'product-first'),
+    () => replay(mode, 'ios', 'product-first'),
   ] as [string, () => Promise<void>]),
 ];

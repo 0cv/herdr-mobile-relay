@@ -20,7 +20,6 @@ function matrix(value: string): EvidenceMatrixEntry[] {
   return entries.map((entry) => ({
     platform: String(entry.platform),
     baseline: String(entry.baseline),
-    scenario: String(entry.scenario),
   }));
 }
 
@@ -41,7 +40,6 @@ export function evidenceOptions(): EvidenceValidationOptions {
   attempt: option('--attempt'),
   directory: option('--directory'),
   matrix: matrix(option('--matrix')),
-  suite: option('--suite'),
   candidateCommit: option('--candidate-commit'),
   sourceRunHeadSha: option('--source-run-head-sha'),
   candidateWebHash: option('--candidate-web-hash'),

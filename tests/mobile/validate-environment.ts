@@ -12,7 +12,7 @@ export async function collectEnvironmentReport(options: EvidenceValidationOption
   for (const row of rows) {
     const summary = publicMobileSummary(row.result, row.assessment);
     if (summary.product === 'PASS') {
-      try { await validateMobileEvidence({ ...options, contract: 'product', directory: dirname(row.filename), matrix: [{ platform: row.result.identity.platform, baseline: row.result.identity.baseline, scenario: row.result.identity.scenario }] }); }
+      try { await validateMobileEvidence({ ...options, contract: 'product', directory: dirname(row.filename), matrix: [{ platform: row.result.identity.platform, baseline: row.result.identity.baseline }] }); }
       catch {
         incomplete = true;
         summary.product = 'INDETERMINATE';
@@ -24,8 +24,8 @@ export async function collectEnvironmentReport(options: EvidenceValidationOption
   }
   incomplete ||= rows.some(row => row.assessment?.collection.status === 'UNKNOWN');
   for (const expected of options.matrix) {
-    if (summaries.some(row => row.platform === expected.platform && row.baseline === expected.baseline && row.scenario === expected.scenario)) continue;
-    if (!['android', 'ios'].includes(expected.platform) || !/^[A-Za-z0-9._-]{1,100}$/u.test(expected.baseline) || !['historical', 'synthetic'].includes(expected.scenario)) throw new Error('MOBILE_ENVIRONMENT: invalid expected row');
+    if (summaries.some(row => row.platform === expected.platform && row.baseline === expected.baseline)) continue;
+    if (!['android', 'ios'].includes(expected.platform) || !/^[A-Za-z0-9._-]{1,100}$/u.test(expected.baseline)) throw new Error('MOBILE_ENVIRONMENT: invalid expected row');
     summaries.push({ ...expected, product: 'INDETERMINATE', environment: expected.platform === 'ios' ? 'NOT_APPLICABLE' : 'UNKNOWN', collection: 'UNKNOWN', findings: [{ category: 'EVIDENCE_INVALID' }] });
     incomplete = true;
   }
@@ -37,10 +37,9 @@ export async function collectEnvironmentReport(options: EvidenceValidationOption
 
 async function singleRowOptions(): Promise<EvidenceValidationOptions> {
   const bundle = JSON.parse(await readFile(option('--bundle-set'), 'utf8'));
-  const scenario = option('--scenario');
   return {
     contract: 'product', runId: option('--run-id'), attempt: option('--attempt'), directory: dirname(option('--result')),
-    suite: option('--suite'), matrix: [{ platform: option('--platform'), baseline: option('--baseline'), scenario }],
+    matrix: [{ platform: option('--platform'), baseline: option('--baseline') }],
     candidateCommit: bundle.candidate.provenance.sourceCommit, sourceRunHeadSha: option('--source-run-head-sha'),
     candidateWebHash: bundle.candidate.identity.webHash, candidateIdentity: bundle.candidate.identity,
     baselineIdentities: bundle.baselines.map((row: { name: string; identity: unknown }) => ({ name: row.name, identity: row.identity })),

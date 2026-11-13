@@ -10,7 +10,6 @@ import { isAndroidPersistentWebAppActivity, runtimeIdentityMismatch } from './or
 export interface EvidenceMatrixEntry {
   platform: string;
   baseline: string;
-  scenario: string;
 }
 
 export interface EvidenceBundleIdentity {
@@ -35,7 +34,6 @@ export interface EvidenceValidationOptions {
   attempt: string;
   directory: string;
   matrix: EvidenceMatrixEntry[];
-  suite: string;
   candidateCommit: string;
   sourceRunHeadSha: string;
   candidateWebHash: string;
@@ -178,8 +176,7 @@ export async function loadEvidenceRows(options: EvidenceValidationOptions, inval
   if (!Array.isArray(options.matrix) || !options.matrix.length || options.matrix.length > 2) fail('expected matrix bound');
   if (new Set(options.matrix.map(entry => entry.platform)).size !== options.matrix.length
     || new Set(options.matrix.map(entry => entry.baseline)).size !== 1
-    || new Set(options.matrix.map(entry => entry.scenario)).size !== 1
-    || options.matrix.some(entry => !['android', 'ios'].includes(entry.platform) || !['historical', 'synthetic'].includes(entry.scenario)
+    || options.matrix.some(entry => !['android', 'ios'].includes(entry.platform)
       || !/^[A-Za-z0-9._-]{1,100}$/u.test(entry.baseline))) fail('expected matrix must have one baseline and one row per platform');
   if (options.baselineIdentities.length !== 1 || options.baselineIdentities[0].name !== options.matrix[0].baseline) fail('prepared baseline must match the expected matrix');
   let files: string[];
@@ -207,15 +204,15 @@ export async function loadEvidenceRows(options: EvidenceValidationOptions, inval
         || typeof failure.stage !== 'string' || typeof failure.message !== 'string') fail('invalid failure receipt');
     }
     validateMeasurementIdentity(result.identity);
-    const scenario = result.candidate === 'current-code-target' ? 'synthetic' : 'historical';
-    const key = rowKey({ platform: String(result.platform), baseline: String(result.baseline), scenario });
+    if (typeof result.candidate !== 'string' || !result.candidate.startsWith('candidate-')) fail('invalid historical candidate identity');
+    const key = rowKey({ platform: String(result.platform), baseline: String(result.baseline) });
     if (!expected.has(key)) fail('foreign or duplicate matrix row');
     const candidate = options.candidateIdentity;
     if (!candidate) fail('missing prepared candidate');
-    const identity = { runId: options.runId, attempt: options.attempt, suite: options.suite, platform: result.platform, baseline: result.baseline, scenario,
+    const identity = { runId: options.runId, attempt: options.attempt, platform: result.platform, baseline: result.baseline,
       sourceCommit: options.candidateCommit, sourceRunHeadSha: options.sourceRunHeadSha, candidateWebHash: options.candidateWebHash, candidateBuild: candidate.build, measurementId: result.identity.measurementId };
     if (!isDeepStrictEqual(result.identity, identity) || result.source_commit !== options.candidateCommit || result.source_run_head_sha !== options.sourceRunHeadSha
-      || result.candidate_web_hash !== identity.candidateWebHash || result.suite !== options.suite) fail('stale or inconsistent run identity');
+      || result.candidate_web_hash !== identity.candidateWebHash) fail('stale or inconsistent run identity');
     const row: EvidenceRow = { filename, result };
     const evidence = record(result.evidence, 'evidence');
     validateDriverReceipt(evidence.driver);
@@ -375,9 +372,8 @@ function assertCredentialEvidence(result: Record<string, unknown>): void {
 function assertConsumedFault(result: Record<string, unknown>, expectedCandidate: EvidenceBundleIdentity): void {
   const labels = stringArray(result.faults_exercised, 'faults_exercised');
   if (labels.length !== 1) fail('exactly one candidate fault must be exercised');
-  const candidate = stringValue(result.candidate, 'candidate');
-  const expectedKind = candidate === 'current-code-target' ? 'missing' : 'corrupt';
-  const expectedPath = candidate === 'current-code-target' ? expectedCandidate.style : expectedCandidate.script;
+  const expectedKind = 'corrupt';
+  const expectedPath = expectedCandidate.script;
   const expectedLabel = `${expectedKind}:${expectedPath}`;
   if (labels[0] !== expectedLabel) fail(`fault identity ${labels[0]} does not match the expected candidate asset ${expectedLabel}`);
   const fault = record(result.fault_identity, 'fault_identity');
@@ -418,7 +414,7 @@ function assertPhoneCompletion(result: Record<string, unknown>, baseline: string
 }
 
 function rowKey(entry: EvidenceMatrixEntry): string {
-  return `${entry.platform}/${entry.baseline}/${entry.scenario}`;
+  return `${entry.platform}/${entry.baseline}`;
 }
 
 export async function validateMobileEvidence(options: EvidenceValidationOptions): Promise<void> {
@@ -465,16 +461,12 @@ export async function validateMobileEvidence(options: EvidenceValidationOptions)
     if (result.source_commit !== options.candidateCommit || result.source_run_head_sha !== options.sourceRunHeadSha) fail(`${filename} has stale source or head identity`);
     if (result.candidate_web_hash !== options.candidateWebHash) fail(`${filename} has the wrong candidate web hash`);
     if (typeof result.candidate_web_hash !== 'string' || !/^[0-9a-f]{64}$/u.test(result.candidate_web_hash)) fail(`${filename} has an invalid candidate web hash`);
-    const candidate = stringValue(result.candidate, `${filename}.candidate`);
-    const scenario = candidate === 'current-code-target' ? 'synthetic' : 'historical';
-    if (scenario === 'historical' && !candidate.startsWith('candidate-')) fail(`${filename} has an invalid historical candidate identity`);
     const expectedCandidate = candidateIdentity;
-    if (!expectedCandidate) fail(`${filename} has no expected ${scenario} candidate identity`);
     const platform = stringValue(result.platform, `${filename}.platform`);
     const baseline = stringValue(result.baseline, `${filename}.baseline`);
     const expectedBaseline = baselineIdentities.get(baseline);
     if (!expectedBaseline) fail(`${filename} has no expected identity for baseline ${baseline}`);
-    const key = rowKey({ platform, baseline, scenario });
+    const key = rowKey({ platform, baseline });
     const expectedRow = expected.get(key);
     if (!expectedRow || seen.has(key)) fail(`${filename} does not match a unique expected matrix row`);
     if (platform !== 'android' && platform !== 'ios') fail(`${filename} has an unsupported platform`);
@@ -484,7 +476,7 @@ export async function validateMobileEvidence(options: EvidenceValidationOptions)
     const finalIdentity = assertRuntime(result.final_identity, platform, 'final identity', origin, expectedCandidate, true);
     if (finalIdentity.origin !== (result.initial_identity as Record<string, unknown>).origin) fail(`${filename} changed fixture origin between identities`);
     assertCredentialEvidence(result);
-    if (options.suite === 'release' && (!Number.isInteger(result.lifecycle_launch_count) || Number(result.lifecycle_launch_count) < 1)) {
+    if (!Number.isInteger(result.lifecycle_launch_count) || Number(result.lifecycle_launch_count) < 1) {
       fail(`${filename} is missing lifecycle evidence`);
     }
     if (result.preference_preserved !== true) fail(`${filename} did not preserve preferences`);

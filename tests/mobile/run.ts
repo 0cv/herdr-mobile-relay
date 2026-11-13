@@ -87,7 +87,6 @@ interface RunResult {
   primary_failure?: ResultFailure;
   additional_failures?: ResultFailure[];
   platform: string;
-  suite: string;
   baseline: string;
   candidate: string;
   origin?: string;
@@ -419,7 +418,6 @@ async function runUpgradeScenario(
   platform: MobilePlatform,
   info: FixtureInfo,
   bundleSet: BundleSet,
-  suite: string,
   setStage: (stage: ScenarioStage) => void,
   budget: PhaseBudget,
   qualification: QualificationFailureLatch,
@@ -429,7 +427,6 @@ async function runUpgradeScenario(
   assertDistinctUpgrade(baseline, bundleSet.candidate);
   const navigationIds = new Set<string>();
   const faultsExercised: string[] = [];
-  let faultIdentity: RunResult['fault_identity'];
   const initialIdentity: RuntimeIdentity = await (async () => {
     setStage('device');
     await platform.startFreshDevice();
@@ -466,53 +463,47 @@ async function runUpgradeScenario(
   await platform.captureSanitizedEvidence('paired');
   setStage('upgrade');
   await platform.clickWebText('Settings');
-  const faultPath = bundleSet.candidate.name === 'current-code-target'
-    ? bundleSet.candidate.identity.style
-    : bundleSet.candidate.identity.script;
-  const faultKind = bundleSet.candidate.name === 'current-code-target' ? 'missing' : 'corrupt';
+  const faultPath = bundleSet.candidate.identity.script;
+  const faultKind = 'corrupt';
   const faultId = `candidate-${bundleSet.candidate.name}-${faultKind}`;
   const faultGeneration = `${faultId}-${Date.now()}`;
-  if (suite === 'release' || suite === 'smoke') {
-    const beforeActivation = await fixtureState(info);
-    if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
-      throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
-    }
-    await control(info, '/fault', 'POST', {
-      id: faultId, generation: faultGeneration, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
-    });
-    faultIdentity = { id: faultId, generation: faultGeneration, kind: faultKind, path: faultPath };
-    faultsExercised.push(`${faultKind}:${faultPath}`);
+  const beforeActivation = await fixtureState(info);
+  if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
+    throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
   }
+  await control(info, '/fault', 'POST', {
+    id: faultId, generation: faultGeneration, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
+  });
+  const faultIdentity = { id: faultId, generation: faultGeneration, kind: faultKind, path: faultPath };
+  faultsExercised.push(`${faultKind}:${faultPath}`);
   await control(info, '/activate', 'POST', { release: 'candidate' });
   await platform.clickWebText('Settings');
   await platform.clickWebText('Check for Updates');
   await platform.clickWebText('Load Update');
   await platform.clickDialogText('update-herdr-dialog', 'Load Update');
-  if (suite === 'release' || suite === 'smoke') {
-    await waitForFault(info, faultPath, faultKind, faultId, faultGeneration, budget);
-    const faultState = await fixtureState(info);
-    assertFaultActive(faultState, faultPath, faultKind, faultId, faultGeneration);
-    await assertCandidateFailureObserved(
-      platform,
-      bundleSet.candidate.identity,
-      info.app_url,
-      baseline,
-      info,
-      faultPath,
-      faultKind,
-      faultId,
-      faultGeneration,
-      qualification,
-      budget,
-    );
-    await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
-    const clearedState = await fixtureState(info);
-    qualification.observe({ fault: clearedState });
-    if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {
-      throw new Error(`FIXTURE_FAULT_CLEAR: fault ${faultId} was not explicitly cleared`);
-    }
-    await platform.clickWebText('Try again');
+  await waitForFault(info, faultPath, faultKind, faultId, faultGeneration, budget);
+  const faultState = await fixtureState(info);
+  assertFaultActive(faultState, faultPath, faultKind, faultId, faultGeneration);
+  await assertCandidateFailureObserved(
+    platform,
+    bundleSet.candidate.identity,
+    info.app_url,
+    baseline,
+    info,
+    faultPath,
+    faultKind,
+    faultId,
+    faultGeneration,
+    qualification,
+    budget,
+  );
+  await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
+  const clearedState = await fixtureState(info);
+  qualification.observe({ fault: clearedState });
+  if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {
+    throw new Error(`FIXTURE_FAULT_CLEAR: fault ${faultId} was not explicitly cleared`);
   }
+  await platform.clickWebText('Try again');
   await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
   const phoneCompletion = await waitForPhoneCompletion(platform, baseline, qualification, budget);
   await platform.clickDialogText('update-progress-dialog', 'Close');
@@ -526,7 +517,7 @@ async function runUpgradeScenario(
   qualification.observe({ ownership: finalBeforeAuth });
   assertRelayOwnership(finalBeforeAuth);
   await platform.relaunchInstalledApp();
-  let finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
   let finalAuth = await reconnectAllRelays(info, finalBeforeAuth, budget);
   qualification.observe({ ownership: finalAuth });
   assertRelayOwnership(finalAuth);
@@ -540,58 +531,56 @@ async function runUpgradeScenario(
     assertNoRelayInstall(relay.install_update_count);
     assertNoRelayDeploy(relay.deploy_app_update_count);
   }
-  if (suite === 'release') {
-    setStage('lifecycle');
-    const beforeResumeAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: beforeResumeAuth });
-    assertRelayOwnership(beforeResumeAuth);
-    await platform.backgroundApp();
-    await platform.relaunchInstalledApp();
-    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
-    const resumeAuth = await reconnectAllRelays(info, beforeResumeAuth, budget);
-    qualification.observe({ ownership: resumeAuth });
-    assertRelayOwnership(resumeAuth, ['alpha', 'beta']);
-    assertCredentialPreserved(beforeResumeAuth, resumeAuth);
-    assertCredentialIdentityPreserved(beforeAuth, resumeAuth);
-    const agentBeforeAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: agentBeforeAuth });
-    assertRelayOwnership(agentBeforeAuth, ['alpha']);
-    const agentCompletion = await platform.readUpdateCompletion();
-    qualification.observe({ completion: agentCompletion });
-    assertUpdateProgressClosed(agentCompletion);
-    await platform.openFixtureAgent('alpha');
-    const agentAfterAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: agentAfterAuth });
-    assertRelayOwnership(agentAfterAuth, ['alpha']);
-    assertCredentialIdentityPreserved(agentBeforeAuth, agentAfterAuth, ['alpha']);
-    await platform.showKeyboardOnComposer();
-    await platform.hideKeyboard();
-    const beforeColdAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: beforeColdAuth });
-    assertRelayOwnership(beforeColdAuth);
-    await platform.terminateInstalledApp();
-    await platform.relaunchInstalledApp();
-    finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
-    const coldAuth = await reconnectAllRelays(info, beforeColdAuth, budget);
-    qualification.observe({ ownership: coldAuth });
-    assertRelayOwnership(coldAuth);
-    assertCredentialPreserved(beforeColdAuth, coldAuth);
-    assertCredentialIdentityPreserved(beforeAuth, coldAuth);
-    finalAuth = coldAuth;
-    finalState = await fixtureState(info);
-    assertPreferencePreserved(beforePreference, { key: beforePreference.key, value: await platform.preferenceValue() });
-    for (const relay of finalState.relays) {
-      assertNoRelayInstall(relay.install_update_count);
-      assertNoRelayDeploy(relay.deploy_app_update_count);
-    }
+  setStage('lifecycle');
+  const beforeResumeAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: beforeResumeAuth });
+  assertRelayOwnership(beforeResumeAuth);
+  await platform.backgroundApp();
+  await platform.relaunchInstalledApp();
+  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  const resumeAuth = await reconnectAllRelays(info, beforeResumeAuth, budget);
+  qualification.observe({ ownership: resumeAuth });
+  assertRelayOwnership(resumeAuth, ['alpha', 'beta']);
+  assertCredentialPreserved(beforeResumeAuth, resumeAuth);
+  assertCredentialIdentityPreserved(beforeAuth, resumeAuth);
+  const agentBeforeAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: agentBeforeAuth });
+  assertRelayOwnership(agentBeforeAuth, ['alpha']);
+  const agentCompletion = await platform.readUpdateCompletion();
+  qualification.observe({ completion: agentCompletion });
+  assertUpdateProgressClosed(agentCompletion);
+  await platform.openFixtureAgent('alpha');
+  const agentAfterAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: agentAfterAuth });
+  assertRelayOwnership(agentAfterAuth, ['alpha']);
+  assertCredentialIdentityPreserved(agentBeforeAuth, agentAfterAuth, ['alpha']);
+  await platform.showKeyboardOnComposer();
+  await platform.hideKeyboard();
+  const beforeColdAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: beforeColdAuth });
+  assertRelayOwnership(beforeColdAuth);
+  await platform.terminateInstalledApp();
+  await platform.relaunchInstalledApp();
+  const finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  const coldAuth = await reconnectAllRelays(info, beforeColdAuth, budget);
+  qualification.observe({ ownership: coldAuth });
+  assertRelayOwnership(coldAuth);
+  assertCredentialPreserved(beforeColdAuth, coldAuth);
+  assertCredentialIdentityPreserved(beforeAuth, coldAuth);
+  finalAuth = coldAuth;
+  finalState = await fixtureState(info);
+  assertPreferencePreserved(beforePreference, { key: beforePreference.key, value: await platform.preferenceValue() });
+  for (const relay of finalState.relays) {
+    assertNoRelayInstall(relay.install_update_count);
+    assertNoRelayDeploy(relay.deploy_app_update_count);
   }
-  if (platform instanceof AndroidPlatform && suite === 'release') platform.productCheckpoint('lifecycle-complete');
+  if (platform instanceof AndroidPlatform) platform.productCheckpoint('lifecycle-complete');
   const reloadCount = Math.max(0, upgradeNavigationCount - 1);
   const lifecycleLaunchCount = Math.max(0, navigationIds.size - upgradeNavigationCount);
   assertBoundedReloads(reloadCount);
   if (lifecycleLaunchCount > 2) throw new Error(`RELOAD_BOUND_EXCEEDED: ${lifecycleLaunchCount} lifecycle launches exceed 2`);
   return {
-    schema: 2, product: { status: 'PASS', categories: [] }, platform: platform.name, suite,
+    schema: 2, product: { status: 'PASS', categories: [] }, platform: platform.name,
     baseline: baseline.name, candidate: bundleSet.candidate.name, origin: info.app_url,
     source_commit: bundleSet.candidate.provenance.sourceCommit,
     source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
@@ -610,7 +599,6 @@ async function runUpgrade(
   platform: MobilePlatform,
   info: FixtureInfo,
   bundleSet: BundleSet,
-  suite: string,
   setStage: (stage: ScenarioStage) => void,
   budget: PhaseBudget,
   afterDevicePreparation: () => Promise<void>,
@@ -618,7 +606,7 @@ async function runUpgrade(
   const qualification = new QualificationFailureLatch();
   let stage: ScenarioStage = 'device';
   try {
-    return await runUpgradeScenario(platform, info, bundleSet, suite, (nextStage) => {
+    return await runUpgradeScenario(platform, info, bundleSet, (nextStage) => {
       stage = nextStage;
       setStage(nextStage);
     }, budget, qualification, afterDevicePreparation);
@@ -664,9 +652,9 @@ async function main(): Promise<void> {
   const outputOption = option('--output') || 'run-artifacts';
   const outputDir = repositoryPath(outputOption);
   const privateDir = repositoryPath(option('--private-output') || process.env.MOBILE_PRIVATE || `${outputOption}.private-${process.pid}`);
-  const suite = option('--suite') || 'smoke';
+  if (!bundleSet.candidate.name.startsWith('candidate-')) throw new Error('invalid historical candidate identity');
   const budget = new PhaseBudget('mobile-scenario', {
-    timeoutMs: suite === 'release' ? 45 * 60_000 : 30 * 60_000,
+    timeoutMs: 45 * 60_000,
     recoveryLimit: 8,
   });
   const diagnostics = new DiagnosticRecorder();
@@ -691,9 +679,8 @@ async function main(): Promise<void> {
   let measurementStarted = false;
   let measured: AndroidMeasurementOutcome | undefined;
   let identity: MeasurementIdentity = {
-    runId: process.env.GITHUB_RUN_ID || '', attempt: process.env.GITHUB_RUN_ATTEMPT || '', suite: suite as MeasurementIdentity['suite'],
+    runId: process.env.GITHUB_RUN_ID || '', attempt: process.env.GITHUB_RUN_ATTEMPT || '',
     platform: process.env.MOBILE_PLATFORM as MeasurementIdentity['platform'], baseline: baseline.name,
-    scenario: bundleSet.candidate.name === 'current-code-target' ? 'synthetic' : 'historical',
     sourceCommit: bundleSet.candidate.provenance.sourceCommit, sourceRunHeadSha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || '',
     candidateWebHash: bundleSet.candidate.identity.webHash, candidateBuild: bundleSet.candidate.identity.build, measurementId: 'ios-not-applicable',
   };
@@ -720,7 +707,7 @@ async function main(): Promise<void> {
       measurement.requireGmsObservations();
       android.environmentMeasurement = measurement;
     }
-    result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; }, budget, async () => {
+    result = await runUpgrade(platform, fixtureInfo, bundleSet, (nextStage) => { stage = nextStage; }, budget, async () => {
       if (!android || !measurement) return;
       await android.observeGmsStage('before-measurement-begin');
       await measurement.begin();
@@ -750,7 +737,7 @@ async function main(): Promise<void> {
     const failure = failureSnapshot(error, stage);
     result = {
       schema: 2, product: { status: 'FAIL', categories: ['REQUIRED_SCENARIO_FAILURE'] },
-      platform: process.env.MOBILE_PLATFORM || 'unknown', suite,
+      platform: process.env.MOBILE_PLATFORM || 'unknown',
       baseline: bundleSet.baselines[0]?.name || '', candidate: bundleSet.candidate.name,
       source_commit: bundleSet.candidate.provenance.sourceCommit,
       source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,

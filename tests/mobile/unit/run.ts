@@ -248,9 +248,9 @@ test('evidence validation enforces matrix identity and platform-specific native 
     script: '/assets/new.js', style: '/assets/new.css', webHash,
   };
   const result = {
-    ...resultContract(measurementIdentity({ platform: 'ios', suite: 'release', measurementId: 'ios-not-applicable' })),
+    ...resultContract(measurementIdentity({ platform: 'ios', measurementId: 'ios-not-applicable' })),
     evidence: { driver: driverFixture(), teardown: { driver: driverFixture(true) } },
-    suite: 'release', platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
+    platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
     origin: 'https://fixture.test', source_commit: sourceCommit, source_run_head_sha: headSha, candidate_web_hash: webHash,
     initial_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
@@ -282,12 +282,16 @@ test('evidence validation enforces matrix identity and platform-specific native 
   const options = {
     contract: 'product' as const, runId: result.identity.runId, attempt: result.identity.attempt,
     directory: root,
-    matrix: [{ platform: 'ios', baseline: '0.20.10', scenario: 'historical' }],
-    suite: 'release', candidateCommit: sourceCommit, sourceRunHeadSha: headSha, candidateWebHash: webHash,
+    matrix: [{ platform: 'ios', baseline: '0.20.10' }],
+    candidateCommit: sourceCommit, sourceRunHeadSha: headSha, candidateWebHash: webHash,
     candidateIdentity: expectedCandidateIdentity,
     baselineIdentities: [{ name: '0.20.10', identity: expectedBaselineIdentity }],
   };
   await validateMobileEvidence(options);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, lifecycle_launch_count: 0 }));
+  await assert.rejects(validateMobileEvidence(options), /missing lifecycle evidence/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, candidate: 'current-code-target' }));
+  await assert.rejects(validateMobileEvidence(options), /invalid historical candidate identity/);
   const secretSentinel = 'serialization-secret-value';
   await writeSanitizedJson(join(root, 'mobile-result.json'), {
     ...result,
@@ -337,9 +341,9 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await writeFile(join(root, 'duplicate', 'mobile-result.json'), JSON.stringify(result));
   await assert.rejects(validateMobileEvidence(options), /missing or duplicated/);
   const androidIdentity = measurementIdentity();
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, ...resultContract(androidIdentity), ...await persistAndroidProof(root, androidIdentity), platform: 'android', suite: 'smoke' }));
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, ...resultContract(androidIdentity), ...await persistAndroidProof(root, androidIdentity), platform: 'android', final_identity: { ...result.final_identity, nativePid: '43' } }));
   await rm(join(root, 'duplicate'), { recursive: true, force: true });
-  await assert.rejects(validateMobileEvidence({ ...options, suite: 'smoke', matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /invalid android provider|nativeActivity/);
+  await assert.rejects(validateMobileEvidence({ ...options, matrix: [{ platform: 'android', baseline: '0.20.10' }] }), /invalid android provider|nativeActivity/);
 });
 
 test('final evidence checkout precedes artifact download', async () => {
@@ -1428,7 +1432,7 @@ test('runtime script observations satisfy baseline and candidate validation cont
     const result = {
       ...resultContract(measurementIdentity({ baseline: expected.version, sourceRunHeadSha: sourceCommit, candidateWebHash: candidate.webHash, candidateBuild: candidate.build })),
       ...await persistAndroidProof(directory, measurementIdentity({ baseline: expected.version, sourceRunHeadSha: sourceCommit, candidateWebHash: candidate.webHash, candidateBuild: candidate.build })),
-      suite: 'smoke', platform: 'android', baseline: expected.version,
+      platform: 'android', baseline: expected.version,
       candidate: 'candidate-proof', origin, source_commit: sourceCommit, source_run_head_sha: sourceCommit,
       candidate_web_hash: candidate.webHash,
       initial_identity: initial,
@@ -1438,7 +1442,7 @@ test('runtime script observations satisfy baseline and candidate validation cont
         url: new URL(candidate.entry, origin).href,
         nativeProvider: 'android:com.android.chrome',
         nativeActivity: 'org.chromium.chrome.browser.webapps.WebappActivity',
-        nativePid: '42',
+        nativePid: '43',
         buildFromApplication: true,
       },
       credential_preserved: true,
@@ -1447,6 +1451,7 @@ test('runtime script observations satisfy baseline and candidate validation cont
         beta: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['beta'], connections: 1 },
       } },
       preference_preserved: true,
+      lifecycle_launch_count: 1,
       phone_completion: { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true },
       faults_exercised: [`corrupt:${candidate.script}`],
       fault_identity: { id: 'contract', generation: '1', kind: 'corrupt', path: candidate.script },
@@ -1456,8 +1461,8 @@ test('runtime script observations satisfy baseline and candidate validation cont
     await validateMobileEvidence({
       contract: 'product', runId: result.identity.runId, attempt: result.identity.attempt,
       directory,
-      matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
-      suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
+      matrix: [{ platform: 'android', baseline: expected.version }],
+      candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
       candidateWebHash: candidate.webHash, candidateIdentity: candidate,
       baselineIdentities: [{ name: expected.version, identity: expected }],
     });
@@ -1470,8 +1475,8 @@ test('runtime script observations satisfy baseline and candidate validation cont
       await assert.rejects(validateMobileEvidence({
         contract: 'product', runId: result.identity.runId, attempt: result.identity.attempt,
         directory,
-        matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
-        suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
+        matrix: [{ platform: 'android', baseline: expected.version }],
+        candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
         candidateWebHash: candidate.webHash, candidateIdentity: candidate,
         baselineIdentities: [{ name: expected.version, identity: expected }],
       }), /RUNTIME_BUILD_SOURCE/);

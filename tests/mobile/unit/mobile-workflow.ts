@@ -84,9 +84,8 @@ function validateNativePath(steps: any[], dimension: 'inputs' | 'matrix'): void 
   assert.equal(check.length, 1);
   assert.equal(check[0].if, `always() && ${dimension}.platform == 'android'`);
   assert.equal(check[0].env.EXPECTED_BASELINE, '${{ ' + dimension + '.baseline }}');
-  assert.equal(check[0].env.EXPECTED_SCENARIO, '${{ ' + dimension + '.scenario }}');
   assert.match(check[0].run, /check --contract report/u);
-  for (const flag of ['directory', 'identity', 'bundle-set', 'run-id', 'attempt', 'suite', 'baseline', 'scenario', 'source-run-head-sha']) assert.match(check[0].run, new RegExp('--' + flag + ' '));
+  for (const flag of ['directory', 'identity', 'bundle-set', 'run-id', 'attempt', 'baseline', 'source-run-head-sha']) assert.match(check[0].run, new RegExp('--' + flag + ' '));
   assert.doesNotMatch(check[0].run, /--output|continue-on-error|\|\| true/u);
   const settle = steps.filter(step => step.run?.includes('tests/mobile/android-gms-settle.ts'));
   assert.equal(settle.length, 1);
@@ -100,11 +99,11 @@ function validateNativePath(steps: any[], dimension: 'inputs' | 'matrix'): void 
   const summary = steps.find(step => step.name === 'Publish bounded mobile summary');
   assert.equal(summary.if, 'always()'); assert.match(summary.run, /validate-environment.ts --result/u);
   assert.ok(steps.indexOf(summary) > steps.indexOf(sanitize));
-  for (const flag of ['bundle-set', 'run-id', 'attempt', 'suite', 'platform', 'baseline', 'scenario', 'source-run-head-sha']) assert.match(summary.run, new RegExp('--' + flag + ' '));
+  for (const flag of ['bundle-set', 'run-id', 'attempt', 'platform', 'baseline', 'source-run-head-sha']) assert.match(summary.run, new RegExp('--' + flag + ' '));
   const strict = steps.find(step => step.name === 'Require strict Android environment qualification');
   assert.equal(strict.if, "always() && inputs.platform == 'android'");
   assert.match(strict.run, /validate-environment.ts --require-pass --result/u);
-  for (const flag of ['bundle-set', 'run-id', 'attempt', 'suite', 'platform', 'baseline', 'scenario', 'source-run-head-sha']) assert.match(strict.run, new RegExp('--' + flag + ' '));
+  for (const flag of ['bundle-set', 'run-id', 'attempt', 'platform', 'baseline', 'source-run-head-sha']) assert.match(strict.run, new RegExp('--' + flag + ' '));
   const scenariosRun = steps.filter(step => step.run?.includes('bun run --cwd tests/mobile run --'));
   assert.equal(scenariosRun.length, 1);
   assert.equal(scenariosRun[0].if, undefined);
@@ -201,7 +200,7 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
   assert.equal(jobs.device['runs-on'], '${{ matrix.runner }}');
   assert.equal(jobs.device['timeout-minutes'], 60);
   const device = jobs.device.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run');
-  assert.deepEqual(device.with, { platform: '${{ matrix.platform }}', baseline: '${{ matrix.baseline }}', scenario: '${{ matrix.scenario }}', suite: 'release', source_head_sha: '${{ needs.provenance.outputs.head_sha }}', evidence_prefix: 'mobile-evidence-device' });
+  assert.deepEqual(device.with, { platform: '${{ matrix.platform }}', baseline: '${{ matrix.baseline }}', source_head_sha: '${{ needs.provenance.outputs.head_sha }}', evidence_prefix: 'mobile-evidence-device' });
   assert.equal(jobs.device.steps.length, 2);
   assert.equal(jobs.device.steps[0].with.ref, '${{ needs.provenance.outputs.source_sha }}');
   validateNativePath(action.runs.steps, 'inputs');
@@ -254,7 +253,6 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
   assert.match(validator.run, /--contract qualified/u);
   for (const step of [report, strict, validator]) {
     for (const flag of ['run-id', 'attempt', 'matrix', 'candidate-commit', 'source-run-head-sha', 'candidate-web-hash', 'candidate-identity', 'baseline-identities']) assert.match(step.run, new RegExp('--' + flag + ' '));
-    assert.match(step.run, /--suite release/u);
     assert.equal(step.env.DEVICE_MATRIX, '${{ needs.prepare.outputs.device_matrix }}');
     assert.equal(step.env.CANDIDATE_COMMIT, '${{ needs.provenance.outputs.source_sha }}');
     assert.equal(step.env.SOURCE_RUN_HEAD_SHA, '${{ needs.provenance.outputs.head_sha }}');
@@ -389,7 +387,6 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
         [...options.matrix, ios.options.matrix[0]],
         [android.options.matrix[0], android.options.matrix[0]],
         [android.options.matrix[0], { ...ios.options.matrix[0], baseline: 'another-release' }],
-        [android.options.matrix[0], { ...ios.options.matrix[0], scenario: 'synthetic' }],
       ]) {
         await assert.rejects(validateMobileEvidence({ ...options, matrix }), /expected matrix/);
         await assert.rejects(collectEnvironmentReport({ ...options, matrix }), /expected matrix/);
@@ -949,8 +946,8 @@ if (mode === operation + '-timeout') process.exit(124);
         }));
         assert.equal(outputs.baseline, expected);
         assert.deepEqual(JSON.parse(outputs.device_matrix).include, [
-          { platform: 'android', runner: 'ubuntu-24.04', baseline: expected, scenario: 'historical' },
-          { platform: 'ios', runner: 'xcode-27', baseline: expected, scenario: 'historical' },
+          { platform: 'android', runner: 'ubuntu-24.04', baseline: expected },
+          { platform: 'ios', runner: 'xcode-27', baseline: expected },
         ]);
       } finally { await rm(root, { recursive: true, force: true }); }
     }
