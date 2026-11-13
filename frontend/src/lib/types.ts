@@ -267,7 +267,6 @@ export interface Agent {
   approval_fingerprint?: string;
   options?: string[];
   interaction?: QuestionInteraction | null;
-  question_layout?: boolean;
   event_id?: string;
   attention_kind?: AttentionKind;
   attention_capable?: boolean;

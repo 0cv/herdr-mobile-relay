@@ -28,7 +28,6 @@ type Classification struct {
 	Options          []string
 	ApprovalFocus    int
 	Interaction      *Interaction
-	QuestionLayout   bool
 	ApprovalIdentity string
 	approvalSource   string
 }
@@ -123,11 +122,10 @@ func Classify(text, agent string) Classification {
 	if structuredControls {
 		if interaction := Parse(text, agent); interaction != nil {
 			return Classification{
-				Kind:           AttentionQuestion,
-				Prompt:         interaction.Question,
-				Command:        interaction.Question,
-				Interaction:    interaction,
-				QuestionLayout: true,
+				Kind:        AttentionQuestion,
+				Prompt:      interaction.Question,
+				Command:     interaction.Question,
+				Interaction: interaction,
 			}
 		}
 		if options, focus, command := liveApprovalDetails(text, agent); len(options) > 0 {

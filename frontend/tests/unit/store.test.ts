@@ -1293,7 +1293,6 @@ describe('relay command store', () => {
           id: 'old-question', kind: 'single_select', question: 'Trust this?',
           options: [{ index: 0, label: 'Yes' }],
         },
-        question_layout: true,
       }],
     });
     const agent = get(relayStore.agents)[0];
@@ -1301,7 +1300,6 @@ describe('relay command store', () => {
       attention_kind: 'unknown',
       attention_capable: false,
       interaction: null,
-      question_layout: false,
     });
     expect(agent.options).toBeUndefined();
   });
@@ -1934,7 +1932,7 @@ describe('relay command store', () => {
       base_fingerprint: 'content-1',
       content_fingerprint: 'content-1',
       segments: [],
-      question_layout: true,
+      interaction: null,
     });
     expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)?.content)
       .toBe('one\ntwo\nthree\nfour\n');

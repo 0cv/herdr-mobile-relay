@@ -1159,7 +1159,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	response := map[string]any{
 		"type": "pane_content", "pane_id": paneID, "content": string(content),
 		"format": format, "truncated": read.Truncated, "viewport_only": terminalColumns > 0,
-		"interaction": nil, "question_layout": false,
+		"interaction": nil,
 	}
 	if terminalRows := intValue(message["terminal_rows"], 0); terminalRows > 0 {
 		response["viewport_rows"] = terminalRows

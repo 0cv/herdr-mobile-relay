@@ -91,7 +91,7 @@ function inventory(peer: Peer, producer: Producer): void {
       generation: 1, agent_session_id: 'session-1', agent: 'codex', status: 'blocked', event_id: 'event-1',
       ...(producer.name === 'respond'
         ? { attention_kind: 'approval', options: ['Approve once', 'Deny'], approval_fingerprint: 'approval-1' }
-        : { attention_kind: 'question', interaction, question_layout: true }),
+        : { attention_kind: 'question', interaction }),
     })),
   });
 }

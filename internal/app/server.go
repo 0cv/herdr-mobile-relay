@@ -2012,7 +2012,6 @@ func setAgentAttention(
 	agent.Options = nil
 	agent.ApprovalFingerprint = ""
 	agent.Interaction = nil
-	agent.QuestionLayout = false
 	agent.InteractionID = ""
 	switch classification.Kind {
 	case question.AttentionApproval:
@@ -2020,7 +2019,6 @@ func setAgentAttention(
 		agent.ApprovalFingerprint = question.ApprovalFingerprint(classification)
 	case question.AttentionQuestion:
 		agent.Interaction = classification.Interaction
-		agent.QuestionLayout = classification.QuestionLayout
 		if agent.Interaction != nil {
 			agent.InteractionID = agent.Interaction.ID
 			if state != nil {
@@ -2044,7 +2042,6 @@ func classificationFromAgent(agent *coordinator.AgentState) question.Classificat
 		Options:          append([]string(nil), agent.Options...),
 		ApprovalIdentity: agent.ApprovalFingerprint,
 		Interaction:      agent.Interaction,
-		QuestionLayout:   agent.QuestionLayout,
 	}
 }
 
@@ -2081,7 +2078,6 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 		"approval_fingerprint": agent.ApprovalFingerprint,
 		"interaction":          agent.Interaction,
 		"interaction_id":       agent.InteractionID,
-		"question_layout":      agent.QuestionLayout,
 		"pane_revision":        agent.StateRevision,
 	}
 	if s.transitionBroadcast == s.hub {
@@ -2914,7 +2910,6 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 	response["command"] = classification.Command
 	response["options"] = classification.Options
 	response["interaction"] = classification.Interaction
-	response["question_layout"] = classification.QuestionLayout
 	if interaction := classification.Interaction; interaction != nil {
 		if text := strings.TrimSpace(interaction.Other.Text); text != "" {
 			s.state.RecordCustomAnswer(paneID, interaction.Question, text)
@@ -2973,7 +2968,6 @@ func paneFrameFingerprint(response map[string]any) string {
 		response["command"],
 		response["options"],
 		response["interaction"],
-		response["question_layout"],
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -3822,9 +3816,6 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 			}
 		}
 	}
-	if value, exists := delta["question_layout"]; exists {
-		agent.QuestionLayout, _ = value.(bool)
-	}
 	if agent.Status != "blocked" {
 		agent.AttentionKind = ""
 		agent.Prompt = ""
@@ -3832,7 +3823,6 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 		agent.Options = nil
 		agent.ApprovalFingerprint = ""
 		agent.Interaction = nil
-		agent.QuestionLayout = false
 	} else {
 		if agent.AttentionKind != question.AttentionApproval {
 			agent.Options = nil
@@ -3840,7 +3830,6 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 		}
 		if agent.AttentionKind != question.AttentionQuestion {
 			agent.Interaction = nil
-			agent.QuestionLayout = false
 		}
 	}
 	if value, exists := delta["tab_number"]; exists {

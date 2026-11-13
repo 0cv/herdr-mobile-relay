@@ -2894,7 +2894,6 @@ class RelayStore {
           status: interaction ? 'blocked' : 'working',
           attention_kind: interaction ? 'question' : undefined,
           interaction,
-          question_layout: Boolean(interaction),
         }
       : item);
     this.publishAgents('pane content interaction');

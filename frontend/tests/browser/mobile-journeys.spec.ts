@@ -4051,7 +4051,7 @@ test('opens the deployed build when a deploy removed the question controls', asy
     await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Which build?', content_fingerprint: 'question' });
     await server(page, 0, {
       type: 'pane_delta', pane_id: 'w1:p1', format: 'plain', base_fingerprint: 'question', content_fingerprint: 'question',
-      segments: [], attention_kind: 'question', interaction, question_layout: true,
+      segments: [], attention_kind: 'question', interaction,
     });
   };
   const deploy = await removeLazyFile(page, 'QuestionForm', { newerBuild: true, missingRequests: 1 });
@@ -4064,7 +4064,7 @@ test('opens the deployed build when a deploy removed the question controls', asy
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Which build?', content_fingerprint: 'question' });
   await server(page, 0, {
     type: 'pane_delta', pane_id: 'w1:p1', format: 'plain', base_fingerprint: 'question', content_fingerprint: 'question',
-    segments: [], attention_kind: 'question', interaction, question_layout: true,
+    segments: [], attention_kind: 'question', interaction,
   });
   await waitForReloadedDocument(page);
   await askQuestion();
@@ -5882,7 +5882,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
     ...first, id: 'q2', question: 'Choose device coverage', submit_label: 'Submit', can_go_back: true, question_index: 2,
   };
   await setAutoCommands(page, false);
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', attention_kind: 'question', project: 'Approvals', agent: 'claude', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', attention_kind: 'question', project: 'Approvals', agent: 'claude', interaction: first });
   await expect(page.getByText('Question 1 of 2')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Chat about this' })).toBeHidden();
   await page.evaluate(() => {
@@ -5932,7 +5932,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   }
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi',
-    attention_kind: 'question', interaction: second, question_layout: true,
+    attention_kind: 'question', interaction: second,
   });
   expect(await page.evaluate(() => {
     const trace = window as unknown as {
@@ -5952,7 +5952,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
     .filter((command) => command.type === 'answer_question').at(-1)!;
   await server(page, 0, {
     type: 'blocked', pane_id: 'w1:p1', attention_kind: 'unknown',
-    project: 'Approvals', agent: 'claude', interaction: null, question_layout: false,
+    project: 'Approvals', agent: 'claude', interaction: null,
   });
   await server(page, 0, {
     type: 'command_result', action: 'answer_question', request_id: finalAnswer.request_id,
@@ -5963,7 +5963,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
 
   await server(page, 0, {
     type: 'blocked', pane_id: 'w1:p1', attention_kind: 'approval', project: 'Approvals', agent: 'claude',
-    interaction: null, question_layout: false, options: ['Proceed with plan', 'Cancel'],
+    interaction: null, options: ['Proceed with plan', 'Cancel'],
   });
   await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Proceed with plan' })).toBeVisible();
@@ -6038,7 +6038,6 @@ test(resizeWhileHidden
     content,
     attention_kind: 'question',
     interaction,
-    question_layout: true,
   });
   await expect(page.getByRole('group', { name: interaction.question })).toBeVisible();
   await expect(page.getByRole('log')).toBeHidden();
@@ -6103,7 +6102,6 @@ test('shows a live plan question immediately without reopening the agent', async
     segments: [],
     attention_kind: 'question',
     interaction,
-    question_layout: true,
   });
 
   await expect(page.getByRole('group', { name: interaction.question })).toBeVisible();
@@ -6131,7 +6129,7 @@ test('keeps a nonfinal question mounted when a transient frame is confirmed', as
     type: 'agents',
     agents: [{
       pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question',
-      project: 'Questions', agent: 'claude', interaction: first, question_layout: true,
+      project: 'Questions', agent: 'claude', interaction: first,
     }],
   });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
@@ -6150,7 +6148,7 @@ test('keeps a nonfinal question mounted when a transient frame is confirmed', as
   await expect(page.getByText('Unexpected question result.')).toBeVisible();
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi',
-    attention_kind: 'question', interaction: second, question_layout: true,
+    attention_kind: 'question', interaction: second,
   });
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 });
@@ -6204,10 +6202,10 @@ test('answers a short single-choice question from its card in one tap', async ({
   await server(page, 0, {
     type: 'agents',
     agents: [
-      { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Short', agent: 'claude', options: [], interaction: short, question_layout: true },
-      { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'question', project: 'Long', agent: 'claude', options: [], interaction: long, question_layout: true },
-      { pane_id: 'w1:p3', status: 'blocked', attention_kind: 'question', project: 'Described', agent: 'claude', options: [], interaction: described, question_layout: true },
-      { pane_id: 'w1:p4', status: 'blocked', attention_kind: 'question', project: 'Essay', agent: 'claude', options: [], interaction: essay, question_layout: true },
+      { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Short', agent: 'claude', options: [], interaction: short },
+      { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'question', project: 'Long', agent: 'claude', options: [], interaction: long },
+      { pane_id: 'w1:p3', status: 'blocked', attention_kind: 'question', project: 'Described', agent: 'claude', options: [], interaction: described },
+      { pane_id: 'w1:p4', status: 'blocked', attention_kind: 'question', project: 'Essay', agent: 'claude', options: [], interaction: essay },
     ],
   });
   // Five options, options with descriptions, or a very long question keep the full form;
@@ -6269,7 +6267,7 @@ test('treats a follow-up question from the answer form like the card does', asyn
   await handshake(page, 0);
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone, question_layout: true }],
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone }],
   });
   await page.getByRole('button', { name: 'More…' }).click();
   await expect(page.getByRole('group', { name: 'Which database?' })).toBeVisible();
@@ -6291,7 +6289,7 @@ test('treats a follow-up question from the answer form like the card does', asyn
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [],
-      interaction: { ...followUp, id: 'first-of-three', question: 'Which tier?', question_index: 1, question_total: 3, submit_label: 'Next' }, question_layout: true }],
+      interaction: { ...followUp, id: 'first-of-three', question: 'Which tier?', question_index: 1, question_total: 3, submit_label: 'Next' } }],
   });
   await expect(page.getByRole('group', { name: 'Which tier?' })).toBeVisible();
   await page.getByRole('radio', { name: /Asia/ }).click();
@@ -6301,7 +6299,7 @@ test('treats a follow-up question from the answer form like the card does', asyn
   // An agent update lands before the rejection; the toast still judges the submitted question.
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone, question_layout: true }],
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone }],
   });
   await server(page, 0, {
     type: 'command_result', action: 'answer_question', request_id: second.request_id, ok: false, phase: 'failed',
@@ -6325,7 +6323,7 @@ test('keeps one-tap answers working with missing option indexes and explains dis
   });
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Sides', agent: 'claude', options: [], interaction: unindexed, question_layout: true }],
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Sides', agent: 'claude', options: [], interaction: unindexed }],
   });
   const left = page.getByRole('button', { name: 'Left', exact: true });
   await expect(left).toBeDisabled();
@@ -6361,7 +6359,7 @@ test('restores structured questions from the cached agent snapshot after reload'
     agents: [{
       pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude',
       prompt: interaction.question, command: interaction.question, options: [],
-      interaction, question_layout: true,
+      interaction,
     }],
   };
 
@@ -6397,18 +6395,18 @@ test('restores a confirmed choice after navigating away from an incomplete draft
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude' }] });
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: first });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
   await page.getByRole('textbox', { name: 'Other answer' }).focus();
   await expect(page.getByRole('radio', { name: 'Other' })).toBeChecked();
 
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: second, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: second });
   await expect(page.getByRole('group', { name: 'Choose offline scope' })).toBeVisible();
   const confirmed = {
     ...first,
     options: first.options.map((option) => ({ ...option, selected: option.index === 1 })),
   };
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: confirmed, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: confirmed });
 
   await expect(page.getByRole('radio', { name: 'Signals' })).toBeChecked();
   await expect(page.getByRole('radio', { name: 'Other' })).not.toBeChecked();
@@ -6438,7 +6436,7 @@ test('keeps the third single choice checked across live pane transitions', async
   };
   const agent = {
     pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude',
-    interaction: first, question_layout: true,
+    interaction: first,
   };
 
   await boot(page, [fedora]);
@@ -6460,18 +6458,18 @@ test('keeps the third single choice checked across live pane transitions', async
   await page.getByRole('button', { name: 'Next' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
   const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: second, question_layout: true });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: second });
   await server(page, 0, { type: 'command_result', request_id: answer.request_id, ok: true, phase: 'advanced', data: { interaction: second } });
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 
   await page.getByRole('button', { name: /Previous/ }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'navigate_question').length).toBe(1);
   const navigation = (await commands(page)).find((command) => command.type === 'navigate_question')!;
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first });
   await server(page, 0, { type: 'command_result', request_id: navigation.request_id, ok: true, phase: 'navigated', data: { interaction: first } });
   await server(page, 0, { type: 'agents', agents: [agent] });
   for (let refresh = 0; refresh < 20; refresh += 1) {
-    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first, question_layout: true });
+    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first });
     await page.waitForTimeout(5);
   }
 
@@ -6501,7 +6499,7 @@ test('keeps normal single-select answers across repeated question navigation', a
     submit_label: 'Next', can_go_back: true,
   };
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude' }] });
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: first });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
   const questionForm = page.getByRole('form', { name: 'Choose reconnect behavior' });
   const formHeight = await questionForm.evaluate((element) => element.getBoundingClientRect().height);
@@ -6549,7 +6547,7 @@ test('does not report failed question navigation as opened', async ({ page }) =>
     type: 'agents',
     agents: [{
       pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'codex',
-      interaction: second, question_layout: true,
+      interaction: second,
     }],
   });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
@@ -8089,7 +8087,7 @@ for (const mode of ['Conversation', 'Full history']) {
 
   test(`shared composer ${mode}: structured questions and approvals respond without leaving history`, async ({ page }) => {
     const prompt = await openSharedComposer(page, mode);
-    await server(page, 0, { ...composerTarget, type: 'blocked', attention_kind: 'question', interaction: composerQuestion, question_layout: true });
+    await server(page, 0, { ...composerTarget, type: 'blocked', attention_kind: 'question', interaction: composerQuestion });
     await expect(prompt).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
     await page.getByRole('radio', { name: 'Both views' }).check();
