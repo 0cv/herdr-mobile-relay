@@ -62,7 +62,7 @@ func TestClaudeChainCompactionOverlapsSavedPreparation(t *testing.T) {
 				phases.Add(1)
 				hookOnce.Do(func() { close(compacting); <-releaseCompaction })
 			})
-			job, failure := b.startClaudeChainJob(scope, chain, 1)
+			job, failure := b.startClaudeChainJob(scope, chain, 1, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 			if job == nil || failure != nil {
 				t.Fatalf("preparation admission=%v", failure)
 			}

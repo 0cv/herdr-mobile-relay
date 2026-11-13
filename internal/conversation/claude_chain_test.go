@@ -1651,7 +1651,7 @@ func TestClaudeChainEvidenceCompactionBoundsRetentionAndRejectsRewrite(t *testin
 		FileIdentity: fileIdentity(latest.info),
 	}
 	latest.close()
-	if err := browser.claudeChainObservedRangesMatch(context.Background(), compacted, candidate); !errors.Is(err, errClaudeChainLineageChanged) {
+	if err := browser.claudeChainObservedRangesMatch(context.Background(), compacted, candidate, newClaudeChainRequestBudget(browser.options.RecentBytes).validation); !errors.Is(err, errClaudeChainLineageChanged) {
 		t.Fatalf("compacted evidence accepted rewrite: %v", err)
 	}
 }
@@ -2631,7 +2631,7 @@ func TestClaudeChainPreparationDeduplicatesConcurrentHandles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	context, err := browser.acquireClaudeChainContext(context.Background(), scope, chain)
+	context, err := browser.acquireClaudeChainContext(context.Background(), scope, chain, newClaudeChainRequestBudget(browser.options.RecentBytes).validation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2644,7 +2644,7 @@ func TestClaudeChainPreparationDeduplicatesConcurrentHandles(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			job, page := browser.startClaudeChainJob(scope, context, 0)
+			job, page := browser.startClaudeChainJob(scope, context, 0, newClaudeChainRequestBudget(browser.options.RecentBytes).validation)
 			jobs <- job
 			pages <- page
 		}()
@@ -2787,7 +2787,7 @@ func TestClaudeChainContextAdmissionIsAtomic(t *testing.T) {
 			<-start
 			scope := BrowseScope{Provider: "claude", CWD: fmt.Sprintf("/work/%d", index), SessionID: fmt.Sprintf("123e4567-e89b-12d3-a456-%012d", index%1000000000000)}
 			chain := claudeChain{Segments: []claudeSegment{{SessionID: scope.SessionID, Location: Location{Path: fmt.Sprintf("/tmp/%d.jsonl", index), Root: "/tmp"}, FileRevision: fmt.Sprintf("revision-%d", index), FileIdentity: fmt.Sprintf("identity-%d", index)}}}
-			context, acquireErr := browser.acquireClaudeChainContext(context.Background(), scope, chain)
+			context, acquireErr := browser.acquireClaudeChainContext(context.Background(), scope, chain, newClaudeChainRequestBudget(browser.options.RecentBytes).validation)
 			mu.Lock()
 			if acquireErr != nil {
 				failures++

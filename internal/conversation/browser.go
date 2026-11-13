@@ -577,9 +577,6 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	b.readWG.Add(1)
 	b.mu.Unlock()
 	defer b.readWG.Done()
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return browseRequestCancelled(), nil
 	}
@@ -1360,7 +1357,7 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 		}
 		return b.continueJob(ctx, request, job)
 	}
-	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, "", -1)
+	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, "", -1, claudeChainJobBinding{})
 	if page != nil {
 		return *page, nil
 	}
@@ -1441,7 +1438,7 @@ type claudeChainJobBinding struct {
 	observedRanges []claudeRangeEvidence
 }
 
-func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, chainContextID string, chainSegment int, bindings ...claudeChainJobBinding) (*browseJob, *BrowsePage) {
+func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, chainContextID string, chainSegment int, binding claudeChainJobBinding) (*browseJob, *BrowsePage) {
 	if b.cacheErr != nil {
 		page := failPage("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true)
 		return nil, &page
@@ -1519,11 +1516,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		page := failPage("index_failed", "Older history preparation is shutting down.", true)
 		return nil, &page
 	}
-	var binding claudeChainJobBinding
-	if len(bindings) > 0 {
-		binding = bindings[0]
-		binding.observedRanges = append([]claudeRangeEvidence(nil), binding.observedRanges...)
-	}
+	binding.observedRanges = append([]claudeRangeEvidence(nil), binding.observedRanges...)
 	job := &browseJob{
 		id: id, dedupKey: dedupKey, scope: scope, scopeID: scopeID, source: source,
 		boundary: boundary, rangeStart: start, rangeEnd: end, rangeDigest: digest,
@@ -1594,7 +1587,7 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 				job.autoRetried = true
 				job.mu.Unlock()
 			}
-			if b.retryJob(ctx, job) {
+			if b.retryJob(ctx, job, nil) {
 				return b.preparingPage(job, cursor), nil
 			}
 		}
@@ -1613,14 +1606,7 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 	return b.readSnapshotPage(ctx, request.Scope, request.Limit, job)
 }
 
-func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*claudeChainForegroundBudget) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
+func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget *claudeChainForegroundBudget) bool {
 	job.mu.RLock()
 	scope := job.scope
 	sourceRevision := job.source.revision
@@ -1815,7 +1801,7 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 	if index == nil {
 		return failPage("index_failed", "The prepared conversation history is no longer available.", true), nil
 	}
-	if err := b.validateSnapshotJob(ctx, job, source); err != nil {
+	if err := b.validateSnapshotJob(ctx, job, source, nil); err != nil {
 		if ctx.Err() != nil {
 			return browseRequestCancelled(), nil
 		}
@@ -2049,11 +2035,7 @@ func (b *Browser) ensureClaudeChainJobValidation(job *browseJob, source fileSour
 	return errClaudeChainValidationPending
 }
 
-func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, source fileSource, foreground ...*claudeChainForegroundBudget) error {
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
+func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, source fileSource, foregroundBudget *claudeChainForegroundBudget) error {
 	if err := validateSnapshotSource(source); err != nil {
 		return err
 	}

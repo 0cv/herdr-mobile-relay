@@ -68,7 +68,7 @@ func TestCapacityAdmissionAllocationAndDedup(t *testing.T) {
 			}
 			defer sourceFile.Close()
 			source := fileSource{file: sourceFile, revision: "new", end: 2}
-			job, page := b.createJob(BrowseScope{Provider: "claude", SessionID: "private-id"}, source, 0, 2, 2, "digest", "", 0)
+			job, page := b.createJob(BrowseScope{Provider: "claude", SessionID: "private-id"}, source, 0, 2, 2, "digest", "", 0, claudeChainJobBinding{})
 			if page != nil || job == nil || !victim.retired {
 				t.Fatalf("job=%v page=%+v retired=%v", job, page, victim.retired)
 			}
@@ -76,7 +76,7 @@ func TestCapacityAdmissionAllocationAndDedup(t *testing.T) {
 			b.capacityMu.Lock()
 			b.options.AggregateQuota = b.aggregateCacheBytes()
 			b.unlockCapacity()
-			duplicate, page := b.createJob(job.scope, source, 0, 2, 2, "digest", "", 0)
+			duplicate, page := b.createJob(job.scope, source, 0, 2, 2, "digest", "", 0, claudeChainJobBinding{})
 			if page != nil || duplicate != job {
 				t.Fatalf("dedup at capacity: job=%v page=%+v", duplicate, page)
 			}
@@ -408,7 +408,7 @@ func TestCacheUsageDisappearedEntry(t *testing.T) {
 func TestCapacityAdmissionClosing(t *testing.T) {
 	b := capacityTestBrowser(t)
 	b.closing = true
-	job, page := b.createJob(BrowseScope{}, fileSource{}, 0, 0, 0, "", "", 0)
+	job, page := b.createJob(BrowseScope{}, fileSource{}, 0, 0, 0, "", "", 0, claudeChainJobBinding{})
 	if job != nil || page == nil || page.Reason != "Older history preparation is shutting down." || page.ReasonCode != "index_failed" || page.Error == nil || !page.Error.Retryable {
 		t.Fatalf("job=%v page=%+v", job, page)
 	}

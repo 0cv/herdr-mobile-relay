@@ -86,7 +86,7 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 					<-release
 				})
 				var page *BrowsePage
-				job, page = b.startClaudeChainJob(scope, chain, 1)
+				job, page = b.startClaudeChainJob(scope, chain, 1, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 				if job == nil || page != nil {
 					t.Fatalf("first job=%v page=%v", job, page)
 				}
@@ -129,10 +129,10 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 			returned := make(chan bool, 1)
 			go func() {
 				if retry {
-					returned <- b.retryJob(context.Background(), job)
+					returned <- b.retryJob(context.Background(), job, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 					return
 				}
-				j, p := b.startClaudeChainJob(scope, chain, 1)
+				j, p := b.startClaudeChainJob(scope, chain, 1, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 				if j != nil {
 					b.releaseJob(j)
 				}
@@ -176,7 +176,7 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					j, p := b.startClaudeChainJob(scope, chain, 1)
+					j, p := b.startClaudeChainJob(scope, chain, 1, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 					if j != nil {
 						b.releaseJob(j)
 						if j != job {
@@ -332,7 +332,7 @@ func TestClaudeChainPreparedAppendLatestConcurrentGrownSegments(t *testing.T) {
 	chain := scheduleChain(t, b, scope)
 	// Prepare every segment through the production job admission path.
 	for segment := range paths {
-		job, page := b.startClaudeChainJob(scope, chain, segment)
+		job, page := b.startClaudeChainJob(scope, chain, segment, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 		if job == nil || page != nil {
 			t.Fatalf("prepare %d=%v", segment, page)
 		}

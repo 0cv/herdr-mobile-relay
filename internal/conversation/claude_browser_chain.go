@@ -242,7 +242,7 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 				b.mu.Unlock()
 				if job == nil {
 					var page *BrowsePage
-					job, page = b.startClaudeChainJob(request.Scope, chainContext, segmentIndex, budgetForeground(requestBudget))
+					job, page = b.startClaudeChainJob(request.Scope, chainContext, segmentIndex, requestBudget.validation)
 					if page != nil {
 						return b.claudeChainAdmissionFailure(request.Scope, chainContext, segmentIndex, boundary, true, *page), nil
 					}
@@ -300,13 +300,6 @@ type claudeChainForegroundBudget struct {
 
 const claudeChainForegroundPhysicalBytes = claudeChainForegroundValidationBytes + int64(claudeContinuationMaxSegments+1)*claudeContinuationFooterBytes
 
-func budgetForeground(budget *claudeChainRequestBudget) *claudeChainForegroundBudget {
-	if budget == nil {
-		return nil
-	}
-	return budget.validation
-}
-
 func newClaudeChainRequestBudget(recentBytes int64) *claudeChainRequestBudget {
 	return &claudeChainRequestBudget{
 		recent: &claudeChainRecentBudget{remaining: recentBytes},
@@ -326,7 +319,7 @@ func newClaudeChainRequestBudget(recentBytes int64) *claudeChainRequestBudget {
 }
 
 func (budget *claudeChainForegroundBudget) takeValidation(bytes int64) bool {
-	if budget == nil || bytes < 0 || bytes > budget.validationRemaining {
+	if bytes < 0 || bytes > budget.validationRemaining {
 		return false
 	}
 	budget.validationRemaining -= bytes
@@ -334,9 +327,6 @@ func (budget *claudeChainForegroundBudget) takeValidation(bytes int64) bool {
 }
 
 func (budget *claudeChainForegroundBudget) takePhysical(bytes int64) bool {
-	if budget == nil {
-		return true
-	}
 	if bytes < 0 || bytes > budget.physicalRemaining {
 		return false
 	}
@@ -345,7 +335,7 @@ func (budget *claudeChainForegroundBudget) takePhysical(bytes int64) bool {
 }
 
 func (budget *claudeChainRequestBudget) takeDiscovery(bytes int64) error {
-	if budget == nil || bytes < 0 || bytes > budget.discovery {
+	if bytes < 0 || bytes > budget.discovery {
 		return errClaudeChainDiscoveryBudget
 	}
 	budget.discovery -= bytes
@@ -357,9 +347,6 @@ type claudeChainRecentBudget struct {
 }
 
 func (budget *claudeChainRecentBudget) take(bytes int64) bool {
-	if budget == nil {
-		return true
-	}
 	if bytes < 0 || bytes > budget.remaining {
 		return false
 	}
@@ -367,15 +354,8 @@ func (budget *claudeChainRecentBudget) take(bytes int64) bool {
 	return true
 }
 
-func (b *Browser) acquireClaudeChainContext(ctx context.Context, scope BrowseScope, chain claudeChain, foreground ...*claudeChainForegroundBudget) (*claudeChainContext, error) {
+func (b *Browser) acquireClaudeChainContext(ctx context.Context, scope BrowseScope, chain claudeChain, foregroundBudget *claudeChainForegroundBudget) (*claudeChainContext, error) {
 	key := claudeChainKey(scope, chain)
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
-	if foregroundBudget == nil {
-		foregroundBudget = &claudeChainForegroundBudget{validationRemaining: claudeChainForegroundValidationBytes, physicalRemaining: claudeChainForegroundPhysicalBytes}
-	}
 	scopeID := browseScopeID(scope)
 	b.mu.Lock()
 	if b.closing {
@@ -530,17 +510,7 @@ type claudeChainEvidenceCompaction struct {
 	generation string
 }
 
-func (b *Browser) claudeChainLineageCompatible(ctx context.Context, previous, current []claudeSegment, foreground ...*claudeChainForegroundBudget) (bool, error) {
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
-	if foregroundBudget == nil {
-		foregroundBudget = &claudeChainForegroundBudget{validationRemaining: claudeChainForegroundValidationBytes, physicalRemaining: claudeChainForegroundPhysicalBytes}
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (b *Browser) claudeChainLineageCompatible(ctx context.Context, previous, current []claudeSegment, foregroundBudget *claudeChainForegroundBudget) (bool, error) {
 	for index, old := range previous {
 		if old.EvidenceCompactionPending {
 			return false, errClaudeChainValidationPending
@@ -643,16 +613,9 @@ func claudeChainValidationKey(candidate claudeSegment, evidence []claudeRangeEvi
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candidate claudeSegment, foreground ...*claudeChainForegroundBudget) error {
+func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candidate claudeSegment, foregroundBudget *claudeChainForegroundBudget) error {
 	if old.CapturedEnd < 0 || candidate.CapturedEnd < old.CapturedEnd {
 		return errClaudeChainLineageChanged
-	}
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
-	if foregroundBudget == nil {
-		foregroundBudget = &claudeChainForegroundBudget{validationRemaining: claudeChainForegroundValidationBytes, physicalRemaining: claudeChainForegroundPhysicalBytes}
 	}
 	evidence := claudeChainEvidence(old)
 	if len(evidence) == 0 {
@@ -719,9 +682,6 @@ func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candi
 }
 
 func (b *Browser) deferClaudeChainValidation(ctx context.Context, candidate claudeSegment, identity string, evidence []claudeRangeEvidence) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -875,9 +835,6 @@ func (b *Browser) validateClaudeChainCandidateMetadata(source fileSource, candid
 }
 
 func (b *Browser) revalidateClaudeChainCandidate(ctx context.Context, candidate claudeSegment) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -902,12 +859,8 @@ func (b *Browser) revalidateClaudeChainCandidate(ctx context.Context, candidate 
 	return nil
 }
 
-func (b *Browser) digestClaudeChainValidationRange(ctx context.Context, file *os.File, start, end int64, foreground ...*claudeChainForegroundBudget) (string, error) {
-	var budget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		budget = foreground[0]
-	}
-	if budget != nil && !budget.takeValidation(end-start) {
+func (b *Browser) digestClaudeChainValidationRange(ctx context.Context, file *os.File, start, end int64, budget *claudeChainForegroundBudget) (string, error) {
+	if !budget.takeValidation(end - start) {
 		return "", errClaudeChainForegroundBudget
 	}
 	return b.digestClaudeChainValidationRangeObserved(ctx, file, start, end, budget)
@@ -921,7 +874,7 @@ func (b *Browser) digestClaudeChainValidationRangeObserved(ctx context.Context, 
 	// writeFileRangeObserved reports chunks after ReadAt has completed. Reserve
 	// the complete bounded range first so a final chunk cannot overshoot the
 	// aggregate foreground allowance before the observer rejects it.
-	if budget != nil && !budget.takePhysical(length) {
+	if !budget.takePhysical(length) {
 		return "", errClaudeChainForegroundBudget
 	}
 	b.observeRangeRead(length)
@@ -1580,10 +1533,7 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 	if !ok {
 		return recentProjection{}, errors.New("invalid Claude chain segment")
 	}
-	var foregroundBudget *claudeChainForegroundBudget
-	if budget != nil {
-		foregroundBudget = budget.validation
-	}
+	foregroundBudget := budget.validation
 	source, err := b.captureClaudeChainSource(segment.Location, foregroundBudget)
 	if errors.Is(err, errClaudeChainForegroundBudget) {
 		return recentProjection{}, errClaudeChainRecentBudget
@@ -1614,7 +1564,7 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 	if window > segment.CapturedEnd {
 		window = segment.CapturedEnd
 	}
-	if budget != nil && budget.recent != nil && !budget.recent.take(window) {
+	if !budget.recent.take(window) {
 		return recentProjection{}, errClaudeChainRecentBudget
 	}
 	b.observe(browserObservation{kind: "source_read", bytes: window})
@@ -1623,7 +1573,7 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 	if start < 0 {
 		start = 0
 	}
-	if start > 0 && foregroundBudget != nil && !foregroundBudget.takePhysical(1) {
+	if start > 0 && !foregroundBudget.takePhysical(1) {
 		return recentProjection{}, errClaudeChainRecentBudget
 	}
 	if segment.RecentDigest != "" && (segment.RecentStart != start || segment.RecentEnd != segment.CapturedEnd) {
@@ -1678,7 +1628,7 @@ func (b *Browser) claudeChainLatestValidationFailure(ctx context.Context, err er
 }
 
 func (b *Browser) claudeChainSourceFailure(ctx context.Context, err error) BrowsePage {
-	if ctx != nil && ctx.Err() != nil {
+	if ctx.Err() != nil {
 		return browseRequestCancelled()
 	}
 	if errors.Is(err, errRecentProjectionChanged) || err != nil {
@@ -1699,14 +1649,7 @@ func namespaceClaudeProjectedEntries(entries []projectedEntry, segment claudeSeg
 	return entries
 }
 
-func (b *Browser) validateClaudeChainSegment(ctx context.Context, segment claudeSegment, foreground ...*claudeChainForegroundBudget) error {
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
-	if foregroundBudget == nil {
-		foregroundBudget = &claudeChainForegroundBudget{validationRemaining: claudeChainForegroundValidationBytes, physicalRemaining: claudeChainForegroundPhysicalBytes}
-	}
+func (b *Browser) validateClaudeChainSegment(ctx context.Context, segment claudeSegment, foregroundBudget *claudeChainForegroundBudget) error {
 	source, err := captureFileSourceWithHooks(segment.Location, reserveClaudeChainPhysical(foregroundBudget), b.observeValidationRead)
 	if err != nil {
 		if errors.Is(err, errClaudeChainForegroundBudget) {
@@ -1834,14 +1777,7 @@ func (b *Browser) claudeChainAdmissionFailure(scope BrowseScope, chain *claudeCh
 	return page
 }
 
-func (b *Browser) startClaudeChainJob(scope BrowseScope, chain *claudeChainContext, segmentIndex int, foreground ...*claudeChainForegroundBudget) (*browseJob, *BrowsePage) {
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
-	if foregroundBudget == nil {
-		foregroundBudget = &claudeChainForegroundBudget{validationRemaining: claudeChainForegroundValidationBytes, physicalRemaining: claudeChainForegroundPhysicalBytes}
-	}
+func (b *Browser) startClaudeChainJob(scope BrowseScope, chain *claudeChainContext, segmentIndex int, foregroundBudget *claudeChainForegroundBudget) (*browseJob, *BrowsePage) {
 	b.mu.Lock()
 	if segmentIndex < 0 || segmentIndex >= len(chain.jobs) {
 		b.mu.Unlock()
@@ -1950,7 +1886,7 @@ func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequ
 				job.autoRetried = true
 				job.mu.Unlock()
 			}
-			if b.retryJob(ctx, job, budgetForeground(budget)) {
+			if b.retryJob(ctx, job, budget.validation) {
 				return b.claudeChainPreparingPageForJob(request.Scope, chain, segmentIndex, boundary, byteBoundary, job)
 			}
 		}
@@ -1976,9 +1912,6 @@ func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequ
 }
 
 func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, segmentIndex int, boundary int64, retry bool, budget *claudeChainRequestBudget) BrowsePage {
-	if budget == nil {
-		budget = newClaudeChainRequestBudget(b.options.RecentBytes)
-	}
 	b.mu.Lock()
 	if segmentIndex < 0 || segmentIndex >= len(chain.jobs) {
 		b.mu.Unlock()
@@ -2012,7 +1945,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 		}
 		return b.claudeChainPreparingPageForJob(scope, chain, segmentIndex, boundary, true, job)
 	}
-	if err := b.validateSnapshotJob(ctx, job, source, budgetForeground(budget)); err != nil {
+	if err := b.validateSnapshotJob(ctx, job, source, budget.validation); err != nil {
 		if errors.Is(err, errClaudeChainValidationPending) {
 			return b.claudeChainPreparingPage(scope, chain, segmentIndex, boundary, true)
 		}
@@ -2051,9 +1984,6 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 			return browseContinuationFailed()
 		}
 	} else {
-		if budget == nil {
-			budget = newClaudeChainRequestBudget(b.options.RecentBytes)
-		}
 		nextSegment, nextBoundary, hasNext, nextIsOffset, nextErr := b.claudeChainOlderPosition(ctx, scope, chain, segmentIndex, 0, budget, false)
 		if nextErr != nil && !errors.Is(nextErr, errClaudeChainRecentBudget) {
 			return b.claudeChainSourceFailure(ctx, nextErr)
@@ -2086,9 +2016,6 @@ func mergeBrowseDiagnostics(left, right BrowseDiagnostics) BrowseDiagnostics {
 func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, budget *claudeChainRequestBudget) BrowsePage {
 	if chain == nil {
 		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
-	}
-	if budget == nil {
-		budget = newClaudeChainRequestBudget(b.options.RecentBytes)
 	}
 	view := b.claudeChainView(chain)
 	for index := len(view.chain.Segments) - 1; index >= 0; index-- {
@@ -2158,9 +2085,6 @@ func (b *Browser) claudeChainBudgetPage(scope BrowseScope, chain *claudeChainCon
 }
 
 func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, latest bool, segmentIndex, boundary int, entries []projectedEntry, budget *claudeChainRequestBudget, recentTailExhausted bool) BrowsePage {
-	if budget == nil {
-		budget = newClaudeChainRequestBudget(b.options.RecentBytes)
-	}
 	view := b.claudeChainView(chain)
 	if chain == nil || segmentIndex < 0 || segmentIndex >= len(view.chain.Segments) {
 		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
