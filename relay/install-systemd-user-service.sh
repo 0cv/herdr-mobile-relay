@@ -9,14 +9,8 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/usr
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 LABEL="$RELAY_SYSTEMD_LABEL"
-LEGACY_LABEL="herdr-remote.service"
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT_FILE="$UNIT_DIR/$LABEL"
-LEGACY_UNIT_FILE="$UNIT_DIR/$LEGACY_LABEL"
-if [ "$HERDR_RELAY_BACKEND" = hc ]; then
-    LEGACY_LABEL=""
-    LEGACY_UNIT_FILE=""
-fi
 . "$SCRIPT_DIR/native-install-transaction.sh"
 require_user_service_context
 
@@ -46,7 +40,7 @@ if [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ ! -r "$CLOUDFLARED_CONFIG" ]; then
     exit 1
 fi
 
-native_install_begin systemd "$UNIT_FILE" "$LEGACY_UNIT_FILE" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
+native_install_begin systemd "$UNIT_FILE" "$ENV_FILE" "$LABEL"
 if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
     ensure_relay_env "$ENV_FILE" ""
 else
@@ -93,9 +87,6 @@ cp "$STAGED_UNIT" "$native_stage"
 chmod 600 "$native_stage"
 mv -f "$native_stage" "$UNIT_FILE"
 systemctl --user daemon-reload
-if [ "$native_legacy_active" = true ]; then
-    systemctl --user stop "$LEGACY_LABEL"
-fi
 systemctl --user enable "$LABEL"
 systemctl --user restart "$LABEL"
 
@@ -119,5 +110,5 @@ if ! HEALTH="$(wait_for_relay_health "$PORT" 15 1 "$INSTANCE")"; then
     exit 1
 fi
 verify_public_readiness "$ENV_FILE" "$HEALTH"
-native_install_commit
+native_committed=true
 echo "Relay readiness: $HEALTH"

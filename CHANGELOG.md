@@ -25,6 +25,11 @@ project follows [Semantic Versioning](https://semver.org/).
   `HERDR_GATEWAY_MAX_RELAYS` and `HERDR_GATEWAY_MAX_CLIENTS` from `.env`, so
   operators can change the gateway-wide connection limits.
 
+### Removed
+
+- Support for upgrading installs older than 0.20.0. Uninstall them before
+  installing this version, then pair every phone again.
+
 ## [0.25.1] - 2026-11-10
 
 ### Fixed

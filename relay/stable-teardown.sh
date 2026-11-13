@@ -12,74 +12,13 @@ ENV_FILE="$(canonical_file_path "$ENV_FILE")"
 refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}"
 
-recover_state_from_config() {
-    local config
-    local port
-    local resolved
-
-    load_relay_env "$ENV_FILE"
-    port="${HERDR_RELAY_PORT:-$RELAY_DEFAULT_PORT}"
-    config="${CLOUDFLARED_CONFIG:-}"
-    if [ -z "$config" ] && [ -r "$RELAY_CLOUDFLARED_CONFIG" ]; then
-        config="$RELAY_CLOUDFLARED_CONFIG"
-    fi
-    if [ -z "$config" ] || [ ! -r "$config" ]; then
-        echo "✗ No stable state or readable Herdr Cloudflare config was found." >&2
-        echo "  Checked state:  $STATE_FILE" >&2
-        echo "  Checked config: ${config:-$RELAY_CLOUDFLARED_CONFIG}" >&2
-        return 1
-    fi
-
-    config="$(canonical_file_path "$config")"
-    if ! read_cloudflared_relay_config "$config" "$port"; then
-        echo "✗ Refusing to recover teardown identity from $config." >&2
-        return 1
-    fi
-
-    # The wizard writes the tunnel UUID as the config's `tunnel:` scalar, so the
-    # namespace guard below has nothing to recognize until Cloudflare resolves
-    # that id back to the name the tunnel was created with.
-    if [[ "$TUNNEL_NAME" =~ ^[0-9a-fA-F-]{36}$ ]]; then
-        resolved="$(cloudflared_tunnel_name_by_id "$TUNNEL_UUID" "$(cloudflared_origin_cert "$config")")" || resolved=""
-        if [ -z "$resolved" ]; then
-            echo "✗ Cloudflare could not name tunnel $TUNNEL_UUID recorded in $config." >&2
-            echo "  Authorize cloudflared with cloudflared tunnel login, then rerun this teardown," >&2
-            echo "  or delete tunnel $TUNNEL_UUID in the Cloudflare dashboard." >&2
-            return 1
-        fi
-        TUNNEL_NAME="$resolved"
-    fi
-    case "$TUNNEL_NAME" in
-        herdr-mobile-relay-*) ;;
-        *)
-            echo "✗ Refusing recovery: config tunnel is outside the Herdr stable-tunnel namespace: $TUNNEL_NAME" >&2
-            return 1
-            ;;
-    esac
-
-    state_command init "$STATE_FILE" "$ENV_FILE"
-    state_update \
-        "stage=recovered_for_teardown" \
-        "tunnel_uuid=$TUNNEL_UUID" \
-        "tunnel_name=$TUNNEL_NAME" \
-        "hostname=$CONFIG_HOST" \
-        "credentials_path=$CREDENTIALS_PATH" \
-        "config_path=$config"
-    echo "▸ Recovered teardown identity from the retained Herdr Cloudflare config."
-    echo "  This repairs state cleared by older no-op teardown behavior."
-}
-
 require_supported_platform
 
-
 if [ ! -f "$STATE_FILE" ]; then
-    if ! recover_state_from_config; then
-        exit 1
-    fi
+    echo "✗ No stable setup state was found at $STATE_FILE." >&2
+    exit 1
 fi
 
-# Every state read validates the Herdr ownership marker. Missing legacy state is
-# rebuilt only after the config, loopback origin, namespace, and credentials agree.
 TUNNEL_NAME="$(state_get tunnel_name)"
 case "$TUNNEL_NAME" in
     herdr-mobile-relay-*) ;;

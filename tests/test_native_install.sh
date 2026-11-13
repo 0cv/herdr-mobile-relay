@@ -81,7 +81,6 @@ if [ "$1" = print ]; then
     case "$2" in gui/*/*) ;; gui/*) exit 0 ;; esac
 fi
 loaded="$CASE/loaded"
-case "$*" in *herdr-remote*) loaded="$CASE/legacy-loaded" ;; esac
 case "$1" in
 print) [ -f "$loaded" ]; exit $? ;;
 bootout) if [ "$FAILURE" = rollback ] && [ -f "$CASE/failed" ]; then exit 1; fi; rm -f "$loaded" ;;
@@ -125,40 +124,33 @@ if [ "$1" = -u ]; then printf '501\n'; else /usr/bin/id "$@"; fi
 EOF
         chmod 700 "$BIN/"* "$HOME/releases/current/herdr-mobile-relay"
         export PATH="$BIN:$PATH"
-        if [ "$initial" = active ]; then touch "$CASE/loaded" "$CASE/legacy-loaded"; fi
+        if [ "$initial" = active ]; then touch "$CASE/loaded"; fi
         if [ "$platform" = systemd ]; then
             definition="$HOME/.config/systemd/user/herdr-mobile-relay$suffix.service"
             sibling="$HOME/.config/systemd/user/herdr-mobile-relay.service"
-            legacy="$HOME/.config/systemd/user/herdr-remote.service"
             script=install-systemd-user-service.sh
         else
             definition="$HOME/Library/LaunchAgents/com.herdr-mobile-relay$suffix.service.plist"
             sibling="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
-            legacy="$HOME/Library/LaunchAgents/com.herdr-remote.service.plist"
             script=install-service.sh
         fi
         if [ "$initial" != fresh ]; then
             printf 'previous definition\n' > "$definition"
-            printf 'legacy definition\n' > "$legacy"
         fi
         if [ "$backend" = hc ]; then
             printf 'TUI unit sentinel\n' > "$sibling"
-            printf 'legacy definition\n' > "$legacy"
             printf 'TUI environment sentinel\n' > "$HOME/config/tui.env"
         fi
         if [ -f "$HERDR_RELAY_ENV" ]; then cp "$HERDR_RELAY_ENV" "$CASE/env-before"; fi
         if bash "$REPO_DIR/relay/$script" > "$CASE/output" 2>&1; then
             if [ "$failure" != none ]; then echo "$platform accepted $failure failure" >&2; exit 1; fi
-            if [ "$backend" = herdr ]; then test ! -e "$legacy"; fi
             test -n "$(sed -n 's/^HERDR_RELAY_INSTANCE_ID=//p' "$HERDR_RELAY_ENV")"
         else
             if [ "$failure" = none ]; then cat "$CASE/output" >&2; exit 1; fi
             if [ "$initial" = fresh ]; then
                 test ! -e "$definition"
-                if [ "$backend" = herdr ]; then test ! -e "$legacy"; fi
             else
                 grep -Fx 'previous definition' "$definition" >/dev/null
-                grep -Fx 'legacy definition' "$legacy" >/dev/null
             fi
             if [ -f "$CASE/env-before" ]; then
                 cmp "$HERDR_RELAY_ENV" "$CASE/env-before"
@@ -173,8 +165,7 @@ EOF
         if [ "$backend" = hc ]; then
             grep -Fx 'TUI unit sentinel' "$sibling"
             grep -Fx 'TUI environment sentinel' "$HOME/config/tui.env"
-            grep -Fx 'legacy definition' "$legacy"
-            if grep -E 'herdr-remote|herdr-mobile-relay\.service' "$CASE/manager.log"; then
+            if grep -E 'herdr-mobile-relay\.service' "$CASE/manager.log"; then
                 echo "Core installation touched a TUI service" >&2
                 exit 1
             fi

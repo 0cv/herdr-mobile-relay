@@ -78,7 +78,7 @@ legacy_home="$WORK_DIR/legacy-home"
 legacy_release="$legacy_home/.local/share/herdr-mobile-relay"
 legacy_config="$legacy_home/.config/herdr-mobile-relay"
 legacy_cache="$legacy_home/.cache/herdr-mobile-relay"
-mkdir -p "$legacy_config/device-auth" "$legacy_config/push" "$legacy_cache/claude-history" "$legacy_cache/uploads"
+mkdir -p "$legacy_config/device-auth" "$legacy_config/push"
 printf "HERDR_RELAY_TOKEN='legacy-token'\nHERDR_RELAY_INSTANCE_ID='legacy-instance'\n" > "$legacy_config/relay.env"
 printf 'https://app.example.test\n' > "$legacy_config/phone-app-origin-configured"
 printf '{"schema_version":1,"credentials":[]}\n' > "$legacy_config/device-auth/devices.json"
@@ -87,12 +87,6 @@ printf '{"state":"failed"}\n' > "$legacy_config/update-state.json"
 printf '{"state":"idle"}\n' > "$legacy_config/app-deploy-state.json"
 printf 'private-token\n' > "$legacy_config/github-token"
 chmod 600 "$legacy_config/github-token"
-printf '{"id":"legacy"}\n' > "$legacy_cache/activity.jsonl"
-printf '[]\n' > "$legacy_cache/activity.tombstones"
-mkdir -p "$legacy_cache/push"
-printf 'private-key\n' > "$legacy_cache/push/vapid_private.pem"
-printf 'verified\n' > "$legacy_cache/approval-verification-1"
-printf '{"history":["preserved"]}\n' > "$legacy_cache/claude-history/pane.json"
 HOME="$legacy_home"
 prepare_install_roots "$legacy_release" "$legacy_config" "$legacy_cache"
 test -f "$legacy_config/.herdr-mobile-relay-installation"
@@ -102,7 +96,6 @@ test "$(cat "$legacy_config/phone-app-origin-configured")" = "https://app.exampl
 test "$(cat "$legacy_config/device-auth/devices.json")" = '{"schema_version":1,"credentials":[]}'
 grep -F failed "$legacy_config/update-state.json" >/dev/null
 grep -F idle "$legacy_config/app-deploy-state.json" >/dev/null
-grep -F preserved "$legacy_cache/claude-history/pane.json" >/dev/null
 
 symlink_config="$WORK_DIR/symlink-config"
 mkdir -p "$symlink_config"
@@ -113,25 +106,6 @@ if (write_install_sentinel "$symlink_config" config) 2>/dev/null; then
     exit 1
 fi
 test ! -e "$symlink_config/.herdr-mobile-relay-installation"
-
-xdg_home="$WORK_DIR/xdg-home"
-xdg_release="$xdg_home/.local/share/herdr-mobile-relay"
-xdg_config="$xdg_home/.config/herdr-mobile-relay"
-old_cache="$xdg_home/.cache/herdr-mobile-relay"
-new_cache="$xdg_home/custom-cache/herdr-mobile-relay"
-mkdir -p "$xdg_config/push" "$old_cache/claude-history"
-printf "HERDR_RELAY_TOKEN='xdg-token'\n" > "$xdg_config/relay.env"
-printf '[]\n' > "$xdg_config/push/subscriptions.json"
-printf '{"history":["migrated"]}\n' > "$old_cache/claude-history/pane.json"
-mkdir -p "$new_cache"
-printf '#!/bin/sh\n' > "$new_cache/post-install.sh"
-printf 'legacy waiter\n' > "$new_cache/post-install.log"
-HOME="$xdg_home"
-prepare_install_roots "$xdg_release" "$xdg_config" "$new_cache"
-test ! -e "$old_cache"
-grep -F migrated "$new_cache/claude-history/pane.json" >/dev/null
-grep -F 'legacy waiter' "$new_cache/post-install.log" >/dev/null
-test -f "$new_cache/.herdr-mobile-relay-installation"
 
 timeout_started=$(date +%s)
 if run_with_timeout 1 sleep 3; then

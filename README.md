@@ -12,9 +12,9 @@ connects to them and merges every agent into one installable web app.
 > Native Windows is not supported. WSL2 may work but is not tested.
 
 > [!WARNING]
-> 0.20.0 replaces the shared relay key with per-device credentials and a new
-> encrypted transport. It cannot be installed through the phone updater:
-> [upgrade the relay manually and pair every phone again](docs/updates.md#upgrading-from-v0191).
+> Installs older than 0.20.0 must be uninstalled before installing this version.
+> Install the relay again using the steps below, then pair every phone again;
+> the phone updater cannot cross this encrypted-transport boundary.
 
 ## Get started in two minutes
 
