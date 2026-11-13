@@ -27,6 +27,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- `HERDR_SQLITE_BACKEND` and the external `sqlite3` backend. Conversation history
+  always uses the SQLite driver built into the relay; no `sqlite3` command is needed.
 - Support for upgrading installs older than 0.20.0. Uninstall them before
   installing this version, then pair every phone again.
 

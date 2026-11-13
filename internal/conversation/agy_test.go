@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,7 +70,7 @@ type agyStep struct {
 	metadata []byte
 }
 
-func createAgyDatabase(t *testing.T, sqlite, database string, steps []agyStep) {
+func createAgyDatabase(t *testing.T, database string, steps []agyStep) {
 	t.Helper()
 	var sql strings.Builder
 	sql.WriteString("BEGIN;CREATE TABLE `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`metadata` blob,`step_payload` blob,PRIMARY KEY (`idx`));")
@@ -83,19 +82,11 @@ func createAgyDatabase(t *testing.T, sqlite, database string, steps []agyStep) {
 		fmt.Fprintf(&sql, "INSERT INTO steps(idx,step_type,status,metadata,step_payload) VALUES(%d,%d,3,X'%x',X'%x');", index, step.typ, metadata, step.payload)
 	}
 	sql.WriteString("COMMIT;")
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql.String())
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create agy database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql.String())
 }
 
 func agyFixture(t *testing.T) (*Reader, string, string) {
 	t.Helper()
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	t.Setenv(agentroots.AgyListEnv, root)
 	// agentroots appends the conversations leaf to every configured base.
@@ -105,7 +96,7 @@ func agyFixture(t *testing.T) (*Reader, string, string) {
 	}
 	database := filepath.Join(conversations, agySessionID+".db")
 	call := [3]string{"call_1", "run_command", `{"CommandLine":"ls -la"}`}
-	createAgyDatabase(t, sqlite, database, []agyStep{
+	createAgyDatabase(t, database, []agyStep{
 		{typ: agyStepUser, payload: agyUserStep(1000, "check the gateway")},
 		{typ: agyStepAssistant, payload: agyAssistantStep(1001, "", call)},
 		{typ: agyStepToolDone, payload: agyToolDoneStep(1002, "call_1"), metadata: agyMeta(1002, "call_1")},
@@ -114,7 +105,6 @@ func agyFixture(t *testing.T) (*Reader, string, string) {
 		{typ: agyStepAssistant, payload: agyAssistantStep(1004, "Done.")},
 	})
 	reader := NewReader(t.TempDir())
-	reader.agy.binary = sqlite
 	return reader, database, agySessionID
 }
 
@@ -198,12 +188,7 @@ func TestAgyBrowserNativeCursorAndChangeToken(t *testing.T) {
 	if again, _ := reader.ChangeToken(context.Background(), scope); again != before {
 		t.Fatal("idle change token moved")
 	}
-	sqlite, _ := exec.LookPath("sqlite3")
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(fmt.Sprintf("INSERT INTO steps(idx,step_type,status,metadata,step_payload) VALUES(99,%d,3,X'',X'%x');", agyStepUser, agyUserStep(2000, "again")))
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("append step: %v: %s", err, output)
-	}
+	execTestSQL(t, database, fmt.Sprintf("INSERT INTO steps(idx,step_type,status,metadata,step_payload) VALUES(99,%d,3,X'',X'%x');", agyStepUser, agyUserStep(2000, "again")))
 	if after, _ := reader.ChangeToken(context.Background(), scope); after == before {
 		t.Fatal("appended step did not change the token")
 	}

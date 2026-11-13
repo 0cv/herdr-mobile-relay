@@ -40,7 +40,6 @@ const (
 
 type agyReader struct {
 	home     string
-	binary   string
 	executor sqliteexec.Executor
 }
 
@@ -60,11 +59,7 @@ type agyPageMeta struct {
 }
 
 func newAgyReader(home string) *agyReader {
-	return &agyReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv()}
-}
-
-func (r *agyReader) queryExec() sqliteexec.Executor {
-	return resolveQueryExecutor(r.executor, r.binary)
+	return &agyReader{home: home, executor: sqliteexec.New()}
 }
 
 func isAgyAgent(agent string) bool {
@@ -84,9 +79,6 @@ func (r *agyReader) locate(sessionID string) Location {
 func (r *agyReader) locateContext(sessionID string) (Location, string) {
 	if !canonicalSessionID.MatchString(sessionID) {
 		return Location{}, "invalid_session"
-	}
-	if exec := r.queryExec(); exec == nil || !exec.Ready() {
-		return Location{}, "source_unavailable"
 	}
 	for _, root := range agentroots.Agy(r.home) {
 		if path := containedRegularFile(filepath.Join(root, sessionID+".db"), root); path != "" {
@@ -156,7 +148,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 func (r *agyReader) queryRows(ctx context.Context, database, query string) ([]agyRow, string) {
 	queryCtx, cancel := context.WithTimeout(ctx, agyQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxAgyOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxAgyOutput)
 	if code != "" {
 		return nil, code
 	}

@@ -5,48 +5,71 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
+	"modernc.org/libc"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type nativeWorkExecutor struct {
 	t        *testing.T
 	delegate sqliteexec.Executor
-	cli      string
 	steps    int64
 	queries  int
 }
-
-func (r *nativeWorkExecutor) Ready() bool { return true }
 
 func (r *nativeWorkExecutor) QueryJSON(ctx context.Context, database, query string, maxBytes int) ([]byte, error) {
 	raw, err := r.delegate.QueryJSON(ctx, database, query, maxBytes)
 	if err != nil {
 		return raw, err
 	}
-	command := exec.CommandContext(ctx, r.cli, "-readonly", "-batch", "-cmd", ".stats on", database, query)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		r.t.Fatalf("measure SQLite work: %v: %s", err, output)
-	}
-	match := regexp.MustCompile(`(?m)^Virtual Machine Steps:\s*([0-9]+)`).FindSubmatch(output)
-	if len(match) != 2 {
-		r.t.Fatalf("missing genuine SQLite VM counter: %s", output)
-	}
-	steps, err := strconv.ParseInt(string(match[1]), 10, 64)
-	if err != nil {
-		r.t.Fatal(err)
-	}
-	r.steps += steps
+	r.steps += sqliteVMSteps(r.t, database, query)
 	r.queries++
 	return raw, nil
+}
+
+func sqliteVMSteps(t *testing.T, database, query string) int64 {
+	t.Helper()
+	tls := libc.NewTLS()
+	defer tls.Close()
+	filename, err := libc.CString(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer libc.Xfree(tls, filename)
+	sqlText, err := libc.CString(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer libc.Xfree(tls, sqlText)
+	slots := tls.Alloc(2 * int(unsafe.Sizeof(uintptr(0))))
+	defer tls.Free(2 * int(unsafe.Sizeof(uintptr(0))))
+	if rc := sqlite3.Xsqlite3_open_v2(tls, filename, slots, sqlite3.SQLITE_OPEN_READONLY, 0); rc != sqlite3.SQLITE_OK {
+		t.Fatalf("open SQLite work counter: %d", rc)
+	}
+	db := libc.AtomicLoadPUintptr(slots)
+	defer sqlite3.Xsqlite3_close(tls, db)
+	statementSlot := slots + unsafe.Sizeof(uintptr(0))
+	if rc := sqlite3.Xsqlite3_prepare_v2(tls, db, sqlText, -1, statementSlot, 0); rc != sqlite3.SQLITE_OK {
+		t.Fatalf("prepare SQLite work counter: %s", libc.GoString(sqlite3.Xsqlite3_errmsg(tls, db)))
+	}
+	statement := libc.AtomicLoadPUintptr(statementSlot)
+	defer sqlite3.Xsqlite3_finalize(tls, statement)
+	for {
+		switch rc := sqlite3.Xsqlite3_step(tls, statement); rc {
+		case sqlite3.SQLITE_ROW:
+		case sqlite3.SQLITE_DONE:
+			return int64(sqlite3.Xsqlite3_stmt_status(tls, statement, sqlite3.SQLITE_STMTSTATUS_VM_STEP, 0))
+		default:
+			t.Fatalf("measure SQLite work: %s", libc.GoString(sqlite3.Xsqlite3_errmsg(tls, db)))
+		}
+	}
 }
 
 func nativeWorkDatabase(t *testing.T, provider string, count int, directory string) string {
@@ -118,17 +141,9 @@ func nativeWorkDatabase(t *testing.T, provider string, count int, directory stri
 
 func measureNativeOpening(t *testing.T, provider string, count int) int64 {
 	t.Helper()
-	cli, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 VM counters are unavailable")
-	}
 	directory := t.TempDir()
 	session := nativeWorkDatabase(t, provider, count, directory)
-	native, err := sqliteexec.Resolve(sqliteexec.BackendNative, "sqlite3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	recorder := &nativeWorkExecutor{t: t, delegate: native, cli: cli}
+	recorder := &nativeWorkExecutor{t: t, delegate: sqliteexec.New()}
 	reader := NewReader(t.TempDir())
 	reader.openCode.executor, reader.hermes.executor = recorder, recorder
 	t.Setenv(agentroots.OpenCodeListEnv, directory)

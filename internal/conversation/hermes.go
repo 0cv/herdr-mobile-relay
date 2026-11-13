@@ -22,7 +22,6 @@ const (
 
 type hermesReader struct {
 	home     string
-	binary   string
 	executor sqliteexec.Executor
 }
 
@@ -50,17 +49,10 @@ type hermesToolRow struct {
 }
 
 func newHermesReader(home string) *hermesReader {
-	return &hermesReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv()}
-}
-
-func (r *hermesReader) queryExec() sqliteexec.Executor {
-	return resolveQueryExecutor(r.executor, r.binary)
+	return &hermesReader{home: home, executor: sqliteexec.New()}
 }
 
 func (r *hermesReader) databases() ([]string, string) {
-	if exec := r.queryExec(); exec == nil || !exec.Ready() {
-		return nil, "source_unavailable"
-	}
 	roots := agentroots.HermesData(r.home)
 	databases := make([]string, 0, len(roots))
 	for index, candidate := range agentroots.HermesDBs(r.home) {
@@ -208,7 +200,7 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxHermesOutput)
 	if code != "" {
 		return nil, false, code
 	}
@@ -299,7 +291,7 @@ func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessi
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxHermesOutput)
 	if code != "" {
 		return nil, code
 	}

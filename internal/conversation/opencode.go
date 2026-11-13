@@ -23,7 +23,6 @@ const (
 
 type openCodeReader struct {
 	home     string
-	binary   string
 	executor sqliteexec.Executor
 	mu       sync.Mutex
 	cache    map[string]openCodeCacheEntry
@@ -71,17 +70,10 @@ type openCodeRow struct {
 }
 
 func newOpenCodeReader(home string) *openCodeReader {
-	return &openCodeReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv(), cache: make(map[string]openCodeCacheEntry), layouts: make(map[string]openCodeLayoutEntry)}
-}
-
-func (r *openCodeReader) queryExec() sqliteexec.Executor {
-	return resolveQueryExecutor(r.executor, r.binary)
+	return &openCodeReader{home: home, executor: sqliteexec.New(), cache: make(map[string]openCodeCacheEntry), layouts: make(map[string]openCodeLayoutEntry)}
 }
 
 func (r *openCodeReader) databases() ([]string, string) {
-	if exec := r.queryExec(); exec == nil || !exec.Ready() {
-		return nil, "source_unavailable"
-	}
 	roots := agentroots.OpenCodeData(r.home)
 	databases := make([]string, 0, len(roots))
 	for index, candidate := range agentroots.OpenCodeDBs(r.home) {
@@ -248,7 +240,7 @@ func (r *openCodeReader) layoutContext(ctx context.Context, database string, sta
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database,
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database,
 		`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session','message','part','session_v2','session_message');`,
 		maxOpenCodeOutput)
 	if code != "" {
@@ -362,7 +354,7 @@ func (r *openCodeReader) queryV2(ctx context.Context, database, sessionID, befor
 func (r *openCodeReader) runRows(ctx context.Context, database, query string, limit int, v2 bool) ([]openCodeRow, bool, string) {
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxOpenCodeOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxOpenCodeOutput)
 	if code != "" {
 		return nil, false, code
 	}
