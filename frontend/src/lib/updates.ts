@@ -11,7 +11,6 @@ const APP_RELOAD_TARGET_KEY = 'herdr_app_reload_target';
 const APP_RELOAD_ATTEMPTS_KEY = 'herdr_app_reload_attempts';
 const MAX_AUTOMATIC_RELOAD_ATTEMPTS = 2;
 const sessionStartedRelayIds = new Set<string>();
-const APP_DEPLOY_SELF_UPDATE_MIN_VERSION = '0.13.3';
 export const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes';
 export const CHECKOUT_UPDATE_COMMAND = 'git pull --ff-only && make service-install';
 const RELAY_UPDATE_STATES = new Set([
@@ -98,17 +97,9 @@ export function newerVersion(candidate: string, current: string): boolean {
   return false;
 }
 export function relayNeedsManualBootstrap(
-  connection: Pick<RelayConnectionView, 'appDeploy' | 'capabilities' | 'releaseVersion' | 'update'>,
-  failure = '',
+  connection: Pick<RelayConnectionView, 'capabilities'>,
 ): boolean {
-  if (!connection.capabilities.includes('self_update')) return true;
-  const legacyVersion = newerVersion(APP_DEPLOY_SELF_UPDATE_MIN_VERSION, connection.releaseVersion);
-  if (!legacyVersion) return false;
-  if (connection.appDeploy.configured) return true;
-  const error = (failure || connection.update.error || connection.appDeploy.reason).toLowerCase();
-  return (error.includes('deploy target app before relay')
-    && error.includes('app deployment origin'))
-    || error.includes('no https app deployment origin is configured');
+  return !connection.capabilities.includes('self_update');
 }
 
 
@@ -225,7 +216,7 @@ async function versionMetadata(
   return {
     version,
     assets: Number.isInteger(assets) ? assets : 0,
-    build: metadataString(payload.build || payload.build_id, 100),
+    build: metadataString(payload.build, 100),
     entry: metadataString(payload.entry, 500),
     script: metadataString(payload.script, 500),
     style: metadataString(payload.style, 500),
@@ -689,9 +680,9 @@ function normalizeUpdateProgress(value: unknown): UpdateProgressPlan | null {
   const rawPhoneTarget = candidate.phoneTarget && typeof candidate.phoneTarget === 'object'
     ? candidate.phoneTarget as Record<string, unknown>
     : {};
-  const rawPhoneVersion = String(rawPhoneTarget.version || candidate.phoneVersion || targetVersion);
+  const rawPhoneVersion = String(rawPhoneTarget.version || targetVersion);
   const phoneVersion = semverTuple(rawPhoneVersion) ? rawPhoneVersion : targetVersion;
-  const rawPhoneAssets = Number(rawPhoneTarget.assets ?? candidate.phoneAssets);
+  const rawPhoneAssets = Number(rawPhoneTarget.assets);
   const phoneAssets = Number.isInteger(rawPhoneAssets) && rawPhoneAssets >= 0
     ? Math.min(rawPhoneAssets, 1_000_000)
     : 0;
@@ -699,7 +690,7 @@ function normalizeUpdateProgress(value: unknown): UpdateProgressPlan | null {
     ? {
       version: phoneVersion,
       assets: phoneAssets,
-      build: String(rawPhoneTarget.build || candidate.phoneBuild || '').slice(0, 100),
+      build: String(rawPhoneTarget.build || '').slice(0, 100),
     }
     : null;
   const rawPhoneState = String(candidate.phoneState || 'loading');

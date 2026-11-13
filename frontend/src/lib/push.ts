@@ -134,16 +134,6 @@ function subscriptionApplicationServerKey(subscription: PushSubscription): strin
   return key ? base64UrlEncode(new Uint8Array(key)) : '';
 }
 
-async function legacyPushEndpoint(): Promise<string> {
-  if (!pushSupported()) return '';
-  const registration = await readyServiceWorker();
-  try {
-    return (await registration?.pushManager.getSubscription())?.endpoint || '';
-  } catch {
-    return '';
-  }
-}
-
 export async function registerPushSubscription(relayId: string): Promise<boolean> {
   const connection = relayStore.connection(relayId);
   if (!connection || relayProtocolError(connection)) return false;
@@ -179,8 +169,6 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
         applicationServerKey: base64UrlDecode(connection.vapidPublicKey),
       });
     }
-    const legacy = await legacyPushEndpoint();
-    if (legacy) replaced.push(legacy);
     localStorage.setItem(relayVapidStorageKey(relayId), connection.vapidPublicKey);
     const payload: PushSubscribePayload = {
       type: 'push_subscribe',
@@ -290,11 +278,6 @@ export async function stopPushNotifications(): Promise<void> {
   try {
     localStorage.setItem(PUSH_ENABLED_KEY, 'false');
     await Promise.all([...get(relayStore.connections).keys()].map(unsubscribePushSubscription));
-    const legacy = await legacyPushEndpoint();
-    if (legacy) {
-      const registration = await readyServiceWorker();
-      await (await registration?.pushManager.getSubscription())?.unsubscribe().catch(() => false);
-    }
   } finally {
     refreshPushPreferences();
     relayStore.notificationBusy.set(false);

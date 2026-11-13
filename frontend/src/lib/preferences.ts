@@ -4,7 +4,6 @@ import {
   DEFAULT_AGENT_VIEW_KEY,
   PANE_AGENT_VIEW_OVERRIDES_KEY,
   HIDDEN_SERVERS_KEY,
-  LEGACY_FONT_KEY,
   HOME_LAYOUT_KEY,
   HOME_LAYOUTS,
   INTERFACE_SIZE_KEY,
@@ -112,7 +111,7 @@ const themePreference = persistedPreference<Theme>(
 export const theme = themePreference.store;
 const interfaceSizePreference = persistedPreference<InterfaceSize>(
   INTERFACE_SIZE_KEY,
-  savedChoice(localStorage.getItem(INTERFACE_SIZE_KEY) || localStorage.getItem(LEGACY_FONT_KEY), INTERFACE_SIZES, 'compact'),
+  savedChoice(localStorage.getItem(INTERFACE_SIZE_KEY), INTERFACE_SIZES, 'compact'),
 );
 export const interfaceSize = interfaceSizePreference.store;
 export const { store: terminalHistoryLines, set: setTerminalHistoryLines } = persistedPreference<TerminalHistoryLines>(

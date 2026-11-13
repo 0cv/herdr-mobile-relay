@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Interface sizes saved before 0.10.0 and never changed now reset to the
+  default. Sizes saved by newer app builds are unchanged.
+
 ### Fixed
 
 - Cloudflare setup links, status, and hostname changes now read quoted tunnel

@@ -1747,7 +1747,7 @@ describe('relay command store', () => {
       await tick();
       const recovery = reads().at(-1)!;
       expect(recovery.request_id).not.toBe(initial.request_id);
-      const delta = { type: 'pane_delta', pane_id: 'w1:p1', target, base_fingerprint: 'same-screen', content_fingerprint: 'same-screen', segments: null, format: 'ansi' };
+      const delta = { type: 'pane_delta', pane_id: 'w1:p1', target, base_fingerprint: 'same-screen', content_fingerprint: 'same-screen', segments: [], format: 'ansi' };
       now = 50;
       socket.message(delta);
       expect(frame()).toMatchObject({ receivedAt: 50 });
@@ -1933,7 +1933,7 @@ describe('relay command store', () => {
       format: 'ansi',
       base_fingerprint: 'content-1',
       content_fingerprint: 'content-1',
-      segments: null,
+      segments: [],
       question_layout: true,
     });
     expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)?.content)
@@ -1990,6 +1990,20 @@ describe('relay command store', () => {
       type: 'watch_pane',
       pane_id: 'w1:p1',
       content_fingerprint: 'content-3',
+    });
+    socket.message({
+      type: 'pane_delta',
+      pane_id: 'w1:p1',
+      base_fingerprint: 'content-3',
+      content_fingerprint: 'content-3',
+      segments: null,
+    });
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)?.content)
+      .toBe('resynchronized\n');
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
+      type: 'read_pane',
+      pane_id: 'w1:p1',
+      content_fingerprint: '',
     });
   });
 

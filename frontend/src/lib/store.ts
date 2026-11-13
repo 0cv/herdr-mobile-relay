@@ -1675,12 +1675,9 @@ class RelayStore {
       if (!paneMessageMatches(message)) return;
       const frame = this.terminalFramesValue.get(paneId);
       const baseFingerprint = this.paneContentFingerprints.get(paneId);
-      // Released relays encoded metadata-only deltas as null. Preserve the
-      // terminal bytes when both fingerprints prove the content is unchanged.
       const metadataOnly = baseFingerprint === message.base_fingerprint
         && message.base_fingerprint === message.content_fingerprint
-        && (message.segments === null
-          || (Array.isArray(message.segments) && message.segments.length === 0));
+        && Array.isArray(message.segments) && message.segments.length === 0;
       const nextContent = frame && baseFingerprint === message.base_fingerprint
         ? metadataOnly ? frame.content : applyPaneDelta(frame.content, message.segments)
         : null;

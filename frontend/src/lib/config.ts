@@ -7,7 +7,6 @@ export const THEME_KEY = 'herdr_theme';
 // Keep the existing key so stored terminal-size preferences migrate into the
 // whole-interface size without resetting users.
 export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
-export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
 export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';
@@ -218,18 +217,10 @@ export function loadRelayConfigs(): RelayConfig[] {
           .map(normalizeRelayConfig);
       }
     } catch {
-      // Fall through to the legacy single-relay keys.
+      return [];
     }
   }
-  const url = localStorage.getItem('herdr_relay_url') || '';
-  if (!url) return [];
-  const relay = normalizeRelayConfig({
-    url,
-    token: localStorage.getItem('herdr_relay_token') || '',
-    label: relayLabelFromUrl(url),
-  });
-  localStorage.setItem(RELAYS_KEY, JSON.stringify([relay]));
-  return [relay];
+  return [];
 }
 
 export function saveRelayConfigs(relays: RelayConfig[]): void {

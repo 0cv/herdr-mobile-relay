@@ -15,7 +15,7 @@ import { currentView, navigate } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
-import { appUpdateStatus, clearUpdateProgress, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { appUpdateStatus, clearUpdateProgress } from '$lib/updates';
 import { guardReload } from '$lib/reload-guard';
 import { defaultAgentView, paneAgentViewOverrides, readTerminalResizeSession, setTerminalResizeSession } from '$lib/preferences';
 
@@ -435,45 +435,6 @@ describe('settings relay status', () => {
     expect(screen.queryByText(/assets \d+/i)).not.toBeInTheDocument();
     expect(screen.getAllByRole('heading', { level: 3 }).at(-1)).toHaveTextContent('About');
   });
-  it('routes a legacy app deployment owner to Update Help before scheduling', async () => {
-    const user = userEvent.setup();
-    render(SettingsView);
-    const socket = MockWebSocket.instances[0];
-    socket.open();
-    socket.server({
-      type: 'push_config',
-      protocol: 3,
-      release_version: '0.13.2',
-      capabilities: ['self_update', 'app_deploy'],
-      agent_profiles: [],
-      update: {
-        state: 'available',
-        current_version: '0.13.2',
-        available_version: APP_VERSION,
-        available_revision: 'f'.repeat(12),
-        target_revision: 'f'.repeat(40),
-        can_install: true,
-      },
-      app_deploy: {
-        configured: true,
-        origin: location.origin,
-        project: 'herdr-app',
-        branch: 'main',
-        revision: 'abc1234',
-        state: 'idle',
-      },
-    });
-
-    expect(await screen.findByText('Manual update required')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Check Fedora for updates' })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'How to update Fedora' }));
-    const dialog = screen.getByRole('dialog', { name: 'Update Fedora' });
-    expect(dialog).toHaveTextContent('one-time Terminal update before phone-driven updates can continue');
-    expect(dialog).toHaveTextContent(MANAGED_UPDATE_COMMAND);
-    expect(socket.sent.map((payload) => JSON.parse(payload)).some((message) => message.type === 'install_update')).toBe(false);
-  });
-
-
   it('requires confirmation before removing a relay', async () => {
     const user = userEvent.setup();
     render(SettingsView);
