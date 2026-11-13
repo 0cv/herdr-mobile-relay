@@ -14,6 +14,11 @@ STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}
 
 require_supported_platform
 
+if [ ! -f "$STATE_FILE" ]; then
+    echo "✗ No stable setup state was found at $STATE_FILE." >&2
+    exit 1
+fi
+
 TUNNEL_NAME="$(state_get tunnel_name)"
 case "$TUNNEL_NAME" in
     herdr-mobile-relay-*) ;;

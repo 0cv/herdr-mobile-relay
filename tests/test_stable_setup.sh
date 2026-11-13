@@ -642,6 +642,7 @@ test_teardown_ownership_and_dns_retention() {
     STATUS=$?
     set -e
     [ "$STATUS" -ne 0 ] || fail "teardown without recorded state should fail"
+    assert_contains "$OUTPUT" "No stable setup state was found at $HERDR_STABLE_STATE_FILE"
     [ ! -e "$HERDR_STABLE_STATE_FILE" ] || fail "teardown created missing state"
     [ -f "$HOME/custom-config.yml" ] || fail "teardown without state removed config"
     [ -f "$HOME/custom-credentials.json" ] || fail "teardown without state removed credentials"
