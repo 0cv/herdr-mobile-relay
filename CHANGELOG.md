@@ -5,10 +5,10 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Removed
+### Changed
 
-- Support for upgrading installs older than 0.20.0. Uninstall them before
-  installing this version, then pair every phone again.
+- Interface sizes saved before 0.10.0 and never changed now reset to the
+  default. Sizes saved by newer app builds are unchanged.
 
 ### Fixed
 
@@ -24,6 +24,11 @@ project follows [Semantic Versioning](https://semver.org/).
 - Self-hosted gateways deployed with the generated Compose bundle now honor
   `HERDR_GATEWAY_MAX_RELAYS` and `HERDR_GATEWAY_MAX_CLIENTS` from `.env`, so
   operators can change the gateway-wide connection limits.
+
+### Removed
+
+- Support for upgrading installs older than 0.20.0. Uninstall them before
+  installing this version, then pair every phone again.
 
 ## [0.25.1] - 2026-11-10
 

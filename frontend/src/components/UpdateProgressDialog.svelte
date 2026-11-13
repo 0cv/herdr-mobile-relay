@@ -177,7 +177,7 @@
     }
     const clientError = currentPlan.errors[relayId];
     if (clientError) {
-      const manual = Boolean(connection && relayNeedsManualBootstrap(connection, clientError));
+      const manual = Boolean(connection && relayNeedsManualBootstrap(connection));
       return {
         ...base,
         label: manual ? 'Manual update required' : 'Update could not start',
