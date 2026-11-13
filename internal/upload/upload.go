@@ -16,7 +16,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -770,19 +769,6 @@ func (m *Manager) cleanupDiskLocked() int {
 			}
 		}
 	}
-	entries, err := fs.ReadDir(m.root.FS(), ".")
-	if err == nil {
-		for _, entry := range entries {
-			if !entry.Type().IsRegular() || !legacyUploadFilename.MatchString(entry.Name()) {
-				continue
-			}
-			info, infoErr := entry.Info()
-			if infoErr == nil && now.Sub(info.ModTime()) >= m.attachTTL {
-				_ = m.root.Remove(entry.Name())
-				removed++
-			}
-		}
-	}
 	return removed
 }
 
@@ -1106,8 +1092,6 @@ func canonicalExtension(mediaType string) string {
 	}
 	return ".data"
 }
-
-var legacyUploadFilename = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}-.+[.](png|jpg|jpeg|webp|gif|heic|heif|img)$`)
 
 func newDiskAttachmentTarget(target protocol.TargetRef) diskAttachmentTarget {
 	return diskAttachmentTarget{
