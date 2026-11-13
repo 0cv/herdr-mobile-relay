@@ -134,15 +134,9 @@ export function parseNotificationTarget(value: string): NotificationTarget | nul
     const parsed = JSON.parse(decodeURIComponent(value)) as Record<string, unknown>;
     const paneId = String(parsed?.pane_id || '').trim();
     const host = String(parsed?.host || '').trim();
-    const action = parsed?.action === 'approve' || parsed?.action === 'deny' ? parsed.action : '';
-    const index = Number.isInteger(parsed?.index) ? Number(parsed.index) : null;
-    const total = Number.isInteger(parsed?.total) ? Number(parsed.total) : null;
     const notificationId = String(parsed?.notification_id || '').trim().slice(0, 120);
     if (!paneId) return null;
-    if (action && (index === null || total === null || index < 0 || index >= total || total < 2 || total > 20)) {
-      return null;
-    }
-    return { pane_id: paneId, host, action, index, total, notification_id: notificationId };
+    return { pane_id: paneId, host, notification_id: notificationId };
   } catch {
     return null;
   }

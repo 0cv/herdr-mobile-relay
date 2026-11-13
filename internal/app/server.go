@@ -102,16 +102,13 @@ type Server struct {
 	home         string
 	logger       *slog.Logger
 
-	state          *coordinator.State
-	hub            *transport.Hub
-	poller         *coordinator.Poller
-	udp            *coordinator.UDPListener
-	journal        *activity.Journal
-	auditLog       *audit.Logger
-	pushM          *push.Manager
-	transitionPush interface {
-		Send(context.Context, []byte)
-	}
+	state               *coordinator.State
+	hub                 *transport.Hub
+	poller              *coordinator.Poller
+	udp                 *coordinator.UDPListener
+	journal             *activity.Journal
+	auditLog            *audit.Logger
+	pushM               *push.Manager
 	transitionBroadcast interface {
 		Broadcast(any)
 	}
@@ -1205,7 +1202,6 @@ func (s *Server) Run(ctx context.Context) error {
 				var sub push.Subscription
 				if json.Unmarshal(inbound.Subscription, &sub) == nil {
 					sub.ClientID = inbound.ClientID
-					sub.NotifyFinished = inbound.NotifyFinished
 					sub.DeviceID = identity.DeviceID
 					sub.Locale = identity.Locale
 					// The authenticated connection does not currently carry a
@@ -1892,12 +1888,6 @@ func (s *Server) handleTransition(
 		}
 		if s.pushM != nil {
 			s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
-		} else if s.transitionPush != nil {
-			payload := push.BuildAttentionPayload(
-				agent, project, command, eventID, paneID, s.hostname,
-				string(agentState.AttentionKind), len(agentState.Options),
-			)
-			s.sendTransitionPush(ctx, payload, classifiedCurrent)
 		}
 		if !classifiedCurrent() {
 			return
@@ -1944,42 +1934,7 @@ func (s *Server) handleTransition(
 		} else if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
 			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
 		}
-	} else if s.transitionPush != nil {
-		payload := push.BuildFinishedPayload(agent, project, paneID, s.hostname, eventID)
-		s.sendTransitionPush(ctx, payload, transitionCurrent)
 	}
-}
-
-func (s *Server) sendTransitionPush(
-	ctx context.Context,
-	payload []byte,
-	transitionCurrent func() bool,
-) {
-	pushCtx, cancel := context.WithCancel(ctx)
-	finished := make(chan struct{})
-	watcherDone := make(chan struct{})
-	go func() {
-		defer close(watcherDone)
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-finished:
-				return
-			case <-pushCtx.Done():
-				return
-			case <-ticker.C:
-				if !transitionCurrent() {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	s.transitionPush.Send(pushCtx, payload)
-	close(finished)
-	cancel()
-	<-watcherDone
 }
 
 const (
@@ -2180,15 +2135,6 @@ func (s *Server) handleChatCompletion(
 	}
 	if s.pushM != nil {
 		s.publishAgentPush(ctx, agent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
-	} else if s.transitionPush != nil {
-		payload := push.BuildFinishedPayload(
-			agent.Agent,
-			agent.Project,
-			agent.PaneID,
-			s.hostname,
-			eventID,
-		)
-		s.sendTransitionPush(ctx, payload, current)
 	}
 }
 

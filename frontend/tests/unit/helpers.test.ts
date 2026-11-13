@@ -130,9 +130,9 @@ describe('protocol and setup parsing', () => {
       host: 'app.example.com',
     } as Location)).toBeNull();
 
-    const encoded = encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', host: 'Fedora', action: 'approve', index: 0, total: 3 }));
-    expect(parseNotificationTarget(encoded)).toMatchObject({ pane_id: 'w1:p1', action: 'approve', index: 0, total: 3 });
-    expect(parseNotificationTarget(encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', action: 'approve', index: 9, total: 3 })))).toBeNull();
+    const encoded = encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', host: 'Fedora', notification_id: 'event-1' }));
+    expect(parseNotificationTarget(encoded)).toEqual({ pane_id: 'w1:p1', host: 'Fedora', notification_id: 'event-1' });
+    expect(parseNotificationTarget(encodeURIComponent(JSON.stringify({ host: 'Fedora' })))).toBeNull();
     expect(parseNotificationTarget('%not-json')).toBeNull();
     expect(stateFromLocation({ hash: '#pane=%invalid' } as Location)).toEqual({ view: 'agents' });
     expect(stateFromLocation({ hash: '#history=relay%3A%3Apane-1' } as Location)).toEqual({

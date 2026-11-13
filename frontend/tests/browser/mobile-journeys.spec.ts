@@ -5863,16 +5863,13 @@ test('scales and expands the prompt composer for multiline text', async ({ page 
 
 test('handles approvals, chained questions, and notification routing', async ({ page }) => {
   const target = encodeURIComponent(JSON.stringify({
-    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'notice-1',
+    pane_id: 'w1:p1', host: 'fedora', notification_id: 'notice-1',
   }));
   await boot(page, [fedora], `/#notify=${target}`);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', event_id: 'notice-1', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
-  // A legacy notification action has no backend-verifiable identity: the app
-  // opens the live thread read-only and never executes the approval itself.
   await expect(page.getByRole('main', { name: /Terminal for Approvals/ })).toBeVisible();
-  await expect(page.getByRole('status').filter({ hasText: 'No notification action was taken' })).toBeVisible();
   expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
 
   const first = {
@@ -6156,31 +6153,6 @@ test('keeps a nonfinal question mounted when a transient frame is confirmed', as
     attention_kind: 'question', interaction: second, question_layout: true,
   });
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
-});
-
-test('never executes notification approvals, stale or current', async ({ page }) => {
-  const staleTarget = encodeURIComponent(JSON.stringify({
-    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'old-event',
-  }));
-  await boot(page, [fedora], `/#notify=${staleTarget}`);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', options: ['Approve once', 'Deny'], event_id: 'new-event', project: 'Stale approval', agent: 'codex' }],
-  });
-  await expect(page.getByRole('main', { name: /Terminal for Stale approval/ })).toBeVisible();
-  await expect(page.getByRole('status').filter({ hasText: 'No notification action was taken' })).toBeVisible();
-  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
-
-  // Even a target naming the current event opens read-only: a legacy
-  // notification action carries no backend-verifiable approval identity.
-  const currentTarget = encodeURIComponent(JSON.stringify({
-    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'new-event',
-  }));
-  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, currentTarget);
-  await expect(page.getByRole('main', { name: /Terminal for Stale approval/ })).toBeVisible();
-  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(0);
 });
 
 test('shows long approval choices in full on touch-sized buttons', async ({ page }) => {

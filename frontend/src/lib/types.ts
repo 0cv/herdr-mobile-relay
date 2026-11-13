@@ -578,9 +578,6 @@ export interface CommandResult {
 export interface NotificationTarget {
   pane_id: string;
   host: string;
-  action: 'approve' | 'deny' | '';
-  index: number | null;
-  total: number | null;
   notification_id: string;
 }
 

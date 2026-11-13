@@ -245,15 +245,6 @@
     if ($currentView.view !== 'notification') { clearNotificationFallback(); return; }
     const target = $currentView.target;
     const agent = resolveNotificationTarget(target, $agents);
-    // Legacy notifications never carry an immutable backend-verifiable action
-    // reference. Open their current thread read-only; never execute the action.
-    if (target.action) {
-      if (!agent) return;
-      clearNotificationFallback();
-      relayStore.showToast('Open the app to review this request. No notification action was taken.');
-      replaceView({ view: 'terminal', paneId: agent.pane_id, target: targetRefForAgent(agent) || undefined });
-      return;
-    }
     // A plain open shows the stored excerpt card. Activity history streams in on
     // connect, so re-run reactively until it arrives; if it never does (older
     // relay with no stored excerpt), fall back to the live thread.
@@ -538,7 +529,6 @@
       pane_id: agent.raw_pane_id,
       notification_id: String(agent.event_id || `herdr-${hostLabel(agent)}-${agent.raw_pane_id}`),
     };
-    const open = { ...target, action: '', index: null, total: null } as NotificationTarget;
     const title = kind === 'approval'
       ? `${displayName(agent)} blocked`
       : kind === 'question'
@@ -557,8 +547,7 @@
       badge: 'icons/notification-badge.png',
       actions: [],
       data: {
-        url: viewUrl({ view: 'notification', target: open }),
-        action_urls: {},
+        url: viewUrl({ view: 'notification', target }),
       },
     });
   }

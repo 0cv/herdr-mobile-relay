@@ -33,16 +33,15 @@ type Subscription struct {
 		P256dh string `json:"p256dh"`
 		Auth   string `json:"auth"`
 	} `json:"keys"`
-	DeviceID       string   `json:"device_id,omitempty"`
-	Locale         string   `json:"locale,omitempty"`
-	Platform       Platform `json:"platform,omitempty"`
-	UserAgent      string   `json:"user_agent,omitempty"`
-	NotifyFinished bool     `json:"notify_finished,omitempty"`
-	ClientID       string   `json:"client_id,omitempty"`
+	DeviceID  string   `json:"device_id,omitempty"`
+	Locale    string   `json:"locale,omitempty"`
+	Platform  Platform `json:"platform,omitempty"`
+	UserAgent string   `json:"user_agent,omitempty"`
+	ClientID  string   `json:"client_id,omitempty"`
 }
 
 // pythonSubscription matches the Python relay's on-disk format:
-// {"subscriptions":[{"subscription":{endpoint,keys},"client_id":"...","user_agent":"...","notify_finished":bool}]}
+// {"subscriptions":[{"subscription":{endpoint,keys},"client_id":"...","user_agent":"..."}]}
 type pythonSubscription struct {
 	Subscription struct {
 		Endpoint string `json:"endpoint"`
@@ -51,12 +50,11 @@ type pythonSubscription struct {
 			Auth   string `json:"auth"`
 		} `json:"keys"`
 	} `json:"subscription"`
-	DeviceID       string   `json:"device_id,omitempty"`
-	Locale         string   `json:"locale,omitempty"`
-	Platform       Platform `json:"platform,omitempty"`
-	ClientID       string   `json:"client_id"`
-	UserAgent      string   `json:"user_agent"`
-	NotifyFinished bool     `json:"notify_finished"`
+	DeviceID  string   `json:"device_id,omitempty"`
+	Locale    string   `json:"locale,omitempty"`
+	Platform  Platform `json:"platform,omitempty"`
+	ClientID  string   `json:"client_id"`
+	UserAgent string   `json:"user_agent"`
 }
 
 type pythonFile struct {
@@ -370,7 +368,6 @@ func (m *Manager) load() error {
 			sub.Locale = ps.Locale
 			sub.Platform = ps.Platform
 			sub.UserAgent = ps.UserAgent
-			sub.NotifyFinished = ps.NotifyFinished
 			sub.ClientID = ps.ClientID
 			m.subscriptions = append(m.subscriptions, sub)
 		}
@@ -413,7 +410,6 @@ func encodeSubscriptions(subscriptions []Subscription) ([]byte, error) {
 		ps.Locale = sub.Locale
 		ps.Platform = sub.Platform
 		ps.UserAgent = sub.UserAgent
-		ps.NotifyFinished = sub.NotifyFinished
 		ps.ClientID = sub.ClientID
 		pf.Subscriptions = append(pf.Subscriptions, ps)
 	}
@@ -487,33 +483,6 @@ func (m *Manager) Subscribe(sub Subscription, replacementSets ...[]string) error
 	}
 	if err := m.queue.replaceSubscriptionsWhileProcessing(sub.DeviceID, replaceEndpoints, sub); err != nil {
 		_ = m.persist(m.subscriptions)
-		return err
-	}
-	m.subscriptions = filtered
-	return nil
-}
-
-func (m *Manager) Unsubscribe(endpoints []string, clientIDs ...string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	clientID := ""
-	if len(clientIDs) > 0 {
-		clientID = clientIDs[0]
-	}
-	remove := make(map[string]bool, len(endpoints))
-	for _, e := range endpoints {
-		remove[e] = true
-	}
-
-	var filtered []Subscription
-	for _, sub := range m.subscriptions {
-		matchesClient := clientID != "" && sub.ClientID == clientID
-		if !remove[sub.Endpoint] && !matchesClient {
-			filtered = append(filtered, sub)
-		}
-	}
-	if err := m.persist(filtered); err != nil {
 		return err
 	}
 	m.subscriptions = filtered
@@ -968,48 +937,6 @@ func (m *Manager) signal() {
 	}
 }
 
-func (m *Manager) Send(ctx context.Context, payload []byte) {
-	subs := m.Subscriptions()
-	if len(subs) == 0 {
-		return
-	}
-
-	finished := payloadType(payload) == "finished"
-	var toRemove []string
-	for _, sub := range subs {
-		if finished && !sub.NotifyFinished {
-			continue
-		}
-		if err := m.sendPush(ctx, sub, payload); err != nil {
-			m.logger.Warn("push send failed", "endpoint", truncateEndpoint(sub.Endpoint), "error", err)
-			if isTerminalError(err) {
-				toRemove = append(toRemove, sub.Endpoint)
-			}
-		}
-	}
-
-	if len(toRemove) > 0 {
-		if err := m.Unsubscribe(toRemove, ""); err != nil {
-			m.logger.Warn("failed to persist pruned push subscriptions", "error", err)
-		}
-		m.logger.Info("pruned dead push subscriptions", "count", len(toRemove))
-	}
-}
-
-func payloadType(payload []byte) string {
-	var envelope struct {
-		Tag  string `json:"tag"`
-		Data struct {
-			Type string `json:"type"`
-		} `json:"data"`
-	}
-	_ = json.Unmarshal(payload, &envelope)
-	if envelope.Data.Type == "" && strings.HasPrefix(envelope.Tag, "herdr-finished-") {
-		return "finished"
-	}
-	return envelope.Data.Type
-}
-
 func atomicWrite(filename string, data []byte, mode os.FileMode) error {
 	directory := filepath.Dir(filename)
 	temp, err := os.CreateTemp(directory, "."+filepath.Base(filename)+".")
@@ -1092,108 +1019,4 @@ func isTerminalError(err error) bool {
 		}
 	}
 	return false
-}
-
-func truncateEndpoint(endpoint string) string {
-	if len(endpoint) > 60 {
-		return endpoint[:60] + "..."
-	}
-	return endpoint
-}
-
-func BuildBlockedPayload(agent, project, command, eventID, paneID, host string, hasApproval bool, approvalTotal int) []byte {
-	kind := "question"
-	if hasApproval {
-		kind = "approval"
-	}
-	return BuildAttentionPayload(agent, project, command, eventID, paneID, host, kind, approvalTotal)
-}
-
-func BuildAttentionPayload(
-	agent, project, command, eventID, paneID, host, kind string,
-	approvalTotal int,
-) []byte {
-	notifyURL := notificationURL(host, paneID, eventID, "", 0, 0)
-
-	if project == "" {
-		project = agent
-	}
-	if project == "" {
-		project = "agent"
-	}
-	if command == "" {
-		command = "Agent needs inspection"
-	}
-	title := fmt.Sprintf("%s needs inspection", project)
-	body := fmt.Sprintf("%s · %s", command, host)
-	if kind == "approval" && approvalTotal >= 2 {
-		title = fmt.Sprintf("%s blocked", project)
-	} else if kind == "question" {
-		title = fmt.Sprintf("%s needs answers", project)
-	}
-
-	payload := map[string]any{
-		"title":       title,
-		"body":        body,
-		"tag":         fmt.Sprintf("herdr-%s-%s", host, paneID),
-		"url":         notifyURL,
-		"actions":     []any{},
-		"action_urls": map[string]string{},
-	}
-	if kind == "approval" && approvalTotal >= 2 {
-		payload["actions"] = []map[string]any{
-			{"action": "approve", "title": "Approve once"},
-		}
-		payload["action_urls"] = map[string]string{
-			"approve": notificationURL(host, paneID, eventID, "approve", 0, approvalTotal),
-		}
-	}
-	data, _ := json.Marshal(payload)
-	return data
-}
-
-func BuildFinishedPayload(agent, project, paneID, host, eventID string) []byte {
-	notifyURL := notificationURL(host, paneID, eventID, "", 0, 0)
-
-	if project == "" {
-		project = agent
-	}
-	if project == "" {
-		project = "Agent"
-	}
-	if agent == "" {
-		agent = "Agent"
-	}
-	payload := map[string]any{
-		"title":       fmt.Sprintf("%s finished", project),
-		"body":        fmt.Sprintf("%s completed · %s", agent, host),
-		"tag":         fmt.Sprintf("herdr-finished-%s-%s", host, paneID),
-		"url":         notifyURL,
-		"actions":     []any{},
-		"action_urls": map[string]string{},
-	}
-	data, _ := json.Marshal(payload)
-	return data
-}
-
-func notificationURL(host, paneID, eventID, action string, index, total int) string {
-	target := struct {
-		Host           string `json:"host"`
-		PaneID         string `json:"pane_id"`
-		NotificationID string `json:"notification_id"`
-		Action         string `json:"action,omitempty"`
-		Index          *int   `json:"index,omitempty"`
-		Total          *int   `json:"total,omitempty"`
-	}{
-		Host:           host,
-		PaneID:         paneID,
-		NotificationID: eventID,
-		Action:         action,
-	}
-	if action != "" {
-		target.Index = &index
-		target.Total = &total
-	}
-	encoded, _ := json.Marshal(target)
-	return "./#notify=" + url.QueryEscape(string(encoded))
 }

@@ -221,7 +221,7 @@ func TestSubscribeAndUnsubscribe(t *testing.T) {
 	dir := t.TempDir()
 	m, _ := NewManager(dir, testLogger())
 
-	sub := Subscription{Endpoint: "https://fcm.googleapis.com/ep1"}
+	sub := Subscription{Endpoint: "https://fcm.googleapis.com/ep1", DeviceID: "device-a"}
 	sub.Keys.P256dh = "key1"
 	sub.Keys.Auth = "auth1"
 	m.Subscribe(sub)
@@ -235,7 +235,7 @@ func TestSubscribeAndUnsubscribe(t *testing.T) {
 	}
 
 	// Subscribe same endpoint updates
-	sub2 := Subscription{Endpoint: "https://fcm.googleapis.com/ep1", NotifyFinished: true}
+	sub2 := Subscription{Endpoint: "https://fcm.googleapis.com/ep1", DeviceID: "device-a"}
 	sub2.Keys.P256dh = "key2"
 	sub2.Keys.Auth = "auth2"
 	m.Subscribe(sub2)
@@ -244,12 +244,14 @@ func TestSubscribeAndUnsubscribe(t *testing.T) {
 	if len(subs) != 1 {
 		t.Fatalf("after update: subs = %d, want 1", len(subs))
 	}
-	if !subs[0].NotifyFinished {
-		t.Error("NotifyFinished should be true after update")
+	if subs[0].Keys.P256dh != "key2" || subs[0].Keys.Auth != "auth2" {
+		t.Fatalf("subscription keys were not updated: %+v", subs[0].Keys)
 	}
 
 	// Unsubscribe
-	m.Unsubscribe([]string{"https://fcm.googleapis.com/ep1"})
+	if err := m.UnsubscribeDevice("device-a", []string{"https://fcm.googleapis.com/ep1"}, ""); err != nil {
+		t.Fatal(err)
+	}
 	subs = m.Subscriptions()
 	if len(subs) != 0 {
 		t.Fatalf("after unsubscribe: subs = %d, want 0", len(subs))
@@ -332,109 +334,6 @@ func TestRemoveDeviceClearsPushState(t *testing.T) {
 	}
 }
 
-func TestBuildBlockedPayload(t *testing.T) {
-	payload := BuildBlockedPayload("Claude", "my-project", "rm -rf build-cache", "evt-1", "pane-1", "myhost", true, 3)
-	assertPayloadFixture(t, payload, "blocked.json")
-	if len(payload) == 0 {
-		t.Fatal("payload is empty")
-	}
-	s := string(payload)
-	if !strings.Contains(s, `"title":"my-project blocked"`) {
-		t.Errorf("expected blocked project title, payload = %s", s)
-	}
-	if !strings.Contains(s, "rm -rf build-cache · myhost") {
-		t.Errorf("expected command+host in body, payload = %s", s)
-	}
-	if !strings.Contains(s, `"tag":"herdr-myhost-pane-1"`) {
-		t.Errorf("expected stable host/pane tag, payload = %s", s)
-	}
-	if !strings.Contains(s, "Approve once") {
-		t.Errorf("expected Approve once action, payload = %s", s)
-	}
-	if !strings.Contains(s, `%22total%22%3A3`) {
-		t.Errorf("expected total from options in approve URL, payload = %s", s)
-	}
-}
-
-func TestBuildQuestionPayloadMatchesPythonContract(t *testing.T) {
-	payload := BuildBlockedPayload("Claude", "my-project", "Which database?", "evt-1", "pane-1", "myhost", false, 0)
-	assertPayloadFixture(t, payload, "question.json")
-}
-
-func TestBuildUnknownAttentionPayloadHasNoActions(t *testing.T) {
-	payload := BuildAttentionPayload(
-		"OpenCode", "my-project", "Agent needs inspection",
-		"evt-1", "pane-1", "myhost", "unknown", 3,
-	)
-	var decoded map[string]any
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded["title"] != "my-project needs inspection" {
-		t.Fatalf("title = %v", decoded["title"])
-	}
-	if actions, ok := decoded["actions"].([]any); !ok || len(actions) != 0 {
-		t.Fatalf("unknown attention actions = %#v", decoded["actions"])
-	}
-	actionURLs, ok := decoded["action_urls"].(map[string]any)
-	if !ok || len(actionURLs) != 0 {
-		t.Fatalf("unknown attention action URLs = %#v", decoded["action_urls"])
-	}
-}
-
-func TestBuildFinishedPayload(t *testing.T) {
-	payload := BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1")
-	assertPayloadFixture(t, payload, "finished.json")
-	s := string(payload)
-	if !strings.Contains(s, `"title":"app finished"`) {
-		t.Errorf("expected project as title, payload = %s", s)
-	}
-	if !strings.Contains(s, "Codex completed · myhost") {
-		t.Errorf("expected agent finished on host in body, payload = %s", s)
-	}
-	if !strings.Contains(s, `"tag":"herdr-finished-myhost-pane-1"`) {
-		t.Errorf("expected distinct finished host/pane tag, payload = %s", s)
-	}
-	if !strings.Contains(s, "evt-finished-1") {
-		t.Errorf("expected event ID in payload = %s", s)
-	}
-}
-
-func TestFinishedPayloadIsClassifiedForOptInFiltering(t *testing.T) {
-	payload := BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1")
-	if kind := payloadType(payload); kind != "finished" {
-		t.Fatalf("finished payload type = %q, want finished so non-opted-in subscriptions are skipped", kind)
-	}
-}
-
-func TestSendFinishedHonorsSubscriptionOptIn(t *testing.T) {
-	manager, err := NewManager(t.TempDir(), testLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, sub := range []Subscription{
-		{Endpoint: "https://fcm.googleapis.com/disabled"},
-		{Endpoint: "https://fcm.googleapis.com/enabled", NotifyFinished: true},
-	} {
-		sub.Keys.P256dh = "test-p256dh"
-		sub.Keys.Auth = "test-auth"
-		if err := manager.Subscribe(sub); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	var sent []string
-	manager.sendPush = func(_ context.Context, sub Subscription, _ []byte) error {
-		sent = append(sent, sub.Endpoint)
-		return nil
-	}
-	manager.Send(t.Context(), BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1"))
-
-	if !reflect.DeepEqual(sent, []string{"https://fcm.googleapis.com/enabled"}) {
-		t.Fatalf("finished push endpoints = %v, want only opted-in subscription", sent)
-	}
-}
-
 func TestSendOneUsesRoutableVAPIDSubject(t *testing.T) {
 	var authorization string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -490,24 +389,6 @@ func TestSendOneUsesRoutableVAPIDSubject(t *testing.T) {
 	}
 	if want := "https://github.com/0cv/herdr-mobile-relay"; claims.Subject != want {
 		t.Fatalf("VAPID subject = %q, want %q", claims.Subject, want)
-	}
-}
-
-func assertPayloadFixture(t *testing.T, actual []byte, name string) {
-	t.Helper()
-	expected, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "push", name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var actualValue, expectedValue any
-	if err := json.Unmarshal(actual, &actualValue); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(expected, &expectedValue); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(actualValue, expectedValue) {
-		t.Fatalf("payload mismatch\nactual: %s\nexpected: %s", actual, expected)
 	}
 }
 

@@ -223,7 +223,6 @@ type Inbound struct {
 	Data                 string          `json:"data,omitempty"`
 	ClientID             string          `json:"client_id,omitempty"`
 	ReplaceEndpoints     []string        `json:"replace_endpoints,omitempty"`
-	NotifyFinished       bool            `json:"notify_finished,omitempty"`
 	Endpoints            []string        `json:"endpoints,omitempty"`
 	Origin               string          `json:"origin,omitempty"`
 	ExpectedOrigin       string          `json:"expected_origin,omitempty"`
