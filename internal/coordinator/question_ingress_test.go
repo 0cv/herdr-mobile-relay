@@ -48,7 +48,7 @@ func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
 	questionDone := make(chan *CommandResult, 1)
 	go func() {
 		questionDone <- dispatcher.HandleAdmitted(t.Context(), map[string]any{
-			"action":           "answer_question",
+			"type":             "answer_question",
 			"request_id":       "question",
 			"pane_id":          "pane-1",
 			"interaction_id":   interaction.ID,
@@ -70,7 +70,7 @@ func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
 	promptCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	prompt := dispatcher.Handle(promptCtx, map[string]any{
-		"action":     "submit_prompt",
+		"type":       "submit_prompt",
 		"request_id": "prompt",
 		"pane_id":    "pane-2",
 		"text":       "continue",

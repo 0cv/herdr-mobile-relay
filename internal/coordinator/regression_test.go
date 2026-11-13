@@ -113,7 +113,7 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 		return d.Handle(ctx, map[string]any{
-			"action":               "respond",
+			"type":                 "respond",
 			"request_id":           "r1",
 			"pane_id":              "pane-1",
 			"event_id":             eventID,

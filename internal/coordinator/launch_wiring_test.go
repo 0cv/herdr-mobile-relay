@@ -25,7 +25,7 @@ func TestAgentStartWithoutWiringDoesNotMutate(t *testing.T) {
 				{"proj", strings.Repeat("x", promptMaxChars+1), "longer"},
 				{"proj", "hello", "not configured"},
 			} {
-				result := d.Handle(f.ctx, map[string]any{"action": "agent_start", "request_id": "unwired", "profile_id": "claude", "name": input.name, "cwd": f.cwd, "prompt": input.prompt})
+				result := d.Handle(f.ctx, map[string]any{"type": "agent_start", "request_id": "unwired", "profile_id": "claude", "name": input.name, "cwd": f.cwd, "prompt": input.prompt})
 				if result.OK || !strings.Contains(result.Error, input.want) || result.PaneID != "" {
 					t.Fatalf("result = %+v, want %q", result, input.want)
 				}

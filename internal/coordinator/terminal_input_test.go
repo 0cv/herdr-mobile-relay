@@ -30,7 +30,7 @@ func TestManualTerminalNativeFixture(t *testing.T) {
 	d := NewDispatcher(client, state, nil, testLogger())
 	defer d.Close(context.Background())
 	text := "  /literal-command 界😀  "
-	result := d.Handle(context.Background(), map[string]any{"action": "send_terminal_text", "request_id": "native-text", "pane_id": "native-dialog", "text": text})
+	result := d.Handle(context.Background(), map[string]any{"type": "send_terminal_text", "request_id": "native-text", "pane_id": "native-dialog", "text": text})
 	if !result.OK {
 		t.Fatalf("native text: %+v", result)
 	}
@@ -47,7 +47,7 @@ func TestManualTerminalNativeFixture(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	result = d.Handle(context.Background(), map[string]any{"action": "send_keys", "request_id": "native-enter", "pane_id": "native-dialog", "keys": []any{"Enter"}})
+	result = d.Handle(context.Background(), map[string]any{"type": "send_keys", "request_id": "native-enter", "pane_id": "native-dialog", "keys": []any{"Enter"}})
 	if !result.OK {
 		t.Fatalf("native Enter: %+v", result)
 	}
@@ -70,7 +70,7 @@ func TestTerminalTextLiteralDispatchAndIdempotency(t *testing.T) {
 	d, fake := newControlledFilterDispatcher(t)
 	before, _ := d.state.Agent("pane-1")
 	text := "  /arbitrary 界😀  "
-	message := map[string]any{"action": "send_terminal_text", "request_id": "manual-1", "pane_id": "pane-1", "text": text}
+	message := map[string]any{"type": "send_terminal_text", "request_id": "manual-1", "pane_id": "pane-1", "text": text}
 	for attempt := 0; attempt < 2; attempt++ {
 		result := d.Handle(context.Background(), message)
 		if !result.OK || result.Phase != "completed" {
@@ -110,7 +110,7 @@ func TestTerminalTextLedgerUsesKeyedNonReversibleConflictToken(t *testing.T) {
 	if token != d.terminalTextConflictToken(text) || token == d.terminalTextConflictToken(text+" changed") || token == other.terminalTextConflictToken(text) {
 		t.Fatal("conflict token does not preserve per-dispatcher equality and conflict semantics")
 	}
-	message := map[string]any{"action": "send_terminal_text", "request_id": "private-ledger", "pane_id": "pane-1", "text": text}
+	message := map[string]any{"type": "send_terminal_text", "request_id": "private-ledger", "pane_id": "pane-1", "text": text}
 	if result := d.Handle(context.Background(), message); !result.OK {
 		t.Fatalf("dispatch: %+v", result)
 	}
@@ -130,7 +130,7 @@ func TestTerminalTextLedgerUsesKeyedNonReversibleConflictToken(t *testing.T) {
 func TestTerminalTextUncertainDeliveryIsNotReplayed(t *testing.T) {
 	d, fake := newControlledFilterDispatcher(t)
 	fake.dropInputReply = true
-	message := map[string]any{"action": "send_terminal_text", "request_id": "lost-text", "pane_id": "pane-1", "text": "private text"}
+	message := map[string]any{"type": "send_terminal_text", "request_id": "lost-text", "pane_id": "pane-1", "text": "private text"}
 	for attempt := 0; attempt < 2; attempt++ {
 		result := d.Handle(context.Background(), message)
 		if result.OK || result.Phase != "dispatched_unknown" {
@@ -145,7 +145,7 @@ func TestTerminalTextUncertainDeliveryIsNotReplayed(t *testing.T) {
 func TestTerminalTextRechecksDispatchAuthorization(t *testing.T) {
 	d, fake := newControlledFilterDispatcher(t)
 	ctx := herdr.WithDispatchCheck(context.Background(), func() error { return errors.New("revoked") })
-	result := d.Handle(ctx, map[string]any{"action": "send_terminal_text", "pane_id": "pane-1", "text": "private text"})
+	result := d.Handle(ctx, map[string]any{"type": "send_terminal_text", "pane_id": "pane-1", "text": "private text"})
 	if result.OK || len(fake.recordedWrites()) != 0 {
 		t.Fatalf("revoked mutation: %+v", result)
 	}
@@ -154,11 +154,11 @@ func TestTerminalTextRechecksDispatchAuthorization(t *testing.T) {
 func TestTerminalTextRejectsControlsAndKeysBeforeDispatch(t *testing.T) {
 	d, fake := newControlledFilterDispatcher(t)
 	for _, text := range []string{"\n", "\r", "\t", "\x1b[200~", "\u0085", strings.Repeat("x", 65537)} {
-		if result := d.Handle(context.Background(), map[string]any{"action": "send_terminal_text", "pane_id": "pane-1", "text": text}); result.OK {
+		if result := d.Handle(context.Background(), map[string]any{"type": "send_terminal_text", "pane_id": "pane-1", "text": text}); result.OK {
 			t.Fatal("invalid text dispatched")
 		}
 	}
-	if result := d.Handle(context.Background(), map[string]any{"action": "send_terminal_text", "pane_id": "pane-1", "text": "text", "keys": []any{"Enter"}}); result.OK {
+	if result := d.Handle(context.Background(), map[string]any{"type": "send_terminal_text", "pane_id": "pane-1", "text": "text", "keys": []any{"Enter"}}); result.OK {
 		t.Fatal("implicit Enter allowed")
 	}
 	if len(fake.recordedWrites()) != 0 {

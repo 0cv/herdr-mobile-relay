@@ -31,7 +31,7 @@ func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
 	resCh := make(chan *CommandResult, 1)
 	go func() {
 		resCh <- d.Handle(context.Background(), map[string]any{
-			"action": "submit_prompt", "request_id": "p", "pane_id": "pane-1", "text": "hi",
+			"type": "submit_prompt", "request_id": "p", "pane_id": "pane-1", "text": "hi",
 		})
 	}()
 
@@ -68,7 +68,7 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 	resCh := make(chan *CommandResult, 1)
 	go func() {
 		resCh <- d.Handle(context.Background(), map[string]any{
-			"action": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
+			"type": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
 			"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
 		})
 	}()
@@ -83,7 +83,7 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 
 	// The claim must have been released: a retry can now dispatch.
 	second := d.Handle(context.Background(), map[string]any{
-		"action": "respond", "request_id": "b", "pane_id": "pane-1", "event_id": eventID,
+		"type": "respond", "request_id": "b", "pane_id": "pane-1", "event_id": eventID,
 		"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
 	})
 	if !second.OK {
@@ -266,7 +266,7 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 	result := make(chan *CommandResult, 1)
 	go func() {
 		result <- d.Handle(context.Background(), map[string]any{
-			"action": "submit_prompt", "request_id": "absent-prompt",
+			"type": "submit_prompt", "request_id": "absent-prompt",
 			"pane_id": "pane-1", "text": "must not cross sessions",
 		})
 	}()
@@ -301,18 +301,18 @@ func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
 	})
 
 	messages := []map[string]any{
-		{"action": "send_keys", "request_id": "keys", "pane_id": "missing", "keys": []any{"Enter"}},
-		{"action": "send_text", "request_id": "text", "pane_id": "missing", "text": "text"},
-		{"action": "agent_stop", "request_id": "stop", "pane_id": "missing"},
-		{"action": "agent_rename", "request_id": "rename", "pane_id": "missing", "name": "new-name"},
-		{"action": "agent_clear", "request_id": "clear", "pane_id": "missing"},
-		{"action": "acknowledge_pane", "request_id": "ack", "pane_id": "missing"},
-		{"action": "respond", "request_id": "approval", "pane_id": "missing", "event_id": "old-event", "index": float64(0)},
-		{"action": "answer_question", "request_id": "question", "pane_id": "missing", "interaction_id": "old-question", "selected": []any{float64(0)}},
+		{"type": "send_keys", "request_id": "keys", "pane_id": "missing", "keys": []any{"Enter"}},
+		{"type": "send_text", "request_id": "text", "pane_id": "missing", "text": "text"},
+		{"type": "agent_stop", "request_id": "stop", "pane_id": "missing"},
+		{"type": "agent_rename", "request_id": "rename", "pane_id": "missing", "name": "new-name"},
+		{"type": "agent_clear", "request_id": "clear", "pane_id": "missing"},
+		{"type": "acknowledge_pane", "request_id": "ack", "pane_id": "missing"},
+		{"type": "respond", "request_id": "approval", "pane_id": "missing", "event_id": "old-event", "index": float64(0)},
+		{"type": "answer_question", "request_id": "question", "pane_id": "missing", "interaction_id": "old-question", "selected": []any{float64(0)}},
 	}
 	for _, message := range messages {
 		if result := d.Handle(context.Background(), message); result.OK {
-			t.Errorf("%s unexpectedly succeeded for absent pane", message["action"])
+			t.Errorf("%s unexpectedly succeeded for absent pane", message["type"])
 		}
 	}
 	if data, _ := os.ReadFile(record); len(data) != 0 {

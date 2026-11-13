@@ -3248,15 +3248,12 @@ func (s *Server) recordWriteAudit(
 }
 
 func auditAction(message map[string]any) string {
-	messageType, _ := message["type"].(string)
-	action, _ := message["action"].(string)
-	operation, _ := protocol.ResolveOperation(messageType, action)
-	return operation
+	action, _ := message["type"].(string)
+	return action
 }
 
 func auditWriteDetails(message map[string]any) map[string]any {
 	action := auditAction(message)
-	// Invalid/ambiguous identities must never reach payload hashing or logging.
 	if action == "" {
 		return nil
 	}

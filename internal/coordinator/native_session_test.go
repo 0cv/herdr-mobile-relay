@@ -46,7 +46,7 @@ func TestQueuedPromptRejectsObservedNativeSessionChange(t *testing.T) {
 				return nil
 			})
 			go func() {
-				results <- d.HandleAdmitted(ctx, map[string]any{"action": "submit_prompt", "request_id": "stale", "pane_id": "pane", "text": "hello"}, func() { close(admitted) })
+				results <- d.HandleAdmitted(ctx, map[string]any{"type": "submit_prompt", "request_id": "stale", "pane_id": "pane", "text": "hello"}, func() { close(admitted) })
 			}()
 			<-admitted
 			if replacement == "revoked" {

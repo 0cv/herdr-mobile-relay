@@ -319,26 +319,20 @@ type CreateResult struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
-// UnmarshalJSON accepts both the nested Herdr 0.7.5 create responses and the
-// flat result returned by older versions and test fixtures.
 func (r *CreateResult) UnmarshalJSON(data []byte) error {
 	var wire struct {
-		PaneID      string    `json:"pane_id"`
-		TabID       string    `json:"tab_id"`
-		WorkspaceID string    `json:"workspace_id"`
-		RootPane    Pane      `json:"root_pane"`
-		Tab         Tab       `json:"tab"`
-		Workspace   Workspace `json:"workspace"`
-		Agent       AgentInfo `json:"agent"`
+		RootPane  Pane      `json:"root_pane"`
+		Tab       Tab       `json:"tab"`
+		Workspace Workspace `json:"workspace"`
+		Agent     AgentInfo `json:"agent"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
 
-	r.PaneID = cmp.Or(wire.PaneID, wire.RootPane.ID, wire.Agent.PaneID)
-	r.TabID = cmp.Or(wire.TabID, wire.RootPane.TabID, wire.Tab.ID)
+	r.PaneID = cmp.Or(wire.RootPane.ID, wire.Agent.PaneID)
+	r.TabID = cmp.Or(wire.RootPane.TabID, wire.Tab.ID)
 	r.WorkspaceID = cmp.Or(
-		wire.WorkspaceID,
 		wire.RootPane.WorkspaceID,
 		wire.Tab.WorkspaceID,
 		wire.Workspace.ID,

@@ -1,6 +1,5 @@
 {
-  "type": "command",
-  "action": "respond",
+  "type": "respond",
   "request_id": "req-003",
   "protocol": 3,
   "pane_id": "pane-1",

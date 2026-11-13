@@ -61,7 +61,7 @@ func TestSendSecretDispatchesOneKeystrokeBatch(t *testing.T) {
 	})
 
 	result := d.Handle(context.Background(), map[string]any{
-		"action": "send_secret", "request_id": "secret-1", "pane_id": "pane-1",
+		"type": "send_secret", "request_id": "secret-1", "pane_id": "pane-1",
 		"text": "hunter 2!",
 	})
 	if !result.OK || result.Action != "send_secret" || result.Phase != "completed" {
@@ -123,7 +123,7 @@ func TestSendSecretRejectsUnsendableSecrets(t *testing.T) {
 			})
 
 			result := d.Handle(context.Background(), map[string]any{
-				"action": "send_secret", "request_id": "secret-1", "pane_id": "pane-1",
+				"type": "send_secret", "request_id": "secret-1", "pane_id": "pane-1",
 				"text": tt.text,
 			})
 			if result.OK {

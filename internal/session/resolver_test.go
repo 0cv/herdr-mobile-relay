@@ -217,7 +217,7 @@ func TestOMPSessionName(t *testing.T) {
 	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	expireTitleCache(resolver, "omp|/home/user/app|"+sessionPath)
+	expireTitleCache(resolver, "omp|/home/user/app||"+sessionPath)
 	if got := resolver.SessionName("omp", "/home/user/app", sessionPath); got != "session_fix_renamed" {
 		t.Fatalf("updated session name = %q, want %q after cache expiry", got, "session_fix_renamed")
 	}
@@ -283,7 +283,7 @@ func TestCacheTTL(t *testing.T) {
 	if got := r.SessionName("qoder", "/home/user/proj", "s1"); got != "First Title" {
 		t.Fatalf("cached call = %q, want stable title before TTL expiry", got)
 	}
-	expireTitleCache(r, "qoder|/home/user/proj|s1")
+	expireTitleCache(r, "qoder|/home/user/proj||s1")
 	if got := r.SessionName("qoder", "/home/user/proj", "s1"); got != "Second Title" {
 		t.Errorf("expired call = %q, want 'Second Title'", got)
 	}
@@ -519,7 +519,7 @@ func TestTitleCacheTTLWithNonDefaultClaudeRoot(t *testing.T) {
 	if got := r.SessionName("claude", "/home/user/proj", "s1"); got != "First Title" {
 		t.Fatalf("cached call = %q, want stable title before TTL expiry", got)
 	}
-	expireTitleCache(r, "claude|/home/user/proj|s1")
+	expireTitleCache(r, "claude|/home/user/proj||s1")
 	if got := r.SessionName("claude", "/home/user/proj", "s1"); got != "Second Title After Rename" {
 		t.Fatalf("expired call = %q, want %q", got, "Second Title After Rename")
 	}
@@ -545,7 +545,7 @@ func TestTitleCacheKeepsSelectedRootUntilExpiry(t *testing.T) {
 	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "First Title" {
 		t.Fatalf("cached call = %q, want stable title before TTL expiry", got)
 	}
-	expireTitleCache(r, "claude|/home/user/app|wanted")
+	expireTitleCache(r, "claude|/home/user/app||wanted")
 	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "Renamed Title" {
 		t.Fatalf("expired call = %q, want %q", got, "Renamed Title")
 	}
@@ -740,7 +740,7 @@ func TestTitleCacheEntryMustMatchLocatedTranscript(t *testing.T) {
 	home := t.TempDir()
 	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "-work", "session.jsonl"), "Current title")
 	resolver := NewResolver(home)
-	key := "claude|/work|session"
+	key := "claude|/work||session"
 	resolver.cache[key] = cacheEntry{
 		name:     "Stale title from another transcript",
 		location: conversation.Location{Path: filepath.Join(home, "other.jsonl"), Root: filepath.Join(home, "other")},

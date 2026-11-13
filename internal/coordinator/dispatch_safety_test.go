@@ -19,13 +19,12 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
-func TestConflictingOperationRejectedBeforeDispatch(t *testing.T) {
+func TestDispatcherRequiresDirectActionType(t *testing.T) {
 	for _, admitted := range []bool{false, true} {
-		for _, pair := range [][2]string{{"refresh_agents", "send_secret"}, {"send_secret", "refresh_agents"}, {"submit_prompt", "send_secret"}} {
-			// A zero dispatcher has no state, scheduler, client or logger. Rejection
-			// must happen before any of those side-effect-capable dependencies.
-			d := &Dispatcher{}
-			message := map[string]any{"type": pair[0], "action": pair[1], "request_id": "conflict", "pane_id": "pane", "text": "fixture"}
+		for _, typ := range []string{"", "command"} {
+			d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+			t.Cleanup(func() { _ = d.Close(context.Background()) })
+			message := map[string]any{"type": typ, "action": "send_secret", "request_id": "unsupported", "pane_id": "pane", "text": "fixture"}
 			var result *CommandResult
 			signals := 0
 			if admitted {
@@ -33,7 +32,7 @@ func TestConflictingOperationRejectedBeforeDispatch(t *testing.T) {
 			} else {
 				result = d.Handle(context.Background(), message)
 			}
-			if result == nil || result.OK || result.Phase != "failed" || result.RequestID != "conflict" || result.Error != "conflicting message type and action" {
+			if result == nil || result.OK || result.Phase != "failed" || result.RequestID != "unsupported" || result.Action != typ || result.Error != "Unknown command" {
 				t.Fatalf("result = %#v", result)
 			}
 			if admitted && signals != 1 {
@@ -108,7 +107,7 @@ func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
 
 	approve := func(reqID string) {
 		d.Handle(context.Background(), map[string]any{
-			"action":               "respond",
+			"type":                 "respond",
 			"request_id":           reqID,
 			"pane_id":              "pane-1",
 			"event_id":             eventID,
@@ -155,7 +154,7 @@ func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
 	result := d.Handle(context.Background(), map[string]any{
-		"action": "respond", "request_id": "stale", "pane_id": "pane-1",
+		"type": "respond", "request_id": "stale", "pane_id": "pane-1",
 		"event_id": eventID, "approval_fingerprint": fingerprint, "choice": choice,
 		"index": float64(0), "total": float64(2),
 	})
@@ -187,7 +186,7 @@ Enter to select · Esc to cancel`
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 	result := d.Handle(context.Background(), map[string]any{
-		"action": "respond", "request_id": "changed", "pane_id": "pane-1",
+		"type": "respond", "request_id": "changed", "pane_id": "pane-1",
 		"event_id": blockedEventID(t, d, "pane-1"), "approval_fingerprint": fingerprint,
 		"choice": choice, "index": float64(0), "total": float64(2),
 	})
@@ -245,7 +244,7 @@ func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
 	)
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 	result := d.Handle(context.Background(), map[string]any{
-		"action":               "respond",
+		"type":                 "respond",
 		"request_id":           "focus-aware",
 		"pane_id":              "pane-1",
 		"event_id":             blockedEventID(t, d, "pane-1"),
@@ -311,7 +310,7 @@ func TestPostDispatchTimeoutIsDispatchedUnknown(t *testing.T) {
 	defer cancel()
 
 	res := d.Handle(ctx, map[string]any{
-		"action":     "submit_prompt",
+		"type":       "submit_prompt",
 		"request_id": "r1",
 		"pane_id":    "pane-1",
 		"text":       "hello",

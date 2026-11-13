@@ -71,7 +71,7 @@ Context [░░░░░░░░] 11.1k/1M (1%) │ 5h [░░░░░░░�
 			})
 			fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 			result := d.Handle(context.Background(), map[string]any{
-				"action": "respond", "request_id": "agy-approval", "pane_id": "pane-1",
+				"type": "respond", "request_id": "agy-approval", "pane_id": "pane-1",
 				"event_id": blockedEventID(t, d, "pane-1"), "approval_fingerprint": fingerprint,
 				"choice": choice, "index": float64(0), "total": float64(len(classification.Options)),
 			})

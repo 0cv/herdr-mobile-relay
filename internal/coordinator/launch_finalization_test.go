@@ -13,7 +13,7 @@ import (
 func TestAgentStartRetryReplaysInitialPromptWarning(t *testing.T) {
 	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: "exit 1"})
 	d, record := f.dispatcher, f.calls
-	message := map[string]any{"action": "agent_start", "request_id": "warning", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
+	message := map[string]any{"type": "agent_start", "request_id": "warning", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 	first, second := d.Handle(f.ctx, message), d.Handle(f.ctx, message)
 	f.assertCalls(t, 1)
 	if !second.replayed || first.Phase != "completed_with_warning" || second.Phase != first.Phase {
@@ -55,7 +55,7 @@ func TestInitialQoderPromptUsesTextAndEnter(t *testing.T) {
 			}
 			f := newLaunchFixtureWithOptions(t, launchFixtureOptions{enter: enter})
 			d, record := f.dispatcher, f.calls
-			message := map[string]any{"action": "agent_start", "request_id": "qoder", "profile_id": "qodercli", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
+			message := map[string]any{"type": "agent_start", "request_id": "qoder", "profile_id": "qodercli", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 			result := d.Handle(f.ctx, message)
 			want := "completed"
 			if failEnter {
@@ -85,7 +85,7 @@ func TestInitialPromptBlocksDuplicateCompletion(t *testing.T) {
 	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: fmt.Sprintf(": > %q; while [ ! -f %q ]; do /bin/sleep 0.01; done; exit 1", entered, release)})
 	d := f.dispatcher
 	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
-	message := map[string]any{"action": "agent_start", "request_id": "blocked", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
+	message := map[string]any{"type": "agent_start", "request_id": "blocked", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 	first, duplicate := make(chan *CommandResult, 1), make(chan *CommandResult, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()

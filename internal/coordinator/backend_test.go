@@ -136,7 +136,7 @@ func TestPromptNotStartedKeepsAction(t *testing.T) {
 			dispatcher := NewDispatcher(client, state, nil, testLogger())
 			defer dispatcher.Close(context.Background())
 			message := map[string]any{
-				"action": "submit_prompt", "request_id": "prompt", "pane_id": "pane-1", "text": "hello",
+				"type": "submit_prompt", "request_id": "prompt", "pane_id": "pane-1", "text": "hello",
 			}
 			if reason == "expired" {
 				message["_server_received_at"] = time.Now().Add(-2 * commandDeadline).Format(time.RFC3339Nano)
@@ -194,7 +194,7 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	results := make(chan *CommandResult, 1)
 	go func() {
 		results <- dispatcher.HandleAdmitted(ctx, map[string]any{
-			"action": "submit_prompt", "request_id": "queued", "pane_id": "pane-1", "text": "hello",
+			"type": "submit_prompt", "request_id": "queued", "pane_id": "pane-1", "text": "hello",
 		}, func() { close(admitted) })
 	}()
 	select {
