@@ -9,6 +9,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Interface sizes saved before 0.10.0 and never changed now reset to the
   default. Sizes saved by newer app builds are unchanged.
+- Relay status and `/healthz` now report `gateway.stun.mapped` as a single address
+  string instead of an array, or an empty string before discovery succeeds.
 
 ### Fixed
 

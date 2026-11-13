@@ -709,18 +709,11 @@ func waitForRelayMapping(t *testing.T, base string) (mappedPort, localPort int) 
 		gateway := gatewayHealth(t, base)
 		local := natInt(gateway["webrtc_port"])
 		discovery, _ := gateway["stun"].(map[string]any)
-		mapped, _ := discovery["mapped"].([]any)
-		for _, raw := range mapped {
-			addr, _ := raw.(string)
-			_, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				continue
+		mapped, _ := discovery["mapped"].(string)
+		if _, port, err := net.SplitHostPort(mapped); err == nil {
+			if parsed, err := strconv.Atoi(port); err == nil {
+				return parsed, local
 			}
-			parsed, err := strconv.Atoi(port)
-			if err != nil {
-				continue
-			}
-			return parsed, local
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
