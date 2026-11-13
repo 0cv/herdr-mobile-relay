@@ -30,10 +30,11 @@ func TestBrowserFailurePublishesAfterWorkerRelinquishesJob(t *testing.T) {
 	release := make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer unblock()
-	browser.workerBeforeFinishObserver = func(job *browseJob) {
+	setBrowserObserver(browser, "worker_before_finish", func(observation browserObservation) {
+		job := observation.job
 		finishing <- job
 		<-release
-	}
+	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}

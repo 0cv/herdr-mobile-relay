@@ -81,7 +81,10 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 			var job *browseJob
 			if retry {
 				firstCapture, release := make(chan struct{}), make(chan struct{})
-				b.chainWorkerCaptureObserver = func([]claudeRangeEvidence) { close(firstCapture); <-release }
+				setBrowserObserver(b, "chain_worker_capture", func(observation browserObservation) {
+					close(firstCapture)
+					<-release
+				})
 				var page *BrowsePage
 				job, page = b.startClaudeChainJob(scope, chain, 1)
 				if job == nil || page != nil {
@@ -109,9 +112,20 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 			defer creatorOnce.Do(func() { close(creatorRelease) })
 			defer workerOnce.Do(func() { close(workerRelease) })
 			creatorPaused := make(chan struct{})
-			b.chainQueueAdmissionObserver = func(j *browseJob) { close(creatorPaused); admitted <- j; <-creatorRelease }
-			b.chainWorkerBeforeCaptureObserver = func() { <-creatorPaused }
-			b.chainWorkerCaptureObserver = func(e []claudeRangeEvidence) { captured <- e; <-workerRelease }
+			setBrowserObserver(b, "chain_queue_admission", func(observation browserObservation) {
+				j := observation.job
+				close(creatorPaused)
+				admitted <- j
+				<-creatorRelease
+			})
+			setBrowserObserver(b, "chain_worker_before_capture", func(observation browserObservation) {
+				<-creatorPaused
+			})
+			setBrowserObserver(b, "chain_worker_capture", func(observation browserObservation) {
+				e := observation.evidence
+				captured <- e
+				<-workerRelease
+			})
 			returned := make(chan bool, 1)
 			go func() {
 				if retry {
@@ -208,11 +222,17 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 func TestClaudeChainHotAppendEvidenceAndPhysicalBounds(t *testing.T) {
 	b, scope, paths := claudeScheduleFixture(t, 2)
 	var foreground, background, compactions atomic.Int64
-	b.foregroundReadObserver = func(n int64) { foreground.Add(n) }
-	b.backgroundReadObserver = func(n int64) { background.Add(n) }
+	setBrowserObserver(b, "foreground_read", func(observation browserObservation) {
+		n := observation.bytes
+		foreground.Add(n)
+	})
+	setBrowserObserver(b, "background_read", func(observation browserObservation) {
+		n := observation.bytes
+		background.Add(n)
+	})
 	var mutateCompaction atomic.Bool
 	mutationResult := make(chan error, 1)
-	b.chainCompactionObserver = func() {
+	setBrowserObserver(b, "chain_compaction", func(observation browserObservation) {
 		compactions.Add(1)
 		if !mutateCompaction.Swap(false) {
 			return
@@ -230,7 +250,7 @@ func TestClaudeChainHotAppendEvidenceAndPhysicalBounds(t *testing.T) {
 			}
 		}
 		mutationResult <- err
-	}
+	})
 	initial := scheduleLatest(t, b, scope)
 	if initial.ReasonCode != "" {
 		t.Fatalf("initial=%#v", initial)
@@ -373,8 +393,15 @@ func TestClaudeChainPreparedAppendLatestConcurrentGrownSegments(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	var foreground, background atomic.Int64
-	b.foregroundReadObserver = func(n int64) { foreground.Add(n) }
-	b.backgroundReadObserver = func(n int64) { background.Add(n); once.Do(func() { close(entered); <-release }) }
+	setBrowserObserver(b, "foreground_read", func(observation browserObservation) {
+		n := observation.bytes
+		foreground.Add(n)
+	})
+	setBrowserObserver(b, "background_read", func(observation browserObservation) {
+		n := observation.bytes
+		background.Add(n)
+		once.Do(func() { close(entered); <-release })
+	})
 	var wg sync.WaitGroup
 	pages := make(chan BrowsePage, 12)
 	for caller := range 12 {

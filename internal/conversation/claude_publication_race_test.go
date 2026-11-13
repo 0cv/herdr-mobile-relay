@@ -28,8 +28,14 @@ func TestClaudeChainCompactionOverlapsSavedPreparation(t *testing.T) {
 		t.Run(fmt.Sprintf("rewrite=%v", rewrite), func(t *testing.T) {
 			b, scope, paths := claudeScheduleFixture(t, 2)
 			var foreground, background, phases atomic.Int64
-			b.foregroundReadObserver = func(n int64) { foreground.Add(n) }
-			b.backgroundReadObserver = func(n int64) { background.Add(n) }
+			setBrowserObserver(b, "foreground_read", func(observation browserObservation) {
+				n := observation.bytes
+				foreground.Add(n)
+			})
+			setBrowserObserver(b, "background_read", func(observation browserObservation) {
+				n := observation.bytes
+				background.Add(n)
+			})
 			initial := scheduleLatest(t, b, scope)
 			if initial.ReasonCode != "" || initial.NextCursor == "" {
 				t.Fatalf("initial=%#v", initial)
@@ -38,14 +44,24 @@ func TestClaudeChainCompactionOverlapsSavedPreparation(t *testing.T) {
 			e0 := b.claudeChainView(chain).chain.Segments[1].CapturedEnd
 			preparing, releasePreparation := make(chan struct{}), make(chan struct{})
 			compacting, releaseCompaction := make(chan struct{}), make(chan struct{})
+			validated := make(chan struct{}, 1)
+			setBrowserObserver(b, "chain_validation_finished", func(browserObservation) {
+				select {
+				case validated <- struct{}{}:
+				default:
+				}
+			})
 			var preparationOnce, compactionOnce, hookOnce sync.Once
 			defer preparationOnce.Do(func() { close(releasePreparation) })
 			defer compactionOnce.Do(func() { close(releaseCompaction) })
-			b.chainPreparationObserver = func() { close(preparing); <-releasePreparation }
-			b.chainCompactionObserver = func() {
+			setBrowserObserver(b, "chain_preparation", func(observation browserObservation) {
+				close(preparing)
+				<-releasePreparation
+			})
+			setBrowserObserver(b, "chain_compaction", func(observation browserObservation) {
 				phases.Add(1)
 				hookOnce.Do(func() { close(compacting); <-releaseCompaction })
-			}
+			})
 			job, failure := b.startClaudeChainJob(scope, chain, 1)
 			if job == nil || failure != nil {
 				t.Fatalf("preparation admission=%v", failure)
@@ -71,12 +87,6 @@ func TestClaudeChainCompactionOverlapsSavedPreparation(t *testing.T) {
 					}
 					b.mu.Lock()
 					pending := b.chainLineage[browseScopeID(scope)].segments[1].EvidenceCompactionPending
-					var tasks []<-chan struct{}
-					for _, task := range b.chainValidations {
-						if task.running {
-							tasks = append(tasks, task.done)
-						}
-					}
 					b.mu.Unlock()
 					if pending || page.ReasonCode == "" {
 						break
@@ -84,9 +94,7 @@ func TestClaudeChainCompactionOverlapsSavedPreparation(t *testing.T) {
 					if attempt >= 80 {
 						t.Fatal("append validator stalled")
 					}
-					for _, done := range tasks {
-						awaitClaudeBarrier(t, done)
-					}
+					awaitClaudeBarrier(t, validated)
 				}
 				b.mu.Lock()
 				pending := b.chainLineage[browseScopeID(scope)].segments[1].EvidenceCompactionPending
@@ -258,12 +266,13 @@ func TestClaudeChainGrowthBetweenDiscoveryAndValidationOpen(t *testing.T) {
 			var reads atomic.Int64
 			var once sync.Once
 			defer once.Do(func() { close(release) })
-			b.discoveryReadObserver = func(n int64) {
+			setBrowserObserver(b, "discovery_read", func(observation browserObservation) {
+				n := observation.bytes
 				if n == e1 && reads.Add(1) == 2 {
 					close(entered)
 					<-release
 				}
-			}
+			})
 			done := make(chan BrowsePage, 1)
 			go func() {
 				page, _ := b.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10})

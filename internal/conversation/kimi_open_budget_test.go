@@ -33,8 +33,13 @@ func TestKimiOpeningProjectionWorkBudget(t *testing.T) {
 	scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane", ProcessIdentity: "1:argv"}
 	var acquired int64
 	projections := 0
-	browser.physicalReadObserver = func(n int64) { acquired += n }
-	browser.kimiProjectionObserver = func() { projections++ }
+	setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+		n := observation.bytes
+		acquired += n
+	})
+	setBrowserObserver(browser, "kimi_projection", func(observation browserObservation) {
+		projections++
+	})
 	read := func(cursor string) BrowsePage {
 		t.Helper()
 		page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 24, Cursor: cursor})

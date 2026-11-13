@@ -70,14 +70,15 @@ func TestClaudeChainForegroundValidationMutationBeforeAdmission(t *testing.T) {
 			appendClaudeTestRow(t, path, map[string]any{"type": "assistant", "uuid": "r1", "message": map[string]any{"content": "legitimate R1"}})
 			entered, release := make(chan struct{}), make(chan struct{})
 			var once atomic.Bool
-			b.validationReadObserver = func(n int64) {
+			setBrowserObserver(b, "validation_read", func(observation browserObservation) {
+				n := observation.bytes
 				// The revision anchor reads E1, not E0. Only stop after the old digest's
 				// actual ReadAt returned its bytes, before hashing that buffered copy.
 				if n == oldEnd && once.CompareAndSwap(false, true) {
 					close(entered)
 					<-release
 				}
-			}
+			})
 			done := make(chan BrowsePage, 1)
 			go func() { p, _ := b.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10}); done <- p }()
 			select {

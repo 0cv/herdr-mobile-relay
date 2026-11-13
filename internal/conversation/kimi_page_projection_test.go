@@ -102,7 +102,10 @@ func TestKimiPageProjectionDifferential(t *testing.T) {
 			defer browser.Close()
 			scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane", ProcessIdentity: "1:test"}
 			var work kimiMaterializationWork
-			browser.kimiMaterializationObserver = func(value kimiMaterializationWork) { work = value }
+			setBrowserObserver(browser, "kimi_materialization", func(observation browserObservation) {
+				value := observation.work
+				work = value
+			})
 			cursor, remaining, revision := "", len(reference.entries), ""
 			seen := make(map[string]bool)
 			for {
@@ -258,9 +261,17 @@ func TestKimiPageProjectionWorkAndMemory(t *testing.T) {
 			defer browser.Close()
 			var physical int64
 			validations := 0
-			browser.physicalReadObserver = func(n int64) { physical += n }
-			browser.kimiProjectionObserver = func() { validations++ }
-			browser.kimiMaterializationObserver = func(value kimiMaterializationWork) { work = value }
+			setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+				n := observation.bytes
+				physical += n
+			})
+			setBrowserObserver(browser, "kimi_projection", func(observation browserObservation) {
+				validations++
+			})
+			setBrowserObserver(browser, "kimi_materialization", func(observation browserObservation) {
+				value := observation.work
+				work = value
+			})
 			scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane"}
 			read := func(cursor string) BrowsePage {
 				t.Helper()

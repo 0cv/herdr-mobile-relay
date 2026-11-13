@@ -303,7 +303,10 @@ func TestClaudeChainDefaultWindowPreparesTheCurrentClippedSegment(t *testing.T) 
 	// The cursor issued before preparation must remain a cursor into the
 	// omitted prefix, not an entry-count cursor into the already-read tail.
 	var postPreparationRead int64
-	browser.sourceReadObserver = func(bytes int64) { postPreparationRead += bytes }
+	setBrowserObserver(browser, "source_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		postPreparationRead += bytes
+	})
 	saved, savedErr := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: savedCursor, Limit: 4})
 	if savedErr != nil {
 		t.Fatal(savedErr)
@@ -320,7 +323,7 @@ func TestClaudeChainDefaultWindowPreparesTheCurrentClippedSegment(t *testing.T) 
 	// Exhaust the same saved cursor, not only its first page. The initial
 	// latest page is included so this verifies that the saved count boundary and
 	// every translated index continuation together cover the exact chain once.
-	browser.sourceReadObserver = nil
+	setBrowserObserver(browser, "source_read", nil)
 	savedIDs := make(map[string]bool)
 	savedChildIndexes := make(map[int]bool)
 	savedParent := false
@@ -602,13 +605,13 @@ func TestClaudeChainRecentTailDoesNotSkipPrefixWhenPreparationFinishesConcurrent
 	readEntered := make(chan struct{})
 	releaseRead := make(chan struct{})
 	var readBlocked atomic.Int32
-	browser.sourceReadObserver = func(int64) {
+	setBrowserObserver(browser, "source_read", func(observation browserObservation) {
 		if !readBlocked.CompareAndSwap(0, 1) {
 			return
 		}
 		close(readEntered)
 		<-releaseRead
-	}
+	})
 	latestDone := make(chan BrowsePage, 1)
 	latestErr := make(chan error, 1)
 	go func() {
@@ -861,16 +864,28 @@ func TestClaudeChainPreparedBoundaryPreservesBudgetAndPhysicalReadAccounting(t *
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	var discoveryReads int64
 	var validationReads int64
-	browser.discoveryReadObserver = func(bytes int64) { atomic.AddInt64(&discoveryReads, bytes) }
-	browser.validationReadObserver = func(bytes int64) { atomic.AddInt64(&validationReads, bytes) }
+	setBrowserObserver(browser, "discovery_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		atomic.AddInt64(&discoveryReads, bytes)
+	})
+	setBrowserObserver(browser, "validation_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		atomic.AddInt64(&validationReads, bytes)
+	})
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(latest.Entries) != 1 || latest.Entries[0].Text != "leaf answer" || latest.NextCursor == "" {
 		t.Fatalf("latest leaf page = %#v, err=%v", latest, err)
 	}
 	var recentReads int64
 	var physicalReads int64
-	browser.recentReadObserver = func(bytes int64) { recentReads += bytes }
-	browser.physicalReadObserver = func(bytes int64) { atomic.AddInt64(&physicalReads, bytes) }
+	setBrowserObserver(browser, "recent_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		recentReads += bytes
+	})
+	setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		atomic.AddInt64(&physicalReads, bytes)
+	})
 	preparing, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 	if err != nil || preparing.State != BrowsePreparing || preparing.NextCursor == "" {
 		t.Fatalf("leaf preparation = %#v, err=%v", preparing, err)
@@ -980,8 +995,14 @@ func TestClaudeChainPreparedPagingDoesNotRehashTheCapturedTranscript(t *testing.
 	}
 	var validationReads int64
 	var recentReads int64
-	browser.validationReadObserver = func(bytes int64) { atomic.AddInt64(&validationReads, bytes) }
-	browser.recentReadObserver = func(bytes int64) { atomic.AddInt64(&recentReads, bytes) }
+	setBrowserObserver(browser, "validation_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		atomic.AddInt64(&validationReads, bytes)
+	})
+	setBrowserObserver(browser, "recent_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		atomic.AddInt64(&recentReads, bytes)
+	})
 	if ready.NextCursor != "" {
 		page, readErr := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: ready.NextCursor, Limit: 1})
 		if readErr != nil || page.ReasonCode != "" {
@@ -1030,7 +1051,10 @@ func TestClaudeChainRecentReadsShareAggregateBudget(t *testing.T) {
 	}
 	defer browser.Close()
 	var observed int64
-	browser.sourceReadObserver = func(bytes int64) { observed += bytes }
+	setBrowserObserver(browser, "source_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		observed += bytes
+	})
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}, Limit: 1})
 	if err != nil || page.NextCursor == "" {
 		t.Fatalf("empty chain budget page = %#v, err=%v", page, err)
@@ -1464,13 +1488,13 @@ func TestClaudeChainCancellationPreservesClaudeLineage(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enteredOnce atomic.Bool
-	browser.sourceReadObserver = func(int64) {
+	setBrowserObserver(browser, "source_read", func(observation browserObservation) {
 		if !enteredOnce.CompareAndSwap(false, true) {
 			return
 		}
 		close(entered)
 		<-release
-	}
+	})
 	requestCtx, cancel := context.WithCancel(context.Background())
 	result := make(chan BrowsePage, 1)
 	go func() {
@@ -1494,7 +1518,7 @@ func TestClaudeChainCancellationPreservesClaudeLineage(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cancelled Claude lineage request did not return")
 	}
-	browser.sourceReadObserver = nil
+	setBrowserObserver(browser, "source_read", nil)
 	if cancelled.ReasonCode != "request_cancelled" {
 		t.Fatalf("cancelled lineage request = %#v, want request_cancelled", cancelled)
 	}
@@ -1548,10 +1572,13 @@ func TestClaudeChainEvidenceCompactionBoundsRetentionAndRejectsRewrite(t *testin
 	}
 	defer browser.Close()
 	var compactionReads atomic.Int64
-	browser.validationReadObserver = func(bytes int64) { compactionReads.Add(bytes) }
+	setBrowserObserver(browser, "validation_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		compactionReads.Add(bytes)
+	})
 	appendResult := make(chan error, 1)
 	var appendOnce atomic.Bool
-	browser.chainCompactionObserver = func() {
+	setBrowserObserver(browser, "chain_compaction", func(observation browserObservation) {
 		if !appendOnce.CompareAndSwap(false, true) {
 			return
 		}
@@ -1563,7 +1590,7 @@ func TestClaudeChainEvidenceCompactionBoundsRetentionAndRejectsRewrite(t *testin
 			}
 		}
 		appendResult <- openErr
-	}
+	})
 	scopeID := "claude|/work|" + testSessionID
 	browser.mu.Lock()
 	browser.recordClaudeChainLineageLocked(scopeID, []claudeSegment{segment})
@@ -1575,7 +1602,7 @@ func TestClaudeChainEvidenceCompactionBoundsRetentionAndRejectsRewrite(t *testin
 	if got, want := compactionReads.Load(), int64(4*segment.CapturedEnd+64*1024); got > want {
 		t.Fatalf("compaction physical validation read %d bytes, want at most %d", got, want)
 	}
-	browser.chainCompactionObserver = nil
+	setBrowserObserver(browser, "chain_compaction", nil)
 	browser.mu.Lock()
 	lineage := browser.chainLineage[scopeID]
 	if len(lineage.segments) != 1 {
@@ -1668,7 +1695,7 @@ func TestClaudeChainEvidenceCompactionRejectsRewriteAndAppendBetweenPhases(t *te
 	defer browser.Close()
 	mutationResult := make(chan error, 1)
 	var mutationOnce atomic.Bool
-	browser.chainCompactionObserver = func() {
+	setBrowserObserver(browser, "chain_compaction", func(observation browserObservation) {
 		if !mutationOnce.CompareAndSwap(false, true) {
 			return
 		}
@@ -1688,7 +1715,7 @@ func TestClaudeChainEvidenceCompactionRejectsRewriteAndAppendBetweenPhases(t *te
 			readErr = openErr
 		}
 		mutationResult <- readErr
-	}
+	})
 	scopeID := "claude|/work|" + testSessionID
 	browser.mu.Lock()
 	browser.recordClaudeChainLineageLocked(scopeID, []claudeSegment{segment})
@@ -1697,7 +1724,7 @@ func TestClaudeChainEvidenceCompactionRejectsRewriteAndAppendBetweenPhases(t *te
 	if err := <-mutationResult; err != nil {
 		t.Fatal(err)
 	}
-	browser.chainCompactionObserver = nil
+	setBrowserObserver(browser, "chain_compaction", nil)
 	browser.mu.Lock()
 	lineage := browser.chainLineage[scopeID]
 	compacted := lineage.segments[0]
@@ -1776,17 +1803,21 @@ func TestClaudeChainLargeAppendValidationIsDeferredAndDeduplicated(t *testing.T)
 	appendedModTime := appendedInfo.ModTime()
 	var foregroundBytes atomic.Int64
 	var validationBytes atomic.Int64
-	browser.sourceReadObserver = func(bytes int64) { foregroundBytes.Add(bytes) }
+	setBrowserObserver(browser, "source_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		foregroundBytes.Add(bytes)
+	})
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enteredOnce atomic.Bool
-	browser.validationReadObserver = func(bytes int64) {
+	setBrowserObserver(browser, "validation_read", func(observation browserObservation) {
+		bytes := observation.bytes
 		validationBytes.Add(bytes)
 		if enteredOnce.CompareAndSwap(false, true) {
 			close(entered)
 			<-release
 		}
-	}
+	})
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || first.ReasonCode != "validation_pending" {
 		t.Fatalf("large append validation was not deferred: %#v, err=%v", first, err)
@@ -1838,7 +1869,7 @@ func TestClaudeChainLargeAppendValidationIsDeferredAndDeduplicated(t *testing.T)
 	if err := os.Chtimes(childPath, appendedModTime, appendedModTime); err != nil {
 		t.Fatal(err)
 	}
-	browser.validationReadObserver = nil
+	setBrowserObserver(browser, "validation_read", nil)
 	changed, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -2142,12 +2173,12 @@ func TestClaudeChainPreparationRefusesRewriteAcrossEvidenceAndScanGap(t *testing
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enteredOnce atomic.Bool
-	browser.chainPreparationObserver = func() {
+	setBrowserObserver(browser, "chain_preparation", func(observation browserObservation) {
 		if enteredOnce.CompareAndSwap(false, true) {
 			close(entered)
 			<-release
 		}
-	}
+	})
 	queued, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 	if err != nil || queued.State != BrowsePreparing || queued.NextCursor == "" {
 		t.Fatalf("gap preparation admission = %#v, err=%v", queued, err)
@@ -2516,10 +2547,11 @@ func TestClaudeChainPreparationPublishesEvidenceBeforeWorkerCapture(t *testing.T
 	}
 	captured := make(chan []claudeRangeEvidence, 1)
 	release := make(chan struct{})
-	browser.chainWorkerCaptureObserver = func(evidence []claudeRangeEvidence) {
+	setBrowserObserver(browser, "chain_worker_capture", func(observation browserObservation) {
+		evidence := observation.evidence
 		captured <- evidence
 		<-release
-	}
+	})
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 	if err != nil || first.State != BrowsePreparing || first.NextCursor == "" {
 		t.Fatalf("queue preparation intent = %#v, err=%v", first, err)
@@ -2569,7 +2601,7 @@ func TestClaudeChainPreparationPublishesEvidenceBeforeWorkerCapture(t *testing.T
 	}
 	close(release)
 	ready := waitForReadySnapshot(t, browser, scope, latest.NextCursor, 1)
-	browser.chainWorkerCaptureObserver = nil
+	setBrowserObserver(browser, "chain_worker_capture", nil)
 	if ready.State != BrowseReady || ready.ReasonCode != "" || len(ready.Entries) != 1 {
 		t.Fatalf("published evidence preparation = %#v", ready)
 	}

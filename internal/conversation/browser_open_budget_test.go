@@ -63,7 +63,10 @@ func TestRecentOpeningWorkBudget(t *testing.T) {
 		}
 		defer browser.Close()
 		var bytes int64
-		browser.physicalReadObserver = func(n int64) { bytes += n }
+		setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+			n := observation.bytes
+			bytes += n
+		})
 		start := time.Now()
 		first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: limit})
 		cold := time.Since(start)

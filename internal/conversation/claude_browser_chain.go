@@ -398,9 +398,7 @@ func (b *Browser) acquireClaudeChainContext(ctx context.Context, scope BrowseSco
 			return nil, compatibilityErr
 		}
 	}
-	if b.chainContextAdmissionObserver != nil {
-		b.chainContextAdmissionObserver(chain, false)
-	}
+	b.observe(browserObservation{kind: "chain_context_admission", chain: chain})
 
 	b.mu.Lock()
 	if b.closing {
@@ -427,9 +425,7 @@ func (b *Browser) acquireClaudeChainContext(ctx context.Context, scope BrowseSco
 	b.mu.Unlock()
 
 	built, err := b.buildClaudeChainContext(ctx, chain, scopeID, key)
-	if b.chainContextAdmissionObserver != nil {
-		b.chainContextAdmissionObserver(chain, true)
-	}
+	b.observe(browserObservation{kind: "chain_context_admission", chain: chain, afterBuild: true})
 	b.mu.Lock()
 	if b.chainReservations > 0 {
 		b.chainReservations--
@@ -515,7 +511,6 @@ const (
 )
 
 type claudeChainValidation struct {
-	done       chan struct{}
 	running    bool
 	err        error
 	lastAccess time.Time
@@ -780,7 +775,7 @@ func (b *Browser) deferClaudeChainValidation(ctx context.Context, candidate clau
 		}
 		delete(b.chainValidations, oldestKey)
 	}
-	task := &claudeChainValidation{done: make(chan struct{}), running: true, lastAccess: time.Now()}
+	task := &claudeChainValidation{running: true, lastAccess: time.Now()}
 	b.chainValidations[key] = task
 	b.chainValidationActive++
 	b.validationWG.Add(1)
@@ -796,8 +791,8 @@ func (b *Browser) deferClaudeChainValidation(ctx context.Context, candidate clau
 		if b.chainValidationActive > 0 {
 			b.chainValidationActive--
 		}
-		close(task.done)
 		b.mu.Unlock()
+		b.observe(browserObservation{kind: "chain_validation_finished"})
 	}()
 	return errClaudeChainValidationPending
 }
@@ -1270,7 +1265,7 @@ func (b *Browser) runClaudeChainEvidenceCompaction(task *claudeChainEvidenceComp
 			// outside the captured prefix, but a rewrite during either phase must not
 			// be converted into a digest that retroactively authorizes old evidence.
 			if result = validateItems(); result == nil {
-				b.observeChainCompactionPhase()
+				b.observe(browserObservation{kind: "chain_compaction"})
 				firstDigest, digestErr := fileRangeDigestObserved(b.ctx, source.file, task.start, task.end, nil, b.observeBackgroundRead)
 				if digestErr != nil {
 					result = digestErr
@@ -1622,8 +1617,8 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 	if budget != nil && budget.recent != nil && !budget.recent.take(window) {
 		return recentProjection{}, errClaudeChainRecentBudget
 	}
-	b.observeSourceRead(window)
-	b.observeRecentRead(window)
+	b.observe(browserObservation{kind: "source_read", bytes: window})
+	b.observe(browserObservation{kind: "recent_read", bytes: window})
 	start := segment.CapturedEnd - window
 	if start < 0 {
 		start = 0
