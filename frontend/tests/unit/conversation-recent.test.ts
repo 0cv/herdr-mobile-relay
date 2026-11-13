@@ -1,8 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, expect, it, vi } from 'vitest';
 import ConversationHistory from '$components/ConversationHistory.svelte';
-import { ConversationHistoryController, conversationIdentity, HISTORY_WIRE_PAGE_SIZE } from '$lib/conversation-history';
-import { clearConversationPreviews, getConversationPreview, putConversationPreview } from '$lib/conversation-cache';
+import { ConversationHistoryController, conversationIdentity } from '$lib/conversation-history';
+import { clearConversationPreviews, getConversationPreview, putConversationPreview, type ConversationPreview } from '$lib/conversation-cache';
 import { relayStore } from '$lib/store';
 import type { Agent, ConversationEntry, ConversationPage } from '$lib/types';
 
@@ -28,10 +28,10 @@ afterEach(() => {
 it('reuses only a bounded cloned suffix of the exact memory preview without fetching context', async () => {
   const identity = conversationIdentity(agent)!;
   putConversationPreview({ identity, relayId: agent.relay_id, historical: false, sourceRevision: 'cached', savedAt: Date.now(), entries: rows(0, 1000) });
-  const preview = getConversationPreview(identity, Date.now(), HISTORY_WIRE_PAGE_SIZE)!;
+  const preview = getConversationPreview(identity)!;
   expect(preview.entries).toHaveLength(24);
   preview.entries[0].text = 'changed';
-  expect(getConversationPreview(identity)!.entries[976].text).toBe('message 976');
+  expect(getConversationPreview(identity)!.entries[0].text).toBe('message 976');
   expect(getConversationPreview(conversationIdentity({ ...agent, generation: 2 })!)).toBeNull();
   const request = vi.fn(() => new Promise<ConversationPage>(() => {}));
   const controller = new ConversationHistoryController(agent, { request, getPreview: getConversationPreview });
@@ -107,9 +107,12 @@ it('preserves live edits while paging and resets the target identity', async () 
   const request = vi.fn().mockResolvedValueOnce(page(rows(24, 48), 'older'))
     .mockImplementationOnce(() => new Promise<ConversationPage>(resolve => { complete = resolve; }))
     .mockResolvedValueOnce(page(rows(100, 124)));
-  const controller = new ConversationHistoryController(agent, { request });
+  const putPreview = vi.fn((preview: ConversationPreview) => { putConversationPreview(preview); });
+  const controller = new ConversationHistoryController(agent, { request, putPreview });
+  const identity = conversationIdentity(agent)!;
   controller.start();
   await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+  expect(putPreview.mock.calls.at(-1)![0].entries).toEqual(rows(24, 48));
   controller.demandOlder();
   expect(controller.applyLiveEntries('revision', [{ ...rows(47, 48)[0], text: 'live edit' }], 2)).toBe(true);
   complete(page([...rows(0, 24), rows(24, 25)[0]]));
@@ -117,6 +120,12 @@ it('preserves live edits while paging and resets the target identity', async () 
   expect(controller.state.entries).toHaveLength(48);
   expect(new Set(controller.state.entries.map(entry => entry.id)).size).toBe(48);
   expect(controller.state.entries.at(-1)?.text).toBe('live edit');
+  for (const [preview] of putPreview.mock.calls) expect(preview.entries).toHaveLength(24);
+  expect(getConversationPreview(identity)!.entries.map(entry => entry.id)).toEqual(rows(24, 48).map(entry => entry.id));
+  expect(getConversationPreview(identity)!.entries.at(-1)?.text).toBe('live edit');
+  expect(controller.applyLiveEntries('revision', rows(48, 50), 3)).toBe(true);
+  expect(putPreview.mock.calls.at(-1)![0].entries.map(entry => entry.id)).toEqual(rows(26, 50).map(entry => entry.id));
+  expect(getConversationPreview(identity)!.entries.map(entry => entry.id)).toEqual(rows(26, 50).map(entry => entry.id));
   controller.setAgent({ ...agent, generation: 2 });
   await vi.waitFor(() => expect(controller.state.entries[0]?.id).toBe('entry-100'));
   controller.cancel();

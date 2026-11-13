@@ -1,6 +1,6 @@
 import { cloneDiagnostics, cloneEntries, clonePlan, estimateEntriesBytes } from './conversation-values';
 import { conversationEntries } from './conversation';
-import type { ConversationPreview } from './conversation-cache';
+import { CONVERSATION_PREVIEW_PAGE_SIZE, conversationPreviewEntries, type ConversationPreview } from './conversation-cache';
 import { targetRefForAgent, targetStoreKey } from './resource-id';
 import type {
   Agent,
@@ -14,7 +14,7 @@ import type {
   OmoTodoState,
 } from './types';
 
-export const HISTORY_WIRE_PAGE_SIZE = 24;
+export const HISTORY_WIRE_PAGE_SIZE = CONVERSATION_PREVIEW_PAGE_SIZE;
 export const HISTORY_PREPARATION_INTERVAL_MS = 1_000;
 export const HISTORY_MAX_PREPARATION_POLLS = 30;
 export const HISTORY_MAX_PAGES_PER_DEMAND = 100;
@@ -1010,7 +1010,7 @@ export class ConversationHistoryController {
       historical: this.stateValue.intent === 'historical',
       ...(this.stateValue.diagnostics ? { diagnostics: { ...this.stateValue.diagnostics } } : {}),
       plan: this.stateValue.omoPlan ? clonePlan(this.stateValue.omoPlan) : null,
-      entries: cloneEntries(this.rawEntries),
+      entries: cloneEntries(conversationPreviewEntries(this.rawEntries)),
     });
   }
 
