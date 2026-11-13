@@ -243,7 +243,7 @@
       maxContentBytes: HISTORY_MAX_CONTENT_BYTES - LIVE_MAX_BYTES,
       onState: applyHistoryState,
       onInitialPage: (page) => onInitialPage?.(page),
-      getPreview: (identity) => getConversationPreview(identity, Date.now(), HISTORY_WIRE_PAGE_SIZE),
+      getPreview: (identity) => getConversationPreview(identity),
       putPreview: (preview) => putConversationPreview(preview),
       isActive: () => mounted
         && document.visibilityState !== 'hidden'

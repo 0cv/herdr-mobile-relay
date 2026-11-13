@@ -100,31 +100,40 @@ describe('conversation preview cache', () => {
     expect(conversationPreviewCacheSize().identities).toBe(0);
   });
 
-  it('keeps whole newest exchanges and skips an oversized newest exchange', () => {
-    configureConversationCache({ maxEntries: 4, itemBytes: 1_500 });
-    const accepted = putConversationPreview(preview('identity-1', 'relay-1', [
-      entry('u0', 'user', 'old question'),
-      entry('a0', 'assistant', 'old answer'),
-      entry('u1', 'user', 'new question'),
-      entry('a1', 'assistant', 'new answer'),
-    ]), 100);
-    expect(accepted).toBe(true);
-    expect(getConversationPreview('identity-1', 101)?.entries.map(({ id }) => id)).toEqual(['u0', 'a0', 'u1', 'a1']);
+  it('keeps the newest page without reading or cloning older entries', () => {
+    const older = entry('old', 'user');
+    Object.defineProperty(older, 'text', { get() { throw new Error('older entry read'); } });
+    const entries = [older, ...Array.from({ length: 23 }, (_, index) => entry(`a${index}`, 'assistant')),
+      entry('u1', 'user'), entry('a1', 'assistant')];
+    expect(putConversationPreview(preview('identity-1', 'relay-1', entries), 100)).toBe(true);
+    expect(getConversationPreview('identity-1', 101)?.entries).toEqual(entries.slice(-24));
+  });
 
-    configureConversationCache({ maxEntries: 2, itemBytes: 1_500 });
-    expect(putConversationPreview(preview('identity-2', 'relay-1', [
-      entry('u0', 'user', 'old question'),
-      entry('a0', 'assistant', 'old answer'),
-      entry('u1', 'user', 'new question'),
-      entry('a1', 'assistant', 'new answer'),
+  it('replaces an existing preview with the newest page of a long assistant turn and keeps short fragments', () => {
+    const entries = [entry('u1', 'user'), ...Array.from({ length: 24 }, (_, index) => entry(`a${index}`, 'assistant'))];
+    expect(putConversationPreview(preview('long-turn'), 99)).toBe(true);
+    expect(putConversationPreview(preview('long-turn', 'relay-1', entries), 100)).toBe(true);
+    const saved = getConversationPreview('long-turn', 101)!;
+    expect(saved.entries).toEqual(entries.slice(-24));
+    expect(saved.savedAt).toBe(100);
+    expect(putConversationPreview(preview('fragment', 'relay-1', [entry('a1', 'assistant')]), 100)).toBe(true);
+    expect(getConversationPreview('fragment', 101)?.entries.map(({ id }) => id)).toEqual(['a1']);
+  });
+
+  it('keeps whole newest exchanges within the byte budget and skips an oversized newest exchange', () => {
+    configureConversationCache({ itemBytes: 1_500 });
+    expect(putConversationPreview(preview('identity-1', 'relay-1', [
+      entry('u0', 'user', 'x'.repeat(1_000)),
+      entry('a0', 'assistant'),
+      entry('u1', 'user'),
+      entry('a1', 'assistant'),
     ]), 100)).toBe(true);
-    expect(getConversationPreview('identity-2', 101)?.entries.map(({ id }) => id)).toEqual(['u1', 'a1']);
-
-    expect(putConversationPreview(preview('identity-3', 'relay-1', [
+    expect(getConversationPreview('identity-1', 101)?.entries.map(({ id }) => id)).toEqual(['u1', 'a1']);
+    expect(putConversationPreview(preview('identity-2', 'relay-1', [
       entry('u1', 'user', 'x'.repeat(1_000)),
       entry('a1', 'assistant', 'answer'),
     ]), 100)).toBe(false);
-    expect(getConversationPreview('identity-3', 101)).toBeNull();
+    expect(getConversationPreview('identity-2', 101)).toBeNull();
   });
 });
 

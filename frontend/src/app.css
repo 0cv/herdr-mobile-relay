@@ -519,46 +519,45 @@ textarea { min-height: 6.5rem; resize: vertical; }
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
   overscroll-behavior: none;
   padding: 10px 16px 0;
-  white-space: pre-wrap;
+  white-space: pre;
   word-break: normal;
 }
 .term-screen { display: block; min-width: 100%; }
 .terminal-virtual-spacer { display: block; pointer-events: none; width: 1px; }
-.term-content.preserve-layout { overflow-wrap: normal; white-space: pre; }
-.term-content.preserve-layout > .term-screen { display: grid; min-width: 100%; width: max(100%, var(--terminal-content-width, 100%)); }
-.term-content.preserve-layout.resize-layout > .term-screen { min-width: 0; }
-.term-content.preserve-layout.resize-layout > .term-screen > .ansi-line-background {
+.term-content > .term-screen { display: grid; min-width: 100%; width: max(100%, var(--terminal-content-width, 100%)); }
+.term-content.resize-layout > .term-screen { min-width: 0; }
+.term-content.resize-layout > .term-screen > .ansi-line-background {
   justify-self: start;
   width: var(--terminal-width, auto);
 }
-.term-content.preserve-layout > .term-screen > .ansi-line { overflow: visible; }
+.term-content > .term-screen > .ansi-line { overflow: visible; }
 /* No content-visibility on terminal rows: the component virtualizes them
    itself, mounting only a pixel-bounded window. content-visibility: auto on
    top of that made Safari size skipped mounted rows at the one-line
    contain-intrinsic height regardless of wrapping, corrupting scrollHeight
    and the row measurements — the transcript loaded with its bottom hidden
    and scrolling flickered until every row had been rendered (issue #11). */
-.term-content.preserve-layout.resize-layout > .term-screen > .ansi-line {
+.term-content.resize-layout > .term-screen > .ansi-line {
   max-width: var(--terminal-width, 100%);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.term-content.preserve-layout.resize-layout > .term-screen > .ansi-line.terminal-grid-line {
+.term-content.resize-layout > .term-screen > .ansi-line.terminal-grid-line {
   max-width: none;
   overflow-wrap: normal;
   white-space: pre;
 }
-.term-content.preserve-layout.resize-layout .terminal-grid-line .terminal-cell-run { display: inline-block; }
-.term-content.preserve-layout.resize-layout .terminal-cell-run { display: inline; }
+.term-content.resize-layout .terminal-grid-line .terminal-cell-run { display: inline-block; }
+.term-content.resize-layout .terminal-cell-run { display: inline; }
 /* A box-drawn row wider than the pane cannot reflow, but wrapping it destroys
    its column alignment. It keeps its cell grid inside a per-row horizontal
    scroller clipped at the pane width; TerminalView keeps a contiguous block's
    rows scrolling in lockstep so the table pans as one unit. Only this row
    scrolls - the pane itself never pans sideways. */
-.term-content.preserve-layout:is(.resize-layout, .resize-pending) > .term-screen > .ansi-line.terminal-wide-grid {
+.term-content:is(.resize-layout, .resize-pending) > .term-screen > .ansi-line.terminal-wide-grid {
   display: block;
   max-width: var(--terminal-width, 100%);
   overflow-x: auto;
@@ -567,18 +566,18 @@ textarea { min-height: 6.5rem; resize: vertical; }
   white-space: pre;
   scrollbar-width: none;
 }
-.term-content.preserve-layout .terminal-wide-grid .terminal-cell-run { display: inline-block; }
+.term-content .terminal-wide-grid .terminal-cell-run { display: inline-block; }
 /* No lease has landed: the pane's width is not the phone's, so column
    alignment is already lost. Wrap at the container rather than scrolling
    sideways - a pan survives every refresh, stranding the reader on the tails
    of the newest lines. A leased pane keeps the rules above, where the pane
    really is this wide. Box-drawing rows past this width are classified in
    terminal.ts and scroll inside their own row instead of wrapping. */
-.term-content.preserve-layout.resize-pending > .term-screen {
+.term-content.resize-pending > .term-screen {
   min-width: 0;
   width: 100%;
 }
-.term-content.preserve-layout.resize-pending > .term-screen > .ansi-line {
+.term-content.resize-pending > .term-screen > .ansi-line {
   max-width: 100%;
   /* `anywhere`, not `break-word`: only `anywhere` also shrinks a row's
      min-content, which keeps one long token from holding a run wider than the
@@ -591,8 +590,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
 }
 :root[data-interface-size='regular'] :is(.activity-extract pre, .term-content) { font-size: .82rem; }
 :root[data-interface-size='large'] :is(.activity-extract pre, .term-content) { font-size: .94rem; }
-.term-content.preserve-layout .terminal-cell-run { display: inline-block; }
-.term-content.preserve-layout .terminal-cell {
+.term-content .terminal-cell-run { display: inline-block; }
+.term-content .terminal-cell {
   display: inline-block;
   text-align: center;
   /* Probed cell advance in px. The 1ch fallback covers the pre-measurement
@@ -602,9 +601,9 @@ textarea { min-height: 6.5rem; resize: vertical; }
      wraps text, a wrong cell only misaligns it for one frame. */
   width: var(--terminal-cell-width, 1ch);
 }
-.term-content.preserve-layout .terminal-cell-wide { width: calc(2 * var(--terminal-cell-width, 1ch)); }
-.term-content.preserve-layout .terminal-cell-horizontal,
-.term-content.preserve-layout .terminal-cell-box {
+.term-content .terminal-cell-wide { width: calc(2 * var(--terminal-cell-width, 1ch)); }
+.term-content .terminal-cell-horizontal,
+.term-content .terminal-cell-box {
   display: inline-block;
   height: 1.45em;
   overflow: hidden;
@@ -612,7 +611,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
   text-indent: -9999px;
   vertical-align: top;
 }
-.term-content.preserve-layout .terminal-cell-horizontal::after {
+.term-content .terminal-cell-horizontal::after {
   content: '';
   left: 0;
   position: absolute;
@@ -620,23 +619,23 @@ textarea { min-height: 6.5rem; resize: vertical; }
   top: 50%;
   transform: translateY(-50%);
 }
-.term-content.preserve-layout .terminal-cell-horizontal-single::after {
+.term-content .terminal-cell-horizontal-single::after {
   border-top: 1px solid currentColor;
 }
-.term-content.preserve-layout .terminal-cell-horizontal-heavy::after {
+.term-content .terminal-cell-horizontal-heavy::after {
   border-top: 2px solid currentColor;
 }
-.term-content.preserve-layout .terminal-cell-horizontal-double::after {
+.term-content .terminal-cell-horizontal-double::after {
   border-bottom: 1px solid currentColor;
   border-top: 1px solid currentColor;
   height: .3em;
 }
-.term-content.preserve-layout .terminal-cell-arc::after {
+.term-content .terminal-cell-arc::after {
   box-sizing: border-box;
   content: '';
   position: absolute;
 }
-.term-content.preserve-layout .terminal-cell-arc-down-right::after {
+.term-content .terminal-cell-arc-down-right::after {
   border-left: .75px solid currentColor;
   border-top: 1px solid currentColor;
   border-top-left-radius: .5ch;
@@ -645,7 +644,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
   right: 0;
   top: 50%;
 }
-.term-content.preserve-layout .terminal-cell-arc-down-left::after {
+.term-content .terminal-cell-arc-down-left::after {
   border-right: .75px solid currentColor;
   border-top: 1px solid currentColor;
   border-top-right-radius: .5ch;
@@ -654,7 +653,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
   right: 50%;
   top: 50%;
 }
-.term-content.preserve-layout .terminal-cell-arc-up-right::after {
+.term-content .terminal-cell-arc-up-right::after {
   border-bottom: 1px solid currentColor;
   border-bottom-left-radius: .5ch;
   border-left: .75px solid currentColor;
@@ -663,7 +662,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
   right: 0;
   top: 0;
 }
-.term-content.preserve-layout .terminal-cell-arc-up-left::after {
+.term-content .terminal-cell-arc-up-left::after {
   border-bottom: 1px solid currentColor;
   border-bottom-right-radius: .5ch;
   border-right: .75px solid currentColor;
