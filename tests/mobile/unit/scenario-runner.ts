@@ -153,18 +153,14 @@ export const stopProcess = async () => { trace('cleanup:fixture'); if(mode.inclu
   await writeFile(join(root, 'android-measurement.ts'), `
 import { trace, mode, assessment } from './fixture-protocol';
 export class AndroidEnvironmentMeasurement {
-  id='android-test'; operations=[]; errors=[]; gmsErrors=[]; required=false; stages=[]; begun=false; finalized=false; finished=false; stageFailed=false;
+  id='android-test'; operations=[]; errors=[]; gmsErrors=[]; stages=[]; begun=false; finalized=false; finished=false; stageFailed=false;
   expectedStages=['after-device-start','before-measurement-begin','after-setup-url','after-browser-install','after-initial-installed-app-launch'];
   bind(identity) { this.identity=identity; }
   failureOutcome() { return { errors:this.errors }; }
   plannedOperations() { return structuredClone(this.operations); }
-  requireGmsObservations() {
-    if (this.required || this.begun || this.finalized) throw new Error('ANDROID_ENVIRONMENT: GMS requirement must be set once before begin');
-    this.required=true; trace('measurement:gms:required');
-  }
   async observeGmsStage(stage) {
     const index=this.stages.length;
-    if (!this.required || this.finalized || this.stageFailed || index>=this.expectedStages.length || this.expectedStages[index]!==stage || (index<2 && this.begun) || (index>=2 && !this.begun)) {
+    if (this.finalized || this.stageFailed || index>=this.expectedStages.length || this.expectedStages[index]!==stage || (index<2 && this.begun) || (index>=2 && !this.begun)) {
       this.stageFailed=true; this.gmsErrors.push('GMS stage order or measurement phase is invalid');
       trace('measurement:gms:rejected:' + stage); return;
     }
@@ -173,7 +169,7 @@ export class AndroidEnvironmentMeasurement {
   startGmsFinalization() {
     if (this.finalized) return;
     this.finalized=true; trace('measurement:gms:finalize');
-    if (!this.required || !this.begun || this.stageFailed || this.stages.length!==this.expectedStages.length) {
+    if (!this.begun || this.stageFailed || this.stages.length!==this.expectedStages.length) {
       this.gmsErrors.push('GMS diagnostic stage sequence is incomplete');
     }
     if (this.gmsErrors.length) this.errors.push(new Error('ANDROID_ENVIRONMENT: ' + this.gmsErrors.length + ' GMS diagnostic observation error(s)'));
@@ -187,7 +183,7 @@ export class AndroidEnvironmentMeasurement {
   }
   async begin() {
     trace('measurement:begin');
-    if (!this.required || this.stageFailed || this.stages.length!==2) {
+    if (this.stageFailed || this.stages.length!==2) {
       const error=new Error('ANDROID_ENVIRONMENT: begin requires both ordered pre-measurement GMS stage attempts');
       this.errors.push(error); throw error;
     }

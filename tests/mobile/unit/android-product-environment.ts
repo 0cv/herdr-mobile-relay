@@ -325,7 +325,7 @@ class MeasurementCollectorMock implements OwnedProcess {
   retire(_reason: string): Promise<RetirementEvidence> { return this.retirement; }
 }
 
-export const measurementFailureCases = ['none', 'begin-snapshot', 'begin-marker', 'close', 'transport', 'log', 'collector', 'identity', 'check', 'completion', 'end-snapshot'] as const;
+export const measurementFailureCases = ['none', 'begin-snapshot', 'begin-marker', 'close', 'log', 'collector', 'identity', 'check', 'completion', 'end-snapshot'] as const;
 export async function measurementControl(failure: typeof measurementFailureCases[number]): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'sm59-measurement-'));
   const diagnostics = await import('./android-environment').catch(() => undefined);
@@ -335,6 +335,38 @@ export async function measurementControl(failure: typeof measurementFailureCases
   const failBegin = failure.startsWith('begin-');
   const io: Partial<AndroidMeasurementIO> = {
     boundedCommand: async (binary, args, timeout, options) => {
+      if (args.includes('--android-measurement-persist-json') || args.includes('--android-measurement-persist-text')) {
+        const request = JSON.parse(String(options.input));
+        const name = request.target.endsWith('.log') ? 'log' : request.target.match(/android-environment-(\w+)\.json$/u)![1];
+        trace.push(name);
+        if (name === failure) throw original;
+        if (failBegin && name === 'completion') throw new Error('injected-receipt');
+      }
+      if (args.includes('dumpsys')) {
+        const stdout = `Packages:
+  Package [com.google.android.gms] (fixture):
+    codePath=/system/app/browser
+    versionCode=1 minSdk=23 targetSdk=35
+    versionName=131.0.6778.200
+    installerPackageName=null
+    initiatingPackageName=null
+    originatingPackageName=null
+    packageSource=0
+    lastUpdateTime=2026-09-10 08:00:00
+    flags=[SYSTEM]
+    splits=[base]
+    User 0: installed=true hidden=false suspended=false stopped=false enabled=0
+      firstInstallTime=2026-09-10 08:00:00
+Queries:
+
+Compiler stats:
+  [com.google.android.gms]
+    (No recorded stats)
+`;
+        return { stdout, stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
+          childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0,
+          stdoutRetainedBytes: Buffer.byteLength(stdout), stderrRetainedBytes: 0, stdoutSha256: hash(stdout), stderrSha256: hash('') };
+      }
       if (args.includes('snapshot')) {
         const boundary = args[args.indexOf('--boundary') + 1];
         trace.push(`snapshot:${boundary}`);
@@ -348,8 +380,8 @@ export async function measurementControl(failure: typeof measurementFailureCases
           childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: 0, stderrBytes: 0,
           stdoutRetainedBytes: 0, stderrRetainedBytes: 0, stdoutSha256: hash(''), stderrSha256: hash('') };
       }
-      if (args.includes('--android-measurement-owner')) {
-        const stdout = 'BEGIN_OK\n';
+      if (args.includes('--android-measurement-owner') || args.includes('--gms-diagnostic-ownership')) {
+        const stdout = args.includes('--gms-diagnostic-ownership') ? 'OWNED\n' : 'BEGIN_OK\n';
         return { stdout, stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
           childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0,
           stdoutRetainedBytes: Buffer.byteLength(stdout), stderrRetainedBytes: 0, stdoutSha256: hash(stdout), stderrSha256: hash('') };
@@ -386,13 +418,14 @@ export async function measurementControl(failure: typeof measurementFailureCases
       return { stdout: '', stderr: '' } as Awaited<ReturnType<AndroidMeasurementIO['command']>>;
     },
     stopProcess: async () => { trace.push('close'); if (failure === 'close') throw original; if (failBegin) throw cleanup; return child.retire('measurement-finished').then(evidence => evidence); },
-    transport: { observe: () => undefined, finish: async () => { trace.push('transport'); if (failure === 'transport') throw original; }, failure: undefined },
-    writeFile: (async (path: any, data: any, options: any) => { trace.push(String(path).endsWith('.log') ? 'log' : 'session'); if (failure === 'log' && String(path).endsWith('.log')) throw original; return writeFile(path, data, options); }) as typeof writeFile,
     writeJson: async (path, data) => { const name = path.match(/android-environment-(\w+)\.json$/u)![1]; trace.push(name); if (name === failure) throw original; if (failBegin && name === 'completion') throw new Error('injected-receipt'); await writeSanitizedJson(path, data); },
   };
   const measurement = new AndroidEnvironmentMeasurement('emulator-5554', directory, 'unused-public-toolchains', io,
     new PhaseBudget('product-measurement-control', { timeoutMs: 600_000 }));
   measurement.bind(measurementIdentity({ measurementId: measurement.id }));
+  const stageBudget = new PhaseBudget('measurement-stages', { timeoutMs: 60_000 });
+  await measurement.observeGmsStage('after-device-start', stageBudget);
+  await measurement.observeGmsStage('before-measurement-begin', stageBudget);
   if (failBegin) {
     let caught: unknown;
     try { await measurement.begin(); } catch (error) { caught = error; }
@@ -400,14 +433,15 @@ export async function measurementControl(failure: typeof measurementFailureCases
     if (failure === 'begin-snapshot') assert.equal(caught, original);
     assert.equal(measurement.failureOutcome().errors[0], caught);
     assert.ok(measurement.failureOutcome().errors.includes(cleanup));
-    assert.ok(trace.indexOf('close') < trace.indexOf('transport'));
+    await measurement.finish();
     assert.ok(trace.includes('collector') && trace.includes('completion'));
     return;
   }
   await measurement.begin();
+  for (const stage of ['after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const) await measurement.observeGmsStage(stage, stageBudget);
   const outcome = await measurement.finish();
   assert.ok(trace.indexOf('snapshot:end') < trace.indexOf('close'));
-  for (const step of ['close', 'transport', 'log', 'collector', 'identity', 'check', 'completion']) assert.ok(trace.includes(step), `${failure}/${step}`);
+  for (const step of ['close', 'log', 'collector', 'identity', 'check', 'completion']) assert.ok(trace.includes(step), `${failure}/${step}`);
   if (failure === 'none') { assert.deepEqual(outcome.errors, []); assert.equal(outcome.assessment?.status, 'PASS'); assert.equal(outcome.assessmentSha256, hash(await readFile(join(directory, 'android-environment-check.json')))); }
   else assert.ok(outcome.errors.includes(original), failure);
   if (failure === 'none') {

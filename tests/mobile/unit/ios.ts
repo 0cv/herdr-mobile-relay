@@ -9,12 +9,12 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnOwnedProcess } from '../support/owned-process';
 import { setTimeout as wait } from 'node:timers/promises';
-import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
+import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, type IOSPlatformIO, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
 import { AppiumClient, WebDriverError, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
-import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
+import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock } from '../support/ios-launch-receipt';
 import { PhaseBudget, timingScale } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
-import { CommandError, command, type CommandResult } from '../support/process';
+import { CommandError, command, commandOutput, type CommandResult } from '../support/process';
 import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
@@ -71,7 +71,20 @@ async function adapter(name: string, handler: (request: Request) => Response | P
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
   const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now });
-  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', deviceId: 'protocol-only', budget });
+  const io: IOSPlatformIO = {
+    navigationCommand: command,
+    launchCollector: collectIOSLaunchReceipt,
+    launchWrite: writeFile,
+    launchMkdir: mkdir,
+    diagnosticCommand: commandOutput,
+  };
+  const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', deviceId: 'protocol-only', budget }, {
+    navigationCommand: (...args) => io.navigationCommand(...args),
+    launchCollector: (...args) => io.launchCollector(...args),
+    launchWrite: (...args) => io.launchWrite(...args),
+    launchMkdir: (...args) => io.launchMkdir(...args),
+    diagnosticCommand: (...args) => io.diagnosticCommand(...args),
+  });
   const requests: Request[] = [];
   const nativeAdmissions: Array<{ phase: string; phaseRemainingMs: number; rootRemainingMs: number }> = [];
   let dispatchedOrdinal = 0;
@@ -127,7 +140,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
   (platform as any).driver = driver;
   (platform as any).installedBundleId = 'com.apple.webapp';
   (platform as any).springBoardRoot = 'springboard-root';
-  return { platform, driver, requests, budget, outputDir, nativeAdmissions };
+  return { platform, driver, requests, budget, outputDir, nativeAdmissions, io };
 }
 
 function commandForRequest(driver: AppiumClient, requests: Request[], matchesRequest: (request: Request) => boolean) {
@@ -503,7 +516,7 @@ for (const mode of ['ready', 'absent'] as const) {
     let now = 0;
     let discoveries = 0;
     let navigations = 0;
-    const { platform, driver, requests, budget } = await adapter(`hosted-safari-${mode}`, ({ path, body }) => {
+    const { platform, io, driver, requests, budget } = await adapter(`hosted-safari-${mode}`, ({ path, body }) => {
       if (body.script === 'mobile: getContexts') {
         discoveries += 1;
         now += discoveries === 1 ? 44_889 : 44_500;
@@ -522,7 +535,7 @@ for (const mode of ['ready', 'absent'] as const) {
       throw new Error(`unexpected hosted Safari operation ${path}`);
     }, () => now);
     (platform as any).simulatorReadyAt = '2026-10-22T09:56:48.108Z';
-    (platform as any).navigationCommand = async (binary: string, args: string[], timeoutMs: number) => {
+    io.navigationCommand = async (binary, args, timeoutMs = 0) => {
       assert.equal(binary, 'xcrun');
       assert.deepEqual(args, ['simctl', 'openurl', 'protocol-only', `${origin}/`]);
       assert.equal(timeoutMs, 90_000);
@@ -1403,7 +1416,7 @@ async function confirmationReplay(name: string, options: {
       observations.push({ boundary, lookup: lookups, now });
     });
   };
-  const { platform, driver, requests, budget, outputDir } = await adapter(`confirmation-${name}`, async ({ path, body, signal }) => {
+  const { platform, driver, requests, budget, outputDir, io } = await adapter(`confirmation-${name}`, async ({ path, body, signal }) => {
     const responseBody = (kind: 'hung' | 'interrupted' | 'late') => new Response(new ReadableStream({
       start(controller) {
         if (kind === 'interrupted') {
@@ -1594,7 +1607,7 @@ async function confirmationReplay(name: string, options: {
     assert.equal(settingsWrites.length, driver.snapshot().firstFatal || driver.snapshot().unusable || restoreRefused ? 1 : 2);
     if (!driver.snapshot().firstFatal && !driver.snapshot().unusable && !restoreRefused) assert.deepEqual(settingsWrites[1].body.settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
   }
-  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now, outputDir };
+  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now, outputDir, io };
 }
 
 test('confirmation product-first proceeds directly from acknowledged row to foreground and final Add checks', async () => {
@@ -1776,7 +1789,7 @@ test('activity click timeout records its boundary without further native command
   let captures = 0;
   a.driver.screenshot = async () => { captures++; throw new Error('unexpected screenshot'); };
   a.driver.pageSource = async () => { captures++; throw new Error('unexpected hierarchy'); };
-  (a.platform as any).diagnosticCommand = async () => { captures++; throw new Error('unexpected native diagnostic'); };
+  a.io.diagnosticCommand = async () => { captures++; throw new Error('unexpected native diagnostic'); };
   await a.platform.captureSanitizedEvidence('failure');
   assert.equal(captures, 0);
   assert.equal(a.requests.length, count);
@@ -2475,7 +2488,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
   test(`openurl ${mode} records bounded serial diagnostics without reissuing navigation`, async () => {
     const { browser } = await shareFixtures();
     let processActive = false;
-    const { platform, requests, outputDir } = await adapter(`navigation-${mode}`, ({ path, body, signal }) => {
+    const { platform, io, requests, outputDir } = await adapter(`navigation-${mode}`, ({ path, body, signal }) => {
       assert.equal(processActive, false, 'no Appium request while a process is unsettled');
       if (path.endsWith('/context')) return value(null);
       if (path.endsWith('/source')) return value(browser);
@@ -2488,7 +2501,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
       }
       throw new Error(`unexpected navigation diagnostic ${path} ${JSON.stringify(body)}`);
     });
-    assert.equal(typeof (platform as any).navigationCommand, 'function', 'diagnostics must be available before invoking any process');
+    assert.equal(typeof io.navigationCommand, 'function', 'diagnostics must be available before invoking any process');
     if (mode === 'discovery-interrupted') {
       const discover = platform.driver.contextMetadata.bind(platform.driver);
       platform.driver.contextMetadata = () => discover(1_000);
@@ -2500,7 +2513,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     const settledOutput = (stdout: string) => new Promise<CommandResult>((resolve) => setTimeout(() => resolve({
       stdout, stderr: '', code: 0, durationMs: 5, timedOut: false,
     }), 5));
-    (platform as any).navigationCommand = async (binary: string, args: string[], timeoutMs: number) => {
+    io.navigationCommand = async (binary, args, timeoutMs = 0) => {
       assert.equal(processActive, false);
       processActive = true;
       processes.push({ binary, args, timeoutMs });
@@ -2575,8 +2588,8 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
 
 test('an insufficient navigation budget records prerequisite skips without admitting a command', async () => {
   let now = 0;
-  const { platform, requests } = await adapter('navigation-budget', () => { throw new Error('no diagnostic request is admissible'); }, () => now);
-  (platform as any).navigationCommand = () => { throw new Error('no process is admissible'); };
+  const { platform, io, requests } = await adapter('navigation-budget', () => { throw new Error('no diagnostic request is admissible'); }, () => now);
+  io.navigationCommand = () => { throw new Error('no process is admissible'); };
   now = 119_900;
   await assert.rejects(() => platform.openSetupURL(`${origin}/`), /insufficient time for a complete openurl command/u);
   assert.equal(requests.length, 1);
@@ -3046,7 +3059,7 @@ test('Home observation timeout quarantines failure evidence and blocks owned DEL
   (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
   (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
   const native: string[][] = [];
-  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  a.io.diagnosticCommand = async (_binary, argv) => { native.push(argv); return ''; };
   await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), /APPIUM_SESSION_UNUSABLE/u);
   assert.equal(a.requests.length, stopped);
   assert.deepEqual(a.driver.snapshot().firstFatal, first);
@@ -4404,13 +4417,13 @@ async function receiptCaptureAdapter(name: string, clock = new ReceiptClock()) {
   internal.launchObservation = new IOSLaunchObservation(clock);
   internal.launchObservation.failure = Object.freeze(receiptFailure(clock));
   const native: string[][] = [];
-  internal.diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  a.io.diagnosticCommand = async (_binary, argv) => { native.push(argv); return ''; };
   const writes: Array<{ path: string; text: string; options: unknown }> = [];
-  internal.launchMkdir = async () => undefined;
-  internal.launchWrite = async (path: string, text: string, options: unknown) => { writes.push({ path, text, options }); };
+  a.io.launchMkdir = async () => undefined;
+  a.io.launchWrite = async (path, text, options) => { writes.push({ path, text, options }); };
   const child = new ReceiptChild();
   let queries = 0;
-  internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => collectIOSLaunchReceipt(udid, failure, fixture, {
+  a.io.launchCollector = (udid, failure, fixture, hooks) => collectIOSLaunchReceipt(udid, failure, fixture, {
     ...hooks, clock, spawn: () => {
       queries += 1;
       queueMicrotask(() => { child.emit('spawn'); child.stdout.emit('data', Buffer.from(receiptLoad())); child.close(); });
@@ -4476,14 +4489,14 @@ async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode
   };
   internal.waitForHomeIconReadiness = async (observation: unknown) => observation;
   const native: string[][] = [];
-  internal.diagnosticCommand = async (_binary: string, argv: string[]) => { trace.push('native'); native.push(argv); return ''; };
+  a.io.diagnosticCommand = async (_binary, argv) => { trace.push('native'); native.push(argv); return ''; };
   const writes: Array<{ path: string; text: string; options: unknown }> = [];
-  internal.launchMkdir = async () => { trace.push('mkdir'); };
-  internal.launchWrite = async (path: string, text: string, options: unknown) => { trace.push('write'); writes.push({ path, text, options }); };
+  a.io.launchMkdir = async () => { trace.push('mkdir'); };
+  a.io.launchWrite = async (path, text, options) => { trace.push('write'); writes.push({ path, text, options }); };
   const child = new ReceiptChild();
   let queries = 0;
   let collect: () => void = () => { child.stdout.emit('data', Buffer.from(receiptLoad())); child.close(); };
-  internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => {
+  a.io.launchCollector = (udid, failure, fixture, hooks) => {
     trace.push('collector');
     return receiptSettled(collectIOSLaunchReceipt(udid, failure, fixture, { ...hooks, clock, spawn: () => {
       queries += 1;
@@ -4536,7 +4549,7 @@ test('SM55 receipt ordinary delayed writes stay owned and frozen on reentry', as
   let started!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   const writing = new Promise<void>(resolve => { started = resolve; });
-  a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+  a.io.launchWrite = async (path, text, options) => {
     a.writes.push({ path, text, options });
     if (a.writes.length === 1) { started(); await pending; }
   };
@@ -4593,7 +4606,7 @@ test('ordinary failure evidence saves one bounded native hierarchy and records h
       throw new Error(`unexpected failure evidence command ${path}`);
     });
     const internal = a.platform as any;
-    internal.diagnosticCommand = async () => '';
+    a.io.diagnosticCommand = async () => '';
     internal.nativeDiagnosticsBlocked = mode === 'blocked';
     await a.platform.captureSanitizedEvidence('failure');
     const sources = a.driver.snapshot().commands.filter((command) => command.path.endsWith('/source'));
@@ -4619,7 +4632,7 @@ for (const state of ['firstFatal-only', 'unusable-only'] as const) {
       (a.driver as any).unusable = true;
     }
     let nativeAttempts = 0;
-    (a.platform as any).diagnosticCommand = async () => { nativeAttempts += 1; return ''; };
+    a.io.diagnosticCommand = async () => { nativeAttempts += 1; return ''; };
     await a.platform.captureSanitizedEvidence('paired');
     await a.platform.captureSanitizedEvidence('candidate');
     assert.equal(screenshotAttempts, 0);
@@ -4649,7 +4662,7 @@ test('fatal screenshot quarantine skips hierarchy and every later native command
   (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
   (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
   const native: string[][] = [];
-  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  a.io.diagnosticCommand = async (_binary, argv) => { native.push(argv); return ''; };
   await a.platform.captureSanitizedEvidence('failure');
   assert.equal(a.requests.filter(request => request.path.endsWith('/screenshot')).length, 1);
   assert.equal(a.requests.filter(request => request.path.endsWith('/source')).length, 0);
@@ -4675,7 +4688,7 @@ test('fatal hierarchy quarantine skips every later native command', async () => 
     throw new Error(`unexpected hierarchy-quarantine request ${path}`);
   });
   const native: string[][] = [];
-  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  a.io.diagnosticCommand = async (_binary, argv) => { native.push(argv); return ''; };
   await a.platform.captureSanitizedEvidence('failure');
   assert.equal(a.requests.filter(request => request.path.endsWith('/screenshot')).length, 1);
   assert.equal(a.requests.filter(request => request.path.endsWith('/source')).length, 1);
@@ -4723,9 +4736,9 @@ test('fatal failure capture without a launch failure omits receipt and all live 
   const first = structuredClone(a.driver.snapshot().firstFatal);
   let collectorCalls = 0;
   let spawnAttempts = 0;
-  (a.platform as any).launchCollector = (_udid: string, _failure: IOSLaunchFailure, _fixture: string, hooks: IOSReceiptHooks) => {
+  a.io.launchCollector = (_udid, _failure, _fixture, hooks) => {
     collectorCalls += 1;
-    if (hooks.queryEligible) spawnAttempts += 1;
+    if (hooks?.queryEligible) spawnAttempts += 1;
     return Promise.reject(new Error('unexpected collector invocation'));
   };
   let screenshotCalls = 0;
@@ -4735,7 +4748,7 @@ test('fatal failure capture without a launch failure omits receipt and all live 
   (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
   (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
   let nativeCalls = 0;
-  (a.platform as any).diagnosticCommand = async () => { nativeCalls += 1; return ''; };
+  a.io.diagnosticCommand = async () => { nativeCalls += 1; return ''; };
 
   const capture = a.platform.captureSanitizedEvidence('failure');
   assert.equal(a.platform.captureSanitizedEvidence('failure'), capture);
@@ -4799,7 +4812,7 @@ test('SM55 receipt rejected partial writes preserve first fatal without retry', 
     const failure = a.internal.launchObservation.failure;
     const driverFatal = a.driver.snapshot().firstFatal;
     assert.equal(failure.eligible, true);
-    a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+    a.io.launchWrite = async (path, text, options) => {
       a.writes.push({ path, text, options });
       if (a.writes.length === rejected) { a.clock.advance(25_000); throw Object.assign(new Error('synthetic-private-path'), { code: 'ENOSPC', cause: new Error('secret') }); }
     };
@@ -4824,7 +4837,7 @@ test('SM55 receipt pending rejection and directory refusal are owned once', asyn
   let started!: () => void;
   const pending = new Promise<void>((_resolve, rejectWrite) => { reject = rejectWrite; });
   const writing = new Promise<void>(resolve => { started = resolve; });
-  a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+  a.io.launchWrite = async (path, text, options) => {
     a.writes.push({ path, text, options }); started(); await pending;
   };
   const capture = a.platform.captureSanitizedEvidence('failure');
@@ -4844,7 +4857,7 @@ test('SM55 receipt pending rejection and directory refusal are owned once', asyn
   assert.equal(a.native.length, 0);
   assert.equal(JSON.stringify(a.platform.evidenceSnapshot().launchPersistence).includes('synthetic-secret'), false);
   const b = await receiptCaptureAdapter('directory-refusal');
-  b.internal.launchMkdir = async () => { throw { code: 'EEXIST', path: 'synthetic-secret' }; };
+  b.io.launchMkdir = async () => { throw { code: 'EEXIST', path: 'synthetic-secret' }; };
   await b.platform.captureSanitizedEvidence('failure');
   await b.platform.captureSanitizedEvidence('failure');
   assert.equal(b.queries(), 1);
@@ -4852,7 +4865,7 @@ test('SM55 receipt pending rejection and directory refusal are owned once', asyn
   assert.equal(b.internal.launchPersistence.directory.error, 'EEXIST');
   const c = await receiptCaptureAdapter('collector-refusal');
   let attempts = 0;
-  c.internal.launchCollector = async () => { attempts += 1; throw new Error('synthetic-private-callback'); };
+  c.io.launchCollector = async () => { attempts += 1; throw new Error('synthetic-private-callback'); };
   await c.platform.captureSanitizedEvidence('failure');
   await c.platform.captureSanitizedEvidence('failure');
   assert.equal(attempts, 1);
@@ -4873,7 +4886,7 @@ test('SM55 receipt unconfirmed stop fences all native diagnostics before persist
     });
     if (mode === 'abort-inside-spawn') {
       const controller = new AbortController();
-      a.internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => receiptSettled(collectIOSLaunchReceipt(udid, failure, fixture, {
+      a.io.launchCollector = (udid, failure, fixture, hooks) => receiptSettled(collectIOSLaunchReceipt(udid, failure, fixture, {
         ...hooks, signal: controller.signal, spawn: () => {
           controller.abort();
           queueMicrotask(() => a.clock.advance(2_000));
@@ -4884,7 +4897,7 @@ test('SM55 receipt unconfirmed stop fences all native diagnostics before persist
     let release!: () => void;
     let writing = false;
     const pending = new Promise<void>(resolve => { release = resolve; });
-    a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+    a.io.launchWrite = async (path, text, options) => {
       a.writes.push({ path, text, options });
       if (a.writes.length === 1) { writing = true; await pending; }
     };

@@ -1,6 +1,6 @@
 import { createConnection } from 'node:net';
 import type { Writable } from 'node:stream';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { resolve } from 'node:path';
 import { BoundedCommandError, boundedCommand, type BoundedCommandResult } from './bounded-process';
 import { monotonicNowNs } from './owned-process';
 import { redactText, writeSanitizedJson } from './diagnostics';
@@ -15,37 +15,6 @@ export interface AndroidTransportCommandResult {
   timedOut: boolean;
   truncated: boolean;
   unavailable: boolean;
-}
-
-export interface AndroidTransportTestFixture {
-  adbPort: number;
-  hostCommandScript: string;
-  stateFile: string;
-  acquisitionLogFile: string;
-  commandPidFile: string;
-  descendantPidFile: string;
-  lateWriteFile: string;
-}
-
-function validateTransportFixture(value: unknown, outputDir: string): AndroidTransportTestFixture | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Android transport fixture is malformed');
-  const fixture = value as Record<string, unknown>;
-  const fields = ['adbPort', 'hostCommandScript', 'stateFile', 'acquisitionLogFile', 'commandPidFile', 'descendantPidFile', 'lateWriteFile'];
-  if (Object.keys(fixture).length !== fields.length || fields.some(field => !Object.hasOwn(fixture, field))
-    || !Number.isSafeInteger(fixture.adbPort) || Number(fixture.adbPort) < 1 || Number(fixture.adbPort) > 65_535) {
-    throw new Error('Android transport fixture is malformed');
-  }
-  const paths = fields.slice(1).map(field => fixture[field]);
-  if (paths.some(path => typeof path !== 'string' || !path || !isAbsolute(path) || path.includes('\0'))) {
-    throw new Error('Android transport fixture paths are malformed');
-  }
-  const root = resolve(outputDir);
-  if (paths.some(path => {
-    const pathFromRoot = relative(root, resolve(path as string));
-    return pathFromRoot === '' || pathFromRoot === '..' || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot);
-  })) throw new Error('Android transport fixture paths must stay inside its output directory');
-  return fixture as unknown as AndroidTransportTestFixture;
 }
 
 export interface AndroidTransportCommandDiagnostics {
@@ -362,15 +331,12 @@ export class AndroidTransportTriggerDetector {
 
 export class AndroidTransportObservation {
   private readonly triggerDetector = new AndroidTransportTriggerDetector();
-  private readonly fixture?: AndroidTransportTestFixture;
   private task?: Promise<void>;
   failure?: string;
 
   constructor(private readonly serial: string, private readonly outputDir: string,
     private readonly run: typeof transportCommand = transportCommand,
-    private readonly runAdb: typeof transportAdbObservation = transportAdbObservation, fixture?: AndroidTransportTestFixture) {
-    this.fixture = validateTransportFixture(fixture, outputDir);
-  }
+    private readonly runAdb: typeof transportAdbObservation = transportAdbObservation) {}
 
   observe(chunk: Buffer): void {
     const candidate = this.triggerDetector.observe(chunk)[0];
@@ -414,12 +380,7 @@ export class AndroidTransportObservation {
       const startedAt = new Date().toISOString();
       try {
         if (file === 'adb-socket') {
-          return { name, ...await this.runAdb(this.serial, name === 'adb-state' ? 'get-state' : 'uptime', this.fixture?.adbPort ?? 5037, 1500) };
-        }
-        if (this.fixture) {
-          return { name, ...await this.run('/bin/sh', [this.fixture.hostCommandScript, this.fixture.stateFile,
-            this.fixture.acquisitionLogFile, this.fixture.commandPidFile, this.fixture.descendantPidFile,
-            this.fixture.lateWriteFile, name], 1500, 16_384) };
+          return { name, ...await this.runAdb(this.serial, name === 'adb-state' ? 'get-state' : 'uptime', 5037, 1500) };
         }
         return { name, ...await this.run(file, args, 1500, 16_384) };
       } catch {

@@ -21,14 +21,25 @@ import { FailureLedger, qualified } from '../support/mobile-result';
 import { QualificationFailureLatch, QualificationFatalError } from '../support/oracle';
 import { checkCLI, measurementIdentity, rehashPackage } from './android-product-environment';
 import { androidTransportNormalRecords } from './android-transport';
+import { transportFixtureIO, fixtureTransportObservation, type AndroidTransportFixture } from './android-measurement-doubles';
 import { bindEmulatorChild, emulatorBindingSha256 } from '../support/android-emulator-lifetime';
 
 class AndroidEnvironmentMeasurement extends Measurement {
-  constructor(serial: string, output: string, toolchains: string, io: Partial<AndroidMeasurementIO> = {},
+  constructor(serial: string, output: string, toolchains: string, io: Partial<AndroidMeasurementIO> & { transportFixture?: AndroidTransportFixture } = {},
     lifetime = new PhaseBudget('android-measurement-unit', { timeoutMs: 30 * 60_000 })) {
-    super(serial, output, toolchains, io, lifetime);
+    super(serial, output, toolchains, io.transportFixture ? transportFixtureIO(io.transportFixture, io) : io, lifetime);
     this.bind(measurementIdentity({ measurementId: this.id }));
   }
+}
+
+async function beginObservedMeasurement(measurement: Measurement): Promise<void> {
+  const budget = new PhaseBudget('measurement-stages', { timeoutMs: 60_000 });
+  await measurement.observeGmsStage('after-device-start', budget);
+  await measurement.observeGmsStage('before-measurement-begin', budget);
+  await measurement.begin();
+  await measurement.observeGmsStage('after-setup-url', budget);
+  await measurement.observeGmsStage('after-browser-install', budget);
+  await measurement.observeGmsStage('after-initial-installed-app-launch', budget);
 }
 
 interface GroupPollTestTimer {
@@ -65,7 +76,7 @@ function groupPollTestTimers() {
 import { androidLifecycleCases, runAndroidLifecycleCase, withAndroidRetainedLifecycleFixture } from './android-retained-launch';
 import { AppiumClient } from '../support/webdriver';
 import { androidEventDetails, androidLogEvents } from '../android-events';
-import { AndroidTransportObservation, AndroidTransportTriggerDetector, transportAdbObservation, type AndroidTransportCommandResult, type AndroidTransportTestFixture } from '../support/android-transport';
+import { AndroidTransportTriggerDetector, transportAdbObservation, type AndroidTransportCommandResult } from '../support/android-transport';
 
 interface Fixture {
   root: string;
@@ -456,8 +467,8 @@ async function createAndroidTransportTestEndpoint(unresponsive = false,
   };
 }
 
-async function createAndroidTransportFixture(root: string, adbPort: number, state: string): Promise<AndroidTransportTestFixture> {
-  const fixture: AndroidTransportTestFixture = {
+async function createAndroidTransportFixture(root: string, adbPort: number, state: string): Promise<AndroidTransportFixture> {
+  const fixture: AndroidTransportFixture = {
     adbPort,
     hostCommandScript: join(root, 'transport-host-command.sh'),
     stateFile: join(root, 'transport-state'),
@@ -3419,7 +3430,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         ? `spawnCollector:()=>spawnOwnedProcess('adb',['-s','emulator-5554','logcat','-b','main','-b','system','-v','epoch','-T','1'],{timeoutMs:budget.remainingMs,cleanupReservationMs:1000,observerStdout:createWriteStream('',{fd:3,autoClose:false}),observerStderr:createWriteStream('',{fd:4,autoClose:false}),observerSupervisor:createWriteStream('',{fd:5,autoClose:false})}),stopProcess:async collector=>{process.stdout.write(JSON.stringify({event:'failed-begin-cleanup',atNs:process.hrtime.bigint().toString()})+'\\n');await new Promise(resolve=>setTimeout(resolve,5000));return collector.retire('measurement-finished')},boundedCommand:async(binary,args,timeout,options)=>{if(args.includes('snapshot'))throw new Error('controlled public failed-begin after collector startup');return boundedCommand(binary,args,timeout,options)}`
         : '';
       const io = mode === 'default' ? `{${observer}}` : `{${observer},${injected}}`;
-      const ownerSource = `const {createWriteStream}=await import('node:fs');const {AndroidEnvironmentMeasurement}=await import(${JSON.stringify(measurementModule)});const {PhaseBudget}=await import(${JSON.stringify(budgetModule)});const {spawnOwnedProcess}=await import(${JSON.stringify(ownedModule)});const {boundedCommand}=await import(${JSON.stringify(repositoryPath('tests/mobile/support/bounded-process.ts'))});const budget=new PhaseBudget('caller-loss-${mode}',{timeoutMs:10000,recoveryLimit:0});const measurement=new AndroidEnvironmentMeasurement('emulator-5554',${JSON.stringify(outputDir)},${JSON.stringify(toolchains)},${io},budget);measurement.bind({runId:'35556703407',attempt:'2',platform:'android',baseline:'0.20.10',sourceCommit:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',sourceRunHeadSha:'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',candidateWebHash:'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',candidateBuild:'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',measurementId:measurement.id});const log=(event,value)=>process.stdout.write(JSON.stringify({event,atNs:process.hrtime.bigint().toString(),value})+String.fromCharCode(10));${mode === 'default' ? "try{await measurement.begin();log('measurement-ready',{id:measurement.id})}catch(error){log('begin-error',{message:String(error),result:error?.result})}" : "measurement.begin().then(()=>log('unexpected-begin-success'),error=>log('begin-error',{message:String(error),result:error?.result}));"}setTimeout(()=>process.exit(0),6500);`;
+      const ownerSource = `const {createWriteStream}=await import('node:fs');const {AndroidEnvironmentMeasurement}=await import(${JSON.stringify(measurementModule)});const {PhaseBudget}=await import(${JSON.stringify(budgetModule)});const {spawnOwnedProcess}=await import(${JSON.stringify(ownedModule)});const {boundedCommand}=await import(${JSON.stringify(repositoryPath('tests/mobile/support/bounded-process.ts'))});const budget=new PhaseBudget('caller-loss-${mode}',{timeoutMs:10000,recoveryLimit:0});const measurement=new AndroidEnvironmentMeasurement('emulator-5554',${JSON.stringify(outputDir)},${JSON.stringify(toolchains)},${io},budget);measurement.bind({runId:'35556703407',attempt:'2',platform:'android',baseline:'0.20.10',sourceCommit:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',sourceRunHeadSha:'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',candidateWebHash:'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',candidateBuild:'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',measurementId:measurement.id});await measurement.observeGmsStage('after-device-start',budget);await measurement.observeGmsStage('before-measurement-begin',budget);const log=(event,value)=>process.stdout.write(JSON.stringify({event,atNs:process.hrtime.bigint().toString(),value})+String.fromCharCode(10));${mode === 'default' ? "try{await measurement.begin();log('measurement-ready',{id:measurement.id})}catch(error){log('begin-error',{message:String(error),result:error?.result})}" : "measurement.begin().then(()=>log('unexpected-begin-success'),error=>log('begin-error',{message:String(error),result:error?.result}));"}setTimeout(()=>process.exit(0),6500);`;
       let caller: LifetimeCaller | undefined;
       let supervisorPID: number | undefined;
       let groupID: number | undefined;
@@ -3521,7 +3532,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     Object.assign(process.env, fixture.environment);
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
     try {
-      await measurement.begin();
+      await beginObservedMeasurement(measurement);
       if (observationFails) await writeFile(join(fixture.fixtureDirectory, 'valid-vending.json'), JSON.stringify({ processListFail: true }));
       let deletes = 0;
       const driver = new AppiumClient('http://fixture.test', 1_000, async (input, init) => {
@@ -4543,7 +4554,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     Object.assign(process.env, fixture.environment);
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
     try {
-      await measurement.begin();
+      await beginObservedMeasurement(measurement);
       await assert.rejects(measurement.begin(), /rebaseline/u);
       const baseline = JSON.parse(await readFile(join(fixture.root, 'android-environment-before.json'), 'utf8'));
       assert.equal(baseline.measurement.processes['6700'], undefined);
@@ -4582,7 +4593,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, fixture.environment);
       const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { plannedTerminationExitMs: 300 });
       try {
-        await measurement.begin();
+        await beginObservedMeasurement(measurement);
         const changes = {
           'inventory denied': { processListFail: true },
           'malformed inventory': { processList: 'PID NAME\nmalformed\n' },
@@ -4687,7 +4698,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           const source = await readFile(adb, 'utf8');
           await writeFile(adb, source.replace('\n', "\nif (process.argv.slice(2).join(' ').includes(' OP_END ')) process.exit(1);\n"));
         }
-        await measurement.begin();
+        await beginObservedMeasurement(measurement);
         const hostBefore = Date.now();
         let thrown: unknown;
         try { await measurement.terminate('com.android.chrome', '6538'); } catch (error) { thrown = error; }
@@ -4814,7 +4825,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      await measurement.begin();
+      await beginObservedMeasurement(measurement);
       await assert.rejects(measurement.terminate('com.android.chrome', '6538'), error => error === primary);
       const operation = measurement.plannedOperations()[0];
       assert.equal(operation.succeeded, false);
@@ -4869,9 +4880,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         }
         return result;
       },
-      writeFile: async (...args) => {
-        if (variant === 'required collection failure' && args[0] === join(fixture.root, 'android-qualification-logcat.log')) throw requiredError;
-        return writeFile(...args);
+      boundedCommand: async (binary, args, timeout, options) => {
+        if (variant === 'required collection failure' && args.includes('--android-measurement-persist-text')) throw requiredError;
+        return boundedCommand(binary, args, timeout, options);
       },
       writeJson: async (path, value) => {
         if (path === join(fixture.root, 'android-environment-operations.json')) {
@@ -4885,7 +4896,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      await measurement.begin();
+      await beginObservedMeasurement(measurement);
       await measurement.terminate('com.android.chrome', '6538');
       const operation = measurement.plannedOperations()[0];
       assert.equal(operation.succeeded, true);
@@ -4948,7 +4959,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     Object.assign(process.env, fixture.environment);
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
     try {
-      await measurement.begin();
+      await beginObservedMeasurement(measurement);
       await state(fixture, { absent: true, children, lingeringInventories: 2 });
       await measurement.terminate('com.android.chrome', '6538');
       await measurement.finish();
@@ -4977,7 +4988,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     Object.assign(process.env, fixture.environment);
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
     try {
-      await assert.rejects(measurement.begin(), /collector/u);
+      await assert.rejects(beginObservedMeasurement(measurement), /collector/u);
       const outcome = await measurement.finish();
       assert.ok(outcome.errors.some(error => /no active measurement/u.test(String(error))));
       const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
@@ -5017,7 +5028,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-collector-tree', { timeoutMs: 15_000 }));
       await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('gms-collector-tree', { timeoutMs: 15_000 }));
       await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot after collector launch/u);
@@ -5079,7 +5089,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         },
       });
       try {
-        measurement.requireGmsObservations();
         await measurement.observeGmsStage('after-device-start', new PhaseBudget(`gms-owner-${failure}`, { timeoutMs: 10_000 }));
         await measurement.finalizeGmsObservations();
         const observations = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
@@ -5128,7 +5137,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-no-begin', { timeoutMs: 10_000 }));
       for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-no-begin', { timeoutMs: 10_000 }));
       await measurement.finalizeGmsObservations();
@@ -5163,7 +5171,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       } : {};
       const guarded = new AndroidEnvironmentMeasurement('emulator-5554', current.root, repositoryPath('tests/mobile/toolchains.json'), io);
       try {
-        guarded.requireGmsObservations();
+
         if (failBegin) {
           for (const stage of stages.slice(0, 2)) await guarded.observeGmsStage(stage, new PhaseBudget('gms-failed-begin', { timeoutMs: 10_000 }));
           await assert.rejects(guarded.begin(), /synthetic begin snapshot failure/u);
@@ -5194,7 +5202,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      duplicate.requireGmsObservations();
       await duplicate.observeGmsStage(stages[0], new PhaseBudget('gms-duplicate', { timeoutMs: 10_000 }));
       await duplicate.observeGmsStage(stages[0], new PhaseBudget('gms-duplicate', { timeoutMs: 10_000 }));
       await duplicate.finalizeGmsObservations();
@@ -5227,7 +5234,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     });
     let first: Promise<void> | undefined;
     try {
-      concurrent.requireGmsObservations();
+
       first = concurrent.observeGmsStage(stages[0], new PhaseBudget('gms-concurrent', { timeoutMs: 10_000 }));
       await commandEntered;
       await concurrent.observeGmsStage(stages[1], new PhaseBudget('gms-concurrent', { timeoutMs: 10_000 }));
@@ -5252,7 +5259,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       spawnCollector: () => { finishedSpawns++; throw new Error('collector must not start after finish'); },
     });
     try {
-      finished.requireGmsObservations();
       for (const stage of stages.slice(0, 2)) await finished.observeGmsStage(stage, new PhaseBudget('gms-finish-before-begin', { timeoutMs: 10_000 }));
       await finished.finish();
       await assert.rejects(finished.begin(), /cannot begin after start or finalization/u);
@@ -5282,7 +5288,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     });
     let pendingBegin: Promise<void> | undefined;
     try {
-      interrupted.requireGmsObservations();
       for (const stage of stages.slice(0, 2)) await interrupted.observeGmsStage(stage, new PhaseBudget('gms-concurrent-begin', { timeoutMs: 10_000 }));
       deferOwnership = true;
       pendingBegin = interrupted.begin();
@@ -5326,7 +5331,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     });
     let pendingBegin: Promise<void> | undefined;
     try {
-      measurement.requireGmsObservations();
       for (const stage of stages) await measurement.observeGmsStage(stage, new PhaseBudget('gms-snapshot-retirement', { timeoutMs: 20_000 }));
       pendingBegin = measurement.begin();
       await snapshotEntered;
@@ -5381,7 +5385,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       for (const stage of stages) await measurement.observeGmsStage(stage, new PhaseBudget('failed-begin-publication', { timeoutMs: 15_000 }));
       await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot/u);
       const collectorPath = join(output, 'android-environment-collector.json');
@@ -5448,7 +5451,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage('after-device-start', new PhaseBudget('failed-begin-summary-failure', { timeoutMs: 15_000 }));
       await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('failed-begin-summary-failure', { timeoutMs: 15_000 }));
       await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot/u);
@@ -5503,7 +5505,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         transportObservationFailure: (measurement as unknown as { transportObservationFailure?: string }).transportObservationFailure,
         failure: boundedCommandFailureDetails(failure?.result, observer.records()) });
       const measurement: AndroidEnvironmentMeasurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        transportObservationFixture: transportFixture,
+        transportFixture,
         spawnCollector: () => {
           collectorSpawns++;
           if (mode === '--android-transport-observation-trigger') {
@@ -5540,7 +5542,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       });
       let pendingBegin: Promise<void> | undefined;
       try {
-        measurement.requireGmsObservations();
         await measurement.observeGmsStage('after-device-start', new PhaseBudget(`failed-begin-${phase}`, { timeoutMs: 15_000 }));
         await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget(`failed-begin-${phase}`, { timeoutMs: 15_000 }));
         if (phase === 'collector') await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot/u);
@@ -5616,7 +5617,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       });
       let pendingBegin: Promise<void> | undefined;
       try {
-        measurement.requireGmsObservations();
         await measurement.observeGmsStage('after-device-start', new PhaseBudget('bounded-begin', { timeoutMs: 15_000 }));
         await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('bounded-begin', { timeoutMs: 15_000 }));
         await rm(output, { recursive: true, force: true });
@@ -5692,7 +5692,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
     const budget = () => new PhaseBudget('gms-observation-test', { timeoutMs: 30_000 });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], budget());
       await measurement.observeGmsStage(stages[1], budget());
       await measurement.begin();
@@ -5819,7 +5818,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           },
         });
       try {
-        delayedMeasurement.requireGmsObservations();
         await delayedMeasurement.observeGmsStage('after-device-start',
           new PhaseBudget('gms-parser-delayed-control', { timeoutMs: 15_000 }));
         await delayedMeasurement.finalizeGmsObservations();
@@ -5945,7 +5943,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('recorded-gms-writer', { timeoutMs: 30_000 }));
       await measurement.begin();
       for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('recorded-gms-writer', { timeoutMs: 30_000 }));
@@ -5998,7 +5995,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         throw new Error(`unexpected command ${args.join(' ')}`);
       },
     });
-    measurement.requireGmsObservations();
+
     await measurement.finalizeGmsObservations();
     const outcome = await measurement.finish();
     assert.ok(cleanupTimeout > 300);
@@ -6037,7 +6034,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-persist-timeout', { timeoutMs: 30_000 }));
       await measurement.begin();
       for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-persist-timeout', { timeoutMs: 30_000 }));
@@ -6095,7 +6091,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       call: number; timeoutMs: number; cleanupReservationMs?: number; command?: Record<string, unknown>;
       status: 'pending' | 'returned' | 'bounded-command-error' | 'error' | 'non-error';
     }> = [];
-    const script = repositoryPath('tests/mobile/android-measurement.ts');
+
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
       boundedCommand: async (binary, args, timeout, options) => {
         if (args.includes('--gms-diagnostic-cleanup')) {
@@ -6123,7 +6119,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         if (!args.includes('--gms-diagnostic-persist')) return boundedCommand(binary, args, timeout, options);
         if (!String(options.input || '').includes('"finalized":true')) return writers.run(binary, args, timeout, options);
         try {
-          return await boundedCommand(process.execPath, [script, '--gms-diagnostic-persist-stall-after-publication'], timeout,
+          return await boundedCommand(process.execPath, [repositoryPath('tests/mobile/unit/android-measurement-doubles.ts'), '--gms-diagnostic-persist'], timeout,
             { ...options, observerSupervisor: observer.stream });
         } catch (error) { if (error instanceof BoundedCommandError) writerFailure = error; throw error; }
       },
@@ -6132,7 +6128,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let outcome: Awaited<ReturnType<Measurement['finish']>> | undefined;
     let collector: any;
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], new PhaseBudget('unconfirmed-publication', { timeoutMs: 20_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('unconfirmed-publication', { timeoutMs: 20_000 }));
       await measurement.begin();
@@ -6244,7 +6239,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           throw new Error(`unexpected command ${args.join(' ')}`);
         },
       });
-      measurement.requireGmsObservations();
+
       await measurement.finalizeGmsObservations();
       const outcome = await measurement.finish();
       const errors = outcome.errors.map(error => String(error));
@@ -6266,7 +6261,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);
     const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    const script = repositoryPath('tests/mobile/android-measurement.ts');
+
     const observer = createBoundedSupervisorObserver(fixture.root, 'gms-collector-confirmation-supervisor');
     let writerFailure: BoundedCommandError | undefined;
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
@@ -6275,7 +6270,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           const request = JSON.parse(String(options.input));
           if (request.target.endsWith('android-environment-collector.json')) {
             try {
-              return await boundedCommand(process.execPath, [script, '--android-measurement-persist-json-stall-after-publication'], timeout,
+              return await boundedCommand(process.execPath, [repositoryPath('tests/mobile/unit/android-measurement-doubles.ts'), '--android-measurement-persist-json'], timeout,
                 { ...options, observerSupervisor: observer.stream });
             } catch (error) {
               if (error instanceof BoundedCommandError) writerFailure = error;
@@ -6287,7 +6282,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-collector-confirmation', { timeoutMs: 20_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-collector-confirmation', { timeoutMs: 20_000 }));
       await measurement.begin();
@@ -6345,7 +6339,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let workerDispatches = 0;
     let collectorCode = '';
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      transportObservationFixture: transportFixture,
+      transportFixture,
       spawnCollector: () => spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', collectorCode], { timeoutMs: 50_000, cleanupReservationMs: 2_000 }),
       boundedCommand: async (binary, args, timeout, options) => {
         if (!args.includes('--android-transport-observation-trigger')) return boundedCommand(binary, args, timeout, options);
@@ -6361,7 +6355,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch.padStart(23)+'  5606  5606 I HerdrMeasure: ${measurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(triggerPath)})){fs.rmSync(${JSON.stringify(triggerPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3).padStart(23)+'   546   561 I adbd    : timeout expired while flushing socket, closing\\n')}if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3).padStart(23)+'  6233  6233 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
     try {
       const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-      measurement.requireGmsObservations();
+
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-transport-trigger', { timeoutMs: 20_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-transport-trigger', { timeoutMs: 20_000 }));
       await measurement.begin();
@@ -6441,7 +6435,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           return { startedAt: timestamp, endedAt: timestamp, stdout: 'present-host\n', stderr: '',
             exitCode: 0, signal: null, timedOut: false, truncated: false, unavailable: false };
         };
-        const observation = new AndroidTransportObservation('emulator-5554', fixture.root, runHost, transportAdbObservation, transportFixture);
+        const observation = fixtureTransportObservation('emulator-5554', fixture.root, transportFixture, runHost);
         await observation.observeTrigger({ guestEpochSeconds: '123.456', triggeredAt: new Date(Date.now() - 1_000).toISOString() });
         assert.equal(observation.failure, 'transport acquisition was unavailable or failed');
         const record = JSON.parse(await readFile(join(fixture.root, 'android-transport-observation.json'), 'utf8'));
@@ -6558,7 +6552,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let collectorCode = '';
     let replayEpoch = '';
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      transportObservationFixture: transportFixture,
+      transportFixture,
       spawnCollector: () => {
         replayEpoch = ((Date.now() + 500) / 1000).toFixed(3);
         collectorCode = `const fs=require('node:fs');setTimeout(()=>{process.stdout.write('--------- beginning of system\\n'+${JSON.stringify(replayEpoch)}+' 77 77 I adbd: timeout expired while flushing socket, closing\\n'+(Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${measurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
@@ -6570,7 +6564,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-pre-anchor-replay', { timeoutMs: 20_000 }));
       await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('gms-pre-anchor-replay', { timeoutMs: 20_000 }));
       await measurement.begin();
@@ -6598,7 +6591,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  for (const mode of ['normal', 'oversized', 'eof', 'non-gms-eof'] as const) {
+  for (const mode of ['normal', 'oversized', 'eof'] as const) {
     test(`Android transport framing measurement preserves evidence and classification ${mode}`, async () => {
       const fixture = await harness.createFixture();
       const saved = { ...process.env };
@@ -6628,14 +6621,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n');const bytes=Buffer.from(${JSON.stringify(normal)}.replaceAll('1790000000.150',epoch));for(let offset=0;offset<bytes.length;offset+=17)process.stdout.write(bytes.subarray(offset,offset+17))},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.stdout.write(${JSON.stringify(tail)},()=>process.exit(0))})`;
       try {
         const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-        if (mode !== 'non-gms-eof') {
-          measurement.requireGmsObservations();
-          for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('framing-measurement', { timeoutMs: 20_000 }));
-        }
+        for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('framing-measurement', { timeoutMs: 20_000 }));
         await measurement.begin();
-        if (mode !== 'non-gms-eof') {
-          for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('framing-measurement', { timeoutMs: 20_000 }));
-        }
+        for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('framing-measurement', { timeoutMs: 20_000 }));
         const outcome = await measurement.finish();
         const raw = Buffer.concat(observed);
         const persisted = await readFile(join(fixture.root, 'android-qualification-logcat.log'));
@@ -6649,7 +6637,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         assert.equal(summary.bytes, raw.length);
         assert.equal(summary.failure, undefined);
         assert.equal(dispatches, 0);
-        if (mode !== 'non-gms-eof') assert.equal(summary.gmsObservations.terminalConfirmation, 'confirmed');
+        assert.equal(summary.gmsObservations.terminalConfirmation, 'confirmed');
         if (mode === 'normal') {
           assert.equal(summary.transportObservationFailure, undefined);
           assert.equal(outcome.assessment?.collection.status, 'PASS', JSON.stringify(outcome.assessment?.collection));
@@ -6669,42 +6657,35 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       }
     });
   }
-  test('Android transport framing acquisition ceiling precedes both detector paths', async () => {
+  test('Android transport framing acquisition ceiling precedes trigger detection', async () => {
     assert.equal(ANDROID_LOG_LIMIT, 100 * 1024 * 1024);
     const fixture = await harness.createFixture();
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
     try {
-      await measurement.begin();
+      await beginObservedMeasurement(measurement);
       const internal = measurement as unknown as {
-        bytes: number; collectorStdoutHandler: (chunk: Buffer) => void; requireGmsObservationsValue: boolean;
-        transportTrigger: AndroidTransportTriggerDetector; transport: AndroidMeasurementIO['transport'];
+        bytes: number; collectorStdoutHandler: (chunk: Buffer) => void;
+        transportTrigger: AndroidTransportTriggerDetector;
         collector: { stop: (reason: string) => void }; collectorFailure?: Error; chunks: Buffer[];
       };
       let detectorCalls = 0;
-      let observerCalls = 0;
       const stops: string[] = [];
       internal.transportTrigger.observe = () => { detectorCalls++; return []; };
-      internal.transport.observe = () => { observerCalls++; };
       const stop = internal.collector.stop.bind(internal.collector);
       internal.collector.stop = reason => { stops.push(reason); };
       const chunk = Buffer.from('ordinary message\n');
       const chunksBefore = internal.chunks.length;
       internal.bytes = ANDROID_LOG_LIMIT - chunk.length;
       internal.collectorStdoutHandler(chunk);
-      assert.equal(observerCalls, 1);
+      assert.equal(detectorCalls, 1);
       assert.equal(internal.chunks.length, chunksBefore + 1);
-      for (const gms of [false, true]) {
-        internal.requireGmsObservationsValue = gms;
-        internal.collectorStdoutHandler(chunk);
-      }
-      internal.requireGmsObservationsValue = false;
+      internal.collectorStdoutHandler(chunk);
       internal.collector.stop = stop;
-      assert.equal(observerCalls, 1);
-      assert.equal(detectorCalls, 0);
+      assert.equal(detectorCalls, 1);
       assert.equal(internal.chunks.length, chunksBefore + 1);
-      assert.deepEqual(stops, ['collector-output-limit', 'collector-output-limit']);
+      assert.deepEqual(stops, ['collector-output-limit']);
       assert.equal(internal.collectorFailure?.message, 'ANDROID_ENVIRONMENT: measured log exceeds bound');
     } finally {
       await measurement.finish().catch(() => undefined);
@@ -6736,7 +6717,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const workerFinished = new Promise<void>(resolve => { resolveWorkerFinished = resolve; });
     let collectorCode = '';
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      transportObservationFixture: transportFixture,
+      transportFixture,
       spawnCollector: () => {
         const collector = spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', collectorCode], { timeoutMs: 50_000, cleanupReservationMs: 2_000 });
         collector.stdout.on('data', chunk => { observedChunks.push(String(chunk)); });
@@ -6757,7 +6738,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     collectorCode = `const fs=require('node:fs');let split=0;let fresh='';setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n--------- beginning of system\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(stalePath)})){fs.rmSync(${JSON.stringify(stalePath)},{force:true});process.stdout.write(${JSON.stringify(staleLine)}+'\\n')}if(fs.existsSync(${JSON.stringify(releasePath)})){fs.rmSync(${JSON.stringify(releasePath)},{force:true});split=1;fresh=(Date.now()/1000).toFixed(3);process.stdout.write(fresh+${JSON.stringify(freshPrefix)})}if(split===1&&fs.existsSync(${JSON.stringify(completePath)})){fs.rmSync(${JSON.stringify(completePath)},{force:true});split=2;process.stdout.write('ket, closing\\n'+fresh+${JSON.stringify(freshPrefix)}+'ket, closing\\n')}if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
     try {
       const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-      measurement.requireGmsObservations();
+
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-transport-framing', { timeoutMs: 20_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-transport-framing', { timeoutMs: 20_000 }));
       await measurement.begin();
@@ -6834,7 +6815,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let workerFailure: BoundedCommandError | undefined;
     let collectorCode = '';
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      transportObservationFixture: transportFixture,
+      transportFixture,
       spawnCollector: () => spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', collectorCode], { timeoutMs: 50_000, cleanupReservationMs: 2_000 }),
       boundedCommand: async (binary, args, timeout, options) => {
         if (args.includes('snapshot') && args[args.indexOf('--boundary') + 1] === 'start') {
@@ -6857,7 +6838,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     });
     collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(triggerPath)})){fs.rmSync(${JSON.stringify(triggerPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I adbd: timeout expired while flushing socket, closing\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-transport-cancellation', { timeoutMs: 20_000 }));
       await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('gms-transport-cancellation', { timeoutMs: 20_000 }));
       await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot after transport acquisition started/u);
@@ -6908,7 +6888,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       let workerDispatches = 0;
       let collectorCode = '';
       const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        transportObservationFixture: transportFixture,
+        transportFixture,
         spawnCollector: () => spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', collectorCode], { timeoutMs: 50_000, cleanupReservationMs: 2_000 }),
         boundedCommand: async (binary, args, timeout, options) => {
           if (!args.includes('--android-transport-observation-trigger')) return boundedCommand(binary, args, timeout, options);
@@ -6920,7 +6900,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(triggerPath)})){fs.rmSync(${JSON.stringify(triggerPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I adbd: timeout expired while flushing socket, closing\\n')}if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
       try {
         const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-        measurement.requireGmsObservations();
+
         await measurement.observeGmsStage(stages[0], new PhaseBudget(`gms-transport-${mode}`, { timeoutMs: 20_000 }));
         await measurement.observeGmsStage(stages[1], new PhaseBudget(`gms-transport-${mode}`, { timeoutMs: 20_000 }));
         await measurement.begin();
@@ -6997,7 +6977,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let primaryFailure: unknown;
     let failed = false;
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-finalizer-concurrency', { timeoutMs: 30_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-finalizer-concurrency', { timeoutMs: 30_000 }));
       await measurement.begin();
@@ -7105,7 +7084,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     });
     let finalizationSettlement: Promise<PromiseSettledResult<void>> | undefined;
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-finalizer-barrier', { timeoutMs: 20_000 }));
       const precondition = await gmsStagePersistencePrecondition(fixture.root, stages, measurement);
       assert.match(precondition.violations[0] ?? '', /^GMS observations are missing or unreadable: /u, JSON.stringify(precondition));
@@ -7178,7 +7156,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       let failed = false;
       try {
         const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-        measurement.requireGmsObservations();
+
         await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-finalizer-first', { timeoutMs: 20_000 }));
         await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-finalizer-first', { timeoutMs: 20_000 }));
         await measurement.begin();
@@ -7273,7 +7251,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let noFinishFailed = false;
     collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${noFinishMeasurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${noFinishMeasurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
     try {
-      noFinishMeasurement.requireGmsObservations();
       await noFinishMeasurement.observeGmsStage(noFinishStages[0], new PhaseBudget('gms-no-finish', { timeoutMs: 20_000 }));
       await noFinishMeasurement.observeGmsStage(noFinishStages[1], new PhaseBudget('gms-no-finish', { timeoutMs: 20_000 }));
       await noFinishMeasurement.begin();
@@ -7343,7 +7320,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       });
       try {
         const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-        measurement.requireGmsObservations();
+
         await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-successful-terminal', { timeoutMs: 20_000 }));
         await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-successful-terminal', { timeoutMs: 20_000 }));
         await measurement.begin();
@@ -7435,7 +7412,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-persistence-accounting', { timeoutMs: 30_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-persistence-accounting', { timeoutMs: 30_000 }));
       await measurement.begin();
@@ -7726,7 +7702,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { boundedCommand: runChild });
     const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-byte-accounting', { timeoutMs: 60_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-byte-accounting', { timeoutMs: 60_000 }));
       await measurement.begin();
@@ -7840,7 +7815,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { boundedCommand: runChild });
     const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-event-loop-stall', { timeoutMs: 60_000 }));
       await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-event-loop-stall', { timeoutMs: 60_000 }));
       await measurement.begin();
@@ -7976,7 +7950,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.ok(Number.isSafeInteger(observerWriterDescriptor) && observerWriterDescriptor! > 0);
       observerWriter.fd = observerWriterDescriptor!;
       await readerConnected;
-      measurement.requireGmsObservations();
+
       stageStartedAt = performance.now();
       stage = measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-owner-retirement', { timeoutMs: 10_000 }));
       const admission = await Promise.race([
@@ -8096,7 +8070,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-late-ownership', { timeoutMs: 10_000 }));
       await measurement.finalizeGmsObservations();
       const observation = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
@@ -8131,7 +8104,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { boundedCommand: runChild });
     let stage: Promise<void> | undefined;
     try {
-      measurement.requireGmsObservations();
+
       stage = measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-finalize-interruption', { timeoutMs: 20_000 }));
       await commandEntered;
       const readyDeadline = Date.now() + 5_000;
@@ -8209,7 +8182,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       },
     });
     try {
-      measurement.requireGmsObservations();
       await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-redaction', { timeoutMs: 10_000 }));
       await measurement.finalizeGmsObservations();
       const bytes = await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8');
@@ -8295,7 +8267,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           throw new Error(`unexpected command ${args.join(' ')}`);
         },
       });
-      measurement.requireGmsObservations();
+
       await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-timeout-probe', { timeoutMs: parentTimeoutMs, now: () => clockMs }));
       await measurement.finalizeGmsObservations();
       assert.deepEqual(snapshot.limits.ownershipTimeoutMs, limits.ownershipTimeoutMs);
@@ -8348,7 +8320,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     });
     let limits: { ownershipTimeoutMs: number; parseReserveMs: number; persistenceOperationTimeoutMs: number } | undefined;
     try {
-      attackMeasurement.requireGmsObservations();
+
       const attackStarted = performance.now();
       await attackMeasurement.observeGmsStage('after-device-start', new PhaseBudget('gms-parser-bound', { timeoutMs: 10_000 }));
       await attackMeasurement.finalizeGmsObservations();
@@ -8382,7 +8354,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         timeoutMs: failure === 'timeout' ? ownershipAndParseReservedBudgetMs : limits!.persistenceOperationTimeoutMs + 4_000,
       });
       try {
-        measurement.requireGmsObservations();
+
         if (failure === 'malformed') await writeFile(join(current.fixtureDirectory, 'valid-gms.dump'), originalDump.slice(0, -10));
         if (failure === 'timeout') await writeFile(join(current.fixtureDirectory, 'valid-vending.json'), JSON.stringify({ gmsTimeout: true }));
         if (failure === 'wrong-owner') await writeFile(current.environment.MOBILE_DEVICE_OWNERSHIP_FILE!, 'android:other-device');

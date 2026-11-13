@@ -704,7 +704,6 @@ async function main(): Promise<void> {
       measurement = new AndroidEnvironmentMeasurement(platformOptions.deviceId || '', outputDir, repositoryPath('tests/mobile/toolchains.json'), {}, budget);
       identity = { ...identity, measurementId: measurement.id };
       measurement.bind(identity);
-      measurement.requireGmsObservations();
       android.environmentMeasurement = measurement;
     }
     result = await runUpgrade(platform, fixtureInfo, bundleSet, (nextStage) => { stage = nextStage; }, budget, async () => {

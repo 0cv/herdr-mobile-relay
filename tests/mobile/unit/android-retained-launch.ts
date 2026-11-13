@@ -541,7 +541,10 @@ else if (request === 'shell pm list packages') {
         else process.env.ADB_SERVER_SOCKET = endpoint;
       }
     };
+    await measurement.observeGmsStage('after-device-start', budget);
+    await measurement.observeGmsStage('before-measurement-begin', budget);
     await measurement.begin();
+    for (const stage of ['after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const) await measurement.observeGmsStage(stage, budget);
     platform.environmentMeasurement = measurement;
     if (!fixture.freshSetup) {
       await (platform as any).createChromeSession(false);
