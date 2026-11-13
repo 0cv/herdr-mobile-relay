@@ -118,9 +118,6 @@ func resolveClaudeChain(ctx context.Context, anchor Location, anchorSessionID st
 // observer alone would discover an over-budget ReadAt only after the kernel had
 // already returned the bytes.
 func resolveClaudeChainWithReadHooks(ctx context.Context, anchor Location, anchorSessionID string, reserve, observe func(int64) error) (claudeChain, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	anchorSessionID = strings.TrimSpace(anchorSessionID)
 	if anchor.Path == "" || anchor.Root == "" || !safeSessionID(anchorSessionID) {
 		return claudeChain{}, errors.New("invalid Claude chain anchor")
@@ -321,9 +318,6 @@ func inspectClaudeSegmentFooter(ctx context.Context, source fileSource, sessionI
 }
 
 func readFileRangeObservedWithReserve(ctx context.Context, file *os.File, start, end int64, reserve, observe func(int64) error) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if file == nil || start < 0 || end < start {
 		return nil, errors.New("invalid file range")
 	}
@@ -373,9 +367,6 @@ func claudeFooterBoundaryUninspectableBytes(footer []byte, maxRecordBytes int64)
 // captured boundary. It is used by the legacy reader and deliberately verifies
 // the descriptor before reading, so an old chain never grows into a new leaf.
 func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64) (string, bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}

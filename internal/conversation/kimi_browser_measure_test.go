@@ -46,8 +46,13 @@ func TestKimiBrowserColdWarmMeasurements(t *testing.T) {
 			scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane"}
 			var physical int64
 			replays := 0
-			browser.physicalReadObserver = func(n int64) { physical += n }
-			browser.kimiProjectionObserver = func() { replays++ }
+			setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+				n := observation.bytes
+				physical += n
+			})
+			setBrowserObserver(browser, "kimi_projection", func(observation browserObservation) {
+				replays++
+			})
 			read := func() BrowsePage {
 				t.Helper()
 				page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 24})

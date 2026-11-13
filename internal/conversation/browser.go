@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -221,6 +222,18 @@ type browseJob struct {
 	retired                bool
 }
 
+type browserObservation struct {
+	kind       string
+	bytes      int64
+	stage      string
+	job        *browseJob
+	locked     bool
+	chain      claudeChain
+	afterBuild bool
+	evidence   []claudeRangeEvidence
+	work       kimiMaterializationWork
+}
+
 type Browser struct {
 	reader    *Reader
 	cacheRoot string
@@ -263,26 +276,9 @@ type Browser struct {
 	validationWG sync.WaitGroup
 	closeOnce    sync.Once
 
-	capacityOperationObserver        func(string, *browseJob, bool)
-	snapshotReadObserver             func(*browseJob)
-	sourceReadObserver               func(int64)
-	recentReadObserver               func(int64)
-	physicalReadObserver             func(int64)
-	foregroundReadObserver           func(int64)
-	backgroundReadObserver           func(int64)
-	chainQueueAdmissionObserver      func(*browseJob)
-	validationReadObserver           func(int64)
-	discoveryReadObserver            func(int64)
-	chainPreparationObserver         func()
-	chainCompactionObserver          func()
-	chainContextAdmissionObserver    func(claudeChain, bool)
-	chainWorkerCaptureObserver       func([]claudeRangeEvidence)
-	chainWorkerBeforeCaptureObserver func()
-	workerBeforeFinishObserver       func(*browseJob)
-	recentCache                      *recentProjectionCache
-	kimiProjection                   *kimiProjectionSnapshot
-	kimiProjectionObserver           func()
-	kimiMaterializationObserver      func(kimiMaterializationWork)
+	observer       atomic.Pointer[func(browserObservation)]
+	recentCache    *recentProjectionCache
+	kimiProjection *kimiProjectionSnapshot
 }
 
 func NewBrowser(reader *Reader, cacheRoot string, options BrowserOptions) (*Browser, error) {
@@ -475,72 +471,45 @@ func (b *Browser) signalWake() {
 	}
 }
 
-func (b *Browser) observeSourceRead(bytes int64) {
-	if b.sourceReadObserver != nil {
-		b.sourceReadObserver(bytes)
-	}
-}
-
-func (b *Browser) observeRecentRead(bytes int64) {
-	if b.recentReadObserver != nil {
-		b.recentReadObserver(bytes)
+func (b *Browser) observe(event browserObservation) {
+	if observer := b.observer.Load(); observer != nil {
+		(*observer)(event)
 	}
 }
 
 func (b *Browser) observePhysicalRead(bytes int64) {
 	b.observeForegroundRead(bytes)
-	if b.physicalReadObserver != nil {
-		b.physicalReadObserver(bytes)
-	}
+	b.observe(browserObservation{kind: "physical_read", bytes: bytes})
 }
 
 func (b *Browser) observeDiscoveryRead(bytes int64) {
 	b.observeForegroundRead(bytes)
-	if b.discoveryReadObserver != nil {
-		b.discoveryReadObserver(bytes)
-	}
+	b.observe(browserObservation{kind: "discovery_read", bytes: bytes})
 }
 
-// observeRangeRead accounts a source range consumed by browser validation.
-// The dedicated validation hook makes the physical validation pass visible
-// without charging it to the recent-projection budget hook. Validation is
-// deliberately accounted separately from recent-page admission; it is owned
-// by the bounded validation scheduler below.
 func (b *Browser) observeRangeRead(bytes int64) {
-	if bytes <= 0 {
-		return
+	if bytes > 0 {
+		b.observe(browserObservation{kind: "source_read", bytes: bytes})
 	}
-	b.observeSourceRead(bytes)
 }
 
-// observeValidationPhysicalRead is called by the bounded digest pass for the
-// bytes actually returned by the file reader. Keep the legacy source-range
-// accounting above separate: it describes the logical obligation, while this
-// hook lets tests and diagnostics measure physical validation I/O.
 func (b *Browser) observeValidationPhysicalRead(bytes int64) {
 	b.observeForegroundRead(bytes)
-	if bytes <= 0 {
-		return
-	}
-	if b.validationReadObserver != nil {
-		b.validationReadObserver(bytes)
+	if bytes > 0 {
+		b.observe(browserObservation{kind: "validation_read", bytes: bytes})
 	}
 }
 
 func (b *Browser) observeForegroundRead(bytes int64) {
-	if bytes > 0 && b.foregroundReadObserver != nil {
-		b.foregroundReadObserver(bytes)
+	if bytes > 0 {
+		b.observe(browserObservation{kind: "foreground_read", bytes: bytes})
 	}
 }
 
 func (b *Browser) observeBackgroundRead(bytes int64) error {
 	if bytes > 0 {
-		if b.backgroundReadObserver != nil {
-			b.backgroundReadObserver(bytes)
-		}
-		if b.validationReadObserver != nil {
-			b.validationReadObserver(bytes)
-		}
+		b.observe(browserObservation{kind: "background_read", bytes: bytes})
+		b.observe(browserObservation{kind: "validation_read", bytes: bytes})
 	}
 	return nil
 }
@@ -550,21 +519,9 @@ func (b *Browser) observeValidationRead(bytes int64) error {
 	return nil
 }
 
-func (b *Browser) observeChainPreparationScan() {
-	if b.chainPreparationObserver != nil {
-		b.chainPreparationObserver()
-	}
-}
-
-func (b *Browser) observeChainCompactionPhase() {
-	if b.chainCompactionObserver != nil {
-		b.chainCompactionObserver()
-	}
-}
-
 func (b *Browser) observeChainWorkerCapture(evidence []claudeRangeEvidence) {
-	if b.chainWorkerCaptureObserver != nil {
-		b.chainWorkerCaptureObserver(append([]claudeRangeEvidence(nil), evidence...))
+	if b.observer.Load() != nil {
+		b.observe(browserObservation{kind: "chain_worker_capture", evidence: append([]claudeRangeEvidence(nil), evidence...)})
 	}
 }
 
@@ -620,9 +577,6 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	b.readWG.Add(1)
 	b.mu.Unlock()
 	defer b.readWG.Done()
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return browseRequestCancelled(), nil
 	}
@@ -1403,7 +1357,7 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 		}
 		return b.continueJob(ctx, request, job)
 	}
-	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, "", -1)
+	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, "", -1, claudeChainJobBinding{})
 	if page != nil {
 		return *page, nil
 	}
@@ -1484,7 +1438,7 @@ type claudeChainJobBinding struct {
 	observedRanges []claudeRangeEvidence
 }
 
-func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, chainContextID string, chainSegment int, bindings ...claudeChainJobBinding) (*browseJob, *BrowsePage) {
+func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, chainContextID string, chainSegment int, binding claudeChainJobBinding) (*browseJob, *BrowsePage) {
 	if b.cacheErr != nil {
 		page := failPage("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true)
 		return nil, &page
@@ -1562,11 +1516,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		page := failPage("index_failed", "Older history preparation is shutting down.", true)
 		return nil, &page
 	}
-	var binding claudeChainJobBinding
-	if len(bindings) > 0 {
-		binding = bindings[0]
-		binding.observedRanges = append([]claudeRangeEvidence(nil), binding.observedRanges...)
-	}
+	binding.observedRanges = append([]claudeRangeEvidence(nil), binding.observedRanges...)
 	job := &browseJob{
 		id: id, dedupKey: dedupKey, scope: scope, scopeID: scopeID, source: source,
 		boundary: boundary, rangeStart: start, rangeEnd: end, rangeDigest: digest,
@@ -1595,8 +1545,8 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	b.unlockCapacity()
 	capacityLocked = false
 	b.signalWake()
-	if chainContextID != "" && b.chainQueueAdmissionObserver != nil {
-		b.chainQueueAdmissionObserver(job)
+	if chainContextID != "" {
+		b.observe(browserObservation{kind: "chain_queue_admission", job: job})
 	}
 	return job, nil
 }
@@ -1637,7 +1587,7 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 				job.autoRetried = true
 				job.mu.Unlock()
 			}
-			if b.retryJob(ctx, job) {
+			if b.retryJob(ctx, job, nil) {
 				return b.preparingPage(job, cursor), nil
 			}
 		}
@@ -1656,14 +1606,7 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 	return b.readSnapshotPage(ctx, request.Scope, request.Limit, job)
 }
 
-func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*claudeChainForegroundBudget) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
+func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget *claudeChainForegroundBudget) bool {
 	job.mu.RLock()
 	scope := job.scope
 	sourceRevision := job.source.revision
@@ -1796,8 +1739,8 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*c
 	b.unlockCapacity()
 	capacityLocked = false
 	b.signalWake()
-	if job.chainContextID != "" && b.chainQueueAdmissionObserver != nil {
-		b.chainQueueAdmissionObserver(job)
+	if job.chainContextID != "" {
+		b.observe(browserObservation{kind: "chain_queue_admission", job: job})
 	}
 	return true
 }
@@ -1839,12 +1782,7 @@ func (b *Browser) readSnapshotPage(ctx context.Context, scope BrowseScope, limit
 }
 
 func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, limit int, job *browseJob, boundary int64) (BrowsePage, error) {
-	b.mu.Lock()
-	observer := b.snapshotReadObserver
-	b.mu.Unlock()
-	if observer != nil {
-		observer(job)
-	}
+	b.observe(browserObservation{kind: "snapshot_read", job: job})
 	b.renewJob(job)
 	job.mu.Lock()
 	index := job.index
@@ -1863,7 +1801,7 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 	if index == nil {
 		return failPage("index_failed", "The prepared conversation history is no longer available.", true), nil
 	}
-	if err := b.validateSnapshotJob(ctx, job, source); err != nil {
+	if err := b.validateSnapshotJob(ctx, job, source, nil); err != nil {
 		if ctx.Err() != nil {
 			return browseRequestCancelled(), nil
 		}
@@ -2097,11 +2035,7 @@ func (b *Browser) ensureClaudeChainJobValidation(job *browseJob, source fileSour
 	return errClaudeChainValidationPending
 }
 
-func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, source fileSource, foreground ...*claudeChainForegroundBudget) error {
-	var foregroundBudget *claudeChainForegroundBudget
-	if len(foreground) > 0 {
-		foregroundBudget = foreground[0]
-	}
+func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, source fileSource, foregroundBudget *claudeChainForegroundBudget) error {
 	if err := validateSnapshotSource(source); err != nil {
 		return err
 	}
@@ -2207,9 +2141,7 @@ func (b *Browser) snapshotCursor(scope BrowseScope, job *browseJob, boundary int
 func (b *Browser) runJob(job *browseJob) {
 	defer b.workerWG.Done()
 	defer func() {
-		if b.workerBeforeFinishObserver != nil {
-			b.workerBeforeFinishObserver(job)
-		}
+		b.observe(browserObservation{kind: "worker_before_finish", job: job})
 		job.mu.Lock()
 		job.running = false
 		if job.err != nil {
@@ -2224,8 +2156,8 @@ func (b *Browser) runJob(job *browseJob) {
 			b.failJob(job, "index_failed", "History preparation failed on this computer.", true)
 		}
 	}()
-	if job.chainContextID != "" && b.chainWorkerBeforeCaptureObserver != nil {
-		b.chainWorkerBeforeCaptureObserver()
+	if job.chainContextID != "" {
+		b.observe(browserObservation{kind: "chain_worker_before_capture"})
 	}
 	job.mu.Lock()
 	job.phase = "scanning"
@@ -2267,7 +2199,7 @@ func (b *Browser) runJob(job *browseJob) {
 		// valid range may be rewritten after the admission read and before the
 		// scan establishes a new full digest; without this second check the
 		// rewritten bytes could be published as the old cursor's snapshot.
-		b.observeChainPreparationScan()
+		b.observe(browserObservation{kind: "chain_preparation"})
 	}
 	scanDigest := sha256.New()
 	records, err := NewJSONLRecordReader(b.ctx, file, 0, job.source.end, b.options.MaxRecordBytes, func(progress JSONLRecordProgress) {
@@ -2365,7 +2297,7 @@ func (b *Browser) runJob(job *browseJob) {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
 		return
 	}
-	b.observeSourceRead(job.source.end)
+	b.observe(browserObservation{kind: "source_read", bytes: job.source.end})
 	secondDigest, digestErr := fileRangeDigestObserved(b.ctx, file, 0, job.source.end, func() error {
 		if !b.jobHasInterest(job) {
 			return errJSONLCheckpoint

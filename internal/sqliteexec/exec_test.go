@@ -22,10 +22,7 @@ func TestNativeQueryJSONRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exec, err := Resolve(BackendNative, "")
-	if err != nil || !exec.Ready() {
-		t.Fatalf("native executor: %v ready=%v", err, exec != nil && exec.Ready())
-	}
+	exec := New()
 	raw, err := exec.QueryJSON(context.Background(), database,
 		`SELECT id AS session_id, title, CAST(n AS REAL) AS timestamp FROM sessions ORDER BY id;`,
 		1<<20,
@@ -45,38 +42,6 @@ func TestNativeQueryJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestNativeReadyWithoutCLI(t *testing.T) {
-	t.Parallel()
-	exec, err := Resolve(BackendNative, filepath.Join(t.TempDir(), "missing-sqlite3"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !exec.Ready() {
-		t.Fatal("native must be ready without sqlite3 CLI")
-	}
-}
-
-func TestAutoPrefersNative(t *testing.T) {
-	t.Parallel()
-	exec, err := Resolve(BackendAuto, filepath.Join(t.TempDir(), "missing-sqlite3"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !exec.Ready() {
-		t.Fatal("auto must use native when CLI is missing")
-	}
-	if _, ok := exec.(*nativeExecutor); !ok {
-		t.Fatalf("auto executor type = %T, want *nativeExecutor", exec)
-	}
-}
-
-func TestCLIUnavailable(t *testing.T) {
-	t.Parallel()
-	if _, err := Resolve(BackendCLI, filepath.Join(t.TempDir(), "missing-sqlite3")); err == nil {
-		t.Fatal("expected unavailable")
-	}
-}
-
 func TestNativeQueryJSONPathWithSpaces(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -84,10 +49,7 @@ func TestNativeQueryJSONPathWithSpaces(t *testing.T) {
 	if err := seedDatabaseWrite(database); err != nil {
 		t.Fatal(err)
 	}
-	exec, err := Resolve(BackendNative, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	exec := New()
 	raw, err := exec.QueryJSON(context.Background(), database, `SELECT id AS session_id FROM sessions;`, 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -114,10 +76,7 @@ func TestNativeQueryJSONOutputLimit(t *testing.T) {
 	}
 	_ = db.Close()
 
-	exec, err := Resolve(BackendNative, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	exec := New()
 	_, err = exec.QueryJSON(context.Background(), database, `SELECT id AS session_id FROM sessions;`, 8)
 	if !errors.Is(err, ErrOutputLimit) {
 		t.Fatalf("err = %v, want ErrOutputLimit", err)
@@ -141,10 +100,7 @@ func TestNativeQueryJSONDoesNotHTMLEscape(t *testing.T) {
 	}
 	_ = db.Close()
 
-	exec, err := Resolve(BackendNative, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	exec := New()
 	// Envelope is ["{...}"] — raw HTML fits in ~1.3 MiB; HTML-escaped would be ~7+ MiB.
 	maxBytes := 2 << 20
 	raw, err := exec.QueryJSON(context.Background(), database, `SELECT content FROM tool;`, maxBytes)
@@ -194,10 +150,7 @@ func TestNativeQueryJSONHonoursCancellationDuringScan(t *testing.T) {
 	}
 	_ = db.Close()
 
-	exec, err := Resolve(BackendNative, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	exec := New()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already done before QueryJSON — must not succeed
 	_, err = exec.QueryJSON(ctx, database, `SELECT id, payload FROM sessions;`, 32<<20)
@@ -218,20 +171,6 @@ func TestNativeQueryJSONHonoursCancellationDuringScan(t *testing.T) {
 	}
 	if elapsed > 200*time.Millisecond {
 		t.Fatalf("cancellation too slow: %s", elapsed)
-	}
-}
-
-func TestNormalizeJSONArray(t *testing.T) {
-	t.Parallel()
-	if got := string(NormalizeJSONArray(nil)); got != "[]" {
-		t.Fatalf("nil -> %q", got)
-	}
-	if got := string(NormalizeJSONArray([]byte("  \n"))); got != "[]" {
-		t.Fatalf("blank -> %q", got)
-	}
-	in := []byte(`[{"a":1}]`)
-	if got := NormalizeJSONArray(in); string(got) != string(in) {
-		t.Fatalf("passthrough = %s", got)
 	}
 }
 

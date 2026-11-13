@@ -9,6 +9,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Interface sizes saved before 0.10.0 and never changed now reset to the
   default. Sizes saved by newer app builds are unchanged.
+- Relay status and `/healthz` now report `gateway.stun.mapped` as a single address
+  string instead of an array, or an empty string before discovery succeeds.
 
 ### Fixed
 
@@ -27,6 +29,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- `HERDR_SQLITE_BACKEND` and the external `sqlite3` backend. Conversation history
+  always uses the SQLite driver built into the relay; no `sqlite3` command is needed.
 - Support for upgrading installs older than 0.20.0. Uninstall them before
   installing this version, then pair every phone again.
 

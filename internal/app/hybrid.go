@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -78,7 +77,7 @@ type hybridTransport struct {
 // operator can tell "no STUN offered" apart from "STUN offered but silent".
 type stunStatus struct {
 	configured bool
-	mapped     []netip.AddrPort
+	mapped     netip.AddrPort
 	checkedAt  time.Time
 }
 
@@ -182,7 +181,7 @@ func (h *hybridTransport) reachabilityLoop(ctx context.Context) {
 		}
 		if h.mapper != nil {
 			if mapping, ok := h.mapper.Current(); ok {
-				h.webrtc.SetNAT1To1IPs([]string{mapping.External.Addr().String()})
+				h.webrtc.SetNAT1To1IP(mapping.External.Addr().String())
 			}
 		}
 		discovered := h.discoverMappedAddress(ctx)
@@ -244,24 +243,24 @@ func (h *hybridTransport) runSelfTest(ctx context.Context) {
 func (h *hybridTransport) discoverMappedAddress(ctx context.Context) bool {
 	server := stunURL(h.gateway.CurrentURL(), h.gateway.STUNPort())
 	if server == "" {
-		h.webrtc.SetSTUNServers(nil)
+		h.webrtc.SetSTUNServer("")
 		h.mu.Lock()
 		h.stun.configured = false
 		h.mu.Unlock()
 		return false
 	}
-	h.webrtc.SetSTUNServers([]string{server})
+	h.webrtc.SetSTUNServer(server)
 	h.mu.Lock()
 	h.stun.configured = true
 	h.mu.Unlock()
 
-	mapped, err := h.webrtc.DiscoverMappedAddresses(ctx)
+	mapped, err := h.webrtc.DiscoverMappedAddress(ctx)
 	if err != nil {
 		h.logger.Warn("stun address discovery failed", "error", err)
 		return false
 	}
 	h.mu.Lock()
-	changed := !slices.Equal(h.stun.mapped, mapped)
+	changed := h.stun.mapped != mapped
 	h.stun.mapped = mapped
 	h.stun.checkedAt = time.Now().UTC()
 	h.mu.Unlock()
@@ -271,10 +270,8 @@ func (h *hybridTransport) discoverMappedAddress(ctx context.Context) bool {
 	if !changed {
 		return true
 	}
-	h.webrtc.PublishMappedAddresses(mapped)
-	// The addresses themselves are the relay's public endpoints; only the shape
-	// of the result is logged.
-	h.logger.Info("stun address discovery", "families", len(mapped))
+	h.webrtc.PublishMappedAddress(mapped)
+	h.logger.Info("stun address discovery")
 	return true
 }
 
@@ -373,13 +370,11 @@ func (h *hybridTransport) status() map[string]any {
 		// gateway offers no address discovery" from "it does and we heard
 		// nothing back".
 		discovery := map[string]any{"configured": stun.configured}
-		// An array because a dual-stack relay discovers one mapping per family,
-		// and the IPv6 one is usually the address that makes a direct path easy.
-		addresses := make([]string, 0, len(stun.mapped))
-		for _, mapped := range stun.mapped {
-			addresses = append(addresses, mapped.String())
+		mapped := ""
+		if stun.mapped.IsValid() {
+			mapped = stun.mapped.String()
 		}
-		discovery["mapped"] = addresses
+		discovery["mapped"] = mapped
 		if !stun.checkedAt.IsZero() {
 			discovery["checked_at"] = stun.checkedAt
 		}

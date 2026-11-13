@@ -32,7 +32,7 @@ const chromeDataChannelOffer = "v=0\r\n" +
 	"a=max-message-size:262144\r\n"
 
 func TestManagerAnswersRealBrowserOffer(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-chrome"}
 	answer, err := h.manager.HandleOffer(context.Background(), key, chromeDataChannelOffer)
@@ -55,7 +55,7 @@ func TestManagerAnswersRealBrowserOffer(t *testing.T) {
 // TestManagerRejectsOfferMissingLineTerminator documents the failure mode that
 // trimming an SDP produces, so nobody re-introduces a TrimSpace on the way in.
 func TestManagerRejectsOfferMissingLineTerminator(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-trimmed"}
 	trimmed := strings.TrimSpace(chromeDataChannelOffer)

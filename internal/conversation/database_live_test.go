@@ -26,7 +26,6 @@ type liveBudgetExecutor struct {
 	plans    map[string]bool
 }
 
-func (e *liveBudgetExecutor) Ready() bool { return e.base.Ready() }
 func (e *liveBudgetExecutor) QueryJSON(ctx context.Context, database, query string, maxBytes int) ([]byte, error) {
 	if e.active && (strings.Contains(query, "COUNT(*)") || strings.Contains(query, " OVER (") || strings.Contains(query, " OFFSET ")) {
 		e.t.Fatalf("unbounded live query: %s", query)
@@ -99,7 +98,7 @@ func liveDatabaseFixture(t *testing.T, format string, count int) (*sql.DB, *Brow
 	}
 	seed(max(1, count-maxPageSize+1), count)
 	reader := NewReader(t.TempDir())
-	executor := &liveBudgetExecutor{t: t, base: sqliteexec.MustFromEnv(), plans: make(map[string]bool)}
+	executor := &liveBudgetExecutor{t: t, base: sqliteexec.New(), plans: make(map[string]bool)}
 	reader.openCode.executor, reader.hermes.executor = executor, executor
 	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
 	if err != nil {

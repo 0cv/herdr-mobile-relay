@@ -165,7 +165,7 @@ type harness struct {
 	candidates []Candidate
 }
 
-func newHarness(t *testing.T, maxSessions int, mappedIPs []string) *harness {
+func newHarness(t *testing.T, maxSessions int) *harness {
 	t.Helper()
 
 	h := &harness{
@@ -175,7 +175,6 @@ func newHarness(t *testing.T, maxSessions int, mappedIPs []string) *harness {
 	manager, err := New(Options{
 		Logger:           quietLogger(),
 		MaxSessions:      maxSessions,
-		NAT1To1IPs:       mappedIPs,
 		OnLocalCandidate: h.routeCandidate,
 		Serve: func(ctx context.Context, conn transport.FrameConn) {
 			h.recordServe(conn)
@@ -323,7 +322,7 @@ func (h *harness) awaitSessionCount(t *testing.T, want int) {
 }
 
 func TestManagerServesDataChannelOverLoopback(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	if h.manager.LocalPort() <= 0 {
 		t.Fatal("manager did not resolve an ice port")
 	}
@@ -383,7 +382,7 @@ func TestManagerServesDataChannelOverLoopback(t *testing.T) {
 }
 
 func TestManagerRefusesUnexpectedDataChannelLabel(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-bad-label"}
 	h.negotiate(t, key, "not-herdr")
@@ -397,7 +396,7 @@ func TestManagerRefusesUnexpectedDataChannelLabel(t *testing.T) {
 }
 
 func TestManagerEnforcesMaxSessions(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 
 	first := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, first, dataChannelLabel)
@@ -424,7 +423,7 @@ func TestManagerEnforcesMaxSessions(t *testing.T) {
 }
 
 func TestManagerRenegotiatesKnownSession(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	peer := h.negotiate(t, key, dataChannelLabel)
@@ -458,7 +457,7 @@ func TestManagerRenegotiatesKnownSession(t *testing.T) {
 }
 
 func TestManagerCloseSessionAndUnknownSignaling(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	unknown := SessionKey{ClientID: "client-x", RequestID: "req-x"}
 	if err := h.manager.AddRemoteCandidate(unknown, Candidate{Candidate: "candidate:0 1 udp 1 127.0.0.1 1 typ host"}); !errors.Is(err, errNoSession) {
@@ -478,8 +477,8 @@ func TestManagerCloseSessionAndUnknownSignaling(t *testing.T) {
 }
 
 func TestManagerAdvertisesMappedAddress(t *testing.T) {
-	h := newHarness(t, 0, nil)
-	h.manager.SetNAT1To1IPs([]string{"203.0.113.7"})
+	h := newHarness(t, 0)
+	h.manager.SetNAT1To1IP("203.0.113.7")
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, key, dataChannelLabel)
@@ -501,7 +500,7 @@ func TestManagerAdvertisesMappedAddress(t *testing.T) {
 }
 
 func TestManagerClosesSessionOnFramingViolation(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	peer := h.negotiate(t, key, dataChannelLabel)
@@ -524,7 +523,7 @@ func TestManagerClosesSessionOnFramingViolation(t *testing.T) {
 }
 
 func TestManagerSweepsStalledAssembly(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	peer := h.negotiate(t, key, dataChannelLabel)
@@ -569,7 +568,7 @@ func TestDataChannelConnRejectsOversizedFrame(t *testing.T) {
 func TestManagerCloseReleasesGoroutines(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, key, dataChannelLabel)
 	h.awaitServe(t)
@@ -655,9 +654,9 @@ func stunBindingSuccess(request []byte, ip net.IP, port int) ([]byte, bool) {
 // TestDiscoverMappedAddressRequiresSTUNServer keeps a relay whose gateway
 // advertises no STUN port from silently reporting a mapping it never learned.
 func TestDiscoverMappedAddressRequiresSTUNServer(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 
-	if _, err := h.manager.DiscoverMappedAddresses(context.Background()); !errors.Is(err, errNoSTUNServer) {
+	if _, err := h.manager.DiscoverMappedAddress(context.Background()); !errors.Is(err, errNoSTUNServer) {
 		t.Fatalf("discovery without a server = %v, want errNoSTUNServer", err)
 	}
 }
@@ -667,15 +666,15 @@ func TestDiscoverMappedAddressRequiresSTUNServer(t *testing.T) {
 // gathers on, so the reflected port is the shared ICE port.
 func TestDiscoverMappedAddressReflectsSharedSocket(t *testing.T) {
 	server := startSTUNResponder(t, 0)
-	h := newHarness(t, 1, nil)
-	h.manager.SetSTUNServers([]string{"stun:" + server})
+	h := newHarness(t, 1)
+	h.manager.SetSTUNServer("stun:" + server)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	var discovered []netip.AddrPort
+	var mapped netip.AddrPort
 	var err error
 	for attempt := range 3 {
-		discovered, err = h.manager.DiscoverMappedAddresses(ctx)
+		mapped, err = h.manager.DiscoverMappedAddress(ctx)
 		if err == nil {
 			break
 		}
@@ -687,10 +686,6 @@ func TestDiscoverMappedAddressReflectsSharedSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover mapped address after bounded connectivity attempts: %v", err)
 	}
-	if len(discovered) == 0 {
-		t.Fatal("discovery returned no mappings")
-	}
-	mapped := discovered[0]
 	if got := mapped.Addr().String(); got != "127.0.0.1" {
 		t.Fatalf("mapped ip = %s, want 127.0.0.1", got)
 	}
@@ -703,10 +698,11 @@ func TestDiscoverMappedAddressReflectsSharedSocket(t *testing.T) {
 // router: the port survives the NAT, so pion can gather the reflexive
 // candidate itself and no candidate has to be synthesised.
 func TestPublishMappedAddressPortPreservedFeedsNAT1To1(t *testing.T) {
-	h := newHarness(t, 1, []string{"198.51.100.7"})
+	h := newHarness(t, 1)
+	h.manager.SetNAT1To1IP("198.51.100.7")
 	mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(h.manager.LocalPort()))
 
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 
 	h.manager.mu.Lock()
 	ips := h.manager.natIPsLocked()
@@ -727,16 +723,16 @@ func TestPublishMappedAddressPortPreservedFeedsNAT1To1(t *testing.T) {
 // session already reserved from the old API must receive the mapping by
 // trickle even when the NAT preserved the shared socket's port.
 func TestPublishMappedAddressPortPreservedUpdatesPendingSession(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.manager.mu.Lock()
 	h.manager.newSessionLocked(key)
 	h.manager.mu.Unlock()
 	mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(h.manager.LocalPort()))
 
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 	// A keepalive reporting the same mapping must not duplicate the candidate.
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 
 	got := h.localCandidates()
 	if len(got) != 1 {
@@ -760,7 +756,7 @@ func TestPublishMappedAddressPortPreservedUpdatesPendingSession(t *testing.T) {
 // which rewrites the port: NAT1To1 cannot express that, so exactly one
 // reflexive candidate is synthesised and trickled per session.
 func TestPublishMappedAddressPortChangedTricklesSrflx(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.manager.mu.Lock()
 	h.manager.newSessionLocked(key)
@@ -771,9 +767,9 @@ func TestPublishMappedAddressPortChangedTricklesSrflx(t *testing.T) {
 		externalPort = h.manager.LocalPort() - 1
 	}
 	mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(externalPort))
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 	// A repeated discovery of the same address must not duplicate it.
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 
 	got := h.localCandidates()
 	if len(got) != 1 {
@@ -811,6 +807,38 @@ func TestPublishMappedAddressPortChangedTricklesSrflx(t *testing.T) {
 	}
 }
 
+func TestPublishMappedAddressReachesOffersAndUpdates(t *testing.T) {
+	for name, publishFirst := range map[string]bool{"before_offer": true, "after_offer": false} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, 1)
+			externalPort := h.manager.LocalPort()%65535 + 1
+			mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(externalPort))
+			if publishFirst {
+				h.manager.PublishMappedAddress(mapped)
+			}
+			key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
+			h.negotiateWithCandidates(t, key, dataChannelLabel, false)
+			h.manager.PublishMappedAddress(mapped)
+			h.manager.PublishMappedAddress(mapped)
+
+			updated := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), mapped.Port())
+			h.manager.PublishMappedAddress(updated)
+			h.manager.PublishMappedAddress(updated)
+
+			var reflexive []string
+			for _, candidate := range h.localCandidates() {
+				if candidateType(candidate.Candidate) == "srflx" {
+					reflexive = append(reflexive, candidate.Candidate)
+				}
+			}
+			want := []string{h.manager.srflxCandidate(mapped), h.manager.srflxCandidate(updated)}
+			if !slices.Equal(reflexive, want) {
+				t.Fatalf("reflexive candidates = %v, want %v", reflexive, want)
+			}
+		})
+	}
+}
+
 // Candidate types are read from strings the remote peer supplies, so the parser
 // must be closed: an unknown or malformed type becomes "other" rather than a new
 // map key an attacker chooses.
@@ -833,7 +861,7 @@ func TestCandidateTypeIsClosedSet(t *testing.T) {
 }
 
 func TestSessionReportEmptyCandidateTypesAreObjects(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	h.manager.mu.Lock()
 	h.manager.newSessionLocked(SessionKey{ClientID: "client-1", RequestID: "req-1"})
 	h.manager.mu.Unlock()
@@ -858,7 +886,7 @@ func TestSessionReportEmptyCandidateTypesAreObjects(t *testing.T) {
 
 // A report must never carry an address: /healthz is unauthenticated.
 func TestSessionReportCarriesTypesOnly(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, key, dataChannelLabel)
 
@@ -905,7 +933,7 @@ func awaitSelectedPair(t *testing.T, s *session) SessionReport {
 // direct session, and a session that closes without one is the cohort that
 // would justify symmetric-NAT port prediction.
 func TestOutcomeCountersClassifyEachSessionOnce(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	if got := h.manager.Outcomes(); got.Direct != 0 || got.Relayed != 0 {
 		t.Fatalf("fresh manager outcomes = %+v, want zeroes", got)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,10 +12,6 @@ import (
 )
 
 func TestOpenCodeQueryPagesNewestMessagesThenRestoresChronologicalOrder(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	database := filepath.Join(t.TempDir(), "opencode.db")
 	const messageCount = 5010
 	var sql strings.Builder
@@ -25,13 +20,10 @@ func TestOpenCodeQueryPagesNewestMessagesThenRestoresChronologicalOrder(t *testi
 		fmt.Fprintf(&sql, "INSERT INTO message VALUES('m%05d','ses_ordering',%d,'{\"role\":\"user\"}');INSERT INTO part VALUES('p%05d','m%05d','{\"type\":\"text\",\"text\":\"row %d\"}');", index, index, index, index, index)
 	}
 	sql.WriteString("COMMIT;")
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql.String())
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql.String())
 	reader := newOpenCodeReader(t.TempDir())
-	reader.binary = sqlite
+	executor := &changeCountingExecutor{Executor: reader.executor}
+	reader.executor = executor
 	rows, hasMore, code := reader.queryContext(context.Background(), database, "ses_ordering", "", maxPageSize)
 	if code != "" {
 		t.Fatalf("query code = %q", code)
@@ -42,12 +34,14 @@ func TestOpenCodeQueryPagesNewestMessagesThenRestoresChronologicalOrder(t *testi
 	if rows[0].MessageID != "m04810" || rows[len(rows)-1].MessageID != "m05009" {
 		t.Fatalf("query range = %q through %q", rows[0].MessageID, rows[len(rows)-1].MessageID)
 	}
-	reader.binary = filepath.Join(t.TempDir(), "missing-sqlite")
+	queries := executor.queries
 	cached, cachedMore, code := reader.queryContext(context.Background(), database, "ses_ordering", "", maxPageSize)
 	if code != "" || !cachedMore || len(cached) != maxPageSize {
 		t.Fatalf("cached query returned %d rows, hasMore %v, code %q", len(cached), cachedMore, code)
 	}
-	reader.binary = sqlite
+	if executor.queries != queries {
+		t.Fatal("cached page executed another query")
+	}
 	older, olderMore, code := reader.queryContext(context.Background(), database, "ses_ordering", rows[0].MessageID, maxPageSize)
 	if code != "" || !olderMore || len(older) != maxPageSize {
 		t.Fatalf("older page returned %d rows, more %v, code %q", len(older), olderMore, code)
@@ -58,10 +52,6 @@ func TestOpenCodeQueryPagesNewestMessagesThenRestoresChronologicalOrder(t *testi
 }
 
 func TestOpenCodeQueryOutputParsesStoredJSONText(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	database := filepath.Join(t.TempDir(), "opencode.db")
 	sql := `CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_updated INTEGER,agent TEXT);
 CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);
@@ -69,13 +59,8 @@ CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);
 INSERT INTO session VALUES('ses_parser','/work/project','Title',1,'opencode');
 INSERT INTO message VALUES('message-one','ses_parser',2,'{"role":"user"}');
 INSERT INTO part VALUES('part-one','message-one','{"type":"text","text":"hello"}');`
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 	reader := newOpenCodeReader(t.TempDir())
-	reader.binary = sqlite
 	rows, hasMore, code := reader.queryContext(context.Background(), database, "ses_parser", "", defaultPageSize)
 	if code != "" || hasMore {
 		t.Fatalf("query code = %q, hasMore = %v", code, hasMore)
@@ -87,10 +72,6 @@ INSERT INTO part VALUES('part-one','message-one','{"type":"text","text":"hello"}
 }
 
 func TestOpenCodePartialCorruptionIsNotReportedAsFileTruncation(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "project")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -104,14 +85,9 @@ INSERT INTO session VALUES('ses_corrupt','%s','Title',1,'opencode');
 INSERT INTO message VALUES('message-one','ses_corrupt',2,'{"role":"assistant"}');
 INSERT INTO part VALUES('part-one','message-one','{"type":"text","text":"valid turn"}');
 INSERT INTO part VALUES('part-two','message-one','not-json');`, cwd)
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
-	reader.openCode.binary = sqlite
 	page, err := reader.readOpenCode("ses_corrupt", "", defaultPageSize)
 	if err != nil {
 		t.Fatal(err)
@@ -122,10 +98,6 @@ INSERT INTO part VALUES('part-two','message-one','not-json');`, cwd)
 }
 
 func TestOpenCodeCorruptRowsStillReturnAContinuationPage(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "work")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -137,14 +109,9 @@ CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,da
 CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);
 INSERT INTO session VALUES('ses_bad1','%s','Bad',1,'opencode');
 INSERT INTO message VALUES('m1','ses_bad1',1,'{"role":"unexpected"}');`, cwd)
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create corrupt OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
-	reader.openCode.binary = sqlite
 	page, err := reader.readOpenCode("ses_bad1", "", 1)
 	if err != nil || !page.Available || !page.SourceCorrupt || len(page.Entries) != 0 {
 		t.Fatalf("corrupt OpenCode page = %#v, err = %v", page, err)
@@ -154,10 +121,6 @@ INSERT INTO message VALUES('m1','ses_bad1',1,'{"role":"unexpected"}');`, cwd)
 // OpenCode resumes a session in its stored directory from any launch
 // directory (#61), so the pane cwd must not hide the session Herdr reported.
 func TestOpenCodeSessionIsNotBoundToPaneDirectory(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	sessionDirectory := filepath.Join(root, "Code")
 	panes := map[string]string{
@@ -183,14 +146,9 @@ INSERT INTO message VALUES('m1','ses_resumed',1,'{"role":"user"}');
 INSERT INTO part VALUES('p1','m1','{"type":"text","text":"older"}');
 INSERT INTO message VALUES('m2','ses_resumed',2,'{"role":"assistant"}');
 INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, sessionDirectory)
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
-	reader.openCode.binary = sqlite
 	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -219,10 +177,6 @@ INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, sessionDi
 }
 
 func TestBrowserUsesNativeOpenCodeCursorPaging(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "project")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -237,14 +191,9 @@ INSERT INTO message VALUES('m1','ses_browser',1,'{"role":"user"}');
 INSERT INTO part VALUES('p1','m1','{"type":"text","text":"older"}');
 INSERT INTO message VALUES('m2','ses_browser',2,'{"role":"assistant"}');
 INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, cwd)
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
-	reader.openCode.binary = sqlite
 	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -255,10 +204,7 @@ INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, cwd)
 	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {
 		t.Fatalf("OpenCode latest page = %#v, err = %v", latest, err)
 	}
-	appendCommand := exec.Command(sqlite, database, "INSERT INTO message VALUES('m3','ses_browser',3,'{\"role\":\"assistant\"}'); INSERT INTO part VALUES('p3','m3','{\"type\":\"text\",\"text\":\"appended\"}'); UPDATE session SET time_updated=3 WHERE id='ses_browser';")
-	if output, err := appendCommand.CombinedOutput(); err != nil {
-		t.Fatalf("append OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, "INSERT INTO message VALUES('m3','ses_browser',3,'{\"role\":\"assistant\"}'); INSERT INTO part VALUES('p3','m3','{\"type\":\"text\",\"text\":\"appended\"}'); UPDATE session SET time_updated=3 WHERE id='ses_browser';")
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" {
 		t.Fatalf("OpenCode older page after append = %#v, err = %v", older, err)
@@ -266,10 +212,6 @@ INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, cwd)
 }
 
 func TestOpenCodeReaderSearchesEveryConfiguredDatabase(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	rootA := t.TempDir()
 	rootB := t.TempDir()
 	createDatabase := func(root, sessionSQL string) {
@@ -278,10 +220,7 @@ func TestOpenCodeReaderSearchesEveryConfiguredDatabase(t *testing.T) {
 		schema := "CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_updated INTEGER,agent TEXT);" +
 			"CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);" +
 			"CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);" + sessionSQL
-		command := exec.Command(sqlite, database, schema)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("create OpenCode database: %v: %s", err, output)
-		}
+		execTestSQL(t, database, schema)
 	}
 	createDatabase(rootA, "")
 	createDatabase(rootB,
@@ -291,7 +230,6 @@ func TestOpenCodeReaderSearchesEveryConfiguredDatabase(t *testing.T) {
 	)
 	t.Setenv(agentroots.OpenCodeListEnv, rootA+string(os.PathListSeparator)+rootB)
 	reader := newOpenCodeReader(t.TempDir())
-	reader.binary = sqlite
 	entries, _, _, metadata, code := reader.read("ses_second", "", defaultPageSize)
 	if code != "" || len(entries) != 1 || entries[0].Text != "found" || metadata.Title != "Second root" {
 		t.Fatalf("second-root result = %#v, metadata %#v, code %q", entries, metadata, code)
@@ -307,25 +245,15 @@ CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,type T
 CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message(session_id,seq);`
 )
 
-func createOpenCodeFixture(t *testing.T, database, sql string) string {
+func createOpenCodeFixture(t *testing.T, database, sql string) {
 	t.Helper()
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create OpenCode database: %v: %s", err, output)
-	}
-	return sqlite
+	execTestSQL(t, database, sql)
 }
 
-func openCodeFixtureReader(t *testing.T, sqlite string, roots ...string) *Reader {
+func openCodeFixtureReader(t *testing.T, roots ...string) *Reader {
 	t.Helper()
 	t.Setenv(agentroots.OpenCodeListEnv, strings.Join(roots, string(os.PathListSeparator)))
 	reader := NewReader(t.TempDir())
-	reader.openCode.binary = sqlite
 	return reader
 }
 
@@ -351,8 +279,8 @@ func TestOpenCodeV2FreshStoreReadsVisibleTurns(t *testing.T) {
 		openCodeV2Message("m4", "ses_fresh", "idle", 4, 4, `{"outcome":"succeeded"}`) +
 		openCodeV2Message("m5", "ses_fresh", "compaction", 5, 5, `{"summary":"x"}`) +
 		openCodeV2Message("m6", "ses_fresh", "system", 6, 6, `{"text":"sys"}`)
-	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
+	reader := openCodeFixtureReader(t, root)
 	page, err := reader.readOpenCode("ses_fresh", "", defaultPageSize)
 	if err != nil || !page.Available || page.SourceCorrupt || page.HasMore || page.Total != UnknownTotal || len(page.Entries) != 2 {
 		t.Fatalf("page = %#v, err = %v", page, err)
@@ -394,8 +322,8 @@ func TestOpenCodeV2RealToolCallsKeepBlocksApartAndFlagFailedExits(t *testing.T) 
 	sql := openCodeV2Schema + `INSERT INTO session_v2(id,directory,title,agent,time_updated) VALUES('ses_tools','/work','Tools','build',9);` +
 		openCodeV2Message("m1", "ses_tools", "user", 4, 1, `{"time":{"created":1},"text":"run them","files":[],"agents":[]}`) +
 		openCodeV2Message("m2", "ses_tools", "assistant", 5, 2, assistant)
-	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
+	reader := openCodeFixtureReader(t, root)
 	page, err := reader.readOpenCode("ses_tools", "", defaultPageSize)
 	if err != nil || !page.Available || page.SourceCorrupt || len(page.Entries) != 2 || len(page.Entries[1].Tools) != 4 {
 		t.Fatalf("page = %#v, err = %v", page, err)
@@ -424,8 +352,8 @@ func TestOpenCodeV1ShellExitCodeMarksToolFailed(t *testing.T) {
 		`INSERT INTO part VALUES('p2','m1','{"type":"tool","tool":"bash","callID":"c2","state":{"status":"completed","input":{"command":"false"},"output":"","metadata":{"exit":1}}}');` +
 		`INSERT INTO part VALUES('p3','m1','{"type":"tool","tool":"bash","callID":"c3","state":{"status":"completed","input":{"command":"odd"},"output":"x","metadata":{"exit":"unknown"}}}');` +
 		`INSERT INTO part VALUES('p4','m1','{"type":"tool","tool":"read","callID":"c4","state":{"status":"completed","input":{},"output":"y","metadata":"not-an-object"}}');`
-	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
+	reader := openCodeFixtureReader(t, root)
 	page, err := reader.readOpenCode("ses_exit", "", defaultPageSize)
 	if err != nil || !page.Available || page.SourceCorrupt || len(page.Entries) != 1 || len(page.Entries[0].Tools) != 4 {
 		t.Fatalf("page = %#v, err = %v", page, err)
@@ -455,8 +383,8 @@ func TestOpenCodeV2PagingOrdersBySeqAndSkipsHiddenTurns(t *testing.T) {
 		openCodeV2Message("f6", "ses_pages", "assistant", 10, 8, `{"content":[{"type":"text","text":"four"}]}`) +
 		openCodeV2Message("g7", "ses_pages", "user", 11, 8, `{"text":"five"}`) +
 		openCodeV2Message("h4", "ses_pages", "idle", 12, 9, `{}`)
-	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
+	reader := openCodeFixtureReader(t, root)
 	texts := func(page Page) string {
 		var parts []string
 		for _, entry := range page.Entries {
@@ -505,8 +433,8 @@ INSERT INTO message VALUES('d-old','ses_hidden',1,'{"role":"user"}');
 INSERT INTO part VALUES('dp','d-old','{"type":"text","text":"legacy d"}');
 INSERT INTO session_v2(id,directory,title,agent) VALUES('ses_hidden','/work','D','build');` +
 		openCodeV2Message("d-idle", "ses_hidden", "idle", 1, 1, `{}`)
-	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
+	reader := openCodeFixtureReader(t, root)
 	page, err := reader.readOpenCode("ses_migrated", "", defaultPageSize)
 	if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "migrated copy" {
 		t.Fatalf("migrated page = %#v, err = %v", page, err)
@@ -535,8 +463,8 @@ func TestOpenCodeV2CorruptRowKeepsOtherEntries(t *testing.T) {
 		openCodeV2Message("m1", "ses_badrow", "user", 1, 1, `{"text":"before"}`) +
 		openCodeV2Message("m2", "ses_badrow", "assistant", 2, 2, `not-json`) +
 		openCodeV2Message("m3", "ses_badrow", "assistant", 3, 3, `{"content":[{"type":"text","text":"after"}]}`)
-	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
+	reader := openCodeFixtureReader(t, root)
 	page, err := reader.readOpenCode("ses_badrow", "", defaultPageSize)
 	if err != nil || !page.Available || !page.SourceCorrupt || len(page.Entries) != 2 || page.Entries[0].Text != "before" || page.Entries[1].Text != "after" {
 		t.Fatalf("corrupt page = %#v, err = %v", page, err)
@@ -554,8 +482,8 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 		openCodeV2Message("m1", "ses_browser2", "user", 1, 1, `{"text":"older"}`) +
 		openCodeV2Message("m2", "ses_browser2", "idle", 2, 2, `{}`) +
 		openCodeV2Message("m3", "ses_browser2", "assistant", 3, 3, `{"content":[{"type":"text","text":"newer"}]}`)
-	sqlite := createOpenCodeFixture(t, database, sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, database, sql)
+	reader := openCodeFixtureReader(t, root)
 	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -568,10 +496,7 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 		t.Fatalf("latest page = %#v, err = %v", latest, err)
 	}
 	appendSQL := openCodeV2Message("m4", "ses_browser2", "assistant", 4, 4, `{"content":[{"type":"text","text":"appended"}]}`)
-	appendCommand := exec.Command(sqlite, database, appendSQL)
-	if output, err := appendCommand.CombinedOutput(); err != nil {
-		t.Fatalf("append OpenCode database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, appendSQL)
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" || older.Total != nil {
 		t.Fatalf("older page after append = %#v, err = %v", older, err)
@@ -585,12 +510,11 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 func TestOpenCodeReaderFindsV2SessionInSecondDatabase(t *testing.T) {
 	rootA, rootB := t.TempDir(), t.TempDir()
 	createOpenCodeFixture(t, filepath.Join(rootA, "opencode.db"), openCodeV1Schema)
-	sqlite := createOpenCodeFixture(t, filepath.Join(rootB, "opencode.db"), openCodeV2Schema+
+	createOpenCodeFixture(t, filepath.Join(rootB, "opencode.db"), openCodeV2Schema+
 		`INSERT INTO session_v2(id,directory,title,agent) VALUES('ses_second2','/work','Second v2','build');`+
 		openCodeV2Message("m1", "ses_second2", "assistant", 1, 1, `{"content":[{"type":"text","text":"found"}]}`))
-	openCodeFixtureReader(t, sqlite, rootA, rootB)
+	openCodeFixtureReader(t, rootA, rootB)
 	reader := newOpenCodeReader(t.TempDir())
-	reader.binary = sqlite
 	entries, _, _, metadata, code := reader.read("ses_second2", "", defaultPageSize)
 	if code != "" || len(entries) != 1 || entries[0].Text != "found" || metadata.Title != "Second v2" {
 		t.Fatalf("second-root result = %#v, metadata %#v, code %q", entries, metadata, code)
@@ -606,8 +530,8 @@ INSERT INTO message VALUES('legacy-1','ses_move',1,'{"role":"user"}');
 INSERT INTO part VALUES('p1','legacy-1','{"type":"text","text":"old"}');
 INSERT INTO message VALUES('legacy-2','ses_move',2,'{"role":"assistant"}');
 INSERT INTO part VALUES('p2','legacy-2','{"type":"text","text":"new"}');`
-	sqlite := createOpenCodeFixture(t, database, sql)
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, database, sql)
+	reader := openCodeFixtureReader(t, root)
 	latest, err := reader.readOpenCode("ses_move", "", 1)
 	if err != nil || !latest.Available || !latest.HasMore || len(latest.Entries) != 1 || latest.Entries[0].ID != "legacy-2" {
 		t.Fatalf("1.x page = %#v, err = %v", latest, err)
@@ -615,9 +539,7 @@ INSERT INTO part VALUES('p2','legacy-2','{"type":"text","text":"new"}');`
 	migrate := `INSERT INTO session_v2(id,directory,title,agent) VALUES('ses_move','/work','Move','build');` +
 		openCodeV2Message("v2-1", "ses_move", "user", 1, 1, `{"text":"old"}`) +
 		openCodeV2Message("v2-2", "ses_move", "assistant", 2, 2, `{"content":[{"type":"text","text":"new"}]}`)
-	if output, err := exec.Command(sqlite, database, migrate).CombinedOutput(); err != nil {
-		t.Fatalf("migrate: %v: %s", err, output)
-	}
+	execTestSQL(t, database, migrate)
 	page, err := reader.readOpenCode("ses_move", latest.Entries[0].ID, 1)
 	if err != nil || page.Available || page.ReasonCode != "invalid_cursor" || len(page.Entries) != 0 {
 		t.Fatalf("stale cursor page = %#v, err = %v", page, err)
@@ -626,8 +548,8 @@ INSERT INTO part VALUES('p2','legacy-2','{"type":"text","text":"new"}');`
 
 func TestOpenCodeUnknownLayoutFails(t *testing.T) {
 	root := t.TempDir()
-	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), "CREATE TABLE unrelated(id TEXT);")
-	reader := openCodeFixtureReader(t, sqlite, root)
+	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), "CREATE TABLE unrelated(id TEXT);")
+	reader := openCodeFixtureReader(t, root)
 	page, err := reader.readOpenCode("ses_unknown", "", defaultPageSize)
 	if err != nil || page.Available || page.ReasonCode != "query_failed" {
 		t.Fatalf("unknown layout page = %#v, err = %v", page, err)

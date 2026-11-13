@@ -129,9 +129,9 @@ func (w *DatabaseWatch) observe(page BrowsePage, replace bool) {
 
 func (w *DatabaseWatch) executor() sqliteexec.Executor {
 	if w.format == "hermes" {
-		return w.browser.reader.hermes.queryExec()
+		return w.browser.reader.hermes.executor
 	}
-	return w.browser.reader.openCode.queryExec()
+	return w.browser.reader.openCode.executor
 }
 
 func (w *DatabaseWatch) query(ctx context.Context, query string, result any) string {

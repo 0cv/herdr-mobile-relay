@@ -83,10 +83,6 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 	}
 
 	generation := d.state.Generation(paneID)
-	if stale := d.waitTestGate(ctx, paneID, generation); stale != nil {
-		stale.RequestID, stale.Action = requestID, "approval"
-		return stale
-	}
 
 	result := d.schedule(ctx, ScheduleOptions{
 		Command:     d.command(ctx, receivedAt, requestID, "approval", paneID, approvalDeadline),
@@ -471,14 +467,6 @@ func (d *Dispatcher) executeQuestion(
 		}
 	}
 	return nil
-}
-
-func (d *Dispatcher) sendQuestionKeys(ctx context.Context, paneID string, keys []string) error {
-	return d.sendQuestionKeysForSession(ctx, WorkerToken{
-		PaneID:      paneID,
-		Generation:  d.state.Generation(paneID),
-		AllowAbsent: true,
-	}, paneID, keys)
 }
 
 func (d *Dispatcher) sendQuestionKeysForSession(ctx context.Context, token WorkerToken, paneID string, keys []string) error {

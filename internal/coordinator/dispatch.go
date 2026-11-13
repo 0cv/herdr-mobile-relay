@@ -79,10 +79,6 @@ type Dispatcher struct {
 	watcherClosed    bool
 	watcherWG        sync.WaitGroup
 
-	// testGates is a deterministic pre-admission hook retained for the existing
-	// package tests. Production never creates an entry and never takes a lock.
-	testGatesMu    sync.Mutex
-	testGates      map[string]chan struct{}
 	testFilterWait func(context.Context, time.Duration) error
 }
 
@@ -105,7 +101,6 @@ func NewDispatcher(client backend.Backend, state *State, journal *activity.Journ
 		state:           state,
 		logger:          logger,
 		scheduler:       NewScheduler(defaultHerdrCapacity),
-		testGates:       make(map[string]chan struct{}),
 		reads:           make(map[string]*paneRead),
 		watcherCtx:      watcherCtx,
 		watcherCancel:   watcherCancel,
@@ -197,53 +192,12 @@ func (d *Dispatcher) ActivityFailures() uint64 {
 	return d.activityFailures.Load()
 }
 
-func (d *Dispatcher) paneSlot(paneID string) chan struct{} {
-	d.testGatesMu.Lock()
-	defer d.testGatesMu.Unlock()
-	gate := d.testGates[paneID]
-	if gate == nil {
-		gate = make(chan struct{}, 1)
-		d.testGates[paneID] = gate
-	}
-	return gate
-}
-
-func (d *Dispatcher) waitTestGate(ctx context.Context, paneID string, generation int64) *CommandResult {
-	d.testGatesMu.Lock()
-	gate := d.testGates[paneID]
-	d.testGatesMu.Unlock()
-	if gate == nil {
-		return nil
-	}
-	select {
-	case gate <- struct{}{}:
-		defer func() { <-gate }()
-	case <-ctx.Done():
-		return d.fail("", "", paneID, "Timed out waiting for the pane")
-	}
-	if d.state.Generation(paneID) != generation {
-		return d.fail("", "", paneID, "pane session was replaced")
-	}
-	return nil
-}
-
 func (d *Dispatcher) PruneSlots(active map[string]bool) {
 	generations := make(map[string]int64, len(active))
 	for paneID := range active {
 		generations[paneID] = d.state.Generation(paneID)
 	}
-	d.ApplyTopology(active, generations)
-}
-
-func (d *Dispatcher) ApplyTopology(active map[string]bool, generations map[string]int64) {
 	d.scheduler.ApplyTopology(active, generations)
-	d.testGatesMu.Lock()
-	defer d.testGatesMu.Unlock()
-	for paneID, gate := range d.testGates {
-		if !active[paneID] && len(gate) == 0 {
-			delete(d.testGates, paneID)
-		}
-	}
 }
 
 func (d *Dispatcher) paneSessionCurrent(token WorkerToken, requestID, action string) *CommandResult {
@@ -390,11 +344,6 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	}
 	if len([]rune(text)) > promptMaxChars {
 		return d.fail(requestID, action, paneID, "Prompt is longer than 100,000 characters")
-	}
-	generation := d.state.Generation(paneID)
-	if stale := d.waitTestGate(ctx, paneID, generation); stale != nil {
-		stale.RequestID, stale.Action = requestID, action
-		return stale
 	}
 	requiresEnter := false
 	if agent, ok := d.state.Agent(paneID); ok {

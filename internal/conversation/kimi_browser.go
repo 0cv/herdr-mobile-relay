@@ -89,9 +89,7 @@ func (b *Browser) readKimiPage(ctx context.Context, request BrowseRequest) (Brow
 	}
 	start := max(0, end-request.Limit)
 	entries, work, code := projection.materialize(ctx, start, end)
-	if b.kimiMaterializationObserver != nil {
-		b.kimiMaterializationObserver(work)
-	}
+	b.observe(browserObservation{kind: "kimi_materialization", work: work})
 	if code != "" {
 		return browseUnavailable(code, kimiReason(code)), nil
 	}

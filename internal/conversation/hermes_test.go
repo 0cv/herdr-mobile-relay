@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -14,10 +13,6 @@ import (
 )
 
 func TestBrowserUsesNativeHermesCursorPaging(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -28,11 +23,10 @@ func TestBrowserUsesNativeHermesCursorPaging(t *testing.T) {
 	messageSQL := fmt.Sprintf(`INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
 	('%s','user','older',100,1,0),
 	('%s','assistant','newer',101,1,0);`, sessionID, sessionID)
-	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Browser", messageSQL)
+	createHermesTestDatabase(t, database, sessionID, cwd, "Browser", messageSQL)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -43,14 +37,8 @@ func TestBrowserUsesNativeHermesCursorPaging(t *testing.T) {
 	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {
 		t.Fatalf("Hermes latest page = %#v, err = %v", latest, err)
 	}
-	appendCommand := exec.Command(sqlite, database, fmt.Sprintf("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','appended',102,1,0);", sessionID))
-	if output, err := appendCommand.CombinedOutput(); err != nil {
-		t.Fatalf("append Hermes database: %v: %s", err, output)
-	}
-	compactCommand := exec.Command(sqlite, database, fmt.Sprintf("UPDATE messages SET active=0,compacted=1 WHERE session_id='%s' AND content='newer'; INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','newer',101,1,0);", sessionID, sessionID))
-	if output, err := compactCommand.CombinedOutput(); err != nil {
-		t.Fatalf("compact Hermes database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, fmt.Sprintf("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','appended',102,1,0);", sessionID))
+	execTestSQL(t, database, fmt.Sprintf("UPDATE messages SET active=0,compacted=1 WHERE session_id='%s' AND content='newer'; INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','newer',101,1,0);", sessionID, sessionID))
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
 	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" {
 		t.Fatalf("Hermes older page after append = %#v, err = %v", older, err)
@@ -58,10 +46,6 @@ func TestBrowserUsesNativeHermesCursorPaging(t *testing.T) {
 }
 
 func TestHermesReaderReadsStateDatabaseConversation(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -94,15 +78,10 @@ INSERT INTO messages(session_id,role,content,tool_calls,timestamp,active,compact
 INSERT INTO messages(session_id,role,content,tool_call_id,tool_name,timestamp,active,compacted)
  VALUES('%s','tool','command output','call_1','terminal',102,1,0);
 COMMIT;`, sessionID, cwd, sessionID, sessionID, sessionID)
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create Hermes database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 
 	page, err := reader.ReadFor("hermes-agent", cwd, sessionID, "", 80)
 	if err != nil {
@@ -156,10 +135,6 @@ func TestHermesDirectoryBindingResolvesSymlinks(t *testing.T) {
 }
 
 func TestHermesReaderPagesByMessageIDAndBindsWorkspace(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	other := filepath.Join(root, "other")
@@ -175,15 +150,10 @@ CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT N
 INSERT INTO sessions VALUES('%s','%s','Paging');
 INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','user','question',100,1,0);
 INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','answer',101,1,0);`, sessionID, cwd, sessionID, sessionID)
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create Hermes database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 
 	latest, err := reader.ReadFor("hermes", cwd, sessionID, "", 1)
 	if err != nil {
@@ -222,7 +192,7 @@ const hermesTestMessageSchema = `CREATE TABLE messages(
  display_kind TEXT
 );`
 
-func createHermesTestDatabase(t *testing.T, sqlite, database, sessionID, cwd, title, messageSQL string) {
+func createHermesTestDatabase(t *testing.T, database, sessionID, cwd, title, messageSQL string) {
 	t.Helper()
 	sql := fmt.Sprintf(`BEGIN;
 CREATE TABLE sessions(id TEXT PRIMARY KEY,cwd TEXT,title TEXT);
@@ -230,18 +200,10 @@ CREATE TABLE sessions(id TEXT PRIMARY KEY,cwd TEXT,title TEXT);
 INSERT INTO sessions VALUES('%s','%s','%s');
 %s
 COMMIT;`, hermesTestMessageSchema, sessionID, cwd, title, messageSQL)
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create Hermes database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql)
 }
 
 func TestHermesReaderPreservesCompactedLogicalOrder(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -256,11 +218,10 @@ INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
  ('%s','assistant','C',100,1,0),
  ('%s','assistant','A',100,1,0),
  ('%s','assistant','B',100,1,0);`, sessionID, sessionID, sessionID, sessionID, sessionID)
-	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Compacted order", messageSQL)
+	createHermesTestDatabase(t, database, sessionID, cwd, "Compacted order", messageSQL)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 
 	all, err := reader.ReadFor("hermes", cwd, sessionID, "", 80)
 	if err != nil {
@@ -297,10 +258,6 @@ INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
 }
 
 func TestHermesReaderResolvesArchivedCursorAfterCompaction(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -312,11 +269,10 @@ func TestHermesReaderResolvesArchivedCursorAfterCompaction(t *testing.T) {
 INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
  ('%s','assistant','A',100,1,0),
  ('%s','assistant','B',200,1,0);`, sessionID, sessionID)
-	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Cursor compaction", messageSQL)
+	createHermesTestDatabase(t, database, sessionID, cwd, "Cursor compaction", messageSQL)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 
 	latest, err := reader.ReadFor("hermes", cwd, sessionID, "", 1)
 	if err != nil {
@@ -327,16 +283,12 @@ INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
 		t.Fatalf("Hermes initial page = %#v", latest)
 	}
 
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(fmt.Sprintf(`
+	execTestSQL(t, database, fmt.Sprintf(`
 BEGIN;
 UPDATE messages SET active=0,compacted=1 WHERE session_id='%s' AND active=1;
 INSERT INTO messages(session_id,role,content,timestamp,active,compacted)
 VALUES('%s','assistant','B',200,1,0);
 COMMIT;`, sessionID, sessionID))
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("compact Hermes database: %v: %s", err, output)
-	}
 
 	older, err := reader.ReadFor("hermes-agent", cwd, sessionID, latest.Entries[0].ID, 1)
 	if err != nil {
@@ -349,10 +301,6 @@ COMMIT;`, sessionID, sessionID))
 }
 
 func TestHermesCorruptRowsStillReturnAContinuationPage(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -361,11 +309,10 @@ func TestHermesCorruptRowsStillReturnAContinuationPage(t *testing.T) {
 	const sessionID = "20260812_130000_corrupt"
 	database := filepath.Join(root, "state.db")
 	messageSQL := fmt.Sprintf("INSERT INTO messages(session_id,role,content,tool_calls,timestamp,active,compacted) VALUES('%s','assistant','', 'not-json',100,1,0);", sessionID)
-	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Corrupt", messageSQL)
+	createHermesTestDatabase(t, database, sessionID, cwd, "Corrupt", messageSQL)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 1)
 	if err != nil || !page.Available || !page.SourceCorrupt || len(page.Entries) != 0 {
 		t.Fatalf("corrupt Hermes page = %#v, err = %v", page, err)
@@ -373,10 +320,6 @@ func TestHermesCorruptRowsStillReturnAContinuationPage(t *testing.T) {
 }
 
 func TestHermesReaderFiltersHiddenMessagesBeforePaging(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -389,11 +332,10 @@ INSERT INTO messages(session_id,role,content,timestamp,active,compacted,display_
  ('%s','user','visible question',100,1,0,NULL),
  ('%s','user','internal handoff',200,0,1,'hidden'),
  ('%s','assistant','visible answer',300,1,0,NULL);`, sessionID, sessionID, sessionID)
-	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Hidden rows", messageSQL)
+	createHermesTestDatabase(t, database, sessionID, cwd, "Hidden rows", messageSQL)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 
 	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 1)
 	if err != nil {
@@ -412,10 +354,6 @@ INSERT INTO messages(session_id,role,content,timestamp,active,compacted,display_
 }
 
 func TestHermesReaderUsesCachedDatabaseForTitleAndContent(t *testing.T) {
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	base := t.TempDir()
 	rootA := filepath.Join(base, "a")
 	rootB := filepath.Join(base, "b")
@@ -427,12 +365,11 @@ func TestHermesReaderUsesCachedDatabaseForTitleAndContent(t *testing.T) {
 	}
 	const sessionID = "20260812_140000_abcdef"
 	databaseB := filepath.Join(rootB, "state.db")
-	createHermesTestDatabase(t, sqlite, databaseB, sessionID, cwd, "Title B",
+	createHermesTestDatabase(t, databaseB, sessionID, cwd, "Title B",
 		fmt.Sprintf("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','Transcript B',100,1,0);", sessionID))
 	t.Setenv(agentroots.HermesListEnv, strings.Join([]string{rootA, rootB}, string(os.PathListSeparator)))
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = sqlite
 
 	location := reader.Locate("hermes-agent", cwd, sessionID)
 	if location.Path != databaseB || location.Title != "Title B" {
@@ -440,7 +377,7 @@ func TestHermesReaderUsesCachedDatabaseForTitleAndContent(t *testing.T) {
 	}
 
 	databaseA := filepath.Join(rootA, "state.db")
-	createHermesTestDatabase(t, sqlite, databaseA, sessionID, cwd, "Title A",
+	createHermesTestDatabase(t, databaseA, sessionID, cwd, "Title A",
 		fmt.Sprintf("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','Transcript A',100,1,0);", sessionID))
 	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 80)
 	if err != nil {

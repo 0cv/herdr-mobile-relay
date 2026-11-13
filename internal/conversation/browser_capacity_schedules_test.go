@@ -91,7 +91,7 @@ func startCapacitySource(t *testing.T, b *Browser, home string, number int) *bro
 		source.close()
 		t.Fatal(err)
 	}
-	job, page := b.createJob(scope, source, 0, source.end, source.end, digest, "", 0)
+	job, page := b.createJob(scope, source, 0, source.end, source.end, digest, "", 0, claudeChainJobBinding{})
 	if page != nil || job == nil {
 		source.close()
 		t.Fatalf("admission: %+v", page)
@@ -154,12 +154,16 @@ func TestCapacityCompetingGrowthAdmissionAndExpiry(t *testing.T) {
 	var removalMu sync.Mutex
 	removals := map[string]int{}
 	b.mu.Lock()
-	b.snapshotReadObserver = func(job *browseJob) {
+	setBrowserObserver(b, "snapshot_read", func(observation browserObservation) {
+		job := observation.job
 		if job == reader {
 			readGate.stop()
 		}
-	}
-	b.capacityOperationObserver = func(stage string, job *browseJob, locked bool) {
+	})
+	setBrowserObserver(b, "capacity_operation", func(observation browserObservation) {
+		stage := observation.stage
+		job := observation.job
+		locked := observation.locked
 		if stage == "admission" {
 			admissions <- struct{}{}
 		}
@@ -182,12 +186,13 @@ func TestCapacityCompetingGrowthAdmissionAndExpiry(t *testing.T) {
 		if job.scope.SessionID == "123e4567-e89b-12d3-a456-000000000004" && !locked {
 			secondGate.stop()
 		}
-	}
-	b.workerBeforeFinishObserver = func(job *browseJob) {
+	})
+	setBrowserObserver(b, "worker_before_finish", func(observation browserObservation) {
+		job := observation.job
 		if job.scope.SessionID == "123e4567-e89b-12d3-a456-000000000003" {
 			finishGate.stop()
 		}
-	}
+	})
 	b.mu.Unlock()
 	b.capacityMu.Lock()
 	b.options.AggregateQuota = 2*size + 2*initial
@@ -294,16 +299,18 @@ func TestCapacityAggregateRetryAndShutdown(t *testing.T) {
 			readGate := newCapacityBarrier(t)
 			retryGate := newCapacityBarrier(t)
 			b.mu.Lock()
-			b.snapshotReadObserver = func(job *browseJob) {
+			setBrowserObserver(b, "snapshot_read", func(observation browserObservation) {
+				job := observation.job
 				if job == victim {
 					readGate.stop()
 				}
-			}
-			b.capacityOperationObserver = func(stage string, _ *browseJob, _ bool) {
+			})
+			setBrowserObserver(b, "capacity_operation", func(observation browserObservation) {
+				stage := observation.stage
 				if stage == "retry" {
 					retryGate.stop()
 				}
-			}
+			})
 			b.mu.Unlock()
 			b.capacityMu.Lock()
 			b.options.AggregateQuota = size + initial
@@ -389,16 +396,19 @@ func TestCapacityCloseDuringGrowthAndRead(t *testing.T) {
 	readGate := newCapacityBarrier(t)
 	growthGate := newCapacityBarrier(t)
 	b.mu.Lock()
-	b.snapshotReadObserver = func(job *browseJob) {
+	setBrowserObserver(b, "snapshot_read", func(observation browserObservation) {
+		job := observation.job
 		if job == reader {
 			readGate.stop()
 		}
-	}
-	b.capacityOperationObserver = func(stage string, _ *browseJob, locked bool) {
+	})
+	setBrowserObserver(b, "capacity_operation", func(observation browserObservation) {
+		stage := observation.stage
+		locked := observation.locked
 		if stage == "batch" && locked {
 			growthGate.stop()
 		}
-	}
+	})
 	b.mu.Unlock()
 	b.capacityMu.Lock()
 	b.options.AggregateQuota = reader.index.size() + initialSnapshotBytes(t)

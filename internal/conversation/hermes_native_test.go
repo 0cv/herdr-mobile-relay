@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
-	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
-
 	_ "modernc.org/sqlite"
 )
 
@@ -27,13 +25,8 @@ func TestHermesReadUsesNativeBackendWithoutCLI(t *testing.T) {
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 
-	native, err := sqliteexec.Resolve(sqliteexec.BackendNative, filepath.Join(t.TempDir(), "missing-sqlite3"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("PATH", t.TempDir())
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = filepath.Join(t.TempDir(), "missing-sqlite3")
-	reader.hermes.executor = native
 
 	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 10)
 	if err != nil {

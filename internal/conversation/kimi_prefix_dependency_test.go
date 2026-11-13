@@ -44,7 +44,10 @@ func TestKimiRecentWindowRequiresPrefixValidation(t *testing.T) {
 			}
 			defer browser.Close()
 			var acquired int64
-			browser.physicalReadObserver = func(n int64) { acquired += n }
+			setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+				n := observation.bytes
+				acquired += n
+			})
 			page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane"}, Limit: 24})
 			if err != nil || page.ReasonCode != test.code || acquired != int64(len(test.wire)) {
 				t.Fatalf("page=%+v err=%v bytes=%d", page, err, acquired)
@@ -75,7 +78,10 @@ func TestKimiColdLimitDoesNotTrustUnverifiedTail(t *testing.T) {
 	}
 	defer browser.Close()
 	var acquired int64
-	browser.physicalReadObserver = func(n int64) { acquired += n }
+	setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+		n := observation.bytes
+		acquired += n
+	})
 	page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id}, Limit: 24})
 	if err != nil || page.Available || page.ReasonCode != "output_limit" || len(page.Entries) != 0 || acquired != 0 {
 		t.Fatalf("replay bound bypassed: page=%+v err=%v bytes=%d", page, err, acquired)

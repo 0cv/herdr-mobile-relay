@@ -74,7 +74,7 @@ func TestDatabaseChangeTokenIdleAndReplacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			reader := NewReader(t.TempDir())
-			executor := &changeCountingExecutor{Executor: sqliteexec.MustFromEnv()}
+			executor := &changeCountingExecutor{Executor: sqliteexec.New()}
 			reader.openCode.executor, reader.hermes.executor = executor, executor
 			scope := BrowseScope{Provider: provider, SessionID: "ses_idle123"}
 			before, err := reader.ChangeToken(t.Context(), scope)

@@ -55,9 +55,6 @@ func NewJSONLRecordReader(
 	start, end, maxBytes int64,
 	progress func(JSONLRecordProgress),
 ) (*JSONLRecordReader, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if file == nil {
 		return nil, errors.New("jsonl record reader requires a file")
 	}
@@ -255,9 +252,6 @@ func (r *JSONLRecordReader) reportProgress() {
 // discovery uses this form so hashing, boundary checks, and marker parsing do
 // not reread the same 64 KiB from disk three times.
 func collectJSONLRecordsBytes(ctx context.Context, data []byte, start int64, startsInside bool, maxBytes int64) ([]JSONLRecord, int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if start < 0 || maxBytes < 1 {
 		return nil, 0, errors.New("invalid jsonl record range")
 	}

@@ -279,14 +279,6 @@ func (s *Scheduler) ExecuteAdmitted(
 	}
 }
 
-// UpdateLedgerPhase synchronously applies a confirmation-watch result through
-// the scheduler owner. A false return means the operation was invalidated by a
-// generation change, pruned, or the scheduler is closing.
-func (s *Scheduler) UpdateLedgerPhase(key string, generation int64, phase string) bool {
-	result := &CommandResult{OK: phase == "confirmed", Phase: phase}
-	return s.UpdateLedgerResult(key, generation, result)
-}
-
 // UpdateLedgerResult replaces the accepted ledger result with the complete
 // terminal confirmation result. Replays must preserve data and errors, not only
 // the terminal phase.

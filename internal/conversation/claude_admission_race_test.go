@@ -49,12 +49,14 @@ func TestClaudeChainLateLatestAdmissionPreservesNewerEvidence(t *testing.T) {
 			var stopped atomic.Bool
 			var releaseOnce sync.Once
 			defer releaseOnce.Do(func() { close(release) })
-			b.chainContextAdmissionObserver = func(candidate claudeChain, afterBuild bool) {
+			setBrowserObserver(b, "chain_context_admission", func(observation browserObservation) {
+				candidate := observation.chain
+				afterBuild := observation.afterBuild
 				if afterBuild == schedule.afterBuild && len(candidate.Segments) == 2 && candidate.Segments[1].CapturedEnd == e1 && stopped.CompareAndSwap(false, true) {
 					close(entered)
 					<-release
 				}
-			}
+			})
 			done := make(chan BrowsePage, 1)
 			go func() {
 				page, _ := b.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10})

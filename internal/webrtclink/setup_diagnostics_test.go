@@ -206,7 +206,7 @@ func (h *harness) setupSnapshot() string {
 }
 
 func TestSetupDiagnosticsRetainAsyncCandidateError(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	peer := newBrowserPeer(t, dataChannelLabel)
 	key := SessionKey{ClientID: "fixture", RequestID: "fixture"}
 	peer.diagnosticID = 1

@@ -193,7 +193,10 @@ func TestSnapshotAppendGrowthAvoidsCapturedRangeRehash(t *testing.T) {
 		t.Fatalf("snapshot page = %#v", snapshot)
 	}
 	var observed int64
-	browser.sourceReadObserver = func(bytes int64) { observed += bytes }
+	setBrowserObserver(browser, "source_read", func(observation browserObservation) {
+		bytes := observation.bytes
+		observed += bytes
+	})
 	if err := appendRows(path, map[string]any{"type": "assistant", "uuid": "a2", "message": map[string]any{"content": "appended"}}); err != nil {
 		t.Fatal(err)
 	}

@@ -1,8 +1,13 @@
 package app
 
 import (
+	"context"
+	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/transport"
+	"github.com/0cv/herdr-mobile-relay/internal/webrtclink"
 )
 
 // TestStringFieldPreservesSDPTerminator pins the signaling decode contract.
@@ -74,6 +79,47 @@ func TestSignalBudgetLimitsNegotiation(t *testing.T) {
 	h.forgetClient("client-1")
 	if _, ok := h.signals["client-1"]; ok {
 		t.Fatal("disconnected client kept its budget entry")
+	}
+}
+
+func TestHybridStatusReportsSingleMappedAddress(t *testing.T) {
+	gateway, err := transport.NewGatewayClient(&transport.Hub{}, transport.GatewayOptions{
+		URLs:     []string{"wss://gateway.example.com"},
+		RelayKey: "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := webrtclink.New(webrtclink.Options{
+		Serve: func(context.Context, transport.FrameConn) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	h := &hybridTransport{gateway: gateway, webrtc: manager}
+	for _, address := range []string{"", "203.0.113.9:12345"} {
+		t.Run(address, func(t *testing.T) {
+			h.stun = stunStatus{}
+			if address != "" {
+				h.stun = stunStatus{
+					configured: true,
+					mapped:     netip.MustParseAddrPort(address),
+					checkedAt:  time.Now().UTC(),
+				}
+			}
+			status := h.status()["stun"].(map[string]any)
+			if got := status["mapped"]; got != address {
+				t.Fatalf("mapped = %v, want %q", got, address)
+			}
+			if status["configured"] != h.stun.configured {
+				t.Fatalf("configured = %v, want %v", status["configured"], h.stun.configured)
+			}
+			checkedAt, present := status["checked_at"]
+			if address == "" && present || address != "" && checkedAt != h.stun.checkedAt {
+				t.Fatalf("checked_at = %v, present = %v", checkedAt, present)
+			}
+		})
 	}
 }
 
