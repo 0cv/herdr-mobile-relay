@@ -1353,398 +1353,427 @@ class RelayStore {
     }, delay);
   }
 
+  private readonly messageHandlers = new Map<string, (relayId: string, message: Record<string, any>) => void>([
+    ['push_config', (relayId, message) => this.handlePushConfig(relayId, message)],
+    ['herdr_status', (relayId, message) => this.handleHerdrStatus(relayId, message)],
+    ['inventory_status', (relayId, message) => this.handleInventoryStatus(relayId, message)],
+    ['update_status', (relayId, message) => this.handleUpdateStatus(relayId, message)],
+    ['app_deploy_status', (relayId, message) => this.handleAppDeployStatus(relayId, message)],
+    ['speech_voices', (relayId, message) => this.handleSpeechVoices(relayId, message)],
+    ['push_policy', (relayId, message) => this.handlePushPolicy(relayId, message)],
+    ['push_policy_result', (relayId, message) => this.handlePushPolicy(relayId, message)],
+    ['push_test_result', (relayId, message) => this.handlePushTestResult(relayId, message)],
+    ['push_subscribed', (relayId, message) => this.handlePushSubscribed(relayId, message)],
+    ['push_unsubscribed', (relayId, message) => this.handlePushUnsubscribed(relayId, message)],
+    ['action_receipt', (relayId, message) => this.handleActionReceipt(relayId, message)],
+    ['error', (relayId, message) => this.handleApiError(relayId, message)],
+    ['command_result', (relayId, message) => this.handleCommandResult(relayId, message as CommandResult)],
+    ['upload_begin_result', (relayId, message) => this.handleUploadResult(relayId, message)],
+    ['upload_chunk_result', (relayId, message) => this.handleUploadResult(relayId, message)],
+    ['upload_finish_result', (relayId, message) => this.handleUploadResult(relayId, message)],
+    ['upload_cancel_result', (relayId, message) => this.handleUploadResult(relayId, message)],
+    ['activity_history', (relayId, message) => this.mergeActivityHistory(relayId, message.activities || [])],
+    ['activity', (relayId, message) => this.handleActivity(relayId, message)],
+    ['workspaces', (relayId, message) => this.handleWorkspaces(relayId, message)],
+    ['agents', (relayId, message) => this.handleAgents(relayId, message)],
+    ['blocked', (relayId, message) => this.handleBlocked(relayId, message)],
+    ['agent_update', (relayId, message) => this.handleAgentUpdate(relayId, message)],
+    ['pane_unchanged', (relayId, message) => this.handlePaneUnchanged(relayId, message)],
+    ['pane_resync', (relayId, message) => this.handlePaneResync(relayId, message)],
+    ['pane_delta', (relayId, message) => this.handlePaneDelta(relayId, message)],
+    ['pane_content', (relayId, message) => this.handlePaneContent(relayId, message)],
+  ]);
+
   private handleMessage(relayId: string, message: Record<string, any>): void {
+    this.messageHandlers.get(String(message.type))?.(relayId, message);
+  }
+
+  private handlePushConfig(relayId: string, message: Record<string, any>): void {
     const connection = this.connectionsValue.get(relayId);
-    if (message.type === 'push_config') {
-      if (!connection) return;
-      // Pane revisions are monotonic only for one relay process. A new socket
-      // handshake may follow a relay restart, so discard the retained
-      // process-local baseline before its fresh snapshot arrives.
-      this.agentsValue = this.agentsValue.map((agent) => {
-        if (agent.relay_id !== relayId || agent.pane_revision === undefined) return agent;
-        const withoutRevision = { ...agent };
-        delete withoutRevision.pane_revision;
-        return withoutRevision;
-      });
-      connection.vapidPublicKey = String(message.vapid_public_key || '');
-      connection.host = String(message.host || '');
-      connection.home = String(message.home || '').slice(0, 1024);
-      connection.protocol = Number.isInteger(message.protocol) && message.protocol > 0 ? message.protocol : 1;
-      connection.version = typeof message.version === 'string' ? message.version.slice(0, 40) : '';
-      connection.releaseVersion = String(message.release_version || '').slice(0, 32);
-      connection.revision = String(message.revision || message.version || '').slice(0, 40);
-      connection.update = normalizeRelayUpdate(
-        message.update,
-        connection.releaseVersion,
-        connection.revision,
-      );
-      observeAppUpstreamVersion(connection.update.upstream_version);
-      connection.gatewayAvailableVersion = connection.update.available_version || connection.releaseVersion;
-      this.syncUpdateRestartReconnect(relayId, connection);
-      connection.herdrStatus = normalizeHerdrStatus(message.herdr_status);
-      connection.appDeploy = normalizeAppDeployment(message.app_deploy);
-      connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
-      connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
-      connection.speechLanguages = (Array.isArray(message.speech_languages) ? message.speech_languages : [])
-        .filter(isSpeechLanguage);
-      adoptRelaySpeech(connection.speechLanguages);
-      this.adoptHybridDescriptor(connection, message.hybrid);
-      const attentionCapable = connection.capabilities.includes('attention_classification');
-      this.agentsValue = this.agentsValue.map((agent) =>
-        agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
-      );
-      this.publishAgents('push_config');
-      connection.agentProfiles = Array.isArray(message.agent_profiles)
-        ? message.agent_profiles
-          .filter((profile: unknown): profile is AgentProfile => {
-            if (!profile || typeof profile !== 'object' || !('id' in profile)) return false;
-            if (typeof profile.id !== 'string' || !profile.id) return false;
-            return !('label' in profile) || profile.label === undefined || typeof profile.label === 'string';
-          })
-          .sort((left, right) => (
-            String(left.label || left.id).localeCompare(
-              String(right.label || right.id),
-              undefined,
-              { sensitivity: 'base' },
-            )
-            || String(left.id).localeCompare(String(right.id), undefined, { sensitivity: 'base' })
-          ))
-        : [];
-      // A relay that predates the picker omits the field entirely, and a
-      // malformed entry would otherwise reach `-p` as a non-string.
-      connection.hermesProfiles = Array.isArray(message.hermes_profiles)
-        ? message.hermes_profiles.filter((name): name is string => typeof name === 'string' && name.length > 0)
-        : [];
-      this.emitConnections();
-      this.pushConfigHandler?.(relayId);
-      if (connection.capabilities.includes('push_policy')) {
-        this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
-      }
-      if (connection.capabilities.includes('device_management')) {
-        void this.refreshDevices(relayId);
-      }
-      return;
+    if (!connection) return;
+    // Pane revisions are monotonic only for one relay process. A new socket
+    // handshake may follow a relay restart, so discard the retained
+    // process-local baseline before its fresh snapshot arrives.
+    this.agentsValue = this.agentsValue.map((agent) => {
+      if (agent.relay_id !== relayId || agent.pane_revision === undefined) return agent;
+      const withoutRevision = { ...agent };
+      delete withoutRevision.pane_revision;
+      return withoutRevision;
+    });
+    connection.vapidPublicKey = String(message.vapid_public_key || '');
+    connection.host = String(message.host || '');
+    connection.home = String(message.home || '').slice(0, 1024);
+    connection.protocol = Number.isInteger(message.protocol) && message.protocol > 0 ? message.protocol : 1;
+    connection.version = typeof message.version === 'string' ? message.version.slice(0, 40) : '';
+    connection.releaseVersion = String(message.release_version || '').slice(0, 32);
+    connection.revision = String(message.revision || message.version || '').slice(0, 40);
+    connection.update = normalizeRelayUpdate(
+      message.update,
+      connection.releaseVersion,
+      connection.revision,
+    );
+    observeAppUpstreamVersion(connection.update.upstream_version);
+    connection.gatewayAvailableVersion = connection.update.available_version || connection.releaseVersion;
+    this.syncUpdateRestartReconnect(relayId, connection);
+    connection.herdrStatus = normalizeHerdrStatus(message.herdr_status);
+    connection.appDeploy = normalizeAppDeployment(message.app_deploy);
+    connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
+    connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
+    connection.speechLanguages = (Array.isArray(message.speech_languages) ? message.speech_languages : [])
+      .filter(isSpeechLanguage);
+    adoptRelaySpeech(connection.speechLanguages);
+    this.adoptHybridDescriptor(connection, message.hybrid);
+    const attentionCapable = connection.capabilities.includes('attention_classification');
+    this.agentsValue = this.agentsValue.map((agent) =>
+      agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
+    );
+    this.publishAgents('push_config');
+    connection.agentProfiles = Array.isArray(message.agent_profiles)
+      ? message.agent_profiles
+        .filter((profile: unknown): profile is AgentProfile => {
+          if (!profile || typeof profile !== 'object' || !('id' in profile)) return false;
+          if (typeof profile.id !== 'string' || !profile.id) return false;
+          return !('label' in profile) || profile.label === undefined || typeof profile.label === 'string';
+        })
+        .sort((left, right) => (
+          String(left.label || left.id).localeCompare(
+            String(right.label || right.id),
+            undefined,
+            { sensitivity: 'base' },
+          )
+          || String(left.id).localeCompare(String(right.id), undefined, { sensitivity: 'base' })
+        ))
+      : [];
+    // A relay that predates the picker omits the field entirely, and a
+    // malformed entry would otherwise reach `-p` as a non-string.
+    connection.hermesProfiles = Array.isArray(message.hermes_profiles)
+      ? message.hermes_profiles.filter((name): name is string => typeof name === 'string' && name.length > 0)
+      : [];
+    this.emitConnections();
+    this.pushConfigHandler?.(relayId);
+    if (connection.capabilities.includes('push_policy')) {
+      this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
     }
-    if (message.type === 'herdr_status' && connection) {
-      const status = normalizeHerdrStatus(message.status);
-      if (status.generation <= connection.herdrStatus.generation) return;
-      connection.herdrStatus = status;
-      if (Array.isArray(message.capabilities)) {
-        connection.capabilities = message.capabilities.filter(Boolean);
-      }
-      this.emitConnections();
-      return;
+    if (connection.capabilities.includes('device_management')) {
+      void this.refreshDevices(relayId);
     }
-    if (message.type === 'inventory_status' && connection) {
-      connection.inventory = normalizeAgentInventory(message);
-      this.emitConnections();
-      return;
+  }
+
+  private handleHerdrStatus(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection) return;
+    const status = normalizeHerdrStatus(message.status);
+    if (status.generation <= connection.herdrStatus.generation) return;
+    connection.herdrStatus = status;
+    if (Array.isArray(message.capabilities)) {
+      connection.capabilities = message.capabilities.filter(Boolean);
     }
-    if (message.type === 'update_status' && connection) {
-      connection.update = normalizeRelayUpdate(
-        message.update,
-        connection.releaseVersion,
-        connection.revision,
-      );
-      observeAppUpstreamVersion(connection.update.upstream_version);
-      this.syncUpdateRestartReconnect(relayId, connection);
-      if (connection.update.available_version) {
-        connection.gatewayAvailableVersion = connection.update.available_version;
-      }
-      if (connection.update.state === 'failed') {
-        clearPendingRelayUpdate(relayId);
-      }
-      this.emitConnections();
-      return;
+    this.emitConnections();
+  }
+
+  private handleInventoryStatus(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection) return;
+    connection.inventory = normalizeAgentInventory(message);
+    this.emitConnections();
+  }
+
+  private handleUpdateStatus(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection) return;
+    connection.update = normalizeRelayUpdate(
+      message.update,
+      connection.releaseVersion,
+      connection.revision,
+    );
+    observeAppUpstreamVersion(connection.update.upstream_version);
+    this.syncUpdateRestartReconnect(relayId, connection);
+    if (connection.update.available_version) {
+      connection.gatewayAvailableVersion = connection.update.available_version;
     }
-    if (message.type === 'app_deploy_status' && connection) {
-      connection.appDeploy = normalizeAppDeployment(message.app_deploy);
-      this.emitConnections();
-      return;
+    if (connection.update.state === 'failed') {
+      clearPendingRelayUpdate(relayId);
     }
-    if (message.type === 'speech_voices' && connection) {
-      this.adoptSpeechVoices(connection, message);
-      this.emitConnections();
-      return;
+    this.emitConnections();
+  }
+
+  private handleAppDeployStatus(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection) return;
+    connection.appDeploy = normalizeAppDeployment(message.app_deploy);
+    this.emitConnections();
+  }
+
+  private handleSpeechVoices(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection) return;
+    this.adoptSpeechVoices(connection, message);
+    this.emitConnections();
+  }
+
+  private handlePushPolicy(relayId: string, message: Record<string, any>): void {
+    if (message.ok === false) return;
+    const policy = normalizePushPolicy(message.policy);
+    if (policy) {
+      this.pushPoliciesValue.set(relayId, policy);
+      this.pushPolicies.set(new Map(this.pushPoliciesValue));
     }
-    if ((message.type === 'push_policy' || message.type === 'push_policy_result') && message.ok !== false) {
-      const policy = normalizePushPolicy(message.policy);
-      if (policy) {
-        this.pushPoliciesValue.set(relayId, policy);
-        this.pushPolicies.set(new Map(this.pushPoliciesValue));
-      }
-      return;
-    }
-    if (message.type === 'push_test_result') {
-      const stage = String(message.stage || 'dropped');
-      const state: PushTestState = stage === 'service_accepted'
-        ? { status: 'accepted', result: 'accepted' }
-        : stage === 'queued' || stage === 'retrying'
-          ? { status: 'accepted', result: 'queued' }
-          : { status: 'rejected', code: stage };
-      this.pushTestsValue.set(relayId, state);
-      this.pushTests.set(new Map(this.pushTestsValue));
-      return;
-    }
-    if (message.type === 'push_subscribed' && connection) {
-      connection.pushStatus = message.ok ? 'subscribed' : 'failed';
-      this.emitConnections();
-      return;
-    }
-    if (message.type === 'push_unsubscribed' && connection && message.ok) {
-      connection.pushStatus = '';
-      this.emitConnections();
-      return;
-    }
-    if (message.type === 'action_receipt') {
-      this.handleActionReceipt(relayId, message);
-      return;
-    }
-    if (message.type === 'error') {
-      this.handleApiError(relayId, message);
-      return;
-    }
-    if (message.type === 'command_result') {
-      this.handleCommandResult(relayId, message as CommandResult);
-      return;
-    }
-    if ([
-      'upload_begin_result',
-      'upload_chunk_result',
-      'upload_finish_result',
-      'upload_cancel_result',
-    ].includes(String(message.type))) {
-      this.handleUploadResult(relayId, message);
-      return;
-    }
-    if (message.type === 'activity_history') {
-      this.mergeActivityHistory(relayId, message.activities || []);
-      return;
-    }
-    if (message.type === 'activity' && message.activity) {
-      this.upsertActivity(relayId, message.activity);
-      return;
-    }
-    if (message.type === 'workspaces') {
-      if (
-        connection
-        && connection.inventory.state !== 'ready'
-        && !connection.inventory.stale
-      ) return;
-      const relayLabel = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-      const incoming = (Array.isArray(message.workspaces) ? message.workspaces : [])
-        .map((workspace: unknown) => workspace && typeof workspace === 'object'
-          ? normalizeWorkspace(relayId, relayLabel, workspace as Record<string, unknown>)
-          : null)
-        .filter((workspace: RelayWorkspace | null): workspace is RelayWorkspace => workspace !== null);
-      this.workspacesValue = [
-        ...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId),
-        ...incoming,
-      ];
-      this.workspaces.set(this.workspacesValue);
-      return;
-    }
-    if (message.type === 'agents') {
-      // Starting/error snapshots are not authoritative. In particular, a relay
-      // restart has no in-memory pane cache yet; accepting its placeholder []
-      // would erase the phone's last useful snapshot and recreate the original
-      // "no agents" failure. The first ready transition is followed by a fresh
-      // authoritative agents frame.
-      if (
-        connection
-        && connection.inventory.state !== 'ready'
-        && !connection.inventory.stale
-      ) return;
-      const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-      const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
-      const incoming = (Array.isArray(message.agents) ? message.agents : [])
-        .map((agent: Partial<Agent>) => normalizeAgent(
-          relayId,
-          label,
-          normalizeAgentTargetFields(agent),
-          attentionCapable,
-        ));
-      this.agentsValue = mergeAgentList(
-        this.agentsValue,
-        relayId,
-        incoming,
-        this.blockedSnapshotMisses,
-        this.respondingValue,
-      );
-      this.reconcileResponding();
-      this.publishAgents('agents snapshot');
-      return;
-    }
-    if (message.type === 'blocked') {
-      const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-      const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
-      const next = normalizeAgent(
+  }
+
+  private handlePushTestResult(relayId: string, message: Record<string, any>): void {
+    const stage = String(message.stage || 'dropped');
+    const state: PushTestState = stage === 'service_accepted'
+      ? { status: 'accepted', result: 'accepted' }
+      : stage === 'queued' || stage === 'retrying'
+        ? { status: 'accepted', result: 'queued' }
+        : { status: 'rejected', code: stage };
+    this.pushTestsValue.set(relayId, state);
+    this.pushTests.set(new Map(this.pushTestsValue));
+  }
+
+  private handlePushSubscribed(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection) return;
+    connection.pushStatus = message.ok ? 'subscribed' : 'failed';
+    this.emitConnections();
+  }
+
+  private handlePushUnsubscribed(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection) return;
+    if (!message.ok) return;
+    connection.pushStatus = '';
+    this.emitConnections();
+  }
+
+  private handleActivity(relayId: string, message: Record<string, any>): void {
+    if (!message.activity) return;
+    this.upsertActivity(relayId, message.activity);
+  }
+
+  private handleWorkspaces(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    if (
+      connection
+      && connection.inventory.state !== 'ready'
+      && !connection.inventory.stale
+    ) return;
+    const relayLabel = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
+    const incoming = (Array.isArray(message.workspaces) ? message.workspaces : [])
+      .map((workspace: unknown) => workspace && typeof workspace === 'object'
+        ? normalizeWorkspace(relayId, relayLabel, workspace as Record<string, unknown>)
+        : null)
+      .filter((workspace: RelayWorkspace | null): workspace is RelayWorkspace => workspace !== null);
+    this.workspacesValue = [
+      ...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId),
+      ...incoming,
+    ];
+    this.workspaces.set(this.workspacesValue);
+  }
+
+  private handleAgents(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    // Starting/error snapshots are not authoritative. In particular, a relay
+    // restart has no in-memory pane cache yet; accepting its placeholder []
+    // would erase the phone's last useful snapshot and recreate the original
+    // "no agents" failure. The first ready transition is followed by a fresh
+    // authoritative agents frame.
+    if (
+      connection
+      && connection.inventory.state !== 'ready'
+      && !connection.inventory.stale
+    ) return;
+    const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
+    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
+    const incoming = (Array.isArray(message.agents) ? message.agents : [])
+      .map((agent: Partial<Agent>) => normalizeAgent(
         relayId,
         label,
-        normalizeAgentTargetFields({ ...message, status: 'blocked' }),
+        normalizeAgentTargetFields(agent),
         attentionCapable,
-      );
-      const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
-      const before = index >= 0 ? this.agentsValue[index] : undefined;
-      if (staleAgentRevision(before, next)) return;
-      this.blockedSnapshotMisses.delete(next.pane_id);
-      if (index >= 0) {
-        const copy = [...this.agentsValue];
-        copy[index] = mergeAgentDetails(before, next);
-        this.agentsValue = copy;
-      } else this.agentsValue = [...this.agentsValue, next];
-      this.respondingValue.delete(next.pane_id);
-      this.responding.set(new Set(this.respondingValue));
-      this.publishAgents('blocked event');
-      return;
-    }
-    if (message.type === 'agent_update' && message.pane_id) {
-      const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-      const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
-      const paneId = clientPaneId(relayId, message.pane_id);
-      const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
-      const before = index >= 0 ? this.agentsValue[index] : undefined;
-      const source = before && rawBlocked(message)
-        && !Object.prototype.hasOwnProperty.call(message, 'attention_kind')
-        ? { ...before, ...message }
-        : message;
-      const next = normalizeAgent(relayId, label, normalizeAgentTargetFields(source), attentionCapable);
-      if (staleAgentRevision(before, next)) return;
-      const stabilized = stabilizeBlockedSnapshot(before, next, this.blockedSnapshotMisses, this.respondingValue);
-      if (index >= 0) {
-        const copy = [...this.agentsValue];
-        copy[index] = mergeAgentDetails(before, stabilized);
-        this.agentsValue = copy;
-      } else this.agentsValue = [...this.agentsValue, stabilized];
-      this.reconcileResponding();
-      this.publishAgents('agent update');
-      return;
-    }
-    const paneMessageTarget = (message: Record<string, any>): FrontendTargetRef | null => {
-      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      const agent = this.agentsValue.find((candidate) => candidate.pane_id === paneId)
-        || this.watchedPanes.get(paneId);
-      if (!agent) return null;
-      if (!Object.prototype.hasOwnProperty.call(message, 'target')) return targetRefForAgent(agent);
-      return normalizeFrontendTargetRef({
-        ...(message.target as Record<string, unknown>),
-        relay_id: relayId,
-      });
-    };
-    const paneMessageMatches = (message: Record<string, any>): boolean => {
-      if (!Object.prototype.hasOwnProperty.call(message, 'target')) return true;
-      const target = paneMessageTarget(message);
-      if (!target) return false;
-      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      const agent = this.agentsValue.find((candidate) => candidate.pane_id === paneId)
-        || this.watchedPanes.get(paneId);
-      return Boolean(agent && targetRefMatchesAgent(target, agent));
-    };
-    const readTarget = paneMessageTarget(message);
-    const readKey = readTarget && targetStoreKey(readTarget);
+      ));
+    this.agentsValue = mergeAgentList(
+      this.agentsValue,
+      relayId,
+      incoming,
+      this.blockedSnapshotMisses,
+      this.respondingValue,
+    );
+    this.reconcileResponding();
+    this.publishAgents('agents snapshot');
+  }
+
+  private handleBlocked(relayId: string, message: Record<string, any>): void {
+    const connection = this.connectionsValue.get(relayId);
+    const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
+    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
+    const next = normalizeAgent(
+      relayId,
+      label,
+      normalizeAgentTargetFields({ ...message, status: 'blocked' }),
+      attentionCapable,
+    );
+    const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
+    const before = index >= 0 ? this.agentsValue[index] : undefined;
+    if (staleAgentRevision(before, next)) return;
+    this.blockedSnapshotMisses.delete(next.pane_id);
+    if (index >= 0) {
+      const copy = [...this.agentsValue];
+      copy[index] = mergeAgentDetails(before, next);
+      this.agentsValue = copy;
+    } else this.agentsValue = [...this.agentsValue, next];
+    this.respondingValue.delete(next.pane_id);
+    this.responding.set(new Set(this.respondingValue));
+    this.publishAgents('blocked event');
+  }
+
+  private handleAgentUpdate(relayId: string, message: Record<string, any>): void {
+    if (!message.pane_id) return;
+    const connection = this.connectionsValue.get(relayId);
+    const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
+    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
+    const paneId = clientPaneId(relayId, message.pane_id);
+    const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
+    const before = index >= 0 ? this.agentsValue[index] : undefined;
+    const source = before && rawBlocked(message)
+      && !Object.prototype.hasOwnProperty.call(message, 'attention_kind')
+      ? { ...before, ...message }
+      : message;
+    const next = normalizeAgent(relayId, label, normalizeAgentTargetFields(source), attentionCapable);
+    if (staleAgentRevision(before, next)) return;
+    const stabilized = stabilizeBlockedSnapshot(before, next, this.blockedSnapshotMisses, this.respondingValue);
+    if (index >= 0) {
+      const copy = [...this.agentsValue];
+      copy[index] = mergeAgentDetails(before, stabilized);
+      this.agentsValue = copy;
+    } else this.agentsValue = [...this.agentsValue, stabilized];
+    this.reconcileResponding();
+    this.publishAgents('agent update');
+  }
+
+  private paneMessageContext(relayId: string, message: Record<string, any>) {
+    const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+    const agent = this.agentsValue.find((candidate) => candidate.pane_id === paneId)
+      || this.watchedPanes.get(paneId);
+    const hasTarget = Object.prototype.hasOwnProperty.call(message, 'target');
+    const target = !agent
+      ? null
+      : hasTarget
+        ? normalizeFrontendTargetRef({
+          ...(message.target as Record<string, unknown>),
+          relay_id: relayId,
+        })
+        : targetRefForAgent(agent);
+    const readKey = target && targetStoreKey(target);
     const pendingRead = readKey ? this.pendingPaneReads.get(readKey) : undefined;
-    if ((message.type === 'pane_content' || message.type === 'pane_unchanged')
-      && message.request_id && message.request_id !== pendingRead?.requestId) return;
-    const completePaneRead = (): number | undefined => {
-      if (!readKey || !pendingRead || message.request_id !== pendingRead.requestId) return;
-      this.pendingPaneReads.delete(readKey);
-      return !message.error ? pendingRead.startedAt : undefined;
+    return {
+      paneId,
+      matches: !hasTarget || Boolean(target && agent && targetRefMatchesAgent(target, agent)),
+      staleRead: Boolean(message.request_id && message.request_id !== pendingRead?.requestId),
+      inputTarget: !message.error && hasTarget ? target : undefined,
+      completeRead: (): number | undefined => {
+        if (!readKey || !pendingRead || message.request_id !== pendingRead.requestId) return;
+        this.pendingPaneReads.delete(readKey);
+        return !message.error ? pendingRead.startedAt : undefined;
+      },
     };
-    const inputTarget = !message.error && Object.prototype.hasOwnProperty.call(message, 'target') ? readTarget : undefined;
-    if (message.type === 'pane_unchanged') {
-      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      if (!paneMessageMatches(message)) return;
-      completePaneRead();
-      if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
-        this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-      }
-      this.startPaneWatch(paneId);
-      return;
+  }
+
+  private handlePaneUnchanged(relayId: string, message: Record<string, any>): void {
+    const { paneId, matches, staleRead, completeRead } = this.paneMessageContext(relayId, message);
+    if (staleRead || !matches) return;
+    completeRead();
+    if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
+      this.paneContentFingerprints.set(paneId, message.content_fingerprint);
     }
-    if (message.type === 'pane_resync') {
-      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      if (!paneMessageMatches(message)) return;
-      const watched = this.watchedPanes.get(paneId);
+    this.startPaneWatch(paneId);
+  }
+
+  private handlePaneResync(relayId: string, message: Record<string, any>): void {
+    const { paneId, matches } = this.paneMessageContext(relayId, message);
+    if (!matches) return;
+    const watched = this.watchedPanes.get(paneId);
+    if (watched) this.readPane(watched, true);
+  }
+
+  private handlePaneDelta(relayId: string, message: Record<string, any>): void {
+    const { paneId, matches, inputTarget } = this.paneMessageContext(relayId, message);
+    if (!matches) return;
+    const frame = this.terminalFramesValue.get(paneId);
+    const baseFingerprint = this.paneContentFingerprints.get(paneId);
+    const metadataOnly = baseFingerprint === message.base_fingerprint
+      && message.base_fingerprint === message.content_fingerprint
+      && Array.isArray(message.segments) && message.segments.length === 0;
+    const nextContent = frame && baseFingerprint === message.base_fingerprint
+      ? metadataOnly ? frame.content : applyPaneDelta(frame.content, message.segments)
+      : null;
+    const watched = this.watchedPanes.get(paneId);
+    if (nextContent === null || typeof message.content_fingerprint !== 'string') {
       if (watched) this.readPane(watched, true);
       return;
     }
-    if (message.type === 'pane_delta') {
-      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      if (!paneMessageMatches(message)) return;
-      const frame = this.terminalFramesValue.get(paneId);
-      const baseFingerprint = this.paneContentFingerprints.get(paneId);
-      const metadataOnly = baseFingerprint === message.base_fingerprint
-        && message.base_fingerprint === message.content_fingerprint
-        && Array.isArray(message.segments) && message.segments.length === 0;
-      const nextContent = frame && baseFingerprint === message.base_fingerprint
-        ? metadataOnly ? frame.content : applyPaneDelta(frame.content, message.segments)
-        : null;
-      const watched = this.watchedPanes.get(paneId);
-      if (nextContent === null || typeof message.content_fingerprint !== 'string') {
-        if (watched) this.readPane(watched, true);
-        return;
-      }
+    this.paneContentFingerprints.set(paneId, message.content_fingerprint);
+    const deltaNoEcho = typeof message.no_echo === 'boolean' ? message.no_echo : frame?.noEcho;
+    this.terminalFramesValue.set(paneId, {
+      paneId,
+      content: nextContent,
+      receivedAt: performance.now(),
+      inputTarget,
+      target: typeof message.no_echo === 'boolean' ? inputTarget : undefined,
+      format: String(message.format || frame?.format || 'plain'),
+      truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
+      viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
+      viewportRows: typeof message.viewport_rows === 'number' ? message.viewport_rows : frame?.viewportRows,
+      noEcho: deltaNoEcho,
+      noEchoPrompt: deltaNoEcho
+        ? typeof message.no_echo_prompt === 'string' ? message.no_echo_prompt : frame?.noEchoPrompt
+        : undefined,
+      resizeSettling: message.resize_settling === true,
+    });
+    this.terminalFrames.set(new Map(this.terminalFramesValue));
+    this.mergePaneInteraction(paneId, message);
+    if (watched) this.acknowledgePaneFrame(watched, message.content_fingerprint);
+    return;
+  }
+
+  private handlePaneContent(relayId: string, message: Record<string, any>): void {
+    const { paneId, matches, staleRead, inputTarget, completeRead } = this.paneMessageContext(relayId, message);
+    if (staleRead || !matches) return;
+    const readStartedAt = completeRead();
+    const connection = this.connectionsValue.get(relayId);
+    if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
       this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-      const deltaNoEcho = typeof message.no_echo === 'boolean' ? message.no_echo : frame?.noEcho;
-      this.terminalFramesValue.set(paneId, {
-        paneId,
-        content: nextContent,
-        receivedAt: performance.now(),
-        inputTarget,
-        target: typeof message.no_echo === 'boolean' ? inputTarget : undefined,
-        format: String(message.format || frame?.format || 'plain'),
-        truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
-        viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
-        viewportRows: typeof message.viewport_rows === 'number' ? message.viewport_rows : frame?.viewportRows,
-        noEcho: deltaNoEcho,
-        noEchoPrompt: deltaNoEcho
-          ? typeof message.no_echo_prompt === 'string' ? message.no_echo_prompt : frame?.noEchoPrompt
-          : undefined,
-        resizeSettling: message.resize_settling === true,
-      });
-      this.terminalFrames.set(new Map(this.terminalFramesValue));
-      this.mergePaneInteraction(paneId, message);
-      if (watched) this.acknowledgePaneFrame(watched, message.content_fingerprint);
-      return;
     }
-    if (message.type === 'pane_content') {
-      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      if (!paneMessageMatches(message)) return;
-      const readStartedAt = completePaneRead();
-      if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
-        this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-      }
-      const nextFrame: TerminalFrame = {
-        readStartedAt,
-        paneId,
-        content: typeof message.content === 'string' ? message.content : '(empty)',
-        receivedAt: performance.now(),
-        target: inputTarget,
-        inputTarget,
-        noEcho: typeof message.no_echo === 'boolean' ? message.no_echo : undefined,
-        format: String(message.format || 'plain'),
-      };
-      if (message.truncated === true) nextFrame.truncated = true;
-      if (message.viewport_only === true) nextFrame.viewportOnly = true;
-      if (typeof message.viewport_rows === 'number') nextFrame.viewportRows = message.viewport_rows;
-      if (message.no_echo === true) {
-        nextFrame.noEcho = true;
-        if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
-      }
-      if (message.resize_settling === true) nextFrame.resizeSettling = true;
-      if (connection && typeof nextFrame.noEcho === 'boolean' && Number.isFinite(readStartedAt)) this.secretObservations.set(nextFrame, connection);
-      this.terminalFramesValue.set(paneId, nextFrame);
-      this.terminalFrames.set(new Map(this.terminalFramesValue));
-      this.mergePaneInteraction(paneId, message);
-      const watched = this.watchedPanes.get(paneId);
-      const contentFingerprint = typeof message.content_fingerprint === 'string'
-        ? message.content_fingerprint
-        : '';
-      if (watched && message.ack_required && contentFingerprint) {
-        this.acknowledgePaneFrame(watched, contentFingerprint);
-      }
-      this.startPaneWatch(paneId);
+    const nextFrame: TerminalFrame = {
+      readStartedAt,
+      paneId,
+      content: typeof message.content === 'string' ? message.content : '(empty)',
+      receivedAt: performance.now(),
+      target: inputTarget,
+      inputTarget,
+      noEcho: typeof message.no_echo === 'boolean' ? message.no_echo : undefined,
+      format: String(message.format || 'plain'),
+    };
+    if (message.truncated === true) nextFrame.truncated = true;
+    if (message.viewport_only === true) nextFrame.viewportOnly = true;
+    if (typeof message.viewport_rows === 'number') nextFrame.viewportRows = message.viewport_rows;
+    if (message.no_echo === true) {
+      nextFrame.noEcho = true;
+      if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
     }
+    if (message.resize_settling === true) nextFrame.resizeSettling = true;
+    if (connection && typeof nextFrame.noEcho === 'boolean' && Number.isFinite(readStartedAt)) this.secretObservations.set(nextFrame, connection);
+    this.terminalFramesValue.set(paneId, nextFrame);
+    this.terminalFrames.set(new Map(this.terminalFramesValue));
+    this.mergePaneInteraction(paneId, message);
+    const watched = this.watchedPanes.get(paneId);
+    const contentFingerprint = typeof message.content_fingerprint === 'string'
+      ? message.content_fingerprint
+      : '';
+    if (watched && message.ack_required && contentFingerprint) {
+      this.acknowledgePaneFrame(watched, contentFingerprint);
+    }
+    this.startPaneWatch(paneId);
   }
 
   private acknowledgePaneFrame(agent: Agent, contentFingerprint: string): void {
@@ -1896,52 +1925,81 @@ class RelayStore {
     const requestId = payload.type === 'send_pi_prompt_unconfirmed'
       ? `${String(payload.pi_prompt_lease?.incarnation || '')}_${commandRequestId()}`
       : commandRequestId();
-    return new Promise((resolve, reject) => {
-      const abort = () => {
-        clearTimeout(this.pendingRequests.get(requestId)?.timer ?? timer);
-        if (!this.pendingRequests.delete(requestId)) return;
-        cleanup();
+    return this.sendPending<PendingRequest, CommandResult>({
+      operations: this.pendingRequests,
+      relayId,
+      requestId,
+      frame: () => {
+        const command: Record<string, unknown> = {
+          ...payload,
+          request_id: requestId,
+          protocol: RELAY_PROTOCOL_VERSION,
+        };
+        if (payload.type !== 'lease_pane_size' && payload.type !== 'release_pane_size') {
+          command.client_id = pushClientId();
+        }
+        return command;
+      },
+      signal,
+      timeoutMs,
+      timeoutMessage: 'Relay confirmation timed out',
+      sendFailureMessage: 'Could not send command to relay',
+      abortError: () => {
         const error = new CommandError('Conversation history request was cancelled.');
         error.code = 'request_cancelled';
-        reject(error);
+        return error;
+      },
+      createPending: (base) => {
+        const actionId = payload.intent && typeof payload.intent === 'object'
+          ? String(payload.intent.action_id || '')
+          : '';
+        return {
+          ...base,
+          action: String(payload.action || payload.type),
+          actionId: actionId || undefined,
+        };
+      },
+    });
+  }
+
+  private sendPending<TPending extends PendingOperation, TResult>(options: {
+    operations: Map<string, TPending>;
+    relayId: string;
+    requestId: string;
+    frame: () => Record<string, unknown>;
+    signal: AbortSignal | undefined;
+    timeoutMs: number;
+    timeoutMessage: string;
+    sendFailureMessage: string;
+    abortError: () => CommandError;
+    createPending: (base: PendingOperation & { resolve: (result: TResult) => void }) => TPending;
+  }): Promise<TResult> {
+    const { operations, relayId, requestId, signal } = options;
+    return new Promise<TResult>((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(operations.get(requestId)?.timer ?? timer);
+        if (!operations.delete(requestId)) return;
+        cleanup();
+        reject(options.abortError());
       };
       const cleanup = () => signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
         cleanup();
-        this.pendingRequests.delete(requestId);
-        reject(dispatchedUnknownError('Relay confirmation timed out'));
-      }, timeoutMs);
-      registerPendingOperation<PendingRequest>(
-        this.pendingRequests, requestId, signal, abort, () => {
-          const actionId = payload.intent && typeof payload.intent === 'object'
-            ? String(payload.intent.action_id || '')
-            : '';
-          return {
-            relayId,
-            action: String(payload.action || payload.type),
-            actionId: actionId || undefined,
-            resolve,
-            reject,
-            timer,
-            cleanup,
-          };
-        },
+        operations.delete(requestId);
+        reject(dispatchedUnknownError(options.timeoutMessage));
+      }, options.timeoutMs);
+      registerPendingOperation<TPending>(
+        operations, requestId, signal, abort,
+        () => options.createPending({ relayId, resolve, reject, timer, cleanup }),
       );
-      const command: Record<string, unknown> = {
-        ...payload,
-        request_id: requestId,
-        protocol: RELAY_PROTOCOL_VERSION,
-      };
-      if (payload.type !== 'lease_pane_size' && payload.type !== 'release_pane_size') {
-        command.client_id = pushClientId();
-      }
-      if (!this.sendRaw(relayId, command)) {
+      if (!this.sendRaw(relayId, options.frame())) {
         releasePendingResources({ timer, cleanup });
-        this.pendingRequests.delete(requestId);
-        reject(new CommandError('Could not send command to relay'));
+        operations.delete(requestId);
+        reject(new CommandError(options.sendFailureMessage));
       }
     });
   }
+
   deviceCredential(relayId: string): RelayDeviceCredential | null {
     const authentication = this.deviceCredentials.get(relayId);
     return authentication?.kind === 'credential' ? authentication : null;
@@ -3236,42 +3294,31 @@ class RelayStore {
     if (protocolError) return Promise.reject(new CommandError(protocolError));
     if (signal?.aborted) return Promise.reject(new CommandError('Attachment upload was cancelled.'));
     const requestId = commandRequestId();
-    return new Promise<TResult>((resolve, reject) => {
-      const cleanup = () => signal?.removeEventListener('abort', abort);
-      const timer = setTimeout(() => {
-        cleanup();
-        this.pendingUploads.delete(requestId);
-        reject(dispatchedUnknownError('Attachment upload did not finish in time.'));
-      }, ATTACHMENT_UPLOAD_TIMEOUT_MS);
-      const abort = () => {
-        clearTimeout(timer);
-        this.pendingUploads.delete(requestId);
-        cleanup();
-        const error = new CommandError('Attachment upload was interrupted.');
-        error.code = 'attachment_upload_interrupted';
-        reject(error);
-      };
-      registerPendingOperation<PendingUpload>(
-        this.pendingUploads, requestId, signal, abort, () => ({
-          relayId,
-          responseType,
-          resolve: (result) => resolve(result as TResult),
-          reject,
-          timer,
-          cleanup,
-        }),
-      );
-      if (!this.sendRaw(relayId, {
+    return this.sendPending<PendingUpload, TResult>({
+      operations: this.pendingUploads,
+      relayId,
+      requestId,
+      frame: () => ({
         type,
         protocol: RELAY_PROTOCOL_VERSION,
         request_id: requestId,
         client_id: pushClientId(),
         ...(request as Record<string, unknown>),
-      })) {
-        releasePendingResources({ timer, cleanup });
-        this.pendingUploads.delete(requestId);
-        reject(new CommandError('Could not send attachment upload request.'));
-      }
+      }),
+      signal,
+      timeoutMs: ATTACHMENT_UPLOAD_TIMEOUT_MS,
+      timeoutMessage: 'Attachment upload did not finish in time.',
+      sendFailureMessage: 'Could not send attachment upload request.',
+      abortError: () => {
+        const error = new CommandError('Attachment upload was interrupted.');
+        error.code = 'attachment_upload_interrupted';
+        return error;
+      },
+      createPending: (base) => ({
+        ...base,
+        responseType,
+        resolve: (result) => base.resolve(result as TResult),
+      }),
     });
   }
 
