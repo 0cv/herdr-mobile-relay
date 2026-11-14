@@ -370,299 +370,40 @@ func (s *Scheduler) Metrics() SchedulerMetrics {
 	return s.metrics
 }
 
+type schedulerLoop struct {
+	s             *Scheduler
+	slots         map[string]*PaneSlot
+	relayQueue    []*scheduledOperation
+	relayInFlight map[OperationID]*scheduledOperation
+	ledger        map[string]*ledgerEntry
+	knownActive   map[string]bool
+	deadlines     deadlineHeap
+	inUse         int
+	stopping      bool
+	stopAck       chan struct{}
+	timer         *time.Timer
+}
+
 func (s *Scheduler) run() {
 	defer close(s.done)
 
-	slots := make(map[string]*PaneSlot)
-	var relayQueue []*scheduledOperation
-	relayInFlight := make(map[OperationID]*scheduledOperation)
-	ledger := make(map[string]*ledgerEntry)
-	knownActive := make(map[string]bool)
-	deadlines := deadlineHeap{}
-	heap.Init(&deadlines)
-	inUse := 0
-	stopping := false
-	var stopAck chan struct{}
-
-	timer := time.NewTimer(time.Hour)
-	timer.Stop()
-	defer timer.Stop()
-
-	resetTimer := func() {
-		timer.Stop()
-		for deadlines.Len() > 0 && deadlines[0].index < 0 {
-			heap.Pop(&deadlines)
-		}
-		if deadlines.Len() == 0 {
-			return
-		}
-		wait := time.Until(deadlines[0].options.Deadline)
-		if wait < 0 {
-			wait = 0
-		}
-		timer.Reset(wait)
+	l := &schedulerLoop{
+		s:             s,
+		slots:         make(map[string]*PaneSlot),
+		relayInFlight: make(map[OperationID]*scheduledOperation),
+		ledger:        make(map[string]*ledgerEntry),
+		knownActive:   make(map[string]bool),
+		timer:         time.NewTimer(time.Hour),
 	}
+	l.timer.Stop()
+	defer l.timer.Stop()
+	l.serve()
+}
 
-	var dispatch func()
-	dispatch = func() {
-		now := time.Now()
-
-		for len(relayQueue) > 0 && inUse < s.capacity && !stopping {
-			op := relayQueue[0]
-			relayQueue = relayQueue[1:]
-			if !now.Before(op.options.Deadline) {
-				if op.index >= 0 {
-					heap.Remove(&deadlines, op.index)
-				}
-				s.expire(op, ledger)
-				continue
-			}
-			inUse++
-			relayInFlight[op.operation] = op
-			op.cancel = s.start(op, 0)
-		}
-
-		paneIDs := make([]string, 0, len(slots))
-		for paneID := range slots {
-			paneIDs = append(paneIDs, paneID)
-		}
-		sort.Strings(paneIDs)
-		progress := true
-		for progress && inUse < s.capacity && !stopping {
-			progress = false
-			for _, paneID := range paneIDs {
-				if inUse >= s.capacity {
-					break
-				}
-				slot := slots[paneID]
-				if slot.InFlight != nil || len(slot.Queue) == 0 {
-					continue
-				}
-				op := slot.Queue[0]
-				slot.Queue = slot.Queue[1:]
-				if op.generation != slot.Generation {
-					if op.index >= 0 {
-						heap.Remove(&deadlines, op.index)
-					}
-					s.replyStale(op, ledger)
-					progress = true
-					continue
-				}
-				if !now.Before(op.options.Deadline) {
-					if op.index >= 0 {
-						heap.Remove(&deadlines, op.index)
-					}
-					s.expire(op, ledger)
-					progress = true
-					continue
-				}
-				inUse++
-				slot.InFlight = &InFlightOperation{
-					OperationID: op.operation,
-					Generation:  slot.Generation,
-				}
-				slot.InFlight.cancel = s.start(op, slot.Generation)
-				progress = true
-			}
-		}
-		s.setOwnerMetrics(inUse, len(slots))
-		resetTimer()
-	}
-
-	completeAndRedispatch := func(event completionEvent) {
-		s.observeCompletion()
-		op := event.operation
-		if op.options.RelayLevel {
-			if _, ok := relayInFlight[op.operation]; !ok {
-				return
-			}
-			delete(relayInFlight, op.operation)
-		} else {
-			slot := slots[op.options.PaneID]
-			if slot == nil || slot.InFlight == nil || slot.InFlight.OperationID != op.operation {
-				return
-			}
-			stale := slot.InFlight.Generation != slot.Generation
-			if !stale && !op.options.AllowAbsent && s.generationCurrent != nil {
-				stale = !s.generationCurrent(op.options.PaneID, slot.InFlight.Generation)
-			}
-			if event.result.BumpGeneration && !stale {
-				slot.Generation++
-				for key, entry := range ledger {
-					if key != op.options.LedgerKey &&
-						entry.paneID == op.options.PaneID &&
-						entry.generation < slot.Generation {
-						delete(ledger, key)
-					}
-				}
-			}
-			slot.InFlight = nil
-			if len(slot.Queue) == 0 && event.result.BumpGeneration && !stale && event.result.Result != nil && event.result.Result.Phase == "closed" {
-				delete(slots, op.options.PaneID)
-			}
-			if stale {
-				inUse--
-				if op.index >= 0 {
-					heap.Remove(&deadlines, op.index)
-				}
-				s.metricsMu.Lock()
-				s.metrics.Completed++
-				s.metricsMu.Unlock()
-				s.setOwnerMetrics(inUse, len(slots))
-				s.replyStale(op, ledger)
-				dispatch()
-				return
-			}
-		}
-		inUse--
-		if op.index >= 0 {
-			heap.Remove(&deadlines, op.index)
-		}
-		if next := event.result.Continuation; next != nil {
-			op.finalize = next.Finalize
-			op.options.RelayLevel = false
-			op.options.PaneID = next.PaneID
-			op.options.AllowAbsent = next.AllowAbsent
-			op.options.Deadline = minDeadline(op.options.Deadline, next.Deadline)
-			op.generation = next.Generation
-			op.runner = next.Runner
-			op.dispatched = false
-			slot := slots[next.PaneID]
-			if slot == nil {
-				slot = &PaneSlot{Generation: next.Generation}
-				slots[next.PaneID] = slot
-			}
-			if next.Generation > slot.Generation && s.generationCurrent != nil && s.generationCurrent(next.PaneID, next.Generation) {
-				slot.Generation = next.Generation
-				if slot.InFlight != nil && slot.InFlight.cancel != nil {
-					slot.InFlight.cancel()
-				}
-				for _, queued := range slot.Queue {
-					if queued.index >= 0 {
-						heap.Remove(&deadlines, queued.index)
-					}
-					s.replyStale(queued, ledger)
-				}
-				slot.Queue = nil
-				for key, entry := range ledger {
-					if key != op.options.LedgerKey && entry.paneID == next.PaneID && entry.generation < slot.Generation {
-						delete(ledger, key)
-					}
-				}
-			}
-			if stopping {
-				s.finish(op, nil, ErrClosed, ledger)
-			} else if slot.Generation != next.Generation {
-				s.replyStale(op, ledger)
-			} else {
-				heap.Push(&deadlines, op)
-				slot.Queue = insertBySequence(slot.Queue, op)
-			}
-			dispatch()
-			return
-		}
-		s.metricsMu.Lock()
-		s.metrics.Completed++
-		latency := time.Since(op.options.ReceivedAt)
-		if latency > 0 {
-			micros := uint64(latency.Microseconds())
-			s.metrics.LatencySamples++
-			s.metrics.LatencyTotalMicros += micros
-			if micros > s.metrics.LatencyMaxMicros {
-				s.metrics.LatencyMaxMicros = micros
-			}
-		}
-		s.metricsMu.Unlock()
-		s.setOwnerMetrics(inUse, len(slots))
-		s.finish(op, event.result.Result, nil, ledger)
-		dispatch()
-	}
-
-	applyTopology := func(update topologyUpdate) {
-		for paneID := range knownActive {
-			if update.active[paneID] {
-				continue
-			}
-			slot := slots[paneID]
-			if slot == nil {
-				continue
-			}
-			slot.Generation++
-			if slot.InFlight != nil && slot.InFlight.cancel != nil {
-				slot.InFlight.cancel()
-			}
-			for _, op := range slot.Queue {
-				if op.index >= 0 {
-					heap.Remove(&deadlines, op.index)
-				}
-				s.replyStale(op, ledger)
-			}
-			slot.Queue = nil
-			for key, entry := range ledger {
-				if entry.paneID == paneID && entry.generation < slot.Generation {
-					delete(ledger, key)
-				}
-			}
-		}
-		for paneID, generation := range update.generations {
-			slot := slots[paneID]
-			if slot == nil {
-				slot = &PaneSlot{}
-				slots[paneID] = slot
-			}
-			if generation <= slot.Generation {
-				continue
-			}
-			slot.Generation = generation
-			if slot.InFlight != nil && slot.InFlight.cancel != nil {
-				slot.InFlight.cancel()
-			}
-			for _, op := range slot.Queue {
-				if op.index >= 0 {
-					heap.Remove(&deadlines, op.index)
-				}
-				s.replyStale(op, ledger)
-			}
-			slot.Queue = nil
-			for key, entry := range ledger {
-				if entry.paneID == paneID && entry.generation < slot.Generation {
-					delete(ledger, key)
-				}
-			}
-		}
-		knownActive = update.active
-		close(update.response)
-		dispatch()
-	}
-
-	pruneLedger := func(now time.Time) {
-		for key, entry := range ledger {
-			if entry.operation == nil && now.Sub(entry.createdAt) >= ledgerRetention {
-				delete(ledger, key)
-			}
-		}
-		for len(ledger) >= maxLedgerEntries {
-			var oldestKey string
-			var oldest time.Time
-			for key, entry := range ledger {
-				if entry.operation != nil {
-					continue
-				}
-				if oldestKey == "" || entry.createdAt.Before(oldest) {
-					oldestKey = key
-					oldest = entry.createdAt
-				}
-			}
-			if oldestKey == "" {
-				return
-			}
-			delete(ledger, oldestKey)
-		}
-	}
-
+func (l *schedulerLoop) serve() {
+	s := l.s
 	for {
-		if stopping && inUse == 0 && stopAck != nil {
-			close(stopAck)
+		if l.stopCompleted() {
 			return
 		}
 
@@ -670,7 +411,7 @@ func (s *Scheduler) run() {
 		// state-generation validator below remains the correctness barrier.
 		select {
 		case update := <-s.topology:
-			applyTopology(update)
+			l.applyTopology(update)
 			continue
 		default:
 		}
@@ -680,99 +421,24 @@ func (s *Scheduler) run() {
 		for drained := 0; drained < protectedCompletionBatch; drained++ {
 			select {
 			case event := <-s.completions:
-				completeAndRedispatch(event)
+				l.complete(event)
 			default:
 				drained = protectedCompletionBatch
 			}
 		}
-		if stopping && inUse == 0 && stopAck != nil {
-			close(stopAck)
+		if l.stopCompleted() {
 			return
 		}
 
 		select {
 		case op := <-s.ingress:
-			pruneLedger(time.Now())
-			if stopping {
-				s.reply(op, nil, ErrClosed)
-				continue
-			}
-			if !time.Now().Before(op.options.Deadline) {
-				s.replyNotStarted(op)
-				continue
-			}
-			if !op.options.RelayLevel {
-				slot := slots[op.options.PaneID]
-				if slot != nil && op.options.PaneGeneration < slot.Generation {
-					s.replyStale(op, ledger)
-					continue
-				}
-			}
-			if key := op.options.LedgerKey; key != "" {
-				if existing, ok := ledger[key]; ok {
-					if existing.payloadHash != op.options.PayloadHash {
-						s.reply(op, nil, ErrConflict)
-						continue
-					}
-					if existing.result != nil {
-						s.replyReplayed(op, cloneResult(existing.result), nil)
-						continue
-					}
-					for index := range op.waiters {
-						op.waiters[index].replayed = true
-					}
-					existing.operation.waiters = append(existing.operation.waiters, op.waiters...)
-					continue
-				}
-				ledger[key] = &ledgerEntry{
-					payloadHash: op.options.PayloadHash,
-					operation:   op,
-					paneID:      op.options.PaneID,
-					createdAt:   op.options.ReceivedAt,
-				}
-			}
-			heap.Push(&deadlines, op)
-			if op.options.RelayLevel {
-				relayQueue = insertBySequence(relayQueue, op)
-			} else {
-				slot := slots[op.options.PaneID]
-				if slot == nil {
-					slot = &PaneSlot{}
-					slots[op.options.PaneID] = slot
-				}
-				if op.options.PaneGeneration > slot.Generation {
-					slot.Generation = op.options.PaneGeneration
-					if slot.InFlight != nil && slot.InFlight.cancel != nil {
-						slot.InFlight.cancel()
-					}
-					for _, queued := range slot.Queue {
-						if queued.index >= 0 {
-							heap.Remove(&deadlines, queued.index)
-						}
-						s.replyStale(queued, ledger)
-					}
-					slot.Queue = nil
-					for key, entry := range ledger {
-						if key != op.options.LedgerKey &&
-							entry.paneID == op.options.PaneID &&
-							entry.generation < slot.Generation {
-							delete(ledger, key)
-						}
-					}
-				}
-				if entry := ledger[op.options.LedgerKey]; entry != nil {
-					entry.generation = slot.Generation
-				}
-				op.generation = slot.Generation
-				slot.Queue = insertBySequence(slot.Queue, op)
-			}
-			dispatch()
+			l.admit(op)
 
 		case event := <-s.completions:
-			completeAndRedispatch(event)
+			l.complete(event)
 
 		case update := <-s.ledger:
-			entry := ledger[update.key]
+			entry := l.ledger[update.key]
 			applied := entry != nil && entry.generation == update.generation &&
 				entry.result != nil && update.result != nil
 			if applied {
@@ -781,7 +447,7 @@ func (s *Scheduler) run() {
 			update.response <- applied
 
 		case query := <-s.replays:
-			entry := ledger[query.key]
+			entry := l.ledger[query.key]
 			response := ledgerReplayResponse{}
 			if entry != nil {
 				response.found = true
@@ -794,68 +460,367 @@ func (s *Scheduler) run() {
 			query.response <- response
 
 		case update := <-s.topology:
-			applyTopology(update)
+			l.applyTopology(update)
 
-		case <-timer.C:
-			now := time.Now()
-			for deadlines.Len() > 0 && !now.Before(deadlines[0].options.Deadline) {
-				op := heap.Pop(&deadlines).(*scheduledOperation)
-				if s.removeQueued(op, slots, &relayQueue) {
-					s.expire(op, ledger)
-				}
-			}
-			dispatch()
+		case <-l.timer.C:
+			l.expireDeadlines()
 
 		case <-s.cancelInflight:
-			if !stopping {
-				stopping = true
-				for _, slot := range slots {
-					if slot.InFlight != nil && slot.InFlight.cancel != nil {
-						slot.InFlight.cancel()
-					}
-					for _, op := range slot.Queue {
-						s.reply(op, nil, ErrClosed)
-					}
-					slot.Queue = nil
-				}
-				for _, op := range relayInFlight {
-					if op.cancel != nil {
-						op.cancel()
-					}
-				}
-				for _, op := range relayQueue {
-					s.reply(op, nil, ErrClosed)
-				}
-				relayQueue = nil
-				resetTimer()
+			if !l.stopping {
+				l.beginStop()
+				l.resetTimer()
 			}
 
 		case ack := <-s.stop:
-			stopAck = ack
-			if !stopping {
-				stopping = true
-				for _, slot := range slots {
-					if slot.InFlight != nil && slot.InFlight.cancel != nil {
-						slot.InFlight.cancel()
-					}
-					for _, op := range slot.Queue {
-						s.reply(op, nil, ErrClosed)
-					}
-					slot.Queue = nil
-				}
-				for _, op := range relayInFlight {
-					if op.cancel != nil {
-						op.cancel()
-					}
-				}
-				for _, op := range relayQueue {
-					s.reply(op, nil, ErrClosed)
-				}
-				relayQueue = nil
+			l.stopAck = ack
+			if !l.stopping {
+				l.beginStop()
 			}
-			resetTimer()
+			l.resetTimer()
 		}
 	}
+}
+
+func (l *schedulerLoop) stopCompleted() bool {
+	if !l.stopping || l.inUse != 0 || l.stopAck == nil {
+		return false
+	}
+	close(l.stopAck)
+	return true
+}
+
+func (l *schedulerLoop) dropDeadline(op *scheduledOperation) {
+	if op.index >= 0 {
+		heap.Remove(&l.deadlines, op.index)
+	}
+}
+
+func (l *schedulerLoop) resetTimer() {
+	l.timer.Stop()
+	for l.deadlines.Len() > 0 && l.deadlines[0].index < 0 {
+		heap.Pop(&l.deadlines)
+	}
+	if l.deadlines.Len() == 0 {
+		return
+	}
+	wait := time.Until(l.deadlines[0].options.Deadline)
+	if wait < 0 {
+		wait = 0
+	}
+	l.timer.Reset(wait)
+}
+
+func (l *schedulerLoop) beginStop() {
+	l.stopping = true
+	for _, slot := range l.slots {
+		if slot.InFlight != nil && slot.InFlight.cancel != nil {
+			slot.InFlight.cancel()
+		}
+		for _, op := range slot.Queue {
+			l.s.reply(op, nil, ErrClosed)
+		}
+		slot.Queue = nil
+	}
+	for _, op := range l.relayInFlight {
+		if op.cancel != nil {
+			op.cancel()
+		}
+	}
+	for _, op := range l.relayQueue {
+		l.s.reply(op, nil, ErrClosed)
+	}
+	l.relayQueue = nil
+}
+
+func (l *schedulerLoop) invalidateSlot(paneID string, slot *PaneSlot, generation int64, keepLedgerKey string) {
+	slot.Generation = generation
+	if slot.InFlight != nil && slot.InFlight.cancel != nil {
+		slot.InFlight.cancel()
+	}
+	for _, queued := range slot.Queue {
+		l.dropDeadline(queued)
+		l.replyStale(queued)
+	}
+	slot.Queue = nil
+	l.pruneLedgerBelow(paneID, generation, keepLedgerKey)
+}
+
+func (l *schedulerLoop) pruneLedgerBelow(paneID string, generation int64, keepLedgerKey string) {
+	for key, entry := range l.ledger {
+		if key != keepLedgerKey && entry.paneID == paneID && entry.generation < generation {
+			delete(l.ledger, key)
+		}
+	}
+}
+
+func (l *schedulerLoop) dispatch() {
+	s := l.s
+	now := time.Now()
+
+	for len(l.relayQueue) > 0 && l.inUse < s.capacity && !l.stopping {
+		op := l.relayQueue[0]
+		l.relayQueue = l.relayQueue[1:]
+		if !now.Before(op.options.Deadline) {
+			l.dropDeadline(op)
+			l.expire(op)
+			continue
+		}
+		l.inUse++
+		l.relayInFlight[op.operation] = op
+		op.cancel = s.start(op, 0)
+	}
+
+	paneIDs := make([]string, 0, len(l.slots))
+	for paneID := range l.slots {
+		paneIDs = append(paneIDs, paneID)
+	}
+	sort.Strings(paneIDs)
+	progress := true
+	for progress && l.inUse < s.capacity && !l.stopping {
+		progress = false
+		for _, paneID := range paneIDs {
+			if l.inUse >= s.capacity {
+				break
+			}
+			slot := l.slots[paneID]
+			if slot.InFlight != nil || len(slot.Queue) == 0 {
+				continue
+			}
+			op := slot.Queue[0]
+			slot.Queue = slot.Queue[1:]
+			if op.generation != slot.Generation {
+				l.dropDeadline(op)
+				l.replyStale(op)
+				progress = true
+				continue
+			}
+			if !now.Before(op.options.Deadline) {
+				l.dropDeadline(op)
+				l.expire(op)
+				progress = true
+				continue
+			}
+			l.inUse++
+			slot.InFlight = &InFlightOperation{
+				OperationID: op.operation,
+				Generation:  slot.Generation,
+			}
+			slot.InFlight.cancel = s.start(op, slot.Generation)
+			progress = true
+		}
+	}
+	s.setOwnerMetrics(l.inUse, len(l.slots))
+	l.resetTimer()
+}
+
+func (l *schedulerLoop) complete(event completionEvent) {
+	s := l.s
+	s.observeCompletion()
+	op := event.operation
+	if op.options.RelayLevel {
+		if _, ok := l.relayInFlight[op.operation]; !ok {
+			return
+		}
+		delete(l.relayInFlight, op.operation)
+	} else {
+		slot := l.slots[op.options.PaneID]
+		if slot == nil || slot.InFlight == nil || slot.InFlight.OperationID != op.operation {
+			return
+		}
+		stale := slot.InFlight.Generation != slot.Generation
+		if !stale && !op.options.AllowAbsent && s.generationCurrent != nil {
+			stale = !s.generationCurrent(op.options.PaneID, slot.InFlight.Generation)
+		}
+		if event.result.BumpGeneration && !stale {
+			slot.Generation++
+			l.pruneLedgerBelow(op.options.PaneID, slot.Generation, op.options.LedgerKey)
+		}
+		slot.InFlight = nil
+		if len(slot.Queue) == 0 && event.result.BumpGeneration && !stale && event.result.Result != nil && event.result.Result.Phase == "closed" {
+			delete(l.slots, op.options.PaneID)
+		}
+		if stale {
+			l.inUse--
+			l.dropDeadline(op)
+			s.metricsMu.Lock()
+			s.metrics.Completed++
+			s.metricsMu.Unlock()
+			s.setOwnerMetrics(l.inUse, len(l.slots))
+			l.replyStale(op)
+			l.dispatch()
+			return
+		}
+	}
+	l.inUse--
+	l.dropDeadline(op)
+	if next := event.result.Continuation; next != nil {
+		op.finalize = next.Finalize
+		op.options.RelayLevel = false
+		op.options.PaneID = next.PaneID
+		op.options.AllowAbsent = next.AllowAbsent
+		op.options.Deadline = minDeadline(op.options.Deadline, next.Deadline)
+		op.generation = next.Generation
+		op.runner = next.Runner
+		op.dispatched = false
+		slot := l.slots[next.PaneID]
+		if slot == nil {
+			slot = &PaneSlot{Generation: next.Generation}
+			l.slots[next.PaneID] = slot
+		}
+		if next.Generation > slot.Generation && s.generationCurrent != nil && s.generationCurrent(next.PaneID, next.Generation) {
+			l.invalidateSlot(next.PaneID, slot, next.Generation, op.options.LedgerKey)
+		}
+		if l.stopping {
+			l.finish(op, nil, ErrClosed)
+		} else if slot.Generation != next.Generation {
+			l.replyStale(op)
+		} else {
+			heap.Push(&l.deadlines, op)
+			slot.Queue = insertBySequence(slot.Queue, op)
+		}
+		l.dispatch()
+		return
+	}
+	s.metricsMu.Lock()
+	s.metrics.Completed++
+	latency := time.Since(op.options.ReceivedAt)
+	if latency > 0 {
+		micros := uint64(latency.Microseconds())
+		s.metrics.LatencySamples++
+		s.metrics.LatencyTotalMicros += micros
+		if micros > s.metrics.LatencyMaxMicros {
+			s.metrics.LatencyMaxMicros = micros
+		}
+	}
+	s.metricsMu.Unlock()
+	s.setOwnerMetrics(l.inUse, len(l.slots))
+	l.finish(op, event.result.Result, nil)
+	l.dispatch()
+}
+
+func (l *schedulerLoop) applyTopology(update topologyUpdate) {
+	for paneID := range l.knownActive {
+		if update.active[paneID] {
+			continue
+		}
+		slot := l.slots[paneID]
+		if slot == nil {
+			continue
+		}
+		l.invalidateSlot(paneID, slot, slot.Generation+1, "")
+	}
+	for paneID, generation := range update.generations {
+		slot := l.slots[paneID]
+		if slot == nil {
+			slot = &PaneSlot{}
+			l.slots[paneID] = slot
+		}
+		if generation <= slot.Generation {
+			continue
+		}
+		l.invalidateSlot(paneID, slot, generation, "")
+	}
+	l.knownActive = update.active
+	close(update.response)
+	l.dispatch()
+}
+
+func (l *schedulerLoop) pruneLedger(now time.Time) {
+	for key, entry := range l.ledger {
+		if entry.operation == nil && now.Sub(entry.createdAt) >= ledgerRetention {
+			delete(l.ledger, key)
+		}
+	}
+	for len(l.ledger) >= maxLedgerEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, entry := range l.ledger {
+			if entry.operation != nil {
+				continue
+			}
+			if oldestKey == "" || entry.createdAt.Before(oldest) {
+				oldestKey = key
+				oldest = entry.createdAt
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(l.ledger, oldestKey)
+	}
+}
+
+func (l *schedulerLoop) admit(op *scheduledOperation) {
+	s := l.s
+	l.pruneLedger(time.Now())
+	if l.stopping {
+		s.reply(op, nil, ErrClosed)
+		return
+	}
+	if !time.Now().Before(op.options.Deadline) {
+		s.replyNotStarted(op)
+		return
+	}
+	if !op.options.RelayLevel {
+		slot := l.slots[op.options.PaneID]
+		if slot != nil && op.options.PaneGeneration < slot.Generation {
+			l.replyStale(op)
+			return
+		}
+	}
+	if key := op.options.LedgerKey; key != "" {
+		if existing, ok := l.ledger[key]; ok {
+			if existing.payloadHash != op.options.PayloadHash {
+				s.reply(op, nil, ErrConflict)
+				return
+			}
+			if existing.result != nil {
+				s.replyReplayed(op, cloneResult(existing.result), nil)
+				return
+			}
+			for index := range op.waiters {
+				op.waiters[index].replayed = true
+			}
+			existing.operation.waiters = append(existing.operation.waiters, op.waiters...)
+			return
+		}
+		l.ledger[key] = &ledgerEntry{
+			payloadHash: op.options.PayloadHash,
+			operation:   op,
+			paneID:      op.options.PaneID,
+			createdAt:   op.options.ReceivedAt,
+		}
+	}
+	heap.Push(&l.deadlines, op)
+	if op.options.RelayLevel {
+		l.relayQueue = insertBySequence(l.relayQueue, op)
+	} else {
+		slot := l.slots[op.options.PaneID]
+		if slot == nil {
+			slot = &PaneSlot{}
+			l.slots[op.options.PaneID] = slot
+		}
+		if op.options.PaneGeneration > slot.Generation {
+			l.invalidateSlot(op.options.PaneID, slot, op.options.PaneGeneration, op.options.LedgerKey)
+		}
+		if entry := l.ledger[op.options.LedgerKey]; entry != nil {
+			entry.generation = slot.Generation
+		}
+		op.generation = slot.Generation
+		slot.Queue = insertBySequence(slot.Queue, op)
+	}
+	l.dispatch()
+}
+
+func (l *schedulerLoop) expireDeadlines() {
+	now := time.Now()
+	for l.deadlines.Len() > 0 && !now.Before(l.deadlines[0].options.Deadline) {
+		op := heap.Pop(&l.deadlines).(*scheduledOperation)
+		if l.removeQueued(op) {
+			l.expire(op)
+		}
+	}
+	l.dispatch()
 }
 
 func (s *Scheduler) start(op *scheduledOperation, generation int64) context.CancelFunc {
@@ -879,13 +844,13 @@ func (s *Scheduler) start(op *scheduledOperation, generation int64) context.Canc
 	return cancel
 }
 
-func (s *Scheduler) removeQueued(op *scheduledOperation, slots map[string]*PaneSlot, relayQueue *[]*scheduledOperation) bool {
+func (l *schedulerLoop) removeQueued(op *scheduledOperation) bool {
 	if op.options.RelayLevel {
 		var removed bool
-		*relayQueue, removed = removeOperation(*relayQueue, op)
+		l.relayQueue, removed = removeOperation(l.relayQueue, op)
 		return removed
 	}
-	slot := slots[op.options.PaneID]
+	slot := l.slots[op.options.PaneID]
 	if slot == nil || (slot.InFlight != nil && slot.InFlight.OperationID == op.operation) {
 		return false
 	}
@@ -894,11 +859,11 @@ func (s *Scheduler) removeQueued(op *scheduledOperation, slots map[string]*PaneS
 	return removed
 }
 
-func (s *Scheduler) expire(op *scheduledOperation, ledger map[string]*ledgerEntry) {
-	s.metricsMu.Lock()
-	s.metrics.ExpiredQueued++
-	s.metricsMu.Unlock()
-	s.finish(op, notStartedResult(op), nil, ledger)
+func (l *schedulerLoop) expire(op *scheduledOperation) {
+	l.s.metricsMu.Lock()
+	l.s.metrics.ExpiredQueued++
+	l.s.metricsMu.Unlock()
+	l.finish(op, notStartedResult(op), nil)
 }
 
 func (s *Scheduler) replyNotStarted(op *scheduledOperation) {
@@ -916,9 +881,9 @@ func notStartedResult(op *scheduledOperation) *CommandResult {
 	}
 }
 
-func (s *Scheduler) replyStale(op *scheduledOperation, ledger map[string]*ledgerEntry) {
+func (l *schedulerLoop) replyStale(op *scheduledOperation) {
 	if op.finalize == nil && op.options.LedgerKey != "" {
-		delete(ledger, op.options.LedgerKey)
+		delete(l.ledger, op.options.LedgerKey)
 	}
 	phase := "failed"
 	publicError := ErrPaneReplaced.Error()
@@ -934,7 +899,7 @@ func (s *Scheduler) replyStale(op *scheduledOperation, ledger map[string]*ledger
 		Error:     publicError,
 		PaneID:    op.options.PaneID,
 	}
-	s.finish(op, result, nil, ledger)
+	l.finish(op, result, nil)
 }
 
 func minDeadline(a, b time.Time) time.Time {
@@ -944,21 +909,21 @@ func minDeadline(a, b time.Time) time.Time {
 	return a
 }
 
-func (s *Scheduler) finish(op *scheduledOperation, result *CommandResult, err error, ledger map[string]*ledgerEntry) {
+func (l *schedulerLoop) finish(op *scheduledOperation, result *CommandResult, err error) {
 	if op.finalize != nil {
 		result = op.finalize(result, err)
 		op.finalize = nil
 		err = nil
 	}
-	if entry := ledger[op.options.LedgerKey]; entry != nil {
+	if entry := l.ledger[op.options.LedgerKey]; entry != nil {
 		if result == nil || result.Phase == "not_started" {
-			delete(ledger, op.options.LedgerKey)
+			delete(l.ledger, op.options.LedgerKey)
 		} else {
 			entry.result = cloneResult(result)
 			entry.operation = nil
 		}
 	}
-	s.reply(op, result, err)
+	l.s.reply(op, result, err)
 }
 
 func (s *Scheduler) reply(op *scheduledOperation, result *CommandResult, err error) {
