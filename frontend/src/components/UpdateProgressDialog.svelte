@@ -10,47 +10,17 @@
     clearUpdateProgress,
     MANAGED_UPDATE_COMMAND,
     markUpdateProgressRelayStarted,
-    newerVersion,
-    phoneTargetMatchesCurrent,
-    relayNeedsManualBootstrap,
+    appProgress,
+    relayAtTarget,
+    relayProgress,
+    type RelayProgressRow,
     restoreUpdateProgress,
     setUpdateProgressError,
     updateProgressRelayStartedThisSession,
     updateProgressPlan,
     type UpdateProgressPlan,
   } from '$lib/updates';
-  import type { RelayConfig, RelayConnectionView, RelayUpdateState } from '$lib/types';
 
-  type ProgressTone = 'pending' | 'active' | 'success' | 'danger';
-
-  interface RelayProgressRow {
-    id: string;
-    relay?: RelayConfig;
-    connection?: RelayConnectionView;
-    label: string;
-    detail: string;
-    tone: ProgressTone;
-    score: number;
-    canStart: boolean;
-    manual: boolean;
-  }
-
-  interface AppProgress {
-    label: string;
-    detail: string;
-    tone: ProgressTone;
-    score: number;
-  }
-
-  const ACTIVE_STATES = new Set<RelayUpdateState>([
-    'checking',
-    'scheduled',
-    'preparing',
-    'deploying_app',
-    'installing',
-    'restarting',
-  ]);
-  const OPERATION_TIMEOUT_MS = 5 * 60 * 1_000;
   let { readOnlyRelayIds = new Set<string>() }: { readOnlyRelayIds?: Set<string> } = $props();
 
   const plan = updateProgressPlan;
@@ -150,152 +120,6 @@
     }
   }
 
-
-  function relayAtTarget(connection: RelayConnectionView | undefined, targetVersion: string): boolean {
-    const current = connection?.releaseVersion || connection?.update.current_version || '';
-    return current === targetVersion || newerVersion(current, targetVersion);
-  }
-
-  function relayProgress(
-    currentPlan: UpdateProgressPlan,
-    relayId: string,
-    relay: RelayConfig | undefined,
-    connection: RelayConnectionView | undefined,
-    timestamp: number,
-  ): RelayProgressRow {
-    const base = { id: relayId, relay, connection };
-    if (relayAtTarget(connection, currentPlan.targetVersion)) {
-      return {
-        ...base,
-        label: `Updated to v${connection?.releaseVersion || currentPlan.targetVersion}`,
-        detail: 'This relay is ready.',
-        tone: 'success',
-        score: 1,
-        canStart: false,
-        manual: false,
-      };
-    }
-    const clientError = currentPlan.errors[relayId];
-    if (clientError) {
-      const manual = Boolean(connection && relayNeedsManualBootstrap(connection));
-      return {
-        ...base,
-        label: manual ? 'Manual update required' : 'Update could not start',
-        detail: manual
-          ? 'Run the one-time Terminal command below to restart the relay and enable phone-driven updates.'
-          : clientError,
-        tone: 'danger',
-        score: 0,
-        canStart: !manual && Boolean(connection?.capabilities.includes('self_update')),
-        manual,
-      };
-    }
-    const started = currentPlan.startedRelayIds.includes(relayId);
-    if (!connection || connection.status !== 'connected') {
-      if (started && timestamp - (currentPlan.relayStartedAt[relayId] || currentPlan.startedAt) < OPERATION_TIMEOUT_MS) {
-        return { ...base, label: 'Waiting for relay to reconnect…', detail: 'The connection normally returns after the service restarts.', tone: 'active', score: .85, canStart: false, manual: false };
-      }
-      return {
-        ...base,
-        label: started ? 'Relay did not reconnect' : 'Relay unavailable',
-        detail: started ? 'Check the relay service on this computer, then close this screen.' : 'Connect this relay before updating it.',
-        tone: started ? 'danger' : 'pending',
-        score: 0,
-        canStart: false,
-        manual: false,
-      };
-    }
-    if (relayNeedsManualBootstrap(connection)) {
-      return {
-        ...base,
-        label: 'Manual update required',
-        detail: 'Run the one-time Terminal command below to restart the relay and enable phone-driven updates.',
-        tone: 'danger',
-        score: 0,
-        canStart: false,
-        manual: true,
-      };
-    }
-    const update = connection.update;
-    if (update.state === 'failed') {
-      return { ...base, label: 'Update failed', detail: update.error || 'The relay reported an update failure.', tone: 'danger', score: 0, canStart: true, manual: false };
-    }
-    if (update.state === 'blocked') {
-      return { ...base, label: 'Update blocked', detail: update.reason || 'This update needs attention before it can continue.', tone: 'danger', score: 0, canStart: false, manual: false };
-    }
-    if (ACTIVE_STATES.has(update.state)) {
-      const status = activeRelayStatus(update.state);
-      return { ...base, ...status, canStart: false, manual: false };
-    }
-    if (update.state === 'available' && update.available_version === currentPlan.targetVersion && update.can_install) {
-      if (started && updateProgressRelayStartedThisSession(relayId)) {
-        return { ...base, label: 'Starting update…', detail: 'Sending the verified target to this relay.', tone: 'active', score: .05, canStart: false, manual: false };
-      }
-      return {
-        ...base,
-        label: started ? `Ready to retry v${currentPlan.targetVersion}` : `Ready for v${currentPlan.targetVersion}`,
-        detail: started ? 'The previous phone session did not finish sending this update; retrying is safe.' : 'Start this relay when the current relay is ready.',
-        tone: 'pending',
-        score: started ? .05 : 0,
-        canStart: true,
-        manual: false,
-      };
-    }
-    if (update.state === 'available') {
-      return { ...base, label: 'Different update advertised', detail: update.reason || `This relay does not currently offer v${currentPlan.targetVersion}.`, tone: 'danger', score: 0, canStart: false, manual: false };
-    }
-    if (started) {
-      return { ...base, label: 'Checking release…', detail: `Confirming that v${currentPlan.targetVersion} is available for this relay.`, tone: 'active', score: .05, canStart: false, manual: false };
-    }
-    return {
-      ...base,
-      label: `Waiting for v${currentPlan.targetVersion}`,
-      detail: 'Herdr will verify and start this relay automatically when its turn begins.',
-      tone: 'pending',
-      score: 0,
-      canStart: true,
-      manual: false,
-    };
-  }
-
-  function activeRelayStatus(state: RelayUpdateState): Pick<RelayProgressRow, 'label' | 'detail' | 'tone' | 'score'> {
-    if (state === 'checking') return { label: 'Checking release…', detail: 'Looking for the exact verified target.', tone: 'active', score: .05 };
-    if (state === 'scheduled') return { label: 'Update scheduled…', detail: 'The background update worker is starting.', tone: 'active', score: .1 };
-    if (state === 'preparing') return { label: 'Verifying release…', detail: 'Downloading and checking the signed release bundle.', tone: 'active', score: .25 };
-    if (state === 'deploying_app') return { label: 'Publishing phone app…', detail: 'Waiting for the app origin to serve the verified bundle.', tone: 'active', score: .45 };
-    if (state === 'installing') return { label: 'Installing relay…', detail: 'Running agents and saved configuration remain intact.', tone: 'active', score: .65 };
-    return { label: 'Restarting relay…', detail: 'The phone connection may briefly disconnect.', tone: 'active', score: .85 };
-  }
-
-  function appProgress(
-    currentPlan: UpdateProgressPlan | null,
-    currentConnections: Map<string, RelayConnectionView>,
-    currentApp: typeof $appUpdate,
-  ): AppProgress | null {
-    if (!currentPlan?.phoneAppRequired) return null;
-    const target = currentPlan.phoneTarget;
-    const acknowledged = currentPlan.phoneAcknowledged && phoneTargetMatchesCurrent(target);
-    if (acknowledged) {
-      return { label: `Phone app v${currentApp.currentVersion} loaded`, detail: 'The new bundle initialized and acknowledged its verified build identity.', tone: 'success', score: 1 };
-    }
-    if (currentPlan.phoneState === 'failed' || currentPlan.phoneError) {
-      return { label: 'Phone app failed to load', detail: currentPlan.phoneError || 'The new bundle did not acknowledge its expected build identity.', tone: 'danger', score: 0 };
-    }
-    if (currentPlan.appRelayId && currentPlan.errors[currentPlan.appRelayId]) {
-      return { label: 'Phone app deployment could not start', detail: currentPlan.errors[currentPlan.appRelayId], tone: 'danger', score: 0 };
-    }
-    const owner = currentPlan.appRelayId ? currentConnections.get(currentPlan.appRelayId) : undefined;
-    if (owner?.appDeploy.state === 'failed') {
-      return { label: 'Phone app deployment failed', detail: owner.appDeploy.error || 'The public app could not be verified.', tone: 'danger', score: 0 };
-    }
-    if (owner?.update.state === 'failed' && owner.appDeploy.state !== 'succeeded') {
-      return { label: 'Phone app deployment failed', detail: owner.update.error || 'The update stopped before publishing the app.', tone: 'danger', score: 0 };
-    }
-    if (owner?.appDeploy.state === 'succeeded' || currentApp.deployedVersion === currentPlan.targetVersion) {
-      return { label: 'Loading updated phone app…', detail: 'The verified bundle is public. This page will acknowledge it only after initialization.', tone: 'active', score: .85 };
-    }
-    return { label: 'Publishing phone app…', detail: 'The release is being published before the phone can load it.', tone: 'active', score: .4 };
-  }
 
   function relaySteps(row: RelayProgressRow, currentPlan: UpdateProgressPlan): string[] {
     const steps = ['Verify release'];
