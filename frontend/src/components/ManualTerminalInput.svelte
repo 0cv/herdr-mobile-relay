@@ -7,7 +7,7 @@
   import { terminalTextError } from '$lib/terminal-input-policy';
   import { freshAgentStatus } from '$lib/input-target-state';
   import { guardReload } from '$lib/reload-guard';
-  import { securityState } from '$lib/security';
+  import { paneActive, pollPane } from '$lib/pane-activity.svelte';
   import { terminalDraftState } from '$lib/terminal-draft-state.svelte';
   import { stripAnsi } from '$lib/terminal';
   import type { Agent, TerminalFrame } from '$lib/types';
@@ -21,15 +21,11 @@
   const connections = relayStore.connections;
   const inputState = terminalDraftState(() => agent, () => frame);
   const connection = $derived($connections.get(agent.relay_id));
-  const canRead = $derived(active && !readOnly && freshAgentStatus(connection) && !$securityState.locked);
+  const canRead = $derived(active && !readOnly && freshAgentStatus(connection) && paneActive.current);
   const ready = $derived(canRead && inputState.ready && Boolean(connection?.capabilities.includes('manual_terminal_input')));
   $effect(() => {
     if (!canRead) return;
-    const target = untrack(() => ({ ...agent }));
-    const refresh = () => relayStore.readPane(target, true);
-    refresh();
-    const timer = setInterval(refresh, 2_000);
-    return () => clearInterval(timer);
+    return untrack(() => pollPane(agent));
   });
   let text = $state('');
   let feedback = $state('');
@@ -53,7 +49,7 @@
     if (sending) return;
     onexit();
     await tick();
-    if (mounted && !active && !$securityState.locked && document.visibilityState !== 'hidden') returnFocus?.();
+    if (mounted && !active && paneActive.current) returnFocus?.();
   }
 
   function paste(event: ClipboardEvent) {

@@ -25,13 +25,12 @@ afterEach(() => {
   clearConversationPreviews();
 });
 
-it('reuses only a bounded cloned suffix of the exact memory preview without fetching context', async () => {
+it('reuses only a bounded suffix of the exact memory preview without fetching context', async () => {
   const identity = conversationIdentity(agent)!;
   putConversationPreview({ identity, relayId: agent.relay_id, historical: false, sourceRevision: 'cached', savedAt: Date.now(), entries: rows(0, 1000) });
   const preview = getConversationPreview(identity)!;
   expect(preview.entries).toHaveLength(24);
-  preview.entries[0].text = 'changed';
-  expect(getConversationPreview(identity)!.entries[0].text).toBe('message 976');
+  expect(preview.entries[0].text).toBe('message 976');
   expect(getConversationPreview(conversationIdentity({ ...agent, generation: 2 })!)).toBeNull();
   const request = vi.fn(() => new Promise<ConversationPage>(() => {}));
   const controller = new ConversationHistoryController(agent, { request, getPreview: getConversationPreview });

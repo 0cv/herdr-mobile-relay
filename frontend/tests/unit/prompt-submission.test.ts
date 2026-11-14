@@ -3,10 +3,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import PromptComposer from '$components/PromptComposer.svelte';
 import { relayStore } from '$lib/store';
 import { clearPromptDraft, loadPromptDraft } from '$lib/prompt-drafts';
-import type { Agent, RelayConnectionView } from '$lib/types';
+import type { Agent, RelayConnectionView, TerminalFrame } from '$lib/types';
 
 const agent: Agent = { relay_id: 'footer', relay_label: 'Footer', raw_pane_id: 'pane', pane_id: 'footer::pane', server_session_id: 'server', terminal_id: 'terminal', generation: 1, agent_session_id: 'session', agent: 'pi', status: 'idle', cwd: '/fixture' };
 const healthy = { status: 'connected', inventory: { state: 'ready', stale: false }, capabilities: ['secret_input'] } as RelayConnectionView;
+const hiddenInputFrame = (target: Agent): TerminalFrame => ({ paneId: target.pane_id, content: '', noEcho: true, format: 'plain', receivedAt: performance.now() });
 async function send() {
   await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'New prompt' } });
   await fireEvent.submit(screen.getByRole('form', { name: 'Send a prompt' }));
@@ -65,9 +66,10 @@ it('keeps reader denial for normal, hidden and attachment input', async () => {
   const sendToAgent = vi.spyOn(relayStore, 'sendToAgent');
   const sendSecret = vi.spyOn(relayStore, 'sendSecret');
   const upload = vi.spyOn(relayStore, 'attachmentController');
-  const view = render(PromptComposer, { agent: { ...agent, status: 'working' }, readOnly: true });
+  const readerAgent = { ...agent, status: 'working' };
+  const view = render(PromptComposer, { agent: readerAgent, readOnly: true });
   await send();
-  await view.rerender({ noEchoActive: true });
+  await view.rerender({ frame: hiddenInputFrame(readerAgent) });
   await fireEvent.input(screen.getByLabelText('Value for the hidden terminal prompt'), { target: { value: 'synthetic-secret' } });
   await fireEvent.keyDown(screen.getByLabelText('Value for the hidden terminal prompt'), { key: 'Enter' });
   const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -83,7 +85,7 @@ it('keeps terminal adapters separate and hidden input disabled without fresh con
   const view = render(PromptComposer, { agent, submitAdapter: adapter });
   await send();
   expect(adapter.send).toHaveBeenCalledExactlyOnceWith(agent, 'New prompt');
-  await view.rerender({ submitAdapter: undefined, noEchoActive: true });
+  await view.rerender({ submitAdapter: undefined, frame: hiddenInputFrame(agent) });
   const input = screen.getByLabelText('Value for the hidden terminal prompt');
   await fireEvent.input(input, { target: { value: 'synthetic-secret' } });
   await fireEvent.keyDown(input, { key: 'Enter' });

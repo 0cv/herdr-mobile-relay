@@ -56,7 +56,7 @@ it('refreshes read-only context using the normal history budget without inventor
   vi.useFakeTimers();
   const current = { ...agent };
   const rendered = render(ManualTerminalInput, { agent: current, frame: frame(), active: true, readOnly: false, delivery: new TerminalInputDelivery(), onexit: () => {} });
-  expect(relayStore.readPane).toHaveBeenCalledExactlyOnceWith(current, true);
+  expect(relayStore.readPane).toHaveBeenCalledExactlyOnceWith(current, true, undefined);
   for (let i = 0; i < 12; i++) relayStore.connections.set(new Map([[agent.relay_id, { ...connection }]] as never));
   await vi.advanceTimersByTimeAsync(2_000);
   expect(relayStore.readPane).toHaveBeenCalledTimes(2);

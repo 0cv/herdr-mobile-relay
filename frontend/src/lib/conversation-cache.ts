@@ -1,4 +1,4 @@
-import { cloneDiagnostics, cloneEntries, clonePlan, estimateEntriesBytes } from './conversation-values';
+import { estimateEntriesBytes } from './conversation-values';
 import { registerConversationCacheClearer } from './conversation-cache-control';
 import type { ConversationBrowseDiagnostics, ConversationEntry, OmoTodoState } from './types';
 
@@ -82,7 +82,7 @@ export function getConversationPreview(identity: string, now = Date.now()): Conv
     return null;
   }
   record.lastUsed = now;
-  return clonePreview(record.preview);
+  return record.preview;
 }
 
 export function putConversationPreview(preview: ConversationPreview, now = Date.now()): boolean {
@@ -119,7 +119,7 @@ export function conversationPreviewEntries(entries: ConversationEntry[]): Conver
 }
 
 function boundedPreview(input: ConversationPreview): ConversationPreview | null {
-  const entries = cloneEntries(conversationPreviewEntries(input.entries));
+  const entries = conversationPreviewEntries(input.entries);
   if (!entries.length) return null;
 
   const groups: ConversationEntry[][] = [];
@@ -155,8 +155,8 @@ function boundedPreview(input: ConversationPreview): ConversationPreview | null 
     savedAt: Number.isFinite(input.savedAt) ? input.savedAt : Date.now(),
     sourceRevision: input.sourceRevision || '',
     historical: input.historical === true,
-    ...(input.diagnostics ? { diagnostics: cloneDiagnostics(input.diagnostics) } : {}),
-    ...(input.plan ? { plan: clonePlan(input.plan) } : {}),
+    ...(input.diagnostics ? { diagnostics: input.diagnostics } : {}),
+    ...(input.plan ? { plan: input.plan } : {}),
     entries: keptEntries,
   };
 }
@@ -176,15 +176,6 @@ function totalCacheBytes(): number {
   let total = 0;
   for (const record of cache.values()) total += record.bytes;
   return total;
-}
-
-function clonePreview(preview: ConversationPreview): ConversationPreview {
-  return {
-    ...preview,
-    ...(preview.diagnostics ? { diagnostics: cloneDiagnostics(preview.diagnostics) } : {}),
-    ...(preview.plan ? { plan: clonePlan(preview.plan) } : {}),
-    entries: cloneEntries(preview.entries),
-  };
 }
 
 /** Conservative UTF-16 heap accounting, not a serialized wire-size estimate. */

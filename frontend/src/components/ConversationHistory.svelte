@@ -3,8 +3,8 @@
   import { onMount, tick, untrack } from 'svelte';
   import PromptComposer from '$components/PromptComposer.svelte';
   import AgentInteraction from '$components/AgentInteraction.svelte';
-  import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
-  import { piPromptDelivery } from '$lib/pi-prompt.svelte';
+  import { terminalInputGate } from '$lib/terminal-input-gate.svelte';
+  import { paneActive, pollPane } from '$lib/pane-activity.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { targetRefForAgent } from '$lib/resource-id';
   import ConversationMessage from '$components/ConversationMessage.svelte';
@@ -36,7 +36,6 @@
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
   import { ConversationMessageStateStore } from '$lib/conversation-message-state';
   import { securityState } from '$lib/security';
-  import { terminalDraftState } from '$lib/terminal-draft-state.svelte';
   import { CommandError, relayStore } from '$lib/store';
   import { stripAnsi } from '$lib/terminal';
   import { terminalTextInputMode } from '$lib/terminal-menu';
@@ -51,20 +50,14 @@
   }: { agent: Agent; readOnly?: boolean; frame?: TerminalFrame; responding?: Set<string>; onInitialPage?: (page: ConversationPage) => void } = $props();
 
   const connections = relayStore.connections;
-  let paneVisible = $state(true);
-  const draftState = terminalDraftState(() => agent, () => frame);
   const paneConnectionStatus = $derived($connections.get(agent.relay_id)?.status);
   const paneStateIdentity = $derived(JSON.stringify(targetRefForAgent(agent)));
   $effect(() => {
     const identity = paneStateIdentity;
     const status = paneConnectionStatus;
-    const target = untrack(() => ({ ...agent }));
-    if (!controllerReady || !paneVisible || $securityState.locked || status !== 'connected') return;
+    if (!controllerReady || !paneActive.current || status !== 'connected') return;
     void identity;
-    const refreshState = () => relayStore.readPane(target, false, 30);
-    relayStore.readPane(target, true, 30);
-    const refresh = setInterval(refreshState, 2_000);
-    return () => clearInterval(refresh);
+    return untrack(() => pollPane(agent, { lines: 30, forceRepeats: false }));
   });
 
   const messageStates = new ConversationMessageStateStore();
@@ -142,20 +135,11 @@
   });
   const waitingQuestionEntryId = $derived(agentNeedsResponse(agent) && attentionKind(agent) === 'question' ? pendingQuestionEntryId(mode === 'activity' ? [...modeEntries, ...liveEntries] : modeEntries) : null);
   const questionFormShown = $derived(!readOnly && Boolean(questionInteraction(agent)));
-  const draftPersistenceAllowed = $derived(draftState.allowed);
   const screenPickerActive = $derived(frame?.paneId === agent.pane_id && terminalTextInputMode(stripAnsi(frame.content)) === 'filter');
-  const delivery = $derived(terminalInputDelivery(agent));
-  const piDelivery = $derived(piPromptDelivery(agent));
-  const inputBlocked = $derived(delivery.pending || delivery.uncertain || piDelivery.pending || piDelivery.uncertain);
-  $effect.pre(() => {
-    const state = delivery;
-    const piState = piDelivery;
-    state.retain();
-    piState.retain();
-    return () => { state.release(); piState.release(); };
-  });
+  const inputGate = terminalInputGate(() => agent);
+  const delivery = $derived(inputGate.delivery);
+  const inputBlocked = $derived(inputGate.blocked);
   const dispatchBlocked = $derived(promptDispatchRestriction(agent, screenPickerActive));
-  const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
   const inputPlaceholder = $derived(readOnly ? 'Reader access is read only' : 'Type a reply…');
   function matchesSearch(entry: ConversationEntry, needle: string): boolean {
     return `${entry.text} ${(entry.tools || []).map(tool => `${tool.name} ${tool.input || ''} ${tool.output || ''}`).join(' ')}`.toLocaleLowerCase().includes(needle);
@@ -245,21 +229,14 @@
       onInitialPage: (page) => onInitialPage?.(page),
       getPreview: (identity) => getConversationPreview(identity),
       putPreview: (preview) => putConversationPreview(preview),
-      isActive: () => mounted
-        && document.visibilityState !== 'hidden'
-        && !$securityState.locked,
+      isActive: () => mounted && paneActive.current,
     });
     controllerReady = true;
     historyController.start();
     refreshTimer = setInterval(() => {
       if (!liveReader?.observing) historyController?.refresh();
     }, refreshIntervalMs);
-    const syncHistoryVisibility = () => {
-      paneVisible = document.visibilityState !== 'hidden';
-      syncActive();
-    };
     const selectionChanged = () => { if (selectionInHistory()) suspendFollowing(); };
-    document.addEventListener('visibilitychange', syncHistoryVisibility);
     document.addEventListener('selectionchange', selectionChanged);
     return () => {
       mounted = false;
@@ -268,7 +245,6 @@
       if (pinPendingTimer) clearTimeout(pinPendingTimer);
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = undefined;
-      document.removeEventListener('visibilitychange', syncHistoryVisibility);
       document.removeEventListener('selectionchange', selectionChanged);
       liveReader?.stop();
       liveReader = null;
@@ -334,7 +310,7 @@
     if (!list || !sentinel || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver((observations) => {
       if (!observations.some((observation) => observation.isIntersecting)) return;
-      if (searching || !historyController || document.visibilityState === 'hidden' || $securityState.locked) return;
+      if (searching || !historyController || !paneActive.current) return;
       if (pinnedToBottom || !upwardDemand) return;
       demandOlder();
     }, { root: list, rootMargin: '300px 0px 0px 0px', threshold: 0 });
@@ -363,7 +339,7 @@
   });
 
   function syncActive() {
-    if ($securityState.locked || document.visibilityState === 'hidden') {
+    if (!paneActive.current) {
       liveReader?.pause();
       historyController?.pause();
     } else {
@@ -381,7 +357,7 @@
     const status = paneConnectionStatus;
     const identity = `${paneStateIdentity}:${historyState?.epoch}`;
     const failure = historyState?.error?.code;
-    const visible = paneVisible && !$securityState.locked;
+    const visible = paneActive.current;
     if (status !== 'connected') { recoveryAttemptedFor = ''; return; }
     if (!visible || failure !== 'transport_disconnected' || recoveryAttemptedFor === identity) return;
     if (historyController?.recoverAfterReconnect(agent)) recoveryAttemptedFor = identity;
@@ -478,7 +454,7 @@
     pinPendingUntil = 0;
     pinnedToBottom = false;
     renderAnchor ||= visibleEntries[0]?.id || null;
-    if (document.visibilityState === 'hidden' || $securityState.locked) return;
+    if (!paneActive.current) return;
     if (bottomGap < bottomThreshold) {
       if (renderStart + mountedEntryLimit < filteredEntries.length) {
         if (movedTowardTail) demandNewer();
@@ -832,8 +808,7 @@
     <AgentInteraction {agent} {readOnly} responding={responding.has(agent.pane_id)} blocked={inputBlocked} />
     {#key JSON.stringify(targetRefForAgent(agent))}
       <PromptComposer {agent} {frame} {readOnly}
-        dispatchBlocked={inputBlocked ? 'Check terminal input delivery in Terminal before sending.' : draftState.secretReady ? '' : dispatchBlocked}
-        {noEchoActive} {draftPersistenceAllowed} noEchoPrompt={frame?.noEchoPrompt || 'Password:'}
+        {dispatchBlocked}
         placeholder={inputPlaceholder} onsubmitted={() => { historyController?.refresh(); }} />
     {/key}
     {#if readOnly}

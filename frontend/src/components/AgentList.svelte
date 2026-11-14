@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createReorderHold } from '$lib/reorder-hold';
-  import { displacedSlot, insertionSlot, slotGap, type ReorderSlot } from '$lib/reorder-geometry';
+  import { createReorderDrag, measureReorderSlots } from '$lib/reorder-drag.svelte';
   import { onMount } from 'svelte';
   import AgentLogo, { agentDisplayName, hasAgentLogo } from '$components/AgentLogo.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
@@ -88,17 +88,7 @@
   ] as const;
   let relativeNow = $state(Date.now());
   let movingTab = $state('');
-  let tabDrag = $state<{
-    owner: HTMLElement;
-    workspaceKey: string;
-    sourceTabId: string;
-    pointerId: number;
-    startY: number;
-    deltaY: number;
-    insertIdx: number;
-    items: ReorderSlot[];
-    gap: number;
-  } | null>(null);
+  const tabDrag = createReorderDrag();
   // Optimistic arrangement applied between releasing a drag and the relay
   // confirming the new order, so tabs never snap back while Herdr catches up.
   let pendingTabOrder = $state<{ key: string; order: string[] } | null>(null);
@@ -195,7 +185,7 @@
     }
 
     function clearOwnedDrag() {
-      if (tabDrag?.owner === node) tabDrag = null;
+      tabDrag.clear(node);
     }
 
     function onPointerDown(event: PointerEvent) {
@@ -205,7 +195,7 @@
       const workspace = current.workspace;
       if (!workspace || !event.isPrimary || event.button !== 0 || movingTab) return;
       hold.start(event, () => {
-        const items = measureTabSlots(node);
+        const items = measureReorderSlots(node, '.workspace-tabs', '.workspace-tab', 'tabId');
         if (items.length < 2) {
           hold.reset();
           return;
@@ -214,18 +204,7 @@
           liftedOwner = pointerIdentity(event);
           suppressOpen = true;
         });
-        const sourceIdx = items.findIndex((item) => item.id === current.tabId);
-        tabDrag = {
-          owner: node,
-          workspaceKey: workspace.key,
-          sourceTabId: current.tabId,
-          pointerId: hold.pointerId,
-          startY: hold.startY + window.scrollY,
-          deltaY: 0,
-          insertIdx: Math.max(0, sourceIdx),
-          items,
-          gap: slotGap(items),
-        };
+        tabDrag.begin(node, hold, workspace.key, current.tabId, items);
       });
     }
 
@@ -253,7 +232,7 @@
 
     const stopListening = hold.listen(onPointerDown, {
       move(event) {
-        if (current.workspace) trackTabDrag(event, current.workspace);
+        if (current.workspace) tabDrag.track(event, current.workspace.key);
       },
       finish(event) {
         if (current.workspace) finishTabDrag(event, current.workspace);
@@ -279,43 +258,10 @@
     };
   }
 
-  // Slots are captured in document coordinates when the drag starts, so the
-  // preview stays correct while the page auto-scrolls under the pointer.
-  function measureTabSlots(node: HTMLElement): ReorderSlot[] {
-    const container = node.closest('.workspace-tabs');
-    if (!container) return [];
-    return [...container.querySelectorAll<HTMLElement>('.workspace-tab')].map((section) => {
-      const bounds = section.getBoundingClientRect();
-      return { id: section.dataset.tabId || '', top: bounds.top + window.scrollY, height: bounds.height };
-    });
-  }
-
-  function trackTabDrag(event: PointerEvent, workspace: WorkspaceGroup) {
-    if (!tabDrag || tabDrag.pointerId !== event.pointerId || tabDrag.workspaceKey !== workspace.key) return;
-    event.preventDefault();
-    if (event.clientY < 72) window.scrollBy(0, -12);
-    else if (event.clientY > window.innerHeight - 72) window.scrollBy(0, 12);
-    const pointerY = event.clientY + window.scrollY;
-    const insertIdx = insertionSlot(tabDrag.items, tabDrag.sourceTabId, pointerY);
-    tabDrag = { ...tabDrag, deltaY: pointerY - tabDrag.startY, insertIdx };
-  }
-
-  // The dragged tab follows the pointer; every other tab translates by the
-  // dragged tab's height to preview the drop slot.
-  function tabShift(workspace: WorkspaceGroup, tabId: string): string {
-    if (!tabDrag || tabDrag.workspaceKey !== workspace.key) return '';
-    if (tabId === tabDrag.sourceTabId) return `translateY(${tabDrag.deltaY}px)`;
-    const { items, sourceTabId, insertIdx, gap } = tabDrag;
-    return displacedSlot(items, sourceTabId, tabId, insertIdx, gap);
-  }
-
   function finishTabDrag(event: PointerEvent, workspace: WorkspaceGroup) {
-    if (!tabDrag || tabDrag.pointerId !== event.pointerId || tabDrag.workspaceKey !== workspace.key) return;
-    const completed = tabDrag;
-    tabDrag = null;
-    const sourceIdx = completed.items.findIndex((item) => item.id === completed.sourceTabId);
-    if (sourceIdx < 0 || completed.insertIdx === sourceIdx) return;
-    const others = completed.items.filter((item) => item.id !== completed.sourceTabId);
+    const completed = tabDrag.finish(event, workspace.key);
+    if (!completed) return;
+    const others = completed.items.filter((item) => item.id !== completed.sourceId);
     // Herdr's insert_index addresses the pre-move list and shifts the slot
     // down by one itself when the source sits before it.
     const insertIndex = completed.insertIdx >= others.length
@@ -323,10 +269,10 @@
       : completed.items.findIndex((item) => item.id === others[completed.insertIdx].id);
     const order = [
       ...others.slice(0, completed.insertIdx).map((item) => item.id),
-      completed.sourceTabId,
+      completed.sourceId,
       ...others.slice(completed.insertIdx).map((item) => item.id),
     ];
-    void commitReorder(workspace, completed.sourceTabId, insertIndex, order);
+    void commitReorder(workspace, completed.sourceId, insertIndex, order);
   }
 
 
@@ -524,11 +470,11 @@
   <div class="workspace-tabs">
     {#each displayTabs(workspace) as tab (tab.id)}
       <section
-        class:tab-dragging={tabDrag?.workspaceKey === workspace.key && tabDrag.sourceTabId === tab.id}
+        class:tab-dragging={tabDrag.isSource(workspace.key, tab.id)}
         class="workspace-tab"
         data-tab-id={tab.id}
         aria-label={`${tab.label} tab`}
-        style:transform={tabShift(workspace, tab.id) || undefined}
+        style:transform={tabDrag.shift(workspace.key, tab.id) || undefined}
       >
         <header class="workspace-tab-header">
           <h3>{tab.label}</h3>

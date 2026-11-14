@@ -45,7 +45,7 @@ const sends = () => commands('send_pi_prompt_unconfirmed');
 const input = () => screen.getByLabelText('Prompt');
 const submit = () => fireEvent.submit(screen.getByRole('form', { name: 'Send a prompt' }));
 async function mount() {
-  const view = render(PromptComposer, { agent, dispatchBlocked: promptDispatchRestriction(agent), draftPersistenceAllowed: true });
+  const view = render(PromptComposer, { agent, dispatchBlocked: promptDispatchRestriction(agent) });
   await vi.advanceTimersByTimeAsync(0);
   let frame = get(relayStore.terminalFrames).get(agent.pane_id)!;
   await view.rerender({ frame });
@@ -89,7 +89,7 @@ it('only enables exact blocked/unknown Pi targets with a live capability and fre
     expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
     await submit();
   }
-  await view.rerender({ agent, dispatchBlocked: promptDispatchRestriction(agent), frame: { ...frame, noEcho: true }, noEchoActive: true });
+  await view.rerender({ agent, dispatchBlocked: promptDispatchRestriction(agent), frame: { ...frame, noEcho: true } });
   await submit();
   expect(sends()).toHaveLength(0);
   expect(commands('submit_prompt')).toHaveLength(0);
@@ -124,7 +124,7 @@ it('shows one honest notice, clears once, fences through view/metadata/reconnect
   await submit();
   expect(commands('submit_prompt')).toHaveLength(0);
   view.unmount();
-  render(PromptComposer, { agent, frame, draftPersistenceAllowed: true, dispatchBlocked: promptDispatchRestriction(agent) });
+  render(PromptComposer, { agent, frame, dispatchBlocked: promptDispatchRestriction(agent) });
   await tick();
   securityState.update(state => ({ ...state, locked: true }));
   await tick();
@@ -161,9 +161,9 @@ it('excludes attachments, hidden/tainted drafts, reader devices and expired capa
   await view.rerender({ frame: { ...frame } });
   await fireEvent.input(input(), { target: { value: 'secret-marker' } }); await submit();
   vi.mocked(relayStore.deviceCredential).mockReturnValue({ role: 'controller' } as never);
-  await view.rerender({ draftPersistenceAllowed: false });
+  await view.rerender({ frame: undefined });
   await fireEvent.input(input(), { target: { value: 'tainted-marker' } });
-  await view.rerender({ draftPersistenceAllowed: true, frame }); await submit();
+  await view.rerender({ frame }); await submit();
   now += 15000;
   await view.rerender({ frame: { ...frame } }); await submit();
   expect(sends()).toHaveLength(0);
@@ -172,7 +172,7 @@ it('excludes attachments, hidden/tainted drafts, reader devices and expired capa
 });
 
 it.each(['idle', 'working'])('retains normal submit_prompt routing for %s panes', async status => {
-  render(PromptComposer, { agent: { ...agent, status }, draftPersistenceAllowed: true });
+  render(PromptComposer, { agent: { ...agent, status } });
   await fireEvent.input(input(), { target: { value: 'ready reply' } }); await submit();
   expect(commands('submit_prompt')).toHaveLength(1);
   expect(sends()).toHaveLength(0);

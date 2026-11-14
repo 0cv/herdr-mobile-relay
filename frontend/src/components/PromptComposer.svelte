@@ -8,8 +8,9 @@
   import { relayStore } from '$lib/store';
   import { securityState } from '$lib/security';
   import { terminalDraftState } from '$lib/terminal-draft-state.svelte';
-  import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
-  import { piPromptDelivery, piPromptTarget, validPiPromptText, type PiPromptCapability } from '$lib/pi-prompt.svelte';
+  import { terminalInputGate } from '$lib/terminal-input-gate.svelte';
+  import { paneActive, pollPane } from '$lib/pane-activity.svelte';
+  import { piPromptTarget, validPiPromptText, type PiPromptCapability } from '$lib/pi-prompt.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { inputContextIdentity } from '$lib/input-target-state';
   import { guardReload, holdReloadsWhileSending } from '$lib/reload-guard';
@@ -18,9 +19,9 @@
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
   // blockExplained: the parent already shows why sending is blocked, so the composer does not repeat dispatchBlocked.
-  let { agent, frame, readOnly = false, dispatchBlocked = '', blockExplained = false, attachmentsBlocked = false, draftPersistenceAllowed = false, noEchoActive = false, noEchoPrompt = 'Password:',
+  let { agent, frame, readOnly = false, dispatchBlocked: restriction = '', blockExplained = false, attachmentsBlocked = false,
     placeholder = 'Type a reply…', submitLabel = 'Send prompt', submitAdapter, sending = $bindable(false), onsubmitted }:
-    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; dispatchBlocked?: string; blockExplained?: boolean; attachmentsBlocked?: boolean; draftPersistenceAllowed?: boolean; noEchoActive?: boolean; noEchoPrompt?: string;
+    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; dispatchBlocked?: string; blockExplained?: boolean; attachmentsBlocked?: boolean;
       placeholder?: string; submitLabel?: string; submitAdapter?: ComposerSubmitAdapter; sending?: boolean; onsubmitted?: () => void } = $props();
   const connections = relayStore.connections;
   const connection = $derived($connections.get(agent.relay_id));
@@ -33,35 +34,31 @@
   let draftRestored = false;
   let secretValue = $state('');
   const secretState = terminalDraftState(() => agent, () => frame);
-  const delivery = $derived(terminalInputDelivery(agent));
-  const piDelivery = $derived(piPromptDelivery(agent));
-  const deliveryBlocked = $derived(delivery.pending || delivery.uncertain || piDelivery.pending || piDelivery.uncertain);
+  const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
+  const noEchoPrompt = $derived(frame?.noEchoPrompt || 'Password:');
+  const draftPersistenceAllowed = $derived(secretState.allowed);
+  const dispatchBlocked = $derived(secretState.secretReady ? '' : restriction);
+  const inputGate = terminalInputGate(() => agent);
+  const piDelivery = $derived(inputGate.piDelivery);
+  const deliveryBlocked = $derived(inputGate.blocked);
   let piCapability = $state.raw<PiPromptCapability | null>(null);
   let piCapabilityTick = $state(0);
   const bridgeReady = $derived.by(() => {
     void piCapabilityTick;
     void connection;
-    return !readOnly && !$securityState.locked && visible && !submitAdapter && !noEchoActive
+    return !readOnly && paneActive.current && !deliveryBlocked && !submitAdapter && !noEchoActive
       && !noEchoDraftTainted && draftPersistenceAllowed && dispatchBlocked === promptDispatchRestriction(agent)
       && relayStore.piPromptReady(agent, piCapability, frame);
   });
   const promptBlocked = $derived(Boolean(dispatchBlocked) && !bridgeReady);
-  $effect.pre(() => {
-    const state = delivery;
-    const piState = piDelivery;
-    state.retain();
-    piState.retain();
-    return () => { state.release(); piState.release(); };
-  });
   let sendingSecret = $state(false);
   onMount(() => guardReload(() => (secretValue || composer && noEchoDraftTainted ? 'draft' : null)));
   let noEchoDraftBaseline: string | null = null;
   let noEchoDraftTainted = $state(false);
   let draftPersistenceWarning = $state('');
   let draftPersistenceError = $state(false);
-  let visible = $state(document.visibilityState !== 'hidden');
   const slashCatalogIdentity = $derived(inputContextIdentity(agent));
-  const piProbeKey = $derived(visible && !$securityState.locked && !readOnly && piPromptTarget(agent)
+  const piProbeKey = $derived(paneActive.current && !readOnly && piPromptTarget(agent)
     && connection?.status === 'connected' && connection.capabilities.includes('pi_prompt_unconfirmed')
     ? slashCatalogIdentity : '');
   $effect(() => {
@@ -79,14 +76,6 @@
     void untrack(refresh);
     const timer = setInterval(() => { piCapabilityTick += 1; void refresh(); }, 5_000);
     return () => { cancelled = true; clearInterval(timer); };
-  });
-
-  onMount(() => {
-    const visibilityChanged = () => {
-      visible = document.visibilityState !== 'hidden';
-    };
-    document.addEventListener('visibilitychange', visibilityChanged);
-    return () => document.removeEventListener('visibilitychange', visibilityChanged);
   });
 
   let uploadStatus = $state('');
@@ -125,12 +114,8 @@
   const secretMode = $derived(!readOnly && noEchoActive && Boolean(connection?.capabilities.includes('secret_input')));
   const secretReady = $derived(!deliveryBlocked && secretMode && secretState.secretReady);
   $effect(() => {
-    if (!secretMode || !visible || $securityState.locked || deliveryBlocked || connection?.status !== 'connected') return;
-    const target = untrack(() => ({ ...agent }));
-    const refresh = () => relayStore.readPane(target, true, 30);
-    refresh();
-    const timer = setInterval(refresh, 2_000);
-    return () => clearInterval(timer);
+    if (!secretMode || !paneActive.current || deliveryBlocked || connection?.status !== 'connected') return;
+    return untrack(() => pollPane(agent, { lines: 30 }));
   });
   const NOT_PERSISTED_AT_HIDDEN_PROMPT =
     'Not saved on this phone: terminal input was hidden or could not be checked when this text was typed.';
@@ -655,7 +640,7 @@
         <button type="button" disabled={readOnly || $securityState.locked} onclick={() => piDelivery.acknowledge()}>I checked — allow another send</button>
       </div>
     {:else if bridgeReady && !piDelivery.pending}<p class="hint">Pi bridge: unconfirmed send, no terminal keys.</p>
-    {:else if dispatchBlocked && !blockExplained && !readOnly && !piDelivery.pending}
+    {:else if dispatchBlocked && !blockExplained && !readOnly && !deliveryBlocked}
       <p class="hint" role="status">{piPromptTarget(agent) && !piCapability ? 'For live Pi replies, enable Settings → Pi Integration, then /reload Pi.' : dispatchBlocked}</p>
     {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}

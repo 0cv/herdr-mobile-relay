@@ -33,7 +33,7 @@
   import { initializePreferences } from '$lib/preferences';
   import { initializeSpeech, stopSpeech } from '$lib/speech';
   import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
-  import { parsePushOpenTarget, RELAY_PROTOCOL_VERSION } from '$lib/protocol';
+  import { createPushOpenRouter } from '$lib/push-open';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import {
     closeCurrentView,
@@ -50,14 +50,11 @@
   import {
     AppReloadHeld,
     appUpdateStatus,
-    clearPendingRelayUpdate,
     importOrReload,
     initializeAppUpdates,
-    pendingRelayUpdate,
-    relayServesCurrentOrigin,
-    reloadHeldMessage,
-    reloadUpdatedSameOriginApp,
   } from '$lib/updates';
+  import { createDeploymentReloader, reloadAfterRelayUpdate } from '$lib/update-reload';
+  import { createViewedPaneReporter } from '$lib/viewed-pane';
   import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
 
@@ -79,17 +76,15 @@
   let lastBlocked = new Set<string>();
   let previousView = '';
   let terminalUnavailable = $state(false);
-  const typedPushOpens = new Set<string>();
-  const typedPushTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  const pushOpenRouter = createPushOpenRouter();
+  const reportViewedPane = createViewedPaneReporter();
+  const reloadAfterDeployment = createDeploymentReloader();
   const automaticUpdateChecks = new Set<string>();
-  const awaitedDeployments = new Set<string>();
   let visibilityRevision = $state(0);
   let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
   let conversationHistoryFailedRoute = $state.raw<ViewState | null>(null);
   let conversationHistoryFailure = $state('');
   let conversationHistoryLoading = false;
-  let viewedRelayId = '';
-  let viewedTargetSignature = '';
 
   const activeAgent = $derived.by(() => {
     const view = $currentView;
@@ -272,79 +267,22 @@
   });
 
   $effect(() => {
-    if ($currentView.view !== 'push' || $securityState.locked) return;
-    const { eventRef, deviceId } = $currentView;
-    const matchingRelays = $relays.filter((relay) =>
-      relayStore.deviceCredential(relay.id)?.deviceId === deviceId,
-    );
-    if (matchingRelays.length !== 1) {
-      replaceView({ view: 'push_unavailable' });
-      return;
-    }
-    const relayId = matchingRelays[0].id;
-    const connection = $connections.get(relayId);
-    if (connection?.status !== 'connected' || connection.inventory.state !== 'ready') {
-      if (!typedPushTimeouts.has(eventRef)) {
-        typedPushTimeouts.set(eventRef, setTimeout(() => {
-          typedPushTimeouts.delete(eventRef);
-          const current = get(currentView);
-          if (current.view === 'push' && current.eventRef === eventRef) {
-            replaceView({ view: 'push_unavailable' });
-          }
-        }, 15_000));
-      }
-      return;
-    }
-    const timeout = typedPushTimeouts.get(eventRef);
-    if (timeout) clearTimeout(timeout);
-    typedPushTimeouts.delete(eventRef);
-    if (!connection.capabilities.includes('typed_push')) {
-      replaceView({ view: 'push_unavailable' });
-      return;
-    }
-    if (typedPushOpens.has(eventRef)) return;
-    typedPushOpens.add(eventRef);
-    void resolveTypedPushOpen(eventRef, relayId)
-      .finally(() => typedPushOpens.delete(eventRef));
+    pushOpenRouter.route({
+      view: $currentView,
+      locked: $securityState.locked,
+      relays: $relays,
+      connections: $connections,
+    });
   });
-
 
   $effect(() => {
     void visibilityRevision;
-    const visible = document.visibilityState === 'visible' && document.hasFocus();
-    const target = $currentView.view === 'terminal' && activeAgent && !$securityState.locked
-      && activeAgent.server_session_id === 'primary'
-      && activeAgent.terminal_id
-      && Number.isSafeInteger(activeAgent.generation)
-      ? targetRefForAgent(activeAgent)
-      : null;
-    const relayId = visible && target && activeAgent
-      && $connections.get(activeAgent.relay_id)?.status === 'connected'
-      ? activeAgent.relay_id
-      : '';
-    const signature = relayId && target
-      ? `${relayId}:${target.pane_id}:${target.terminal_id}:${target.agent_session_id || ''}:${target.generation}`
-      : '';
-    if (signature === viewedTargetSignature) return;
-    if (viewedRelayId) {
-      relayStore.sendRaw(viewedRelayId, {
-        type: 'push_viewed_pane',
-        protocol: RELAY_PROTOCOL_VERSION,
-        visible: false,
-        unlocked: !$securityState.locked,
-      });
-    }
-    viewedRelayId = relayId;
-    viewedTargetSignature = signature;
-    if (relayId && target) {
-      relayStore.sendRaw(relayId, {
-        type: 'push_viewed_pane',
-        protocol: RELAY_PROTOCOL_VERSION,
-        visible: true,
-        unlocked: true,
-        target,
-      });
-    }
+    reportViewedPane({
+      view: $currentView,
+      agent: activeAgent,
+      locked: $securityState.locked,
+      connections: $connections,
+    });
   });
   $effect(() => {
     for (const [relayId, connection] of $connections) {
@@ -358,45 +296,12 @@
     }
   });
 
-  function reloadIntoUpdate(version: string) {
-    void reloadUpdatedSameOriginApp(version).then((reloaded) => {
-      const held = reloadHeldMessage();
-      if (!reloaded && held) relayStore.showToast(held, true);
-    });
-  }
-
   $effect(() => {
-    for (const [relayId, connection] of $connections) {
-      if (connection.status !== 'connected') continue;
-      const pending = pendingRelayUpdate(relayId);
-      if (!pending || connection.releaseVersion !== pending.version) continue;
-      const revision = connection.revision.replace(/-dirty$/, '');
-      if (!revision || !pending.revision.startsWith(revision)) continue;
-      clearPendingRelayUpdate(relayId);
-      relayStore.showToast(`${connection.relay.label} updated to v${pending.version}.`);
-      if (relayServesCurrentOrigin(connection.relay.url)) {
-        reloadIntoUpdate(pending.version);
-      }
-    }
+    reloadAfterRelayUpdate($connections);
   });
 
   $effect(() => {
-    for (const connection of $connections.values()) {
-      const deployment = connection.appDeploy;
-      if (
-        connection.status !== 'connected'
-        || deployment.state !== 'succeeded'
-        || deployment.origin !== location.origin
-        || !deployment.target_version
-      ) continue;
-      // A relay announces its last successful deployment forever; without this
-      // guard every store emission would restart the two-minute wait for a
-      // stale target the origin will never serve again.
-      const identity = `${deployment.target_version}:${deployment.target_revision}`;
-      if (awaitedDeployments.has(identity)) continue;
-      awaitedDeployments.add(identity);
-      reloadIntoUpdate(deployment.target_version);
-    }
+    reloadAfterDeployment($connections);
   });
 
   onMount(() => {
@@ -432,8 +337,7 @@
       document.removeEventListener('visibilitychange', visibilityChanged);
       window.removeEventListener('focus', visibilityChanged);
       window.removeEventListener('blur', visibilityChanged);
-      for (const timeout of typedPushTimeouts.values()) clearTimeout(timeout);
-      typedPushTimeouts.clear();
+      pushOpenRouter.stop();
       relayStore.destroy();
     };
   });
@@ -486,37 +390,6 @@
     }
     return matches.length === 1 ? matches[0] : null;
   }
-
-  async function resolveTypedPushOpen(eventRef: string, relayId: string): Promise<void> {
-    try {
-      const result = await relayStore.sendCommand(relayId, { type: 'push_open_ref', event_ref: eventRef });
-      const target = parsePushOpenTarget(result.data?.target, relayId);
-      if (!target) throw new Error('Invalid notification target');
-      const findAgent = () => get(relayStore.agents).find(agent =>
-        agent.relay_id === relayId && targetRefMatchesAgent(target, agent),
-      );
-      let agent = findAgent();
-      const deadline = Date.now() + 5_000;
-      while (!agent && Date.now() < deadline) {
-        relayStore.requestAgents();
-        await new Promise(resolve => setTimeout(resolve, 100));
-        agent = findAgent();
-      }
-      const current = get(currentView);
-      if (current.view !== 'push' || current.eventRef !== eventRef) return;
-      if (!agent) {
-        replaceView({ view: 'push_unavailable' });
-        return;
-      }
-      replaceView({ view: 'terminal', paneId: agent.pane_id, target });
-    } catch {
-      const current = get(currentView);
-      if (current.view === 'push' && current.eventRef === eventRef) {
-        replaceView({ view: 'push_unavailable' });
-      }
-    }
-  }
-
 
   async function notifyBlockedAgent(agent: Agent) {
     if (!notificationsEnabled()) return;
