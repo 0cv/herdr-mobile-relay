@@ -145,13 +145,14 @@ func (r *activityRecorder) recordTransition(transition TransitionActivity) bool 
 
 func (r *activityRecorder) clear(finish func(error) *CommandResult) *CommandResult {
 	r.order.Lock()
-	defer r.order.Unlock()
 	if _, err := r.worker.Clear(context.Background(), activity.ActivityClearRequested{
 		Sequence: r.sequence.Add(1),
 	}); err != nil {
+		r.order.Unlock()
 		r.failures.Add(1)
 		return finish(err)
 	}
+	defer r.order.Unlock()
 	if r.broadcast != nil {
 		r.broadcast(map[string]any{"type": "activity_history", "activities": []any{}})
 	}
