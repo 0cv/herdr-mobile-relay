@@ -3,6 +3,7 @@ package profiles
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,7 +69,7 @@ func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 		ownership:  make(map[string]profileOwnership),
 		observed:   make(map[string]PaneIdentity),
 		unobserved: make(map[string]bool),
-		aliases:    cloneAliases(defaultAliases),
+		aliases:    maps.Clone(defaultAliases),
 		skillDirs:  make(map[string][]string),
 		formats:    make(map[string]string),
 		warned:     make(map[string]bool),
@@ -150,7 +151,7 @@ func (r *Resolver) loadINI() (
 	skillDirs map[string][]string,
 	formats map[string]string,
 ) {
-	aliases = cloneAliases(defaultAliases)
+	aliases = maps.Clone(defaultAliases)
 	skillDirs = make(map[string][]string)
 	formats = make(map[string]string)
 	iniPath := filepath.Join(r.configHome, "herdr", "agent-profiles.ini")
@@ -379,14 +380,6 @@ func expandedPaths(paths []string) []string {
 func binaryPath(name string) (string, bool) {
 	path, err := exec.LookPath(name)
 	return path, err == nil
-}
-
-func cloneAliases(source map[string]string) map[string]string {
-	result := make(map[string]string, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
-	return result
 }
 
 func cloneProfiles(source []Profile) []Profile {

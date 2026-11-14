@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROFILE="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-TARGET="$PROFILE/extensions/herdr-mobile-relay-commands"
 
 case "${HERDR_DEV_PI_COMMANDS_INSTALL:-1}" in
     0) echo "Pi command discovery: installation disabled for this dev tunnel."; exit 0 ;;
@@ -13,19 +12,6 @@ esac
 
 if [ ! -d "$PROFILE" ]; then
     echo "Pi command discovery: no agent directory at $PROFILE; skipping optional integration."
-    exit 0
-fi
-
-if [ ! -L "$PROFILE/extensions" ] && [ ! -L "$TARGET" ] &&
-    [ -f "$TARGET/.relay-owned" ] && [ ! -L "$TARGET/.relay-owned" ] &&
-    [ -f "$TARGET/index.ts" ] && [ ! -L "$TARGET/index.ts" ] &&
-    [ -f "$TARGET/bridge.mjs" ] && [ ! -L "$TARGET/bridge.mjs" ] &&
-    [ -f "$TARGET/activity.mjs" ] && [ ! -L "$TARGET/activity.mjs" ] &&
-    [ "$(<"$TARGET/.relay-owned")" = herdr-mobile-relay-pi-commands-v1 ] &&
-    cmp -s "$SCRIPT_DIR/pi-command-bridge/index.ts" "$TARGET/index.ts" &&
-    cmp -s "$SCRIPT_DIR/pi-command-bridge/bridge.mjs" "$TARGET/bridge.mjs" &&
-    cmp -s "$SCRIPT_DIR/pi-command-bridge/activity.mjs" "$TARGET/activity.mjs"; then
-    echo "Pi command discovery: integration is current in $PROFILE."
     exit 0
 fi
 

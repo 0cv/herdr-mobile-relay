@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
@@ -38,13 +39,6 @@ const (
 	attachmentIndexFilename    = "attachments.json"
 	attachmentIndexVersion     = 1
 )
-
-type attachmentIndexPublishedError struct {
-	err error
-}
-
-func (e *attachmentIndexPublishedError) Error() string { return e.err.Error() }
-func (e *attachmentIndexPublishedError) Unwrap() error { return e.err }
 
 type Error struct {
 	Code string         `json:"code"`
@@ -304,7 +298,7 @@ func NewManager(config Config) (*Manager, error) {
 			"root", cleanRoot, "dropped", dropped, "kept", len(manager.attachments))
 	}
 	manager.Cleanup()
-	if err := manager.persistAttachments(); err != nil {
+	if _, err := manager.persistAttachments(); err != nil {
 		root.Close()
 		return nil, err
 	}
@@ -540,9 +534,8 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 	if collision {
 		return fail(failure("upload_staging_failed", nil))
 	}
-	if persistErr := m.persistAttachments(); persistErr != nil {
-		var published *attachmentIndexPublishedError
-		if errors.As(persistErr, &published) {
+	if outcome, persistErr := m.persistAttachments(); persistErr != nil {
+		if outcome == atomicfile.Renamed {
 			committed = true
 			return fail(persistErr)
 		}
@@ -605,7 +598,7 @@ func (m *Manager) Resolve(target protocol.TargetRef, ref string) (Attachment, er
 	file, info, err := m.openAttachmentLocked(record)
 	if err != nil {
 		m.removeAttachment(record)
-		if persistErr := m.persistAttachments(); persistErr != nil {
+		if _, persistErr := m.persistAttachments(); persistErr != nil {
 			return Attachment{}, persistErr
 		}
 		return Attachment{}, err
@@ -613,7 +606,7 @@ func (m *Manager) Resolve(target protocol.TargetRef, ref string) (Attachment, er
 	_ = file.Close()
 	if info.Size() != record.attachment.Bytes {
 		m.removeAttachment(record)
-		if persistErr := m.persistAttachments(); persistErr != nil {
+		if _, persistErr := m.persistAttachments(); persistErr != nil {
 			return Attachment{}, persistErr
 		}
 		return Attachment{}, failure("attachment_changed", nil)
@@ -659,7 +652,7 @@ func (m *Manager) Cleanup() int {
 	}
 	diskRemoved := m.cleanupDiskLocked()
 	if len(expiredAttachments) > 0 {
-		_ = m.persistAttachments()
+		_, _ = m.persistAttachments()
 	}
 	m.attachmentMu.Unlock()
 	return len(expiredSessions) + len(expiredAttachments) + diskRemoved
@@ -866,7 +859,7 @@ func (m *Manager) quarantineAttachmentIndexLocked() error {
 	return failure("upload_metadata_invalid", nil)
 }
 
-func (m *Manager) persistAttachments() error {
+func (m *Manager) persistAttachments() (atomicfile.Outcome, error) {
 	m.mu.Lock()
 	records := make([]diskAttachmentRecord, 0, len(m.attachments))
 	for _, record := range m.attachments {
@@ -882,43 +875,15 @@ func (m *Manager) persistAttachments() error {
 	})
 	data, err := json.Marshal(attachmentIndex{SchemaVersion: attachmentIndexVersion, Attachments: records})
 	if err != nil {
-		return failure("upload_metadata_unavailable", nil)
+		return atomicfile.RenameNotConfirmed, failure("upload_metadata_unavailable", nil)
 	}
 	data = append(data, '\n')
-	temp, err := os.CreateTemp(m.rootPath, ".attachments-*.tmp")
-	if err != nil {
-		return failure("upload_metadata_unavailable", nil)
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return failure("upload_metadata_unavailable", nil)
-	}
-	if _, err := temp.Write(data); err != nil {
-		_ = temp.Close()
-		return failure("upload_metadata_unavailable", nil)
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return failure("upload_metadata_unavailable", nil)
-	}
-	if err := temp.Close(); err != nil {
-		return failure("upload_metadata_unavailable", nil)
-	}
 	path := filepath.Join(m.rootPath, attachmentIndexFilename)
-	if err := os.Rename(tempPath, path); err != nil {
-		return failure("upload_metadata_unavailable", nil)
-	}
-	directory, err := os.Open(m.rootPath)
+	outcome, err := atomicfile.Replace(m.rootPath, path, ".attachments-*.tmp", data, 0o600)
 	if err != nil {
-		return &attachmentIndexPublishedError{err: failure("upload_metadata_unavailable", nil)}
+		return outcome, failure("upload_metadata_unavailable", nil)
 	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
-		return &attachmentIndexPublishedError{err: failure("upload_metadata_unavailable", nil)}
-	}
-	return nil
+	return outcome, nil
 }
 
 func (m *Manager) syncObjectsDirectory() error {

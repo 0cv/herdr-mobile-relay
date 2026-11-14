@@ -75,7 +75,7 @@ func (c *socketAPIClient) requestUnary(
 	if err != nil {
 		return nil, false, fmt.Errorf("connect to Herdr socket API: %w", err)
 	}
-	stopWatch := closeOnContextDone(requestCtx, conn)
+	stopWatch := context.AfterFunc(requestCtx, func() { _ = conn.Close() })
 	defer stopWatch()
 	defer conn.Close()
 	deadline, _ := requestCtx.Deadline()

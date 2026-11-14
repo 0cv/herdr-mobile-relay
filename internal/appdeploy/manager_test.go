@@ -15,6 +15,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 )
 
 func TestManagerRejectsPhoneOverrides(t *testing.T) {
@@ -86,11 +87,6 @@ func TestAppDeployWorkerJobForwardsRelayEnvironmentPaths(t *testing.T) {
 		value, found := values[key]
 		return value, found
 	}
-	assignments := []string{
-		"HERDR_RELAY_ENV=/home/cv/.config/herdr-mobile-relay/relay.env",
-		"HERDR_PLUGIN_CONFIG_DIR=/home/cv/.config/herdr-mobile-relay",
-	}
-
 	job := appDeployWorkerJob("/opt/relay", "/tmp/job.json", lookup)
 	sequence, found := strings.CutPrefix(job.Label, launchd.AppDeployWorkerPrefix)
 	if _, err := strconv.ParseInt(sequence, 10, 64); !found || err != nil {
@@ -105,15 +101,6 @@ func TestAppDeployWorkerJobForwardsRelayEnvironmentPaths(t *testing.T) {
 	}
 	if !maps.Equal(job.Environment, wantEnvironment) {
 		t.Fatalf("environment = %#v, want %#v", job.Environment, wantEnvironment)
-	}
-
-	linuxArgs := []string{"--user", "--collect", "--unit=" + job.Label}
-	for _, assignment := range assignments {
-		linuxArgs = append(linuxArgs, "--setenv="+assignment)
-	}
-	linuxArgs = append(linuxArgs, "/opt/relay", "app-deploy-worker", "/tmp/job.json")
-	if args := systemdRunArgs(job); !slices.Equal(args, linuxArgs) {
-		t.Fatalf("systemd-run args = %#v, want %#v", args, linuxArgs)
 	}
 }
 
@@ -166,7 +153,7 @@ func TestManagerRecoversOrphanedDeploymentState(t *testing.T) {
 
 func TestManagerPreservesStateOwnedByWorker(t *testing.T) {
 	root := t.TempDir()
-	lock, err := lockFile(filepath.Join(root, "app-deploy.lock"))
+	lock, err := workerjob.Lock(filepath.Join(root, "app-deploy.lock"), errDeployLocked)
 	if err != nil {
 		t.Fatal(err)
 	}

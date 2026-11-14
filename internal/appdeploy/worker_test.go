@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 	"github.com/andybalholm/brotli"
 )
 
@@ -367,7 +368,7 @@ func TestRunDoesNotOverwriteStateOwnedByAnotherWorker(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := lockFile(filepath.Join(root, "app-deploy.lock"))
+	lock, err := workerjob.Lock(filepath.Join(root, "app-deploy.lock"), errDeployLocked)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,10 +413,8 @@ func TestCommandEnvironmentPinsOneNodeFirstPath(t *testing.T) {
 func TestCommandEnvironmentLoadsOnlyCloudflareCredentials(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "relay.env")
 	if err := os.WriteFile(envFile, []byte(
-		"CF_TOKEN='api token'\n"+
-			"CF_ACCOUNT_ID='account-id # inside value'\n"+
-			"CLOUDFLARE_API_TOKEN=\"$CF_TOKEN\" # trailing comment\n"+
-			"CLOUDFLARE_ACCOUNT_ID=\"${CF_ACCOUNT_ID}\" # trailing comment\n"+
+		"CLOUDFLARE_API_TOKEN='api token' # trailing comment\n"+
+			"CLOUDFLARE_ACCOUNT_ID=\"account-id # inside value\"\n"+
 			"HERDR_RELAY_TOKEN='relay-secret'\n",
 	), 0o600); err != nil {
 		t.Fatal(err)
@@ -472,51 +471,17 @@ func TestWranglerDeployArgsUseFreshNoCacheUpload(t *testing.T) {
 		t.Fatalf("wranglerDeployArgs() = %#v, want %#v", got, want)
 	}
 }
-func TestCommandEnvironmentRejectsUnsupportedExpansion(t *testing.T) {
+func TestCommandEnvironmentRejectsVariableReference(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "relay.env")
-	if err := os.WriteFile(envFile, []byte("CLOUDFLARE_API_TOKEN=$(printf bad)\n"), 0o600); err != nil {
+	if err := os.WriteFile(envFile, []byte("CLOUDFLARE_API_TOKEN=$CF_TOKEN\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_RELAY_ENV", envFile)
 	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "")
 
-	if _, err := commandEnvironmentWithCloudflareCredentials("/opt/pinned-node", []string{"PATH=/usr/bin"}); err == nil {
-		t.Fatal("unsupported command substitution was accepted")
-	}
-}
-
-func TestUnquoteShellWord(t *testing.T) {
-	tests := map[string]struct {
-		value string
-		want  string
-	}{
-		"escaped_space": {
-			value: `api\ token # comment`,
-			want:  "api token",
-		},
-		"escaped_double_quote": {
-			value: `"api\"token" # comment`,
-			want:  `api"token`,
-		},
-		"hash_inside_quotes": {
-			value: `"api # token"`,
-			want:  "api # token",
-		},
-		"single_quotes_keep_backslash": {
-			value: `'api\ token'`,
-			want:  `api\ token`,
-		},
-	}
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			got, err := parseShellEnvironmentValue(test.value, nil)
-			if err != nil {
-				t.Fatalf("parseShellEnvironmentValue(%q) error = %v", test.value, err)
-			}
-			if got != test.want {
-				t.Fatalf("parseShellEnvironmentValue(%q) = %q, want %q", test.value, got, test.want)
-			}
-		})
+	_, err := commandEnvironmentWithCloudflareCredentials("/opt/pinned-node", []string{"PATH=/usr/bin"})
+	if err == nil || !strings.Contains(err.Error(), "CLOUDFLARE_API_TOKEN") {
+		t.Fatalf("error = %v, want one naming CLOUDFLARE_API_TOKEN", err)
 	}
 }
 

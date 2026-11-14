@@ -226,7 +226,7 @@ func (c *EventClient) subscribeWith(ctx context.Context, includeWorkspaceReorder
 	if err != nil {
 		return nil, fmt.Errorf("connect to Herdr events socket: %w", err)
 	}
-	stopWatch := closeOnContextDone(requestCtx, conn)
+	stopWatch := context.AfterFunc(requestCtx, func() { _ = conn.Close() })
 	defer stopWatch()
 	if err := setSocketDeadline(conn, requestCtx); err != nil {
 		_ = conn.Close()
@@ -313,7 +313,7 @@ func (c *EventClient) snapshot(ctx context.Context) (SessionSnapshot, error) {
 		return SessionSnapshot{}, fmt.Errorf("connect to Herdr snapshot socket: %w", err)
 	}
 	defer conn.Close()
-	stopWatch := closeOnContextDone(requestCtx, conn)
+	stopWatch := context.AfterFunc(requestCtx, func() { _ = conn.Close() })
 	defer stopWatch()
 	if err := setSocketDeadline(conn, requestCtx); err != nil {
 		return SessionSnapshot{}, fmt.Errorf("set Herdr snapshot socket deadline: %w", err)
@@ -388,27 +388,6 @@ func topologySubscriptions(includeWorkspaceReordered bool) []map[string]string {
 		subscriptions[index] = map[string]string{"type": name}
 	}
 	return subscriptions
-}
-
-// closeOnContextDone closes conn when ctx finishes, so a peer that accepts a
-// request and then stops responding cannot keep a read blocked until the
-// socket deadline and delay shutdown. The returned func ends the watcher and
-// must run before the request context is cancelled.
-func closeOnContextDone(ctx context.Context, conn net.Conn) func() {
-	done := make(chan struct{})
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
-	}()
-	return func() {
-		close(done)
-		<-stopped
-	}
 }
 
 func setSocketDeadline(conn net.Conn, ctx context.Context) error {

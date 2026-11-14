@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT
+export HERDR_RELAY_BIN="$TEMP/herdr-mobile-relay"
+(cd "$ROOT" && go build -o "$HERDR_RELAY_BIN" ./cmd/herdr-mobile-relay)
 export HOME="$TEMP/home"
 export PI_CODING_AGENT_DIR="$TEMP/custom-agent"
 mkdir -p "$PI_CODING_AGENT_DIR/extensions" "$HOME/.pi/agent"
@@ -21,7 +23,7 @@ cmp "$ROOT/relay/pi-command-bridge/activity.mjs" "$TARGET/activity.mjs"
 grep -q 'Reload affected Pi panes' "$TEMP/installed"
 
 "$ROOT/relay/dev-pi-commands.sh" </dev/null > "$TEMP/current"
-grep -q 'integration is current' "$TEMP/current"
+grep -q 'is up to date' "$TEMP/current"
 
 printf '%s\n' outdated > "$TARGET/activity.mjs"
 "$ROOT/relay/dev-pi-commands.sh" </dev/null > "$TEMP/updated"

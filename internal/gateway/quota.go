@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/gatewaywire"
 )
 
@@ -221,40 +222,8 @@ func (q *quotaStore) save(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("gateway: encode state: %w", err)
 	}
-	return writeFileAtomic(q.path, data)
-}
-
-// writeFileAtomic replaces path with data via a same-directory temp file so a
-// crash mid-write cannot truncate the counters.
-func writeFileAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".herdr-gateway-state-*")
-	if err != nil {
-		return fmt.Errorf("gateway: create temp state in %s: %w", dir, err)
-	}
-	name := temp.Name()
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		os.Remove(name)
-		return fmt.Errorf("gateway: chmod temp state: %w", err)
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		os.Remove(name)
-		return fmt.Errorf("gateway: write temp state: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		os.Remove(name)
-		return fmt.Errorf("gateway: sync temp state: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		os.Remove(name)
-		return fmt.Errorf("gateway: close temp state: %w", err)
-	}
-	if err := os.Rename(name, path); err != nil {
-		os.Remove(name)
-		return fmt.Errorf("gateway: replace state %s: %w", path, err)
+	if _, err := atomicfile.Replace(filepath.Dir(q.path), q.path, ".herdr-gateway-state-*", data, 0o600); err != nil {
+		return fmt.Errorf("gateway: write state %s: %w", q.path, err)
 	}
 	return nil
 }

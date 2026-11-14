@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 )
 
 const ownershipLimit = 1024
@@ -189,29 +191,6 @@ func (r *Resolver) persistOwnershipLocked() error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(dir, ".profile-ownership-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(file.Name())
-	if _, err := file.Write(data); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(file.Name(), r.ownershipPath); err != nil {
-		return err
-	}
-	directory, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	_, err = atomicfile.Replace(dir, r.ownershipPath, ".profile-ownership-*", data, 0600)
+	return err
 }

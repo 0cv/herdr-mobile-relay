@@ -2,8 +2,10 @@
 package atomicfile
 
 import (
+	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // Outcome records whether Rename returned success, not whether data is durable.
@@ -89,4 +91,19 @@ func replace(directory, target, pattern string, data []byte, mode os.FileMode, o
 	err = dir.Sync()
 	_ = dir.Close()
 	return Renamed, err
+}
+
+// WriteJSON creates the parent directory, then replaces path with value encoded
+// as indented JSON ending in a newline. Outcome and error follow Replace.
+func WriteJSON(path string, value any, mode os.FileMode) (Outcome, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return RenameNotConfirmed, err
+	}
+	data = append(data, '\n')
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return RenameNotConfirmed, err
+	}
+	return Replace(directory, path, "."+filepath.Base(path)+".*", data, mode)
 }

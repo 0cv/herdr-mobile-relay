@@ -14,6 +14,7 @@ import (
 	"time"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 )
 
 func TestInstallPluginPinsExactCommitAndSuppressesSetup(t *testing.T) {
@@ -137,7 +138,7 @@ func TestWorkerRemovesJobWhenAnotherUpdateHoldsTheLock(t *testing.T) {
 	if err := os.MkdirAll(job.ReleaseRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := acquireLock(filepath.Join(job.ReleaseRoot, "update.lock"))
+	lock, err := workerjob.Lock(filepath.Join(job.ReleaseRoot, "update.lock"), ErrConcurrent)
 	if err != nil {
 		t.Fatal(err)
 	}
