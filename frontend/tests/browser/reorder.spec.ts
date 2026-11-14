@@ -1,95 +1,45 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { installMockRelay, mockRelayCommands, mockRelayServer } from '../support/mock-relay-socket';
 
-for (const kind of ['tabs', 'workspaces'] as const) {
-  for (const journey of ['geometry', 'gestures'] as const) {
-  test(`${kind}: native mouse long-press ${journey} with mocked transport`, async ({ page }) => {
-    await installMockRelay(page, {
-      capabilities: ['tab_reorder', 'workspace_management', 'workspace_reorder_block'],
-      workspaces: [1, 2, 3].map((n) => ({ workspace_id: `w${n}`, number: n, label: `Workspace ${n}`, pane_count: 1, tab_count: 1, cwd: `/work/${n}` })),
-      agents: [1, 2, 3].map((n) => ({ pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1, workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working', tab_id: `t${n}`, tab_number: n, tab_order: n, tab_label: `Tab ${n}` })),
-    }, (command) => {
-      if (command.type === 'tab_reorder' || command.type === 'workspace_reorder') {
-        document.body.dataset.reorder = JSON.stringify(command);
-      }
-    });
-    await page.goto('/');
-    if (kind === 'workspaces') await page.getByRole('button', { name: 'Manage workspaces' }).click();
-    const slots = page.locator(kind === 'tabs' ? '.workspace-tab' : '.workspace-management-slot');
-    await expect(slots).toHaveCount(3);
-    // Real layout/measurement, with intentionally unequal row heights and gaps.
-    await slots.evaluateAll((nodes) => nodes.forEach((node, i) => {
-      const element = node as HTMLElement;
-      element.style.height = `${[160, 200, 180][i]}px`;
-      element.style.marginBottom = `${[10, 20, 10][i]}px`;
-    }));
-    const handle = kind === 'tabs' ? slots.first().locator('.agent-open') : slots.first().locator('.workspace-drag-handle');
-    await handle.scrollIntoViewIfNeeded();
-    const start = await handle.boundingBox();
-    const first = await slots.first().boundingBox();
-    const second = await slots.nth(1).boundingBox();
-    const last = await slots.nth(2).boundingBox();
-    expect(start && first && second && last).toBeTruthy();
-    const span = first!.height + Math.max(0, second!.y - first!.y - first!.height);
-    if (journey === 'gestures') {
-      // Native mouse slop cancellation. Release outside the card to avoid opening it.
-      await page.mouse.move(start!.x + start!.width / 2, start!.y + start!.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(2, 2);
-      await page.waitForTimeout(650);
-      await expect(slots.first()).toHaveCSS('transform', 'none');
-      await page.mouse.up();
-      await expect(page.locator('body')).not.toHaveAttribute('data-reorder');
-
-      // Native mouse hold, but synthetic touch/context/cancel dispatch: NOT native touch.
-      await handle.evaluate(node => node.addEventListener('pointerdown', event => {
-        (node as HTMLElement).dataset.pointerId = String((event as PointerEvent).pointerId);
-      }));
-      // Isolate outside release/cancel from slop using synthetic document events.
-      // Native mouse supplies the down; these are not native touch evidence.
-      for (const type of ['pointerup', 'pointercancel']) {
-        await page.mouse.move(start!.x + start!.width / 2, start!.y + start!.height / 2);
-        await page.mouse.down();
-        const pointerId = Number(await handle.getAttribute('data-pointer-id'));
-        await page.evaluate(({ type, pointerId }) => {
-          document.body.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId }));
-        }, { type, pointerId });
-        await page.waitForTimeout(650);
-        await expect(slots.first()).toHaveCSS('transform', 'none');
-        await page.mouse.move(2, 2);
-        await page.mouse.up();
-        await expect(page.locator('body')).not.toHaveAttribute('data-reorder');
-      }
-      const prevented = (type: string) => handle.evaluate((node, type) => {
-        const event = new Event(type, { bubbles: true, cancelable: true });
-        node.dispatchEvent(event);
-        return event.defaultPrevented;
-      }, type);
-      await page.mouse.move(start!.x + start!.width / 2, start!.y + start!.height / 2);
-      await page.mouse.down();
-      expect(await prevented('touchmove')).toBe(false);
-      expect(await prevented('contextmenu')).toBe(true);
-      await page.waitForTimeout(650);
-      expect(await prevented('touchmove')).toBe(true);
-      expect(await prevented('contextmenu')).toBe(true);
-      await handle.evaluate(node => node.dispatchEvent(new PointerEvent('pointercancel', {
-        bubbles: true, pointerId: Number((node as HTMLElement).dataset.pointerId),
-      })));
-      await expect(slots.first()).toHaveCSS('transform', 'none');
-      expect(await prevented('touchmove')).toBe(false);
-      expect(await prevented('contextmenu')).toBe(false);
-      await page.mouse.up();
-      await expect(page.locator('body')).not.toHaveAttribute('data-reorder');
-
-      return;
+async function openReorderList(page: Page, kind: 'tabs' | 'workspaces') {
+  await installMockRelay(page, {
+    capabilities: ['tab_reorder', 'workspace_management', 'workspace_reorder_block'],
+    workspaces: [1, 2, 3].map((n) => ({ workspace_id: `w${n}`, number: n, label: `Workspace ${n}`, pane_count: 1, tab_count: 1, cwd: `/work/${n}` })),
+    agents: [1, 2, 3].map((n) => ({ pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1, workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working', tab_id: `t${n}`, tab_number: n, tab_order: n, tab_label: `Tab ${n}` })),
+  }, (command) => {
+    if (command.type === 'tab_reorder' || command.type === 'workspace_reorder') {
+      document.body.dataset.reorder = JSON.stringify(command);
     }
+  });
+  await page.goto('/');
+  if (kind === 'workspaces') await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  const slots = page.locator(kind === 'tabs' ? '.workspace-tab' : '.workspace-management-slot');
+  await expect(slots).toHaveCount(3);
+  // Real layout/measurement, with intentionally unequal row heights and gaps.
+  await slots.evaluateAll((nodes) => nodes.forEach((node, i) => {
+    const element = node as HTMLElement;
+    element.style.height = `${[160, 200, 180][i]}px`;
+    element.style.marginBottom = `${[10, 20, 10][i]}px`;
+  }));
+  const handle = kind === 'tabs' ? slots.first().locator('.agent-open') : slots.first().locator('.workspace-drag-handle');
+  await handle.scrollIntoViewIfNeeded();
+  const start = await handle.boundingBox();
+  const first = await slots.first().boundingBox();
+  const second = await slots.nth(1).boundingBox();
+  const last = await slots.nth(2).boundingBox();
+  expect(start && first && second && last).toBeTruthy();
+  const span = first!.height + Math.max(0, second!.y - first!.y - first!.height);
+  return { slots, handle, start: start!, last: last!, span };
+}
 
-    // Original native mouse geometry/commit journey follows unchanged.
-    await page.mouse.move(start!.x + start!.width / 2, start!.y + start!.height / 2);
+for (const kind of ['tabs', 'workspaces'] as const) {
+  test(`${kind}: native mouse long-press geometry with mocked transport`, async ({ page }) => {
+    const { slots, start, last, span } = await openReorderList(page, kind);
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
     await page.mouse.down();
     await page.waitForTimeout(650);
     await expect(slots.first()).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
-    await page.mouse.move(start!.x + start!.width / 2, last!.y + last!.height / 2 + 5);
+    await page.mouse.move(start.x + start.width / 2, last.y + last.height / 2 + 5);
     for (const index of [1, 2]) {
       await expect.poll(() => slots.nth(index).evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).m42)).toBeCloseTo(-span, 2);
     }
@@ -103,7 +53,58 @@ for (const kind of ['tabs', 'workspaces'] as const) {
       expect(command).not.toHaveProperty('insert_index');
     }
   });
-  }
+
+  test(`${kind}: native mouse long-press gestures with mocked transport`, async ({ page }) => {
+    const { slots, handle, start } = await openReorderList(page, kind);
+    // Native mouse slop cancellation. Release outside the card to avoid opening it.
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(2, 2);
+    await page.waitForTimeout(650);
+    await expect(slots.first()).toHaveCSS('transform', 'none');
+    await page.mouse.up();
+    await expect(page.locator('body')).not.toHaveAttribute('data-reorder');
+
+    // Native mouse hold, but synthetic touch/context/cancel dispatch: NOT native touch.
+    await handle.evaluate(node => node.addEventListener('pointerdown', event => {
+      (node as HTMLElement).dataset.pointerId = String((event as PointerEvent).pointerId);
+    }));
+    // Isolate outside release/cancel from slop using synthetic document events.
+    // Native mouse supplies the down; these are not native touch evidence.
+    for (const type of ['pointerup', 'pointercancel']) {
+      await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+      await page.mouse.down();
+      const pointerId = Number(await handle.getAttribute('data-pointer-id'));
+      await page.evaluate(({ type, pointerId }) => {
+        document.body.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId }));
+      }, { type, pointerId });
+      await page.waitForTimeout(650);
+      await expect(slots.first()).toHaveCSS('transform', 'none');
+      await page.mouse.move(2, 2);
+      await page.mouse.up();
+      await expect(page.locator('body')).not.toHaveAttribute('data-reorder');
+    }
+    const prevented = (type: string) => handle.evaluate((node, type) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      node.dispatchEvent(event);
+      return event.defaultPrevented;
+    }, type);
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+    await page.mouse.down();
+    expect(await prevented('touchmove')).toBe(false);
+    expect(await prevented('contextmenu')).toBe(true);
+    await page.waitForTimeout(650);
+    expect(await prevented('touchmove')).toBe(true);
+    expect(await prevented('contextmenu')).toBe(true);
+    await handle.evaluate(node => node.dispatchEvent(new PointerEvent('pointercancel', {
+      bubbles: true, pointerId: Number((node as HTMLElement).dataset.pointerId),
+    })));
+    await expect(slots.first()).toHaveCSS('transform', 'none');
+    expect(await prevented('touchmove')).toBe(false);
+    expect(await prevented('contextmenu')).toBe(false);
+    await page.mouse.up();
+    await expect(page.locator('body')).not.toHaveAttribute('data-reorder');
+  });
 }
 
 const networkAttempts = new WeakMap<import('@playwright/test').BrowserContext, { http: number; sockets: number }>();

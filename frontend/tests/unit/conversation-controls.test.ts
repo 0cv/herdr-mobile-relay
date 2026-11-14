@@ -102,37 +102,66 @@ it('Conversation retains real approval choices with exact routing', async () => 
   uncluttered();
 });
 
-const cases = (['pending-completed', 'pending-unknown', 'accepted', 'dispatched_unknown'] as const).flatMap(state =>
-  (['idle', 'question', 'approval'] as const).flatMap(attention =>
-    (['view', 'cwd', 'agent', 'disconnect', 'lock'] as const).map(transition => ({ state, attention, transition }))));
-it.each(cases)('keeps $state $attention delivery fenced in Conversation across $transition', async ({ state, attention, transition }) => {
+type Attention = 'idle' | 'question' | 'approval';
+type Transition = 'view' | 'cwd' | 'agent' | 'disconnect' | 'lock';
+const attentions: Attention[] = ['idle', 'question', 'approval'];
+const crossings: Transition[] = ['view', 'cwd', 'agent', 'disconnect', 'lock'];
+const crossCases = (states: string[]) => states.flatMap(state => attentions.flatMap(attention => crossings.map(transition => ({ state, attention, transition }))));
+const primaryName: Record<Attention, string> = { idle: 'Send prompt', question: 'Submit', approval: 'Allow once' };
+const uncertainAlert = 'Delivery is uncertain. In Terminal, tap Keyboard to check before sending.';
+
+function agentWithAttention(attention: Attention): Agent {
   const interaction: QuestionInteraction = { id: 'cross-view', kind: 'single_select', question: 'Choose a destination', options: [{ index: 0, label: 'North', selected: true }], can_go_back: true, can_chat: true };
-  let current: Agent = { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
-  const original = await terminalWithManualInput(current);
-  await original.rerender({ frame: frame(current) });
-  let finish!: (value: CommandResult) => void;
-  if (state.startsWith('pending')) vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
-  else vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: state });
+  return { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
+}
+
+function holdDelivery() {
+  const held = {} as { finish: (value: CommandResult) => void };
+  vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { held.finish = resolve; }));
+  return held;
+}
+
+type Crossing = (view: ReturnType<typeof conversation>, current: Agent, stale: ReturnType<typeof frame>) => Promise<Agent>;
+const keepAgent: Crossing = async (_, current) => current;
+const changeIdentity = (field: 'cwd' | 'agent', value: string): Crossing => async (view, current) => {
+  const changed = { ...current, [field]: value };
+  expect(targetRefForAgent(changed)).toEqual(targetRefForAgent(current));
+  await view.rerender({ agent: changed });
+  return changed;
+};
+const interrupt = (start: () => void, end: () => void): Crossing => async (view, current, stale) => {
+  start();
+  await tick();
+  end();
+  await tick();
+  await view.rerender({ frame: stale });
+  return current;
+};
+const crossing: Record<Transition, Crossing> = {
+  view: keepAgent,
+  cwd: changeIdentity('cwd', '/new-directory'),
+  agent: changeIdentity('agent', 'claude'),
+  disconnect: interrupt(
+    () => relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never)),
+    () => relayStore.connections.set(new Map([[agent.relay_id, connection]] as never))),
+  lock: interrupt(() => securityState.set({ locked: true } as never), () => securityState.set({ locked: false } as never)),
+};
+
+async function sendFromTerminalThenCross(attention: Attention, transition: Transition) {
+  const sent = agentWithAttention(attention);
+  const original = await terminalWithManualInput(sent);
+  await original.rerender({ frame: frame(sent) });
   await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'private terminal attempt' } });
   await fireEvent.click(button('Send text'));
   original.unmount();
-  const history = conversation(current);
-  const stale = frame(current);
+  const history = conversation(sent);
+  const stale = frame(sent);
   await history.rerender({ frame: stale });
-  if (transition === 'cwd' || transition === 'agent') {
-    const changed = { ...current, [transition]: transition === 'cwd' ? '/new-directory' : 'claude' };
-    expect(targetRefForAgent(changed)).toEqual(targetRefForAgent(current));
-    current = changed;
-    await history.rerender({ agent: current });
-  } else if (transition === 'disconnect' || transition === 'lock') {
-    if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never));
-    else securityState.set({ locked: true } as never);
-    await tick();
-    if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, connection]] as never));
-    else securityState.set({ locked: false } as never);
-    await tick();
-    await history.rerender({ frame: stale });
-  }
+  const current = await crossing[transition](history, sent, stale);
+  return { history, current, stale };
+}
+
+async function expectConversationFenced(attention: Attention) {
   uncluttered();
   await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal draft while fenced' } });
   expect(screen.getByLabelText('Prompt')).toBeEnabled();
@@ -151,39 +180,66 @@ it.each(cases)('keeps $state $attention delivery fenced in Conversation across $
     expect(button('Allow once')).toBeDisabled();
     await fireEvent.click(button('Allow once'));
   }
-  if (state.startsWith('pending')) {
-    expect(screen.getByText('Waiting for terminal input delivery.')).toBeVisible();
-    finish({ ...receipt, phase: state === 'pending-completed' ? 'completed' : 'dispatched_unknown' });
-  }
-  if (state === 'pending-completed') {
-    await waitFor(() => expect(attention === 'idle' ? button('Send prompt') : attention === 'approval' ? button('Allow once') : button('Submit')).toBeEnabled());
-  } else {
-    await waitFor(() => expect(alertWithText('Delivery is uncertain. In Terminal, tap Keyboard to check before sending.')).toBeVisible());
-    await history.rerender({ frame: frame(current) });
-    expect(button('Send prompt')).toBeDisabled();
-    history.unmount();
-    const restored = terminal(current);
-    await restored.rerender({ frame: stale });
-    await fireEvent.click(button('Keyboard'));
-    await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
-    expect(screen.getByLabelText('Terminal text')).toHaveValue('');
-    expect(button('I checked the terminal')).toBeDisabled();
-    await restored.rerender({ frame: { ...frame(current), readStartedAt: undefined } });
-    expect(button('I checked the terminal')).toBeDisabled();
-    await restored.rerender({ frame: frame(current) });
-    expect(button('I checked the terminal')).toBeEnabled();
-    expect(button('Enter')).toBeDisabled();
-    await fireEvent.click(button('I checked the terminal'));
-    restored.unmount();
-    conversation(current);
-    await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'draft after inspection' } });
-    if (attention === 'question') expect(await screen.findByRole('button', { name: 'Submit' })).toBeEnabled();
-    else expect(attention === 'idle' ? button('Send prompt') : button('Allow once')).toBeEnabled();
-    uncluttered();
-  }
+}
+
+async function inspectUncertainDelivery(history: ReturnType<typeof conversation>, current: Agent, stale: ReturnType<typeof frame>, attention: Attention) {
+  await waitFor(() => expect(alertWithText(uncertainAlert)).toBeVisible());
+  await history.rerender({ frame: frame(current) });
+  expect(button('Send prompt')).toBeDisabled();
+  history.unmount();
+  const restored = terminal(current);
+  await restored.rerender({ frame: stale });
+  await fireEvent.click(button('Keyboard'));
+  await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
+  expect(screen.getByLabelText('Terminal text')).toHaveValue('');
+  expect(button('I checked the terminal')).toBeDisabled();
+  await restored.rerender({ frame: { ...frame(current), readStartedAt: undefined } });
+  expect(button('I checked the terminal')).toBeDisabled();
+  await restored.rerender({ frame: frame(current) });
+  expect(button('I checked the terminal')).toBeEnabled();
+  expect(button('Enter')).toBeDisabled();
+  await fireEvent.click(button('I checked the terminal'));
+  restored.unmount();
+  conversation(current);
+  await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'draft after inspection' } });
+  expect(await screen.findByRole('button', { name: primaryName[attention] })).toBeEnabled();
+  uncluttered();
+}
+
+function expectOnlyTheTerminalTextWasSent() {
   expect(relayStore.sendToAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ pane_id: agent.pane_id, generation: agent.generation }), { type: 'send_terminal_text', text: 'private terminal attempt' });
   for (const operation of [relayStore.answerQuestion, relayStore.respond, relayStore.navigateQuestionPrevious, relayStore.clarifyQuestion]) expect(operation).not.toHaveBeenCalled();
   expect(JSON.stringify(localStorage)).not.toContain('private terminal attempt');
+}
+
+const testName = 'keeps $state $attention delivery fenced in Conversation across $transition';
+
+it.each(crossCases(['pending-completed']))(testName, async ({ attention, transition }) => {
+  const held = holdDelivery();
+  await sendFromTerminalThenCross(attention, transition);
+  await expectConversationFenced(attention);
+  expect(screen.getByText('Waiting for terminal input delivery.')).toBeVisible();
+  held.finish({ ...receipt, phase: 'completed' });
+  await waitFor(() => expect(button(primaryName[attention])).toBeEnabled());
+  expectOnlyTheTerminalTextWasSent();
+});
+
+it.each(crossCases(['pending-unknown']))(testName, async ({ attention, transition }) => {
+  const held = holdDelivery();
+  const { history, current, stale } = await sendFromTerminalThenCross(attention, transition);
+  await expectConversationFenced(attention);
+  expect(screen.getByText('Waiting for terminal input delivery.')).toBeVisible();
+  held.finish({ ...receipt, phase: 'dispatched_unknown' });
+  await inspectUncertainDelivery(history, current, stale, attention);
+  expectOnlyTheTerminalTextWasSent();
+});
+
+it.each(crossCases(['accepted', 'dispatched_unknown']))(testName, async ({ state, attention, transition }) => {
+  vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: state as CommandResult['phase'] });
+  const { history, current, stale } = await sendFromTerminalThenCross(attention, transition);
+  await expectConversationFenced(attention);
+  await inspectUncertainDelivery(history, current, stale, attention);
+  expectOnlyTheTerminalTextWasSent();
 });
 
 it('does not transfer or clear an unresolved delivery when Conversation changes targets', async () => {
