@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,6 @@ const (
 	FeaturePaneRead            = "pane.read"
 	FeatureTabMove             = "tab.move"
 	FeatureEndpoint            = "client_shell.endpoint"
-	FeatureDirectTerminal      = "direct_terminal"
 	FeatureWorkspaceManagement = "workspace_management"
 	FeatureWorkspaceRename     = "workspace_rename"
 	FeatureWorkspaceReorder    = "workspace_reorder"
@@ -52,23 +52,22 @@ type ServerStatus struct {
 	ServerProtocol             int                        `json:"server_protocol,omitempty"`
 	ServerProtocolKnown        bool                       `json:"server_protocol_known"`
 	EndpointProtocolGeneration *int                       `json:"endpoint_protocol_generation,omitempty"`
-	SurfaceInterest            *bool                      `json:"surface_interest,omitempty"`
-	HealthCheck                *bool                      `json:"health_check,omitempty"`
 	Generation                 uint64                     `json:"generation"`
 	Features                   map[string]FeatureEvidence `json:"features"`
 }
 
+var liveFeatures = []string{
+	FeatureJSONAvailability,
+	FeatureWorkspaceMoveBlock,
+	FeatureWorkspaceReordered,
+	FeaturePaneRead,
+	FeatureTabMove,
+	FeatureEndpoint,
+}
+
 func initialServerStatus() ServerStatus {
 	features := map[string]FeatureEvidence{}
-	for _, name := range []string{
-		FeatureJSONAvailability,
-		FeatureWorkspaceMoveBlock,
-		FeatureWorkspaceReordered,
-		FeaturePaneRead,
-		FeatureTabMove,
-		FeatureEndpoint,
-		FeatureDirectTerminal,
-	} {
+	for _, name := range liveFeatures {
 		features[name] = FeatureEvidence{State: FeatureUnknown, Reason: "not_checked"}
 	}
 	for _, name := range []string{
@@ -108,14 +107,6 @@ func cloneServerStatus(status ServerStatus) ServerStatus {
 	if status.EndpointProtocolGeneration != nil {
 		value := *status.EndpointProtocolGeneration
 		status.EndpointProtocolGeneration = &value
-	}
-	if status.SurfaceInterest != nil {
-		value := *status.SurfaceInterest
-		status.SurfaceInterest = &value
-	}
-	if status.HealthCheck != nil {
-		value := *status.HealthCheck
-		status.HealthCheck = &value
 	}
 	return status
 }
@@ -164,19 +155,17 @@ func (m *capabilityManager) updateFeatureAt(epoch uint64, name string, state Fea
 		m.mu.Unlock()
 		return
 	}
-	current := m.status
-	if feature := current.Feature(name); feature.State == state && feature.Reason == reason {
+	if feature := m.status.Feature(name); feature.State == state && feature.Reason == reason {
 		m.mu.Unlock()
 		return
 	}
 	if sequence := m.refreshSeq.Load(); sequence > m.appliedSeq {
 		m.appliedSeq = sequence
 	}
-	features := cloneServerStatus(current).Features
-	features[name] = FeatureEvidence{State: state, Reason: reason, Generation: current.Generation + 1}
-	current.Features = features
+	current := cloneServerStatus(m.status)
 	current.Generation++
-	m.status = cloneServerStatus(current)
+	current.Features[name] = FeatureEvidence{State: state, Reason: reason, Generation: current.Generation}
+	m.status = current
 	callback := m.onChange
 	published := cloneServerStatus(current)
 	m.mu.Unlock()
@@ -211,8 +200,8 @@ func (m *capabilityManager) invalidateMany(names ...string) {
 	if sequence := m.refreshSeq.Load(); sequence > m.appliedSeq {
 		m.appliedSeq = sequence
 	}
-	current := m.status
-	features := cloneServerStatus(current).Features
+	current := cloneServerStatus(m.status)
+	features := current.Features
 	changed := false
 	for _, name := range names {
 		feature := features[name]
@@ -225,16 +214,13 @@ func (m *capabilityManager) invalidateMany(names ...string) {
 		}
 		changed = true
 	}
-	current.Features = features
 	current.ServerVersion = ""
 	current.ServerProtocol = 0
 	current.ServerProtocolKnown = false
 	current.EndpointProtocolGeneration = nil
-	current.SurfaceInterest = nil
-	current.HealthCheck = nil
 	current.Generation++
 	m.serverIdentity = ""
-	m.status = cloneServerStatus(current)
+	m.status = current
 	callback := m.onChange
 	published := cloneServerStatus(current)
 	m.mu.Unlock()
@@ -276,8 +262,6 @@ func (m *capabilityManager) refresh(ctx context.Context) ServerStatus {
 	next.ServerProtocol = *ping.Protocol
 	next.ServerProtocolKnown = true
 	next.EndpointProtocolGeneration = ping.Capabilities.EndpointProtocolGeneration
-	next.SurfaceInterest = ping.Capabilities.SurfaceInterest
-	next.HealthCheck = ping.Capabilities.HealthCheck
 	next.Features[FeatureJSONAvailability] = FeatureEvidence{State: FeatureSupported, Reason: "ping"}
 	if ping.Capabilities.EndpointProtocolGeneration != nil {
 		next.Features[FeatureEndpoint] = FeatureEvidence{State: FeatureSupported, Reason: "server_advertised"}
@@ -287,23 +271,13 @@ func (m *capabilityManager) refresh(ctx context.Context) ServerStatus {
 	// Validation-refusal probes surface as API errors in Herdr's log, so a
 	// conclusive result is reused for the same server identity. Reconnects and
 	// identity changes invalidate it, and real operations still correct it.
-	if moveFeature, ok := m.reusableFeature(FeatureWorkspaceMoveBlock, identity); ok {
-		next.Features[FeatureWorkspaceMoveBlock] = moveFeature
-	} else {
-		moveState, moveReason := probeWorkspaceMoveBlock(ctx, m.client.api)
-		next.Features[FeatureWorkspaceMoveBlock] = FeatureEvidence{State: moveState, Reason: moveReason}
-	}
-	if tabFeature, ok := m.reusableFeature(FeatureTabMove, identity); ok {
-		next.Features[FeatureTabMove] = tabFeature
-	} else {
-		tabState, tabReason := probeTabMove(ctx, m.client.api)
-		next.Features[FeatureTabMove] = FeatureEvidence{State: tabState, Reason: tabReason}
-	}
-	if paneFeature, ok := m.reusableFeature(FeaturePaneRead, identity); ok {
-		next.Features[FeaturePaneRead] = paneFeature
-	} else {
-		paneState, paneReason := probePaneRead(ctx, m.client.api)
-		next.Features[FeaturePaneRead] = FeatureEvidence{State: paneState, Reason: paneReason}
+	for _, probe := range capabilityProbes {
+		if feature, ok := m.reusableFeature(probe.feature, identity); ok {
+			next.Features[probe.feature] = feature
+			continue
+		}
+		state, reason := probe.run(ctx, m.client.api)
+		next.Features[probe.feature] = FeatureEvidence{State: state, Reason: reason}
 	}
 	m.applyRefresh(sequence, epoch, identity, next)
 	return m.snapshot()
@@ -322,24 +296,20 @@ func (m *capabilityManager) applyRefresh(sequence, epoch uint64, identity string
 	if identity != "" && (identity == m.serverIdentity ||
 		m.serverIdentity == "" && m.status.ServerVersion == "") {
 		for name, feature := range m.status.Features {
-			switch name {
-			case FeatureJSONAvailability, FeatureEndpoint, FeatureWorkspaceMoveBlock, FeatureTabMove, FeaturePaneRead:
+			if name != FeatureWorkspaceReordered && slices.Contains(liveFeatures, name) {
 				continue
-			default:
-				status.Features[name] = feature
 			}
+			status.Features[name] = feature
 		}
 	}
 	m.appliedSeq = sequence
 	status.Generation = m.status.Generation + 1
-	features := cloneServerStatus(status).Features
-	for name, feature := range features {
+	for name, feature := range status.Features {
 		feature.Generation = status.Generation
-		features[name] = feature
+		status.Features[name] = feature
 	}
-	status.Features = features
 	m.serverIdentity = identity
-	m.status = cloneServerStatus(status)
+	m.status = status
 	callback := m.onChange
 	published := cloneServerStatus(status)
 	m.mu.Unlock()
@@ -390,14 +360,7 @@ func (c *Client) RunCapabilityRefresh(ctx context.Context, interval time.Duratio
 }
 
 func (c *Client) InvalidateLiveCapabilities() {
-	c.capabilities.invalidateMany(
-		FeatureJSONAvailability,
-		FeatureWorkspaceMoveBlock,
-		FeatureWorkspaceReordered,
-		FeaturePaneRead,
-		FeatureTabMove,
-		FeatureEndpoint,
-	)
+	c.capabilities.invalidateMany(liveFeatures...)
 	c.capabilities.requestRefresh()
 }
 
@@ -472,25 +435,68 @@ func pingIdentity(response pingResponse) string {
 	)
 }
 
-func probeWorkspaceMoveBlock(ctx context.Context, api *socketAPIClient) (FeatureState, string) {
-	raw, wrote, err := api.requestUnary(ctx, "workspace.move_block", map[string]any{"workspace_ids": []string{}})
+type capabilityProbe struct {
+	feature string
+	method  string
+	params  map[string]any
+	// successType is the result type that proves support. Probes without one
+	// are built to be refused, so any success is unexpected.
+	successType string
+	refusalCode string
+}
+
+// The pane.read probe uses an empty explicit ID, which cannot target a real
+// pane. Its validation refusal proves method support without reading output,
+// scrolling, or resizing a user's terminal, including when the server has no
+// panes yet.
+var capabilityProbes = []capabilityProbe{
+	{
+		feature:     FeatureWorkspaceMoveBlock,
+		method:      "workspace.move_block",
+		params:      map[string]any{"workspace_ids": []string{}},
+		successType: "workspace_list",
+		refusalCode: "workspace_move_block_failed",
+	},
+	{
+		feature:     FeatureTabMove,
+		method:      "tab.move",
+		params:      map[string]any{"tab_id": "", "insert_index": 0},
+		refusalCode: "tab_not_found",
+	},
+	{
+		feature: FeaturePaneRead,
+		method:  "pane.read",
+		params: map[string]any{
+			"pane_id":    "",
+			"source":     "visible",
+			"lines":      1,
+			"format":     "ansi",
+			"strip_ansi": false,
+		},
+		refusalCode: "pane_not_found",
+	},
+}
+
+func (p capabilityProbe) run(ctx context.Context, api *socketAPIClient) (FeatureState, string) {
+	raw, wrote, err := api.requestUnary(ctx, p.method, p.params)
 	if err == nil {
+		if p.successType == "" {
+			return FeatureUnknown, "unexpected_probe_success"
+		}
 		var result struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal(raw, &result) == nil && result.Type == "workspace_list" {
+		if json.Unmarshal(raw, &result) == nil && result.Type == p.successType {
 			return FeatureSupported, "probe_succeeded"
 		}
 		return FeatureUnknown, "unexpected_probe_result"
 	}
 	var cliErr *CLIError
-	if errors.As(err, &cliErr) && cliErr != nil {
-		switch cliErr.Code {
-		case "workspace_move_block_failed":
-			return FeatureSupported, "recognized_validation_refusal"
-		case "unknown_method", "method_not_found", "unsupported_method":
-			return FeatureUnsupported, "method_not_supported"
-		}
+	if errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == p.refusalCode {
+		return FeatureSupported, "recognized_validation_refusal"
+	}
+	if isUnsupportedMethod(err) {
+		return FeatureUnsupported, "method_not_supported"
 	}
 	if errors.Is(err, context.DeadlineExceeded) || !wrote {
 		return FeatureUnknown, capabilityTransportReason(wrote, err)
@@ -498,56 +504,16 @@ func probeWorkspaceMoveBlock(ctx context.Context, api *socketAPIClient) (Feature
 	return FeatureUnknown, "probe_failed"
 }
 
-func probeTabMove(ctx context.Context, api *socketAPIClient) (FeatureState, string) {
-	_, wrote, err := api.requestUnary(ctx, "tab.move", map[string]any{
-		"tab_id":       "",
-		"insert_index": 0,
-	})
-	if err == nil {
-		return FeatureUnknown, "unexpected_probe_success"
-	}
+func isUnsupportedMethod(err error) bool {
 	var cliErr *CLIError
-	if errors.As(err, &cliErr) && cliErr != nil {
-		switch cliErr.Code {
-		case "tab_not_found":
-			return FeatureSupported, "recognized_validation_refusal"
-		case "unknown_method", "method_not_found", "unsupported_method":
-			return FeatureUnsupported, "method_not_supported"
-		}
+	if !errors.As(err, &cliErr) || cliErr == nil {
+		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || !wrote {
-		return FeatureUnknown, capabilityTransportReason(wrote, err)
+	switch cliErr.Code {
+	case "unknown_method", "method_not_found", "unsupported_method":
+		return true
 	}
-	return FeatureUnknown, "probe_failed"
-}
-
-func probePaneRead(ctx context.Context, api *socketAPIClient) (FeatureState, string) {
-	// An empty explicit ID cannot target a real pane. Its validation refusal
-	// proves method support without reading output, scrolling, or resizing a
-	// user's terminal, including when the server has no panes yet.
-	_, wrote, err := api.requestUnary(ctx, "pane.read", map[string]any{
-		"pane_id":    "",
-		"source":     "visible",
-		"lines":      1,
-		"format":     "ansi",
-		"strip_ansi": false,
-	})
-	if err == nil {
-		return FeatureUnknown, "unexpected_probe_success"
-	}
-	var cliErr *CLIError
-	if errors.As(err, &cliErr) && cliErr != nil {
-		switch cliErr.Code {
-		case "pane_not_found":
-			return FeatureSupported, "recognized_validation_refusal"
-		case "unknown_method", "method_not_found", "unsupported_method":
-			return FeatureUnsupported, "method_not_supported"
-		}
-	}
-	if errors.Is(err, context.DeadlineExceeded) || !wrote {
-		return FeatureUnknown, capabilityTransportReason(wrote, err)
-	}
-	return FeatureUnknown, "probe_failed"
+	return false
 }
 
 func (c *Client) noteSocketFeature(epoch uint64, name string, err error) {
@@ -555,11 +521,7 @@ func (c *Client) noteSocketFeature(epoch uint64, name string, err error) {
 		c.noteFeatureSupportedAt(epoch, name, "operation_succeeded")
 		return
 	}
-	var cliErr *CLIError
-	if errors.As(err, &cliErr) && cliErr != nil {
-		switch cliErr.Code {
-		case "unknown_method", "method_not_found", "unsupported_method":
-			c.capabilities.updateFeatureAt(epoch, name, FeatureUnsupported, "method_not_supported")
-		}
+	if isUnsupportedMethod(err) {
+		c.capabilities.updateFeatureAt(epoch, name, FeatureUnsupported, "method_not_supported")
 	}
 }

@@ -667,7 +667,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.herdrC.SetCapabilityChangeCallback(func(status herdr.ServerStatus) {
 		s.hub.Broadcast(map[string]any{
 			"type":         "herdr_status",
-			"status":       herdrStatusPayload(status),
+			"status":       status,
 			"capabilities": s.effectiveCapabilitiesFor(status),
 		})
 	})
@@ -1581,28 +1581,6 @@ func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []stri
 		capabilities = append(capabilities, "device_management")
 	}
 	return capabilities
-}
-
-func herdrStatusPayload(status herdr.ServerStatus) protocol.HerdrStatus {
-	features := make(map[string]protocol.HerdrFeatureStatus, len(status.Features))
-	for name, feature := range status.Features {
-		features[name] = protocol.HerdrFeatureStatus{
-			State:      string(feature.State),
-			Reason:     feature.Reason,
-			Generation: feature.Generation,
-		}
-	}
-	return protocol.HerdrStatus{
-		InstalledClientVersion:     status.InstalledClientVersion,
-		ServerVersion:              status.ServerVersion,
-		ServerProtocol:             status.ServerProtocol,
-		ServerProtocolKnown:        status.ServerProtocolKnown,
-		EndpointProtocolGeneration: status.EndpointProtocolGeneration,
-		SurfaceInterest:            status.SurfaceInterest,
-		HealthCheck:                status.HealthCheck,
-		Generation:                 status.Generation,
-		Features:                   features,
-	}
 }
 
 func canonicalHTTPPath(raw string) bool {
@@ -2766,7 +2744,6 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 	capabilities := s.effectiveCapabilitiesFor(herdrCapabilityStatus)
 	speechStatus := s.speechStatus()
 	speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
-	herdrStatus := herdrStatusPayload(herdrCapabilityStatus)
 	s.hub.Send(client, protocol.PushConfig{
 		Type:            "push_config",
 		VAPIDPublicKey:  vapidPublicKey,
@@ -2779,7 +2756,7 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		Update:          s.updateM.State(),
 		AppDeploy:       s.appDeployM.State(),
 		Capabilities:    capabilities,
-		HerdrStatus:     herdrStatus,
+		HerdrStatus:     herdrCapabilityStatus,
 		SpeechLanguages: speechLanguages,
 		Inventory:       inventory,
 		AgentProfiles:   s.profiles.Profiles(),

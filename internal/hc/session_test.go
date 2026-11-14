@@ -19,7 +19,7 @@ func TestSessionLabels(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := New("").pane(terminal{Address: "t1", PID: &pid, Foreground: tt.foreground, Labels: map[string]string{SessionLabel: tt.session, SessionPIDLabel: tt.pid}})
-			if p.Session != tt.want || p.SessionRaw.Value != tt.want || p.SessionRaw.Kind != "" {
+			if p.Session.Value != tt.want || p.Session.Kind != "" {
 				t.Fatalf("%+v", p)
 			}
 		})

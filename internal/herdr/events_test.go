@@ -314,8 +314,8 @@ func TestSessionCacheCoalescesTerminalLocalPaneUpdates(t *testing.T) {
 			Status:      "working",
 			Revision:    5,
 		}},
-		Agents: []SnapshotAgent{{
-			PaneID: "pane-1",
+		Agents: []Pane{{
+			ID:     "pane-1",
 			Agent:  "codex",
 			Name:   "old title",
 			Status: "working",

@@ -224,28 +224,31 @@ func NewClient(bin, socketPath string) *Client {
 }
 
 type Pane struct {
-	ID             string `json:"pane_id"`
-	TerminalID     string `json:"terminal_id"`
-	TabID          string `json:"tab_id"`
-	TabLabel       string `json:"tab_label"`
-	TabNumber      int    `json:"tab_number"`
-	WorkspaceID    string `json:"workspace_id"`
-	Agent          string `json:"agent"`
-	Name           string `json:"name"`
-	Status         string `json:"agent_status"`
-	Focused        bool   `json:"focused"`
-	Cwd            string `json:"cwd"`
-	Revision       int    `json:"revision"`
-	StateChangeSeq int64  `json:"state_change_seq"`
-	Scroll         struct {
-		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
-	} `json:"scroll"`
-	ForegroundCwd string `json:"foreground_cwd"`
-	Session       string `json:"-"`
-	SessionRaw    struct {
-		Value string `json:"value"`
-		Kind  string `json:"kind"`
-	} `json:"agent_session"`
+	ID             string       `json:"pane_id"`
+	TerminalID     string       `json:"terminal_id"`
+	TabID          string       `json:"tab_id"`
+	TabLabel       string       `json:"tab_label"`
+	TabNumber      int          `json:"tab_number"`
+	WorkspaceID    string       `json:"workspace_id"`
+	Agent          string       `json:"agent"`
+	Name           string       `json:"name"`
+	Status         string       `json:"agent_status"`
+	Focused        bool         `json:"focused"`
+	Cwd            string       `json:"cwd"`
+	Revision       int          `json:"revision"`
+	StateChangeSeq int64        `json:"state_change_seq"`
+	Scroll         PaneScroll   `json:"scroll"`
+	ForegroundCwd  string       `json:"foreground_cwd"`
+	Session        AgentSession `json:"agent_session"`
+}
+
+type PaneScroll struct {
+	MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
+}
+
+type AgentSession struct {
+	Value string `json:"value"`
+	Kind  string `json:"kind"`
 }
 
 type Workspace struct {
@@ -379,9 +382,6 @@ func (c *Client) GetInventory(ctx context.Context) (*Inventory, error) {
 	if result.Agents == nil {
 		return nil, errors.New("herdr inventory: agent.list response has no agents")
 	}
-	for i := range *result.Agents {
-		(*result.Agents)[i].Session = (*result.Agents)[i].SessionRaw.Value
-	}
 	return &Inventory{Panes: *result.Agents}, nil
 }
 
@@ -394,9 +394,6 @@ func (c *Client) PaneList(ctx context.Context) ([]Pane, error) {
 	}
 	if result.Panes == nil {
 		return nil, errors.New("herdr pane list: pane.list response has no panes")
-	}
-	for index := range *result.Panes {
-		(*result.Panes)[index].Session = (*result.Panes)[index].SessionRaw.Value
 	}
 	return *result.Panes, nil
 }
