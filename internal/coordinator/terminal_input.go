@@ -44,7 +44,7 @@ func (d *Dispatcher) handleTerminalText(ctx context.Context, req commandRequest)
 		},
 	})
 	if result.OK && !result.replayed {
-		d.recordActivity(action, "sent", "Terminal text delivered; Enter not sent", req.paneID, req.requestID)
+		d.activities.record(action, "sent", "Terminal text delivered; Enter not sent", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result

@@ -184,7 +184,7 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, req commandRequest) *
 		result.Data = map[string]any{"dispatched_unknown": true}
 	}
 	if result.OK {
-		d.recordActivity(action, "sent", "Filter text verified; select separately", req.paneID, req.requestID)
+		d.activities.record(action, "sent", "Filter text verified; select separately", req.paneID, req.requestID)
 	}
 	d.wake()
 	return result

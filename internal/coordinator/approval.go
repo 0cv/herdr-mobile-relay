@@ -130,7 +130,7 @@ func (d *Dispatcher) handleApproval(ctx context.Context, req commandRequest) *Co
 	if result.replayed {
 		return result
 	}
-	d.recordActivity("approval", "approved", fmt.Sprintf("Approved option %d", payload.Index+1), req.paneID, req.requestID)
+	d.activities.record("approval", "approved", fmt.Sprintf("Approved option %d", payload.Index+1), req.paneID, req.requestID)
 	d.wake()
 	d.startWatcher(func(ctx context.Context) {
 		d.watchApproval(ctx, req.requestID, req.paneID, payload.EventID, generation)
@@ -621,11 +621,11 @@ func (d *Dispatcher) finishQuestionWatch(
 	}
 	switch {
 	case navigation == "previous":
-		d.recordActivity("question", "navigated", "Opened previous question", paneID, requestID)
+		d.activities.record("question", "navigated", "Opened previous question", paneID, requestID)
 	case navigation == "next":
-		d.recordActivity("question", "navigated", "Opened next question", paneID, requestID)
+		d.activities.record("question", "navigated", "Opened next question", paneID, requestID)
 	case action == "answer_question":
-		d.recordActivity("question", "answered", "Answered question", paneID, requestID)
+		d.activities.record("question", "answered", "Answered question", paneID, requestID)
 	}
 }
 

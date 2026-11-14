@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
@@ -58,27 +57,23 @@ func CommandResultMessage(result *CommandResult) map[string]any {
 }
 
 type Dispatcher struct {
-	terminalTextKey  string
-	herdr            backend.Backend
-	state            *State
-	activityW        *activity.Worker
-	activityOrder    sync.Mutex
-	activitySequence atomic.Uint64
-	activityFailures atomic.Uint64
-	logger           *slog.Logger
-	scheduler        *Scheduler
-	profiles         *profiles.Resolver
-	lifecycle        *Lifecycle
-	broadcast        func(any)
-	wakePoll         func()
-	readMu           sync.Mutex
-	topologyMu       sync.Mutex
-	reads            map[string]*paneRead
-	watcherMu        sync.Mutex
-	watcherCtx       context.Context
-	watcherCancel    context.CancelFunc
-	watcherClosed    bool
-	watcherWG        sync.WaitGroup
+	terminalTextKey string
+	herdr           backend.Backend
+	state           *State
+	activities      activityRecorder
+	panes           *paneReader
+	logger          *slog.Logger
+	scheduler       *Scheduler
+	profiles        *profiles.Resolver
+	lifecycle       *Lifecycle
+	broadcast       func(any)
+	wakePoll        func()
+	topologyMu      sync.Mutex
+	watcherMu       sync.Mutex
+	watcherCtx      context.Context
+	watcherCancel   context.CancelFunc
+	watcherClosed   bool
+	watcherWG       sync.WaitGroup
 
 	testFilterWait func(context.Context, time.Duration) error
 }
@@ -107,12 +102,6 @@ func (d *Dispatcher) newCommandRequest(receivedAt time.Time, requestID, paneID s
 	}
 }
 
-type paneRead struct {
-	done chan struct{}
-	read herdr.PaneRead
-	err  error
-}
-
 func NewDispatcher(client backend.Backend, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	dispatcher := &Dispatcher{
@@ -121,13 +110,14 @@ func NewDispatcher(client backend.Backend, state *State, journal *activity.Journ
 		state:           state,
 		logger:          logger,
 		scheduler:       NewScheduler(defaultHerdrCapacity),
-		reads:           make(map[string]*paneRead),
+		panes:           &paneReader{herdr: client, state: state, reads: make(map[string]*paneRead)},
+		activities:      activityRecorder{state: state, logger: logger},
 		watcherCtx:      watcherCtx,
 		watcherCancel:   watcherCancel,
 	}
 	dispatcher.scheduler.SetGenerationCurrent(state.PaneSessionCurrent)
 	if journal != nil {
-		dispatcher.activityW = activity.NewWorker(journal)
+		dispatcher.activities.worker = activity.NewWorker(journal)
 	}
 	return dispatcher
 }
@@ -169,10 +159,8 @@ func (d *Dispatcher) CancelInflight() {
 func (d *Dispatcher) Close(ctx context.Context) error {
 	d.closeWatchers()
 	err := d.scheduler.Close(ctx)
-	if d.activityW != nil {
-		if workerErr := d.activityW.Close(ctx); err == nil {
-			err = workerErr
-		}
+	if workerErr := d.activities.close(ctx); err == nil {
+		err = workerErr
 	}
 	return err
 }
@@ -209,7 +197,7 @@ func (d *Dispatcher) Metrics() SchedulerMetrics {
 }
 
 func (d *Dispatcher) ActivityFailures() uint64 {
-	return d.activityFailures.Load()
+	return d.activities.failures.Load()
 }
 
 func (d *Dispatcher) PruneSlots(active map[string]bool) {
@@ -244,6 +232,7 @@ type AgentUpdate struct {
 
 func (d *Dispatcher) SetBroadcast(fn func(any)) {
 	d.broadcast = fn
+	d.activities.broadcast = fn
 }
 
 func (d *Dispatcher) SetWakePoll(fn func()) {
@@ -366,7 +355,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, req commandRequest) *Comm
 		return EffectResult{Result: completed(req.requestID, action, req.paneID, nil)}
 	}))
 	if result.OK {
-		d.recordActivityWithExtract(action, "sent", "Prompt sent", text, req.paneID, req.requestID)
+		d.activities.recordWithExtract(action, "sent", "Prompt sent", text, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -412,7 +401,7 @@ func (d *Dispatcher) handleKeys(ctx context.Context, req commandRequest) *Comman
 		if label == "" {
 			label = "keys"
 		}
-		d.recordActivity(action, "sent", label, req.paneID, req.requestID)
+		d.activities.record(action, "sent", label, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -442,7 +431,7 @@ func (d *Dispatcher) handleInput(ctx context.Context, req commandRequest) *Comma
 		if label == "" {
 			label = "Terminal input sent"
 		}
-		d.recordActivityWithExtract("input", "sent", label, input.Text, req.paneID, req.requestID)
+		d.activities.recordWithExtract("input", "sent", label, input.Text, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -492,7 +481,7 @@ func (d *Dispatcher) handleSecret(ctx context.Context, req commandRequest) *Comm
 	if result.OK {
 		// Constant label, no extract: the journal is readable by anyone who can
 		// read the activity feed.
-		d.recordActivity("send_secret", "sent", "Password entered", req.paneID, req.requestID)
+		d.activities.record("send_secret", "sent", "Password entered", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -517,7 +506,7 @@ func (d *Dispatcher) handleStop(ctx context.Context, req commandRequest) *Comman
 		if d.profiles != nil {
 			d.profiles.Forget(req.paneID)
 		}
-		d.recordActivity("agent_stop", "sent", "Stopped agent", req.paneID, req.requestID)
+		d.activities.record("agent_stop", "sent", "Stopped agent", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -542,7 +531,7 @@ func (d *Dispatcher) handleTabRename(ctx context.Context, req commandRequest) *C
 		},
 	})
 	if result.OK {
-		d.recordActivity("agent_rename", "renamed", "Renamed tab to "+label, req.paneID, req.requestID)
+		d.activities.record("agent_rename", "renamed", "Renamed tab to "+label, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -568,7 +557,7 @@ func (d *Dispatcher) handleTabReorder(ctx context.Context, req commandRequest) *
 		},
 	})
 	if result.OK {
-		d.recordActivity("tab_reorder", "reordered", "Reordered tab", req.paneID, req.requestID)
+		d.activities.record("tab_reorder", "reordered", "Reordered tab", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -677,7 +666,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, req commandRequest) *
 				if err := d.paneSessionError(token); err != nil {
 					return EffectResult{Result: d.failErr(req.requestID, "submit_prompt", started.PaneID, partiallyApplied("initial prompt was already delivered", err))}
 				}
-				d.recordActivityWithExtract("submit_prompt", "sent", "Prompt sent", request.Prompt, started.PaneID, req.requestID+"-initial")
+				d.activities.recordWithExtract("submit_prompt", "sent", "Prompt sent", request.Prompt, started.PaneID, req.requestID+"-initial")
 				d.wake()
 				return EffectResult{Result: completed(req.requestID, "submit_prompt", started.PaneID, nil)}
 			}),
@@ -712,7 +701,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, req commandRequest) *
 			data.PaneID, _ = values["pane_id"].(string)
 		}
 	}
-	d.recordActivity("agent_start", "started", "Started "+request.Name, data.PaneID, req.requestID)
+	d.activities.record("agent_start", "started", "Started "+request.Name, data.PaneID, req.requestID)
 	d.state.MarkTopologyChanged()
 	d.wake()
 	return result
@@ -774,7 +763,7 @@ func (d *Dispatcher) handleClear(ctx context.Context, req commandRequest) *Comma
 		if result.Phase != "completed_with_warning" {
 			d.profiles.Forget(req.paneID)
 		}
-		d.recordActivity("agent_clear", "cleared", "Cleared agent", req.paneID, req.requestID)
+		d.activities.record("agent_clear", "cleared", "Cleared agent", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -853,7 +842,7 @@ func (d *Dispatcher) schedule(ctx context.Context, req commandRequest, options S
 func (d *Dispatcher) fail(requestID, action, paneID, message string) *CommandResult {
 	if action != "" {
 		d.logger.Warn("command failed", "action", action, "request_id", requestID, "pane_id", paneID, "error", message)
-		d.recordActivity(action, "failed", failureSummary(action, message), paneID, requestID)
+		d.activities.record(action, "failed", failureSummary(action, message), paneID, requestID)
 	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: message, PaneID: paneID}
 }
@@ -893,7 +882,7 @@ func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *Comma
 	}
 	d.logger.Warn("command failed", "action", action, "request_id", requestID, "pane_id", paneID, "phase", phase, "error", err)
 	if action != "" {
-		d.recordActivity(action, "failed", failureSummary(action, public), paneID, requestID)
+		d.activities.record(action, "failed", failureSummary(action, public), paneID, requestID)
 	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: phase, Error: public, PaneID: paneID, Data: data}
 }
@@ -902,281 +891,12 @@ func completed(requestID, action, paneID string, data any) *CommandResult {
 	return &CommandResult{RequestID: requestID, Action: action, OK: true, Phase: "completed", PaneID: paneID, Data: data}
 }
 
-func (d *Dispatcher) recordActivity(kind, status, summary, paneID, requestID string) {
-	d.recordActivityWithExtract(kind, status, summary, "", paneID, requestID)
-}
-
-func (d *Dispatcher) recordActivityWithExtract(kind, status, summary, extract, paneID, requestID string) {
-	if d.activityW == nil {
-		return
-	}
-	d.activityOrder.Lock()
-	defer d.activityOrder.Unlock()
-	agentState, _ := d.state.Agent(paneID)
-	agent, project, host, session := "", "", "", ""
-	if agentState != nil {
-		agent = agentState.Agent
-		project = agentState.Project
-		host = agentState.Host
-		session = agentState.Session
-	}
-	entry := activity.NewEntry(kind, status, summary, paneID, agent, project, requestID)
-	entry.Host = host
-	entry.Session = session
-	entry.Extract = extract
-	entry.Details = map[string]any{"action": kind}
-	committed, err := d.activityW.Commit(context.Background(), activity.ActivityCommitRequested{
-		Sequence: d.activitySequence.Add(1),
-		Entry:    entry,
-	})
-	if err != nil {
-		d.activityFailures.Add(1)
-		d.logger.Warn("activity append failed", "error", err)
-		return
-	}
-	if d.broadcast != nil {
-		d.broadcast(map[string]any{"type": "activity", "activity": committed.Entry})
-	}
-}
-
 func (d *Dispatcher) RecordActivity(kind, status, summary, paneID, requestID string) {
-	d.recordActivity(kind, status, summary, paneID, requestID)
+	d.activities.record(kind, status, summary, paneID, requestID)
 }
 
-type TransitionActivity struct {
-	Kind            string
-	Status          string
-	Summary         string
-	PaneID          string
-	ExpectedStatus  string
-	Revision        int64
-	Details         map[string]any
-	Agent           string
-	Project         string
-	Host            string
-	Session         string
-	Extract         string
-	BlockedIdentity *BlockedTransitionIdentity
-}
-
-type BlockedTransitionIdentity struct {
-	EventID           string
-	Generation        int64
-	AttentionKind     string
-	AttentionRevision int64
-}
-
-// RecordTransitionActivity publishes only while the originating state
-// revision is still current. If the state advances during the durable append,
-// the worker tombstones and removes the stale record before it can be exposed.
 func (d *Dispatcher) RecordTransitionActivity(transition TransitionActivity) bool {
-	if d.activityW == nil {
-		return false
-	}
-	d.activityOrder.Lock()
-	defer d.activityOrder.Unlock()
-	transitionCurrent := func() bool {
-		if transition.Kind == "working" {
-			return true
-		}
-		if transition.Kind == "finished" {
-			return d.state.CompletionCurrent(transition.PaneID, transition.Revision)
-		}
-		if identity := transition.BlockedIdentity; transition.ExpectedStatus == "blocked" && identity != nil {
-			return d.state.AttentionTransitionCurrent(
-				transition.PaneID,
-				identity.EventID,
-				identity.Generation,
-				identity.AttentionKind,
-				identity.AttentionRevision,
-			)
-		}
-		return d.state.TransitionCurrent(transition.PaneID, transition.ExpectedStatus, transition.Revision)
-	}
-	if !transitionCurrent() {
-		return false
-	}
-	entry := activity.NewEntry(transition.Kind, transition.Status, transition.Summary, transition.PaneID, transition.Agent, transition.Project, "")
-	entry.Host = transition.Host
-	entry.Session = transition.Session
-	entry.Details = transition.Details
-	if transitionAt, ok := transition.Details["transition_at"].(int64); ok && transitionAt > 0 {
-		entry.Timestamp = activity.MilliTimestamp(transitionAt)
-	}
-	entry.Extract = transition.Extract
-	committed, err := d.activityW.Commit(context.Background(), activity.ActivityCommitRequested{
-		Sequence: d.activitySequence.Add(1),
-		Entry:    entry,
-	})
-	if err != nil {
-		d.activityFailures.Add(1)
-		d.logger.Warn("transition activity append failed", "error", err)
-		return false
-	}
-	if !transitionCurrent() {
-		_, discardErr := d.activityW.Discard(context.Background(), activity.ActivityDiscardRequested{
-			Sequence: d.activitySequence.Add(1),
-			ID:       committed.Entry.ID,
-		})
-		if discardErr != nil {
-			d.activityFailures.Add(1)
-			d.logger.Warn("stale transition activity discard failed", "error", discardErr)
-		}
-		return false
-	}
-	if d.broadcast != nil {
-		d.broadcast(map[string]any{"type": "activity", "activity": committed.Entry})
-	}
-	return true
-}
-
-func (d *Dispatcher) wake() {
-	if d.wakePoll != nil {
-		d.wakePoll()
-	}
-}
-
-func capPaneContentLines(content []byte, limit int) []byte {
-	if limit < 1 || len(content) == 0 {
-		return content
-	}
-	end := len(content)
-	if content[end-1] == '\n' {
-		end--
-	}
-	remaining := limit
-	for index := end - 1; index >= 0; index-- {
-		if content[index] != '\n' {
-			continue
-		}
-		remaining--
-		if remaining == 0 {
-			return content[index+1:]
-		}
-	}
-	return content
-}
-
-// readPaneForDisplay returns physical rows ("recent") for every ansi display read:
-// the visible screen alone loses rows that scroll past between watch polls,
-// and the Resize Session baseline must share row semantics with the resized
-// frames so the trailing desktop screen — including agent chrome — can be cut
-// by exact row count. Claude keeps logical lines ("recent-unwrapped") because
-// its alternate-screen history merge depends on them.
-func (d *Dispatcher) readPaneForDisplay(
-	ctx context.Context,
-	paneID string,
-	lines int,
-	format string,
-	resized bool,
-) (herdr.PaneRead, error) {
-	// A non-ansi read is the only shape Herdr can serve by harvesting
-	// scrollback through the agent's mouse-scroll interface: asking "recent"
-	// or "recent-unwrapped" in text format for more lines than the pane's
-	// viewport holds makes Herdr scroll the operator's real pane up and snap
-	// it back, once per read. Only "visible" cannot trigger the harvest.
-	if format != "ansi" {
-		return d.herdr.ReadPaneVisible(ctx, paneID, lines, format)
-	}
-	if !resized {
-		if agent, ok := d.state.Agent(paneID); ok && agentkind.Of(agent.Agent) == agentkind.Claude {
-			return d.herdr.ReadPane(ctx, paneID, lines, format)
-		}
-	}
-	return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
-}
-
-func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
-	paneID := stringValue(message, "pane_id")
-	if paneID == "" {
-		return map[string]any{"type": "pane_content", "pane_id": "", "content": "", "format": "text"}
-	}
-	d.handleAcknowledge(stringValue(message, "request_id"), paneID)
-	lines := intValue(message["lines"], 30)
-	if lines < 1 {
-		lines = 1
-	}
-	if lines > 10000 {
-		lines = 10000
-	}
-	format := stringValue(message, "format")
-	if format != "ansi" {
-		format = "text"
-	}
-	terminalColumns := intValue(message["terminal_columns"], 0)
-	if terminalColumns < 1 {
-		terminalColumns = 0
-	}
-	readCtx, cancel := context.WithTimeout(ctx, commandDeadline)
-	defer cancel()
-	generation := d.state.Generation(paneID)
-	revision := d.state.ContentRevision(paneID)
-	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d\x00%s", paneID, lines, format, terminalColumns, generation, stringValue(message, "request_id"))
-	d.readMu.Lock()
-	call := d.reads[key]
-	owner := call == nil
-	if owner {
-		call = &paneRead{done: make(chan struct{})}
-		d.reads[key] = call
-	}
-	d.readMu.Unlock()
-	if owner {
-		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format, terminalColumns > 0)
-		d.readMu.Lock()
-		delete(d.reads, key)
-		close(call.done)
-		d.readMu.Unlock()
-	} else {
-		select {
-		case <-call.done:
-		case <-readCtx.Done():
-			return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
-		}
-	}
-	read, err := call.read, call.err
-	if err != nil {
-		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
-	}
-	if d.state.Generation(paneID) != generation {
-		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent pane was replaced while it was being read"}
-	}
-	if d.state.ContentRevision(paneID) != revision {
-		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent state changed while the pane was being read"}
-	}
-	content := capPaneContentLines(read.Content, lines)
-	response := map[string]any{
-		"type": "pane_content", "pane_id": paneID, "content": string(content),
-		"format": format, "truncated": read.Truncated, "viewport_only": terminalColumns > 0,
-		"interaction": nil,
-	}
-	if terminalRows := intValue(message["terminal_rows"], 0); terminalRows > 0 {
-		response["viewport_rows"] = terminalRows
-	}
-	return response
-}
-
-func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {
-	paneID := stringValue(message, "pane_id")
-	format := stringValue(message, "format")
-	if format != "ansi" {
-		format = "text"
-	}
-	if paneID == "" {
-		return map[string]any{"type": "pane_probe", "pane_id": "", "format": format, "error": "Unable to read the agent pane"}
-	}
-	const lines = 500
-	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	generation := d.state.Generation(paneID)
-	contentRevision := d.state.ContentRevision(paneID)
-	content, err := d.herdr.ProbePaneVisible(readCtx, paneID, lines, format)
-	if err != nil {
-		return map[string]any{"type": "pane_probe", "pane_id": paneID, "format": format, "error": "Unable to read the agent pane"}
-	}
-	if d.state.Generation(paneID) != generation || d.state.ContentRevision(paneID) != contentRevision {
-		return map[string]any{"type": "pane_probe", "pane_id": paneID, "format": format, "error": "The agent pane changed while it was being read"}
-	}
-	return map[string]any{"type": "pane_probe", "pane_id": paneID, "content": string(content), "format": format}
+	return d.activities.recordTransition(transition)
 }
 
 func (d *Dispatcher) HandleClearActivities(
@@ -1189,21 +909,32 @@ func (d *Dispatcher) HandleClearActivities(
 		}
 		return result
 	}
-	if d.activityW == nil {
+	if d.activities.worker == nil {
 		return finish(d.fail(requestID, "clear_activities", "", "Activity storage is unavailable"))
 	}
-	d.activityOrder.Lock()
-	defer d.activityOrder.Unlock()
-	if _, err := d.activityW.Clear(context.Background(), activity.ActivityClearRequested{
-		Sequence: d.activitySequence.Add(1),
-	}); err != nil {
-		d.activityFailures.Add(1)
-		return finish(d.fail(requestID, "clear_activities", "", "Activity history could not be cleared"))
+	return d.activities.clear(func(err error) *CommandResult {
+		if err != nil {
+			return finish(d.fail(requestID, "clear_activities", "", "Activity history could not be cleared"))
+		}
+		return finish(completed(requestID, "clear_activities", "", nil))
+	})
+}
+
+func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
+	if paneID := stringValue(message, "pane_id"); paneID != "" {
+		d.handleAcknowledge(stringValue(message, "request_id"), paneID)
 	}
-	if d.broadcast != nil {
-		d.broadcast(map[string]any{"type": "activity_history", "activities": []any{}})
+	return d.panes.read(ctx, message)
+}
+
+func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {
+	return d.panes.probe(ctx, message)
+}
+
+func (d *Dispatcher) wake() {
+	if d.wakePoll != nil {
+		d.wakePoll()
 	}
-	return finish(completed(requestID, "clear_activities", "", nil))
 }
 
 func stringValue(message map[string]any, key string) string {

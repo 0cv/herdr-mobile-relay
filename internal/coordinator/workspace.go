@@ -257,7 +257,7 @@ func (d *Dispatcher) workspaceCloseRefusal(
 	if len(workspaceIDs) > 0 {
 		data["workspace_ids"] = workspaceIDs
 	}
-	d.recordActivity(action, "failed", failureSummary(action, public), "", requestID)
+	d.activities.record(action, "failed", failureSummary(action, public), "", requestID)
 	return &CommandResult{
 		RequestID: requestID,
 		Action:    action,
@@ -486,7 +486,7 @@ func (d *Dispatcher) mutateTopology(ctx context.Context, requestID string, mutat
 		return done.result
 	}
 	d.topologyChanged()
-	d.recordActivity(mutation.action, mutation.status, done.summary, "", requestID)
+	d.activities.record(mutation.action, mutation.status, done.summary, "", requestID)
 	return completed(requestID, mutation.action, "", done.data)
 }
 
@@ -564,7 +564,7 @@ func (d *Dispatcher) failTopologyErr(requestID, action, paneID string, err error
 	}
 	d.logger.Warn("topology command failed", "action", action, "request_id", requestID, "phase", phase, "error", err)
 	if action != "worktree_list" {
-		d.recordActivity(action, "failed", failureSummary(action, public), paneID, requestID)
+		d.activities.record(action, "failed", failureSummary(action, public), paneID, requestID)
 	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: phase, Error: public, PaneID: paneID, Data: data}
 }
