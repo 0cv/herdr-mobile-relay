@@ -103,20 +103,30 @@ export function relayNeedsManualBootstrap(
 }
 
 
-export function newerBundle(
-  candidate: { version: string; assets: number; build?: string },
-  current: { version: string; assets: number; build?: string },
-): boolean {
-  if (newerVersion(candidate.version, current.version)) return true;
-  if (candidate.version !== current.version) return false;
-  if (candidate.assets > current.assets) return true;
-  return candidate.assets === current.assets
-    && Boolean(candidate.build)
-    && Boolean(current.build)
-    && candidate.build !== current.build;
+interface BundleIdentity {
+  version: string;
+  assets: number;
+  build?: string;
 }
 
-export function appUpdateAvailable(deployed: { version: string; assets: number; build?: string }): boolean {
+function satisfiesTarget(
+  candidate: BundleIdentity,
+  target: BundleIdentity,
+  emptyBuildSatisfies: boolean,
+): boolean {
+  if (newerVersion(candidate.version, target.version)) return true;
+  if (candidate.version !== target.version) return false;
+  if (candidate.assets !== target.assets) return candidate.assets > target.assets;
+  if (!target.build) return emptyBuildSatisfies;
+  return candidate.build === target.build;
+}
+
+export function newerBundle(candidate: BundleIdentity, current: BundleIdentity): boolean {
+  if (candidate.version !== current.version) return newerVersion(candidate.version, current.version);
+  return !satisfiesTarget(current, candidate, true);
+}
+
+export function appUpdateAvailable(deployed: BundleIdentity): boolean {
   return newerBundle(deployed, {
     version: APP_VERSION,
     assets: APP_ASSET_VERSION,
@@ -405,11 +415,8 @@ function deployedTargetReady(
   deployed: Pick<AppOriginMetadata, 'version' | 'assets' | 'build'>,
   target: PhoneAppTarget | null,
 ): boolean {
-  if (!target || newerVersion(target.version, deployed.version)) return false;
-  if (deployed.version !== target.version) return true;
-  if (deployed.assets < target.assets) return false;
-  if (deployed.assets > target.assets) return true;
-  return !target.build || Boolean(deployed.build) && deployed.build === target.build;
+  if (!target) return false;
+  return satisfiesTarget(deployed, target, true);
 }
 
 /**
@@ -491,20 +498,12 @@ function currentPhoneTarget(): PhoneAppTarget {
   return { version: APP_VERSION, assets: APP_ASSET_VERSION, build: APP_BUILD_ID };
 }
 
-function phoneTargetIsAtLeast(candidate: PhoneAppTarget, target: PhoneAppTarget): boolean {
-  if (newerVersion(candidate.version, target.version)) return true;
-  if (candidate.version !== target.version) return false;
-  if (candidate.assets > target.assets) return true;
-  if (candidate.assets < target.assets) return false;
-  return !target.build || candidate.build === target.build;
-}
-
 function requestedPhoneTarget(version: string, target: PhoneAppTarget | null): PhoneAppTarget {
   const status = get(appUpdateStatus);
   const requested = target || deployedAppTarget(status, version);
   const pending = get(updateProgressPlan);
   if (pending?.phoneAppRequired && pending.phoneTarget
-    && !phoneTargetIsAtLeast(requested, pending.phoneTarget)) {
+    && !satisfiesTarget(requested, pending.phoneTarget, true)) {
     return pending.phoneTarget;
   }
   return requested;
@@ -791,14 +790,9 @@ export function queueUpdateProgressForReload(
 
 export function phoneTargetMatchesCurrent(target: PhoneAppTarget | null): boolean {
   if (!target) return false;
-  // A compatible newer app already satisfies an older pending target. For the
-  // same release identity, however, legacy plans without a build remain
-  // pending so an old bundle can never acknowledge itself after navigation.
-  if (newerVersion(APP_VERSION, target.version)) return true;
-  if (target.version !== APP_VERSION) return false;
-  if (APP_ASSET_VERSION > target.assets) return true;
-  if (APP_ASSET_VERSION < target.assets) return false;
-  return Boolean(target.build) && target.build === APP_BUILD_ID;
+  // A target without a build stays pending at the same release identity, so
+  // an old bundle can never acknowledge itself after navigation.
+  return satisfiesTarget(currentPhoneTarget(), target, false);
 }
 
 export function setPhoneUpdateTarget(target: PhoneAppTarget): void {
@@ -812,7 +806,7 @@ export function setPhoneUpdateTarget(target: PhoneAppTarget): void {
   // A late response from an older edge must never replace the target that was
   // persisted for the phone. It is safe to learn a more advanced identity,
   // but not to move the plan backwards or sideways at the same revision.
-  if (plan.phoneTarget && !phoneTargetIsAtLeast(next, plan.phoneTarget)) return;
+  if (plan.phoneTarget && !satisfiesTarget(next, plan.phoneTarget, true)) return;
   saveUpdateProgress({
     ...plan,
     phoneTarget: next,
