@@ -1270,7 +1270,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.udp = udpListener
 		s.udp.SetOnDirty(func() { s.poller.Wake() })
 		s.udp.SetOnChange(func(agent *coordinator.AgentState) {
-			s.broadcastCommitted(map[string]any{
+			s.commitAgent(agent, map[string]any{
 				"type":           "agent_update",
 				"pane_id":        agent.PaneID,
 				"raw_pane_id":    agent.RawPaneID,
@@ -2077,7 +2077,7 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 		"pane_revision":        agent.StateRevision,
 	}
 	if s.transitionBroadcast == s.hub {
-		s.broadcastCommitted(message)
+		s.commitAgent(agent, message)
 		return
 	}
 	s.transitionBroadcast.Broadcast(message)
@@ -3623,7 +3623,48 @@ func (s *Server) committedInventorySnapshot() committedInventory {
 	return result
 }
 
+func (s *Server) commitAgent(agent *coordinator.AgentState, message map[string]any) {
+	paneID := agent.PaneID
+	if paneID == "" {
+		s.recordSafeError("agent update broadcast was malformed", nil)
+		return
+	}
+	message["server_session_id"] = protocol.PrimaryServerSessionID
+	message["generation"] = s.state.Generation(paneID)
+	if current, exists := s.state.Agent(paneID); exists {
+		message["terminal_id"] = current.TerminalID
+		message["agent_session_id"] = current.SessionID
+	}
+	s.hub.BroadcastPrepared(message, func() {
+		s.stateViewMu.Lock()
+		agents := cloneAgents(s.agentView)
+		found := false
+		for _, view := range agents {
+			if view.PaneID != paneID {
+				continue
+			}
+			if agent.StateRevision >= view.StateRevision {
+				applyCommittedAgent(view, agent)
+			}
+			found = true
+			break
+		}
+		if !found {
+			if current, ok := s.state.Agent(paneID); ok {
+				applyCommittedAgent(current, agent)
+				agents = append(agents, current)
+			}
+		}
+		s.agentView = agents
+		s.stateViewMu.Unlock()
+	})
+}
+
 func (s *Server) broadcastCommitted(message any) {
+	if update, ok := message.(coordinator.AgentUpdate); ok {
+		s.commitAgent(update.Agent, update.Message)
+		return
+	}
 	envelope, ok := message.(map[string]any)
 	if !ok {
 		s.hub.Broadcast(message)
@@ -3631,41 +3672,6 @@ func (s *Server) broadcastCommitted(message any) {
 	}
 	messageType, _ := envelope["type"].(string)
 	switch messageType {
-	case "agent_update", "blocked":
-		paneID, _ := envelope["pane_id"].(string)
-		if paneID == "" {
-			s.recordSafeError("agent update broadcast was malformed", nil)
-			return
-		}
-		envelope["server_session_id"] = protocol.PrimaryServerSessionID
-		envelope["generation"] = s.state.Generation(paneID)
-		if current, exists := s.state.Agent(paneID); exists {
-			envelope["terminal_id"] = current.TerminalID
-			envelope["agent_session_id"] = current.SessionID
-		}
-		s.hub.BroadcastPrepared(message, func() {
-			s.stateViewMu.Lock()
-			agents := cloneAgents(s.agentView)
-			found := false
-			for _, agent := range agents {
-				if agent.PaneID != paneID {
-					continue
-				}
-				if deltaRevision(envelope) >= agent.StateRevision {
-					applyAgentDelta(agent, envelope)
-				}
-				found = true
-				break
-			}
-			if !found {
-				if current, ok := s.state.Agent(paneID); ok {
-					applyAgentDelta(current, envelope)
-					agents = append(agents, current)
-				}
-			}
-			s.agentView = agents
-			s.stateViewMu.Unlock()
-		})
 	case "activity":
 		var entry activity.Entry
 		data, err := json.Marshal(envelope["activity"])
@@ -3732,18 +3738,6 @@ func mergeAgentSnapshot(current, incoming []*coordinator.AgentState) []*coordina
 	return merged
 }
 
-func deltaRevision(delta map[string]any) int64 {
-	switch number := delta["pane_revision"].(type) {
-	case int:
-		return int64(number)
-	case int64:
-		return number
-	case float64:
-		return int64(number)
-	}
-	return 0
-}
-
 func cloneStringMap(values map[string]any) map[string]any {
 	result := make(map[string]any, len(values))
 	for key, value := range values {
@@ -3752,103 +3746,44 @@ func cloneStringMap(values map[string]any) map[string]any {
 	return result
 }
 
-func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
-	setString := func(key string, destination *string) {
-		if value, exists := delta[key]; exists {
-			if text, ok := value.(string); ok {
-				*destination = text
-			}
-		}
+func applyCommittedAgent(view, committed *coordinator.AgentState) {
+	view.RawPaneID = committed.RawPaneID
+	view.Status = committed.Status
+	view.Agent = committed.Agent
+	view.TabID = committed.TabID
+	view.TabLabel = committed.TabLabel
+	view.TabNumber = committed.TabNumber
+	view.WorkspaceID = committed.WorkspaceID
+	view.Cwd = committed.Cwd
+	view.Project = committed.Project
+	view.Host = committed.Host
+	view.Session = committed.Session
+	view.SessionName = committed.SessionName
+	view.UpdatedAt = committed.UpdatedAt
+	view.BlockedEventID = committed.BlockedEventID
+	view.AttentionKind = committed.AttentionKind
+	view.Prompt = committed.Prompt
+	view.Command = committed.Command
+	view.Options = append([]string(nil), committed.Options...)
+	view.ApprovalFingerprint = committed.ApprovalFingerprint
+	view.Interaction = committed.Clone().Interaction
+	view.StateRevision = committed.StateRevision
+	if view.Status != "blocked" {
+		view.AttentionKind = ""
+		view.Prompt = ""
+		view.Command = ""
+		view.Options = nil
+		view.ApprovalFingerprint = ""
+		view.Interaction = nil
+		return
 	}
-	setString("raw_pane_id", &agent.RawPaneID)
-	setString("status", &agent.Status)
-	setString("agent", &agent.Agent)
-	setString("tab_id", &agent.TabID)
-	setString("tab_label", &agent.TabLabel)
-	setString("workspace_id", &agent.WorkspaceID)
-	setString("cwd", &agent.Cwd)
-	setString("project", &agent.Project)
-	setString("host", &agent.Host)
-	setString("session", &agent.Session)
-	setString("session_name", &agent.SessionName)
-	if value, exists := delta["updated_at"]; exists {
-		switch v := value.(type) {
-		case float64:
-			agent.UpdatedAt = int64(v)
-		case string:
-			agent.UpdatedAt = parseTimestamp(v)
-		}
+	if view.AttentionKind != question.AttentionApproval {
+		view.Options = nil
+		view.ApprovalFingerprint = ""
 	}
-	setString("event_id", &agent.BlockedEventID)
-	if value, exists := delta["attention_kind"]; exists {
-		agent.AttentionKind = question.AttentionKind(fmt.Sprint(value))
+	if view.AttentionKind != question.AttentionQuestion {
+		view.Interaction = nil
 	}
-	setString("prompt", &agent.Prompt)
-	setString("command", &agent.Command)
-	if value, exists := delta["options"]; exists {
-		agent.Options = nil
-		switch options := value.(type) {
-		case []string:
-			agent.Options = append([]string(nil), options...)
-		case []any:
-			for _, option := range options {
-				if text, ok := option.(string); ok {
-					agent.Options = append(agent.Options, text)
-				}
-			}
-		}
-	}
-	if value, exists := delta["approval_fingerprint"]; exists {
-		agent.ApprovalFingerprint, _ = value.(string)
-	}
-	if value, exists := delta["interaction"]; exists {
-		agent.Interaction = nil
-		if value != nil {
-			if data, err := json.Marshal(value); err == nil {
-				var interaction question.Interaction
-				if json.Unmarshal(data, &interaction) == nil {
-					agent.Interaction = &interaction
-				}
-			}
-		}
-	}
-	if agent.Status != "blocked" {
-		agent.AttentionKind = ""
-		agent.Prompt = ""
-		agent.Command = ""
-		agent.Options = nil
-		agent.ApprovalFingerprint = ""
-		agent.Interaction = nil
-	} else {
-		if agent.AttentionKind != question.AttentionApproval {
-			agent.Options = nil
-			agent.ApprovalFingerprint = ""
-		}
-		if agent.AttentionKind != question.AttentionQuestion {
-			agent.Interaction = nil
-		}
-	}
-	if value, exists := delta["tab_number"]; exists {
-		agent.TabNumber = messageInt(value, agent.TabNumber)
-	}
-	if value, exists := delta["pane_revision"]; exists {
-		switch number := value.(type) {
-		case int64:
-			agent.StateRevision = number
-		case float64:
-			agent.StateRevision = int64(number)
-		}
-	}
-}
-
-func parseTimestamp(s string) int64 {
-	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return n
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UnixMilli()
-	}
-	return time.Now().UnixMilli()
 }
 
 func (s *Server) recentActivities(limit int) []activity.Entry {

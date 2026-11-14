@@ -460,9 +460,9 @@ func TestAcknowledgeOnlyBroadcastsDisplayedStatusChanges(t *testing.T) {
 		defer cancel()
 		_ = d.Close(ctx)
 	})
-	updates := make(chan map[string]any, 2)
+	updates := make(chan AgentUpdate, 2)
 	d.SetBroadcast(func(message any) {
-		if update, ok := message.(map[string]any); ok {
+		if update, ok := message.(AgentUpdate); ok {
 			updates <- update
 		}
 	})
@@ -484,7 +484,7 @@ func TestAcknowledgeOnlyBroadcastsDisplayedStatusChanges(t *testing.T) {
 	}
 	select {
 	case update := <-updates:
-		if update["status"] != "idle" {
+		if update.Message["status"] != "idle" || update.Agent.Status != "idle" {
 			t.Fatalf("acknowledgement update = %+v", update)
 		}
 	case <-time.After(time.Second):
