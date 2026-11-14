@@ -1,11 +1,11 @@
 package piintegration
 
 import (
+	"errors"
+	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -180,49 +180,33 @@ func TestMultipleProfilesAndPartialFailure(t *testing.T) {
 	}
 }
 
-func TestShellContract(t *testing.T) {
-	for _, action := range []string{"install", "refresh", "remove"} {
-		t.Run(action, func(t *testing.T) {
-			goDir, shellDir := t.TempDir(), t.TempDir()
-			m := New(bundle(t), func() []string { return []string{goDir} })
-			shell, _ := filepath.Abs("../../relay/pi-commands.sh")
-			run := func(action string) {
-				t.Helper()
-				cmd := exec.Command("/bin/bash", "--noprofile", "--norc", shell, action, shellDir)
-				if out, err := cmd.CombinedOutput(); err != nil {
-					t.Fatalf("%v: %s", err, out)
-				}
-			}
-			m.Set(true)
-			run("install")
-			if action == "refresh" {
-				put(t, filepath.Join(target(goDir), "index.ts"), "old")
-				put(t, filepath.Join(target(shellDir), "index.ts"), "old")
-				m.Refresh()
-				run("install")
-			}
-			if action == "remove" {
-				m.Set(false)
-				run("remove")
-			}
-			manual := New(bundle(t), func() []string { return []string{shellDir} })
-			if manual.Status().Enabled != (action != "remove") {
-				t.Fatal("manual CLI state disagrees")
-			}
-			for _, name := range Files {
-				g, ge := os.ReadFile(filepath.Join(target(goDir), name))
-				s, se := os.ReadFile(filepath.Join(target(shellDir), name))
-				if os.IsNotExist(ge) != os.IsNotExist(se) || !reflect.DeepEqual(g, s) {
-					t.Fatal("shell/Go differ", name, ge, se)
-				}
-				if ge == nil {
-					gi, _ := os.Stat(filepath.Join(target(goDir), name))
-					si, _ := os.Stat(filepath.Join(target(shellDir), name))
-					if gi.Mode().Perm() != si.Mode().Perm() {
-						t.Fatal("shell/Go permissions differ")
-					}
-				}
-			}
-		})
+func TestRunInstallsAndRemoves(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	if err := Run(bundle(t), []string{"install", dir}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), target(dir)) || !New(bundle(t), func() []string { return []string{dir} }).Status().Enabled {
+		t.Fatal("not installed", out.String())
+	}
+	out.Reset()
+	if err := Run(bundle(t), []string{"remove", dir}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(target(dir)); !os.IsNotExist(err) {
+		t.Fatal("not removed", err)
+	}
+}
+
+func TestRunRejectsBadArgumentsAndUnownedDirectories(t *testing.T) {
+	dir := t.TempDir()
+	put(t, filepath.Join(target(dir), "unrelated"), "keep")
+	for _, args := range [][]string{nil, {"install"}, {"status", dir}, {"install", "relative"}} {
+		if err := Run(bundle(t), args, io.Discard); !errors.Is(err, ErrUsage) {
+			t.Fatal(args, err)
+		}
+	}
+	if err := Run(bundle(t), []string{"install", dir}, io.Discard); err == nil || errors.Is(err, ErrUsage) {
+		t.Fatal("overwrote an unowned directory", err)
 	}
 }

@@ -4,6 +4,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT
 export HOME="$TEMP/home"
+export HERDR_RELAY_BIN="$TEMP/herdr-mobile-relay"
+(cd "$ROOT" && go build -o "$HERDR_RELAY_BIN" ./cmd/herdr-mobile-relay)
 export PI_CODING_AGENT_DIR="$TEMP/custom-agent"
 mkdir -p "$PI_CODING_AGENT_DIR/extensions"
 printf '%s\n' unrelated > "$PI_CODING_AGENT_DIR/extensions/herdr.ts"
