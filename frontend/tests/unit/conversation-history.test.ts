@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { normalizeConversationPage } from '$lib/store';
 import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
 import {
-  analyzeConversationBatch,
   conversationIdentity,
   ConversationHistoryController,
   HISTORY_WIRE_PAGE_SIZE,
@@ -49,26 +48,13 @@ function page(overrides: Partial<ConversationPage> = {}): ConversationPage {
   };
 }
 
-describe('conversation history identity and batch analysis', () => {
+describe('conversation history identity', () => {
   it('uses exact target identity while ignoring presentation metadata', () => {
     const first = agent();
     const changed = { ...first, status: 'waiting', project: 'Renamed project', relay_label: 'New label' };
     expect(conversationIdentity(first)).toBe(conversationIdentity(changed));
     expect(conversationIdentity({ ...first, raw_pane_id: 'pane-2' })).not.toBe(conversationIdentity(first));
     expect(conversationIdentity({ ...first, agent_session_id: '' })).toBeNull();
-  });
-
-  it('stages a leading fragment but still reports complete exchanges', () => {
-    const analysis = analyzeConversationBatch([
-      entry('orphan', 'assistant', 'context answer'),
-      entry('u1', 'user', 'first question'),
-      entry('a1', 'assistant', 'first answer'),
-      entry('u2', 'user', 'unanswered question'),
-    ], true);
-    expect(analysis.pendingPrefix.map(({ id }) => id)).toEqual(['orphan']);
-    expect(analysis.needsLeadingContext).toBe(true);
-    expect(analysis.completedOlderExchanges).toBe(1);
-    expect(analysis.hasUsableLatestExchange).toBe(true);
   });
 });
 
@@ -679,69 +665,31 @@ describe('ConversationHistoryController', () => {
   });
 });
 
-describe('conversation clone values through history', () => {
+describe('conversation history entry ownership', () => {
   type Plan = import('$lib/types').OmoTodoState;
   type Preview = import('$lib/conversation-cache').ConversationPreview;
   type State = import('$lib/conversation-history').ConversationHistoryControllerState;
-  type Graph = { entries: ConversationEntry[]; plan: Plan | null | undefined };
 
-  function fixture() {
-    const sentinels = {
-      entry: { label: 'entry extension' }, tool: { label: 'tool extension' },
-      plan: { label: 'plan extension' }, phase: { label: 'phase extension' }, task: { label: 'task extension' },
-    };
-    const tool = { id: 'tool', name: 'Read', input: 'file', output: 'tool result', extension: sentinels.tool };
-    const entries = [entry('u', 'user', 'question'), { ...entry('a', 'assistant', 'answer', [tool]), extension: sentinels.entry }];
-    const task = { content: 'task', status: 'pending' as Plan['phases'][number]['tasks'][number]['status'], extension: sentinels.task };
-    const phase = { name: 'phase', tasks: [task], extension: sentinels.phase };
-    const plan = { available: true, phases: [phase], truncated: false, extension: sentinels.plan };
-    return { entries, plan, sentinels };
+  function recordedPlan(): Plan {
+    return { available: true, phases: [{ name: 'phase', tasks: [{ content: 'task', status: 'pending' }] }], truncated: false };
   }
 
-  function expectValues(graph: Graph, sentinels: ReturnType<typeof fixture>['sentinels']) {
-    expect(graph.entries.map(({ id, role, text }) => [id, role, text])).toEqual([['u', 'user', 'question'], ['a', 'assistant', 'answer']]);
-    expect(graph.entries[1].tools).toHaveLength(1);
-    expect(graph.entries[1].tools![0]).toMatchObject({ id: 'tool', name: 'Read', input: 'file', output: 'tool result' });
-    expect(graph.plan).toMatchObject({ available: true, truncated: false, phases: [{ name: 'phase', tasks: [{ content: 'task', status: 'pending' }] }] });
-    const extension = (value: object) => (value as { extension?: object }).extension;
-    expect(extension(graph.entries[1])).toBe(sentinels.entry);
-    expect(extension(graph.entries[1].tools![0])).toBe(sentinels.tool);
-    expect(extension(graph.plan!)).toBe(sentinels.plan);
-    expect(extension(graph.plan!.phases[0])).toBe(sentinels.phase);
-    expect(extension(graph.plan!.phases[0].tasks[0])).toBe(sentinels.task);
+  function recordedEntries(): ConversationEntry[] {
+    return [entry('u', 'user', 'question'), entry('a', 'assistant', 'answer', [{ id: 'tool', name: 'Read', input: 'file', output: 'tool result' }])];
   }
 
-  // Only the explicitly cloned entry/tool/plan targets, not arbitrary nested properties.
-  function targets(graph: Graph): object[] {
-    return [graph.entries, ...graph.entries, graph.entries[1].tools!, graph.entries[1].tools![0],
-      graph.plan!, graph.plan!.phases, graph.plan!.phases[0], graph.plan!.phases[0].tasks, graph.plan!.phases[0].tasks[0]];
+  function expectRecordedValues(entries: ConversationEntry[], plan: Plan | null | undefined) {
+    expect(entries.map(({ id, role, text }) => [id, role, text])).toEqual([['u', 'user', 'question'], ['a', 'assistant', 'answer']]);
+    expect(entries[1].tools).toEqual([{ id: 'tool', name: 'Read', input: 'file', output: 'tool result' }]);
+    expect(plan).toEqual(recordedPlan());
   }
 
-  function expectIndependent(graphs: Graph[]) {
-    const mapped = graphs.map(targets);
-    for (let index = 0; index < mapped[0].length; index++) {
-      expect(new Set(mapped.map((values) => values[index])).size).toBe(graphs.length);
-    }
-  }
-
-  function mutate(graph: Graph) {
-    graph.entries[0].text = 'changed question';
-    graph.entries[1].text = 'changed answer';
-    graph.entries[1].tools![0].output = 'changed output';
-    graph.plan!.available = false;
-    graph.plan!.phases[0].name = 'changed phase';
-    graph.plan!.phases[0].tasks[0].content = 'changed task';
-    graph.plan!.phases[0].tasks[0].status = 'completed';
-  }
-
-  it('isolates recorded entry and plan clone channels', async () => {
-    const source = fixture();
-    const recorded = page({ entries: source.entries, omoPlan: source.plan, sourceRevision: 'r' });
-    const before = JSON.stringify(recorded);
+  it('publishes an accepted page that later changes to the received page do not alter', async () => {
+    const received = page({ entries: recordedEntries(), omoPlan: recordedPlan(), sourceRevision: 'r' });
     const states: State[] = [];
     const saved: Preview[] = [];
     const controller = new ConversationHistoryController(agent(), {
-      request: async () => recorded,
+      request: async () => received,
       onState: (state) => states.push(state),
       putPreview: (value) => saved.push(value),
     });
@@ -751,40 +699,46 @@ describe('conversation clone values through history', () => {
         expect(controller.state.authoritative).toBe(true);
         expect(controller.state.requestPhase).toBe('idle');
       });
-      const first = controller.state;
-      const second = controller.state;
-      const callback = states.at(-1)!;
+      received.entries[0].text = 'changed question';
+      received.entries[1].tools![0].output = 'changed output';
+      received.omoPlan!.phases[0].tasks[0].content = 'changed task';
+      const published = controller.state;
+      expectRecordedValues(published.entries, published.omoPlan);
+      expectRecordedValues(states.at(-1)!.entries, states.at(-1)!.omoPlan);
       expect(saved).toHaveLength(1);
-      expect(callback.authoritative).toBe(true);
-      expect(callback.requestPhase).toBe('idle');
-      expect(first.state).toBe('ready');
-      expect(first.sourceRevision).toBe('r');
-      expect(first.error).toBeNull();
-      const graphs: Graph[] = [
-        { entries: source.entries, plan: source.plan },
-        { entries: first.entries, plan: first.omoPlan },
-        { entries: second.entries, plan: second.omoPlan },
-        { entries: callback.entries, plan: callback.omoPlan },
-        { entries: saved[0].entries, plan: saved[0].plan },
-      ];
-      for (const graph of graphs) expectValues(graph, source.sentinels);
-      expectIndependent(graphs);
-      expect(JSON.stringify(recorded)).toBe(before);
-      for (const graph of graphs) mutate(graph);
-      const fresh = controller.state;
-      expectValues({ entries: fresh.entries, plan: fresh.omoPlan }, source.sentinels);
+      expectRecordedValues(saved[0].entries, saved[0].plan);
     } finally {
       controller.cancel();
     }
   });
 
-  it('isolates hydrated preview entries and plan', async () => {
-    const source = fixture();
+  it('keeps earlier published states unchanged when later batches arrive', async () => {
+    const states: State[] = [];
+    const controller = new ConversationHistoryController(agent(), {
+      request: async () => page({ entries: [entry('u', 'user', 'question')], sourceRevision: 'r' }),
+      onState: (state) => states.push(state),
+    });
+    try {
+      controller.start();
+      await vi.waitFor(() => {
+        expect(controller.state.authoritative).toBe(true);
+        expect(controller.state.requestPhase).toBe('idle');
+      });
+      const settled = states.at(-1)!;
+      expect(controller.applyLiveEntries('r', [entry('u', 'user', 'question'), entry('a', 'assistant', 'answer')], 1)).toBe(true);
+      expect(settled.entries.map(({ id }) => id)).toEqual(['u']);
+      expect(controller.state.entries.map(({ id }) => id)).toEqual(['u', 'a']);
+      expect(states.at(-1)!.entries.map(({ id }) => id)).toEqual(['u', 'a']);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('shows a warm preview until the fresh page arrives', async () => {
     const warm: Preview = {
       identity: conversationIdentity(agent())!, relayId: 'relay-1', savedAt: 100,
-      sourceRevision: 'warm', historical: false, entries: source.entries, plan: source.plan,
+      sourceRevision: 'warm', historical: false, entries: recordedEntries(), plan: recordedPlan(),
     };
-    const before = JSON.stringify(warm);
     let settle!: (value: ConversationPage) => void;
     const pending = new Promise<ConversationPage>((resolve) => { settle = resolve; });
     const request = vi.fn(() => pending);
@@ -792,23 +746,12 @@ describe('conversation clone values through history', () => {
     try {
       controller.start();
       expect(request).toHaveBeenCalledTimes(1);
-      const first = controller.state;
-      const second = controller.state;
-      expect(first.preview).toBe(true);
-      expect(first.authoritative).toBe(false);
-      expect(first.requestPhase).toBe('initial');
-      expect(first.sourceRevision).toBe('warm');
-      const graphs: Graph[] = [source, { entries: first.entries, plan: first.omoPlan }, { entries: second.entries, plan: second.omoPlan }];
-      for (const graph of graphs) expectValues(graph, source.sentinels);
-      expectIndependent(graphs);
-      expect(JSON.stringify(warm)).toBe(before);
-      mutate(graphs[0]);
-      mutate(graphs[1]);
-      expectValues(graphs[2], source.sentinels);
-      const fresh = controller.state;
-      expect(fresh.preview).toBe(true);
-      expect(fresh.authoritative).toBe(false);
-      expectValues({ entries: fresh.entries, plan: fresh.omoPlan }, source.sentinels);
+      const shown = controller.state;
+      expect(shown.preview).toBe(true);
+      expect(shown.authoritative).toBe(false);
+      expect(shown.requestPhase).toBe('initial');
+      expect(shown.sourceRevision).toBe('warm');
+      expectRecordedValues(shown.entries, shown.omoPlan);
     } finally {
       controller.cancel();
       settle(page());
@@ -817,7 +760,7 @@ describe('conversation clone values through history', () => {
     }
   });
 
-  it('preserves live tool property presence', async () => {
+  it('keeps live entries independent of the batch that delivered them and preserves tool presence', async () => {
     const empty: NonNullable<ConversationEntry['tools']> = [];
     const live: ConversationEntry[] = [
       entry('absent', 'user'),
@@ -833,59 +776,38 @@ describe('conversation clone values through history', () => {
         expect(controller.state.requestPhase).toBe('idle');
       });
       expect(controller.applyLiveEntries('r', live, 1)).toBe(true);
-      const first = controller.state;
-      expect(first.entries.map(({ id }) => id)).toEqual(['absent', 'undefined', 'null', 'empty']);
-      expect(first.omoPlan).toBeNull();
-      for (const values of [live, first.entries]) {
-        expect(values.map((value) => Object.hasOwn(value, 'tools'))).toEqual([false, true, true, true]);
-        expect(values[0].tools).toBeUndefined();
-        expect(values[1].tools).toBeUndefined();
-        expect(values[2].tools).toBeNull();
-        expect(values[3].tools).toEqual([]);
-        expect(values.map(({ text }) => text)).toEqual(['absent', 'undefined', 'null', 'empty']);
-      }
-      for (let index = 0; index < live.length; index++) expect(first.entries[index]).not.toBe(live[index]);
-      expect(first.entries).not.toBe(live);
-      expect(first.entries[3].tools).not.toBe(empty);
       live[0].text = 'changed input';
       empty.push({ name: 'changed input tool' });
-      first.entries[1].text = 'changed outward';
-      first.entries[3].tools!.push({ name: 'changed outward tool' });
-      const fresh = controller.state;
-      expect(fresh.entries.map(({ text }) => text)).toEqual(['absent', 'undefined', 'null', 'empty']);
-      expect(fresh.entries.map((value) => Object.hasOwn(value, 'tools'))).toEqual([false, true, true, true]);
-      expect(fresh.entries[1].tools).toBeUndefined();
-      expect(fresh.entries[2].tools).toBeNull();
-      expect(fresh.entries[3].tools).toEqual([]);
-      expect(fresh.entries[3].tools).not.toBe(first.entries[3].tools);
-      expect(fresh.omoPlan).toBeNull();
+      const published = controller.state;
+      expect(published.omoPlan).toBeNull();
+      expect(published.entries.map(({ id }) => id)).toEqual(['absent', 'undefined', 'null', 'empty']);
+      expect(published.entries.map(({ text }) => text)).toEqual(['absent', 'undefined', 'null', 'empty']);
+      expect(published.entries.map((value) => Object.hasOwn(value, 'tools'))).toEqual([false, true, true, true]);
+      expect(published.entries[1].tools).toBeUndefined();
+      expect(published.entries[2].tools).toBeNull();
+      expect(published.entries[3].tools).toEqual([]);
     } finally {
       controller.cancel();
     }
   });
 
-  it('preserves batch entry getter evaluation order', () => {
-    const trace: string[] = [];
-    const tool = { name: 'Read', get output() { trace.push('tool.output'); return 'tool result'; } };
-    const tools = [tool];
-    const source = {
-      ...entry('getter', 'user', 'question'),
-      get tools() { trace.push('entry.tools'); return tools; },
-      get after() { trace.push('entry.after'); return 'after'; },
-    };
-    const entries = [source];
-    const result = analyzeConversationBatch(entries);
-    expect(trace).toEqual(['entry.tools', 'entry.after', 'entry.tools', 'entry.tools', 'tool.output']);
-    expect(result.displayableEntries).not.toBe(entries);
-    const copied = result.displayableEntries[0];
-    expect(copied).not.toBe(source);
-    expect(copied.id).toBe('getter');
-    expect(copied.text).toBe('question');
-    expect((copied as ConversationEntry & { after: string }).after).toBe('after');
-    expect(copied.tools).not.toBe(tools);
-    expect(copied.tools).toHaveLength(1);
-    expect(copied.tools![0]).not.toBe(tool);
-    expect(copied.tools![0].name).toBe('Read');
-    expect(copied.tools![0].output).toBe('tool result');
+  it('stops at the memory limit without changing the loaded messages', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(page({ entries: [entry('u2', 'user'), entry('a2', 'assistant')], hasMore: true, nextCursor: 'older', sourceRevision: 'r' }))
+      .mockResolvedValueOnce(page({ entries: [entry('u1', 'user'), entry('a1', 'assistant')], sourceRevision: 'r' }));
+    const controller = new ConversationHistoryController(agent(), { request, maxContentBytes: 400 });
+    try {
+      controller.start();
+      await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+      controller.demandOlder();
+      await vi.waitFor(() => expect(controller.state.error?.code).toBe('memory_limit'));
+      expect(controller.state.error?.retryable).toBe(false);
+      expect(controller.state.entries.map(({ id }) => id)).toEqual(['u2', 'a2']);
+      expect(controller.state.nextCursor).toBe('older');
+      expect(controller.state.hasMore).toBe(true);
+      expect(controller.state.beginningReached).toBe(false);
+    } finally {
+      controller.cancel();
+    }
   });
 });

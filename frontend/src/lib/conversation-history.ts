@@ -1,5 +1,4 @@
 import { cloneDiagnostics, cloneEntries, clonePlan, estimateEntriesBytes } from './conversation-values';
-import { conversationEntries } from './conversation';
 import { CONVERSATION_PREVIEW_PAGE_SIZE, conversationPreviewEntries, type ConversationPreview } from './conversation-cache';
 import { targetRefForAgent, targetStoreKey } from './resource-id';
 import type {
@@ -30,6 +29,18 @@ export type HistoryIntent = 'live' | 'historical';
 
 type Demand = 'initial' | 'refresh' | 'older' | 'full';
 
+type EntryLanes = {
+  raw: ConversationEntry[];
+  network: ConversationEntry[];
+  bridge: ConversationEntry[];
+  bridgeActive: boolean;
+  bridgeRestore: OlderContinuation | null;
+  bridgePlan: OmoTodoState | null;
+  latestGapOutstanding: boolean;
+  replacedWindow: boolean;
+  networkSnapshotId?: string;
+};
+
 type OlderContinuation = {
   nextCursor: string;
   hasMore: boolean;
@@ -38,14 +49,6 @@ type OlderContinuation = {
   omoPlan: OmoTodoState | null;
   diagnostics?: ConversationBrowseDiagnostics;
 };
-
-export interface ConversationBatchAnalysis {
-  displayableEntries: ConversationEntry[];
-  completedOlderExchanges: number;
-  needsLeadingContext: boolean;
-  hasUsableLatestExchange: boolean;
-  pendingPrefix: ConversationEntry[];
-}
 
 export interface ConversationHistoryControllerState {
   epoch: number;
@@ -105,41 +108,15 @@ export function conversationIdentity(agent: Partial<Agent>): string | null {
 }
 
 /**
- * Analyse an ordered raw range as exchanges. A page boundary can leave a
- * leading assistant/tool fragment without its prompt; it is staged as a
- * prefix while already complete exchanges remain publishable.
+ * A page boundary can leave a leading assistant/tool fragment without its
+ * prompt; it is staged as a prefix while already complete exchanges remain
+ * publishable.
  */
-export function analyzeConversationBatch(
-  entries: ConversationEntry[],
-  hasOlder = false,
-  sourceExhausted = false,
-): ConversationBatchAnalysis {
-  const copied = cloneEntries(entries);
-  const displayableEntries = conversationEntries(copied);
-  const firstUser = copied.findIndex((entry) => entry.role === 'user');
-  const userIndexes = copied.flatMap((entry, index) => entry.role === 'user' ? [index] : []);
-  const unresolvedOlderContext = hasOlder && !sourceExhausted;
-  const pendingPrefix = unresolvedOlderContext && (firstUser > 0 || firstUser < 0)
-    ? copied.slice(0, firstUser < 0 ? copied.length : firstUser)
-    : [];
-  const needsLeadingContext = unresolvedOlderContext && pendingPrefix.length > 0;
-  let completedOlderExchanges = 0;
-  for (let index = 0; index < userIndexes.length; index++) {
-    const isBoundaryKnown = index + 1 < userIndexes.length || sourceExhausted;
-    if (isBoundaryKnown) completedOlderExchanges++;
-  }
-  // A user prompt is an older boundary when the next user prompt or the
-  // beginning of the source proves where its exchange ends. The newest prompt
-  // remains useful content, but is not counted while the source may continue.
-  const hasUsableLatestExchange = userIndexes.length > 0
-    || ((!hasOlder || sourceExhausted) && displayableEntries.some((entry) => entry.role === 'assistant' && Boolean(entry.text.trim())));
-  return {
-    displayableEntries,
-    completedOlderExchanges,
-    needsLeadingContext,
-    hasUsableLatestExchange,
-    pendingPrefix,
-  };
+function leadingFragment(entries: ConversationEntry[], hasOlder: boolean, sourceExhausted: boolean): ConversationEntry[] {
+  if (!hasOlder || sourceExhausted) return [];
+  const firstUser = entries.findIndex((entry) => entry.role === 'user');
+  if (firstUser === 0) return [];
+  return entries.slice(0, firstUser < 0 ? entries.length : firstUser);
 }
 
 export class ConversationHistoryController {
@@ -204,7 +181,7 @@ export class ConversationHistoryController {
   }
 
   get state(): ConversationHistoryControllerState {
-    return cloneState(this.stateValue);
+    return { ...this.stateValue };
   }
 
   matchesRequestTarget(agent: Agent): boolean {
@@ -318,12 +295,12 @@ export class ConversationHistoryController {
     this.stateValue = {
       ...initialState(identity),
       epoch,
-      entries: cloneEntries(this.rawEntries),
+      entries: this.rawEntries,
       preview: this.rawEntries.length > 0,
       previewHistorical: oldState.previewHistorical || oldState.intent === 'historical',
       available: true,
       sourceRevision: oldState.sourceRevision,
-      omoPlan: oldState.omoPlan ? clonePlan(oldState.omoPlan) : null,
+      omoPlan: oldState.omoPlan,
       requestPhase: this.rawEntries.length > 0 ? 'refresh' : 'initial',
     };
     this.emit();
@@ -393,7 +370,7 @@ export class ConversationHistoryController {
   private hydratePreview(): void {
     const identity = conversationIdentity(this.agent);
     const preview = identity ? this.getPreview?.(identity) : null;
-    this.previewEntries = preview ? cloneEntries(preview.entries.slice(-HISTORY_WIRE_PAGE_SIZE)) : [];
+    this.previewEntries = preview ? preview.entries.slice(-HISTORY_WIRE_PAGE_SIZE) : [];
     this.networkEntries = [];
     this.clearBridge();
     this.headCursor = '';
@@ -405,13 +382,13 @@ export class ConversationHistoryController {
       ...initialState(identity),
       epoch: this.stateValue.epoch,
       identity,
-      entries: cloneEntries(this.rawEntries),
+      entries: this.rawEntries,
       preview: Boolean(preview),
       previewHistorical: preview?.historical === true,
       available: true,
       sourceRevision: preview?.sourceRevision || '',
-      diagnostics: preview?.diagnostics ? { ...preview.diagnostics } : undefined,
-      omoPlan: preview?.plan ? clonePlan(preview.plan) : null,
+      diagnostics: preview?.diagnostics,
+      omoPlan: preview?.plan ?? null,
     };
   }
 
@@ -551,8 +528,8 @@ export class ConversationHistoryController {
       hasMore: this.stateValue.hasMore,
       snapshotId: this.networkSnapshotId,
       beginningReached: this.stateValue.beginningReached,
-      omoPlan: this.stateValue.omoPlan ? clonePlan(this.stateValue.omoPlan) : null,
-      ...(this.stateValue.diagnostics ? { diagnostics: cloneDiagnostics(this.stateValue.diagnostics) } : {}),
+      omoPlan: this.stateValue.omoPlan,
+      ...(this.stateValue.diagnostics ? { diagnostics: this.stateValue.diagnostics } : {}),
     };
   }
 
@@ -561,25 +538,17 @@ export class ConversationHistoryController {
     this.stateValue.hasMore = value.hasMore;
     this.stateValue.snapshotId = value.snapshotId;
     this.stateValue.beginningReached = value.beginningReached;
-    if (restorePlan) this.stateValue.omoPlan = value.omoPlan ? clonePlan(value.omoPlan) : null;
-    if (restoreDiagnostics) this.stateValue.diagnostics = value.diagnostics ? cloneDiagnostics(value.diagnostics) : undefined;
+    if (restorePlan) this.stateValue.omoPlan = value.omoPlan;
+    if (restoreDiagnostics) this.stateValue.diagnostics = value.diagnostics;
     if (restoreNetworkSnapshot) this.networkSnapshotId = value.snapshotId;
   }
 
   private acceptPage(page: ConversationPage, demand: Demand, requestedCursor: string): { accepted: boolean } {
     const previewWasVisible = this.stateValue.preview && !this.stateValue.authoritative;
     const previousSource = this.networkSourceRevision || (previewWasVisible ? '' : this.stateValue.sourceRevision);
-    const stateBefore = cloneState(this.stateValue);
-    const rawBefore = this.rawEntries;
     const networkBefore = this.networkEntries;
-    const bridgeBefore = this.bridgeEntries;
-    const bridgeRestoreBefore = this.bridgeRestore;
-    const bridgePlanBefore = this.bridgePlan ? clonePlan(this.bridgePlan) : null;
     const bridgeWasActive = this.bridgeActive;
-    const sourceBefore = this.networkSourceRevision;
-    const snapshotBefore = this.networkSnapshotId;
-    const headCursorBefore = this.headCursor;
-    const planBefore = this.stateValue.omoPlan ? clonePlan(this.stateValue.omoPlan) : null;
+    const planBefore = this.stateValue.omoPlan;
     const isFreshHead = (demand === 'initial' || demand === 'refresh') && !requestedCursor;
     const preserveOlderContinuation = isFreshHead
       && demand === 'refresh'
@@ -610,6 +579,19 @@ export class ConversationHistoryController {
       const currentEntries = new Map(this.rawEntries.map(entry => [entry.id, entry]));
       page = { ...page, entries: page.entries.map(entry => currentEntries.get(entry.id) || entry) };
     }
+    const incoming = cloneEntries(page.entries);
+    const incomingPlan = page.omoPlan ? clonePlan(page.omoPlan) : null;
+    const carriesContent = page.available && !page.error && pageState === 'ready' && !(page.hasMore && !page.nextCursor);
+    const lanes = carriesContent
+      ? this.nextLanes(page, demand, incoming, incomingPlan, { isFreshHead, previewWasVisible, olderContinuationBefore, planBefore })
+      : null;
+    if (lanes) {
+      const retained = previewWasVisible && lanes.network.length ? [lanes.network] : [lanes.raw, lanes.network, lanes.bridge];
+      if (retainedEntryCount(...retained) > HISTORY_MAX_RAW_ENTRIES || retainedEntryBytes(...retained) > this.maxContentBytes) {
+        this.pauseWithError('History is too large to load further on this device. Loaded messages are still available.', false, 'memory_limit');
+        return { accepted: false };
+      }
+    }
     this.stateValue.progress = page.progress;
     this.stateValue.reason = page.reason || (isFreshHead ? '' : this.stateValue.reason);
     this.stateValue.sourceRevision = page.sourceRevision || this.stateValue.sourceRevision;
@@ -622,7 +604,7 @@ export class ConversationHistoryController {
     this.stateValue.diagnostics = isFreshHead
       ? cloneDiagnostics(page.diagnostics)
       : mergeDiagnostics(this.stateValue.diagnostics, page.diagnostics);
-    if (page.omoPlan && !bridgeWasActive) this.stateValue.omoPlan = clonePlan(page.omoPlan);
+    if (incomingPlan && !bridgeWasActive) this.stateValue.omoPlan = incomingPlan;
 
     if (page.error || pageState === 'failed') {
       this.stateValue.error = page.error || {
@@ -647,7 +629,7 @@ export class ConversationHistoryController {
 
     if (demand === 'initial' && !requestedCursor && pageState !== 'preparing' && !this.initialPageDelivered) {
       this.initialPageDelivered = true;
-      this.onInitialPage?.(clonePage(page));
+      this.onInitialPage?.({ ...page, provisional: undefined });
     }
 
     if (!page.available) {
@@ -691,8 +673,6 @@ export class ConversationHistoryController {
       return { accepted: true };
     }
 
-    const incoming = cloneEntries(page.entries);
-    const laneBefore = cloneEntries(this.networkEntries);
     if (isFreshHead) {
       if (page.sourceRevision) this.networkSourceRevision = page.sourceRevision;
       else if (!preserveOlderContinuation) this.networkSourceRevision = '';
@@ -717,80 +697,23 @@ export class ConversationHistoryController {
       this.stateValue.available = true;
       this.stateValue.contextSearching = true;
       this.stateValue.pendingPrefix = [];
-      this.stateValue.entries = cloneEntries(this.rawEntries);
+      this.stateValue.entries = this.rawEntries;
       this.stateValue.authoritative = !previewWasVisible && this.rawEntries.length > 0;
       this.stateValue.preview = previewWasVisible;
       this.rawProgressThisPage = false;
       this.emit();
       return { accepted: true };
     }
-    let replacedWindow = false;
-    if (isFreshHead) {
-      if (previewWasVisible) {
-        // Never merge a fresh page into cache-owned content merely because a
-        // source revision or entry ID happens to match. The fresh lane is
-        // promoted only after it provides usable/authoritatively empty data.
-        this.networkEntries = incoming;
-        this.bridgeEntries = [];
-        this.bridgeActive = false;
-        this.stateValue.latestGapOutstanding = false;
-      } else if (demand === 'refresh' && this.rawEntries.length > 0 && !sharedEntryId(this.rawEntries, incoming)) {
-        this.bridgeRestore = olderContinuationBefore;
-        this.bridgePlan = page.omoPlan ? clonePlan(page.omoPlan) : planBefore;
-        this.bridgeEntries = incoming;
-        this.networkEntries = this.bridgeEntries;
-        this.bridgeActive = Boolean(page.hasMore || page.nextCursor);
-        this.stateValue.latestGapOutstanding = this.bridgeActive;
-        // A bridge uses the fresh head's cursor and snapshot cohort. The
-        // established older lane is restored after overlap is proven.
-        this.networkSnapshotId = page.mode === 'snapshot' ? page.snapshotId || '' : '';
-        if (!this.bridgeActive) {
-          this.rawEntries = cloneEntries(this.bridgeEntries);
-          this.networkEntries = this.rawEntries;
-          this.bridgeEntries = [];
-          this.bridgeRestore = null;
-          this.stateValue.latestGapOutstanding = false;
-          replacedWindow = true;
-        }
-      } else if (demand === 'refresh' && this.rawEntries.length > 0) {
-        this.rawEntries = mergeFreshEntries(this.rawEntries, incoming);
-        this.networkEntries = this.rawEntries;
-        this.bridgeEntries = [];
-        this.bridgeActive = false;
-        this.stateValue.latestGapOutstanding = false;
-      } else {
-        this.rawEntries = incoming;
-        this.networkEntries = this.rawEntries;
-        this.bridgeEntries = [];
-        this.bridgeActive = false;
-        this.stateValue.latestGapOutstanding = false;
-      }
-    } else if (this.bridgeActive) {
-      this.bridgeEntries = mergeOlderEntries(this.bridgeEntries, incoming);
-      this.networkEntries = this.bridgeEntries;
-      if (sharedEntryId(this.rawEntries, this.bridgeEntries)) {
-        this.rawEntries = mergeBridgedEntries(this.rawEntries, this.bridgeEntries);
-        this.networkEntries = this.rawEntries;
-        this.bridgeEntries = [];
-        this.bridgeActive = false;
-        this.stateValue.latestGapOutstanding = false;
-      } else if (!page.hasMore && !page.nextCursor) {
-        // The new chain reached source start without overlap. It is safe to
-        // replace the old window, but never mix the two disconnected chains.
-        this.rawEntries = this.bridgeEntries;
-        this.networkEntries = this.rawEntries;
-        this.bridgeEntries = [];
-        this.bridgeRestore = null;
-        this.bridgeActive = false;
-        this.stateValue.latestGapOutstanding = false;
-        replacedWindow = true;
-      }
-    } else {
-      this.networkEntries = previewWasVisible
-        ? mergeOlderEntries(this.networkEntries, incoming)
-        : mergeOlderEntries(this.rawEntries, incoming);
-      if (!previewWasVisible) this.rawEntries = this.networkEntries;
-    }
+    const accepted = lanes!;
+    this.rawEntries = accepted.raw;
+    this.networkEntries = accepted.network;
+    this.bridgeEntries = accepted.bridge;
+    this.bridgeActive = accepted.bridgeActive;
+    this.bridgeRestore = accepted.bridgeRestore;
+    this.bridgePlan = accepted.bridgePlan;
+    this.stateValue.latestGapOutstanding = accepted.latestGapOutstanding;
+    if (accepted.networkSnapshotId !== undefined) this.networkSnapshotId = accepted.networkSnapshotId;
+    const replacedWindow = accepted.replacedWindow;
     const preservedOlderLane = olderContinuationBefore || this.bridgeRestore;
     if (preservedOlderLane && !replacedWindow) {
       // A fresh head may use a different cursor chain. Keep the accepted older
@@ -812,7 +735,7 @@ export class ConversationHistoryController {
       this.stateValue.diagnostics = { ...this.stateValue.diagnostics, source_truncated: false };
     }
     const lane = this.networkEntries;
-    const analysis = analyzeConversationBatch(lane, this.stateValue.hasMore, this.stateValue.beginningReached);
+    const pendingPrefix = leadingFragment(lane, this.stateValue.hasMore, this.stateValue.beginningReached);
     const freshUsable = !this.bridgeActive && (!previewWasVisible
       || lane.length > 0
       || (this.stateValue.beginningReached && !page.diagnostics?.source_truncated));
@@ -821,7 +744,7 @@ export class ConversationHistoryController {
       return { accepted: false };
     }
     if (previewWasVisible && freshUsable) {
-      this.rawEntries = cloneEntries(this.networkEntries);
+      this.rawEntries = this.networkEntries;
       this.previewEntries = [];
       this.networkEntries = this.rawEntries;
       this.stateValue.preview = false;
@@ -836,34 +759,111 @@ export class ConversationHistoryController {
       this.stateValue.authoritative = true;
     }
     if (bridgeWasActive || this.bridgeActive) {
-      this.stateValue.omoPlan = this.bridgePlan ? clonePlan(this.bridgePlan) : null;
+      this.stateValue.omoPlan = this.bridgePlan;
     }
     if (!this.bridgeActive) this.bridgePlan = null;
-    this.stateValue.entries = cloneEntries(this.rawEntries);
+    this.stateValue.entries = this.rawEntries;
     this.stateValue.available = true;
-    this.stateValue.pendingPrefix = cloneEntries(analysis.pendingPrefix);
+    this.stateValue.pendingPrefix = pendingPrefix;
     this.stateValue.contextSearching = this.bridgeActive;
     this.stateValue.error = null;
     this.stateValue.preparationPolls = 0;
-    this.rawProgressThisPage = !sameEntryIDs(laneBefore, this.networkEntries);
+    this.rawProgressThisPage = !sameEntryIDs(networkBefore, this.networkEntries);
 
-    if (retainedEntryCount(this.rawEntries, this.networkEntries, this.bridgeEntries) > HISTORY_MAX_RAW_ENTRIES
-      || retainedEntryBytes(this.rawEntries, this.networkEntries, this.bridgeEntries) > this.maxContentBytes) {
-      this.rawEntries = rawBefore;
-      this.networkEntries = networkBefore;
-      this.bridgeEntries = bridgeBefore;
-      this.bridgeRestore = bridgeRestoreBefore;
-      this.bridgePlan = bridgePlanBefore;
-      this.networkSourceRevision = sourceBefore;
-      this.networkSnapshotId = snapshotBefore;
-      this.headCursor = headCursorBefore;
-      this.stateValue = stateBefore;
-      this.pauseWithError('History is too large to load further on this device. Loaded messages are still available.', false, 'memory_limit');
-      return { accepted: false };
-    }
     if (!this.bridgeActive) this.savePreview();
     this.emit();
     return { accepted: true };
+  }
+
+  private nextLanes(
+    page: ConversationPage,
+    demand: Demand,
+    incoming: ConversationEntry[],
+    incomingPlan: OmoTodoState | null,
+    context: {
+      isFreshHead: boolean;
+      previewWasVisible: boolean;
+      olderContinuationBefore: OlderContinuation | null;
+      planBefore: OmoTodoState | null;
+    },
+  ): EntryLanes {
+    const { isFreshHead, previewWasVisible, olderContinuationBefore, planBefore } = context;
+    const lanes: EntryLanes = {
+      raw: this.rawEntries,
+      network: this.networkEntries,
+      bridge: this.bridgeEntries,
+      bridgeActive: this.bridgeActive,
+      bridgeRestore: this.bridgeRestore,
+      bridgePlan: this.bridgePlan,
+      latestGapOutstanding: this.stateValue.latestGapOutstanding,
+      replacedWindow: false,
+    };
+    if (isFreshHead) {
+      if (previewWasVisible) {
+        // Never merge a fresh page into cache-owned content merely because a
+        // source revision or entry ID happens to match. The fresh lane is
+        // promoted only after it provides usable/authoritatively empty data.
+        lanes.network = incoming;
+        lanes.bridge = [];
+        lanes.bridgeActive = false;
+        lanes.latestGapOutstanding = false;
+      } else if (demand === 'refresh' && this.rawEntries.length > 0 && !sharedEntryId(this.rawEntries, incoming)) {
+        lanes.bridgeRestore = olderContinuationBefore;
+        lanes.bridgePlan = incomingPlan || planBefore;
+        lanes.bridge = incoming;
+        lanes.network = incoming;
+        lanes.bridgeActive = Boolean(page.hasMore || page.nextCursor);
+        lanes.latestGapOutstanding = lanes.bridgeActive;
+        // A bridge uses the fresh head's cursor and snapshot cohort. The
+        // established older lane is restored after overlap is proven.
+        lanes.networkSnapshotId = page.mode === 'snapshot' ? page.snapshotId || '' : '';
+        if (!lanes.bridgeActive) {
+          lanes.raw = incoming;
+          lanes.bridge = [];
+          lanes.bridgeRestore = null;
+          lanes.latestGapOutstanding = false;
+          lanes.replacedWindow = true;
+        }
+      } else if (demand === 'refresh' && this.rawEntries.length > 0) {
+        lanes.raw = mergeFreshEntries(this.rawEntries, incoming);
+        lanes.network = lanes.raw;
+        lanes.bridge = [];
+        lanes.bridgeActive = false;
+        lanes.latestGapOutstanding = false;
+      } else {
+        lanes.raw = incoming;
+        lanes.network = incoming;
+        lanes.bridge = [];
+        lanes.bridgeActive = false;
+        lanes.latestGapOutstanding = false;
+      }
+    } else if (this.bridgeActive) {
+      lanes.bridge = mergeOlderEntries(this.bridgeEntries, incoming);
+      lanes.network = lanes.bridge;
+      if (sharedEntryId(this.rawEntries, lanes.bridge)) {
+        lanes.raw = mergeBridgedEntries(this.rawEntries, lanes.bridge);
+        lanes.network = lanes.raw;
+        lanes.bridge = [];
+        lanes.bridgeActive = false;
+        lanes.latestGapOutstanding = false;
+      } else if (!page.hasMore && !page.nextCursor) {
+        // The new chain reached source start without overlap. It is safe to
+        // replace the old window, but never mix the two disconnected chains.
+        lanes.raw = lanes.bridge;
+        lanes.network = lanes.raw;
+        lanes.bridge = [];
+        lanes.bridgeRestore = null;
+        lanes.bridgeActive = false;
+        lanes.latestGapOutstanding = false;
+        lanes.replacedWindow = true;
+      }
+    } else {
+      lanes.network = previewWasVisible
+        ? mergeOlderEntries(this.networkEntries, incoming)
+        : mergeOlderEntries(this.rawEntries, incoming);
+      if (!previewWasVisible) lanes.raw = lanes.network;
+    }
+    return lanes;
   }
 
   private restoreBridgeAfterFailure(): boolean {
@@ -1008,15 +1008,15 @@ export class ConversationHistoryController {
       savedAt: Date.now(),
       sourceRevision: this.stateValue.sourceRevision,
       historical: this.stateValue.intent === 'historical',
-      ...(this.stateValue.diagnostics ? { diagnostics: { ...this.stateValue.diagnostics } } : {}),
-      plan: this.stateValue.omoPlan ? clonePlan(this.stateValue.omoPlan) : null,
-      entries: cloneEntries(conversationPreviewEntries(this.rawEntries)),
+      ...(this.stateValue.diagnostics ? { diagnostics: this.stateValue.diagnostics } : {}),
+      plan: this.stateValue.omoPlan,
+      entries: conversationPreviewEntries(this.rawEntries),
     });
   }
 
   private emit(): void {
-    this.stateValue.entries = cloneEntries(this.rawEntries);
-    this.onState?.(cloneState(this.stateValue));
+    this.stateValue.entries = this.rawEntries;
+    this.onState?.({ ...this.stateValue });
   }
 }
 
@@ -1100,7 +1100,7 @@ function mergeFreshEntries(existing: ConversationEntry[], fresh: ConversationEnt
 function mergeBridgedEntries(existing: ConversationEntry[], bridge: ConversationEntry[]): ConversationEntry[] {
   const existingIndex = new Map(existing.map((entry, index) => [entry.id, index]));
   const bridgeAnchor = bridge.findIndex((entry) => existingIndex.has(entry.id));
-  if (bridgeAnchor < 0) return cloneEntries(bridge);
+  if (bridgeAnchor < 0) return bridge;
   const existingAnchor = existingIndex.get(bridge[bridgeAnchor].id)!;
   const ordered = [
     ...existing.slice(0, existingAnchor),
@@ -1136,29 +1136,6 @@ function mergeDiagnostics(
     continuation_incomplete: Boolean(previous?.continuation_incomplete || next?.continuation_incomplete),
     ...(next?.continuation_reason || previous?.continuation_reason
       ? { continuation_reason: next?.continuation_reason || previous?.continuation_reason } : {}),
-  };
-}
-
-function clonePage(page: ConversationPage): ConversationPage {
-  return {
-    ...page,
-    provisional: undefined,
-    entries: cloneEntries(page.entries),
-    ...(page.progress ? { progress: { ...page.progress } } : {}),
-    ...(page.diagnostics ? { diagnostics: { ...page.diagnostics } } : {}),
-    ...(page.error ? { error: { ...page.error } } : {}),
-    ...(page.omoPlan ? { omoPlan: clonePlan(page.omoPlan) } : {}),
-  };
-}
-
-function cloneState(state: ConversationHistoryControllerState): ConversationHistoryControllerState {
-  return {
-    ...state,
-    entries: cloneEntries(state.entries),
-    ...(state.progress ? { progress: { ...state.progress } } : {}),
-    ...(state.diagnostics ? { diagnostics: { ...state.diagnostics } } : {}),
-    ...(state.error ? { error: { ...state.error } } : {}),
-    ...(state.omoPlan ? { omoPlan: clonePlan(state.omoPlan) } : {}),
   };
 }
 
