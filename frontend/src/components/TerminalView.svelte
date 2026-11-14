@@ -41,7 +41,8 @@
   import { replaceView } from '$lib/router';
   import { targetRefForAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
-  import { terminalDraftState } from '$lib/terminal-draft-state.svelte';
+  import { paneActive } from '$lib/pane-activity.svelte';
+  import { terminalInputGate } from '$lib/terminal-input-gate.svelte';
   import { relayStore } from '$lib/store';
   import {
     latestCompletedResponse,
@@ -175,10 +176,6 @@
   // desktop browser that reports occluded windows as hidden does not lapse
   // the lease on every app switch.
   let hiddenAt = 0;
-  // A locked app is showing this pane to nobody who has verified, so it counts
-  // as hidden for reads and watches. The connection now survives the lock, so
-  // without this the terminal would keep streaming behind the unlock screen.
-  const paneVisible = () => document.visibilityState === 'visible' && !$securityState.locked;
   // The lease needs its own gate: being locked is not the same as being
   // briefly hidden. The grace window below exists so an app switch does not
   // resize the computer's pane, but an unverified holder must not keep it
@@ -231,14 +228,13 @@
   const sendingFilter = $derived(terminalTextMode === 'filter' && sendingPrompt);
   const inputLocked = $derived(readOnly || responsePending || inspectionMode || terminalTextMode === 'filter');
   let manualInput = $state(false);
-  let inputBlocked = $state(false);
+  const inputGate = terminalInputGate(() => agent);
+  const inputBlocked = $derived(inputGate.blocked);
   // Literal terminal input is the escape hatch for when the composer cannot send: the agent awaits a structured
   // response or needs inspection, or an earlier terminal send is unconfirmed and must be inspected first.
   const manualInputOffered = $derived(!readOnly && (Boolean(promptDispatchRestriction(agent)) || inputBlocked));
   const manualInputBusy = $derived(sendingPrompt || keySending || responding.has(agent.pane_id));
   const dispatchBlocked = $derived(responsePending || !terminalTextMode ? promptDispatchRestriction(agent) : '');
-  const draftState = terminalDraftState(() => agent, () => frame);
-  const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
   const submitAdapter = $derived<ComposerSubmitAdapter | undefined>(terminalTextMode ? {
     filter: true,
     validate: (text) => keySending ? 'Wait for the pending terminal key.'
@@ -550,7 +546,7 @@
     );
     let lastRefreshAt = Date.now();
     const visibilityChanged = () => {
-      if (!paneVisible()) {
+      if (!paneActive.current) {
         // Traffic stops while hidden, but lease renewals keep going for a
         // bounded grace: desktop Safari reports an occluded window as hidden,
         // so treating every app switch as departure lapsed the lease and
@@ -584,13 +580,13 @@
     window.visualViewport?.addEventListener('resize', measurePane);
     document.addEventListener('visibilitychange', visibilityChanged);
     const refresh = setInterval(() => {
-      if (!paneVisible()) return;
+      if (!paneActive.current) return;
       const refreshInterval = realtimeDeltaEnabled() ? PANE_REALTIME_RESYNC_MS : 3_000;
       if (Date.now() - lastRefreshAt < refreshInterval) return;
       lastRefreshAt = Date.now();
       relayStore.readPane(agent);
     }, 3_000);
-    if (paneVisible()) relayStore.watchPane(agent);
+    if (paneActive.current) relayStore.watchPane(agent);
     const refreshPaneSizeLease = setInterval(
       () => {
         if (paneLeaseAllowed()) requestPaneSizeLease(true);
@@ -1636,14 +1632,13 @@
 
   </div>
   <div class="terminal-bottom">
-    <TerminalInputMode bind:this={terminalInputMode} {agent} {frame} {readOnly} bind:manual={manualInput} bind:blocked={inputBlocked}
+    <TerminalInputMode bind:this={terminalInputMode} {agent} {frame} {readOnly} bind:manual={manualInput}
       bind:loading={manualInputLoading} busy={manualInputBusy} returnFocus={() => manualInputTriggerHost?.querySelector('button')?.focus()} />
     <div hidden={manualInput}>
     {#if !questionMode && !manualInput}<TerminalKeys queue={keyQueue} bind:this={terminalKeys} {agent} {readOnly} blocked={sendingFilter || inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />{/if}
     {#key JSON.stringify(targetRefForAgent(agent))}
-      <PromptComposer {agent} {frame} {readOnly} dispatchBlocked={manualInput || inputBlocked ? 'Check terminal input delivery before sending.' : draftState.secretReady ? '' : dispatchBlocked}
-        blockExplained={manualInput || inputBlocked} attachmentsBlocked={inputLocked}
-        {noEchoActive} draftPersistenceAllowed={draftState.allowed} noEchoPrompt={frame?.noEchoPrompt || 'Password:'}
+      <PromptComposer {agent} {frame} {readOnly} dispatchBlocked={manualInput ? 'Check terminal input delivery before sending.' : dispatchBlocked}
+        blockExplained={manualInput} attachmentsBlocked={inputLocked}
         {submitAdapter} bind:sending={sendingPrompt}
         placeholder={terminalTextMode ? 'Type filter text…' : 'Type a reply…'}
         submitLabel={terminalTextMode ? 'Send filter text' : 'Send prompt'} />

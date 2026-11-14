@@ -41,7 +41,9 @@ it.each([TerminalView, ConversationHistory])('shows no empty-composer draft warn
 });
 
 it('does not reclassify actual draft storage failures as a healthy or neutral state', async () => {
-  render(PromptComposer, { agent, draftPersistenceAllowed: true });
+  const view = render(PromptComposer, { agent });
+  await vi.advanceTimersByTimeAsync(0);
+  await view.rerender({ frame: frame() });
   vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('Synthetic storage failure'); });
   await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'safe but not persisted' } });
   expect(screen.getByText('Draft persistence is unavailable; keep this page open.')).toHaveClass('error');

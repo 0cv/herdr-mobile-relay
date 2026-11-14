@@ -2,8 +2,7 @@
   import { onDestroy, untrack } from 'svelte';
   import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import { inputContextIdentity } from '$lib/input-target-state';
-  import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
-  import { piPromptDelivery } from '$lib/pi-prompt.svelte';
+  import { terminalInputGate } from '$lib/terminal-input-gate.svelte';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
   import { AppReloadHeld, importOrReload } from '$lib/updates';
@@ -12,31 +11,20 @@
 
   // The parent renders the trigger (inline with the terminal keys) and calls enter(); this component owns the
   // lazily loaded panel and the delivery notices.
-  let { agent, frame, readOnly = false, busy = false, manual = $bindable(false), blocked = $bindable(false), loading = $bindable(false), returnFocus }:
-    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; busy?: boolean; manual?: boolean; blocked?: boolean; loading?: boolean; returnFocus?: () => void } = $props();
+  let { agent, frame, readOnly = false, busy = false, manual = $bindable(false), loading = $bindable(false), returnFocus }:
+    { agent: Agent; frame?: TerminalFrame; readOnly?: boolean; busy?: boolean; manual?: boolean; loading?: boolean; returnFocus?: () => void } = $props();
   const connections = relayStore.connections;
   let Panel = $state<typeof ManualTerminalInput>();
   let destroyed = false;
   onDestroy(() => { destroyed = true; });
   const identity = $derived(inputContextIdentity(agent));
-  const delivery = $derived(terminalInputDelivery(agent));
-  const piDelivery = $derived(piPromptDelivery(agent));
+  const inputGate = terminalInputGate(() => agent);
+  const delivery = $derived(inputGate.delivery);
   const context = $derived(JSON.stringify([identity, $connections.get(agent.relay_id)?.status, $securityState.locked, readOnly]));
 
   $effect.pre(() => {
     void context;
     untrack(() => { manual = false; });
-  });
-  $effect.pre(() => {
-    const state = delivery;
-    const piState = piDelivery;
-    state.retain();
-    piState.retain();
-    return () => { state.release(); piState.release(); };
-  });
-  $effect.pre(() => {
-    const next = delivery.uncertain || delivery.pending || piDelivery.pending || piDelivery.uncertain;
-    if (untrack(() => blocked) !== next) blocked = next;
   });
 
   export async function enter() {
