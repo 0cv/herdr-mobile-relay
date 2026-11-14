@@ -71,6 +71,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     cp "$REPO_DIR/LICENSE" "$STAGE/LICENSE"
     cp "$REPO_DIR/README.md" "$STAGE/README.md"
     cp -R "$REPO_DIR/relay/pi-command-bridge" "$STAGE/relay/pi-command-bridge"
+    cp -R "$REPO_DIR/relay/gateway-bundle" "$STAGE/relay/gateway-bundle"
     for WRAPPER in "$REPO_DIR"/relay/*.sh; do
         case "${WRAPPER##*/}" in
             dev-tunnel.sh|dev-pi-commands.sh|open-plugin-pane.sh|plugin-build.sh) continue ;;

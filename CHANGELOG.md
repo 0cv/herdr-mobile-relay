@@ -17,6 +17,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The README in a generated gateway bundle now names the current setup menu path
+  to an already running gateway.
 - Cloudflare setup links, status, and hostname changes now read quoted tunnel
   hostnames and trailing comments correctly. Hostname changes also accept pasted
   HTTPS or WebSocket URLs and reject invalid domain labels before routing.
