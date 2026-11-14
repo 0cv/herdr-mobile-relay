@@ -1851,11 +1851,11 @@ MOVE_OUTPUT="$(
     printf 'relay-fedora.elsewhere.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
-        TUNNEL_ORIGIN_CERT="$MOVE_CERT" HERDR_CHANGE_HOSTNAME_RELOGIN=false \
+        TUNNEL_ORIGIN_CERT="$MOVE_CERT" HERDR_STABLE_RELOGIN=false \
         bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
 )"
 case "$MOVE_OUTPUT" in
-    *"certificate covers old.test"*"cloudflared tunnel login"*) ;;
+    *"authorizes old.test"*"cloudflared tunnel login"*) ;;
     *)
         echo "a hostname outside the certificate's zone was not refused" >&2
         printf '%s\n' "$MOVE_OUTPUT" >&2

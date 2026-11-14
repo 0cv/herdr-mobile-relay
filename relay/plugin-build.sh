@@ -60,7 +60,7 @@ HERDR_RELAY_ENV="$TARGET_ENV"
 export INSTALL_ROOT BIN_DIR HERDR_PLUGIN_CONFIG_DIR HERDR_RELAY_ENV
 
 PLATFORM=$(uname -s)
-SERVICE_FILE=
+SERVICE_FILE="$(relay_service_file || true)"
 SERVICE_BACKUP=
 service_was_active=false
 service_should_run=false
@@ -68,13 +68,11 @@ recover_broken_service=false
 service_cutover_started=false
 case "$PLATFORM" in
     Linux)
-        SERVICE_FILE="$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL"
         case "$(systemctl --user is-active "$RELAY_SYSTEMD_LABEL" 2>/dev/null || true)" in
             active|activating|reloading) service_was_active=true ;;
         esac
         ;;
     Darwin)
-        SERVICE_FILE="$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist"
         if launchd_service_loaded "gui/$(id -u)/$RELAY_LAUNCHD_LABEL"; then
             service_was_active=true
         fi

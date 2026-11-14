@@ -407,10 +407,78 @@ hostname_in_zone() {
     return 1
 }
 
+ensure_hostname_in_cloudflare_zone() {
+    local hostname="$1"
+    local origin_cert="$2"
+    local cert_zone
+    local confirmation
+
+    cert_zone="$(cloudflare_cert_zone_name "$origin_cert" || true)"
+    if [ -z "$cert_zone" ]; then
+        echo "▸ The Cloudflare login domain could not be read; the created route will be verified exactly."
+        return 0
+    fi
+    if hostname_in_zone "$hostname" "$cert_zone"; then
+        return 0
+    fi
+
+    echo ""
+    echo "✗ The current Cloudflare login authorizes $cert_zone, not $hostname." >&2
+    echo "  Continuing would create $hostname.$cert_zone instead." >&2
+    case "${HERDR_STABLE_RELOGIN:-}" in
+        1|true) confirmation="y" ;;
+        0|false) confirmation="n" ;;
+        *)
+            if [ ! -t 0 ]; then
+                confirmation="n"
+            else
+                read -r -p "Sign in to Cloudflare for ${hostname#*.} now? [Y/n] " confirmation ||
+                    confirmation=""
+            fi
+            ;;
+    esac
+    case "$confirmation" in
+        ""|y|Y|yes|YES) ;;
+        *)
+            echo "  Run 'cloudflared tunnel login' and pick the zone that owns" >&2
+            echo "  $hostname, then run this again." >&2
+            return 1
+            ;;
+    esac
+
+    relogin_for_cloudflare_zone "$origin_cert" "${hostname#*.}" || return 1
+    cert_zone="$(cloudflare_cert_zone_name "$origin_cert" || true)"
+    if [ -z "$cert_zone" ] || ! hostname_in_zone "$hostname" "$cert_zone"; then
+        echo "✗ The new Cloudflare login still does not authorize $hostname." >&2
+        return 1
+    fi
+    echo "✓ Cloudflare authorized $cert_zone."
+}
+
 cloudflare_routed_hostname() {
     printf '%s\n' "$1" |
         sed -n 's/.*Added CNAME \([^ ]*\) which will route.*/\1/p;s/.*INF \([^ ]*\) is already configured.*/\1/p' |
         head -1
+}
+
+relay_service_file() {
+    case "$(uname -s)" in
+        Linux) printf '%s\n' "$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL" ;;
+        Darwin) printf '%s\n' "$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist" ;;
+        *) return 1 ;;
+    esac
+}
+
+relay_transport() {
+    local env_file="$1"
+
+    if [ -n "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ]; then
+        echo tailscale
+    elif [ -n "$(gateway_urls "$env_file")" ]; then
+        echo gateway
+    else
+        echo cloudflare
+    fi
 }
 
 installed_service_env_file() {
@@ -418,13 +486,13 @@ installed_service_env_file() {
 
     case "$(uname -s)" in
         Linux)
-            service_file="$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL"
+            service_file="$(relay_service_file)"
             if [ -r "$service_file" ]; then
                 systemd_field "$service_file" Environment
             fi
             ;;
         Darwin)
-            service_file="$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist"
+            service_file="$(relay_service_file)"
             if [ -r "$service_file" ]; then
                 awk '
                     /<key>HERDR_RELAY_ENV<\/key>/ { found = 1; next }
@@ -1054,8 +1122,7 @@ report_inventory_failure() {
 verify_public_readiness() {
     local env_file="$1" health="$2"
     local config hostname public attempt binary
-    [ -z "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ] || return 0
-    [ -z "$(gateway_urls "$env_file")" ] || return 0
+    [ "$(relay_transport "$env_file")" = cloudflare ] || return 0
     config="$(env_file_value "$env_file" CLOUDFLARED_CONFIG)"
     [ -n "$config" ] || return 0
     [ -f "$config" ] || return 1
@@ -1853,6 +1920,44 @@ print_setup_link_arming() {
     else
         echo "  The relay is not running here; start it, then print the link again."
     fi
+}
+
+print_pairing() {
+    local env_file="$1"
+    local relay_url="$2"
+    local fallback_origin="$3"
+    local kind="$4"
+    local heading="$5"
+    local record_fallback="${6:-1}"
+    local fragment
+    local app_base
+    local armed=0
+
+    if [ -n "$relay_url" ]; then
+        fragment="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$(relay_host_label)" "$relay_url")" || return $?
+    else
+        fragment="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$(relay_host_label)")" || return $?
+    fi
+    if [ "$kind" = gateway ]; then
+        app_base="$(gateway_phone_app_base_url "$env_file")" || return $?
+    else
+        app_base="$(choose_phone_app_base_url "$fallback_origin" "$env_file" "$kind")" || return $?
+    fi
+    if [ "$record_fallback" = 1 ] || [ "$app_base" != "$fallback_origin" ]; then
+        record_phone_app_origin "$app_base" "$env_file" || return $?
+    fi
+    arm_setup_link "$env_file" || armed=$?
+
+    echo "$heading"
+    echo ""
+    print_phone_setup "$app_base/#$fragment" || return $?
+    if [ -n "$fallback_origin" ] && [ "$app_base" != "$fallback_origin" ]; then
+        echo ""
+        echo "  Direct browser fallback:"
+        print_phone_setup_url "$fallback_origin/#$fragment" || return $?
+    fi
+    echo ""
+    print_setup_link_arming "$armed"
 }
 
 prepare_core_directory() {

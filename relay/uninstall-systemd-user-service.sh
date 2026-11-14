@@ -16,7 +16,7 @@ LABELS=("$RELAY_SYSTEMD_LABEL")
 
 for label in "${LABELS[@]}"; do
     systemctl --user disable --now "$label" >/dev/null 2>&1 || true
-    rm -f "$HOME/.config/systemd/user/$label"
+    rm -f "$(relay_service_file)"
 done
 systemctl --user daemon-reload
 

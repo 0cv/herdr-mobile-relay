@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 LABEL="$RELAY_LAUNCHD_LABEL"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+PLIST="$(relay_service_file)"
 LOG_DIR="$RELAY_LOG_DIR"
 . "$SCRIPT_DIR/native-install-transaction.sh"
 

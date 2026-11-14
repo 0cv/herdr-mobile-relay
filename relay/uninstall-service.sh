@@ -15,7 +15,7 @@ fi
 LABELS=("$RELAY_LAUNCHD_LABEL")
 
 for label in "${LABELS[@]}"; do
-    plist="$HOME/Library/LaunchAgents/$label.plist"
+    plist="$(relay_service_file)"
     launchctl bootout "gui/$UID" "$plist" >/dev/null 2>&1 || true
     rm -f "$plist"
 done

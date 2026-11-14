@@ -113,36 +113,9 @@ public_curl() {
 ORIGIN_CERT="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
 
 
-CERT_ZONE="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
-if [ -n "$CERT_ZONE" ] && ! hostname_in_zone "$NEW_HOSTNAME" "$CERT_ZONE"; then
-    echo ""
-    echo "▸ This tunnel's Cloudflare certificate covers $CERT_ZONE, not"
-    echo "  $NEW_HOSTNAME. Routing it now would create"
-    echo "  $NEW_HOSTNAME.$CERT_ZONE instead, so it has to be signed in first."
-    if [ "${HERDR_CHANGE_HOSTNAME_RELOGIN:-}" = "false" ] || [ ! -t 0 ]; then
-        echo "✗ Run 'cloudflared tunnel login' and pick the zone that owns" >&2
-        echo "  $NEW_HOSTNAME, then run this again. Nothing was changed." >&2
-        exit 1
-    fi
-    if ! read -r -p "Sign in to Cloudflare for ${NEW_HOSTNAME#*.} now? [Y/n]: " RELOGIN_ANSWER; then
-        RELOGIN_ANSWER=n
-    fi
-    case "${RELOGIN_ANSWER:-y}" in
-        y | Y | yes | YES) ;;
-        *)
-            echo "Left unchanged." >&2
-            exit 1
-            ;;
-    esac
-    if ! relogin_for_cloudflare_zone "$ORIGIN_CERT" "${NEW_HOSTNAME#*.}"; then
-        exit 1
-    fi
-    CERT_ZONE="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
-    if [ -n "$CERT_ZONE" ] && ! hostname_in_zone "$NEW_HOSTNAME" "$CERT_ZONE"; then
-        echo "✗ The new certificate covers $CERT_ZONE, still not $NEW_HOSTNAME." >&2
-        echo "  Nothing was changed." >&2
-        exit 1
-    fi
+if ! ensure_hostname_in_cloudflare_zone "$NEW_HOSTNAME" "$ORIGIN_CERT"; then
+    echo "  Nothing was changed." >&2
+    exit 1
 fi
 
 echo ""
