@@ -433,4 +433,152 @@ sleep 1
 grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||
     { echo "a configured relay did not open the setup menu" >&2; exit 1; }
 
+# --- launchd service on macOS ------------------------------------------------
+LD_HOME="$WORK_DIR/launchd-home"
+LD_ROOT="$LD_HOME/releases"
+LD_CONFIG="$LD_HOME/config"
+LD_PLIST="$LD_HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+LD_BIN="$WORK_DIR/launchd-bin"
+LAUNCHCTL_LOG="$WORK_DIR/launchctl.log"
+LAUNCHCTL_STATE="$WORK_DIR/launchctl.state"
+PLIST_LOG="$WORK_DIR/plistbuddy.log"
+LD_TARGET="gui/$(id -u)/com.herdr-mobile-relay.service"
+mkdir -p "$LD_BIN" "$(dirname "$LD_PLIST")" "$LD_CONFIG" "$LD_ROOT"
+cp "$FAKE_BIN"/* "$LD_BIN/"
+rm -f "$LD_BIN/systemctl"
+printf '#!/bin/sh\nprintf '"'"'Darwin\\n'"'"'\n' > "$LD_BIN/uname"
+cat > "$LD_BIN/launchctl" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
+case "$1" in
+    print) [ -f "$LAUNCHCTL_STATE" ] ;;
+    bootout) rm -f "$LAUNCHCTL_STATE" ;;
+    bootstrap) touch "$LAUNCHCTL_STATE" ;;
+    kickstart)
+        if [ -f "$LD_PLIST" ] &&
+           ! grep -F "$LD_ROOT/current/relay/herdr-mobile-relay-service.sh" "$LD_PLIST" >/dev/null; then
+            printf '{"status":"ready","inventory":{"state":"ready"},"instance":"source-instance","version":"0.8.6","protocol":3,"release_version":"0.8.6","revision":"old-revision","bundle_hash":"old-web"}\n' > "$HEALTH_FILE"
+        else
+            printf '{"status":"ready","inventory":{"state":"ready"},"instance":"source-instance","version":"%s","protocol":3,"release_version":"%s","revision":"%s","bundle_hash":"new-web"}\n' \
+                "$TEST_VERSION" "$TEST_VERSION" "${REPLACEMENT_REVISION:-wrong-revision}" > "$HEALTH_FILE"
+        fi
+        ;;
+esac
+EOF
+cat > "$LD_BIN/PlistBuddy" <<'EOF'
+#!/bin/sh
+command=$2
+plist=$3
+printf '%s\n' "$command" >> "$PLIST_LOG"
+path=${command#Set :}
+path=${path%% *}
+value=${command#"Set :$path "}
+key=${path%:0}
+key=${key##*:}
+temp="$plist.edit"
+awk -v key="$key" -v value="$value" '
+    state == 0 && index($0, "<key>" key "</key>") { state = 1; print; next }
+    state == 1 && /<string>/ { print "<string>" value "</string>"; state = 2; next }
+    { print }
+' "$plist" > "$temp"
+mv "$temp" "$plist"
+EOF
+chmod 700 "$LD_BIN/launchctl" "$LD_BIN/PlistBuddy" "$LD_BIN/uname"
+export LD_PLIST LD_ROOT LAUNCHCTL_LOG LAUNCHCTL_STATE PLIST_LOG
+
+reset_launchd_service() {
+    rm -f "$LD_ROOT/current" "$LAUNCHCTL_LOG" "$PLIST_LOG" "$RESTART_LOG"
+    ln -s "$OLD_RELEASE" "$LD_ROOT/current"
+    printf "HERDR_RELAY_TOKEN='target-token'\nHERDR_RELAY_INSTANCE_ID='source-instance'\nHERDR_RELAY_PORT='18375'\n" \
+        > "$LD_CONFIG/relay.env"
+    cat > "$LD_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+<key>Label</key>
+<string>com.herdr-mobile-relay.service</string>
+<key>ProgramArguments</key>
+<array>
+<string>$OLD_RELEASE/relay/herdr-mobile-relay-service.sh</string>
+</array>
+<key>WorkingDirectory</key>
+<string>$OLD_RELEASE</string>
+<key>EnvironmentVariables</key>
+<dict>
+<key>HERDR_RELAY_ENV</key>
+<string>$LD_CONFIG/relay.env</string>
+</dict>
+</dict>
+</plist>
+PLIST
+    touch "$LAUNCHCTL_STATE"
+}
+
+run_launchd_build() {
+    HOME="$LD_HOME" \
+        PATH="$LD_BIN:$PATH" \
+        HERDR_RELEASE_ROOT="$LD_ROOT" \
+        HERDR_PLUGIN_CONFIG_DIR="$LD_CONFIG" \
+        HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+        HERDR_PLIST_BUDDY="$LD_BIN/PlistBuddy" \
+        HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 \
+        GH_TOKEN= \
+        GITHUB_TOKEN= \
+        "$@" \
+        bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/launchd-output" 2>&1
+}
+
+reset_launchd_service
+cp "$LD_PLIST" "$WORK_DIR/launchd-plist-before"
+if run_launchd_build env; then
+    echo "launchd upgrade unexpectedly accepted the wrong replacement identity" >&2
+    exit 1
+fi
+test "$(readlink "$LD_ROOT/current")" = "$OLD_RELEASE"
+diff -q "$WORK_DIR/launchd-plist-before" "$LD_PLIST" >/dev/null
+grep -Fx "kickstart -k $LD_TARGET" "$LAUNCHCTL_LOG" >/dev/null
+test "$(grep -c '^bootstrap ' "$LAUNCHCTL_LOG")" -eq 2
+test -f "$LAUNCHCTL_STATE"
+grep -F "previous service recovered successfully" "$WORK_DIR/launchd-output" >/dev/null
+
+reset_launchd_service
+if ! run_launchd_build env REPLACEMENT_REVISION=new-revision; then
+    cat "$WORK_DIR/launchd-output" >&2
+    exit 1
+fi
+test "$(readlink "$LD_ROOT/current")" = "$NEW_RELEASE"
+grep -Fx "Set :ProgramArguments:0 $LD_ROOT/current/relay/herdr-mobile-relay-service.sh" "$PLIST_LOG" >/dev/null
+grep -Fx "Set :WorkingDirectory $LD_ROOT/current" "$PLIST_LOG" >/dev/null
+grep -Fx "Set :EnvironmentVariables:HERDR_RELAY_ENV $LD_CONFIG/relay.env" "$PLIST_LOG" >/dev/null
+grep -Fx "kickstart -k $LD_TARGET" "$LAUNCHCTL_LOG" >/dev/null
+test "$(grep -c '^bootstrap ' "$LAUNCHCTL_LOG")" -eq 1
+test -f "$LAUNCHCTL_STATE"
+
+reset_launchd_service
+rm -f "$LAUNCHCTL_STATE"
+if ! run_launchd_build env HERDR_MOBILE_RELAY_NO_AUTO_SETUP=; then
+    cat "$WORK_DIR/launchd-output" >&2
+    exit 1
+fi
+test "$(readlink "$LD_ROOT/current")" = "$NEW_RELEASE"
+grep -Fx "Set :ProgramArguments:0 $LD_ROOT/current/relay/herdr-mobile-relay-service.sh" "$PLIST_LOG" >/dev/null
+test ! -e "$LAUNCHCTL_STATE"
+if grep -E '^(bootstrap|kickstart) ' "$LAUNCHCTL_LOG" >/dev/null; then
+    echo "an inactive launchd service was started by the upgrade" >&2
+    exit 1
+fi
+
+reset_launchd_service
+rm -f "$LD_PLIST"
+if ! run_launchd_build env REPLACEMENT_REVISION=new-revision; then
+    cat "$WORK_DIR/launchd-output" >&2
+    exit 1
+fi
+test "$(readlink "$LD_ROOT/current")" = "$NEW_RELEASE"
+grep -Fx "kickstart -k $LD_TARGET" "$LAUNCHCTL_LOG" >/dev/null
+if grep -E '^(bootout|bootstrap) ' "$LAUNCHCTL_LOG" >/dev/null; then
+    echo "a loaded launchd service without a plist was reloaded" >&2
+    exit 1
+fi
+
 echo "plugin build migration, rollback, and recovery tests passed"

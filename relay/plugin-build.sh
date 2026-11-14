@@ -25,7 +25,7 @@ VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_DIR/herdr-plugin.toml")
     exit 1
 }
 
-INSTALL_ROOT=${HERDR_RELEASE_ROOT:-"${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay"}
+INSTALL_ROOT=$(relay_release_root)
 BIN_DIR=${HERDR_RELAY_BIN_DIR:-"$HOME/.local/bin"}
 INSTALLER=${HERDR_PLUGIN_INSTALLER:-"$REPO_DIR/install.sh"}
 RELEASE_REPOSITORY=${HERDR_RELEASE_REPOSITORY:-}
@@ -68,15 +68,14 @@ recover_broken_service=false
 service_cutover_started=false
 case "$PLATFORM" in
     Linux)
-        SERVICE_FILE="$HOME/.config/systemd/user/herdr-mobile-relay.service"
-        case "$(systemctl --user is-active herdr-mobile-relay.service 2>/dev/null || true)" in
+        SERVICE_FILE="$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL"
+        case "$(systemctl --user is-active "$RELAY_SYSTEMD_LABEL" 2>/dev/null || true)" in
             active|activating|reloading) service_was_active=true ;;
         esac
         ;;
     Darwin)
-        SERVICE_FILE="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
-        if launchd_service_loaded \
-            "gui/$(id -u)/com.herdr-mobile-relay.service"; then
+        SERVICE_FILE="$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist"
+        if launchd_service_loaded "gui/$(id -u)/$RELAY_LAUNCHD_LABEL"; then
             service_was_active=true
         fi
         ;;
@@ -118,7 +117,7 @@ validate_migration_source() {
                 }
             ;;
         Darwin)
-            grep -F '<string>com.herdr-mobile-relay.service</string>' "$SERVICE_FILE" >/dev/null &&
+            grep -F "<string>$RELAY_LAUNCHD_LABEL</string>" "$SERVICE_FILE" >/dev/null &&
                 grep -E '<string>.*herdr-mobile-relay-service\.sh</string>' \
                     "$SERVICE_FILE" >/dev/null || {
                     echo "herdr-mobile-relay: refusing to migrate an unrecognized launchd service" >&2
@@ -135,7 +134,7 @@ recognized_service_definition() {
                 [[ "$(systemd_field "$SERVICE_FILE" ExecStart)" =~ /herdr-mobile-relay-service\.sh$ ]]
             ;;
         Darwin)
-            grep -F '<string>com.herdr-mobile-relay.service</string>' "$SERVICE_FILE" >/dev/null &&
+            grep -F "<string>$RELAY_LAUNCHD_LABEL</string>" "$SERVICE_FILE" >/dev/null &&
                 grep -F '<key>HERDR_RELAY_ENV</key>' "$SERVICE_FILE" >/dev/null &&
                 grep -E '<string>.*herdr-mobile-relay-service\.sh</string>' \
                     "$SERVICE_FILE" >/dev/null
@@ -353,6 +352,10 @@ if [ -n "$SERVICE_BACKUP" ]; then
     fi
 fi
 
+manifest_field() {
+    sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
 PREVIOUS_RELEASE=
 PREVIOUS_VERSION=
 PREVIOUS_REVISION=
@@ -371,9 +374,9 @@ if [ -L "$INSTALL_ROOT/current" ]; then
         PREVIOUS_RELEASE=$(CDPATH='' cd "$previous_candidate" && pwd -P)
         previous_manifest="$PREVIOUS_RELEASE/release-manifest.json"
         if [ -f "$previous_manifest" ]; then
-            PREVIOUS_VERSION=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$previous_manifest" | head -1)
-            PREVIOUS_REVISION=$(sed -n 's/^[[:space:]]*"revision":[[:space:]]*"\([^"]*\)".*/\1/p' "$previous_manifest" | head -1)
-            PREVIOUS_WEB_HASH=$(sed -n 's/^[[:space:]]*"web_hash":[[:space:]]*"\([^"]*\)".*/\1/p' "$previous_manifest" | head -1)
+            PREVIOUS_VERSION=$(manifest_field "$previous_manifest" version)
+            PREVIOUS_REVISION=$(manifest_field "$previous_manifest" revision)
+            PREVIOUS_WEB_HASH=$(manifest_field "$previous_manifest" web_hash)
         fi
     fi
 fi
@@ -415,17 +418,16 @@ rollback_plugin_migration() {
     case "$PLATFORM" in
         Linux)
             systemctl --user daemon-reload || return 1
-            systemctl --user restart herdr-mobile-relay.service || return 1
+            systemctl --user restart "$RELAY_SYSTEMD_LABEL" || return 1
             ;;
         Darwin)
-            label=com.herdr-mobile-relay.service
-            reload_launchd_service_definition "$SERVICE_FILE" "$label" || return 1
+            reload_launchd_service_definition "$SERVICE_FILE" "$RELAY_LAUNCHD_LABEL" || return 1
             ;;
     esac
 
     rollback_env="${SOURCE_ENV:-$ENV_FILE}"
     rollback_port="$(env_file_value "$rollback_env" HERDR_RELAY_PORT)"
-    rollback_port="${rollback_port:-8375}"
+    rollback_port="${rollback_port:-$RELAY_DEFAULT_PORT}"
     if [ -n "$PREVIOUS_VERSION" ] && [ -n "$PREVIOUS_REVISION" ] && [ -n "$PREVIOUS_WEB_HASH" ]; then
         wait_for_relay_release_health \
             "$rollback_port" 30 1 \
@@ -434,13 +436,7 @@ rollback_plugin_migration() {
     else
         wait_for_relay_health "$rollback_port" 30 1 "$(env_file_value "$rollback_env" HERDR_RELAY_INSTANCE_ID)" >/dev/null || return 1
     fi
-    case "$PLATFORM" in
-        Linux) systemctl --user is-active --quiet herdr-mobile-relay.service || return 1 ;;
-        Darwin)
-            launchd_service_loaded \
-                "gui/$(id -u)/com.herdr-mobile-relay.service" || return 1
-            ;;
-    esac
+    installed_relay_service_active || return 1
     echo "herdr-mobile-relay: previous service recovered successfully." >&2
 }
 
@@ -547,8 +543,8 @@ else
 fi
 "$INSTALL_ROOT/current/herdr-mobile-relay" verify-release "$INSTALL_ROOT/current" >/dev/null
 MANIFEST="$INSTALL_ROOT/current/release-manifest.json"
-REVISION=$(sed -n 's/^[[:space:]]*"revision":[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -1)
-WEB_HASH=$(sed -n 's/^[[:space:]]*"web_hash":[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -1)
+REVISION=$(manifest_field "$MANIFEST" revision)
+WEB_HASH=$(manifest_field "$MANIFEST" web_hash)
 [ -n "$REVISION" ] && [ -n "$WEB_HASH" ] || {
     echo "herdr-mobile-relay: installed release manifest has no identity" >&2
     exit 1
@@ -578,13 +574,9 @@ case "$PLATFORM" in
             systemctl --user daemon-reload 2>/dev/null || true
             if [ "$service_should_run" = true ]; then
                 echo "herdr-mobile-relay: restarting existing service..." >&2
-                systemctl --user restart herdr-mobile-relay.service
+                restart_installed_relay_service
                 service_restarted=true
             fi
-        elif systemctl --user is-active --quiet herdr-mobile-relay.service 2>/dev/null; then
-            echo "herdr-mobile-relay: restarting existing service..." >&2
-            systemctl --user restart herdr-mobile-relay.service
-            service_restarted=true
         fi
         ;;
     Darwin)
@@ -599,22 +591,21 @@ case "$PLATFORM" in
             }
             if [ "$service_should_run" = true ]; then
                 echo "herdr-mobile-relay: reloading existing service..." >&2
-                reload_launchd_service_definition \
-                    "$PLIST" "com.herdr-mobile-relay.service"
+                reload_launchd_service_definition "$PLIST" "$RELAY_LAUNCHD_LABEL"
                 service_restarted=true
             fi
-        elif launchd_service_loaded \
-            "gui/$(id -u)/com.herdr-mobile-relay.service"; then
-            echo "herdr-mobile-relay: restarting existing service..." >&2
-            launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service"
-            service_restarted=true
         fi
         ;;
 esac
+if [ "$service_cutover_started" != true ] && installed_relay_service_active; then
+    echo "herdr-mobile-relay: restarting existing service..." >&2
+    restart_installed_relay_service
+    service_restarted=true
+fi
 
 if [ "$service_restarted" = true ]; then
     PORT="$(env_file_value "$TARGET_ENV" HERDR_RELAY_PORT)"
-    PORT="${PORT:-8375}"
+    PORT="${PORT:-$RELAY_DEFAULT_PORT}"
     echo "herdr-mobile-relay: verifying replacement service identity..." >&2
     if ! HEALTH="$(wait_for_relay_release_health \
         "$PORT" 30 1 "$VERSION" "$REVISION" "$WEB_HASH" "$(env_file_value "$TARGET_ENV" HERDR_RELAY_INSTANCE_ID)")"; then
@@ -622,21 +613,10 @@ if [ "$service_restarted" = true ]; then
         exit 1
     fi
     verify_public_readiness "$TARGET_ENV" "$HEALTH" || exit 1
-    case "$PLATFORM" in
-        Linux)
-            systemctl --user is-active --quiet herdr-mobile-relay.service || {
-                echo "herdr-mobile-relay: replacement service is not active" >&2
-                exit 1
-            }
-            ;;
-        Darwin)
-            launchd_service_loaded \
-                "gui/$(id -u)/com.herdr-mobile-relay.service" || {
-                echo "herdr-mobile-relay: replacement service is not loaded" >&2
-                exit 1
-            }
-            ;;
-    esac
+    installed_relay_service_active || {
+        echo "herdr-mobile-relay: replacement service is not active" >&2
+        exit 1
+    }
 fi
 
 rollback_armed=false
