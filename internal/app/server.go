@@ -1714,40 +1714,196 @@ func (s *Server) handleTransition(
 	paneID, agent, project, status string,
 	revision, transitionAt int64,
 ) {
+	switch status {
+	case "working":
+		s.transitionWorking(parent, paneID, agent, project, revision, transitionAt)
+	case "blocked":
+		s.transitionBlocked(parent, paneID, agent, project, revision, transitionAt)
+	default:
+		s.transitionFinished(parent, paneID, agent, project, status, revision, transitionAt)
+	}
+}
+
+func (s *Server) transitionWorking(
+	parent context.Context,
+	paneID, agent, project string,
+	revision, transitionAt int64,
+) {
+	var session string
+	if agentState, ok := s.state.Agent(paneID); ok && s.state.TransitionCurrent(paneID, "working", revision) {
+		session = agentState.Session
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	if s.pushM != nil {
+		if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
+			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
+		}
+	}
+	summary := agent + " started working"
+	if agent == "" {
+		summary = "Agent started working"
+	}
+	if s.dispatcher != nil {
+		s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+			Kind:           "working",
+			Status:         "working",
+			Summary:        summary,
+			PaneID:         paneID,
+			ExpectedStatus: "working",
+			Revision:       revision,
+			Details:        map[string]any{"transition": "working", "transition_at": transitionAt},
+			Agent:          agent,
+			Project:        project,
+			Host:           s.hostname,
+			Session:        session,
+		})
+	}
+}
+
+func (s *Server) transitionBlocked(
+	parent context.Context,
+	paneID, agent, project string,
+	revision, transitionAt int64,
+) {
+	agentState, agentExists := s.state.Agent(paneID)
+	if !agentExists {
+		return
+	}
+	session := agentState.Session
+	blockedEventID := agentState.BlockedEventID
+	blockedContentRevision := s.state.ContentRevision(paneID)
+	paneGeneration, active := s.state.PaneSession(paneID)
+	if !active || blockedEventID == "" {
+		return
+	}
+	transitionCurrent := func() bool {
+		return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
+	}
+	if !transitionCurrent() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	if s.transitionEnrich != nil {
+		s.transitionEnrich(ctx, agentState)
+	} else {
+		s.enrichBlockedTransition(ctx, agentState)
+	}
+	if !transitionCurrent() {
+		return
+	}
+	persisted, ok := s.state.CommitAttentionClassification(
+		paneID,
+		blockedEventID,
+		paneGeneration,
+		blockedContentRevision,
+		classificationFromAgent(agentState),
+	)
+	if !ok || !transitionCurrent() {
+		return
+	}
+	agentState = persisted
+	classifiedAttentionRevision := s.state.AttentionRevision(paneID)
+	classifiedCurrent := func() bool {
+		return s.state.AttentionTransitionCurrent(
+			paneID,
+			blockedEventID,
+			paneGeneration,
+			string(agentState.AttentionKind),
+			classifiedAttentionRevision,
+		)
+	}
+	if !classifiedCurrent() {
+		return
+	}
+	if agentState.AttentionKind == question.AttentionChat {
+		s.broadcastBlockedAttention(agentState)
+		s.handleChatCompletion(ctx, agentState)
+		return
+	}
+
+	eventID := agentState.BlockedEventID
+	command := agentState.Command
+	activityKind := "blocked"
+	if command == "" {
+		switch agentState.AttentionKind {
+		case question.AttentionQuestion:
+			command = "Agent needs an answer"
+		case question.AttentionUnknown:
+			command = "Agent needs inspection"
+		default:
+			command = "Agent needs approval"
+		}
+	}
+	if agentState.AttentionKind == question.AttentionQuestion {
+		activityKind = "question"
+	}
+	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+		Kind:           activityKind,
+		Status:         "attention",
+		Summary:        command,
+		PaneID:         paneID,
+		ExpectedStatus: "blocked",
+		Revision:       agentState.StateRevision,
+		Details: map[string]any{
+			"event_id":       eventID,
+			"attention_kind": agentState.AttentionKind,
+			"transition_at":  transitionAt,
+		},
+		Agent:   agent,
+		Project: project,
+		Host:    s.hostname,
+		Session: session,
+		Extract: agentState.Prompt,
+		BlockedIdentity: &coordinator.BlockedTransitionIdentity{
+			EventID:           blockedEventID,
+			Generation:        paneGeneration,
+			AttentionKind:     string(agentState.AttentionKind),
+			AttentionRevision: classifiedAttentionRevision,
+		},
+	}) {
+		return
+	}
+	if !classifiedCurrent() {
+		return
+	}
+	category := push.CategoryAttention
+	preview := push.PreviewHidden
+	if agentState.AttentionKind == question.AttentionQuestion {
+		category = push.CategoryQuestion
+		preview = push.PreviewQuestion
+	}
+	if s.pushM != nil {
+		s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
+	}
+	if !classifiedCurrent() {
+		return
+	}
+	s.broadcastBlockedAttention(agentState)
+}
+
+func (s *Server) transitionFinished(
+	parent context.Context,
+	paneID, agent, project, status string,
+	revision, transitionAt int64,
+) {
 	agentState, agentExists := s.state.Agent(paneID)
 	var session string
 	var sessionID string
 	conversationAgent := agent
 	var conversationCwd string
 	conversationProject := conversation.ProjectContext{}
-	var blockedEventID string
-	var paneGeneration int64
-	var blockedContentRevision int64
 	if agentExists {
-		if status != "working" || s.state.TransitionCurrent(paneID, status, revision) {
-			session = agentState.Session
-		}
+		session = agentState.Session
 		sessionID = agentState.SessionID
 		conversationAgent = agentState.Agent
 		conversationCwd = agentState.Cwd
 		conversationProject = projectContextForAgent(agentState)
-		blockedEventID = agentState.BlockedEventID
-		blockedContentRevision = s.state.ContentRevision(paneID)
-	}
-	if status == "blocked" {
-		generation, active := s.state.PaneSession(paneID)
-		if !active || blockedEventID == "" {
-			return
-		}
-		paneGeneration = generation
 	}
 	transitionCurrent := func() bool {
-		if status == "blocked" {
-			return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
-		}
-		if status == "working" {
-			return true
-		}
 		return s.state.CompletionCurrent(paneID, revision)
 	}
 	if !transitionCurrent() {
@@ -1756,175 +1912,75 @@ func (s *Server) handleTransition(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	if status == "working" {
-		if s.pushM != nil {
-			if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
-				s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
-			}
-		}
-		summary := agent + " started working"
-		if agent == "" {
-			summary = "Agent started working"
-		}
-		if s.dispatcher != nil {
-			s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
-				Kind:           "working",
-				Status:         "working",
-				Summary:        summary,
-				PaneID:         paneID,
-				ExpectedStatus: status,
-				Revision:       revision,
-				Details:        map[string]any{"transition": "working", "transition_at": transitionAt},
-				Agent:          agent,
-				Project:        project,
-				Host:           s.hostname,
-				Session:        session,
-			})
-		}
-		return
-	}
-
-	if status == "blocked" {
-		if !agentExists {
-			return
-		}
-		if s.transitionEnrich != nil {
-			s.transitionEnrich(ctx, agentState)
-		} else {
-			s.enrichBlockedTransition(ctx, agentState)
-		}
-		if !transitionCurrent() {
-			return
-		}
-		persisted, ok := s.state.CommitAttentionClassification(
-			paneID,
-			blockedEventID,
-			paneGeneration,
-			blockedContentRevision,
-			classificationFromAgent(agentState),
-		)
-		if !ok || !transitionCurrent() {
-			return
-		}
-		agentState = persisted
-		classifiedAttentionRevision := s.state.AttentionRevision(paneID)
-		classifiedCurrent := func() bool {
-			return s.state.AttentionTransitionCurrent(
-				paneID,
-				blockedEventID,
-				paneGeneration,
-				string(agentState.AttentionKind),
-				classifiedAttentionRevision,
-			)
-		}
-		if !classifiedCurrent() {
-			return
-		}
-		if agentState.AttentionKind == question.AttentionChat {
-			s.broadcastBlockedAttention(agentState)
-			s.handleChatCompletion(ctx, agentState)
-			return
-		}
-
-		eventID := agentState.BlockedEventID
-		command := agentState.Command
-		activityKind := "blocked"
-		if command == "" {
-			switch agentState.AttentionKind {
-			case question.AttentionQuestion:
-				command = "Agent needs an answer"
-			case question.AttentionUnknown:
-				command = "Agent needs inspection"
-			default:
-				command = "Agent needs approval"
-			}
-		}
-		if agentState.AttentionKind == question.AttentionQuestion {
-			activityKind = "question"
-		}
-		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
-			Kind:           activityKind,
-			Status:         "attention",
-			Summary:        command,
-			PaneID:         paneID,
-			ExpectedStatus: status,
-			Revision:       agentState.StateRevision,
-			Details: map[string]any{
-				"event_id":       eventID,
-				"attention_kind": agentState.AttentionKind,
-				"transition_at":  transitionAt,
-			},
-			Agent:   agent,
-			Project: project,
-			Host:    s.hostname,
-			Session: session,
-			Extract: agentState.Prompt,
-			BlockedIdentity: &coordinator.BlockedTransitionIdentity{
-				EventID:           blockedEventID,
-				Generation:        paneGeneration,
-				AttentionKind:     string(agentState.AttentionKind),
-				AttentionRevision: classifiedAttentionRevision,
-			},
-		}) {
-			return
-		}
-		if !classifiedCurrent() {
-			return
-		}
-		category := push.CategoryAttention
-		preview := push.PreviewHidden
-		if agentState.AttentionKind == question.AttentionQuestion {
-			category = push.CategoryQuestion
-			preview = push.PreviewQuestion
-		}
-		if s.pushM != nil {
-			s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
-		}
-		if !classifiedCurrent() {
-			return
-		}
-		s.broadcastBlockedAttention(agentState)
-		return
-	}
 	if !s.state.RegisterFinishedNotificationForTransition(paneID, revision) {
 		return
 	}
-	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
 	extract := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID, conversationProject)
 	currentAgent, currentExists := s.state.Agent(paneID)
 	if !transitionCurrent() || agentExists != currentExists ||
 		(agentExists && !sameConversationTuple(agentState, currentAgent)) {
 		return
 	}
-	summary := agent + " completed"
-	if agent == "" {
+	s.publishFinished(ctx, finishedNotice{
+		paneID:         paneID,
+		agent:          agent,
+		project:        project,
+		session:        session,
+		expectedStatus: status,
+		revision:       revision,
+		details:        map[string]any{"transition_at": transitionAt},
+		extract:        extract,
+		pushAgent:      currentAgent,
+	}, transitionCurrent)
+}
+
+type finishedNotice struct {
+	paneID         string
+	agent          string
+	project        string
+	session        string
+	expectedStatus string
+	revision       int64
+	details        map[string]any
+	extract        string
+	pushAgent      *coordinator.AgentState
+}
+
+func (s *Server) publishFinished(ctx context.Context, notice finishedNotice, current func() bool) {
+	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), notice.paneID)
+	notice.details["event_id"] = eventID
+	summary := notice.agent + " completed"
+	if notice.agent == "" {
 		summary = "Agent completed"
 	}
 	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
 		Kind:           "finished",
 		Status:         "completed",
 		Summary:        summary,
-		PaneID:         paneID,
-		ExpectedStatus: status,
-		Revision:       revision,
-		Details:        map[string]any{"event_id": eventID, "transition_at": transitionAt},
-		Agent:          agent,
-		Project:        project,
+		PaneID:         notice.paneID,
+		ExpectedStatus: notice.expectedStatus,
+		Revision:       notice.revision,
+		Details:        notice.details,
+		Agent:          notice.agent,
+		Project:        notice.project,
 		Host:           s.hostname,
-		Session:        session,
-		Extract:        extract,
+		Session:        notice.session,
+		Extract:        notice.extract,
 	}) {
 		return
 	}
-	if !transitionCurrent() {
+	if !current() {
 		return
 	}
-	if s.pushM != nil {
-		if currentAgent != nil {
-			s.publishAgentPush(ctx, currentAgent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
-		} else if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
-			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
-		}
+	if s.pushM == nil {
+		return
+	}
+	if notice.pushAgent != nil {
+		s.publishAgentPush(ctx, notice.pushAgent, eventID, notice.revision, push.CategoryFinished, push.PreviewBrief)
+		return
+	}
+	if err := s.pushM.ResolvePaneID(ctx, notice.paneID, ""); err != nil {
+		s.logger.Warn("push notification retraction failed", "pane_id", notice.paneID, "error", err)
 	}
 }
 
@@ -2093,36 +2149,17 @@ func (s *Server) handleChatCompletion(
 		!s.state.RegisterFinishedNotificationForTransition(agent.PaneID, revision) {
 		return
 	}
-	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), agent.PaneID)
-	summary := agent.Agent + " completed"
-	if agent.Agent == "" {
-		summary = "Agent completed"
-	}
-	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
-		Kind:           "finished",
-		Status:         "completed",
-		Summary:        summary,
-		PaneID:         agent.PaneID,
-		ExpectedStatus: "blocked",
-		Revision:       revision,
-		Details: map[string]any{
-			"event_id":       eventID,
-			"attention_kind": agent.AttentionKind,
-		},
-		Agent:   agent.Agent,
-		Project: agent.Project,
-		Host:    s.hostname,
-		Session: agent.Session,
-		Extract: agent.Prompt,
-	}) {
-		return
-	}
-	if !current() {
-		return
-	}
-	if s.pushM != nil {
-		s.publishAgentPush(ctx, agent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
-	}
+	s.publishFinished(ctx, finishedNotice{
+		paneID:         agent.PaneID,
+		agent:          agent.Agent,
+		project:        agent.Project,
+		session:        agent.Session,
+		expectedStatus: "blocked",
+		revision:       revision,
+		details:        map[string]any{"attention_kind": agent.AttentionKind},
+		extract:        agent.Prompt,
+		pushAgent:      agent,
+	}, current)
 }
 
 func (s *Server) captureHistoryLoop(ctx context.Context) {
