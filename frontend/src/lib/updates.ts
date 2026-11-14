@@ -1152,20 +1152,9 @@ export function relayUpdateMeta(connection?: RelayConnectionView) {
       warning: true,
     };
   }
-  if (update.state === 'scheduled') {
-    return { label: 'Update scheduled…', detail: 'Preparing the verified release.', warning: true };
-  }
-  if (update.state === 'preparing') {
-    return { label: 'Verifying update…', detail: 'Checking release identity and transport compatibility.', warning: true };
-  }
-  if (update.state === 'deploying_app') {
-    return { label: 'Publishing phone app…', detail: 'Waiting for the app origin to serve the verified bundle.', warning: true };
-  }
-  if (update.state === 'installing') {
-    return { label: 'Installing update…', detail: 'The phone connection may briefly disconnect.', warning: true };
-  }
-  if (update.state === 'restarting') {
-    return { label: 'Restarting relay…', detail: 'The phone connection may briefly disconnect.', warning: true };
+  if (relayUpdateRunning(update.state)) {
+    const { label, detail } = RELAY_UPDATE_PROGRESS[update.state]!;
+    return { label, detail, warning: true };
   }
   if (update.state === 'succeeded') {
     return { label: 'Update installed', detail: `Running v${update.current_version}`, warning: false };
