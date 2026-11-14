@@ -437,18 +437,19 @@ func validateExactPaneTarget(state *coordinator.State, inbound protocol.Inbound,
 		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target"})
 		return &apiErr
 	}
-	serverSessionID := agent.ServerSessionID
-	if serverSessionID == "" {
-		serverSessionID = "primary"
-	}
-	if target.ServerSessionID != serverSessionID ||
-		target.TerminalID == "" || target.TerminalID != agent.TerminalID ||
-		target.Generation != agent.Generation ||
-		target.AgentSessionID != agent.SessionID {
+	if !targetMatchesAgent(*target, agent) {
 		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target"})
 		return &apiErr
 	}
 	return nil
+}
+
+func targetMatchesAgent(target protocol.TargetRef, agent *coordinator.AgentState) bool {
+	return target.ServerSessionID == protocol.PrimaryServerSessionID &&
+		target.PaneID == agent.PaneID &&
+		target.TerminalID != "" && target.TerminalID == agent.TerminalID &&
+		target.Generation == agent.Generation &&
+		target.AgentSessionID == agent.SessionID
 }
 
 func deviceCredentialID(store *deviceauth.Store, deviceID string) (string, bool) {
@@ -536,14 +537,8 @@ func pushPolicyResponse(policy push.DevicePolicy) map[string]any {
 }
 
 func (s *Server) pushTargetCurrent(target protocol.TargetRef) bool {
-	if target.ServerSessionID != "primary" || target.PaneID == "" || target.TerminalID == "" || target.Generation < 0 {
-		return false
-	}
 	agent, ok := s.state.Agent(target.PaneID)
-	return ok &&
-		agent.TerminalID == target.TerminalID &&
-		agent.SessionID == target.AgentSessionID &&
-		agent.Generation == target.Generation
+	return ok && targetMatchesAgent(target, agent)
 }
 
 func projectContextForAgent(agent *coordinator.AgentState) conversation.ProjectContext {
@@ -731,7 +726,7 @@ func (s *Server) Run(ctx context.Context) error {
 				requestedSessionID = scope.Target.ServerSessionID
 			}
 		}
-		if requestedSessionID != "" && requestedSessionID != "primary" {
+		if requestedSessionID != "" && requestedSessionID != protocol.PrimaryServerSessionID {
 			admitted()
 			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
 				protocol.ErrorInvalidRequest,
@@ -1670,7 +1665,7 @@ func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinat
 			}
 			current = append(current, push.PushEventKey{
 				DeviceID:            subscription.DeviceID,
-				ServerSessionID:     "primary",
+				ServerSessionID:     protocol.PrimaryServerSessionID,
 				PaneID:              agent.PaneID,
 				TerminalID:          agent.TerminalID,
 				AgentSessionID:      agent.SessionID,
@@ -1700,7 +1695,7 @@ func (s *Server) publishAgentPush(
 		return
 	}
 	key := push.PushEventKey{
-		ServerSessionID:     "primary",
+		ServerSessionID:     protocol.PrimaryServerSessionID,
 		PaneID:              agent.PaneID,
 		TerminalID:          agent.TerminalID,
 		AgentSessionID:      agent.SessionID,
@@ -2067,7 +2062,7 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 		"host":                 agent.Host,
 		"session":              agent.Session,
 		"session_name":         agent.SessionName,
-		"server_session_id":    "primary",
+		"server_session_id":    protocol.PrimaryServerSessionID,
 		"generation":           s.state.Generation(agent.PaneID),
 		"agent_session_id":     agent.SessionID,
 		"updated_at":           agent.UpdatedAt,
@@ -3460,7 +3455,7 @@ func (s *Server) projectAgentResource(agent *coordinator.AgentState) {
 	if agent == nil {
 		return
 	}
-	agent.ServerSessionID = "primary"
+	agent.ServerSessionID = protocol.PrimaryServerSessionID
 }
 
 func (s *Server) projectAgentResources(agents []*coordinator.AgentState) {
@@ -3642,7 +3637,7 @@ func (s *Server) broadcastCommitted(message any) {
 			s.recordSafeError("agent update broadcast was malformed", nil)
 			return
 		}
-		envelope["server_session_id"] = "primary"
+		envelope["server_session_id"] = protocol.PrimaryServerSessionID
 		envelope["generation"] = s.state.Generation(paneID)
 		if current, exists := s.state.Agent(paneID); exists {
 			envelope["terminal_id"] = current.TerminalID

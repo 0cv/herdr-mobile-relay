@@ -13,6 +13,7 @@ const (
 	Version                       = 3
 	EncryptedWebSocketSubprotocol = "herdr-e2ee-v2"
 	HybridTransportCapability     = "herdr-hybrid-v2"
+	PrimaryServerSessionID        = "primary"
 )
 
 type TargetRef struct {

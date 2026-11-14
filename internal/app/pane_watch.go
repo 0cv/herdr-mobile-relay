@@ -59,7 +59,7 @@ func (s *Server) startPaneWatch(client *transport.ClientConn, message map[string
 	if format != "ansi" {
 		format = "text"
 	}
-	target := protocol.TargetRef{ServerSessionID: "primary", PaneID: paneID}
+	target := protocol.TargetRef{ServerSessionID: protocol.PrimaryServerSessionID, PaneID: paneID}
 	if inbound, err := protocol.DecodeMap(message); err == nil && inbound.Target != nil {
 		target = *inbound.Target
 	}

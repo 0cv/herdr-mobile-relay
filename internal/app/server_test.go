@@ -190,6 +190,56 @@ func TestValidateExactPaneTargetBindsCurrentTerminalGenerationAndAgentSession(t 
 	}
 }
 
+func TestPaneTargetValidatorsAgreeOnWhatIsCurrent(t *testing.T) {
+	server := testServer()
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", TerminalID: "terminal-1", Generation: 4, SessionID: "agent-session-1",
+	}}, server.state.RevisionCounter())
+	current, ok := server.state.Agent("pane-1")
+	if !ok {
+		t.Fatal("committed agent missing")
+	}
+	exact := protocol.TargetRef{
+		ServerSessionID: protocol.PrimaryServerSessionID, PaneID: current.PaneID, TerminalID: current.TerminalID,
+		Generation: current.Generation, AgentSessionID: current.SessionID,
+	}
+	validators := map[string]func(protocol.TargetRef) bool{
+		"exact pane target": func(target protocol.TargetRef) bool {
+			return validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1", Target: &target}, true) == nil
+		},
+		"push target": server.pushTargetCurrent,
+		"upload target": func(target protocol.TargetRef) bool {
+			return server.validateUploadTarget(target) == nil
+		},
+	}
+	cases := map[string]struct {
+		mutate  func(*protocol.TargetRef)
+		current bool
+	}{
+		"exact":                {func(*protocol.TargetRef) {}, true},
+		"other server session": {func(target *protocol.TargetRef) { target.ServerSessionID = "other" }, false},
+		"empty server session": {func(target *protocol.TargetRef) { target.ServerSessionID = "" }, false},
+		"other pane":           {func(target *protocol.TargetRef) { target.PaneID = "pane-2" }, false},
+		"empty terminal":       {func(target *protocol.TargetRef) { target.TerminalID = "" }, false},
+		"other terminal":       {func(target *protocol.TargetRef) { target.TerminalID = "terminal-2" }, false},
+		"older generation":     {func(target *protocol.TargetRef) { target.Generation-- }, false},
+		"newer generation":     {func(target *protocol.TargetRef) { target.Generation++ }, false},
+		"negative generation":  {func(target *protocol.TargetRef) { target.Generation = -1 }, false},
+		"other agent session":  {func(target *protocol.TargetRef) { target.AgentSessionID = "agent-session-2" }, false},
+	}
+	for validatorName, validator := range validators {
+		for caseName, tc := range cases {
+			t.Run(validatorName+"/"+caseName, func(t *testing.T) {
+				target := exact
+				tc.mutate(&target)
+				if got := validator(target); got != tc.current {
+					t.Fatalf("current = %v, want %v", got, tc.current)
+				}
+			})
+		}
+	}
+}
+
 func TestValidateExactPaneTargetAllowsStaleOwnerCleanup(t *testing.T) {
 	server := testServer()
 	server.state.CommitInventory([]*coordinator.AgentState{{
