@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
@@ -325,15 +326,6 @@ func (d *Dispatcher) HandleTopologyAdmitted(
 	return result
 }
 
-func isQoderAgent(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "qoder", "qodercli":
-		return true
-	default:
-		return false
-	}
-}
-
 func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
 	const action = "submit_prompt"
 	text := stringValue(message, "text")
@@ -345,7 +337,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	}
 	requiresEnter := false
 	if agent, ok := d.state.Agent(paneID); ok {
-		requiresEnter = isQoderAgent(agent.Agent)
+		requiresEnter = agentkind.Of(agent.Agent) == agentkind.Qoder
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
@@ -668,9 +660,9 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		if request.Prompt == "" || started.PaneID == "" {
 			return EffectResult{Result: launchResult}
 		}
-		requiresEnter := isQoderAgent(profile.Kind) || isQoderAgent(request.ProfileID)
+		requiresEnter := agentkind.Of(profile.Kind) == agentkind.Qoder || agentkind.Of(request.ProfileID) == agentkind.Qoder
 		if agent, ok := d.state.Agent(started.PaneID); ok {
-			requiresEnter = requiresEnter || isQoderAgent(agent.Agent)
+			requiresEnter = requiresEnter || agentkind.Of(agent.Agent) == agentkind.Qoder
 		}
 		return EffectResult{Continuation: &EffectContinuation{
 			PaneID:      started.PaneID,
@@ -1065,10 +1057,6 @@ func capPaneContentLines(content []byte, limit int) []byte {
 	return content
 }
 
-func isClaudeAgent(agent string) bool {
-	return strings.Contains(strings.ToLower(agent), "claude")
-}
-
 // readPaneForDisplay returns physical rows ("recent") for every ansi display read:
 // the visible screen alone loses rows that scroll past between watch polls,
 // and the Resize Session baseline must share row semantics with the resized
@@ -1091,7 +1079,7 @@ func (d *Dispatcher) readPaneForDisplay(
 		return d.herdr.ReadPaneVisible(ctx, paneID, lines, format)
 	}
 	if !resized {
-		if agent, ok := d.state.Agent(paneID); ok && isClaudeAgent(agent.Agent) {
+		if agent, ok := d.state.Agent(paneID); ok && agentkind.Of(agent.Agent) == agentkind.Claude {
 			return d.herdr.ReadPane(ctx, paneID, lines, format)
 		}
 	}

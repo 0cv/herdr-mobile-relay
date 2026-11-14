@@ -2,6 +2,31 @@ import type { Agent, AttentionKind, QuestionInteraction } from './types';
 import { stripAnsi } from './terminal';
 import { pathBase } from './paths';
 
+export type AgentKind = 'agy' | 'claude' | 'codex' | 'cursor' | 'grok' | 'hermes' | 'kimi' | 'omo' | 'omp' | 'opencode' | 'pi' | 'qoder';
+
+export const AGENT_KIND_ALIASES = new Map<string, AgentKind>([
+  ['claude', 'claude'], ['claudecode', 'claude'],
+  ['codex', 'codex'], ['openaicodex', 'codex'], ['codexcli', 'codex'],
+  ['cursor', 'cursor'], ['cursoragent', 'cursor'],
+  ['grok', 'grok'], ['grokbuild', 'grok'],
+  ['qoder', 'qoder'], ['qodercli', 'qoder'],
+  ['pi', 'pi'], ['picodingagent', 'pi'],
+  ['omp', 'omp'], ['ohmypi', 'omp'], ['ompquestion', 'omp'],
+  ['kimi', 'kimi'], ['kimicode', 'kimi'], ['kimicli', 'kimi'], ['kimicodecli', 'kimi'],
+  ['opencode', 'opencode'],
+  ['omo', 'omo'], ['ohmyopencode', 'omo'],
+  ['hermes', 'hermes'], ['hermesagent', 'hermes'],
+  ['agy', 'agy'], ['antigravity', 'agy'], ['antigravitycli', 'agy'],
+]);
+
+export function normalizeAgentName(name: unknown): string {
+  return String(name || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+export function agentKind(name: unknown): AgentKind | '' {
+  return AGENT_KIND_ALIASES.get(normalizeAgentName(name)) ?? '';
+}
+
 const MENU_LINE_RE = /^\s*[❯›]?\s*\d+\.\s+.+$/;
 const COMMAND_LINE_RE = /^\s*(?:[$>❯›])\s+(.+?)\s*$/;
 const PROMPT_SKIP_RE = /^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$/i;

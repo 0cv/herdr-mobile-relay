@@ -3,6 +3,8 @@ package conversation
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 // ProjectContext identifies the directories that may own an agent's
@@ -22,7 +24,7 @@ func NormalizeProjectContext(agent string, project ProjectContext) ProjectContex
 	if !IsKimi(agent) {
 		project.ForegroundCWD = strings.TrimSpace(project.ForegroundCWD)
 	}
-	if (!isClaudeProvider(agent) && !IsKimi(agent)) || project.ForegroundCWD == "" || !filepath.IsAbs(project.ForegroundCWD) ||
+	if (agentkind.Of(agent) != agentkind.Claude && !IsKimi(agent)) || project.ForegroundCWD == "" || !filepath.IsAbs(project.ForegroundCWD) ||
 		project.ForegroundCWD == project.CWD {
 		project.ForegroundCWD = ""
 	}
@@ -32,7 +34,7 @@ func NormalizeProjectContext(agent string, project ProjectContext) ProjectContex
 // normalizeBrowseProjectContext preserves Claude and Kimi directory spelling
 // for source selection and cursor scope IDs. Other providers trim whitespace.
 func normalizeBrowseProjectContext(agent, cwd, foregroundCWD string) ProjectContext {
-	if !isClaudeProvider(agent) && !IsKimi(agent) {
+	if agentkind.Of(agent) != agentkind.Claude && !IsKimi(agent) {
 		cwd = strings.TrimSpace(cwd)
 	}
 	return NormalizeProjectContext(agent, ProjectContext{CWD: cwd, ForegroundCWD: foregroundCWD})

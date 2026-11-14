@@ -4,7 +4,7 @@
   import Button from '$components/ui/Button.svelte';
   import { agentOpeningRoute } from '$lib/agent-navigation';
   import { isAgentView, paneViewPreferenceKey } from '$lib/agent-view';
-  import { displayName, hostLabel, sessionName, tabName } from '$lib/agents';
+  import { agentKind, displayName, hostLabel, sessionName, tabName } from '$lib/agents';
   import { defaultAgentView, paneAgentViewOverrides, setPaneAgentView } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
@@ -30,7 +30,7 @@
   const inheritedPaneViewLabel = $derived(`Use default (${$defaultAgentView === 'conversation' ? 'Conversation' : 'Terminal'})`);
 
   const sessionRenameAvailable = $derived(Boolean(
-    agent && String(agent.agent || '').trim().toLocaleLowerCase().replace(/[\s_-]+/g, '') !== 'opencode',
+    agent && agentKind(agent.agent) !== 'opencode',
   ));
 
   $effect(() => {

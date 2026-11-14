@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const maxBrowseCursorBytes = 2048
@@ -44,7 +46,7 @@ func newBrowseSigningKey() ([32]byte, error) {
 }
 
 func browseScopeID(scope BrowseScope) string {
-	provider := normalizedAgent(scope.Provider)
+	provider := agentkind.Of(scope.Provider)
 	project := normalizeBrowseProjectContext(provider, scope.CWD, scope.ForegroundCWD)
 	normalized := BrowseScope{
 		Provider:        provider,

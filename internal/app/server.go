@@ -24,6 +24,7 @@ import (
 
 	herdrmobilerelay "github.com/0cv/herdr-mobile-relay"
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/audit"
@@ -2342,8 +2343,8 @@ func sameConversationTuple(left, right *coordinator.AgentState) bool {
 		left.ConversationInferred == right.ConversationInferred
 }
 func isClaudeLike(agent string) bool {
-	lower := strings.ToLower(agent)
-	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
+	kind := agentkind.Of(agent)
+	return kind == agentkind.Claude || kind == agentkind.Qoder
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {

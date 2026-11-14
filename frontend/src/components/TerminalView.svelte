@@ -17,6 +17,7 @@
     paneLeaseRenewalAllowed,
   } from '$lib/config';
   import {
+    agentKind,
     agentNeedsInspection,
     agentNeedsResponse,
     attentionKind,
@@ -154,14 +155,9 @@
   const PANE_REALTIME_RESYNC_MS = 15_000;
   // One relay poll of slack over its own three-second settling window.
   const PANE_RESIZE_WAIT_MAX_MS = 4_000;
-  const RESPONSE_COPY_AGENT_IDS = new Set([
-    'hermes', 'hermesagent',
-    'claude', 'claudecode', 'codex', 'openaicodex', 'kimi', 'kimicode',
-    'omp', 'ohmypi', 'pi', 'picodingagent', 'qoder', 'qodercli',
-  ]);
+  const RESPONSE_COPY_KINDS = new Set(['hermes', 'claude', 'codex', 'kimi', 'omp', 'pi', 'qoder']);
   function responseCopyProfileSupported(agentName: unknown): boolean {
-    const normalized = String(agentName || '').trim().toLocaleLowerCase().replace(/\s+/g, '').replace(/-/g, '');
-    return RESPONSE_COPY_AGENT_IDS.has(normalized);
+    return RESPONSE_COPY_KINDS.has(agentKind(agentName));
   }
   let componentMounted = false;
   let leaseGeneration = 0;

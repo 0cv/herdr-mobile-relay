@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
-	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 )
 
 type terminal struct {
@@ -85,7 +85,7 @@ func (c *Client) pane(t terminal) herdr.Pane {
 			p.Session = t.Labels[SessionLabel]
 			p.SessionRaw.Value = p.Session
 		}
-		if p.Agent == "" && slashcmd.ProfileIDForAgentName(t.Foreground.Name) != "" {
+		if p.Agent == "" && agentkind.Of(t.Foreground.Name) != "" {
 			p.Agent = t.Foreground.Name
 		}
 	}

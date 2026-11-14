@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 type BrowseScope struct {
@@ -588,30 +590,25 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	if request.Scope.SessionID == "" {
 		return browseUnavailable("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
-	provider := normalizedAgent(request.Scope.Provider)
-	if !Supported(provider) {
+	switch agentkind.Of(request.Scope.Provider) {
+	case "":
 		return browseUnavailable("invalid_provider", "Conversation history is not available for this agent."), nil
-	}
-	if provider == "opencode" {
+	case agentkind.OpenCode:
 		return b.readOpenCodePage(ctx, request)
-	}
-	if provider == "omo" || provider == "ohmyopencode" {
+	case agentkind.OMO:
 		return b.readFilePage(ctx, request, true)
-	}
-	if isHermesAgent(provider) {
+	case agentkind.Hermes:
 		return b.readHermesPage(ctx, request)
-	}
-	if isAgyAgent(provider) {
+	case agentkind.Agy:
 		return b.readNativePage(ctx, request, "agy")
-	}
-	if provider == "grok" {
+	case agentkind.Grok:
 		return b.readNativePage(ctx, request, "grok")
 	}
 	return b.readFilePage(ctx, request, false)
 }
 
 func normalizeBrowseScope(scope BrowseScope) BrowseScope {
-	scope.Provider = normalizedAgent(scope.Provider)
+	scope.Provider = agentkind.Of(scope.Provider)
 	project := normalizeBrowseProjectContext(scope.Provider, scope.CWD, scope.ForegroundCWD)
 	scope.CWD = project.CWD
 	scope.ForegroundCWD = project.ForegroundCWD
@@ -686,7 +683,7 @@ func browseErrorFor(code, message string, retryable bool) *BrowseError {
 
 func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo bool) (BrowsePage, error) {
 	if request.Cursor == "" {
-		if !omo && isClaudeProvider(request.Scope.Provider) {
+		if !omo && agentkind.Of(request.Scope.Provider) == agentkind.Claude {
 			return b.readClaudeChainPage(ctx, request)
 		}
 		return b.readRecentFilePage(ctx, request, omo)
@@ -704,7 +701,7 @@ func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo b
 	case "snapshot":
 		return b.readSnapshotCursorPage(ctx, request, cursor)
 	case "chain":
-		if !isClaudeProvider(request.Scope.Provider) {
+		if agentkind.Of(request.Scope.Provider) != agentkind.Claude {
 			return browseInvalidConversationCursor(), nil
 		}
 		return b.readClaudeChainCursorPage(ctx, request, cursor)
@@ -1619,7 +1616,7 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget
 	chainFooterEnd := job.chainFooterEnd
 	chainFooterDigest := job.chainFooterDigest
 	job.mu.RUnlock()
-	omo := normalizedAgent(scope.Provider) == "omo" || normalizedAgent(scope.Provider) == "ohmyopencode"
+	omo := agentkind.Of(scope.Provider) == agentkind.OMO
 	var source fileSource
 	var code string
 	var err error
@@ -2331,7 +2328,7 @@ func (b *Browser) runJob(job *browseJob) {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
 		return
 	}
-	if normalizedAgent(job.scope.Provider) == "omo" || normalizedAgent(job.scope.Provider) == "ohmyopencode" {
+	if agentkind.Of(job.scope.Provider) == agentkind.OMO {
 		if todoSeen && !todoValid {
 			diagnostics.CorruptRecords++
 			diagnostics.PlanCorrupt = true

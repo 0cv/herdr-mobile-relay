@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
 
@@ -65,16 +66,16 @@ func (r *Resolver) SessionNameWithProject(agent string, project conversation.Pro
 	r.mu.Unlock()
 
 	var name string
-	switch {
-	case isOMPSessionAgent(agentLower):
+	switch agentkind.Of(agent) {
+	case agentkind.OMP:
 		name = extractOMPSessionTitle(location.Path)
-	case isPiSessionAgent(agentLower):
+	case agentkind.Pi:
 		name = extractPiSessionTitle(location.Path)
-	case isHermesSessionAgent(agentLower), conversation.IsKimi(agentLower), agentLower == "grok":
+	case agentkind.Hermes, agentkind.Kimi, agentkind.Grok:
 		name = location.Title
-	case strings.Contains(agentLower, "qoder"), strings.Contains(agentLower, "claude"):
+	case agentkind.Qoder, agentkind.Claude:
 		name = extractTitle(location.Path)
-	case strings.Contains(agentLower, "codex"):
+	case agentkind.Codex:
 		name = codexIndexThreadName(filepath.Join(filepath.Dir(location.Root), "session_index.jsonl"), sessionID)
 	}
 
@@ -86,29 +87,6 @@ func (r *Resolver) SessionNameWithProject(agent string, project conversation.Pro
 
 func sessionCacheKey(agent string, project conversation.ProjectContext, sessionID string) string {
 	return agent + "|" + project.CWD + "|" + project.ForegroundCWD + "|" + sessionID
-}
-
-func isOMPSessionAgent(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "omp", "oh-my-pi", "oh my pi", "ohmypi":
-		return true
-	default:
-		return false
-	}
-}
-
-func isPiSessionAgent(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "pi", "pi-coding-agent":
-		return true
-	default:
-		return false
-	}
-}
-
-func isHermesSessionAgent(agent string) bool {
-	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(agent)))
-	return normalized == "hermes" || normalized == "hermesagent"
 }
 
 func extractOMPSessionTitle(path string) string {

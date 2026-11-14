@@ -1,5 +1,6 @@
 import { cloneDiagnostics, cloneEntries, clonePlan, estimateEntriesBytes } from './conversation-values';
 import { CONVERSATION_PREVIEW_PAGE_SIZE, conversationPreviewEntries, type ConversationPreview } from './conversation-cache';
+import { agentKind } from './agents';
 import { targetRefForAgent, targetStoreKey } from './resource-id';
 import type {
   Agent,
@@ -101,7 +102,7 @@ export interface ConversationHistoryControllerOptions {
 export function conversationIdentity(agent: Partial<Agent>): string | null {
   const target = targetRefForAgent(agent);
   const targetKey = target ? targetStoreKey(target) : null;
-  const provider = normalizedProvider(agent.agent);
+  const provider = agentKind(agent.agent);
   const session = String(agent.agent_session_id || '').trim();
   if (!targetKey || !provider || !session) return null;
   return JSON.stringify([targetKey, provider, String(agent.cwd || '').trim(), session]);
@@ -1053,11 +1054,7 @@ function requestIdentity(agent: Agent): string {
   const targetKey = (target ? targetStoreKey(target) : null) || JSON.stringify([
     agent.relay_id, agent.server_session_id, agent.raw_pane_id, agent.terminal_id, agent.generation, agent.agent_session_id || '',
   ]);
-  return JSON.stringify([targetKey, normalizedProvider(agent.agent), String(agent.cwd || '').trim(), String(agent.agent_session_id || '').trim()]);
-}
-
-function normalizedProvider(value: unknown): string {
-  return String(value || '').trim().toLocaleLowerCase().replace(/[\s_-]+/gu, '');
+  return JSON.stringify([targetKey, agentKind(agent.agent), String(agent.cwd || '').trim(), String(agent.agent_session_id || '').trim()]);
 }
 
 function sameEntryIDs(first: ConversationEntry[], second: ConversationEntry[]): boolean {

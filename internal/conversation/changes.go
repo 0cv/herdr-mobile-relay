@@ -5,15 +5,18 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 func (r *Reader) ChangeToken(ctx context.Context, scope BrowseScope) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if normalizedAgent(scope.Provider) == "opencode" || isHermesAgent(scope.Provider) {
+	kind := agentkind.Of(scope.Provider)
+	if kind == agentkind.OpenCode || kind == agentkind.Hermes {
 		var databases []string
-		if isHermesAgent(scope.Provider) {
+		if kind == agentkind.Hermes {
 			databases, _ = r.hermes.databases()
 		} else {
 			databases, _ = r.openCode.databases()
@@ -32,7 +35,7 @@ func (r *Reader) ChangeToken(ctx context.Context, scope BrowseScope) (string, er
 		}
 		return fmt.Sprintf("%x", digest.Sum(nil)), nil
 	}
-	if isAgyAgent(scope.Provider) {
+	if kind == agentkind.Agy {
 		digest := sha256.New()
 		for _, database := range r.agy.databasePaths(scope.SessionID) {
 			for _, path := range []string{database, database + "-wal"} {
@@ -51,14 +54,14 @@ func (r *Reader) ChangeToken(ctx context.Context, scope BrowseScope) (string, er
 		return r.kimiChangeToken(ctx, scope)
 	}
 	location := r.LocateWithProject(scope.Provider, ProjectContext{CWD: scope.CWD, ForegroundCWD: scope.ForegroundCWD}, scope.SessionID)
-	if normalizedAgent(scope.Provider) == "omo" || normalizedAgent(scope.Provider) == "ohmyopencode" {
+	if kind == agentkind.OMO {
 		location, _, _ = r.locateOMO(scope.CWD, scope.SessionID)
 	}
 	if location.Path == "" {
 		return "", nil
 	}
 	digest := sha256.New()
-	if isClaudeProvider(scope.Provider) {
+	if kind == agentkind.Claude {
 		chain, err := resolveClaudeChain(ctx, location, scope.SessionID)
 		if err != nil {
 			return "", err

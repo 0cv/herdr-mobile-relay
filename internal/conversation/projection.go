@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 type projectedEntry struct {
@@ -65,7 +67,7 @@ func projectJSONLRecord(agent, revision string, record JSONLRecord) (projectionR
 		result.Diagnostics.PlanCorrupt = true
 	}
 
-	calls, results := parseToolActivity(normalizedAgent(agent), raw)
+	calls, results := parseToolActivity(agentkind.Of(agent), raw)
 	toolEntry := Entry{Tools: calls}
 	omittedTools, omittedPayloads := normalizeEntryTools(&toolEntry)
 	calls = toolEntry.Tools
@@ -139,16 +141,16 @@ func (p *memoryProjector) apply(record JSONLRecord) projectionResult {
 }
 
 func visibleRecord(agent string, record map[string]any) (string, string, string) {
-	normalized := normalizedAgent(agent)
+	normalized := agentkind.Of(agent)
 	role, timestamp, body := "", stringValue(record["timestamp"]), ""
 	switch normalized {
-	case "claude", "claudecode", "qoder", "qodercli":
+	case agentkind.Claude, agentkind.Qoder:
 		role, body = parseClaudeRecord(record)
-	case "codex", "openaicodex":
+	case agentkind.Codex:
 		role, body = parseCodexRecord(record)
-	case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
+	case agentkind.Pi, agentkind.OMP, agentkind.OMO:
 		role, body = parsePiRecord(record)
-	case "cursor", "cursoragent":
+	case agentkind.Cursor:
 		role, body = parseCursorRecord(record)
 		if timestamp == "" {
 			timestamp = cursorTimestampFromRecord(record)
@@ -158,7 +160,7 @@ func visibleRecord(agent string, record map[string]any) (string, string, string)
 }
 
 func observeOMORecord(record map[string]any, agent string) (*OMOTodoState, bool, bool) {
-	if normalizedAgent(agent) != "omo" && normalizedAgent(agent) != "ohmyopencode" {
+	if agentkind.Of(agent) != agentkind.OMO {
 		return nil, false, false
 	}
 	if stringValue(record["type"]) != "custom" || stringValue(record["customType"]) != "senpi.todo-state" {

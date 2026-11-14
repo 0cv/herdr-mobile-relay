@@ -62,15 +62,6 @@ func newAgyReader(home string) *agyReader {
 	return &agyReader{home: home, executor: sqliteexec.New()}
 }
 
-func isAgyAgent(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "agy", "antigravity", "antigravitycli":
-		return true
-	default:
-		return false
-	}
-}
-
 func (r *agyReader) locate(sessionID string) Location {
 	location, _ := r.locateContext(sessionID)
 	return location

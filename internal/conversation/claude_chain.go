@@ -96,15 +96,6 @@ func (chain claudeChain) incomplete() bool {
 	return chain.IncompleteReason != ""
 }
 
-func isClaudeProvider(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "claude", "claudecode":
-		return true
-	default:
-		return false
-	}
-}
-
 // resolveClaudeChain follows only the explicit same-project continued-in
 // footer links of the selected anchor. It intentionally does not call Locate
 // for descendants: root/project selection belongs to the anchor, and a new
