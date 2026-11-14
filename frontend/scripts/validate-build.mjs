@@ -59,7 +59,6 @@ for (const relative of compressedAssets) {
 
 const assets = await readdir(join(root, 'assets'));
 const scripts = assets.filter((name) => name.endsWith('.js'));
-const workerScripts = scripts.filter((name) => /^attachment-hash\.worker-[A-Za-z0-9_-]+\.js$/.test(name));
 const applicationScripts = scripts.filter((name) => appScriptPattern.test(name));
 const lazyScripts = scripts.filter((name) => lazyScriptPattern.test(name));
 if (lazyScripts.some((name) => !name.endsWith(`-${versions.assets}.js`))) {
@@ -67,10 +66,9 @@ if (lazyScripts.some((name) => !name.endsWith(`-${versions.assets}.js`))) {
 }
 const styles = assets.filter((name) => name.endsWith('.css'));
 const applicationStyles = styles.filter((name) => appStylePattern.test(name));
-const unexpectedScripts = scripts.filter((name) => !workerScripts.includes(name)
-  && !applicationScripts.includes(name) && !lazyScripts.includes(name));
-if (applicationScripts.length !== 1 || workerScripts.length !== 1 || unexpectedScripts.length !== 0) {
-  throw new Error(`Expected one content-addressed app script and one attachment hash worker; found ${scripts.join(', ')}`);
+const unexpectedScripts = scripts.filter((name) => !applicationScripts.includes(name) && !lazyScripts.includes(name));
+if (applicationScripts.length !== 1 || unexpectedScripts.length !== 0) {
+  throw new Error(`Expected one content-addressed app script; found ${scripts.join(', ')}`);
 }
 if (versions.withdrawnScripts.includes(`assets/${applicationScripts[0]}`)) {
   throw new Error(`Release uses withdrawn application script: assets/${applicationScripts[0]}`);

@@ -124,80 +124,6 @@ export interface AttachmentBatchSnapshot {
 
 type InternalItem = AttachmentItem & { file?: File; digest?: string };
 type Listener = (snapshot: AttachmentBatchSnapshot) => void;
-interface HashWorkerResponse {
-  id: string;
-  digest?: string;
-  error?: string;
-}
-
-class BackgroundFileHasher {
-  private worker?: Worker;
-  private readonly pending = new Map<string, (digest?: string) => void>();
-
-  constructor() {
-    if (typeof Worker === 'undefined') return;
-    try {
-      this.worker = new Worker(new URL('./attachment-hash.worker.ts', import.meta.url), { type: 'module' });
-    } catch {
-      return;
-    }
-    this.worker.addEventListener('message', (event: MessageEvent<HashWorkerResponse>) => {
-      const settle = this.pending.get(event.data.id);
-      if (!settle) return;
-      this.pending.delete(event.data.id);
-      settle(event.data.digest);
-    });
-    this.worker.addEventListener('error', () => this.cancel());
-  }
-
-  digest(file: File): Promise<string | undefined> | undefined {
-    if (!this.worker) return undefined;
-    const id = crypto.randomUUID();
-    return new Promise((resolve) => {
-      this.pending.set(id, resolve);
-      try {
-        this.worker!.postMessage({ id, file });
-      } catch {
-        this.pending.delete(id);
-        resolve(undefined);
-      }
-    });
-  }
-
-  cancel(): void {
-    this.worker?.terminate();
-    this.worker = undefined;
-    for (const settle of this.pending.values()) settle(undefined);
-    this.pending.clear();
-  }
-}
-
-async function incrementalFileDigest(
-  file: File,
-  chunkBytes: number,
-  cancelled: () => boolean,
-  signal: AbortSignal,
-): Promise<string | undefined> {
-  if (cancelled()) return undefined;
-  const digest = new IncrementalSha256();
-  for (let offset = 0; offset < file.size; offset += chunkBytes) {
-    if (cancelled()) return undefined;
-    let cancelRead!: () => void;
-    const cancelledRead = new Promise<undefined>((resolve) => { cancelRead = () => resolve(undefined); });
-    signal.addEventListener('abort', cancelRead, { once: true });
-    let bytes: ArrayBuffer | undefined;
-    try {
-      // The native read may finish later; cancellation must not keep the composer locked.
-      bytes = await Promise.race([file.slice(offset, offset + chunkBytes).arrayBuffer(), cancelledRead]);
-    } finally {
-      signal.removeEventListener('abort', cancelRead);
-    }
-    if (!bytes || cancelled()) return undefined;
-    digest.update(new Uint8Array(bytes));
-  }
-  return cancelled() ? undefined : digest.digestHex();
-}
-
 
 function normalizedMime(value: string): string {
   return value.split(';', 1)[0].trim().toLowerCase();
@@ -237,7 +163,7 @@ export class AttachmentBatchController {
   private items: InternalItem[] = [];
   private listeners = new Set<Listener>();
   private batchIssue?: AttachmentIssue;
-  private active?: { uploadId: string; expiresAt: number; abort: AbortController; cancelHashing?: () => void };
+  private active?: { uploadId: string; expiresAt: number; abort: AbortController };
   private pendingBegin?: Promise<UploadBeginResult>;
   private epoch = 0;
   private uploading = false;
@@ -337,7 +263,6 @@ export class AttachmentBatchController {
     this.active = undefined;
     if (old) {
       old.abort.abort();
-      old.cancelHashing?.();
       try {
         await this.callbacks.cancel({ target: this.target, upload_id: old.uploadId });
       } catch {
@@ -364,7 +289,6 @@ export class AttachmentBatchController {
     this.items = [];
     this.batchIssue = undefined;
     active?.abort.abort();
-    active?.cancelHashing?.();
     this.notify();
     let uploadId = active?.uploadId;
     if (!uploadId && pendingBegin) {
@@ -407,7 +331,6 @@ export class AttachmentBatchController {
 
     let began = false;
     let beginPromise: Promise<UploadBeginResult> | undefined;
-    let hashing: BackgroundFileHasher | undefined;
     try {
       beginPromise = this.callbacks.begin({
         target: this.target,
@@ -434,23 +357,19 @@ export class AttachmentBatchController {
         throw { code: 'attachment_invalid_response' } satisfies AttachmentIssue;
       }
       began = true;
-      hashing = new BackgroundFileHasher();
-      this.active = {
-        uploadId: begin.upload_id, expiresAt, abort, cancelHashing: () => hashing?.cancel(),
-      };
-      const backgroundDigests = uploadItems.map((item) => hashing!.digest(item.file!));
+      this.active = { uploadId: begin.upload_id, expiresAt, abort };
       let sequence = 0;
 
       for (let fileIndex = 0; fileIndex < uploadItems.length; fileIndex += 1) {
         const item = uploadItems[fileIndex];
         const file = item.file!;
-        const backgroundDigest = backgroundDigests[fileIndex];
+        const fileHash = new IncrementalSha256();
         let offset = 0;
         while (offset < file.size) {
           if (Date.now() >= expiresAt) throw { code: 'attachment_upload_expired' } satisfies AttachmentIssue;
           const bytes = new Uint8Array(await file.slice(offset, offset + begin.chunk_bytes).arrayBuffer());
           if (run !== this.epoch) return [];
-          // The worker owns the whole-file hash; chunks stay on the UI thread only for transport.
+          fileHash.update(bytes);
           const chunkSha256 = bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
           const response = await this.callbacks.chunk({
             target: this.target,
@@ -470,14 +389,8 @@ export class AttachmentBatchController {
           item.progress = file.size === 0 ? 1 : offset / file.size;
           this.notify();
         }
-        const digest = backgroundDigest ? await backgroundDigest : undefined;
-        if (run !== this.epoch) return [];
-        item.digest = digest ?? await incrementalFileDigest(file, begin.chunk_bytes, () => run !== this.epoch, abort.signal);
-        if (!item.digest) return [];
+        item.digest = fileHash.digestHex();
       }
-      hashing.cancel();
-      hashing = undefined;
-      if (this.active) this.active.cancelHashing = undefined;
 
       if (Date.now() >= expiresAt) throw { code: 'attachment_upload_expired' } satisfies AttachmentIssue;
       const finished = await this.callbacks.finish({
@@ -507,7 +420,6 @@ export class AttachmentBatchController {
       this.notify();
       return this.orderedAttachments();
     } catch (error) {
-      hashing?.cancel();
       if (this.pendingBegin === beginPromise) this.pendingBegin = undefined;
       if (run !== this.epoch) return [];
       this.uploading = false;
