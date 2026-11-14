@@ -101,7 +101,7 @@ func TestNativePiActivityBrowserFixture(t *testing.T) {
 				server.handleConversationUpdates(client, inbound)
 			case "unwatch_conversation":
 				server.stopConversationFeed(client.ID(), inbound.SubscriptionID)
-				server.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, nil)
+				server.reply(client, inbound.RequestID, inbound.Type, inbound.PaneID).complete(nil)
 			}
 		case "send_input", "send_keys", "lease_pane_size", "submit_prompt":
 			mutations.Add(1)

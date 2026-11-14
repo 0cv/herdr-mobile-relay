@@ -44,29 +44,22 @@ func validPiIntegrationRequest(message map[string]any, instance string) bool {
 
 func (s *Server) handlePiIntegration(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound, message map[string]any) {
 	changing := inbound.Type == "set_pi_integration"
-	respond := func(ok bool, problem string, data any) {
-		phase := "completed"
-		if !ok {
-			phase = "failed"
-		}
-		if changing {
-			s.sendAuditedCommandResult(client, message, inbound.RequestID, inbound.Type, ok, phase, problem, "", data)
-			return
-		}
-		s.sendCommandResult(client, inbound.RequestID, inbound.Type, ok, phase, problem, "", data)
+	reply := s.reply(client, inbound.RequestID, inbound.Type, "")
+	if changing {
+		reply = s.auditedReply(client, message, inbound.RequestID, inbound.Type, "")
 	}
 	if changing && s.cfg.Backend == "hc" {
-		respond(false, "Pi integration is managed by the TUI relay, not the hc backend", nil)
+		reply.fail("Pi integration is managed by the TUI relay, not the hc backend")
 		return
 	}
 	if s.piIntegration == nil || herdr.CheckDispatch(ctx) != nil {
-		respond(false, "Pi integration is unavailable", nil)
+		reply.fail("Pi integration is unavailable")
 		return
 	}
 	var state piintegration.State
 	if changing {
 		if inbound.RequestID == "" || !validPiIntegrationRequest(message, s.piIntegration.Instance()) {
-			respond(false, "Pi integration request does not match this relay", nil)
+			reply.fail("Pi integration request does not match this relay")
 			return
 		}
 		state = s.piIntegration.Set(message["enabled"].(bool))
@@ -74,5 +67,5 @@ func (s *Server) handlePiIntegration(ctx context.Context, client *transport.Clie
 	} else {
 		state = s.piIntegration.Status()
 	}
-	respond(true, "", state)
+	reply.complete(state)
 }

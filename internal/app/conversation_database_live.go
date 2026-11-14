@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
@@ -15,42 +14,19 @@ type databaseConversationRefresh interface {
 func (s *Server) runDatabaseConversationFeed(feed *conversationFeed, watch databaseConversationRefresh) {
 	capabilities := &conversation.SourceCapabilities{Source: "recorded_history"}
 	var previous conversation.BrowsePage
-	var stamp string
-	var retryAt time.Time
-	first := true
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if !s.conversationCurrent(feed) || feed.ctx.Err() != nil {
-			return
+	s.pollRecordedConversation(feed, watch.NeedsReset, func(first bool) (conversationBatch, bool, bool, bool) {
+		page, reset := watch.Refresh(feed.ctx)
+		reset = reset || !first && (page.SourceRevision != previous.SourceRevision || page.Available != previous.Available || page.State != previous.State || page.ReasonCode != previous.ReasonCode)
+		previous = page
+		kind := "batch"
+		entries := page.Entries
+		if reset {
+			kind = "reset"
+			entries = nil
 		}
-		nextStamp, err := s.conversationM.ChangeToken(feed.ctx, conversationScope(feed.agent))
-		if first || watch.NeedsReset() || err != nil || stamp != nextStamp || previous.State != conversation.BrowseReady && !time.Now().Before(retryAt) {
-			page, reset := watch.Refresh(feed.ctx)
-			if !s.conversationCurrent(feed) || feed.ctx.Err() != nil {
-				return
-			}
-			reset = reset || !first && (page.SourceRevision != previous.SourceRevision || page.Available != previous.Available || page.State != previous.State || page.ReasonCode != previous.ReasonCode)
-			if first || reset || len(page.Entries) > 0 {
-				kind := "batch"
-				if reset {
-					kind = "reset"
-					page.Entries = nil
-				}
-				feed.mu.Lock()
-				sequence := feed.sequence + 1
-				feed.mu.Unlock()
-				feed.publish(conversationBatch{Kind: kind, SourceRevision: page.SourceRevision, Sequence: sequence, Entries: page.Entries, State: "recorded", Capabilities: capabilities, recordedEdits: page.RecordedEdits})
-			}
-			previous, stamp, first = page, nextStamp, false
-			retryAt = time.Now().Add(5 * time.Second)
-		}
-		select {
-		case <-feed.ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
+		publish := first || reset || len(page.Entries) > 0
+		return conversationBatch{Kind: kind, SourceRevision: page.SourceRevision, Entries: entries, State: "recorded", Capabilities: capabilities, recordedEdits: page.RecordedEdits}, publish, page.State == conversation.BrowseReady, true
+	})
 }
 
 func (feed *conversationFeed) observeDatabasePage(clientID, subscription, cursor string, page conversation.BrowsePage) {
