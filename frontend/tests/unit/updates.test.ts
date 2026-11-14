@@ -426,6 +426,17 @@ describe('release updates', () => {
     vi.unstubAllGlobals();
   });
 
+  it('does not poll for a deployment version that is not a release number', async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+
+    await expect(reloadUpdatedSameOriginApp('dev')).resolves.toBe(false);
+    await expect(reloadUpdatedSameOriginApp('v0.12.0-3-gabc-dirty')).resolves.toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
   it('attempts an automatic reload target only once per browser session', async () => {
     const [major, minor, patch] = semverTuple(APP_VERSION)!;
     const target = `${major}.${minor + 1}.${patch}`;

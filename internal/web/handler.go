@@ -168,7 +168,6 @@ func (h *Handler) isAllowedAsset(asset string) bool {
 		return true
 	}
 	return h.isVersionedLazyAsset(asset) ||
-		isAttachmentHashWorker(asset) ||
 		strings.HasPrefix(asset, "icons/") ||
 		strings.HasPrefix(asset, "fonts/")
 }
@@ -205,29 +204,6 @@ func (h *Handler) loadLazyAssets(scriptPath string) {
 		}
 		h.lazyAssets["assets/"+name] = true
 	}
-}
-
-func isAttachmentHashWorker(asset string) bool {
-	const (
-		prefix = "assets/attachment-hash.worker-"
-		suffix = ".js"
-	)
-	if !strings.HasPrefix(asset, prefix) || !strings.HasSuffix(asset, suffix) {
-		return false
-	}
-	hash := strings.TrimSuffix(strings.TrimPrefix(asset, prefix), suffix)
-	if hash == "" {
-		return false
-	}
-	for _, character := range hash {
-		if (character < 'a' || character > 'z') &&
-			(character < 'A' || character > 'Z') &&
-			(character < '0' || character > '9') &&
-			character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
 }
 
 func acceptsBrotli(header string) bool {

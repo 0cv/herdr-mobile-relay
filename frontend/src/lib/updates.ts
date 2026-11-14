@@ -1,7 +1,8 @@
 import { get, writable } from 'svelte/store';
 import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from './config';
 import { reloadRisk, reloadRiskMessage, type ReloadRisk } from './reload-guard';
-import type { AppDeploymentStatus, AppUpdateStatus, RelayConnectionView, RelayUpdateStatus } from './types';
+import { shortRevision } from './protocol';
+import type { AppDeploymentStatus, AppUpdateStatus, RelayConfig, RelayConnectionView, RelayUpdateState, RelayUpdateStatus } from './types';
 
 const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const APP_RECHECK_INTERVAL_MS = 60 * 1_000;
@@ -103,20 +104,30 @@ export function relayNeedsManualBootstrap(
 }
 
 
-export function newerBundle(
-  candidate: { version: string; assets: number; build?: string },
-  current: { version: string; assets: number; build?: string },
-): boolean {
-  if (newerVersion(candidate.version, current.version)) return true;
-  if (candidate.version !== current.version) return false;
-  if (candidate.assets > current.assets) return true;
-  return candidate.assets === current.assets
-    && Boolean(candidate.build)
-    && Boolean(current.build)
-    && candidate.build !== current.build;
+interface BundleIdentity {
+  version: string;
+  assets: number;
+  build?: string;
 }
 
-export function appUpdateAvailable(deployed: { version: string; assets: number; build?: string }): boolean {
+function satisfiesTarget(
+  candidate: BundleIdentity,
+  target: BundleIdentity,
+  emptyBuildSatisfies: boolean,
+): boolean {
+  if (newerVersion(candidate.version, target.version)) return true;
+  if (candidate.version !== target.version) return false;
+  if (candidate.assets !== target.assets) return candidate.assets > target.assets;
+  if (!target.build) return emptyBuildSatisfies;
+  return candidate.build === target.build;
+}
+
+export function newerBundle(candidate: BundleIdentity, current: BundleIdentity): boolean {
+  if (candidate.version !== current.version) return newerVersion(candidate.version, current.version);
+  return !satisfiesTarget(current, candidate, true);
+}
+
+export function appUpdateAvailable(deployed: BundleIdentity): boolean {
   return newerBundle(deployed, {
     version: APP_VERSION,
     assets: APP_ASSET_VERSION,
@@ -405,11 +416,8 @@ function deployedTargetReady(
   deployed: Pick<AppOriginMetadata, 'version' | 'assets' | 'build'>,
   target: PhoneAppTarget | null,
 ): boolean {
-  if (!target || newerVersion(target.version, deployed.version)) return false;
-  if (deployed.version !== target.version) return true;
-  if (deployed.assets < target.assets) return false;
-  if (deployed.assets > target.assets) return true;
-  return !target.build || Boolean(deployed.build) && deployed.build === target.build;
+  if (!target) return false;
+  return satisfiesTarget(deployed, target, true);
 }
 
 /**
@@ -491,20 +499,12 @@ function currentPhoneTarget(): PhoneAppTarget {
   return { version: APP_VERSION, assets: APP_ASSET_VERSION, build: APP_BUILD_ID };
 }
 
-function phoneTargetIsAtLeast(candidate: PhoneAppTarget, target: PhoneAppTarget): boolean {
-  if (newerVersion(candidate.version, target.version)) return true;
-  if (candidate.version !== target.version) return false;
-  if (candidate.assets > target.assets) return true;
-  if (candidate.assets < target.assets) return false;
-  return !target.build || candidate.build === target.build;
-}
-
 function requestedPhoneTarget(version: string, target: PhoneAppTarget | null): PhoneAppTarget {
   const status = get(appUpdateStatus);
   const requested = target || deployedAppTarget(status, version);
   const pending = get(updateProgressPlan);
   if (pending?.phoneAppRequired && pending.phoneTarget
-    && !phoneTargetIsAtLeast(requested, pending.phoneTarget)) {
+    && !satisfiesTarget(requested, pending.phoneTarget, true)) {
     return pending.phoneTarget;
   }
   return requested;
@@ -791,14 +791,9 @@ export function queueUpdateProgressForReload(
 
 export function phoneTargetMatchesCurrent(target: PhoneAppTarget | null): boolean {
   if (!target) return false;
-  // A compatible newer app already satisfies an older pending target. For the
-  // same release identity, however, legacy plans without a build remain
-  // pending so an old bundle can never acknowledge itself after navigation.
-  if (newerVersion(APP_VERSION, target.version)) return true;
-  if (target.version !== APP_VERSION) return false;
-  if (APP_ASSET_VERSION > target.assets) return true;
-  if (APP_ASSET_VERSION < target.assets) return false;
-  return Boolean(target.build) && target.build === APP_BUILD_ID;
+  // A target without a build stays pending at the same release identity, so
+  // an old bundle can never acknowledge itself after navigation.
+  return satisfiesTarget(currentPhoneTarget(), target, false);
 }
 
 export function setPhoneUpdateTarget(target: PhoneAppTarget): void {
@@ -812,7 +807,7 @@ export function setPhoneUpdateTarget(target: PhoneAppTarget): void {
   // A late response from an older edge must never replace the target that was
   // persisted for the phone. It is safe to learn a more advanced identity,
   // but not to move the plan backwards or sideways at the same revision.
-  if (plan.phoneTarget && !phoneTargetIsAtLeast(next, plan.phoneTarget)) return;
+  if (plan.phoneTarget && !satisfiesTarget(next, plan.phoneTarget, true)) return;
   saveUpdateProgress({
     ...plan,
     phoneTarget: next,
@@ -943,4 +938,334 @@ export function clearUpdateProgress(): void {
   } catch {
     // Nothing else is required when session storage is unavailable.
   }
+}
+
+export const MANUAL_UPDATE_LABEL = 'Manual update required';
+
+type ProgressTone = 'pending' | 'active' | 'success' | 'danger';
+
+interface RelayUpdateProgressText {
+  label: string;
+  detail: string;
+  score: number;
+}
+
+const RELAY_UPDATE_PROGRESS: Partial<Record<RelayUpdateState, RelayUpdateProgressText>> = {
+  checking: { label: 'Checking release…', detail: 'Looking for the exact verified target.', score: .05 },
+  scheduled: { label: 'Update scheduled…', detail: 'The background update worker is starting.', score: .1 },
+  preparing: { label: 'Verifying release…', detail: 'Downloading and checking the signed release bundle.', score: .25 },
+  deploying_app: { label: 'Publishing phone app…', detail: 'Waiting for the app origin to serve the verified bundle.', score: .45 },
+  installing: { label: 'Installing relay…', detail: 'Running agents and saved configuration remain intact.', score: .65 },
+  restarting: { label: 'Restarting relay…', detail: 'The phone connection may briefly disconnect.', score: .85 },
+};
+
+export function relayUpdateRunning(state: RelayUpdateState): boolean {
+  return state !== 'checking' && Boolean(RELAY_UPDATE_PROGRESS[state]);
+}
+
+export interface RelayProgressRow {
+  id: string;
+  relay?: RelayConfig;
+  connection?: RelayConnectionView;
+  label: string;
+  detail: string;
+  tone: ProgressTone;
+  score: number;
+  canStart: boolean;
+  manual: boolean;
+}
+
+export interface AppProgress {
+  label: string;
+  detail: string;
+  tone: ProgressTone;
+  score: number;
+}
+
+const RELAY_OPERATION_TIMEOUT_MS = 5 * 60 * 1_000;
+
+export function relayAtTarget(connection: RelayConnectionView | undefined, targetVersion: string): boolean {
+  const current = connection?.releaseVersion || connection?.update.current_version || '';
+  return current === targetVersion || newerVersion(current, targetVersion);
+}
+
+export function relayProgress(
+  currentPlan: UpdateProgressPlan,
+  relayId: string,
+  relay: RelayConfig | undefined,
+  connection: RelayConnectionView | undefined,
+  timestamp: number,
+): RelayProgressRow {
+  const base = { id: relayId, relay, connection };
+  if (relayAtTarget(connection, currentPlan.targetVersion)) {
+    return {
+      ...base,
+      label: `Updated to v${connection?.releaseVersion || currentPlan.targetVersion}`,
+      detail: 'This relay is ready.',
+      tone: 'success',
+      score: 1,
+      canStart: false,
+      manual: false,
+    };
+  }
+  const clientError = currentPlan.errors[relayId];
+  if (clientError) {
+    const manual = Boolean(connection && relayNeedsManualBootstrap(connection));
+    return {
+      ...base,
+      label: manual ? MANUAL_UPDATE_LABEL : 'Update could not start',
+      detail: manual
+        ? 'Run the one-time Terminal command below to restart the relay and enable phone-driven updates.'
+        : clientError,
+      tone: 'danger',
+      score: 0,
+      canStart: !manual && Boolean(connection?.capabilities.includes('self_update')),
+      manual,
+    };
+  }
+  const started = currentPlan.startedRelayIds.includes(relayId);
+  if (!connection || connection.status !== 'connected') {
+    if (started && timestamp - (currentPlan.relayStartedAt[relayId] || currentPlan.startedAt) < RELAY_OPERATION_TIMEOUT_MS) {
+      return { ...base, label: 'Waiting for relay to reconnect…', detail: 'The connection normally returns after the service restarts.', tone: 'active', score: .85, canStart: false, manual: false };
+    }
+    return {
+      ...base,
+      label: started ? 'Relay did not reconnect' : 'Relay unavailable',
+      detail: started ? 'Check the relay service on this computer, then close this screen.' : 'Connect this relay before updating it.',
+      tone: started ? 'danger' : 'pending',
+      score: 0,
+      canStart: false,
+      manual: false,
+    };
+  }
+  if (relayNeedsManualBootstrap(connection)) {
+    return {
+      ...base,
+      label: MANUAL_UPDATE_LABEL,
+      detail: 'Run the one-time Terminal command below to restart the relay and enable phone-driven updates.',
+      tone: 'danger',
+      score: 0,
+      canStart: false,
+      manual: true,
+    };
+  }
+  const update = connection.update;
+  if (update.state === 'failed') {
+    return { ...base, label: 'Update failed', detail: update.error || 'The relay reported an update failure.', tone: 'danger', score: 0, canStart: true, manual: false };
+  }
+  if (update.state === 'blocked') {
+    return { ...base, label: 'Update blocked', detail: update.reason || 'This update needs attention before it can continue.', tone: 'danger', score: 0, canStart: false, manual: false };
+  }
+  const activeText = RELAY_UPDATE_PROGRESS[update.state];
+  if (activeText) {
+    return { ...base, ...activeText, tone: 'active', canStart: false, manual: false };
+  }
+  if (update.state === 'available' && update.available_version === currentPlan.targetVersion && update.can_install) {
+    if (started && updateProgressRelayStartedThisSession(relayId)) {
+      return { ...base, label: 'Starting update…', detail: 'Sending the verified target to this relay.', tone: 'active', score: .05, canStart: false, manual: false };
+    }
+    return {
+      ...base,
+      label: started ? `Ready to retry v${currentPlan.targetVersion}` : `Ready for v${currentPlan.targetVersion}`,
+      detail: started ? 'The previous phone session did not finish sending this update; retrying is safe.' : 'Start this relay when the current relay is ready.',
+      tone: 'pending',
+      score: started ? .05 : 0,
+      canStart: true,
+      manual: false,
+    };
+  }
+  if (update.state === 'available') {
+    return { ...base, label: 'Different update advertised', detail: update.reason || `This relay does not currently offer v${currentPlan.targetVersion}.`, tone: 'danger', score: 0, canStart: false, manual: false };
+  }
+  if (started) {
+    return { ...base, label: 'Checking release…', detail: `Confirming that v${currentPlan.targetVersion} is available for this relay.`, tone: 'active', score: .05, canStart: false, manual: false };
+  }
+  return {
+    ...base,
+    label: `Waiting for v${currentPlan.targetVersion}`,
+    detail: 'Herdr will verify and start this relay automatically when its turn begins.',
+    tone: 'pending',
+    score: 0,
+    canStart: true,
+    manual: false,
+  };
+}
+
+export function appProgress(
+  currentPlan: UpdateProgressPlan | null,
+  currentConnections: Map<string, RelayConnectionView>,
+  currentApp: AppUpdateStatus,
+): AppProgress | null {
+  if (!currentPlan?.phoneAppRequired) return null;
+  const target = currentPlan.phoneTarget;
+  const acknowledged = currentPlan.phoneAcknowledged && phoneTargetMatchesCurrent(target);
+  if (acknowledged) {
+    return { label: `Phone app v${currentApp.currentVersion} loaded`, detail: 'The new bundle initialized and acknowledged its verified build identity.', tone: 'success', score: 1 };
+  }
+  if (currentPlan.phoneState === 'failed' || currentPlan.phoneError) {
+    return { label: 'Phone app failed to load', detail: currentPlan.phoneError || 'The new bundle did not acknowledge its expected build identity.', tone: 'danger', score: 0 };
+  }
+  if (currentPlan.appRelayId && currentPlan.errors[currentPlan.appRelayId]) {
+    return { label: 'Phone app deployment could not start', detail: currentPlan.errors[currentPlan.appRelayId], tone: 'danger', score: 0 };
+  }
+  const owner = currentPlan.appRelayId ? currentConnections.get(currentPlan.appRelayId) : undefined;
+  if (owner?.appDeploy.state === 'failed') {
+    return { label: 'Phone app deployment failed', detail: owner.appDeploy.error || 'The public app could not be verified.', tone: 'danger', score: 0 };
+  }
+  if (owner?.update.state === 'failed' && owner.appDeploy.state !== 'succeeded') {
+    return { label: 'Phone app deployment failed', detail: owner.update.error || 'The update stopped before publishing the app.', tone: 'danger', score: 0 };
+  }
+  if (owner?.appDeploy.state === 'succeeded' || currentApp.deployedVersion === currentPlan.targetVersion) {
+    return { label: 'Loading updated phone app…', detail: 'The verified bundle is public. This page will acknowledge it only after initialization.', tone: 'active', score: .85 };
+  }
+  return { label: 'Publishing phone app…', detail: 'The release is being published before the phone can load it.', tone: 'active', score: .4 };
+}
+
+export function relayUpdateMeta(connection?: RelayConnectionView) {
+  if (!connection || connection.status !== 'connected') {
+    return {
+      label: 'Update status unavailable',
+      detail: 'Connect this relay to check its version.',
+      warning: false,
+    };
+  }
+  if (relayNeedsManualBootstrap(connection)) {
+    return {
+      label: MANUAL_UPDATE_LABEL,
+      detail: 'Open Update Help for the one-time Terminal bootstrap.',
+      warning: true,
+    };
+  }
+  const update = connection.update;
+  if (update.state === 'checking') return { label: 'Checking for updates…', detail: '', warning: false };
+  if (update.state === 'available') {
+    return {
+      label: `Update v${update.available_version} available`,
+      detail: `Revision ${shortRevision(update.available_revision)}`,
+      warning: true,
+    };
+  }
+  if (update.state === 'blocked') {
+    return {
+      label: `Update v${update.available_version} needs attention`,
+      detail: update.reason,
+      warning: true,
+    };
+  }
+  if (relayUpdateRunning(update.state)) {
+    const { label, detail } = RELAY_UPDATE_PROGRESS[update.state]!;
+    return { label, detail, warning: true };
+  }
+  if (update.state === 'succeeded') {
+    return { label: 'Update installed', detail: `Running v${update.current_version}`, warning: false };
+  }
+  if (update.state === 'failed') {
+    return { label: 'Update operation failed', detail: update.error, warning: true };
+  }
+  const checked = update.checked_at
+    ? `Checked ${new Date(update.checked_at * 1_000).toLocaleString()}`
+    : 'Update check pending';
+  return { label: 'Up to date', detail: checked, warning: false };
+}
+
+export type SafeUpdateAction =
+  | {
+    kind: 'deploy_app' | 'install_relay';
+    relayId: string;
+    targetVersion: string;
+    appRelayId: string;
+    phoneAppRequired: boolean;
+    phoneTarget: PhoneAppTarget | null;
+    description: string;
+  }
+  | {
+    kind: 'reload_app';
+    targetVersion: string;
+    phoneTarget: PhoneAppTarget | null;
+    description: string;
+  };
+
+export interface RelayRow {
+  relay: RelayConfig;
+  connection?: RelayConnectionView;
+}
+
+// The owner relay is behind the released app version but can self-update to
+// exactly that version, so one action can deploy the app before updating it.
+export function ownerUpdateReady(connection: RelayConnectionView | undefined, upstreamVersion: string): boolean {
+  if (!connection
+    || connection.releaseVersion === upstreamVersion
+    || relayNeedsManualBootstrap(connection)) return false;
+  const update = connection.update;
+  return connection.capabilities.includes('self_update')
+    && update.state === 'available'
+    && update.can_install
+    && Boolean(update.target_revision)
+    && update.available_version === upstreamVersion;
+}
+
+export function safeUpdateAction(
+  appUpdate: AppUpdateStatus,
+  appUpdateChecking: boolean,
+  appDeploymentOwner: RelayRow | undefined,
+  relayRows: RelayRow[],
+  readOnlyRelayIds: Set<string>,
+): SafeUpdateAction | null {
+  if (appUpdateChecking || appUpdate.state === 'failed') return null;
+  const targetVersion = appUpdate.upstreamVersion;
+  if (appUpdate.state === 'reload-ready') {
+    return {
+      kind: 'reload_app',
+      targetVersion: appUpdate.deployedVersion,
+      phoneTarget: deployedAppTarget(appUpdate),
+      description: `Load the verified phone app v${appUpdate.deployedVersion}.`,
+    };
+  }
+  if (appUpdate.state === 'deployment-required') {
+    const owner = appDeploymentOwner;
+    if (!owner?.connection || !targetVersion) return null;
+    if (owner.connection.releaseVersion === targetVersion
+      && ['scheduled', 'deploying'].includes(owner.connection.appDeploy.state)) return null;
+    if (owner.connection.releaseVersion === targetVersion) {
+      return {
+        kind: 'deploy_app',
+        relayId: owner.relay.id,
+        targetVersion,
+        appRelayId: owner.relay.id,
+        phoneAppRequired: true,
+        phoneTarget: deployedAppTarget(appUpdate, targetVersion),
+        description: `Publish the phone app from ${owner.relay.label}, then continue with any remaining relay updates.`,
+      };
+    }
+    if (!ownerUpdateReady(owner.connection, targetVersion)) return null;
+    return {
+      kind: 'install_relay',
+      relayId: owner.relay.id,
+      targetVersion,
+      appRelayId: owner.relay.id,
+      phoneAppRequired: true,
+      phoneTarget: deployedAppTarget(appUpdate, targetVersion),
+      description: `Publish the phone app first, then update ${owner.relay.label} and continue with the remaining relays.`,
+    };
+  }
+  const installable = relayRows.filter(({ relay, connection }) => (
+    !readOnlyRelayIds.has(relay.id)
+    && connection?.status === 'connected'
+    && connection.capabilities.includes('self_update')
+    && !relayNeedsManualBootstrap(connection)
+    && connection.update.state === 'available'
+    && connection.update.can_install
+    && Boolean(connection.update.target_revision)
+  ));
+  const selected = installable.find(({ relay }) => relay.id === appDeploymentOwner?.relay.id) || installable[0];
+  if (!selected?.connection) return null;
+  return {
+    kind: 'install_relay',
+    relayId: selected.relay.id,
+    targetVersion: selected.connection.update.available_version,
+    appRelayId: '',
+    phoneAppRequired: false,
+    phoneTarget: null,
+    description: `Update ${selected.relay.label} first, then continue safely with each remaining relay.`,
+  };
 }

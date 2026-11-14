@@ -629,13 +629,15 @@
     const rendered = renderTerminalContent(
       next.content,
       next.format,
-      true,
-      preserveLineEnds,
-      // Cap box-drawing rows at the width in force. A fixed-grid row is a run
-      // of fixed-width cells with no wrap opportunity between them, so past
-      // the cap it must render as plain text that can wrap instead. Zero means
-      // "no cap", which only a relay that cannot lease is entitled to.
-      renderColumnCap,
+      {
+        preserveLayout: true,
+        preserveLineEnds,
+        // Cap box-drawing rows at the width in force. A fixed-grid row is a run
+        // of fixed-width cells with no wrap opportunity between them, so past
+        // the cap it must render as plain text that can wrap instead. Zero means
+        // "no cap", which only a relay that cannot lease is entitled to.
+        maxFixedGridColumns: renderColumnCap,
+      },
     );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml

@@ -14,6 +14,8 @@ project follows [Semantic Versioning](https://semver.org/).
   default. Sizes saved by newer app builds are unchanged.
 - Relay status and `/healthz` now report `gateway.stun.mapped` as a single address
   string instead of an array, or an empty string before discovery succeeds.
+- Relay rows in Settings now use the same wording as the update screen while an
+  update is scheduled, verifying or installing.
 
 ### Fixed
 

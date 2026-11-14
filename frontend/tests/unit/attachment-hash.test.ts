@@ -106,107 +106,19 @@ describe('IncrementalSha256 facade', () => {
 });
 
 describe('AttachmentBatchController whole-file hashing', () => {
-  it.each(['unavailable', 'construction failure', 'runtime failure'] as const)(
-    'uses bounded fallback reads after worker %s', async (mode) => {
-      const terminate = vi.fn();
-      const posted = vi.fn();
-      if (mode === 'unavailable') vi.stubGlobal('Worker', undefined);
-      if (mode === 'construction failure') {
-        vi.stubGlobal('Worker', class { constructor() { throw new Error('worker unavailable'); } });
-      }
-      if (mode === 'runtime failure') {
-        vi.stubGlobal('Worker', class {
-          private error?: () => void;
-          addEventListener(type: string, listener: () => void) { if (type === 'error') this.error = listener; }
-          postMessage() { posted(); queueMicrotask(() => this.error?.()); }
-          terminate() { terminate(); }
-        });
-      }
-      const f = fixture();
-      const slices = vi.spyOn(f.file, 'slice');
-      f.controller.select([f.file]);
-      await expect(f.controller.upload()).resolves.toHaveLength(1);
-      assertUploaded(f);
-      expect(slices.mock.calls.map(([start, end]) => [start, end])).toEqual([
-        [0, 4], [4, 8], [8, 12], [0, 4], [4, 8], [8, 12],
-      ]);
-      if (mode === 'runtime failure') {
-        expect(posted).toHaveBeenCalledOnce();
-        expect(terminate).toHaveBeenCalledOnce();
-      }
-    },
-  );
-
-  it('uses a successful worker digest without fallback reads', async () => {
-    const posted = vi.fn();
-    const terminate = vi.fn();
-    vi.stubGlobal('Worker', class {
-      private message?: (event: MessageEvent<{ id: string; digest: string }>) => void;
-      addEventListener(type: string, listener: (event: MessageEvent<{ id: string; digest: string }>) => void) {
-        if (type === 'message') this.message = listener;
-      }
-      postMessage(request: { id: string; file: File }) {
-        posted(request);
-        queueMicrotask(() => this.message?.({ data: { id: request.id, digest: wholeDigest } } as MessageEvent<{ id: string; digest: string }>));
-      }
-      terminate() { terminate(); }
-    });
+  it('hashes the file from the chunks it uploads, reading each chunk once', async () => {
+    const worker = vi.fn();
+    vi.stubGlobal('Worker', worker);
     const f = fixture();
     const slices = vi.spyOn(f.file, 'slice');
     f.controller.select([f.file]);
     await expect(f.controller.upload()).resolves.toHaveLength(1);
     assertUploaded(f);
-    expect(posted).toHaveBeenCalledOnce();
-    expect(posted.mock.calls[0][0]).toMatchObject({ file: f.file, id: expect.any(String) });
-    expect(terminate).toHaveBeenCalledOnce();
     expect(slices.mock.calls.map(([start, end]) => [start, end])).toEqual([[0, 4], [4, 8], [8, 12]]);
+    expect(worker).not.toHaveBeenCalled();
   });
 
-  it('rejects a finish response that does not match the computed digest', async () => {
-    vi.stubGlobal('Worker', undefined);
-    const f = fixture();
-    f.finish.mockImplementationOnce(async () => ({ attachments: [{
-      ref: 'attachment:wrong', name: 'hello.txt', media_type: 'text/plain', bytes: 11,
-      sha256: '0'.repeat(64), expires_at: expiresAt,
-    }] }));
-    f.controller.select([f.file]);
-    await expect(f.controller.upload()).rejects.toMatchObject({ code: 'attachment_invalid_response' });
-    expect(f.finish.mock.calls[0][0].files).toEqual([{ file_index: 0, sha256: wholeDigest }]);
-    expect(f.controller.snapshot().items[0]).toMatchObject({ state: 'interrupted', issue: { code: 'attachment_invalid_response' } });
-  });
-
-  it('cancels while a fallback slice is being read and never finishes late', async () => {
-    vi.stubGlobal('Worker', undefined);
-    const f = fixture();
-    const reading = deferred<void>();
-    const release = deferred<ArrayBuffer>();
-    const originalSlice = f.file.slice.bind(f.file);
-    const slices = vi.spyOn(f.file, 'slice').mockImplementation((start, end, contentType) => {
-      const blob = originalSlice(start, end, contentType);
-      if (slices.mock.calls.length === 4) {
-        Object.defineProperty(blob, 'arrayBuffer', { value: () => { reading.resolve(); return release.promise; } });
-      }
-      return blob;
-    });
-    f.controller.select([f.file]);
-    const upload = f.controller.upload();
-    await reading.promise;
-    expect(f.chunks).toHaveLength(3);
-    expect(slices.mock.calls.map(([start, end]) => [start, end])).toEqual([[0, 4], [4, 8], [8, 12], [0, 4]]);
-    await expect(f.controller.cancel()).resolves.toBeUndefined();
-    expect(f.cancel).toHaveBeenCalledWith({ target, upload_id: 'upload-1' });
-    release.resolve(new TextEncoder().encode('hell').buffer);
-    await expect(upload).resolves.toEqual([]);
-    expect(f.finish).not.toHaveBeenCalled();
-    expect(f.fullRead).not.toHaveBeenCalled();
-    expect(f.controller.snapshot()).toMatchObject({ items: [], uploading: false });
-    expect(slices).toHaveBeenCalledTimes(4);
-  });
-});
-
-describe('fallback read cancellation ownership', () => {
-  it('uses a distinct cancellation participant and removes its subscription for every successful slice', async () => {
-    vi.stubGlobal('Worker', undefined);
+  it('hashes many chunks into one whole-file digest', async () => {
     const input = 'a'.repeat(160);
     const expected = 'bf18b43b61652b5d73f41ebf3d72e5e43aebf5076f497dde31ea3de9de4998ef';
     const chunks: Uint8Array[] = [];
@@ -224,65 +136,53 @@ describe('fallback read cancellation ownership', () => {
       finish,
       cancel: async () => undefined,
     }, { maxFiles: 1, maxFileBytes: 200, maxBatchBytes: 200, maxChunkBytes: 4 });
-    const participants: unknown[] = [];
-    const add = vi.spyOn(AbortSignal.prototype, 'addEventListener');
-    const remove = vi.spyOn(AbortSignal.prototype, 'removeEventListener');
-    const nativeRace = Promise.race.bind(Promise);
-    const race = vi.spyOn(Promise, 'race').mockImplementation(((values: Iterable<unknown>) => {
-      const entries = Array.from(values);
-      expect(entries).toHaveLength(2);
-      const additions = add.mock.calls.filter(([type]) => type === 'abort').length;
-      const removals = remove.mock.calls.filter(([type]) => type === 'abort').length;
-      expect(additions - removals).toBe(1); // Every previous read has already unsubscribed.
-      participants.push(entries[1]);
-      return nativeRace(entries);
-    }) as typeof Promise.race);
-    try {
-      controller.select([new File([input], 'many.txt', { type: 'text/plain' })]);
-      await expect(controller.upload()).resolves.toHaveLength(1);
-      expect(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))).toEqual(Buffer.from(input));
-      expect(createHash('sha256').update(input).digest('hex')).toBe(expected);
-      expect(finish.mock.calls[0][0]).toEqual({ target, upload_id: 'many', files: [{ file_index: 0, sha256: expected }] });
-      expect(race).toHaveBeenCalledTimes(40);
-      // These deliberately retained test references count reuse; they do not measure GC or heap usage.
-      expect(new Set(participants).size).toBe(40);
-      const added = add.mock.calls.filter(([type]) => type === 'abort').map(([, listener]) => listener);
-      const removed = remove.mock.calls.filter(([type]) => type === 'abort').map(([, listener]) => listener);
-      expect(added).toHaveLength(40);
-      expect(removed).toEqual(added);
-    } finally {
-      vi.restoreAllMocks();
-    }
+    controller.select([new File([input], 'many.txt', { type: 'text/plain' })]);
+    await expect(controller.upload()).resolves.toHaveLength(1);
+    expect(chunks).toHaveLength(40);
+    expect(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))).toEqual(Buffer.from(input));
+    expect(createHash('sha256').update(input).digest('hex')).toBe(expected);
+    expect(finish.mock.calls[0][0]).toEqual({ target, upload_id: 'many', files: [{ file_index: 0, sha256: expected }] });
   });
 
-  it('removes the cancellation subscription when a fallback read fails', async () => {
-    vi.stubGlobal('Worker', undefined);
+  it('rejects a finish response that does not match the computed digest', async () => {
     const f = fixture();
-    const add = vi.spyOn(AbortSignal.prototype, 'addEventListener');
-    const remove = vi.spyOn(AbortSignal.prototype, 'removeEventListener');
-    const originalSlice = f.file.slice.bind(f.file);
-    const slices = vi.spyOn(f.file, 'slice').mockImplementation((start, end, type) => {
-      const part = originalSlice(start, end, type);
-      if (slices.mock.calls.length === 4) Object.defineProperty(part, 'arrayBuffer', {
-        value: () => Promise.reject(new Error('fallback read failed')),
-      });
-      return part;
-    });
-    try {
-      f.controller.select([f.file]);
-      await expect(f.controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_state_unknown' });
-      expect(f.finish).not.toHaveBeenCalled();
-      const added = add.mock.calls.filter(([type]) => type === 'abort').map(([, listener]) => listener);
-      const removed = remove.mock.calls.filter(([type]) => type === 'abort').map(([, listener]) => listener);
-      expect(added).toHaveLength(1);
-      expect(removed).toEqual(added);
-    } finally {
-      vi.restoreAllMocks();
-    }
+    f.finish.mockImplementationOnce(async () => ({ attachments: [{
+      ref: 'attachment:wrong', name: 'hello.txt', media_type: 'text/plain', bytes: 11,
+      sha256: '0'.repeat(64), expires_at: expiresAt,
+    }] }));
+    f.controller.select([f.file]);
+    await expect(f.controller.upload()).rejects.toMatchObject({ code: 'attachment_invalid_response' });
+    expect(f.finish.mock.calls[0][0].files).toEqual([{ file_index: 0, sha256: wholeDigest }]);
+    expect(f.controller.snapshot().items[0]).toMatchObject({ state: 'interrupted', issue: { code: 'attachment_invalid_response' } });
   });
 
-  it('settles cancellation before a held read rejects late without an unhandled rejection or old state changes', async () => {
-    vi.stubGlobal('Worker', undefined);
+  it('cancels while a chunk is being read and never finishes late', async () => {
+    const f = fixture();
+    const reading = deferred<void>();
+    const release = deferred<ArrayBuffer>();
+    const originalSlice = f.file.slice.bind(f.file);
+    const slices = vi.spyOn(f.file, 'slice').mockImplementation((start, end, contentType) => {
+      const blob = originalSlice(start, end, contentType);
+      if (slices.mock.calls.length === 2) {
+        Object.defineProperty(blob, 'arrayBuffer', { value: () => { reading.resolve(); return release.promise; } });
+      }
+      return blob;
+    });
+    f.controller.select([f.file]);
+    const upload = f.controller.upload();
+    await reading.promise;
+    expect(f.chunks).toHaveLength(1);
+    await expect(f.controller.cancel()).resolves.toBeUndefined();
+    expect(f.cancel).toHaveBeenCalledWith({ target, upload_id: 'upload-1' });
+    release.resolve(new TextEncoder().encode('o wo').buffer);
+    await expect(upload).resolves.toEqual([]);
+    expect(f.chunks).toHaveLength(1);
+    expect(f.finish).not.toHaveBeenCalled();
+    expect(f.fullRead).not.toHaveBeenCalled();
+    expect(f.controller.snapshot()).toMatchObject({ items: [], uploading: false });
+  });
+
+  it('ignores a chunk read that fails after cancellation', async () => {
     const f = fixture();
     const reading = deferred<void>();
     let rejectRead!: (error: Error) => void;
@@ -290,40 +190,21 @@ describe('fallback read cancellation ownership', () => {
     const originalSlice = f.file.slice.bind(f.file);
     const slices = vi.spyOn(f.file, 'slice').mockImplementation((start, end, type) => {
       const part = originalSlice(start, end, type);
-      if (slices.mock.calls.length === 4) Object.defineProperty(part, 'arrayBuffer', {
+      if (slices.mock.calls.length === 2) Object.defineProperty(part, 'arrayBuffer', {
         value: () => { reading.resolve(); return held; },
       });
       return part;
     });
-    const add = vi.spyOn(AbortSignal.prototype, 'addEventListener');
-    const remove = vi.spyOn(AbortSignal.prototype, 'removeEventListener');
-    const unhandled: unknown[] = [];
-    const observeUnhandled = (reason: unknown) => { unhandled.push(reason); };
-    process.on('unhandledRejection', observeUnhandled);
-    try {
-      f.controller.select([f.file]);
-      const oldUpload = f.controller.upload();
-      await reading.promise;
-      await f.controller.cancel();
-      await expect(oldUpload).resolves.toEqual([]); // Native delivery is still pending here.
-      const added = add.mock.calls.filter(([type]) => type === 'abort').map(([, listener]) => listener);
-      const removed = remove.mock.calls.filter(([type]) => type === 'abort').map(([, listener]) => listener);
-      expect(added).toHaveLength(1);
-      expect(removed).toEqual(added);
-      f.controller.select([new File(['hello world'], 'hello.txt', { type: 'text/plain' })]);
-      await expect(f.controller.upload()).resolves.toHaveLength(1);
-      const current = f.controller.snapshot();
-      rejectRead(new Error('late native read failure'));
-      // Give the runtime an unhandled-rejection turn; do not attach a catch to the held read.
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
-      expect(unhandled).toEqual([]);
-      expect(slices).toHaveBeenCalledTimes(4);
-      expect(f.finish).toHaveBeenCalledTimes(1);
-      expect(f.controller.snapshot()).toEqual(current);
-      expect(f.controller.orderedAttachments()).toMatchObject([{ ref: 'attachment:hello', sha256: wholeDigest }]);
-    } finally {
-      process.off('unhandledRejection', observeUnhandled);
-      vi.restoreAllMocks();
-    }
+    f.controller.select([f.file]);
+    const oldUpload = f.controller.upload();
+    await reading.promise;
+    await f.controller.cancel();
+    f.controller.select([new File(['hello world'], 'hello.txt', { type: 'text/plain' })]);
+    slices.mockRestore();
+    const current = f.controller.snapshot();
+    rejectRead(new Error('late native read failure'));
+    await expect(oldUpload).resolves.toEqual([]);
+    expect(f.finish).not.toHaveBeenCalled();
+    expect(f.controller.snapshot()).toEqual(current);
   });
 });

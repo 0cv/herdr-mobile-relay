@@ -310,7 +310,7 @@ describe('terminal rendering', () => {
     ].join('\n');
 
     const readable = renderTerminalContent(frame, 'ansi');
-    const preserved = renderTerminalContent(frame, 'ansi', true);
+    const preserved = renderTerminalContent(frame, 'ansi', { preserveLayout: true });
 
     expect(stripAnsi(readable.display).split('\n')).toHaveLength(2);
     expect(stripAnsi(preserved.display).split('\n')).toEqual(frame.split('\n'));
@@ -321,7 +321,7 @@ describe('terminal rendering', () => {
     expect(preserved.html).toContain('<span class="terminal-cell terminal-cell-box terminal-cell-arc terminal-cell-arc-down-right">╭</span>');
     expect(preserved.html).toContain(`class="terminal-cell-horizontal terminal-cell-horizontal-single" style="width:calc(40 * var(--terminal-cell-width, 1ch))">${'─'.repeat(40)}</span>`);
     expect(preserved.html).toContain('<span class="terminal-cell terminal-cell-box terminal-cell-arc terminal-cell-arc-down-left">╮</span>');
-    const mixedBorders = renderTerminalContent('╘╿├┤┴', 'ansi', true);
+    const mixedBorders = renderTerminalContent('╘╿├┤┴', 'ansi', { preserveLayout: true });
     expect(stripAnsi(mixedBorders.display)).toBe('╘╿├┤┴');
     expect(mixedBorders.html.match(/terminal-cell-box/g)).toHaveLength(5);
     expect(mixedBorders.html).not.toContain('<span class="terminal-cell">');
@@ -333,12 +333,12 @@ describe('terminal rendering', () => {
       `│ ${'Metric'.padEnd(78)}│`,
       `└${'─'.repeat(80)}┘`,
     ].join('\n');
-    const preserved = renderTerminalContent(desktopTable, 'ansi', true);
+    const preserved = renderTerminalContent(desktopTable, 'ansi', { preserveLayout: true });
     expect(preserved.rows.every((row) => row.fixedGrid)).toBe(true);
 
     // The stale-width content row keeps its full cells and is marked for the
     // per-row horizontal scroller; only the borders collapse to separators.
-    const resizedHistory = renderTerminalContent(desktopTable, 'ansi', true, false, 40);
+    const resizedHistory = renderTerminalContent(desktopTable, 'ansi', { preserveLayout: true, preserveLineEnds: false, maxFixedGridColumns: 40 });
     expect(resizedHistory.rows.every((row) => !row.fixedGrid)).toBe(true);
     expect(resizedHistory.rows.filter((row) => row.separator)).toHaveLength(2);
     const wideRow = resizedHistory.rows.find((row) => row.wideGrid)!;
@@ -352,7 +352,7 @@ describe('terminal rendering', () => {
       `┌${'─'.repeat(38)}┐`,
       `│ ${'Metric'.padEnd(36)}│`,
       `└${'─'.repeat(38)}┘`,
-    ].join('\n'), 'ansi', true, false, 40);
+    ].join('\n'), 'ansi', { preserveLayout: true, preserveLineEnds: false, maxFixedGridColumns: 40 });
     expect(currentTable.rows.every((row) => row.fixedGrid && !row.wideGrid)).toBe(true);
     expect(currentTable.html.match(/terminal-grid-line/g)).toHaveLength(3);
     expect(currentTable.html).not.toContain('terminal-wide-grid');
@@ -366,7 +366,7 @@ describe('terminal rendering', () => {
       `│ ${'Combined'.padEnd(27)}│ ${'156'.padEnd(32)}│`,
       `└${'─'.repeat(30)}┴${'─'.repeat(30)}┘`,
     ].join('\n');
-    const resized = renderTerminalContent(table, 'ansi', true, false, 40);
+    const resized = renderTerminalContent(table, 'ansi', { preserveLayout: true, preserveLineEnds: false, maxFixedGridColumns: 40 });
     expect(resized.rows.filter((row) => row.separator)).toHaveLength(3);
     expect(resized.rows.filter((row) => row.wideGrid)).toHaveLength(2);
     expect(resized.display).not.toContain('┬');
@@ -379,16 +379,14 @@ describe('terminal rendering', () => {
       `┌${'─'.repeat(17)}┬${'─'.repeat(17)}┐`,
       `│ ${'x'.padEnd(16)}│ ${'y'.padEnd(16)}│`,
       `└${'─'.repeat(17)}┴${'─'.repeat(17)}┘`,
-    ].join('\n'), 'ansi', true, false, 40);
+    ].join('\n'), 'ansi', { preserveLayout: true, preserveLineEnds: false, maxFixedGridColumns: 40 });
     expect(narrow.rows.every((row) => row.fixedGrid)).toBe(true);
 
     // A wide row of empty cells is content (cell walls), never a border rule.
     const emptyCells = renderTerminalContent(
       `│${' '.repeat(30)}│${' '.repeat(30)}│`,
       'ansi',
-      true,
-      false,
-      40,
+      { preserveLayout: true, preserveLineEnds: false, maxFixedGridColumns: 40 },
     );
     expect(emptyCells.rows.filter((row) => row.separator)).toHaveLength(0);
   });
@@ -398,22 +396,22 @@ describe('terminal rendering', () => {
     // corners or junctions. Wider than the phone, it used to fall through to
     // ordinary text and wrap, leaving a short second line under a full one.
     for (const stroke of ['─', '━', '═']) {
-      const wide = renderTerminalContent(stroke.repeat(74), 'ansi', true, true, 59);
+      const wide = renderTerminalContent(stroke.repeat(74), 'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 59 });
       expect(wide.rows.filter((row) => row.separator)).toHaveLength(1);
       expect(wide.rows.every((row) => !row.text.includes(stroke))).toBe(true);
     }
 
     // A rule that fits is drawn as cells, which keeps the stroke continuous.
-    const fits = renderTerminalContent('─'.repeat(40), 'ansi', true, true, 59);
+    const fits = renderTerminalContent('─'.repeat(40), 'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 59 });
     expect(fits.rows[0].fixedGrid).toBe(true);
 
     // Without a width lease there is nothing to fold it into, so the rule stays
     // a grid row the pane scrolls sideways — still never a wrapped stub.
-    const unleased = renderTerminalContent('─'.repeat(74), 'ansi', true, true, 0);
+    const unleased = renderTerminalContent('─'.repeat(74), 'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 0 });
     expect(unleased.rows[0].fixedGrid).toBe(true);
 
     // Prose that merely contains a stroke is still prose, and still re-wraps.
-    const prose = renderTerminalContent(`Connected ─ ${'detail '.repeat(20)}`, 'ansi', true, true, 59);
+    const prose = renderTerminalContent(`Connected ─ ${'detail '.repeat(20)}`, 'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 59 });
     expect(prose.rows[0].separator).toBe(false);
     expect(prose.rows[0].fixedGrid).toBe(false);
   });
@@ -424,7 +422,7 @@ describe('terminal rendering', () => {
     // stroke with a short offcut hanging under it.
     const reflowed = renderTerminalContent(
       [`${'─'.repeat(59)}`, `${'─'.repeat(15)}`].join('\n'),
-      'ansi', true, true, 59,
+      'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 59 },
     );
     expect(reflowed.rows.filter((row) => row.separator)).toHaveLength(1);
     expect(reflowed.rows).toHaveLength(1);
@@ -432,14 +430,14 @@ describe('terminal rendering', () => {
     // Several continuation rows collapse into the same single rule.
     const long = renderTerminalContent(
       ['─'.repeat(59), '─'.repeat(59), '─'.repeat(12)].join('\n'),
-      'ansi', true, true, 59,
+      'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 59 },
     );
     expect(long.rows).toHaveLength(1);
 
     // Two rules that each fit were never one line, so they stay two.
     const deliberate = renderTerminalContent(
       ['─'.repeat(20), '─'.repeat(20)].join('\n'),
-      'ansi', true, true, 59,
+      'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 59 },
     );
     expect(deliberate.rows).toHaveLength(2);
     expect(deliberate.rows.every((row) => row.fixedGrid)).toBe(true);
@@ -447,7 +445,7 @@ describe('terminal rendering', () => {
     // A full-width rule followed by content keeps both.
     const followed = renderTerminalContent(
       ['─'.repeat(59), 'next line'].join('\n'),
-      'ansi', true, true, 59,
+      'ansi', { preserveLayout: true, preserveLineEnds: true, maxFixedGridColumns: 59 },
     );
     expect(followed.rows).toHaveLength(2);
     expect(followed.rows[1].text).toBe('next line');
@@ -458,7 +456,7 @@ describe('terminal rendering', () => {
     // wrap is baked in, so the row keeps its full text and the browser wraps it.
     const prose = '\x1b[1mBoth questions answered\x1b[0m — the pane window reflows to the '
       + 'current width, so history rows re-wrap on the phone.';
-    const rendered = renderTerminalContent(prose, 'ansi', true, false, 40);
+    const rendered = renderTerminalContent(prose, 'ansi', { preserveLayout: true, preserveLineEnds: false, maxFixedGridColumns: 40 });
     expect(rendered.rows).toHaveLength(1);
     expect(rendered.rows[0].fixedGrid).toBe(false);
     expect(rendered.rows[0].text).toBe(stripAnsi(prose));
@@ -501,7 +499,7 @@ describe('terminal rendering', () => {
     expect(readable).toContain('Claude status');
     expect(readable).toContain('Pi status');
 
-    const preserved = stripAnsi(renderTerminalContent(frame, 'ansi', true).display);
+    const preserved = stripAnsi(renderTerminalContent(frame, 'ansi', { preserveLayout: true }).display);
     expect(preserved).toBe(stripAnsi(frame));
   });
 });
