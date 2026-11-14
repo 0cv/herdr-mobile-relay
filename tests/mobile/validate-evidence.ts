@@ -5,13 +5,7 @@ import {
   type EvidenceMatrixEntry,
   type EvidenceValidationOptions,
 } from './support/evidence';
-
-export function option(name: string): string {
-  const index = process.argv.indexOf(name);
-  const value = index >= 0 ? process.argv[index + 1] : undefined;
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
-}
+import { required } from './support/cli';
 
 function matrix(value: string): EvidenceMatrixEntry[] {
   const parsed = JSON.parse(value) as { include?: EvidenceMatrixEntry[] } | EvidenceMatrixEntry[];
@@ -25,24 +19,24 @@ function matrix(value: string): EvidenceMatrixEntry[] {
 
 function json<T>(name: string): T {
   try {
-    return JSON.parse(option(name)) as T;
+    return JSON.parse(required(name)) as T;
   } catch (error) {
     throw new Error(`${name} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 
 export function evidenceOptions(): EvidenceValidationOptions {
-  const contract = option('--contract');
+  const contract = required('--contract');
   if (contract !== 'product' && contract !== 'qualified') throw new Error('explicit product or qualified contract required');
   return {
   contract,
-  runId: option('--run-id'),
-  attempt: option('--attempt'),
-  directory: option('--directory'),
-  matrix: matrix(option('--matrix')),
-  candidateCommit: option('--candidate-commit'),
-  sourceRunHeadSha: option('--source-run-head-sha'),
-  candidateWebHash: option('--candidate-web-hash'),
+  runId: required('--run-id'),
+  attempt: required('--attempt'),
+  directory: required('--directory'),
+  matrix: matrix(required('--matrix')),
+  candidateCommit: required('--candidate-commit'),
+  sourceRunHeadSha: required('--source-run-head-sha'),
+  candidateWebHash: required('--candidate-web-hash'),
   candidateIdentity: json<EvidenceBundleIdentity>('--candidate-identity'),
   baselineIdentities: json<EvidenceExpectedBundle[]>('--baseline-identities'),
   };

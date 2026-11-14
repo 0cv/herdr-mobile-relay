@@ -58,7 +58,7 @@ globalThis.fetch = async (input, init) => {
   if (url.pathname === '/shutdown' && mode.includes('shutdown-failure')) throw Error('SHUTDOWN_FAILED');
   if (url.pathname === '/relay/drop') state.relays.find(r => r.name === url.searchParams.get('name')).credential_auth_count++;
   if (url.pathname === '/activate') state.active_release = 'candidate';
-  if (url.pathname === '/fault') { state.faults.push(body); state.requests.push({method:'GET',path:body.path,fault:body.kind,fault_id:body.id,fault_generation:body.generation,release:'candidate'}); }
+  if (url.pathname === '/fault') { state.faults.push(body); state.requests.push({method:'GET',path:body.path,fault:body.kind,fault_id:body.id,fault_generation:body.generation,release:'candidate',status:200}); }
   if (url.pathname === '/fault/clear') state.faults = [];
   return Response.json(url.pathname === '/state' ? state : {});
 };

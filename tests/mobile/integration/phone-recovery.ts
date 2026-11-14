@@ -1,52 +1,13 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { chromium, devices, webkit, type BrowserContext, type Page } from '../../../frontend/node_modules/playwright';
-import { integrityFor, type BundleIdentity, type BundleSet } from '../support/artifacts';
+import { integrityFor, readBundleSet, type BundleIdentity, type BundleSet } from '../support/artifacts';
+import { option, required } from '../support/cli';
 import { writeSanitizedJson } from '../support/diagnostics';
+import { fixtureControl, waitForFault, waitForFixtureInfo, type FixtureInfo, type FixtureRequest, type FixtureState } from '../support/fixture-client';
 import { startCommand, stopProcess } from '../support/process';
 import { repositoryPath, repositoryRoot } from '../support/paths';
-
-interface FixtureInfo {
-  app_url: string;
-  control_url: string;
-  control_secret: string;
-}
-
-interface FixtureRequest {
-  sequence: number;
-  method: string;
-  path: string;
-  release: string;
-  fault?: string;
-  fault_id?: string;
-  fault_generation?: string;
-  status: number;
-  content_type: string;
-  cache_control: string;
-  bytes: number;
-  sha256: string;
-}
-
-interface FaultAction {
-  action: string;
-  id: string;
-  generation: string;
-  path: string;
-  kind?: string;
-  policy?: string;
-  remaining: number;
-  request_count: number;
-}
-
-interface FixtureState {
-  invalidated: boolean;
-  invalidation_reason: string;
-  requests: FixtureRequest[];
-  request_counts: Record<string, number>;
-  fault_actions: FaultAction[];
-  faults: Array<{ id: string; generation: string; path: string; kind: string; remaining: number }>;
-}
 
 interface ResourceObservation {
   path: string;
@@ -89,48 +50,6 @@ const engines = [
   { name: 'webkit' as const, browser: webkit, device: devices['iPhone 15'] },
 ];
 
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function required(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`PHONE_RECOVERY: missing ${name}`);
-  return value;
-}
-
-async function readJson<T>(filename: string): Promise<T> {
-  return JSON.parse(await readFile(filename, 'utf8')) as T;
-}
-
-async function waitForInfo(filename: string): Promise<FixtureInfo> {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    try {
-      return await readJson<FixtureInfo>(filename);
-    } catch {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-    }
-  }
-  throw new Error('PHONE_RECOVERY: fixture info was not published');
-}
-
-async function control(info: FixtureInfo, path: string, method = 'GET', body?: unknown): Promise<any> {
-  const response = await fetch(`${info.control_url}${path}`, {
-    method,
-    headers: {
-      'X-Herdr-Fixture-Secret': info.control_secret,
-      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`PHONE_RECOVERY: fixture control returned HTTP ${response.status}`);
-  return text ? JSON.parse(text) : null;
-}
-
 function ensure(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`PHONE_RECOVERY: ${message}`);
 }
@@ -156,29 +75,6 @@ function sha256(value: Uint8Array | string): string {
 
 function observationFor(session: Session, path: string, from = 0): ResourceObservation | undefined {
   return [...session.resources.slice(from)].reverse().find((resource) => resource.path === path);
-}
-
-function matchingRequest(state: FixtureState, path: string, id: string, generation: string): FixtureRequest | undefined {
-  return [...state.requests].reverse().find((request) => request.path === path
-    && request.fault_id === id && request.fault_generation === generation);
-}
-
-async function waitForFault(
-  info: FixtureInfo,
-  path: string,
-  kind: string,
-  id: string,
-  generation: string,
-): Promise<{ state: FixtureState; request: FixtureRequest }> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const state = await control(info, '/state') as FixtureState;
-    ensure(!state.invalidated, `fixture invalidated: ${state.invalidation_reason || 'unknown reason'}`);
-    const request = matchingRequest(state, path, id, generation);
-    if (request?.fault === kind && request.status > 0) return { state, request };
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-  }
-  throw new Error(`PHONE_RECOVERY: intended ${kind} response was not consumed at ${path}`);
 }
 
 async function openSession(engine: typeof engines[number], profile: string, appOrigin: string): Promise<Session> {
@@ -425,19 +321,19 @@ async function runCanonicalAndUnchangedCss(options: Options, engine: typeof engi
   let session = await openSession(engine, profile, appOrigin(options.info));
   let phase = 'baseline-navigation';
   try {
-    await control(options.info, '/activate', 'POST', { release: 'old' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'old' });
     const firstDocument = await session.page.goto(options.info.app_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await waitForApp(session.page, baseline.identity, session.appOrigin);
     const baselineRuntime = await runtimeDetails(session.page, baseline.identity, session.appOrigin);
     phase = 'candidate-cutover';
-    const styleCountBefore = pathCount(await control(options.info, '/state'), baseline.identity.style);
-    const cleanCountsBefore = await control(options.info, '/state') as FixtureState;
-    await control(options.info, '/activate', 'POST', { release: 'candidate' });
+    const styleCountBefore = pathCount(await fixtureControl(options.info, '/state'), baseline.identity.style);
+    const cleanCountsBefore = await fixtureControl(options.info, '/state') as FixtureState;
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'candidate' });
     const candidateDocument = await session.page.goto(`${options.info.app_url}/index.html`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await waitForApp(session.page, candidate.identity, session.appOrigin);
     await flushResources(session);
     const candidateRuntime = await runtimeDetails(session.page, candidate.identity, session.appOrigin);
-    const stateAfterCutover = await control(options.info, '/state') as FixtureState;
+    const stateAfterCutover = await fixtureControl(options.info, '/state') as FixtureState;
     const styleCountAfter = pathCount(stateAfterCutover, candidate.identity.style);
     const styleBrowserResponse = observationFor(session, candidate.identity.style);
     ensure(firstDocument?.status() === 200 || firstDocument?.status() === 307,
@@ -460,7 +356,7 @@ async function runCanonicalAndUnchangedCss(options: Options, engine: typeof engi
     const restartRuntime = await runtimeDetails(session.page, candidate.identity, session.appOrigin);
     ensure(restartRuntime.build === candidate.identity.build && restartRuntime.cssAccepted,
       'reusable profile restart did not load the candidate build and stylesheet');
-    const stateAfterRestart = await control(options.info, '/state') as FixtureState;
+    const stateAfterRestart = await fixtureControl(options.info, '/state') as FixtureState;
     return {
       scenario: 'clean-canonical-startup-and-unchanged-css',
       engine: engine.name,
@@ -481,7 +377,7 @@ async function runCanonicalAndUnchangedCss(options: Options, engine: typeof engi
   } catch (error) {
     await flushResources(session);
     const [state, runtime] = await Promise.all([
-      control(options.info, '/state').catch(() => undefined) as Promise<FixtureState | undefined>,
+      fixtureControl(options.info, '/state').catch(() => undefined) as Promise<FixtureState | undefined>,
       runtimeDetails(session.page, baseline.identity, session.appOrigin).catch(() => undefined),
     ]);
     const details = {
@@ -513,17 +409,17 @@ async function runImmutableDocumentRetry(
   const profile = join(options.workDir, 'profiles', `${engine.name}-${kind}-retry`);
   let session = await openSession(engine, profile, appOrigin(options.info));
   try {
-    await control(options.info, '/activate', 'POST', { release: 'old' });
-    const beforeBaseline = await control(options.info, '/state') as FixtureState;
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'old' });
+    const beforeBaseline = await fixtureControl(options.info, '/state') as FixtureState;
     await session.page.goto(options.info.app_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await waitForApp(session.page, baseline.identity, session.appOrigin);
-    const beforePoison = await control(options.info, '/state') as FixtureState;
+    const beforePoison = await fixtureControl(options.info, '/state') as FixtureState;
     ensure(pathCount(beforePoison, path) === pathCount(beforeBaseline, path), 'candidate module was requested before the poison was armed');
     const poisonEventOffset = session.resources.length;
-    await control(options.info, '/fault', 'POST', {
+    await fixtureControl(options.info, '/fault', 'POST', {
       id, generation, method: 'GET', path, kind, remaining: -1, lifetime_ms: 120_000,
     });
-    await control(options.info, '/activate', 'POST', { release: 'candidate' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'candidate' });
     const documentResult = await navigateCandidate(session, options.info);
     await waitForFailure(session.page);
     const { state: consumedState, request } = await waitForFault(options.info, path, kind, id, generation);
@@ -542,8 +438,8 @@ async function runImmutableDocumentRetry(
       ensure(session.consoleKinds.includes('integrity'), 'the browser did not report the corrupt bytes as an integrity rejection');
     }
     const countBeforeRetry = pathCount(consumedState, path);
-    await control(options.info, '/fault/clear', 'POST', { id, generation });
-    const clearedState = await control(options.info, '/state') as FixtureState;
+    await fixtureControl(options.info, '/fault/clear', 'POST', { id, generation });
+    const clearedState = await fixtureControl(options.info, '/state') as FixtureState;
     ensure(clearedState.fault_actions.some((action) => action.action === 'fault_cleared'
       && action.id === id && action.generation === generation), 'explicit server repair was not accounted separately from exhaustion');
     const retryEventOffset = session.resources.length;
@@ -552,7 +448,7 @@ async function runImmutableDocumentRetry(
     await navigation;
     await waitForFailure(session.page);
     await flushResources(session);
-    const stateAfterRetry = await control(options.info, '/state') as FixtureState;
+    const stateAfterRetry = await fixtureControl(options.info, '/state') as FixtureState;
     const countAfterRetry = pathCount(stateAfterRetry, path);
     const retryRuntime = await runtimeDetails(session.page, candidate.identity, session.appOrigin);
     const retryResponse = observationFor(session, path, retryEventOffset);
@@ -569,14 +465,14 @@ async function runImmutableDocumentRetry(
       retryAssessment = 'server-refetch-did-not-recover';
     }
     session = await restartSession(engine, session);
-    const restartBefore = await control(options.info, '/state') as FixtureState;
+    const restartBefore = await fixtureControl(options.info, '/state') as FixtureState;
     const restartCountBefore = pathCount(restartBefore, path);
     const restartDocument = await session.page.goto(options.info.app_url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
     await session.page.waitForFunction(() => Boolean(document.querySelector('#app')?.childNodes.length
       || document.querySelector('#herdr-load-recovery')), undefined, { timeout: 20_000 }).catch(() => undefined);
     await flushResources(session);
     const restartRuntime = await runtimeDetails(session.page, candidate.identity, session.appOrigin);
-    const restartAfter = await control(options.info, '/state') as FixtureState;
+    const restartAfter = await fixtureControl(options.info, '/state') as FixtureState;
     return {
       scenario: `${kind}-document-only-retry`,
       engine: engine.name,
@@ -741,7 +637,7 @@ async function canonicalNavigationObservation(
   options: Options,
   identity: BundleIdentity,
 ): Promise<Record<string, unknown>> {
-  const pathCountBefore = pathCount(await control(options.info, '/state'), identity.script);
+  const pathCountBefore = pathCount(await fixtureControl(options.info, '/state'), identity.script);
   const responseOffset = session.resources.length;
   const response = await session.page.goto(`${options.info.app_url}/index.html?herdr_reload=phone-recovery`, {
     waitUntil: 'domcontentloaded', timeout: 30_000,
@@ -752,7 +648,7 @@ async function canonicalNavigationObservation(
   const runtime = await runtimeDetails(session.page, identity, session.appOrigin);
   const browserScript = observationFor(session, identity.script, responseOffset);
   const browserStyle = observationFor(session, identity.style, responseOffset);
-  const stateAfter = await control(options.info, '/state') as FixtureState;
+  const stateAfter = await fixtureControl(options.info, '/state') as FixtureState;
   const documentSameOrigin = new URL(session.page.url()).origin === session.appOrigin;
   const scriptResponseCanonical = browserScript?.sameOrigin === true && browserScript.canonicalUrl === true;
   const stylesheetResponseCanonical = browserStyle?.sameOrigin === true && browserStyle.canonicalUrl === true;
@@ -788,14 +684,14 @@ async function runRepairPolicyExperiment(
   const profile = join(options.workDir, 'profiles', `${engine.name}-repair-${policy}`);
   let session = await openSession(engine, profile, appOrigin(options.info));
   try {
-    await control(options.info, '/activate', 'POST', { release: 'old' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'old' });
     await session.page.goto(options.info.app_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await waitForApp(session.page, baseline.identity, session.appOrigin);
     const poisonEventOffset = session.resources.length;
-    await control(options.info, '/fault', 'POST', {
+    await fixtureControl(options.info, '/fault', 'POST', {
       id, generation, method: 'GET', path, kind: 'immutable-corrupt', remaining: -1, lifetime_ms: 120_000,
     });
-    await control(options.info, '/activate', 'POST', { release: 'candidate' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'candidate' });
     const documentResult = await navigateCandidate(session, options.info);
     await waitForFailure(session.page);
     const consumed = await waitForFault(options.info, path, 'immutable-corrupt', id, generation);
@@ -805,26 +701,26 @@ async function runRepairPolicyExperiment(
     const failureRuntime = await runtimeDetails(session.page, candidate.identity, session.appOrigin);
     ensure(!failureRuntime.appMounted && failureRuntime.recoveryVisible && documentResult.cspIntact,
       'repair experiment did not begin from an intact rejected poisoned module');
-    const repairBefore = await control(options.info, '/state') as FixtureState;
-    await control(options.info, '/fault/repair', 'POST', { id, generation, response_policy: policy });
-    const repaired = await control(options.info, '/state') as FixtureState;
+    const repairBefore = await fixtureControl(options.info, '/state') as FixtureState;
+    await fixtureControl(options.info, '/fault/repair', 'POST', { id, generation, response_policy: policy });
+    const repaired = await fixtureControl(options.info, '/state') as FixtureState;
     const repairEvent = repaired.fault_actions.find((action) => action.action === 'fault_repaired'
       && action.id === id && action.generation === generation);
     ensure(repairEvent?.policy === policy, 'explicit repair and response policy were not recorded');
 
-    const defaultBefore = await control(options.info, '/state') as FixtureState;
+    const defaultBefore = await fixtureControl(options.info, '/state') as FixtureState;
     const defaultFetch = await fetchCanonicalResource(
       session.page, path, 'default', session.appOrigin, candidate.identity.scriptSha256,
     );
-    const defaultAfter = await control(options.info, '/state') as FixtureState;
+    const defaultAfter = await fixtureControl(options.info, '/state') as FixtureState;
     const defaultServerRequests = defaultAfter.requests.filter((request) => request.path === path
       && request.sequence > Math.max(...defaultBefore.requests.map((request) => request.sequence), 0));
 
-    const reloadBefore = await control(options.info, '/state') as FixtureState;
+    const reloadBefore = await fixtureControl(options.info, '/state') as FixtureState;
     const reloadFetch = await fetchCanonicalResource(
       session.page, path, 'reload', session.appOrigin, candidate.identity.scriptSha256,
     );
-    const reloadAfter = await control(options.info, '/state') as FixtureState;
+    const reloadAfter = await fixtureControl(options.info, '/state') as FixtureState;
     const reloadServerRequests = reloadAfter.requests.filter((request) => request.path === path
       && request.sequence > Math.max(...reloadBefore.requests.map((request) => request.sequence), 0));
     for (const request of [...defaultServerRequests, ...reloadServerRequests]) {
@@ -883,14 +779,14 @@ async function runStaleEntryScenario(options: Options, engine: typeof engines[nu
   const profile = join(options.workDir, 'profiles', `${engine.name}-stale-entry`);
   const session = await openSession(engine, profile, appOrigin(options.info));
   try {
-    await control(options.info, '/activate', 'POST', { release: 'old' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'old' });
     await session.page.goto(options.info.app_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await waitForApp(session.page, baseline.identity, session.appOrigin);
     const oldEntry = baseline.identity.entry;
     const oldScript = baseline.identity.script;
-    const before = await control(options.info, '/state') as FixtureState;
+    const before = await fixtureControl(options.info, '/state') as FixtureState;
     ensure(pathCount(before, oldScript) > 0, 'baseline entry did not consume its descriptor-derived script before cutover');
-    await control(options.info, '/activate', 'POST', { release: 'candidate' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'candidate' });
     const staleResponse = await session.page.goto(new URL(oldEntry, options.info.app_url).href, {
       waitUntil: 'domcontentloaded', timeout: 30_000,
     });
@@ -911,7 +807,7 @@ async function runStaleEntryScenario(options: Options, engine: typeof engines[nu
         sameOrigin: new URL(response.url).origin === location.origin,
       };
     }, oldScript);
-    const after = await control(options.info, '/state') as FixtureState;
+    const after = await fixtureControl(options.info, '/state') as FixtureState;
     const oldScriptRequest = [...after.requests].reverse().find((request) => request.path === oldScript);
     ensure(staleResponse?.status() === 404 && staleHeaders['cache-control'] === 'no-store',
       'stale entry did not resolve to the expected non-storing 404 after cutover');
@@ -948,30 +844,30 @@ async function runPersistentOfflineScenario(options: Options, engine: typeof eng
   const profile = join(options.workDir, 'profiles', `${engine.name}-persistent-offline`);
   const session = await openSession(engine, profile, appOrigin(options.info));
   try {
-    await control(options.info, '/activate', 'POST', { release: 'old' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'old' });
     await session.page.goto(options.info.app_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await waitForApp(session.page, baseline.identity, session.appOrigin);
-    await control(options.info, '/fault', 'POST', {
+    await fixtureControl(options.info, '/fault', 'POST', {
       id, generation, method: 'GET', path, kind: 'missing', remaining: -1, lifetime_ms: 120_000,
     });
-    await control(options.info, '/activate', 'POST', { release: 'candidate' });
+    await fixtureControl(options.info, '/activate', 'POST', { release: 'candidate' });
     await navigateCandidate(session, options.info);
     await waitForFailure(session.page);
     const first = await waitForFault(options.info, path, 'missing', id, generation);
     const onlineAttempts = [first.request];
     for (let attempt = 0; attempt < 2; attempt++) {
-      const previousCount = pathCount(await control(options.info, '/state'), path);
+      const previousCount = pathCount(await fixtureControl(options.info, '/state'), path);
       const navigation = session.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => null);
       await session.page.getByRole('button', { name: 'Try again' }).click({ timeout: 10_000 });
       await navigation;
       await waitForFailure(session.page);
-      const state = await control(options.info, '/state') as FixtureState;
+      const state = await fixtureControl(options.info, '/state') as FixtureState;
       ensure(pathCount(state, path) > previousCount, 'explicit persistent-fault retry did not make its bounded asset request');
       onlineAttempts.push([...state.requests].reverse().find((request) => request.path === path && request.fault_id === id)!);
     }
-    const beforeIdle = await control(options.info, '/state') as FixtureState;
+    const beforeIdle = await fixtureControl(options.info, '/state') as FixtureState;
     await session.page.waitForTimeout(1_000);
-    const afterIdle = await control(options.info, '/state') as FixtureState;
+    const afterIdle = await fixtureControl(options.info, '/state') as FixtureState;
     ensure(pathCount(afterIdle, path) === pathCount(beforeIdle, path), 'persistent failure caused an automatic retry without user action');
     const beforeOffline = pathCount(afterIdle, path);
     await session.context.setOffline(true);
@@ -979,12 +875,12 @@ async function runPersistentOfflineScenario(options: Options, engine: typeof eng
     await session.page.getByRole('button', { name: 'Try again' }).click({ timeout: 10_000 }).catch(() => undefined);
     await offlineAttempt;
     await session.context.setOffline(false);
-    const afterOffline = await control(options.info, '/state') as FixtureState;
+    const afterOffline = await fixtureControl(options.info, '/state') as FixtureState;
     ensure(pathCount(afterOffline, path) === beforeOffline, 'offline attempt unexpectedly reached the fixture origin');
     const activeFault = afterOffline.faults.find((fault) => fault.id === id && fault.generation === generation);
     ensure(activeFault?.remaining === -1, 'persistent fault did not remain explicitly active and time-bounded');
-    await control(options.info, '/fault/clear', 'POST', { id, generation });
-    const repaired = await control(options.info, '/state') as FixtureState;
+    await fixtureControl(options.info, '/fault/clear', 'POST', { id, generation });
+    const repaired = await fixtureControl(options.info, '/state') as FixtureState;
     const repairedPage = await session.page.goto(options.info.app_url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
     await session.page.waitForFunction(() => Boolean(document.querySelector('#app')?.childNodes.length
       || document.querySelector('#herdr-load-recovery')), undefined, { timeout: 20_000 }).catch(() => undefined);
@@ -1029,13 +925,7 @@ async function main(): Promise<void> {
   const fixtureBinary = resolve(required('--fixture'));
   await mkdir(workDir, { recursive: true, mode: 0o700 });
   await mkdir(resultDir, { recursive: true, mode: 0o700 });
-  const bundleDirectory = resolve(bundleSetFile, '..');
-  const rawBundleSet = await readJson<BundleSet>(bundleSetFile);
-  const bundleSet: BundleSet = {
-    ...rawBundleSet,
-    candidate: { ...rawBundleSet.candidate, root: resolve(bundleDirectory, rawBundleSet.candidate.root) },
-    baselines: rawBundleSet.baselines.map((baseline) => ({ ...baseline, root: resolve(bundleDirectory, baseline.root) })),
-  };
+  const bundleSet = await readBundleSet(bundleSetFile);
   ensure(bundleSet.baselines.length === 1, 'phone-recovery fixture must name exactly one generated baseline');
   ensure(bundleSet.candidate.identity.script !== bundleSet.baselines[0]!.identity.script,
     'synthetic baseline and candidate must emit separate canonical script paths');
@@ -1058,11 +948,11 @@ async function main(): Promise<void> {
       LC_ALL: 'C',
     },
   });
-  const options: Options = { bundleSet, info: { app_url: '', control_url: '', control_secret: '' }, workDir, resultDir, fixtureBinary };
+  const options: Options = { bundleSet, info: { app_url: '', relay_urls: [], setup_urls: [], control_url: '', control_secret: '', ca_certificate: '', old_release: '', candidate_release: '' }, workDir, resultDir, fixtureBinary };
   const results: Record<string, unknown>[] = [];
   let failure: string | undefined;
   try {
-    options.info = await waitForInfo(infoFile);
+    options.info = await waitForFixtureInfo(infoFile, 60_000);
     for (const engine of engines) {
       results.push(await runCanonicalAndUnchangedCss(options, engine));
     }
@@ -1081,7 +971,7 @@ async function main(): Promise<void> {
   } catch (error) {
     failure = cleanFailure(error);
   } finally {
-    if (options.info.control_url) await control(options.info, '/shutdown', 'POST').catch(() => undefined);
+    if (options.info.control_url) await fixtureControl(options.info, '/shutdown', 'POST').catch(() => undefined);
     await stopProcess(fixtureProcess);
     await writeSanitizedJson(join(resultDir, 'result.json'), {
       schema: 1,
