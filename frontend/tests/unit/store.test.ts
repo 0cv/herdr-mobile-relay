@@ -27,13 +27,14 @@ import { normalizeConversationPage, relayStore, CommandError } from '$lib/store'
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
+import { MockWebSocket, connectRelay } from '../support/relay';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
 
 /**
  * Lets one test swap in a transport the store cannot otherwise reach, such as
  * a path that reports a fatal failure. Every other test keeps the real
- * WebSocket transport and the MockWebSocket below.
+ * WebSocket transport and the MockWebSocket.
  */
 const transportHijack = vi.hoisted(() => ({ current: null as TransportFactory | null }));
 
@@ -46,28 +47,6 @@ vi.mock('$lib/transports', async (importOriginal) => {
   };
 });
 
-class MockWebSocket {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSED = 3;
-  static instances: MockWebSocket[] = [];
-  readyState = MockWebSocket.CONNECTING;
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onclose: ((event?: { code: number }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
-  get protocol() { return typeof this.protocols === 'string' ? this.protocols : ''; }
-  send(payload: string) { this.sent.push(payload); }
-  close() { this.readyState = MockWebSocket.CLOSED; }
-  open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
-  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
-  serverClose(code?: number) {
-    this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.(code === undefined ? undefined : { code });
-  }
-}
 function exactAgentFields(paneId = 'w1:p1') {
   return {
     server_session_id: 'primary',
@@ -153,9 +132,7 @@ describe('relay command store', () => {
   });
 
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' }, capabilities: [], agent_profiles: [] });
+    const socket = connectRelay({ capabilities: [], agent_profiles: [] });
     socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', terminal_id: 'terminal', workspace_id: 'workspace', tab_id: 'tab', name: 'Named agent', agent: '', status: 'unknown', cwd: '/home/example/Development', conversation_history_available: false }] });
     const row = get(relayStore.agents)[0];
     expect(row).toMatchObject({ raw_pane_id: 'w1:p1', terminal_id: 'terminal', name: 'Named agent', agent: '', cwd: '/home/example/Development' });
@@ -175,9 +152,7 @@ describe('relay command store', () => {
     { label: 'spaces only', session: '   ' },
     { label: 'maximum length', session: 'x'.repeat(2048) },
   ].map(value => ({ ingress, ...value }))))('preserves $label opaque session bytes through $ingress ingress and read/send round trips', async ({ ingress, session }) => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    const socket = connectRelay({ capabilities: ['manual_terminal_input'] });
     const initial = { ...exactAgentFields(), pane_id: 'w1:p1', agent: 'pi', status: 'idle', pane_revision: 1, agent_session_id: 'previous-session' };
     socket.message({ type: 'agents', agents: [initial] });
     const incoming = { ...initial, pane_revision: 2, agent_session_id: session };
@@ -206,9 +181,7 @@ describe('relay command store', () => {
   });
 
   it.each([' invalid\n', '\tinvalid', 'x'.repeat(2049)])('does not turn an invalid opaque session into a routable identity', async session => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', agent_session_id: session }] });
     const agent = get(relayStore.agents)[0];
     expect(targetRefForAgent(agent)).toBeNull();
@@ -251,9 +224,7 @@ describe('relay command store', () => {
 
   it.each(['completed', 'completed_with_warning'])('retains a launch until delayed %s', async (phase) => {
     vi.useFakeTimers();
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     const relayId = get(relayStore.relayConfigs)[0].id;
     const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'claude', name: 'project', cwd: '/tmp' });
     const command = JSON.parse(socket.sent.at(-1)!);
@@ -269,9 +240,7 @@ describe('relay command store', () => {
 
   it.each(['missing', 'repeated-accepted', 'disconnect', 'abort'] as const)('bounds Hermes launch confirmation with %s results and never replays it', async outcome => {
     vi.useFakeTimers();
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     const relayId = get(relayStore.relayConfigs)[0].id;
     const controller = new AbortController();
     const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'hermes', name: 'development-hermes', cwd: '/fixture/Development' }, undefined, false, controller.signal);
@@ -1649,9 +1618,7 @@ describe('relay command store', () => {
   it.each([100, 500, 1_000, 10_000] as const)('preserves %i-line history during repeated manual context refreshes', async lines => {
     vi.useFakeTimers();
     setTerminalHistoryLines(lines);
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    const socket = connectRelay({ capabilities: ['manual_terminal_input'] });
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', agent: 'pi', ...exactAgentFields() }] });
     const agent = get(relayStore.agents)[0];
     const target = exactWireScope('w1:p1', agent.relay_id).target;
@@ -1678,9 +1645,7 @@ describe('relay command store', () => {
   it('correlates inspection freshness with read issuance, not a delayed response arrival', () => {
     let now = 10;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
     const agent = get(relayStore.agents)[0];
     const target = exactWireScope('w1:p1', agent.relay_id).target;
@@ -1718,9 +1683,7 @@ describe('relay command store', () => {
   it('requires a post-unlock correlated read before a pane delta can authorize manual input', async () => {
     let now = 10;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    const socket = connectRelay({ capabilities: ['manual_terminal_input'] });
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', agent: 'pi', ...exactAgentFields() }] });
     const agent = get(relayStore.agents)[0];
     const target = exactWireScope('w1:p1', agent.relay_id).target;
@@ -1782,9 +1745,7 @@ describe('relay command store', () => {
     let now = 10;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
     vi.spyOn(Date, 'now').mockImplementation(() => now);
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, capabilities: ['manual_terminal_input'], inventory: { state: 'ready' } });
+    const socket = connectRelay({ capabilities: ['manual_terminal_input'] });
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', agent: 'pi', ...exactAgentFields() }] });
     const agent = get(relayStore.agents)[0];
     const target = exactWireScope('w1:p1', agent.relay_id).target;
@@ -1848,9 +1809,7 @@ describe('relay command store', () => {
   it.each(['untagged', 'unknown-id', 'error', 'replacement', 'disconnected'] as const)('does not authorize inspection from a %s read response', kind => {
     let now = 10;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
     const agent = get(relayStore.agents)[0];
     const target = exactWireScope('w1:p1', agent.relay_id).target;
@@ -2021,9 +1980,7 @@ describe('relay command store', () => {
   });
 
   it('survives a corrupted snapshot that repeats a pane and reports it', () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     // The home view keys agent cards by pane_id: a duplicate from a corrupted
     // relay snapshot previously crashed Svelte's flush and every control in
     // the app silently died. The newest copy wins and the anomaly is visible.
@@ -2044,9 +2001,7 @@ describe('relay command store', () => {
   });
 
   it('ignores blocked and agent update frames older than the pane revision', () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     socket.message({
       type: 'agents',
       agents: [{ pane_id: 'w1:p1', status: 'working', pane_revision: 12, project: 'Current', ...exactAgentFields() }],
@@ -2114,9 +2069,7 @@ describe('relay command store', () => {
 
   it('bounds Conversation pane reads and records only received, explicit echo state', () => {
     vi.useFakeTimers();
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', ...exactAgentFields() }] });
     const agent = get(relayStore.agents)[0];
     relayStore.readPane(agent, false, 30);
@@ -2131,9 +2084,7 @@ describe('relay command store', () => {
   });
 
   it('never attributes untagged or inherited echo state to the current pane target', () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const socket = connectRelay();
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
     const agent = get(relayStore.agents)[0];
     const target = exactWireScope('w1:p1', agent.relay_id).target;
@@ -3941,8 +3892,7 @@ describe('command error detail through public transport ingress', () => {
     relayStore.relayConfigs.set([]);
     relayStore.addRelay({ label: 'Detail relay', url: 'ws://127.0.0.1:8871', token: '' });
     const socket = MockWebSocket.instances[0];
-    socket.open();
-    socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+    connectRelay({ capabilities: [] }, socket);
   });
 
   afterEach(() => {
@@ -4180,8 +4130,7 @@ describe('pending resource release through public consumers', () => {
     relayStore.addRelay({ label: 'Release owner', url: 'ws://127.0.0.1:8871', token: '' });
     relayStore.addRelay({ label: 'Release other', url: 'ws://127.0.0.1:8872', token: '' });
     for (const socket of MockWebSocket.instances.slice(-2)) {
-      socket.open();
-      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+      connectRelay({ capabilities: [] }, socket);
     }
     cleanupOrder.length = 0;
     ({ clear, add, remove } = instrumentation());
@@ -4696,8 +4645,7 @@ describe('pending deadline replacement through public ingress', () => {
     relayStore.addRelay({ label: 'Deadline other', url: 'ws://127.0.0.1:8872', token: '' });
     // addRelay reconnects all: establish both before registering any command.
     for (const socket of MockWebSocket.instances.slice(-2)) {
-      socket.open();
-      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+      connectRelay({ capabilities: [] }, socket);
     }
     relayStore.toast.set(null);
     timers = instrumentation(); // All spies call through to the installed fake/native APIs.
@@ -4928,8 +4876,7 @@ describe('pending registration through genuine public consumers', () => {
     relayStore.addRelay({ label: 'Registration owner', url: 'ws://127.0.0.1:8871', token: '' });
     relayStore.addRelay({ label: 'Registration other', url: 'ws://127.0.0.1:8872', token: '' });
     for (const socket of MockWebSocket.instances.slice(-2)) {
-      socket.open();
-      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+      connectRelay({ capabilities: [] }, socket);
     }
     calls = instrumentation();
   });
@@ -5330,8 +5277,7 @@ describe('explicit false-send release through genuine public consumers', () => {
     relayStore.addRelay({ label: 'False owner', url: 'ws://127.0.0.1:8871', token: '' });
     relayStore.addRelay({ label: 'False other', url: 'ws://127.0.0.1:8872', token: '' });
     for (const socket of MockWebSocket.instances.slice(-2)) {
-      socket.open();
-      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+      connectRelay({ capabilities: [] }, socket);
     }
     calls = instrumentation();
   });
@@ -5750,8 +5696,7 @@ describe('three-field safe-integer wire consumers on decoded JSON', () => {
     relayStore.addRelay({ label: 'Wire owner', url: 'ws://127.0.0.1:8871', token: '' });
     relayStore.addRelay({ label: 'Wire other', url: 'ws://127.0.0.1:8872', token: '' });
     for (const socket of MockWebSocket.instances.slice(-2)) {
-      socket.open();
-      socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+      connectRelay({ capabilities: [] }, socket);
       socket.message({ type: 'agents', agents: [
         { ...exactAgentFields(), pane_id: 'w1:p1', name: 'Wire agent', agent: 'codex', status: 'idle' },
       ] });
@@ -6089,8 +6034,7 @@ describe('command assigned-deadline abort regressions', () => {
       relayStore.addRelay({ label: 'Assigned A', url: 'ws://127.0.0.1:8871', token: '' });
       relayStore.addRelay({ label: 'Assigned B', url: 'ws://127.0.0.1:8872', token: '' });
       for (const socket of MockWebSocket.instances.slice(-2)) {
-        socket.open();
-        socket.message({ type: 'push_config', protocol: 3, capabilities: [], inventory: { state: 'ready' } });
+        connectRelay({ capabilities: [] }, socket);
       }
       const map = (relayStore as unknown as { pendingRequests: Map<string, Pending> }).pendingRequests;
       const nativeClear = globalThis.clearTimeout;

@@ -9,19 +9,12 @@ import { PiPromptDelivery, piPromptDelivery, piPromptTarget, validPiPromptText }
 import { promptDispatchRestriction } from '$lib/terminal-input';
 import { targetRefForAgent, targetStoreKey } from '$lib/resource-id';
 import type { Agent } from '$lib/types';
+import { MockWebSocket } from '../support/relay';
 
-class Socket {
-  static instances: Socket[] = [];
-  static OPEN = 1;
-  readyState = 0;
-  sent: Record<string, any>[] = [];
-  onopen?: () => void;
-  onmessage?: (event: { data: string }) => void;
-  onclose?: () => void;
-  constructor() { Socket.instances.push(this); }
+class PromptSocket extends MockWebSocket {
   send(value: string) {
+    super.send(value);
     const command = JSON.parse(value);
-    this.sent.push(command);
     if (command.type === 'get_pi_prompt_capability') queueMicrotask(() => {
       now++;
       this.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'completed', data: {
@@ -32,15 +25,12 @@ class Socket {
     if (command.type === 'read_pane') queueMicrotask(() => this.message({ type: 'pane_content', pane_id: 'pane', request_id: command.request_id,
       target: command.target, content: 'Unrecognized dialog', no_echo: false }));
   }
-  close() { this.readyState = 3; }
-  open() { this.readyState = 1; this.onopen?.(); }
-  message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
 }
 let agent: Agent;
-let socket: Socket;
+let socket: MockWebSocket;
 let now = 1000;
 let generation = 100;
-const commands = (type: string) => socket.sent.filter(command => command.type === type);
+const commands = (type: string) => socket.messages().filter(command => command.type === type);
 const sends = () => commands('send_pi_prompt_unconfirmed');
 const input = () => screen.getByLabelText('Prompt');
 const submit = () => fireEvent.submit(screen.getByRole('form', { name: 'Send a prompt' }));
@@ -64,14 +54,14 @@ beforeEach(() => {
   now += 10000;
   vi.spyOn(performance, 'now').mockImplementation(() => now);
   localStorage.clear(); sessionStorage.clear();
-  Socket.instances = [];
-  vi.stubGlobal('WebSocket', Socket);
+  MockWebSocket.instances = [];
+  vi.stubGlobal('WebSocket', PromptSocket);
   relayStore.destroy(); relayStore.setHidden(false); relayStore.relayConfigs.set([]);
   securityState.set({ locked: false, busy: false, reason: 'open', status: '', hint: '' });
   vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role: 'controller' } as never);
   vi.spyOn(relayStore, 'showToast');
   relayStore.addRelay({ id: 'pi-prompt', label: 'Synthetic', url: 'ws://127.0.0.1:8871', token: '' });
-  socket = Socket.instances.at(-1)!; socket.open();
+  socket = MockWebSocket.instances.at(-1)!; socket.open();
   socket.message({ type: 'push_config', protocol: 3, capabilities: ['pi_prompt_unconfirmed', 'secret_input', 'conversation_activity'], inventory: { state: 'ready' } });
   const relay = get(relayStore.relayConfigs)[0];
   agent = { relay_id: relay.id, relay_label: relay.label, pane_id: `${relay.id}::pane`, raw_pane_id: 'pane', server_session_id: 'primary', terminal_id: 'terminal',

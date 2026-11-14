@@ -8,27 +8,13 @@ import { relayStore } from '$lib/store';
 import { securityState } from '$lib/security';
 import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import type { Agent, TerminalFrame } from '$lib/types';
+import { MockWebSocket, connectRelay } from '../support/relay';
 
-class Socket {
-  static instances: Socket[] = [];
-  static OPEN = 1;
-  readyState = 0;
-  sent: string[] = [];
-  onopen?: () => void;
-  onmessage?: (event: { data: string }) => void;
-  onclose?: () => void;
-  onerror?: () => void;
-  constructor(readonly url: string) { Socket.instances.push(this); }
-  send(value: string) { this.sent.push(value); }
-  close() { this.readyState = 3; }
-  open() { this.readyState = 1; this.onopen?.(); }
-  message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
-}
 let generation = 0;
 let agent: Agent;
-let socket: Socket;
+let socket: MockWebSocket;
 let now: number;
-const commands = () => Socket.instances.flatMap(value => value.sent.map(text => JSON.parse(text)));
+const commands = () => MockWebSocket.instances.flatMap(value => value.sent.map(text => JSON.parse(text)));
 const sends = () => commands().filter(command => command.type === 'send_secret');
 const secretInput = () => screen.getByLabelText('Value for the hidden terminal prompt');
 const sendButton = () => screen.getByRole('button', { name: 'Send hidden value' });
@@ -55,8 +41,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   now = 100_000 + (++generation) * 100_000;
   vi.spyOn(performance, 'now').mockImplementation(() => now);
-  Socket.instances = [];
-  vi.stubGlobal('WebSocket', Socket);
+  MockWebSocket.instances = [];
+  vi.stubGlobal('WebSocket', MockWebSocket);
   localStorage.clear();
   sessionStorage.clear();
   relayStore.destroy();
@@ -64,9 +50,8 @@ beforeEach(() => {
   relayStore.relayConfigs.set([]);
   securityState.set({ locked: false, busy: false, reason: 'open', status: '', hint: '' });
   relayStore.addRelay({ id: 'secret-fixture', label: 'Synthetic', url: 'ws://127.0.0.1:8872', token: '' });
-  socket = Socket.instances.at(-1)!;
-  socket.open();
-  socket.message({ type: 'push_config', protocol: 3, capabilities: ['secret_input', 'manual_terminal_input'], inventory: { state: 'ready' } });
+  socket = MockWebSocket.instances.at(-1)!;
+  connectRelay({ capabilities: ['secret_input', 'manual_terminal_input'] }, socket);
   const relay = get(relayStore.relayConfigs)[0];
   agent = { relay_id: relay.id, relay_label: relay.label, pane_id: `${relay.id}::pane`, raw_pane_id: 'pane',
     server_session_id: 'primary', terminal_id: 'terminal', generation, agent_session_id: `session-${generation}`, agent: 'codex', status: 'idle' };
@@ -152,9 +137,8 @@ for (const name of ['Conversation', 'Terminal'] as const) {
       } else {
         relayStore.connectRelay(get(relayStore.relayConfigs)[0]);
         await tick();
-        socket = Socket.instances.at(-1)!;
-        socket.open();
-        socket.message({ type: 'push_config', protocol: 3, capabilities: ['secret_input', 'manual_terminal_input'], inventory: { state: 'ready' } });
+        socket = MockWebSocket.instances.at(-1)!;
+        connectRelay({ capabilities: ['secret_input', 'manual_terminal_input'] }, socket);
       }
       await tick();
       expect(secretInput()).toHaveValue('');
