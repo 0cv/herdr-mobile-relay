@@ -84,13 +84,7 @@ func (s *Server) acquireConversationFeed(client *transport.ClientConn, inbound p
 	}
 	if old := s.conversationClients[client.ID()]; old != nil && (old != s.conversationFeeds[key] || inbound.Cursor == "") {
 		old.mu.Lock()
-		delete(old.clients, client.ID())
-		delete(old.subscriptions, client.ID())
-		delete(old.loaded, client.ID())
-		if pending := old.waiting[client.ID()]; pending != nil {
-			close(pending)
-			delete(old.waiting, client.ID())
-		}
+		old.removeClientLocked(client.ID())
 		empty := len(old.clients) == 0
 		old.mu.Unlock()
 		if old != s.conversationFeeds[key] && empty {
@@ -142,17 +136,20 @@ func (s *Server) stopConversationFeed(clientID, subscription string) {
 		return
 	}
 	delete(s.conversationClients, clientID)
+	feed.removeClientLocked(clientID)
+	empty := len(feed.clients) == 0
+	feed.mu.Unlock()
+	if empty {
+		feed.cancel()
+	}
+}
+func (feed *conversationFeed) removeClientLocked(clientID string) {
 	delete(feed.clients, clientID)
 	delete(feed.subscriptions, clientID)
 	delete(feed.loaded, clientID)
 	if pending := feed.waiting[clientID]; pending != nil {
 		close(pending)
 		delete(feed.waiting, clientID)
-	}
-	empty := len(feed.clients) == 0
-	feed.mu.Unlock()
-	if empty {
-		feed.cancel()
 	}
 }
 func (feed *conversationFeed) publish(batch conversationBatch) {
@@ -212,9 +209,7 @@ func (s *Server) runConversationFeed(feed *conversationFeed) {
 				feed.mu.Lock()
 				for id, seen := range feed.clients {
 					if time.Since(seen) > 30*time.Second {
-						delete(feed.clients, id)
-						delete(feed.subscriptions, id)
-						delete(feed.loaded, id)
+						feed.removeClientLocked(id)
 					}
 				}
 				empty := len(feed.clients) == 0
@@ -289,51 +284,89 @@ func (s *Server) runRecordedConversationFeed(feed *conversationFeed) {
 	}
 	capabilities := &conversation.SourceCapabilities{Source: "recorded_history", ActiveBranch: conversation.IsKimi(feed.agent.Agent)}
 	var previous conversation.BrowsePage
+	s.pollRecordedConversation(feed, func() bool { return false }, func(first bool) (conversationBatch, bool, bool, bool) {
+		page, err := s.conversationB.ReadPage(feed.ctx, conversation.BrowseRequest{Scope: conversationScope(feed.agent), Limit: 200})
+		if err != nil {
+			return conversationBatch{}, false, false, false
+		}
+		kind := "batch"
+		changed := recordedEntriesChanged(previous, page)
+		if !first && recordedPageNeedsReset(previous, page, changed) {
+			kind = "reset"
+			changed = nil
+		}
+		publish := first || kind == "reset" || len(changed) > 0
+		previous = page
+		return conversationBatch{Kind: kind, SourceRevision: page.SourceRevision, Entries: changed, Remove: []string{}, State: "recorded", Capabilities: capabilities}, publish, page.State == conversation.BrowseReady, true
+	})
+}
+func recordedEntriesChanged(previous, page conversation.BrowsePage) []conversation.Entry {
+	changed := []conversation.Entry{}
+	old := make(map[string]string, len(previous.Entries))
+	for _, entry := range previous.Entries {
+		raw, _ := json.Marshal(entry)
+		old[entry.ID] = string(raw)
+	}
+	for _, entry := range page.Entries {
+		raw, _ := json.Marshal(entry)
+		if prior, ok := old[entry.ID]; !ok || prior != string(raw) {
+			changed = append(changed, entry)
+		}
+	}
+	return changed
+}
+func recordedPageNeedsReset(previous, page conversation.BrowsePage, changed []conversation.Entry) bool {
+	if page.SourceRevision != previous.SourceRevision || page.State != previous.State || page.Available != previous.Available {
+		return true
+	}
+	if page.ReasonCode != previous.ReasonCode || page.Reason != previous.Reason || page.Diagnostics != previous.Diagnostics {
+		return true
+	}
+	if page.State != conversation.BrowseReady && (len(changed) > 0 || len(page.Entries) != len(previous.Entries)) {
+		return true
+	}
+	return recordedEntriesReplaced(previous, page) || recordedWindowRemoved(previous, page) || recordedPlanChanged(previous, page)
+}
+func recordedEntriesReplaced(previous, page conversation.BrowsePage) bool {
+	if len(previous.Entries) == 0 || len(page.Entries) == 0 {
+		return false
+	}
+	known := make(map[string]bool, len(previous.Entries))
+	for _, entry := range previous.Entries {
+		known[entry.ID] = true
+	}
+	for _, entry := range page.Entries {
+		if known[entry.ID] {
+			return false
+		}
+	}
+	return true
+}
+func (s *Server) pollRecordedConversation(feed *conversationFeed, needsReset func() bool, read func(first bool) (batch conversationBatch, publish, ready, ok bool)) {
 	var stamp string
 	var retryAt time.Time
+	ready := true
+	first := true
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
-	first := true
 	for {
 		if !s.conversationCurrent(feed) || feed.ctx.Err() != nil {
 			return
 		}
-		nextStamp, tokenErr := s.conversationM.ChangeToken(feed.ctx, conversationScope(feed.agent))
-		if first || tokenErr != nil || nextStamp != stamp || previous.State != conversation.BrowseReady && !time.Now().Before(retryAt) {
-			page, readErr := s.conversationB.ReadPage(feed.ctx, conversation.BrowseRequest{Scope: conversationScope(feed.agent), Limit: 200})
-			if readErr == nil && s.conversationCurrent(feed) {
-				feed.mu.Lock()
-				seq := feed.sequence + 1
-				feed.mu.Unlock()
-				kind := "batch"
-				changed := []conversation.Entry{}
-				old := make(map[string]string, len(previous.Entries))
-				for _, entry := range previous.Entries {
-					raw, _ := json.Marshal(entry)
-					old[entry.ID] = string(raw)
+		nextStamp, err := s.conversationM.ChangeToken(feed.ctx, conversationScope(feed.agent))
+		if first || needsReset() || err != nil || stamp != nextStamp || !ready && !time.Now().Before(retryAt) {
+			batch, publish, pageReady, ok := read(first)
+			if !s.conversationCurrent(feed) || feed.ctx.Err() != nil {
+				return
+			}
+			if ok {
+				if publish {
+					feed.mu.Lock()
+					batch.Sequence = feed.sequence + 1
+					feed.mu.Unlock()
+					feed.publish(batch)
 				}
-				overlap := false
-				for _, entry := range page.Entries {
-					raw, _ := json.Marshal(entry)
-					if prior, ok := old[entry.ID]; ok {
-						overlap = true
-						if prior != string(raw) {
-							changed = append(changed, entry)
-						}
-					} else {
-						changed = append(changed, entry)
-					}
-				}
-				if !first && ((len(previous.Entries) > 0 && !overlap && len(page.Entries) > 0) || page.SourceRevision != previous.SourceRevision || page.State != previous.State || (page.State != conversation.BrowseReady && (len(changed) > 0 || len(page.Entries) != len(previous.Entries))) || page.Available != previous.Available || page.ReasonCode != previous.ReasonCode || page.Reason != previous.Reason || page.Diagnostics != previous.Diagnostics || recordedWindowRemoved(previous, page) || recordedPlanChanged(previous, page)) {
-					kind = "reset"
-					changed = nil
-				}
-				if first || kind == "reset" || len(changed) > 0 {
-					feed.publish(conversationBatch{Kind: kind, SourceRevision: page.SourceRevision, Sequence: seq, Entries: changed, Remove: []string{}, State: "recorded", Capabilities: capabilities})
-				}
-				previous = page
-				stamp = nextStamp
-				first = false
+				stamp, ready, first = nextStamp, pageReady, false
 				retryAt = time.Now().Add(5 * time.Second)
 			}
 		}
