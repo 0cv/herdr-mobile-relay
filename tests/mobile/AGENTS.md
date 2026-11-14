@@ -9,6 +9,7 @@
 
 ## Rules
 
+- Node and Bun versions live in `toolchains.json` and the Go version in `go.mod`. Workflows and the device action install them through `.github/actions/setup-toolchain`; never write the versions into a workflow.
 - Never weaken a product assertion to get a green run. Limits such as at most 2 reloads and at most 2 lifecycle launches describe what users must experience.
 - `APPIUM_TIMEOUT` stays fatal for the rest of the run because the driver can no longer be trusted. Do not retry inside the run.
 - Hosted iOS runs with `MOBILE_TIMING_SCALE=3`, which scales phase and request allowances but not admission. The release scenario has 45 minutes and the device job 60.
