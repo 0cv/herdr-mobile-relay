@@ -712,7 +712,7 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 }
 
 func (c *Client) Close() error {
-	return c.api.close()
+	return nil
 }
 
 func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) error {

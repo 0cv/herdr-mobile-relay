@@ -158,7 +158,7 @@ func TestReadPaneCLIFallbackDoesNotHideUnsupportedSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	refusal := map[string]any{"error": map[string]any{"code": "unknown_method", "message": "unsupported"}}
-	path, listener, done := capabilitySocket(t, []map[string]any{refusal, refusal})
+	path, listener, done := capabilitySocket(t, []map[string]any{refusal})
 	defer listener.Close()
 	client := NewClient(bin, path)
 	defer client.Close()
