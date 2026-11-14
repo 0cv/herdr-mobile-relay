@@ -354,6 +354,20 @@ func claudeFooterBoundaryUninspectableBytes(footer []byte, maxRecordBytes int64)
 	return lineBytes > maxRecordBytes
 }
 
+func (segment claudeSegment) stamp() sourceStamp {
+	return sourceStamp{
+		size: segment.CapturedEnd, modTime: segment.SourceModTime,
+		changeToken: segment.SourceChangeToken, identity: segment.FileIdentity,
+	}
+}
+
+func (segment claudeSegment) compareSource(source fileSource) sourceChange {
+	if source.revision != segment.FileRevision {
+		return sourceChanged
+	}
+	return segment.stamp().compare(source.info)
+}
+
 // readCapturedSegment reads at most limit bytes ending at a descriptor's
 // captured boundary. It is used by the legacy reader and deliberately verifies
 // the descriptor before reading, so an old chain never grows into a new leaf.
@@ -366,8 +380,7 @@ func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64
 		return "", false, err
 	}
 	defer source.close()
-	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
-		source.end == segment.CapturedEnd && segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken {
+	if segment.compareSource(source) == sourceChanged {
 		return "", false, errors.New("Claude chain source changed")
 	}
 	end := segment.CapturedEnd
