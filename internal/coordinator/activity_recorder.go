@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"context"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -10,12 +9,11 @@ import (
 )
 
 type activityRecorder struct {
-	worker    *activity.Worker
+	journal   *activity.Journal
 	state     *State
 	logger    *slog.Logger
 	broadcast func(any)
 	order     sync.Mutex
-	sequence  atomic.Uint64
 	failures  atomic.Uint64
 }
 
@@ -24,7 +22,7 @@ func (r *activityRecorder) record(kind, status, summary, paneID, requestID strin
 }
 
 func (r *activityRecorder) recordWithExtract(kind, status, summary, extract, paneID, requestID string) {
-	if r.worker == nil {
+	if r.journal == nil {
 		return
 	}
 	r.order.Lock()
@@ -42,17 +40,14 @@ func (r *activityRecorder) recordWithExtract(kind, status, summary, extract, pan
 	entry.Session = session
 	entry.Extract = extract
 	entry.Details = map[string]any{"action": kind}
-	committed, err := r.worker.Commit(context.Background(), activity.ActivityCommitRequested{
-		Sequence: r.sequence.Add(1),
-		Entry:    entry,
-	})
-	if err != nil {
+	entry = activity.NormalizeEntry(entry)
+	if err := r.journal.Append(entry); err != nil {
 		r.failures.Add(1)
 		r.logger.Warn("activity append failed", "error", err)
 		return
 	}
 	if r.broadcast != nil {
-		r.broadcast(map[string]any{"type": "activity", "activity": committed.Entry})
+		r.broadcast(map[string]any{"type": "activity", "activity": entry})
 	}
 }
 
@@ -81,9 +76,9 @@ type BlockedTransitionIdentity struct {
 
 // recordTransition publishes only while the originating state
 // revision is still current. If the state advances during the durable append,
-// the worker tombstones and removes the stale record before it can be exposed.
+// the stale entry is removed before it can be exposed.
 func (r *activityRecorder) recordTransition(transition TransitionActivity) bool {
-	if r.worker == nil {
+	if r.journal == nil {
 		return false
 	}
 	r.order.Lock()
@@ -117,37 +112,28 @@ func (r *activityRecorder) recordTransition(transition TransitionActivity) bool 
 		entry.Timestamp = activity.MilliTimestamp(transitionAt)
 	}
 	entry.Extract = transition.Extract
-	committed, err := r.worker.Commit(context.Background(), activity.ActivityCommitRequested{
-		Sequence: r.sequence.Add(1),
-		Entry:    entry,
-	})
-	if err != nil {
+	entry = activity.NormalizeEntry(entry)
+	if err := r.journal.Append(entry); err != nil {
 		r.failures.Add(1)
 		r.logger.Warn("transition activity append failed", "error", err)
 		return false
 	}
 	if !transitionCurrent() {
-		_, discardErr := r.worker.Discard(context.Background(), activity.ActivityDiscardRequested{
-			Sequence: r.sequence.Add(1),
-			ID:       committed.Entry.ID,
-		})
-		if discardErr != nil {
+		if discardErr := r.journal.Discard(entry.ID); discardErr != nil {
 			r.failures.Add(1)
 			r.logger.Warn("stale transition activity discard failed", "error", discardErr)
 		}
 		return false
 	}
 	if r.broadcast != nil {
-		r.broadcast(map[string]any{"type": "activity", "activity": committed.Entry})
+		r.broadcast(map[string]any{"type": "activity", "activity": entry})
 	}
 	return true
 }
 
 func (r *activityRecorder) clear(finish func(error) *CommandResult) *CommandResult {
 	r.order.Lock()
-	if _, err := r.worker.Clear(context.Background(), activity.ActivityClearRequested{
-		Sequence: r.sequence.Add(1),
-	}); err != nil {
+	if err := r.journal.Clear(); err != nil {
 		r.order.Unlock()
 		r.failures.Add(1)
 		return finish(err)
@@ -157,11 +143,4 @@ func (r *activityRecorder) clear(finish func(error) *CommandResult) *CommandResu
 		r.broadcast(map[string]any{"type": "activity_history", "activities": []any{}})
 	}
 	return finish(nil)
-}
-
-func (r *activityRecorder) close(ctx context.Context) error {
-	if r.worker == nil {
-		return nil
-	}
-	return r.worker.Close(ctx)
 }

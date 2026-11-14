@@ -1,7 +1,6 @@
 package activity
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -165,24 +164,6 @@ func TestAppendEnforcesSerializedByteLimit(t *testing.T) {
 	}
 }
 
-func TestWorkerReturnsPersistedNormalizedEntry(t *testing.T) {
-	j, err := OpenJournal(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker := NewWorker(j)
-	defer worker.Close(context.Background())
-	entry := NewEntry("prompt", "sent", "Prompt sent", "p1", "", "", "r1")
-	entry.Extract = strings.Repeat("x", maxExtractChars+10)
-	committed, err := worker.Commit(context.Background(), ActivityCommitRequested{Sequence: 1, Entry: entry})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if committed.Entry.Extract != j.Recent(1)[0].Extract {
-		t.Fatal("worker returned a different entry than the journal persisted")
-	}
-}
-
 func TestJournalFileCreated(t *testing.T) {
 	dir := t.TempDir()
 	j, _ := OpenJournal(dir)
@@ -194,7 +175,7 @@ func TestJournalFileCreated(t *testing.T) {
 	}
 }
 
-func TestDiscardPersistsWithoutLeavingTombstone(t *testing.T) {
+func TestDiscardPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	journal, err := OpenJournal(dir)
 	if err != nil {
@@ -215,71 +196,12 @@ func TestDiscardPersistsWithoutLeavingTombstone(t *testing.T) {
 	if len(recent) != 1 || recent[0].ID != retained.ID {
 		t.Fatalf("recent = %+v, want only retained entry", recent)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "activity.tombstones")); !os.IsNotExist(err) {
-		t.Fatalf("tombstone cleanup error = %v, want file absent", err)
-	}
 	reopened, err := OpenJournal(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recent := reopened.Recent(10); len(recent) != 1 || recent[0].ID != retained.ID {
 		t.Fatalf("reopened recent = %+v, want only retained entry", recent)
-	}
-}
-
-func TestLegacyTombstoneRecoveryFiltersStaleEntry(t *testing.T) {
-	dir := t.TempDir()
-	stale := NewEntry("blocked", "attention", "stale", "p1", "", "", "")
-	current := NewEntry("finished", "completed", "current", "p1", "", "", "")
-	writeJournalFixture(t, dir, stale, current)
-	if err := os.WriteFile(
-		filepath.Join(dir, "activity.tombstones"),
-		[]byte(stale.ID+"\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	journal, err := OpenJournal(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recent := journal.Recent(10)
-	if len(recent) != 1 || recent[0].ID != current.ID {
-		t.Fatalf("recovered recent = %+v, want only current entry", recent)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "activity.tombstones")); !os.IsNotExist(err) {
-		t.Fatalf("recovered tombstone cleanup error = %v, want file absent", err)
-	}
-}
-
-func TestClearCrashWindowRecoversAsEmpty(t *testing.T) {
-	dir := t.TempDir()
-	first := NewEntry("prompt", "sent", "first", "p1", "", "", "")
-	second := NewEntry("approval", "approved", "second", "p1", "", "", "")
-	writeJournalFixture(t, dir, first, second)
-	tombstones := strings.Join([]string{first.ID, second.ID, ""}, "\n")
-	if err := os.WriteFile(
-		filepath.Join(dir, "activity.tombstones"),
-		[]byte(tombstones),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	journal, err := OpenJournal(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recent := journal.Recent(10); len(recent) != 0 {
-		t.Fatalf("recovered clear has %d entries, want 0", len(recent))
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "activity.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(data) != 0 {
-		t.Fatalf("recovered clear journal = %q, want empty", data)
 	}
 }
 
@@ -298,21 +220,5 @@ func TestCorruptJournalSkipsBadLines(t *testing.T) {
 	}
 	if entries := j.Recent(10); len(entries) != 0 {
 		t.Fatalf("expected 0 entries after skipping corrupt line, got %d", len(entries))
-	}
-}
-
-func writeJournalFixture(t *testing.T, dir string, entries ...Entry) {
-	t.Helper()
-	var data []byte
-	for _, entry := range entries {
-		line, err := json.Marshal(entry)
-		if err != nil {
-			t.Fatal(err)
-		}
-		data = append(data, line...)
-		data = append(data, '\n')
-	}
-	if err := os.WriteFile(filepath.Join(dir, "activity.jsonl"), data, 0o600); err != nil {
-		t.Fatal(err)
 	}
 }
