@@ -4,11 +4,13 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 
-const runner = resolve(import.meta.dirname, '../../scripts/run-attention-tests.sh');
+const runner = resolve(import.meta.dirname, '../../scripts/run-browser-tests.sh');
+const config = 'playwright.attention.config.ts';
+const mainConfig = 'playwright.config.ts';
 const temporaryDirectories: string[] = [];
 interface Invocation { command: string; args: string[]; endpoint?: string }
 
-function run(environment: Record<string, string> = {}, args: string[] = []) {
+function run(environment: Record<string, string> = {}, args: string[] = [], runnerConfig = config) {
   const directory = mkdtempSync(join(tmpdir(), 'herdr-attention-runner-'));
   temporaryDirectories.push(directory);
   const log = join(directory, 'calls.jsonl');
@@ -27,7 +29,7 @@ appendFileSync(process.env.RUNNER_LOG, JSON.stringify({
 if (args[0] === '-e') {
   if (args[1].includes('devDependencies')) console.log(process.env.FAKE_VERSION || '1.62.1');
   else process.exit(Number(process.env.FAKE_READY_EXIT || 0));
-} else process.exit(Number(process.env.FAKE_TEST_EXIT || 0));
+} else process.exit(args.includes('test') ? Number(process.env.FAKE_TEST_EXIT || 0) : 0);
 `);
   const runtime = `${record}
 if (args[0] === 'run') console.log('owned-test-container');
@@ -36,7 +38,7 @@ if (args[0] === 'port') console.log(process.env.FAKE_BIND || '127.0.0.1:43210');
   executable('docker', runtime);
   executable('podman', runtime);
   executable('grep', 'process.exit(process.env.FAKE_FEDORA === "1" ? 0 : 1);');
-  const result = spawnSync('bash', [runner, ...args], {
+  const result = spawnSync('bash', [runner, runnerConfig, ...args], {
     env: {
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
@@ -57,21 +59,48 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-describe('attention browser runner', () => {
+describe('browser test runner', () => {
   it('uses the cached version-matched browser server, forwards arguments, and removes only its container', () => {
-    const result = run({}, ['--project=webkit-attention', '--grep', 'full conversation']);
+    const result = run({}, ['--project=webkit-mobile', '--grep', 'full conversation']);
     expect(result.status, result.stderr).toBe(0);
     const launched = result.calls.find((call) => call.command === 'docker' && call.args[0] === 'run')!;
     expect(launched.args).toContain('mcr.microsoft.com/playwright:v1.62.1-noble');
     expect(launched.args).toContain('127.0.0.1::3000');
     expect(launched.args.some((arg) => arg.endsWith(':/work/frontend:ro'))).toBe(true);
     expect(launched.args).toContain('node_modules/playwright/cli.js');
-    const tests = result.calls.find((call) => call.command === 'bun' && call.args[0] === 'x')!;
-    expect(tests.args).toEqual(['x', 'playwright', 'test', '--config', 'playwright.attention.config.ts',
-      '--project=webkit-attention', '--grep', 'full conversation']);
+    const tests = result.calls.find((call) => call.command === 'bun' && call.args.includes('test'))!;
+    expect(tests.args).toEqual(['x', 'playwright', 'test', '--config', config,
+      '--project=webkit-mobile', '--grep', 'full conversation']);
     expect(tests.endpoint).toBe('ws://127.0.0.1:43210/');
+    expect(result.calls.some((call) => call.command === 'bun' && call.args.includes('install'))).toBe(true);
     expect(result.calls.filter((call) => call.args[0] === 'rm').map((call) => call.args))
       .toEqual([['rm', '-f', 'owned-test-container']]);
+  });
+
+  it('runs the whole main-suite WebKit project inside the container', () => {
+    const result = run({ HERDR_WEB_ROOT: '../web', HERDR_WEBKIT_WORKERS: '3' }, ['--grep', 'caching'], mainConfig);
+    expect(result.status, result.stderr).toBe(0);
+    const tests = result.calls.filter((call) => call.command === 'bun' && call.args.includes('test'));
+    expect(tests.map((call) => call.args)).toEqual([[
+      'x', 'playwright', 'test', '--config', mainConfig, '--project=chromium-mobile', '--grep', 'caching',
+    ]]);
+    expect(tests[0].endpoint).toBe('');
+    const launched = result.calls.find((call) => call.command === 'docker' && call.args[0] === 'run')!;
+    expect(launched.args).not.toContain('-d');
+    expect(launched.args).toContain('mcr.microsoft.com/playwright:v1.62.1-noble');
+    expect(launched.args).toContain('HERDR_WEB_ROOT=../web');
+    expect(launched.args.some((arg) => arg.endsWith(':/work/web:ro'))).toBe(true);
+    expect(launched.args.slice(launched.args.indexOf('npx'))).toEqual([
+      'npx', 'playwright', 'test', '--config', mainConfig, '--project=webkit-mobile',
+      '--workers=3', '--output=/tmp/playwright-results', '--grep', 'caching',
+    ]);
+  });
+
+  it('rejects an invalid main-suite WebKit worker count', () => {
+    const result = run({ HERDR_WEBKIT_WORKERS: '0' }, [], mainConfig);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('HERDR_WEBKIT_WORKERS');
+    expect(result.calls.some((call) => call.command === 'docker')).toBe(false);
   });
 
   it('automatically uses Podman with a read-only SELinux-compatible mount on Fedora', () => {
@@ -87,7 +116,7 @@ describe('attention browser runner', () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.calls).toEqual([{
       command: 'bun', endpoint: '',
-      args: ['x', 'playwright', 'test', '--config', 'playwright.attention.config.ts', '--list'],
+      args: ['x', 'playwright', 'test', '--config', config, '--list'],
     }]);
   });
 
@@ -101,7 +130,7 @@ describe('attention browser runner', () => {
     const result = run({ FAKE_READY_EXIT: '1' });
     expect(result.status).toBe(1);
     expect(result.calls.some((call) => call.args[0] === 'logs')).toBe(true);
-    expect(result.calls.some((call) => call.command === 'bun' && call.args[0] === 'x')).toBe(false);
+    expect(result.calls.some((call) => call.command === 'bun' && call.args.includes('test'))).toBe(false);
     expect(result.calls.at(-1)?.args).toEqual(['rm', '-f', 'owned-test-container']);
   });
 

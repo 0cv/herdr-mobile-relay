@@ -149,7 +149,7 @@ installed once (`sudo dnf install podman`); the image is downloaded on first
 use and remains cached across runs and reboots. A Playwright version upgrade
 fetches the matching new image.
 
-Both browser test commands select the container automatically on Fedora:
+Both browser test commands share one wrapper, `frontend/scripts/run-browser-tests.sh`, and select the container automatically on Fedora:
 
 ```bash
 make frontend-browser                    # Chromium and WebKit UI journeys
@@ -158,16 +158,21 @@ make frontend-browser-attention-release  # Chromium and WebKit relay/attention t
 HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention --project=webkit-attention
 ```
 
-The attention runner keeps Bun, Go, and the isolated relay fixture on the host.
+The attention suite keeps Bun, Go, and the isolated relay fixture on the host.
 Only the WebKit browser runs in the container, with Playwright forwarding its
 loopback traffic to the host's test HTTP and relay WebSocket servers. The
 browser-control port is published only on `127.0.0.1`, on an automatically
-allocated port, and the runner removes its container on exit without removing
-the cached image. Test output and failure traces stay on the host. Ubuntu CI
-continues to use native browsers; `HERDR_WEBKIT_CONTAINER=1` selects Docker for
-hosts that explicitly want containerized WebKit. Directly invoking
-`playwright test --config playwright.attention.config.ts` bypasses the wrapper;
-use the package script or Make target instead.
+allocated port, and the wrapper removes its container on exit without removing
+the cached image. Test output and failure traces stay on the host.
+
+The UI journeys suite runs Chromium on the host and its whole WebKit project
+inside the container (`HERDR_WEBKIT_WORKERS` sets the container's worker count,
+default 2), because some of its tests launch WebKit directly.
+
+Ubuntu CI continues to use native browsers; `HERDR_WEBKIT_CONTAINER=1` selects
+Docker for hosts that explicitly want containerized WebKit. Directly invoking
+`playwright test` bypasses the wrapper; use the Make targets or the package
+script instead.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
 response barriers, and process-control traces for black-box tests.
