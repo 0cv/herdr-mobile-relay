@@ -2501,7 +2501,7 @@ func TestSpeechVoiceManagementOverTheWire(t *testing.T) {
 			if scope.Action.Class != protocol.ActionReadOnly {
 				t.Error("listing voices must stay a read-only action")
 			}
-			s.sendCommandResult(client, requestID, action, true, "completed", "", "", s.speechVoicePayload(nil))
+			s.reply(client, requestID, action, "").complete(s.speechVoicePayload(nil))
 		case "speech_voice_install", "speech_voice_remove":
 			if scope.Action.Class != protocol.ActionMutating {
 				t.Errorf("%s must be a mutating action so readers cannot run it", action)

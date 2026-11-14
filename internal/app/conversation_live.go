@@ -410,22 +410,23 @@ func (s *Server) conversationFeedPage(client *transport.ClientConn, inbound prot
 }
 func (s *Server) handleConversationUpdates(client *transport.ClientConn, inbound protocol.Inbound) {
 	action := "get_conversation_updates"
+	reply := s.reply(client, inbound.RequestID, action, inbound.PaneID)
 	s.conversationLiveMu.Lock()
 	feed := s.conversationClients[client.ID()]
 	s.conversationLiveMu.Unlock()
 	if feed == nil || inbound.Target == nil || feed.target != *inbound.Target || !s.conversationCurrent(feed) {
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation subscription is unavailable", inbound.PaneID, nil)
+		reply.fail("Conversation subscription is unavailable")
 		return
 	}
 	feed.mu.Lock()
 	if inbound.SubscriptionID == "" || feed.subscriptions[client.ID()] != inbound.SubscriptionID {
 		feed.mu.Unlock()
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation subscription changed", inbound.PaneID, nil)
+		reply.fail("Conversation subscription changed")
 		return
 	}
 	if feed.waiting[client.ID()] != nil {
 		feed.mu.Unlock()
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation request already pending", inbound.PaneID, nil)
+		reply.fail("Conversation request already pending")
 		return
 	}
 	cancelled := make(chan struct{})
@@ -473,7 +474,7 @@ func (s *Server) handleConversationUpdates(client *transport.ClientConn, inbound
 			}
 		}
 		if failed || !s.conversationCurrent(feed) || s.authorizeDeviceAction(client, protocol.ActionMetadata{Operation: action, Class: protocol.ActionReadOnly}, "") != nil {
-			s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation source disconnected", inbound.PaneID, nil)
+			reply.fail("Conversation source disconnected")
 			return
 		}
 		if ready {
@@ -487,7 +488,7 @@ func (s *Server) handleConversationUpdates(client *transport.ClientConn, inbound
 				return
 			}
 			batch.SubscriptionID = inbound.SubscriptionID
-			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, batch)
+			reply.complete(batch)
 			return
 		}
 	}
