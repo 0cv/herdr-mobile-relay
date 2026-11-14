@@ -83,10 +83,29 @@ type Dispatcher struct {
 	testFilterWait func(context.Context, time.Duration) error
 }
 
-type receiptContextKey struct{}
 type admissionContextKey struct{}
 
-type paneSessionContextKey struct{}
+type commandRequest struct {
+	receivedAt  time.Time
+	requestID   string
+	paneID      string
+	message     map[string]any
+	receipt     CommandID
+	paneSession int64
+	admitted    func()
+}
+
+func (d *Dispatcher) newCommandRequest(receivedAt time.Time, requestID, paneID string, message map[string]any, admitted func()) commandRequest {
+	generation, _ := d.state.PaneSession(paneID)
+	return commandRequest{
+		receivedAt:  receivedAt,
+		requestID:   requestID,
+		paneID:      paneID,
+		message:     message,
+		paneSession: generation,
+		admitted:    admitted,
+	}
+}
 
 type paneRead struct {
 	done chan struct{}
@@ -232,68 +251,7 @@ func (d *Dispatcher) SetWakePoll(fn func()) {
 }
 
 func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *CommandResult {
-	receivedAt := time.Now()
-	if raw, ok := message["_server_received_at"].(string); ok {
-		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-			receivedAt = parsed
-		}
-	}
-	if sequence := uint64Value(message["_server_sequence"]); sequence != 0 {
-		ctx = context.WithValue(ctx, receiptContextKey{}, CommandID(sequence))
-	}
-	action := stringValue(message, "type")
-	requestID := stringValue(message, "request_id")
-	if requestID == "" {
-		requestID = fmt.Sprintf("req-%d", receivedAt.UnixNano())
-	}
-	paneID := stringValue(message, "pane_id")
-	if paneID != "" {
-		generation, _ := d.state.PaneSession(paneID)
-		ctx = context.WithValue(ctx, paneSessionContextKey{}, generation)
-	}
-
-	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
-
-	switch action {
-	case "submit_prompt":
-		return d.handlePrompt(ctx, receivedAt, requestID, paneID, message)
-	case "send_keys":
-		return d.handleKeys(ctx, receivedAt, requestID, paneID, message)
-	case "send_filter_text":
-		return d.handleFilterText(ctx, receivedAt, requestID, paneID, message)
-	case "send_input":
-		return d.handleInput(ctx, receivedAt, requestID, paneID, message)
-	case "send_terminal_text":
-		return d.handleTerminalText(ctx, receivedAt, requestID, paneID, message)
-	case "send_secret":
-		return d.handleSecret(ctx, receivedAt, requestID, paneID, message)
-	case "respond":
-		return d.handleApproval(ctx, receivedAt, requestID, paneID, message)
-	case "answer_question":
-		return d.handleQuestion(ctx, receivedAt, requestID, paneID, message)
-	case "navigate_question":
-		return d.handleNavigateQuestion(ctx, receivedAt, requestID, paneID, message)
-	case "clarify_question":
-		return d.handleClarifyQuestion(ctx, receivedAt, requestID, paneID, message)
-	case "agent_stop":
-		return d.handleStop(ctx, receivedAt, requestID, paneID)
-	case "agent_rename":
-		return d.handleTabRename(ctx, receivedAt, requestID, paneID, message)
-	case "tab_reorder":
-		return d.handleTabReorder(ctx, receivedAt, requestID, paneID, message)
-	case "acknowledge_pane":
-		return d.handleAcknowledge(requestID, paneID)
-	case "agent_start", "agent_clear":
-		if !d.herdr.CapabilityStatus().Supports(herdr.FeatureAgentLaunch) {
-			return d.fail(requestID, action, paneID, "This backend does not support launching agents")
-		}
-		if action == "agent_start" {
-			return d.handleAgentStart(ctx, receivedAt, requestID, message)
-		}
-		return d.handleClear(ctx, receivedAt, requestID, paneID)
-	default:
-		return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: "Unknown command"}
-	}
+	return d.handle(ctx, message, nil)
 }
 
 func (d *Dispatcher) HandleAdmitted(
@@ -301,14 +259,70 @@ func (d *Dispatcher) HandleAdmitted(
 	message map[string]any,
 	admitted func(),
 ) *CommandResult {
-	var once sync.Once
-	signal := func() {
-		once.Do(admitted)
-	}
-	ctx = context.WithValue(ctx, admissionContextKey{}, signal)
-	result := d.Handle(ctx, message)
+	signal := sync.OnceFunc(admitted)
+	result := d.handle(ctx, message, signal)
 	signal()
 	return result
+}
+
+func (d *Dispatcher) handle(ctx context.Context, message map[string]any, admitted func()) *CommandResult {
+	receivedAt := time.Now()
+	if raw, ok := message["_server_received_at"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			receivedAt = parsed
+		}
+	}
+	action := stringValue(message, "type")
+	requestID := stringValue(message, "request_id")
+	if requestID == "" {
+		requestID = fmt.Sprintf("req-%d", receivedAt.UnixNano())
+	}
+	paneID := stringValue(message, "pane_id")
+	req := d.newCommandRequest(receivedAt, requestID, paneID, message, admitted)
+	req.receipt = CommandID(uint64Value(message["_server_sequence"]))
+
+	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
+
+	switch action {
+	case "submit_prompt":
+		return d.handlePrompt(ctx, req)
+	case "send_keys":
+		return d.handleKeys(ctx, req)
+	case "send_filter_text":
+		return d.handleFilterText(ctx, req)
+	case "send_input":
+		return d.handleInput(ctx, req)
+	case "send_terminal_text":
+		return d.handleTerminalText(ctx, req)
+	case "send_secret":
+		return d.handleSecret(ctx, req)
+	case "respond":
+		return d.handleApproval(ctx, req)
+	case "answer_question":
+		return d.handleQuestion(ctx, req)
+	case "navigate_question":
+		return d.handleNavigateQuestion(ctx, req)
+	case "clarify_question":
+		return d.handleClarifyQuestion(ctx, req)
+	case "agent_stop":
+		return d.handleStop(ctx, req)
+	case "agent_rename":
+		return d.handleTabRename(ctx, req)
+	case "tab_reorder":
+		return d.handleTabReorder(ctx, req)
+	case "acknowledge_pane":
+		return d.handleAcknowledge(requestID, paneID)
+	case "agent_start", "agent_clear":
+		if !d.herdr.CapabilityStatus().Supports(herdr.FeatureAgentLaunch) {
+			return d.fail(requestID, action, paneID, "This backend does not support launching agents")
+		}
+		if action == "agent_start" {
+			return d.handleAgentStart(ctx, req)
+		}
+		return d.handleClear(ctx, req)
+	default:
+		return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: "Unknown command"}
+	}
 }
 
 // HandleTopologyAdmitted mirrors HandleAdmitted for the workspace and
@@ -323,39 +337,36 @@ func (d *Dispatcher) HandleTopologyAdmitted(
 	admitted func(),
 	handle func(context.Context) *CommandResult,
 ) *CommandResult {
-	var once sync.Once
-	signal := func() {
-		once.Do(admitted)
-	}
+	signal := sync.OnceFunc(admitted)
 	ctx = context.WithValue(ctx, admissionContextKey{}, signal)
 	result := handle(ctx)
 	signal()
 	return result
 }
 
-func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handlePrompt(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "submit_prompt"
-	text := stringValue(message, "text")
-	if paneID == "" || text == "" {
-		return d.fail(requestID, action, paneID, "Text and agent are required")
+	text := stringValue(req.message, "text")
+	if req.paneID == "" || text == "" {
+		return d.fail(req.requestID, action, req.paneID, "Text and agent are required")
 	}
 	if len([]rune(text)) > promptMaxChars {
-		return d.fail(requestID, action, paneID, "Prompt is longer than 100,000 characters")
+		return d.fail(req.requestID, action, req.paneID, "Prompt is longer than 100,000 characters")
 	}
 	requiresEnter := false
-	if agent, ok := d.state.Agent(paneID); ok {
+	if agent, ok := d.state.Agent(req.paneID); ok {
 		requiresEnter = agentkind.Of(agent.Agent) == agentkind.Qoder
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
+	result := d.schedule(ctx, req, ScheduleOptions{
+		Command: d.command(req, action, commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if err := d.deliverPrompt(effectCtx, token, text, requiresEnter); err != nil {
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, action, req.paneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, action, paneID, nil)}
+		return EffectResult{Result: completed(req.requestID, action, req.paneID, nil)}
 	}))
 	if result.OK {
-		d.recordActivityWithExtract(action, "sent", "Prompt sent", text, paneID, requestID)
+		d.recordActivityWithExtract(action, "sent", "Prompt sent", text, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -384,64 +395,54 @@ func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text 
 	return nil
 }
 
-func (d *Dispatcher) handleKeys(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handleKeys(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "send_keys"
-	keys, err := stringSlice(message["keys"])
-	if paneID == "" || err != nil || len(keys) == 0 {
-		return d.fail(requestID, action, paneID, "Keys and agent are required")
+	keys, err := stringSlice(req.message["keys"])
+	if req.paneID == "" || err != nil || len(keys) == 0 {
+		return d.fail(req.requestID, action, req.paneID, "Keys and agent are required")
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if err := d.herdr.SendKeys(effectCtx, paneID, keys); err != nil {
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
-		}
-		return EffectResult{Result: completed(requestID, action, paneID, nil)}
-	}))
+	result := d.callPane(ctx, req, paneCall{
+		action: action,
+		run: func(callCtx context.Context) error {
+			return d.herdr.SendKeys(callCtx, req.paneID, keys)
+		},
+	})
 	if result.OK {
-		label := stringValue(message, "activity_label")
+		label := stringValue(req.message, "activity_label")
 		if label == "" {
 			label = "keys"
 		}
-		d.recordActivity(action, "sent", label, paneID, requestID)
+		d.recordActivity(action, "sent", label, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
 }
 
-func (d *Dispatcher) handleInput(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handleInput(ctx context.Context, req commandRequest) *CommandResult {
 	var keys []string
 	var err error
-	if rawKeys, present := message["keys"]; present {
+	if rawKeys, present := req.message["keys"]; present {
 		keys, err = stringSlice(rawKeys)
 	}
 	input, inputErr := herdr.ValidatePaneInput(herdr.PaneInput{
-		Text: stringValue(message, "text"),
+		Text: stringValue(req.message, "text"),
 		Keys: keys,
 	})
-	if paneID == "" || err != nil || inputErr != nil {
-		return d.fail(requestID, "send_input", paneID, "Valid text or keys and an agent are required")
+	if req.paneID == "" || err != nil || inputErr != nil {
+		return d.fail(req.requestID, "send_input", req.paneID, "Valid text or keys and an agent are required")
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, "send_input", paneID, commandDeadline),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "send_input"); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if err := d.herdr.SendInput(effectCtx, paneID, input); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "send_input", paneID, err)}
-		}
-		return EffectResult{Result: completed(requestID, "send_input", paneID, nil)}
-	}))
+	result := d.callPane(ctx, req, paneCall{
+		action: "send_input",
+		run: func(callCtx context.Context) error {
+			return d.herdr.SendInput(callCtx, req.paneID, input)
+		},
+	})
 	if result.OK {
-		label := stringValue(message, "activity_label")
+		label := stringValue(req.message, "activity_label")
 		if label == "" {
 			label = "Terminal input sent"
 		}
-		d.recordActivityWithExtract("input", "sent", label, input.Text, paneID, requestID)
+		d.recordActivityWithExtract("input", "sent", label, input.Text, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -453,139 +454,121 @@ func (d *Dispatcher) handleInput(ctx context.Context, receivedAt time.Time, requ
 // in a bracketed paste whenever the pane enables it, and a reader using termios
 // noecho takes the paste markers as part of the secret. The single SendKeys
 // call keeps the whole secret plus its submission atomic.
-func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
-	text := stringValue(message, "text")
-	if paneID == "" || text == "" {
-		return d.fail(requestID, "send_secret", paneID, "Secret and agent are required")
+func (d *Dispatcher) handleSecret(ctx context.Context, req commandRequest) *CommandResult {
+	text := stringValue(req.message, "text")
+	if req.paneID == "" || text == "" {
+		return d.fail(req.requestID, "send_secret", req.paneID, "Secret and agent are required")
 	}
 	runes := []rune(text)
 	if len(runes) > secretMaxRunes {
-		return d.fail(requestID, "send_secret", paneID, "Secret is too long")
+		return d.fail(req.requestID, "send_secret", req.paneID, "Secret is too long")
 	}
 	for _, value := range runes {
 		if value < 0x20 || value == 0x7f {
-			return d.fail(requestID, "send_secret", paneID, "Secret must not contain control characters")
+			return d.fail(req.requestID, "send_secret", req.paneID, "Secret must not contain control characters")
 		}
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, "send_secret", paneID, commandDeadline),
+	result := d.schedule(ctx, req, ScheduleOptions{
+		Command: d.command(req, "send_secret", commandDeadline),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
+		if stale := d.paneSessionCurrent(token, req.requestID, "send_secret"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		read, err := d.herdr.ReadPaneVisible(effectCtx, paneID, 30, "text")
+		read, err := d.herdr.ReadPaneVisible(effectCtx, req.paneID, 30, "text")
 		if err != nil {
-			return EffectResult{Result: d.fail(requestID, "send_secret", paneID, "Hidden prompt could not be verified")}
+			return EffectResult{Result: d.fail(req.requestID, "send_secret", req.paneID, "Hidden prompt could not be verified")}
 		}
 		if _, ok := noecho.Match(string(read.Content)); !ok {
-			return EffectResult{Result: d.fail(requestID, "send_secret", paneID, "The terminal is no longer asking for a hidden value")}
+			return EffectResult{Result: d.fail(req.requestID, "send_secret", req.paneID, "The terminal is no longer asking for a hidden value")}
 		}
-		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
+		if stale := d.paneSessionCurrent(token, req.requestID, "send_secret"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.herdr.SendSecret(effectCtx, paneID, text); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "send_secret", paneID, err)}
+		if err := d.herdr.SendSecret(effectCtx, req.paneID, text); err != nil {
+			return EffectResult{Result: d.failErr(req.requestID, "send_secret", req.paneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, "send_secret", paneID, nil)}
+		return EffectResult{Result: completed(req.requestID, "send_secret", req.paneID, nil)}
 	}))
 	if result.OK {
 		// Constant label, no extract: the journal is readable by anyone who can
 		// read the activity feed.
-		d.recordActivity("send_secret", "sent", "Password entered", paneID, requestID)
+		d.recordActivity("send_secret", "sent", "Password entered", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
 }
 
-func (d *Dispatcher) handleStop(ctx context.Context, receivedAt time.Time, requestID, paneID string) *CommandResult {
-	if paneID == "" {
-		return d.fail(requestID, "agent_stop", paneID, "Agent is required")
+func (d *Dispatcher) handleStop(ctx context.Context, req commandRequest) *CommandResult {
+	if req.paneID == "" {
+		return d.fail(req.requestID, "agent_stop", req.paneID, "Agent is required")
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, "agent_stop", paneID, commandDeadline),
-		LedgerKey:   "stop\x00" + paneID + "\x00" + requestID,
-		PayloadHash: hashPayload(struct{}{}),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "agent_stop"); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "agent_stop", paneID, err)}
-		}
-		return EffectResult{Result: completed(requestID, "agent_stop", paneID, nil), BumpGeneration: true}
-	}))
+	result := d.callPane(ctx, req, paneCall{
+		action:         "agent_stop",
+		ledgerKey:      "stop\x00" + req.paneID + "\x00" + req.requestID,
+		payloadHash:    hashPayload(struct{}{}),
+		bumpGeneration: true,
+		run: func(callCtx context.Context) error {
+			return d.herdr.StopPane(callCtx, req.paneID)
+		},
+	})
 	if result.OK && !result.replayed {
-		d.state.BumpGeneration(paneID)
+		d.state.BumpGeneration(req.paneID)
 		d.state.MarkTopologyChanged()
 		if d.profiles != nil {
-			d.profiles.Forget(paneID)
+			d.profiles.Forget(req.paneID)
 		}
-		d.recordActivity("agent_stop", "sent", "Stopped agent", paneID, requestID)
+		d.recordActivity("agent_stop", "sent", "Stopped agent", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
 }
 
-func (d *Dispatcher) handleTabRename(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
-	label := strings.TrimSpace(stringValue(message, "name"))
-	if paneID == "" {
-		return d.fail(requestID, "agent_rename", paneID, "Agent is required")
+func (d *Dispatcher) handleTabRename(ctx context.Context, req commandRequest) *CommandResult {
+	label := strings.TrimSpace(stringValue(req.message, "name"))
+	if req.paneID == "" {
+		return d.fail(req.requestID, "agent_rename", req.paneID, "Agent is required")
 	}
 	if label == "" {
-		return d.fail(requestID, "agent_rename", paneID, "Tab name is required")
+		return d.fail(req.requestID, "agent_rename", req.paneID, "Tab name is required")
 	}
-	agent, ok := d.state.Agent(paneID)
+	agent, ok := d.state.Agent(req.paneID)
 	if !ok || agent.TabID == "" {
-		return d.fail(requestID, "agent_rename", paneID, "Tab is unavailable")
+		return d.fail(req.requestID, "agent_rename", req.paneID, "Tab is unavailable")
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, "agent_rename", paneID, commandDeadline),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "agent_rename"); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if err := d.herdr.TabRename(effectCtx, agent.TabID, label); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "agent_rename", paneID, err)}
-		}
-		return EffectResult{Result: completed(requestID, "agent_rename", paneID, nil)}
-	}))
+	result := d.callPane(ctx, req, paneCall{
+		action: "agent_rename",
+		run: func(callCtx context.Context) error {
+			return d.herdr.TabRename(callCtx, agent.TabID, label)
+		},
+	})
 	if result.OK {
-		d.recordActivity("agent_rename", "renamed", "Renamed tab to "+label, paneID, requestID)
+		d.recordActivity("agent_rename", "renamed", "Renamed tab to "+label, req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
 }
 
-func (d *Dispatcher) handleTabReorder(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
-	insertIndex, valid := tabInsertIndex(message["insert_index"])
-	if paneID == "" {
-		return d.fail(requestID, "tab_reorder", paneID, "Agent is required")
+func (d *Dispatcher) handleTabReorder(ctx context.Context, req commandRequest) *CommandResult {
+	insertIndex, valid := tabInsertIndex(req.message["insert_index"])
+	if req.paneID == "" {
+		return d.fail(req.requestID, "tab_reorder", req.paneID, "Agent is required")
 	}
 	if !valid {
-		return d.fail(requestID, "tab_reorder", paneID, "Tab position is invalid")
+		return d.fail(req.requestID, "tab_reorder", req.paneID, "Tab position is invalid")
 	}
-	agent, ok := d.state.Agent(paneID)
+	agent, ok := d.state.Agent(req.paneID)
 	if !ok || agent.TabID == "" {
-		return d.fail(requestID, "tab_reorder", paneID, "Tab is unavailable")
+		return d.fail(req.requestID, "tab_reorder", req.paneID, "Tab is unavailable")
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, "tab_reorder", paneID, commandDeadline),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "tab_reorder"); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if err := d.herdr.TabMove(effectCtx, agent.TabID, insertIndex); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "tab_reorder", paneID, err)}
-		}
-		return EffectResult{Result: completed(
-			requestID,
-			"tab_reorder",
-			paneID,
-			map[string]any{"insert_index": insertIndex},
-		)}
-	}))
+	result := d.callPane(ctx, req, paneCall{
+		action: "tab_reorder",
+		data:   map[string]any{"insert_index": insertIndex},
+		run: func(callCtx context.Context) error {
+			return d.herdr.TabMove(callCtx, agent.TabID, insertIndex)
+		},
+	})
 	if result.OK {
-		d.recordActivity("tab_reorder", "reordered", "Reordered tab", paneID, requestID)
+		d.recordActivity("tab_reorder", "reordered", "Reordered tab", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
@@ -611,52 +594,53 @@ func (d *Dispatcher) handleAcknowledge(requestID, paneID string) *CommandResult 
 	return completed(requestID, "acknowledge_pane", paneID, nil)
 }
 
-func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time, requestID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handleAgentStart(ctx context.Context, req commandRequest) *CommandResult {
+	req.paneID = ""
 	request := StartRequest{
-		ProfileID:     stringValue(message, "profile_id"),
-		WorkspaceID:   stringValue(message, "workspace_id"),
-		Name:          stringValue(message, "name"),
-		Cwd:           stringValue(message, "cwd"),
-		Prompt:        stringValue(message, "prompt"),
-		HermesProfile: stringValue(message, "hermes_profile"),
+		ProfileID:     stringValue(req.message, "profile_id"),
+		WorkspaceID:   stringValue(req.message, "workspace_id"),
+		Name:          stringValue(req.message, "name"),
+		Cwd:           stringValue(req.message, "cwd"),
+		Prompt:        stringValue(req.message, "prompt"),
+		HermesProfile: stringValue(req.message, "hermes_profile"),
 	}
 	if request.ProfileID == "" || request.Name == "" || request.Cwd == "" {
-		return d.fail(requestID, "agent_start", "", "Profile, name, and working directory are required")
+		return d.fail(req.requestID, "agent_start", "", "Profile, name, and working directory are required")
 	}
 
 	if len([]rune(request.Prompt)) > promptMaxChars {
-		return d.fail(requestID, "agent_start", "", "Prompt is longer than 100,000 characters")
+		return d.fail(req.requestID, "agent_start", "", "Prompt is longer than 100,000 characters")
 	}
-	ledgerKey := "start\x00" + requestID
+	ledgerKey := "start\x00" + req.requestID
 	payloadHash := hashPayload(request)
 	if d.lifecycle == nil || d.profiles == nil || d.lifecycle.profiles == nil {
-		return d.fail(requestID, "agent_start", "", "Agent launch is unavailable: profile lifecycle is not configured")
+		return d.fail(req.requestID, "agent_start", "", "Agent launch is unavailable: profile lifecycle is not configured")
 	}
 	profile, request, err := d.lifecycle.ValidateStart(request)
 	if err != nil {
-		return d.fail(requestID, "agent_start", "", err.Error())
+		return d.fail(req.requestID, "agent_start", "", err.Error())
 	}
 
 	budget := agentStartDeadline
 	if request.Prompt != "" {
 		budget += commandDeadline
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, "agent_start", "", budget),
+	result := d.schedule(ctx, req, ScheduleOptions{
+		Command:     d.command(req, "agent_start", budget),
 		RelayLevel:  true,
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
-		startupCtx, cancel := context.WithDeadline(effectCtx, receivedAt.Add(agentStartDeadline))
+		startupCtx, cancel := context.WithDeadline(effectCtx, req.receivedAt.Add(agentStartDeadline))
 		defer cancel()
 		started, err := d.lifecycle.Start(startupCtx, profile, request)
 		if err != nil {
 			// started.PaneID is set when Herdr created the target before the
 			// start failed. The pane is kept, so it must travel with the
 			// failure: the phone shows it instead of losing the workspace.
-			return EffectResult{Result: d.failErr(requestID, "agent_start", started.PaneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, "agent_start", started.PaneID, err)}
 		}
-		launchResult := completed(requestID, "agent_start", started.PaneID, started)
+		launchResult := completed(req.requestID, "agent_start", started.PaneID, started)
 		if started.PromptNotReady {
 			launchResult.Phase = "completed_with_warning"
 			launchResult.Data = map[string]any{
@@ -679,7 +663,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 			Deadline:    time.Now().Add(commandDeadline),
 			Runner: EffectFunc(func(promptCtx context.Context, token WorkerToken) EffectResult {
 				if !started.Identity.Valid {
-					return EffectResult{Result: d.failErr(requestID, "submit_prompt", started.PaneID, ErrPaneReplaced)}
+					return EffectResult{Result: d.failErr(req.requestID, "submit_prompt", started.PaneID, ErrPaneReplaced)}
 				}
 				promptCtx = herdr.WithDispatchCheck(promptCtx, func() error {
 					if err := d.state.launchIdentityCurrent(started.PaneID, started.Identity); err != nil {
@@ -688,14 +672,14 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 					return herdr.CheckDispatch(ctx)
 				})
 				if err := d.deliverPrompt(promptCtx, token, request.Prompt, requiresEnter); err != nil {
-					return EffectResult{Result: d.failErr(requestID, "submit_prompt", started.PaneID, err)}
+					return EffectResult{Result: d.failErr(req.requestID, "submit_prompt", started.PaneID, err)}
 				}
 				if err := d.paneSessionError(token); err != nil {
-					return EffectResult{Result: d.failErr(requestID, "submit_prompt", started.PaneID, partiallyApplied("initial prompt was already delivered", err))}
+					return EffectResult{Result: d.failErr(req.requestID, "submit_prompt", started.PaneID, partiallyApplied("initial prompt was already delivered", err))}
 				}
-				d.recordActivityWithExtract("submit_prompt", "sent", "Prompt sent", request.Prompt, started.PaneID, requestID+"-initial")
+				d.recordActivityWithExtract("submit_prompt", "sent", "Prompt sent", request.Prompt, started.PaneID, req.requestID+"-initial")
 				d.wake()
-				return EffectResult{Result: completed(requestID, "submit_prompt", started.PaneID, nil)}
+				return EffectResult{Result: completed(req.requestID, "submit_prompt", started.PaneID, nil)}
 			}),
 			Finalize: func(promptResult *CommandResult, err error) *CommandResult {
 				if err != nil || promptResult == nil || !promptResult.OK {
@@ -728,104 +712,122 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 			data.PaneID, _ = values["pane_id"].(string)
 		}
 	}
-	d.recordActivity("agent_start", "started", "Started "+request.Name, data.PaneID, requestID)
+	d.recordActivity("agent_start", "started", "Started "+request.Name, data.PaneID, req.requestID)
 	d.state.MarkTopologyChanged()
 	d.wake()
 	return result
 }
 
-func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requestID, paneID string) *CommandResult {
-	if paneID == "" {
-		return d.fail(requestID, "agent_clear", paneID, "Agent is required")
+func (d *Dispatcher) handleClear(ctx context.Context, req commandRequest) *CommandResult {
+	if req.paneID == "" {
+		return d.fail(req.requestID, "agent_clear", req.paneID, "Agent is required")
 	}
-	agent, ok := d.state.Agent(paneID)
+	agent, ok := d.state.Agent(req.paneID)
 	if !ok {
-		return d.fail(requestID, "agent_clear", paneID, "Agent is no longer available")
+		return d.fail(req.requestID, "agent_clear", req.paneID, "Agent is no longer available")
 	}
 	if d.lifecycle == nil || d.profiles == nil || d.lifecycle.profiles == nil {
-		return d.fail(requestID, "agent_clear", paneID, "Agent lifecycle is unavailable")
+		return d.fail(req.requestID, "agent_clear", req.paneID, "Agent lifecycle is unavailable")
 	}
 
-	profileID := d.profiles.ResolvePane(paneID, agent.Agent)
+	profileID := d.profiles.ResolvePane(req.paneID, agent.Agent)
 	profile, exists := d.profiles.Profile(profileID)
 	if !exists {
-		return d.fail(requestID, "agent_clear", paneID, "No launch profile matches this agent; start a new agent with + instead")
+		return d.fail(req.requestID, "agent_clear", req.paneID, "No launch profile matches this agent; start a new agent with + instead")
 	}
-	name := fmt.Sprintf("clear-%08x", uint32(receivedAt.UnixNano()))
+	name := fmt.Sprintf("clear-%08x", uint32(req.receivedAt.UnixNano()))
 	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd}
 	if d.herdr.CapabilityStatus().OneStepLaunch {
 		request.WorkspaceID, request.TabID = agent.WorkspaceID, agent.TabID
 	}
 	_, request, err := d.lifecycle.ValidateStart(request)
 	if err != nil {
-		return d.fail(requestID, "agent_clear", paneID, err.Error())
+		return d.fail(req.requestID, "agent_clear", req.paneID, err.Error())
 	}
 
-	result := d.schedule(ctx, ScheduleOptions{
-		Command:   d.command(ctx, receivedAt, requestID, "agent_clear", paneID, agentStartDeadline),
-		LedgerKey: "clear\x00" + paneID + "\x00" + requestID,
+	result := d.schedule(ctx, req, ScheduleOptions{
+		Command:   d.command(req, "agent_clear", agentStartDeadline),
+		LedgerKey: "clear\x00" + req.paneID + "\x00" + req.requestID,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
+		if stale := d.paneSessionCurrent(token, req.requestID, "agent_clear"); stale != nil {
 			return EffectResult{Result: stale}
 		}
 		replacement, err := d.lifecycle.Start(effectCtx, profile, request)
 		if err != nil {
-			return EffectResult{Result: d.failErr(requestID, "agent_clear", paneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, "agent_clear", req.paneID, err)}
 		}
 		data := map[string]any{"pane_id": replacement.PaneID, "name": replacement.Name, "cwd": replacement.Cwd}
-		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
+		if stale := d.paneSessionCurrent(token, req.requestID, "agent_clear"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
+		if err := d.herdr.StopPane(effectCtx, req.paneID); err != nil {
 			data["warning"] = "Replacement started, but the old pane could not be closed"
-			result := completed(requestID, "agent_clear", paneID, data)
+			result := completed(req.requestID, "agent_clear", req.paneID, data)
 			result.Phase = "completed_with_warning"
 			return EffectResult{Result: result, BumpGeneration: true}
 		}
-		return EffectResult{Result: completed(requestID, "agent_clear", paneID, data), BumpGeneration: true}
+		return EffectResult{Result: completed(req.requestID, "agent_clear", req.paneID, data), BumpGeneration: true}
 	}))
 	if result.OK && !result.replayed {
-		d.state.BumpGeneration(paneID)
+		d.state.BumpGeneration(req.paneID)
 		d.state.MarkTopologyChanged()
 		if result.Phase != "completed_with_warning" {
-			d.profiles.Forget(paneID)
+			d.profiles.Forget(req.paneID)
 		}
-		d.recordActivity("agent_clear", "cleared", "Cleared agent", paneID, requestID)
+		d.recordActivity("agent_clear", "cleared", "Cleared agent", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result
 }
 
-func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestID, action, paneID string, budget time.Duration) Command {
-	deadline := receivedAt.Add(budget)
-	id, _ := ctx.Value(receiptContextKey{}).(CommandID)
+func (d *Dispatcher) command(req commandRequest, action string, budget time.Duration) Command {
+	id := req.receipt
 	if id == 0 {
 		id = d.scheduler.NextCommandID()
 	}
 	return Command{
 		ID:         id,
-		RequestID:  requestID,
-		ReceivedAt: receivedAt,
-		Deadline:   deadline,
+		RequestID:  req.requestID,
+		ReceivedAt: req.receivedAt,
+		Deadline:   req.receivedAt.Add(budget),
 		Action:     action,
-		PaneID:     paneID,
+		PaneID:     req.paneID,
 	}
 }
 
-func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runner EffectRunner) *CommandResult {
-	if !options.RelayLevel {
-		admittedGeneration, captured := ctx.Value(paneSessionContextKey{}).(int64)
-		if !captured {
-			generation, _ := d.state.PaneSession(options.PaneID)
-			admittedGeneration = generation
+type paneCall struct {
+	action         string
+	ledgerKey      string
+	payloadHash    string
+	data           any
+	bumpGeneration bool
+	run            func(context.Context) error
+}
+
+func (d *Dispatcher) callPane(ctx context.Context, req commandRequest, call paneCall) *CommandResult {
+	return d.schedule(ctx, req, ScheduleOptions{
+		Command:     d.command(req, call.action, commandDeadline),
+		LedgerKey:   call.ledgerKey,
+		PayloadHash: call.payloadHash,
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, req.requestID, call.action); stale != nil {
+			return EffectResult{Result: stale}
 		}
+		if err := call.run(effectCtx); err != nil {
+			return EffectResult{Result: d.failErr(req.requestID, call.action, req.paneID, err)}
+		}
+		return EffectResult{Result: completed(req.requestID, call.action, req.paneID, call.data), BumpGeneration: call.bumpGeneration}
+	}))
+}
+
+func (d *Dispatcher) schedule(ctx context.Context, req commandRequest, options ScheduleOptions, runner EffectRunner) *CommandResult {
+	if !options.RelayLevel {
 		generation, active := d.state.PaneSession(options.PaneID)
-		if generation != admittedGeneration || !active {
+		if generation != req.paneSession || !active {
 			return d.fail(options.RequestID, options.Action, options.PaneID, ErrPaneReplaced.Error())
 		}
-		options.PaneGeneration = admittedGeneration
+		options.PaneGeneration = req.paneSession
 	}
-	admitted, _ := ctx.Value(admissionContextKey{}).(func())
 	checkedRunner := EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		effectCtx = herdr.WithDispatchCheck(effectCtx, func() error { return herdr.CheckDispatch(ctx) })
 		if !options.RelayLevel {
@@ -833,14 +835,14 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 		}
 		return runner.Run(effectCtx, token)
 	})
-	result, err := d.scheduler.ExecuteAdmitted(ctx, options, checkedRunner, admitted)
+	result, err := d.scheduler.ExecuteAdmitted(ctx, options, checkedRunner, req.admitted)
 	switch {
 	case err == nil && result != nil:
 		return result
 	case errors.Is(err, ErrConflict):
 		return d.fail(options.RequestID, options.Action, options.PaneID, "A different response was already submitted")
 	case errors.Is(err, ErrIngressFull), errors.Is(err, ErrClosed):
-		return &CommandResult{RequestID: options.RequestID, Action: options.Action, OK: false, Phase: "not_started", Error: "command was not sent; retry is safe", PaneID: options.PaneID}
+		return &CommandResult{RequestID: options.RequestID, Action: options.Action, OK: false, Phase: "not_started", Error: queueRejectedRetrySafe, PaneID: options.PaneID}
 	case err != nil:
 		return d.failErr(options.RequestID, options.Action, options.PaneID, err)
 	default:
@@ -851,8 +853,7 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 func (d *Dispatcher) fail(requestID, action, paneID, message string) *CommandResult {
 	if action != "" {
 		d.logger.Warn("command failed", "action", action, "request_id", requestID, "pane_id", paneID, "error", message)
-		summary := strings.ReplaceAll(action, "_", " ") + " failed: " + message
-		d.recordActivity(action, "failed", summary, paneID, requestID)
+		d.recordActivity(action, "failed", failureSummary(action, message), paneID, requestID)
 	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: message, PaneID: paneID}
 }
@@ -866,42 +867,33 @@ func partiallyApplied(reason string, err error) error {
 }
 
 func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *CommandResult {
-	phase := "failed"
+	class := classifyFailure(err)
+	phase := class.phase()
 	public := "Command failed"
 	var data any
-	switch {
-	case errors.Is(err, herdr.ErrPartiallyApplied):
-		phase = "dispatched_unknown"
-		public = "Part of the command already reached the agent; review it before retrying"
-		data = map[string]any{"dispatched_unknown": true}
-	// Must follow ErrPartiallyApplied: a started subprocess always carries
-	// ErrDispatchedUnknown, so an earlier applied step would otherwise be
-	// advertised as safe to retry and duplicate the input that landed.
-	case herdr.IsRefused(err):
-		phase = "not_started"
-		code := herdr.RefusalCode(err)
-		if herdr.IsTransientRefused(err) {
-			public = "Command was not sent; retry is safe"
+	switch class.kind {
+	case failurePartiallyApplied:
+		public = partiallyAppliedMessage
+	case failureRefused:
+		if class.transient {
+			public = notSentRetrySafe
 		} else {
-			public = herdr.RefusalMessage(code)
-			data = map[string]any{"code": code}
+			public = herdr.RefusalMessage(class.code)
+			data = map[string]any{"code": class.code}
 		}
-	case errors.Is(err, herdr.ErrCreatedTargetUnknown):
-		phase = "dispatched_unknown"
+	case failureCreatedTargetUnknown:
 		public = "Herdr may have created an empty target; review Herdr before retrying"
-		data = map[string]any{"dispatched_unknown": true}
-	case errors.Is(err, herdr.ErrDispatchedUnknown):
-		phase = "dispatched_unknown"
+	case failureDispatchedUnknown:
 		public = "Command may have executed; review the agent before retrying"
-		data = map[string]any{"dispatched_unknown": true}
-	case errors.Is(err, herdr.ErrNotStarted), errors.Is(err, context.DeadlineExceeded):
-		phase = "not_started"
-		public = "Command was not sent; retry is safe"
+	case failureNotStarted:
+		public = notSentRetrySafe
+	}
+	if phase == "dispatched_unknown" {
+		data = uncertainOutcomeData()
 	}
 	d.logger.Warn("command failed", "action", action, "request_id", requestID, "pane_id", paneID, "phase", phase, "error", err)
 	if action != "" {
-		summary := strings.ReplaceAll(action, "_", " ") + " failed: " + public
-		d.recordActivity(action, "failed", summary, paneID, requestID)
+		d.recordActivity(action, "failed", failureSummary(action, public), paneID, requestID)
 	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: phase, Error: public, PaneID: paneID, Data: data}
 }

@@ -911,7 +911,7 @@ func notStartedResult(op *scheduledOperation) *CommandResult {
 		Action:    op.options.Action,
 		OK:        false,
 		Phase:     "not_started",
-		Error:     "command was not sent; retry is safe",
+		Error:     queueRejectedRetrySafe,
 		PaneID:    op.options.PaneID,
 	}
 }

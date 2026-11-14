@@ -30,6 +30,7 @@ func TestTopologyOutcomePrecedence(t *testing.T) {
 		{"invalid layout", "workspace_reorder", cli("invalid_params", "Layout is missing or ambiguous"), "not_started", "Layout is missing or ambiguous", code("invalid_params")},
 		{"dirty force", "worktree_remove", started(cli("dirty_worktree_requires_force", "private")), "not_started", "Worktree has uncommitted changes; force removal is required", map[string]any{"code": "dirty_worktree_requires_force", "force_available": true}},
 		{"known beats started", "workspace_reorder", started(cli("invalid_request", " refused ")), "not_started", "refused", code("invalid_request")},
+		{"operation in progress", "worktree_create", started(cli("worktree_operation_in_progress", " busy ")), "not_started", "busy", code("worktree_operation_in_progress")},
 		{"blank refusal", "workspace_reorder", cli("invalid_request", " "), "not_started", "Herdr refused the command", code("invalid_request")},
 		{"unknown started", "workspace_reorder", started(errors.New("private")), "dispatched_unknown", uncertain, unknown},
 		{"created beats deadline", "workspace_create", errors.Join(context.DeadlineExceeded, herdr.ErrCreatedTargetUnknown), "dispatched_unknown", uncertain, unknown},

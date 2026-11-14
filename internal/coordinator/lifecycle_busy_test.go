@@ -241,11 +241,11 @@ func TestAgentStartFailureSurfacesTheKeptPane(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stopAfterRefusals(lifecycle, 2)
-	result := d.handleAgentStart(ctx, time.Now(), "request-1", map[string]any{
+	result := d.handleAgentStart(ctx, d.newCommandRequest(time.Now(), "request-1", "", map[string]any{
 		"profile_id": "codex",
 		"name":       "project-codex",
 		"cwd":        cwd,
-	})
+	}, nil))
 	if result.OK {
 		t.Fatal("agent_start reported success against a permanently refusing Herdr")
 	}

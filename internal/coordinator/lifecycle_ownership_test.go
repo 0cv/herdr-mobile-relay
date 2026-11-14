@@ -144,7 +144,7 @@ func TestLifecyclePersistsShellOwnershipBeforeAgentDiscovery(t *testing.T) {
 			if err := os.WriteFile(f.nextPane, []byte("pane-replacement"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			cleared := d.handleClear(ctx, time.Now(), "clear-test", result.PaneID)
+			cleared := d.handleClear(ctx, d.newCommandRequest(time.Now(), "clear-test", result.PaneID, nil, nil))
 			if !cleared.OK {
 				t.Fatalf("Clear after restart = %+v", cleared)
 			}
