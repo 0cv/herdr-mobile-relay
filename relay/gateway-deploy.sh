@@ -32,13 +32,15 @@ DEPLOY_STATE_FILE="$(dirname "$ENV_FILE")/gateway-deploy"
 
 DEFAULT_BUNDLE_DIR="./herdr-gateway-deploy"
 DEFAULT_REMOTE_DIR="/opt/herdr-gateway"
-# Exactly what Dockerfile.gateway builds from: the gateway command and the two
-# packages it imports. Everything else in the repository stays on this computer.
+# Exactly what Dockerfile.gateway builds from: the gateway command and the
+# internal packages it imports. Everything else in the repository stays on this
+# computer.
 GATEWAY_SOURCE_PATHS=(
     Dockerfile.gateway
     go.mod
     go.sum
     cmd/herdr-gateway
+    internal/atomicfile
     internal/gateway
     internal/gatewaywire
 )

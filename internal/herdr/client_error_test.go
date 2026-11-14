@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 )
 
 func TestCommandResultParsesCLIErrorEnvelope(t *testing.T) {
@@ -12,10 +14,10 @@ func TestCommandResultParsesCLIErrorEnvelope(t *testing.T) {
 	if waitErr == nil {
 		t.Fatal("expected command failure")
 	}
-	stderr := &limitedBuffer{limit: maxOutputBytes}
+	stderr := &processgroup.LimitedBuffer{Limit: maxOutputBytes}
 	_, _ = stderr.Write([]byte(`{"id":"cli:pane:list","error":{"code":"server_not_running","message":"no herdr server is running"}}`))
 
-	_, err := commandResult(&limitedBuffer{}, stderr, waitErr)
+	_, err := commandResult(&processgroup.LimitedBuffer{}, stderr, waitErr)
 	var cliErr *CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("commandResult() error = %v, want CLIError", err)
@@ -33,10 +35,10 @@ func TestCommandResultKeepsRawStderrWhenNotAnEnvelope(t *testing.T) {
 	if waitErr == nil {
 		t.Fatal("expected command failure")
 	}
-	stderr := &limitedBuffer{limit: maxOutputBytes}
+	stderr := &processgroup.LimitedBuffer{Limit: maxOutputBytes}
 	_, _ = stderr.Write([]byte("plain diagnostic"))
 
-	_, err := commandResult(&limitedBuffer{}, stderr, waitErr)
+	_, err := commandResult(&processgroup.LimitedBuffer{}, stderr, waitErr)
 	if err == nil || !strings.Contains(err.Error(), "command failed: plain diagnostic") {
 		t.Fatalf("commandResult() error = %v, want raw diagnostic", err)
 	}

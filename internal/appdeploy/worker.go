@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
@@ -1109,37 +1110,8 @@ func lockFile(filename string) (*os.File, error) {
 }
 
 func writeState(filename string, state State) error {
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	directory := filepath.Dir(filename)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	temp, err := os.CreateTemp(directory, ".app-deploy-state.")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempName, filename)
+	_, err := atomicfile.WriteJSON(filename, state, 0o600)
+	return err
 }
 
 func compact(value string, limit int) string {

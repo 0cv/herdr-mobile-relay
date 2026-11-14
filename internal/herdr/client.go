@@ -14,13 +14,12 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 )
 
 const (
 	defaultTimeout   = 15 * time.Second
 	maxOutputBytes   = 4 * 1024 * 1024
-	termGrace        = 2 * time.Second
-	waitDelay        = 4 * time.Second
 	shiftTabSequence = "\x1b[Z"
 )
 
@@ -177,30 +176,6 @@ func (e *OutcomeError) Unwrap() error {
 	}
 	return errors.Join(ErrNotStarted, e.Err)
 }
-
-type limitedBuffer struct {
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	original := len(p)
-	remaining := b.limit - b.buf.Len()
-	if remaining <= 0 {
-		b.truncated = true
-		return original, nil
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-		b.truncated = true
-	}
-	_, err := b.buf.Write(p)
-	return original, err
-}
-
-func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
-func (b *limitedBuffer) String() string { return b.buf.String() }
 
 type Client struct {
 	bin          string
@@ -877,10 +852,10 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 	// Process-group termination owns cancellation. WaitDelay is the final
 	// backstop for inherited stdout/stderr descriptors held by a descendant
 	// that escaped the group before cancellation.
-	cmd.WaitDelay = waitDelay
+	cmd.WaitDelay = processgroup.WaitDelay
 
-	stdout := &limitedBuffer{limit: maxOutputBytes}
-	stderr := &limitedBuffer{limit: maxOutputBytes}
+	stdout := &processgroup.LimitedBuffer{Limit: maxOutputBytes}
+	stderr := &processgroup.LimitedBuffer{Limit: maxOutputBytes}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -897,12 +872,12 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 	case err := <-waitCh:
 		return commandResult(stdout, stderr, err)
 	case <-ctx.Done():
-		terminateProcessGroup(cmd.Process.Pid, waitCh)
+		processgroup.Terminate(cmd.Process.Pid, waitCh, 2*time.Second)
 		return nil, &OutcomeError{Started: true, Err: ctx.Err()}
 	}
 }
 
-func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error) {
+func commandResult(stdout, stderr *processgroup.LimitedBuffer, waitErr error) ([]byte, error) {
 	if waitErr == nil {
 		return append([]byte(nil), stdout.Bytes()...), nil
 	}
@@ -911,7 +886,7 @@ func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error)
 		return nil, &OutcomeError{Started: true, Err: waitErr}
 	}
 	diagnostic := strings.TrimSpace(stderr.String())
-	if !stderr.truncated && diagnostic != "" {
+	if !stderr.Truncated && diagnostic != "" {
 		var envelope cliErrorEnvelope
 		if err := json.Unmarshal([]byte(diagnostic), &envelope); err == nil &&
 			envelope.Error != nil && envelope.Error.Code != "" {
@@ -927,41 +902,13 @@ func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error)
 	if diagnostic == "" {
 		diagnostic = exitErr.Error()
 	}
-	if stderr.truncated {
+	if stderr.Truncated {
 		diagnostic += " (truncated)"
 	}
 	if len(diagnostic) > 500 {
 		diagnostic = diagnostic[:500] + "..."
 	}
 	return nil, &OutcomeError{Started: true, Err: fmt.Errorf("command failed: %s", diagnostic)}
-}
-
-func terminateProcessGroup(pgid int, waitCh <-chan error) {
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	timer := time.NewTimer(termGrace)
-	defer timer.Stop()
-	leaderDone := false
-	select {
-	case <-waitCh:
-		leaderDone = true
-		if !GroupAlive(pgid) {
-			return
-		}
-		<-timer.C
-	case <-timer.C:
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-
-	if !leaderDone {
-		select {
-		case <-waitCh:
-		case <-time.After(2 * time.Second):
-		}
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for GroupAlive(pgid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 // ShellJoin is equivalent to shlex.join for the POSIX shell grammar used by
@@ -983,10 +930,4 @@ func shellQuote(value string) string {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-// GroupAlive is exported only for process-boundary tests and diagnostics.
-func GroupAlive(pgid int) bool {
-	err := syscall.Kill(-pgid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }

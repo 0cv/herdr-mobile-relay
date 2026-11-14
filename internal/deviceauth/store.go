@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 )
 
 const (
@@ -412,34 +414,8 @@ func (s *Store) persistLocked() error {
 		return err
 	}
 	data = append(data, '\n')
-	temp, err := os.CreateTemp(s.dir, ".devices-*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, s.path); err != nil {
-		return err
-	}
-	if err := os.Chmod(s.path, 0o600); err != nil {
-		return err
-	}
-	return syncDirectory(s.dir)
+	_, err = atomicfile.Replace(s.dir, s.path, ".devices-*.tmp", data, 0o600)
+	return err
 }
 
 func protectDirectory(dir string) error {
@@ -457,15 +433,6 @@ func protectDirectory(dir string) error {
 		return fmt.Errorf("protect device store directory: %w", err)
 	}
 	return nil
-}
-
-func syncDirectory(dir string) error {
-	file, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	return file.Sync()
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {

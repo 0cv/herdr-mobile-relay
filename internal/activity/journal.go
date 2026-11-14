@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 )
 
 const (
@@ -246,7 +249,7 @@ func (j *Journal) Clear() error {
 	if err != nil {
 		return err
 	}
-	clearTombstones := cloneSet(previousTombstones)
+	clearTombstones := maps.Clone(previousTombstones)
 	for _, entry := range j.entries {
 		if entry.ID != "" {
 			clearTombstones[entry.ID] = struct{}{}
@@ -294,7 +297,7 @@ func (j *Journal) Discard(id string) error {
 	if err != nil {
 		return err
 	}
-	discardTombstones := cloneSet(previousTombstones)
+	discardTombstones := maps.Clone(previousTombstones)
 	discardTombstones[id] = struct{}{}
 	if err := j.writeTombstonesLocked(discardTombstones); err != nil {
 		return fmt.Errorf("prepare stale activity discard: %w", err)
@@ -315,43 +318,15 @@ func (j *Journal) compactLocked() error {
 }
 
 func (j *Journal) compactEntriesLocked(entries []Entry) error {
-	temp, err := os.CreateTemp(j.dir, ".activity.jsonl.*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
+	var data []byte
 	for _, entry := range entries {
-		data, err := encodeEntry(entry)
+		line, err := encodeEntry(entry)
 		if err != nil {
-			_ = temp.Close()
 			return err
 		}
-		written, err := temp.Write(data)
-		if err != nil {
-			_ = temp.Close()
-			return err
-		}
-		if written != len(data) {
-			_ = temp.Close()
-			return io.ErrShortWrite
-		}
+		data = append(data, line...)
 	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, j.path); err != nil {
-		return err
-	}
-	if err := syncDirectory(j.dir); err != nil {
+	if err := j.replaceFile(j.path, ".activity.jsonl.*.tmp", data); err != nil {
 		return err
 	}
 	j.entries = append([]Entry(nil), entries...)
@@ -407,47 +382,20 @@ func (j *Journal) writeTombstonesLocked(tombstones map[string]struct{}) error {
 		}
 	}
 	sort.Strings(ids)
-	temp, err := os.CreateTemp(j.dir, ".activity.tombstones.*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
+	var data []byte
 	for _, id := range ids {
-		line := id + "\n"
-		written, err := io.WriteString(temp, line)
-		if err != nil {
-			_ = temp.Close()
-			return err
-		}
-		if written != len(line) {
-			_ = temp.Close()
-			return io.ErrShortWrite
-		}
+		data = append(data, id...)
+		data = append(data, '\n')
 	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, j.tombstonePath); err != nil {
-		return err
-	}
-	return syncDirectory(j.dir)
+	return j.replaceFile(j.tombstonePath, ".activity.tombstones.*.tmp", data)
 }
 
-func cloneSet(values map[string]struct{}) map[string]struct{} {
-	result := make(map[string]struct{}, len(values))
-	for value := range values {
-		result[value] = struct{}{}
+func (j *Journal) replaceFile(path, pattern string, data []byte) error {
+	outcome, err := atomicfile.Replace(j.dir, path, pattern, data, 0o600)
+	if outcome == atomicfile.Renamed && unsupportedDirectorySync(err) {
+		return nil
 	}
-	return result
+	return err
 }
 
 func syncDirectory(path string) error {
@@ -457,10 +405,14 @@ func syncDirectory(path string) error {
 	}
 	defer directory.Close()
 	err = directory.Sync()
-	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS) {
+	if unsupportedDirectorySync(err) {
 		return nil
 	}
 	return err
+}
+
+func unsupportedDirectorySync(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS)
 }
 
 func (j *Journal) Recent(limit int) []Entry {

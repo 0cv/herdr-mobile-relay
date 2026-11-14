@@ -180,7 +180,7 @@ for FILE in docker-compose.yml Caddyfile .env README.md; do
 done
 for SOURCE in Dockerfile.gateway go.mod go.sum \
     cmd/herdr-gateway/main.go internal/gateway/server.go \
-    internal/gatewaywire/gatewaywire.go; do
+    internal/atomicfile/atomicfile.go internal/gatewaywire/gatewaywire.go; do
     [ -f "$BUNDLE_DIR/gateway-source/$SOURCE" ] ||
         fail "bundle is missing gateway-source/$SOURCE"
 done

@@ -416,3 +416,42 @@ func TestReplaceNativeVisibility(t *testing.T) {
 		t.Fatalf("final target = %d bytes, error %v", len(data), err)
 	}
 }
+
+func TestWriteJSONCreatesDirectoryAndWritesIndentedJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "state.json")
+
+	outcome, err := WriteJSON(path, map[string]int{"count": 2}, 0o640)
+	if err != nil || outcome != Renamed {
+		t.Fatalf("WriteJSON() = %v, %v", outcome, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "{\n  \"count\": 2\n}\n"; string(data) != want {
+		t.Fatalf("content = %q, want %q", data, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %v", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v, %v", entries, err)
+	}
+}
+
+func TestWriteJSONRejectsUnencodableValueWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	outcome, err := WriteJSON(path, make(chan int), 0o600)
+	if err == nil || outcome != RenameNotConfirmed {
+		t.Fatalf("WriteJSON() = %v, %v", outcome, err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("target exists: %v", statErr)
+	}
+}
