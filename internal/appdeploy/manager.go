@@ -7,16 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
-	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 )
 
 type PublicState struct {
@@ -255,10 +254,19 @@ func (m *Manager) public(state State) PublicState {
 	}
 }
 
-var workerEnvironmentKeys = [...]string{
+var workerEnvironmentKeys = []string{
 	"HERDR_RELAY_ENV",
 	"HERDR_PLUGIN_CONFIG_DIR",
 }
+
+// EnvironmentKeys lists every variable the app deployment reads from its environment.
+var EnvironmentKeys = append([]string{
+	"HERDR_APP_DEPLOY_ORIGIN",
+	"HERDR_CLOUDFLARE_PAGES_PROJECT",
+	"HERDR_CLOUDFLARE_PAGES_BRANCH",
+	"HERDR_APP_DEPLOY_NPX",
+	"HERDR_APP_DEPLOY_NODE_DIR",
+}, workerEnvironmentKeys...)
 
 var sweepWorkers = launchd.SweepWorkers
 
@@ -266,28 +274,8 @@ func appDeployWorkerJob(
 	executable, jobPath string,
 	lookupEnv func(string) (string, bool),
 ) launchd.Job {
-	environment := make(map[string]string, len(workerEnvironmentKeys))
-	for _, key := range workerEnvironmentKeys {
-		value, present := lookupEnv(key)
-		if present && strings.TrimSpace(value) != "" {
-			environment[key] = value
-		}
-	}
-	return launchd.Job{
-		Label:       fmt.Sprintf("%s%d", launchd.AppDeployWorkerPrefix, time.Now().UnixNano()),
-		Program:     []string{executable, "app-deploy-worker", jobPath},
-		Environment: environment,
-	}
-}
-
-func systemdRunArgs(job launchd.Job) []string {
-	args := []string{"--user", "--collect", "--unit=" + job.Label}
-	for _, key := range workerEnvironmentKeys {
-		if value, forwarded := job.Environment[key]; forwarded {
-			args = append(args, "--setenv="+key+"="+value)
-		}
-	}
-	return append(args, job.Program...)
+	program := []string{executable, "app-deploy-worker", jobPath}
+	return launchd.NewJob(launchd.AppDeployWorkerPrefix, program, workerEnvironmentKeys, lookupEnv)
 }
 
 func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
@@ -296,15 +284,8 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 		return err
 	}
 	job := appDeployWorkerJob(executable, jobPath, os.LookupEnv)
-	if runtime.GOOS == "darwin" {
-		if err := launchd.Bootstrap(ctx, m.runtimeDir, job); err != nil {
-			return fmt.Errorf("schedule app deployment worker: %w", err)
-		}
-		return nil
-	}
-	output, err := childenv.CommandContext(ctx, "systemd-run", systemdRunArgs(job)...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("schedule app deployment worker: %s: %s", err, compact(string(output), 300))
+	if err := launchd.Start(ctx, m.runtimeDir, job); err != nil {
+		return fmt.Errorf("schedule app deployment worker: %w", err)
 	}
 	return nil
 }
@@ -345,15 +326,12 @@ func recoverAppDeployState(runtimeDir string, includeScheduled bool) {
 	if state.State != "deploying" && !recoverScheduled {
 		return
 	}
-	lock, err := lockFile(filepath.Join(runtimeDir, "app-deploy.lock"))
-	if err != nil {
-		return
-	}
-	defer lock.Close()
-	state.State = "failed"
-	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-	state.Error = "App deployment worker stopped before completion"
-	_ = writeState(statePath(runtimeDir), state)
+	workerjob.RecoverOrphan(filepath.Join(runtimeDir, "app-deploy.lock"), func() {
+		state.State = "failed"
+		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		state.Error = "App deployment worker stopped before completion"
+		_ = writeState(statePath(runtimeDir), state)
+	})
 }
 
 func scheduledStateExpired(state State) bool {
@@ -361,7 +339,7 @@ func scheduledStateExpired(state State) bool {
 		return false
 	}
 	started, err := time.Parse(time.RFC3339, state.StartedAt)
-	return err == nil && time.Since(started) >= deploymentStartupGrace
+	return err == nil && time.Since(started) >= workerjob.StartupGrace
 }
 
 func unixTime(values ...string) int64 {

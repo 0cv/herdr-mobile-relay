@@ -6,11 +6,13 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -234,5 +236,42 @@ func TestSweepReportsListFailure(t *testing.T) {
 	}
 	if err := sweep(t.Context(), run, UpdateWorkerPrefix); err == nil {
 		t.Fatal("list failure was not reported")
+	}
+}
+
+func TestNewJobForwardsOnlyListedNonBlankVariables(t *testing.T) {
+	values := map[string]string{
+		"HERDR_RELAY_ENV": "/home/cv/relay.env",
+		"HERDR_BLANK":     "  ",
+		"UNLISTED":        "must-not-be-forwarded",
+	}
+	lookup := func(key string) (string, bool) {
+		value, found := values[key]
+		return value, found
+	}
+	job := NewJob(UpdateWorkerPrefix, []string{"/opt/relay", "update-worker"}, []string{"HERDR_RELAY_ENV", "HERDR_BLANK", "HERDR_MISSING"}, lookup)
+
+	sequence, found := strings.CutPrefix(job.Label, UpdateWorkerPrefix)
+	if _, err := strconv.ParseInt(sequence, 10, 64); !found || err != nil {
+		t.Fatalf("label = %q, want %s<unix nanoseconds>", job.Label, UpdateWorkerPrefix)
+	}
+	if !slices.Equal(job.Program, []string{"/opt/relay", "update-worker"}) {
+		t.Fatalf("program = %q", job.Program)
+	}
+	if want := map[string]string{"HERDR_RELAY_ENV": "/home/cv/relay.env"}; !maps.Equal(job.Environment, want) {
+		t.Fatalf("environment = %#v, want %#v", job.Environment, want)
+	}
+}
+
+func TestSystemdRunArgsSetEnvironmentInSortedOrder(t *testing.T) {
+	job := testJob()
+	want := []string{
+		"--user", "--collect", "--unit=" + job.Label,
+		"--setenv=HERDR_PLUGIN_CONFIG_DIR=/Users/a&b/<config>",
+		"--setenv=HERDR_RELAY_ENV=/Users/a&b/relay.env",
+	}
+	want = append(want, job.Program...)
+	if args := systemdRunArgs(job); !slices.Equal(args, want) {
+		t.Fatalf("systemd-run args = %#v, want %#v", args, want)
 	}
 }

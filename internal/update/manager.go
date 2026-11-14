@@ -12,30 +12,22 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
-	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/launchd"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 )
 
 const canonicalAPI = "https://api.github.com/repos/0cv/herdr-mobile-relay"
 const canonicalWeb = "https://github.com/0cv/herdr-mobile-relay"
 
-var appDeployEnvironmentKeys = [...]string{
-	"HERDR_APP_DEPLOY_ORIGIN",
-	"HERDR_CLOUDFLARE_PAGES_PROJECT",
-	"HERDR_CLOUDFLARE_PAGES_BRANCH",
-	"HERDR_APP_DEPLOY_NPX",
-	"HERDR_APP_DEPLOY_NODE_DIR",
-	"HERDR_RELAY_ENV",
-	"HERDR_PLUGIN_CONFIG_DIR",
-	"HERDR_GITHUB_TOKEN_FILE",
-}
+var updateEnvironmentKeys = append(slices.Clone(appdeploy.EnvironmentKeys), "HERDR_GITHUB_TOKEN_FILE")
 
 var sweepWorkers = launchd.SweepWorkers
 
@@ -493,28 +485,8 @@ func updateWorkerJob(
 	executable, jobPath string,
 	lookupEnv func(string) (string, bool),
 ) launchd.Job {
-	environment := make(map[string]string, len(appDeployEnvironmentKeys))
-	for _, key := range appDeployEnvironmentKeys {
-		value, present := lookupEnv(key)
-		if present && strings.TrimSpace(value) != "" {
-			environment[key] = value
-		}
-	}
-	return launchd.Job{
-		Label:       fmt.Sprintf("%s%d", launchd.UpdateWorkerPrefix, time.Now().UnixNano()),
-		Program:     []string{executable, "update-worker", jobPath},
-		Environment: environment,
-	}
-}
-
-func systemdRunArgs(job launchd.Job) []string {
-	args := []string{"--user", "--collect", "--unit=" + job.Label}
-	for _, key := range appDeployEnvironmentKeys {
-		if value, forwarded := job.Environment[key]; forwarded {
-			args = append(args, "--setenv="+key+"="+value)
-		}
-	}
-	return append(args, job.Program...)
+	program := []string{executable, "update-worker", jobPath}
+	return launchd.NewJob(launchd.UpdateWorkerPrefix, program, updateEnvironmentKeys, lookupEnv)
 }
 
 func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
@@ -523,15 +495,8 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 		return err
 	}
 	job := updateWorkerJob(executable, jobPath, os.LookupEnv)
-	if runtime.GOOS == "darwin" {
-		if err := launchd.Bootstrap(ctx, m.runtimeDir, job); err != nil {
-			return fmt.Errorf("schedule update worker: %w", err)
-		}
-		return nil
-	}
-	output, err := childenv.CommandContext(ctx, "systemd-run", systemdRunArgs(job)...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("schedule update worker: %s: %s", err, compact(string(output), 300))
+	if err := launchd.Start(ctx, m.runtimeDir, job); err != nil {
+		return fmt.Errorf("schedule update worker: %w", err)
 	}
 	return nil
 }
@@ -620,7 +585,7 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 		return
 	}
 	started, startedErr := time.Parse(time.RFC3339, state.StartedAt)
-	if startedErr == nil && time.Since(started) < updateStartupGrace {
+	if startedErr == nil && time.Since(started) < workerjob.StartupGrace {
 		return
 	}
 	if state.State == "scheduled" && !includeScheduled && startedErr != nil {
@@ -632,16 +597,12 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 	if err := os.MkdirAll(m.releaseRoot, 0o700); err != nil {
 		return
 	}
-	lock, err := acquireLock(filepath.Join(m.releaseRoot, "update.lock"))
-	if err != nil {
-		return
-	}
-
-	state.State = "failed"
-	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-	state.Error = "Herdr plugin update worker stopped before completion; run the update again"
-	_ = writeState(statePath, state)
-	_ = lock.Close()
+	workerjob.RecoverOrphan(filepath.Join(m.releaseRoot, "update.lock"), func() {
+		state.State = "failed"
+		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		state.Error = "Herdr plugin update worker stopped before completion; run the update again"
+		_ = writeState(statePath, state)
+	})
 }
 
 func (m *Manager) publicState(state State) State {

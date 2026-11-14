@@ -21,7 +21,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
@@ -31,6 +30,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/textutil"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 	"github.com/andybalholm/brotli"
 )
 
@@ -40,7 +40,6 @@ const (
 	// upload path can fail with a generic exit status; 4.125.0 is the
 	// current tested release and the deployment below skips that cache path.
 	WranglerVersion           = "4.125.0"
-	deploymentStartupGrace    = 30 * time.Second
 	publicVerificationTimeout = 2 * time.Minute
 	publicRequestTimeout      = 20 * time.Second
 	deploymentTimeout         = 15 * time.Minute
@@ -79,7 +78,7 @@ type State struct {
 func Run(ctx context.Context, jobPath string) error {
 	ctx, cancel := context.WithTimeout(ctx, deploymentTimeout)
 	defer cancel()
-	job, err := loadJob(jobPath)
+	job, err := workerjob.Load[Job](jobPath, "app deployment")
 	if err != nil {
 		return err
 	}
@@ -111,7 +110,7 @@ func Run(ctx context.Context, jobPath string) error {
 	if err := os.MkdirAll(job.RuntimeDir, 0o700); err != nil {
 		return fail(err)
 	}
-	lock, err := lockFile(filepath.Join(job.RuntimeDir, "app-deploy.lock"))
+	lock, err := workerjob.Lock(filepath.Join(job.RuntimeDir, "app-deploy.lock"), errDeployLocked)
 	if err != nil {
 		if errors.Is(err, errDeployLocked) {
 			return err
@@ -265,18 +264,6 @@ func commandEnvironment(nodeDir string, environment []string) []string {
 	}
 	result = append(result, "PATH="+nodeDir+string(os.PathListSeparator)+pathValue)
 	return result
-}
-
-func loadJob(filename string) (Job, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return Job{}, fmt.Errorf("read app deployment job: %w", err)
-	}
-	var job Job
-	if err := json.Unmarshal(data, &job); err != nil {
-		return Job{}, fmt.Errorf("parse app deployment job: %w", err)
-	}
-	return job, nil
 }
 
 func validate(job Job) error {
@@ -838,21 +825,6 @@ func verifyVersion(data []byte, version, revision string) error {
 		return errors.New("version metadata does not match the expected version and revision")
 	}
 	return nil
-}
-
-func lockFile(filename string) (*os.File, error) {
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errDeployLocked
-		}
-		return nil, fmt.Errorf("lock app deployment: %w", err)
-	}
-	return file, nil
 }
 
 func writeState(filename string, state State) error {

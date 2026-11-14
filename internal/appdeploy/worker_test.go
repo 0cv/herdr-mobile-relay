@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 	"github.com/andybalholm/brotli"
 )
 
@@ -367,7 +368,7 @@ func TestRunDoesNotOverwriteStateOwnedByAnotherWorker(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := lockFile(filepath.Join(root, "app-deploy.lock"))
+	lock, err := workerjob.Lock(filepath.Join(root, "app-deploy.lock"), errDeployLocked)
 	if err != nil {
 		t.Fatal(err)
 	}
