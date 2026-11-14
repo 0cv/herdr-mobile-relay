@@ -590,6 +590,29 @@ function ansiExtendedColor(codes: number[], position: number): { color: string; 
   return { color: '', consumed: 0 };
 }
 
+type SgrSegment = { text: string } | { codes: number[] };
+
+function* sgrSegments(text: string): Generator<SgrSegment> {
+  const parts = text.split(/\x1b\[([0-9;]*)m/g);
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index % 2 === 0) yield { text: parts[index] };
+    else yield { codes: parts[index] ? parts[index].split(';').map(Number) : [0] };
+  }
+}
+
+function* sgrParameters(codes: number[]): Generator<{ code: number; color: string }> {
+  for (let position = 0; position < codes.length; position += 1) {
+    const code = codes[position];
+    if (code !== 38 && code !== 48) {
+      yield { code, color: '' };
+      continue;
+    }
+    const extended = ansiExtendedColor(codes, position);
+    position += extended.consumed;
+    yield { code, color: extended.color };
+  }
+}
+
 function ansiStyleName(name: string): string {
   return ({
     fontWeight: 'font-weight',
@@ -599,25 +622,30 @@ function ansiStyleName(name: string): string {
   } as Record<string, string>)[name] || name;
 }
 
-export function ansiToHtml(
-  text: string,
-  normalizeNearWhiteBackground = false,
-  normalizeNearBlackForeground = false,
-  preserveTerminalCells = false,
-): string {
+export interface AnsiHtmlOptions {
+  normalizeNearWhiteBackground?: boolean;
+  normalizeNearBlackForeground?: boolean;
+  preserveTerminalCells?: boolean;
+}
+
+export function ansiToHtml(text: string, options: AnsiHtmlOptions = {}): string {
+  const {
+    normalizeNearWhiteBackground = false,
+    normalizeNearBlackForeground = false,
+    preserveTerminalCells = false,
+  } = options;
   let html = '';
   let open = false;
   let styles: Record<string, string> = {};
   let column = 0;
-  const parts = text.split(/\x1b\[([0-9;]*)m/g);
-  for (let index = 0; index < parts.length; index += 1) {
-    if (index % 2 === 0) {
+  for (const segment of sgrSegments(text)) {
+    if ('text' in segment) {
       if (preserveTerminalCells) {
-        const rendered = terminalCellsHtml(parts[index], column);
+        const rendered = terminalCellsHtml(segment.text, column);
         html += rendered.html;
         column = rendered.column;
       } else {
-        html += linkifyTerminalText(parts[index]);
+        html += linkifyTerminalText(segment.text);
       }
       continue;
     }
@@ -625,9 +653,7 @@ export function ansiToHtml(
       html += '</span>';
       open = false;
     }
-    const codes = parts[index] ? parts[index].split(';').map(Number) : [0];
-    for (let position = 0; position < codes.length; position += 1) {
-      const code = codes[position];
+    for (const { code, color } of sgrParameters(segment.codes)) {
       if (code === 0) styles = {};
       else if (code === 1) styles.fontWeight = '700';
       else if (code === 2) styles.opacity = '0.7';
@@ -641,12 +667,9 @@ export function ansiToHtml(
       else if (code === 39) delete styles.color;
       else if (code === 49) delete styles.backgroundColor;
       else if (code === 38 || code === 48) {
-        const extended = ansiExtendedColor(codes, position);
-        if (extended.color) {
-          if (code === 38) styles.color = normalizedAnsiForeground(extended.color, normalizeNearBlackForeground);
-          else styles.backgroundColor = normalizedAnsiBackground(extended.color, normalizeNearWhiteBackground);
-        }
-        position += extended.consumed;
+        if (!color) continue;
+        if (code === 38) styles.color = normalizedAnsiForeground(color, normalizeNearBlackForeground);
+        else styles.backgroundColor = normalizedAnsiBackground(color, normalizeNearWhiteBackground);
       } else if (scheme.colors[code]) {
         styles.color = normalizedAnsiForeground(scheme.colors[code], normalizeNearBlackForeground);
       } else if (scheme.colors[code - 10]) {
@@ -669,22 +692,15 @@ export function ansiToHtml(
 
 export function ansiLineBackground(line: string): string {
   let background = '';
-  const parts = line.split(/\x1b\[([0-9;]*)m/g);
-  for (let index = 0; index < parts.length; index += 1) {
-    if (index % 2 === 0) {
-      if (parts[index].replaceAll('\r', '').trim().length) return background;
+  for (const segment of sgrSegments(line)) {
+    if ('text' in segment) {
+      if (segment.text.replaceAll('\r', '').trim().length) return background;
       continue;
     }
-    const codes = parts[index] ? parts[index].split(';').map(Number) : [0];
-    for (let position = 0; position < codes.length; position += 1) {
-      const code = codes[position];
-      if (code === 38) {
-        position += ansiExtendedColor(codes, position).consumed;
-      } else if (code === 0 || code === 49) background = '';
+    for (const { code, color } of sgrParameters(segment.codes)) {
+      if (code === 0 || code === 49) background = '';
       else if (code === 48) {
-        const extended = ansiExtendedColor(codes, position);
-        if (extended.color) background = extended.color;
-        position += extended.consumed;
+        if (color) background = color;
       } else if (scheme.colors[code - 10]) background = scheme.colors[code - 10];
     }
   }
@@ -693,19 +709,12 @@ export function ansiLineBackground(line: string): string {
 
 export function ansiLineBackgroundIndent(line: string): number {
   let visiblePrefix = '';
-  const parts = line.split(/\x1b\[([0-9;]*)m/g);
-  for (let index = 0; index < parts.length; index += 1) {
-    if (index % 2 === 0) {
-      visiblePrefix += parts[index].replaceAll('\r', '');
+  for (const segment of sgrSegments(line)) {
+    if ('text' in segment) {
+      visiblePrefix += segment.text.replaceAll('\r', '');
       continue;
     }
-    const codes = parts[index] ? parts[index].split(';').map(Number) : [0];
-    for (let position = 0; position < codes.length; position += 1) {
-      const code = codes[position];
-      if (code === 38) {
-        position += ansiExtendedColor(codes, position).consumed;
-        continue;
-      }
+    for (const { code } of sgrParameters(segment.codes)) {
       if (code === 48 || scheme.colors[code - 10]) {
         return visiblePrefix.trim() ? 0 : visiblePrefix.replaceAll('\t', '    ').length;
       }
@@ -870,12 +879,27 @@ function responsiveTerminalGridLine(line: string, maxColumns: number): string {
   return line;
 }
 
-export function terminalHtmlRows(
-  text: string,
-  normalizeLightPalette = false,
-  preserveLineEnds = false,
-  maxFixedGridColumns = 0,
-): RenderedTerminalRow[] {
+function classifyGridRow(
+  preserve: boolean,
+  line: string,
+  columns: number,
+  maxFixedGridColumns: number,
+): { fixedGrid: boolean; wideGrid: boolean } {
+  const boxGrid = preserve && hasTerminalBoxCell(line);
+  return {
+    fixedGrid: boxGrid && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns),
+    wideGrid: boxGrid && maxFixedGridColumns >= 1 && columns > maxFixedGridColumns,
+  };
+}
+
+export interface TerminalRowsOptions {
+  normalizeLightPalette?: boolean;
+  preserveLineEnds?: boolean;
+  maxFixedGridColumns?: number;
+}
+
+export function terminalHtmlRows(text: string, options: TerminalRowsOptions = {}): RenderedTerminalRow[] {
+  const { normalizeLightPalette = false, preserveLineEnds = false, maxFixedGridColumns = 0 } = options;
   const lines = text.split('\n');
   const backgrounds = ansiLineBackgrounds(lines);
   return lines.map((line, index) => {
@@ -898,14 +922,7 @@ export function terminalHtmlRows(
     const background = normalizedAnsiBackground(sourceBackground, normalizeRow);
     const renderedText = stripAnsi(renderedLine);
     const columns = terminalTextColumns(renderedText);
-    const boxCell = hasTerminalBoxCell(renderedLine);
-    const fixedGrid = preserveLineEnds
-      && boxCell
-      && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns);
-    const wideGrid = preserveLineEnds
-      && boxCell
-      && maxFixedGridColumns >= 1
-      && columns > maxFixedGridColumns;
+    const { fixedGrid, wideGrid } = classifyGridRow(preserveLineEnds, renderedLine, columns, maxFixedGridColumns);
     const classes = [
       'ansi-line',
       background ? 'ansi-line-background' : '',
@@ -915,7 +932,11 @@ export function terminalHtmlRows(
     const style = background ? ` style="${ansiLineBackgroundStyle(renderedLine, background)}"` : '';
     // ansiToHtml escapes every text segment before it emits controlled span markup.
     return {
-      html: `<span class="${classes}"${style}>${ansiToHtml(renderedLine, normalizeRow, normalizeDarkText, fixedGrid || wideGrid)}</span>`,
+      html: `<span class="${classes}"${style}>${ansiToHtml(renderedLine, {
+        normalizeNearWhiteBackground: normalizeRow,
+        normalizeNearBlackForeground: normalizeDarkText,
+        preserveTerminalCells: fixedGrid || wideGrid,
+      })}</span>`,
       text: renderedText,
       columns,
       fixedGrid,
@@ -952,13 +973,18 @@ function mergeReflowedRules(lines: string[], maxColumns: number): string[] {
   return merged;
 }
 
+export interface TerminalContentOptions {
+  preserveLayout?: boolean;
+  preserveLineEnds?: boolean;
+  maxFixedGridColumns?: number;
+}
+
 export function renderTerminalContent(
   content: string,
   format: string,
-  preserveLayout = false,
-  preserveLineEnds = preserveLayout,
-  maxFixedGridColumns = 0,
+  options: TerminalContentOptions = {},
 ): RenderedTerminalContent {
+  const { preserveLayout = false, preserveLineEnds = preserveLayout, maxFixedGridColumns = 0 } = options;
   const markedDisplay = preserveLayout
     ? preservedTerminalDisplayContent(content)
     : compactSeparatorLines(terminalDisplayContent(content));
@@ -977,14 +1003,7 @@ export function renderTerminalContent(
       html: linkifyTerminalText(plainDisplay),
       rows: plainDisplay.split('\n').map((line) => {
         const columns = terminalTextColumns(line);
-        const boxCell = hasTerminalBoxCell(line);
-        const fixedGrid = preserveLayout
-          && boxCell
-          && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns);
-        const wideGrid = preserveLayout
-          && boxCell
-          && maxFixedGridColumns >= 1
-          && columns > maxFixedGridColumns;
+        const { fixedGrid, wideGrid } = classifyGridRow(preserveLayout, line, columns, maxFixedGridColumns);
         const classes = `ansi-line${fixedGrid ? ' terminal-grid-line' : ''}${wideGrid ? ' terminal-wide-grid' : ''}`;
         return {
           html: `<span class="${classes}">${linkifyTerminalText(line)}</span>`,
@@ -997,7 +1016,11 @@ export function renderTerminalContent(
       }),
     };
   }
-  const rows = terminalHtmlRows(display, true, preserveLayout, maxFixedGridColumns);
+  const rows = terminalHtmlRows(display, {
+    normalizeLightPalette: true,
+    preserveLineEnds: preserveLayout,
+    maxFixedGridColumns,
+  });
   return {
     display,
     html: rows.map((row) => row.html).join(''),

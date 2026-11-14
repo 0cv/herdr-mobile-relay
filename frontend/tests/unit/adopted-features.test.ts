@@ -318,14 +318,14 @@ describe('rendering without Intl.Segmenter', () => {
     const intl = Intl as unknown as { Segmenter?: typeof Intl.Segmenter };
     const segmenter = intl.Segmenter;
     const grid = '┌───┬──┐\n│ ab │漢 │';
-    const expected = renderTerminalContent(grid, 'ansi', true).rows;
+    const expected = renderTerminalContent(grid, 'ansi', { preserveLayout: true }).rows;
     delete intl.Segmenter;
     try {
       vi.resetModules();
       // Static import cannot work: the module must be evaluated again with
       // Intl.Segmenter absent to exercise the feature-detected fallback.
       const terminal = await import('$lib/terminal');
-      const rows = terminal.renderTerminalContent(grid, 'ansi', true).rows;
+      const rows = terminal.renderTerminalContent(grid, 'ansi', { preserveLayout: true }).rows;
 
       expect(rows.map((row) => [row.text, row.columns, row.fixedGrid]))
         .toEqual(expected.map((row) => [row.text, row.columns, row.fixedGrid]));
