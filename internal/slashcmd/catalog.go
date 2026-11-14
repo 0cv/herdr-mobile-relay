@@ -5,7 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
-	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const (
@@ -65,7 +66,7 @@ func Revise(catalog Catalog) Catalog {
 func IsPi(profile, agent string) bool {
 	provider := resolveProvider(profile)
 	if provider == nil {
-		provider = resolveProvider(ProfileIDForAgentName(agent))
+		provider = resolveProvider(agentkind.Of(agent))
 	}
 	return provider != nil && provider.ID() == "pi"
 }
@@ -93,41 +94,8 @@ func MergePiRuntime(entries []RuntimeCommand, status string, truncated bool) Cat
 	return Revise(Catalog{Commands: commands, Metadata: metadata, Status: status, Truncated: truncated})
 }
 
-// ProfileIDForAgentName maps an agent name as herdr reports it onto a provider
-// profile ID. Both entrypoints resolve through this one table on purpose: while
-// they carried separate switches the two drifted, and a kimi or opencode pane
-// whose binary was missing from the relay's PATH fell through to the generic
-// path and got an empty palette - not even builtins.
-func ProfileIDForAgentName(agent string) string {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "claude", "claude-code", "claude code":
-		return "claude"
-	case "codex":
-		return "codex"
-	case "cursor", "cursor-agent", "cursor agent":
-		return "cursor"
-	case "grok", "grok-build":
-		return "grok"
-	case "qoder", "qodercli":
-		return "qoder"
-	case "pi", "pi-coding-agent":
-		return "pi"
-	case "omp", "oh my pi", "oh-my-pi":
-		return "omp"
-	case "kimi", "kimi code", "kimi-code", "kimi-cli":
-		return "kimi"
-	case "opencode", "open code", "open-code":
-		return "opencode"
-	case "hermes", "hermes-agent", "hermes agent":
-		return "hermes"
-	case "agy", "antigravity", "antigravity-cli", "antigravity cli":
-		return "agy"
-	}
-	return ""
-}
-
 func CatalogFor(agent, cwd, home string) Catalog {
-	return CatalogForProfile(ProfileIDForAgentName(agent), agent, cwd, home, nil, "", "")
+	return CatalogForProfile(agentkind.Of(agent), agent, cwd, home, nil, "", "")
 }
 
 func CatalogForProfile(
@@ -161,7 +129,7 @@ func CatalogForProfileWithSuppression(
 
 	p := resolveProvider(profileID)
 	if p == nil && reportedAgent != "" {
-		p = resolveProvider(ProfileIDForAgentName(reportedAgent))
+		p = resolveProvider(agentkind.Of(reportedAgent))
 	}
 
 	if p != nil {

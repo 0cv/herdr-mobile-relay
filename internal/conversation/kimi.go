@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
@@ -26,12 +27,7 @@ const (
 var kimiSlugRun = regexp.MustCompile(`[^a-z0-9._-]+`)
 
 func IsKimi(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "kimi", "kimicode":
-		return true
-	default:
-		return false
-	}
+	return agentkind.Of(agent) == agentkind.Kimi
 }
 
 func kimiWorkspaceKey(cwd string) string {

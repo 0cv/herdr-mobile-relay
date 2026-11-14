@@ -12,12 +12,8 @@ import (
 )
 
 func (s *Server) validateUploadTarget(target protocol.TargetRef) error {
-	if target.ServerSessionID != "primary" {
-		return &upload.Error{Code: "upload_scope_mismatch"}
-	}
 	agent, exists := s.state.Agent(target.PaneID)
-	if !exists || agent.TerminalID != target.TerminalID || agent.Generation != target.Generation ||
-		target.AgentSessionID != agent.SessionID {
+	if !exists || !targetMatchesAgent(target, agent) {
 		return &upload.Error{Code: "upload_scope_mismatch"}
 	}
 	return nil

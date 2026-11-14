@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
@@ -91,31 +92,8 @@ var copyProfiles = map[string]CopyProfile{
 
 func CopyProfileFor(profileID, agent string) (CopyProfile, bool) {
 	for _, value := range []string{profileID, agent} {
-		key := strings.ToLower(strings.TrimSpace(value))
-		key = strings.ReplaceAll(key, " ", "")
-		key = strings.ReplaceAll(key, "-", "")
-		switch key {
-		case "hermes", "hermesagent":
-			profile, ok := copyProfiles["hermes"]
-			return profile, ok
-		case "claude", "claudecode":
-			profile, ok := copyProfiles["claude"]
-			return profile, ok
-		case "codex", "openaicodex":
-			profile, ok := copyProfiles["codex"]
-			return profile, ok
-		case "kimi", "kimicode":
-			profile, ok := copyProfiles["kimi"]
-			return profile, ok
-		case "omp", "ohmypi":
-			profile, ok := copyProfiles["omp"]
-			return profile, ok
-		case "pi", "picodingagent":
-			profile, ok := copyProfiles["pi"]
-			return profile, ok
-		case "qoder", "qodercli":
-			profile, ok := copyProfiles["qoder"]
-			return profile, ok
+		if profile, ok := copyProfiles[agentkind.Of(value)]; ok {
+			return profile, true
 		}
 	}
 	return CopyProfile{}, false

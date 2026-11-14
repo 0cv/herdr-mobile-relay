@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
-	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 )
 
 const maxSessionRegistry = 1 << 20
@@ -25,7 +25,7 @@ type registryEntry struct {
 }
 
 func parseRegistry(data []byte, agent string) ([]registryEntry, error) {
-	if agent == "hermes" {
+	if agent == agentkind.Hermes {
 		var registry struct {
 			Entries []registryEntry `json:"entries"`
 		}
@@ -113,14 +113,14 @@ func (s *Server) enrichRegistrySessions(ctx context.Context, agents []*coordinat
 		if a == nil || a.Session != "" {
 			continue
 		}
-		agent := slashcmd.ProfileIDForAgentName(a.Agent)
-		if agent != "hermes" && agent != "grok" {
+		agent := agentkind.Of(a.Agent)
+		if agent != agentkind.Hermes && agent != agentkind.Grok {
 			continue
 		}
 		entries, ok := loaded[agent]
 		if !ok {
 			paths := []string{filepath.Join(home, ".grok", "active_sessions.json")}
-			if agent == "hermes" {
+			if agent == agentkind.Hermes {
 				paths = nil
 				for _, root := range agentroots.HermesData(home) {
 					paths = append(paths, filepath.Join(root, "runtime", "active_sessions.json"))

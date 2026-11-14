@@ -36,6 +36,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 // Relay-side overrides. Each holds a colon-separated list (the platform
@@ -218,11 +220,10 @@ func PiConfigDirs(home string) []string {
 // profile instead of merging every profile into one catalog.
 func AgentDirForSession(home, agent, sessionPath string) string {
 	var roots []string
-	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(agent)))
-	switch normalized {
-	case "pi", "picodingagent":
+	switch agentkind.Of(agent) {
+	case agentkind.Pi:
 		roots = Pi(home)
-	case "omp", "ohmypi":
+	case agentkind.OMP:
 		roots = OMP(home)
 	default:
 		return ""

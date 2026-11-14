@@ -1,29 +1,18 @@
 <script module lang="ts">
-  export type AgentLogoKind = 'agy' | 'claude' | 'codex' | 'generic' | 'hermes' | 'kimi' | 'omp' | 'opencode' | 'pi' | 'qoder';
+  import { agentKind, normalizeAgentName, type AgentKind } from '$lib/agents';
+
+  export type AgentLogoKind = Exclude<AgentKind, 'cursor' | 'grok' | 'omo'> | 'generic';
 
   // Agents without a bundled logo keep the generic glyph but still show the
   // name their vendor uses instead of the raw executable reported by Herdr.
   const GENERIC_AGENT_LABELS = new Map([
     ['devin', 'Devin'],
-    ['devin cli', 'Devin'],
+    ['devincli', 'Devin'],
   ]);
 
-  function normalizedAgentName(value: string): string {
-    return value.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
-  }
-
   export function agentLogoKind(value: string): AgentLogoKind {
-    const normalized = normalizedAgentName(value);
-    if (['claude', 'claude code', 'claudecode'].includes(normalized)) return 'claude';
-    if (['codex', 'codex cli'].includes(normalized)) return 'codex';
-    if (['open code', 'opencode'].includes(normalized)) return 'opencode';
-    if (['pi', 'pi coding agent'].includes(normalized)) return 'pi';
-    if (['oh my pi', 'omp'].includes(normalized)) return 'omp';
-    if (['kimi', 'kimi cli', 'kimi code', 'kimi code cli'].includes(normalized)) return 'kimi';
-    if (['qoder', 'qoder cli', 'qodercli'].includes(normalized)) return 'qoder';
-    if (['hermes', 'hermes agent', 'hermesagent'].includes(normalized)) return 'hermes';
-    if (['agy', 'antigravity', 'antigravity cli', 'antigravitycli'].includes(normalized)) return 'agy';
-    return 'generic';
+    const kind = agentKind(value);
+    return kind === '' || kind === 'cursor' || kind === 'grok' || kind === 'omo' ? 'generic' : kind;
   }
 
   export function hasAgentLogo(value: string | undefined): boolean {
@@ -40,7 +29,7 @@
     if (value === 'qoder') return 'Qoder';
     if (value === 'hermes') return 'Hermes';
     if (value === 'agy') return 'Antigravity';
-    return GENERIC_AGENT_LABELS.get(normalizedAgentName(original)) || original.trim() || 'Agent';
+    return GENERIC_AGENT_LABELS.get(normalizeAgentName(original)) || original.trim() || 'Agent';
   }
 
   export function agentDisplayName(value: string): string {

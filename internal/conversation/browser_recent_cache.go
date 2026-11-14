@@ -9,6 +9,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const recentProjectionSchema = 2
@@ -196,7 +198,7 @@ func cloneConversationEntry(entry Entry) Entry {
 
 func (b *Browser) recentProjectionKey(scope BrowseScope, source fileSource, start, end int64, digest string, omo bool) string {
 	return (recentProjectionKey{
-		Schema: recentProjectionSchema, Scope: browseScopeID(scope), Provider: normalizedAgent(scope.Provider),
+		Schema: recentProjectionSchema, Scope: browseScopeID(scope), Provider: agentkind.Of(scope.Provider),
 		SourcePath: source.path, SourceRoot: source.location.Root, SourceIdentity: fileIdentity(source.info),
 		SourceModTime: source.info.ModTime().UnixNano(), SourceChangeToken: fileChangeToken(source.info), SourceSize: source.info.Size(), Revision: source.revision,
 		RangeStart: start, RangeEnd: end, RangeDigest: digest, MaxRecordBytes: b.options.MaxRecordBytes, OMO: omo,

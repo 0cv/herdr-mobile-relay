@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
@@ -111,41 +112,33 @@ var (
 )
 
 func Supports(agent string) bool {
-	agent = strings.ToLower(agent)
-	return strings.Contains(agent, "claude") ||
-		strings.Contains(agent, "codex") ||
-		ompAskAgent(agent) ||
-		strings.Contains(agent, "opencode") ||
-		strings.Contains(agent, "qoder") ||
-		strings.Contains(agent, "hermes") ||
-		isAgyAgent(agent)
+	return supportsKind(agentkind.Of(agent))
 }
 
-func ompAskAgent(agent string) bool {
-	agent = strings.ToLower(strings.TrimSpace(agent))
-	return agent == "omp" || strings.HasPrefix(agent, "omp-") ||
-		agent == "pi" || strings.HasPrefix(agent, "pi-") ||
-		strings.Contains(agent, "oh-my-pi")
+func supportsKind(kind string) bool {
+	switch kind {
+	case agentkind.Claude, agentkind.Codex, agentkind.OMP, agentkind.Pi, agentkind.OpenCode,
+		agentkind.Qoder, agentkind.Hermes, agentkind.Agy:
+		return true
+	}
+	return false
 }
 
 func Parse(text, agent string) *Interaction {
 	if !LayoutHint(text) {
 		return nil
 	}
-	normalized := strings.ToLower(agent)
-	if ompAskAgent(normalized) {
+	kind := agentkind.Of(agent)
+	switch kind {
+	case agentkind.OMP, agentkind.Pi:
 		return parseOMP(text)
-	}
-	if strings.Contains(normalized, "codex") {
+	case agentkind.Codex:
 		return parseCodex(text)
-	}
-	if strings.Contains(normalized, "claude") {
+	case agentkind.Claude:
 		return parseClaude(text)
-	}
-	if strings.Contains(normalized, "qoder") {
+	case agentkind.Qoder:
 		return parseQoder(text)
-	}
-	if strings.Contains(normalized, "opencode") {
+	case agentkind.OpenCode:
 		return parseOpenCode(text)
 	}
 	if interaction := parseCodex(text); interaction != nil {

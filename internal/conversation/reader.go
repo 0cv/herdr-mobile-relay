@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	panehistory "github.com/0cv/herdr-mobile-relay/internal/history"
 )
@@ -153,24 +154,7 @@ func (r *Reader) cursorRoots() []string { return agentroots.Cursor(r.home) }
 func (r *Reader) grokRoots() []string { return agentroots.Grok(r.home) }
 
 func Supported(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
-		"pi", "picodingagent", "omp", "ohmypi", "cursor", "cursoragent",
-		"opencode", "hermes", "hermesagent", "omo", "ohmyopencode", "kimi", "kimicode",
-		"agy", "antigravity", "antigravitycli", "grok":
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizedAgent(agent string) string {
-	value := strings.ToLower(strings.TrimSpace(agent))
-	value = strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
-	if value == "grokbuild" {
-		return "grok"
-	}
-	return value
+	return agentkind.Of(agent) != ""
 }
 
 // Read resolves a conversation without project context. It is used for
@@ -190,26 +174,27 @@ func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page,
 // descendants stay in that anchor's project and root.
 func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID, before string, limit int) (Page, error) {
 	project = NormalizeProjectContext(agent, project)
-	if IsKimi(agent) {
+	kind := agentkind.Of(agent)
+	if kind == agentkind.Kimi {
 		projection, _, code := r.readKimi(context.Background(), project, sessionID)
 		if code != "" {
 			return unavailableCode(code, kimiReason(code)), nil
 		}
 		return kimiPage(projection, before, limit), nil
 	}
-	if isHermesAgent(agent) {
+	if kind == agentkind.Hermes {
 		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
 	}
-	if isAgyAgent(agent) {
+	if kind == agentkind.Agy {
 		return r.readAgyFor(sessionID, before, limit)
 	}
-	if normalizedAgent(agent) == "opencode" {
+	if kind == agentkind.OpenCode {
 		return r.readOpenCode(sessionID, before, limit)
 	}
-	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
+	if kind == agentkind.OMO {
 		return r.readOMO(project.CWD, sessionID, before, limit)
 	}
-	if normalizedAgent(agent) == "grok" {
+	if kind == agentkind.Grok {
 		return r.readGrokFor(project, sessionID, before, limit)
 	}
 	if !Supported(agent) {
@@ -223,7 +208,7 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
-	if isClaudeProvider(agent) {
+	if agentkind.Of(agent) == agentkind.Claude {
 		return r.readClaudeChain(sessionID, location, before, limit)
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
@@ -281,16 +266,10 @@ func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 func (r *Reader) LocateWithProject(agent string, project ProjectContext, sessionID string) Location {
 	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
-	agentKey := normalizedAgent(agent)
-	if IsKimi(agent) {
+	agentKey := agentkind.Of(agent)
+	if agentKey == agentkind.Kimi {
 		_, location, _ := r.SelectKimiSession(project, sessionID)
 		return location
-	}
-	if isHermesAgent(agent) {
-		agentKey = "hermes"
-	}
-	if isAgyAgent(agent) {
-		agentKey = "agy"
 	}
 	key := locationKey{Agent: agentKey, CWD: project.CWD, ForegroundCWD: project.ForegroundCWD, SessionID: sessionID}
 	for {
@@ -337,33 +316,33 @@ func (r *Reader) LocateWithProject(agent string, project ProjectContext, session
 
 func (r *Reader) locateWithProject(agent string, project ProjectContext, sessionID string) Location {
 	project = NormalizeProjectContext(agent, project)
-	switch normalizedAgent(agent) {
-	case "claude", "claudecode":
+	switch agentkind.Of(agent) {
+	case agentkind.Claude:
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
 		return findProjectSessionWithProject(r.claudeRoots(), project, sessionID+".jsonl", claudeProjectName)
-	case "qoder", "qodercli":
+	case agentkind.Qoder:
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
 		return findProjectSessionWithProject(r.qoderRoots(), project, sessionID+".jsonl", claudeProjectName)
-	case "codex", "openaicodex":
+	case agentkind.Codex:
 		if !canonicalSessionID.MatchString(sessionID) {
 			return Location{}
 		}
 		return findCodexSession(r.codexRoots(), sessionID)
-	case "pi", "picodingagent":
+	case agentkind.Pi:
 		return resolvePathOrSession(r.piRoots(), sessionID, "_")
-	case "omp", "ohmypi":
+	case agentkind.OMP:
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
-	case "hermes", "hermesagent":
+	case agentkind.Hermes:
 		return r.hermes.locate(project.CWD, sessionID)
-	case "agy", "antigravity", "antigravitycli":
+	case agentkind.Agy:
 		return r.agy.locate(sessionID)
-	case "cursor", "cursoragent":
+	case agentkind.Cursor:
 		return findCursorSession(r.cursorRoots(), project, sessionID)
-	case "grok":
+	case agentkind.Grok:
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
@@ -655,7 +634,7 @@ type toolLocation struct {
 }
 
 func parseTranscript(agent, text string) []Entry {
-	normalized := normalizedAgent(agent)
+	normalized := agentkind.Of(agent)
 	entries := make([]Entry, 0)
 	seenIDs := make(map[string]int)
 	pendingTools := make(map[string]toolLocation)
@@ -697,14 +676,14 @@ func parseTranscript(agent, text string) []Entry {
 
 func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []toolResult) {
 	switch agent {
-	case "claude", "claudecode", "qoder", "qodercli":
+	case agentkind.Claude, agentkind.Qoder:
 		if record["isSidechain"] == true {
 			return nil, nil
 		}
 		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
-	case "codex", "openaicodex":
+	case agentkind.Codex:
 		if stringValue(record["type"]) != "response_item" {
 			return nil, nil
 		}
@@ -724,7 +703,7 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 				failed: payload["is_error"] == true,
 			}}
 		}
-	case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
+	case agentkind.Pi, agentkind.OMP, agentkind.OMO:
 		if stringValue(record["type"]) != "message" {
 			return nil, nil
 		}
@@ -738,7 +717,7 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 		}
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
-	case "cursor", "cursoragent":
+	case agentkind.Cursor:
 		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
 
@@ -52,7 +53,7 @@ type databaseLiveRow struct {
 }
 
 func (b *Browser) NewDatabaseWatch(scope BrowseScope) *DatabaseWatch {
-	if normalizedAgent(scope.Provider) != "opencode" && !isHermesAgent(scope.Provider) {
+	if kind := agentkind.Of(scope.Provider); kind != agentkind.OpenCode && kind != agentkind.Hermes {
 		return nil
 	}
 	return &DatabaseWatch{browser: b, scope: scope, loaded: make(map[string][32]byte), completed: make(map[string][32]byte)}
@@ -191,7 +192,7 @@ func (w *DatabaseWatch) highwater(ctx context.Context) (int64, string) {
 func (w *DatabaseWatch) source(ctx context.Context) string {
 	var databases []string
 	var code string
-	hermes := isHermesAgent(w.scope.Provider)
+	hermes := agentkind.Of(w.scope.Provider) == agentkind.Hermes
 	if hermes {
 		if !safeSessionID(w.scope.SessionID) {
 			return "invalid_session"

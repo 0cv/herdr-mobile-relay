@@ -411,15 +411,6 @@ func hermesTimestamp(value float64) string {
 	return time.Unix(0, int64(value*float64(time.Second))).UTC().Format(time.RFC3339Nano)
 }
 
-func isHermesAgent(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "hermes", "hermesagent":
-		return true
-	default:
-		return false
-	}
-}
-
 func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !safeSessionID(sessionID) {

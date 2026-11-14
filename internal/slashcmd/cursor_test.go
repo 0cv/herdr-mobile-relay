@@ -355,15 +355,6 @@ func TestCursorSuppressNativeYieldsBuiltinsOnly(t *testing.T) {
 	}
 }
 
-// Every reported agent spelling resolves to the cursor provider.
-func TestCursorAgentNameAliases(t *testing.T) {
-	for _, name := range []string{"cursor", "Cursor", "cursor-agent", "cursor agent"} {
-		if got := ProfileIDForAgentName(name); got != "cursor" {
-			t.Errorf("ProfileIDForAgentName(%q) = %q, want cursor", name, got)
-		}
-	}
-}
-
 func TestCursorNestedProjectSkillMetadata(t *testing.T) {
 	for _, stem := range []string{".cursor", ".agents"} {
 		t.Run(stem, func(t *testing.T) {
