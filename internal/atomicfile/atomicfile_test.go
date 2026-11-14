@@ -12,23 +12,6 @@ import (
 	"testing"
 )
 
-func atomicFixtureDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "herdr-atomicfile-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Errorf("remove fixture directory: %v", err)
-		}
-	})
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 type recordingOps struct {
 	events       []string
 	fail         map[string]error
@@ -186,7 +169,7 @@ func TestReplaceFaultsAndPrecedence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := atomicFixtureDir(t)
+			dir := t.TempDir()
 			target := filepath.Join(dir, "target")
 			if err := os.WriteFile(target, []byte("old bytes"), 0o600); err != nil {
 				t.Fatal(err)
@@ -256,7 +239,7 @@ func TestReplaceFaultsAndPrecedence(t *testing.T) {
 }
 
 func TestReplaceNoncanonicalPathsRemainSeparate(t *testing.T) {
-	root := atomicFixtureDir(t)
+	root := t.TempDir()
 	physical := filepath.Join(root, "physical")
 	child := filepath.Join(physical, "child")
 	if err := os.Mkdir(physical, 0o700); err != nil {
@@ -324,7 +307,7 @@ func TestReplaceNoncanonicalPathsRemainSeparate(t *testing.T) {
 }
 
 func TestReplacePublicMode(t *testing.T) {
-	dir := atomicFixtureDir(t)
+	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
@@ -357,7 +340,7 @@ func TestReplacePublicMode(t *testing.T) {
 }
 
 func TestReplaceNativeVisibility(t *testing.T) {
-	dir := atomicFixtureDir(t)
+	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	old := bytes.Repeat([]byte("old-payload-"), 8192)
 	newData := bytes.Repeat([]byte("new-payload-"), 8192)
