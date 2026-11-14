@@ -114,7 +114,7 @@ function validateNativePath(steps: any[], dimension: 'inputs' | 'matrix'): void 
   assert.ok(steps.indexOf(upload) > steps.indexOf(summary));
   for (const step of steps) assert.equal(step['continue-on-error'], undefined);
 }
-function auditUnitShardWorkflow(check: any, source: string): void {
+function auditUnitShardWorkflow(check: any, unitSetup: any, toolchain: any, source: string): void {
   const jobs = check.jobs;
   const preparation = jobs['mobile-unit-prepare'];
   const shards = jobs['mobile-unit-shards'];
@@ -129,17 +129,43 @@ function auditUnitShardWorkflow(check: any, source: string): void {
   assert.equal(preparation.outputs.matrix, '${{ steps.prepare.outputs.matrix }}');
   assert.equal(aggregate.if, 'always()');
   assert.deepEqual(aggregate.needs, ['mobile-unit-prepare', 'mobile-unit-shards']);
+  const setupSteps = unitSetup.runs.steps;
+  const cache = setupSteps.find((step: any) => step.id === 'mobile-unit-cache');
+  assert.ok(cache?.uses?.startsWith('actions/cache@'));
+  assert.equal(cache.with.path, 'frontend/node_modules\ntests/mobile/node_modules\n');
+  assert.equal(cache.with.key, "mobile-unit-${{ runner.os }}-node-${{ steps.toolchain.outputs.node }}-bun-${{ steps.toolchain.outputs.bun }}-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}");
+  const install = setupSteps.find((step: any) => step.id === 'install-test-dependencies');
+  assert.equal(install.if, "steps.mobile-unit-cache.outputs.cache-hit != 'true'");
+  assert.ok(install.run.includes('bun install --frozen-lockfile --cwd frontend'));
+  assert.ok(install.run.includes('bun install --frozen-lockfile --cwd tests/mobile'));
+  assert.ok(setupSteps.indexOf(cache) < setupSteps.indexOf(install));
+  const toolchainStep = setupSteps.find((step: any) => step.id === 'toolchain');
+  assert.equal(toolchainStep.uses, './.github/actions/setup-toolchain');
+  assert.deepEqual(toolchainStep.with, { node: 'true', bun: 'true', go: 'true' });
+  assert.ok(setupSteps.indexOf(toolchainStep) < setupSteps.indexOf(cache));
+  assert.ok(setupSteps.some((step: any) => step.run?.includes('go env GOTOOLCHAIN') && step.run.includes('tar --version') && step.run.includes('xmllint --version')));
+  assert.ok(setupSteps.some((step: any) => step.run?.includes('git rev-parse HEAD') && step.run.includes('$GITHUB_SHA')));
+  assert.ok(setupSteps.some((step: any) => step.run?.includes('"$(bun --version)" = "$BUN_VERSION"') && step.run.includes('go$GO_VERSION')));
+  for (const step of setupSteps) assert.equal(step['continue-on-error'], undefined);
+  const toolchainSteps = toolchain.runs.steps;
+  const setupNode = toolchainSteps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
+  const setupBun = toolchainSteps.find((step: any) => step.uses?.startsWith('oven-sh/setup-bun@'));
+  const setupGo = toolchainSteps.find((step: any) => step.uses?.startsWith('actions/setup-go@'));
+  assert.equal(setupNode.with['node-version'], '${{ steps.versions.outputs.node }}');
+  assert.equal(setupBun.with['bun-version'], '${{ steps.versions.outputs.bun }}');
+  assert.equal(setupGo.with['go-version'], '${{ steps.versions.outputs.go }}');
+  const versions = toolchainSteps.find((step: any) => step.id === 'versions');
+  assert.match(versions.run, /tests\/mobile\/toolchains\.json/u);
+  assert.match(versions.run, /go\.mod/u);
+  assert.ok(toolchainSteps.some((step: any) => step.name === 'Assert shell Node runtime' && step.run.includes('v$NODE_VERSION')));
+  for (const step of toolchainSteps) assert.equal(step['continue-on-error'], undefined);
   for (const job of [preparation, shards, aggregate]) {
-    const cache = job.steps.find((step: any) => step.id === 'mobile-unit-cache');
-    assert.ok(cache?.uses?.startsWith('actions/cache@'));
-    assert.equal(cache.with.path, 'frontend/node_modules\ntests/mobile/node_modules\n');
-    assert.equal(cache.with.key, "mobile-unit-${{ runner.os }}-node-26.13.0-bun-1.4.4-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}");
-    const install = job.steps.find((step: any) => step.id === 'install-test-dependencies');
-    assert.equal(install.if, "steps.mobile-unit-cache.outputs.cache-hit != 'true'");
-    assert.ok(install.run.includes('bun install --frozen-lockfile --cwd frontend'));
-    assert.ok(install.run.includes('bun install --frozen-lockfile --cwd tests/mobile'));
+    const setup = job.steps.findIndex((step: any) => step.uses === './.github/actions/mobile-unit-setup');
+    assert.ok(setup > job.steps.findIndex((step: any) => step.uses?.startsWith('actions/checkout@')));
     const unitCommand = job.steps.findIndex((step: any) => step.run?.includes('tests/mobile/unit/test-shard-ci.ts'));
-    assert.ok(job.steps.indexOf(cache) < job.steps.indexOf(install) && job.steps.indexOf(install) < unitCommand);
+    assert.ok(setup >= 0 && setup < unitCommand);
+    assert.equal(job.steps[setup].if, undefined);
+    assert.equal(job.steps[setup].with, undefined);
   }
   for (const [name, job] of Object.entries({ preparation, shards, aggregate }) as Array<[string, any]>) {
     assert.equal(job['timeout-minutes'], 20);
@@ -147,11 +173,6 @@ function auditUnitShardWorkflow(check: any, source: string): void {
     assert.equal(job.env.GOTOOLCHAIN, 'local');
     const checkout = job.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
     assert.equal(checkout.with.ref, '${{ github.sha }}', `${name} must use the event merge/source SHA`);
-    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('actions/setup-node@') && step.with['node-version'] === '26.13.0'));
-    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('oven-sh/setup-bun@') && step.with['bun-version'] === '1.4.4'));
-    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('actions/setup-go@') && step.with['go-version'] === '1.27.3'));
-    assert.ok(job.steps.some((step: any) => step.run?.includes('go env GOTOOLCHAIN') && step.run.includes('tar --version') && step.run.includes('xmllint --version')));
-    assert.ok(job.steps.some((step: any) => step.run?.includes('git rev-parse HEAD') && step.run.includes('$GITHUB_SHA')));
     assert.equal(job['continue-on-error'], undefined);
     for (const step of job.steps) assert.equal(step['continue-on-error'], undefined);
   }
@@ -187,9 +208,9 @@ function auditUnitShardWorkflow(check: any, source: string): void {
   assert.match(source, /receiptDigests/u);
 }
 
-function audit(workflow: any, action: any, release: any, check: any, shardSource: string): void {
+function audit(workflow: any, action: any, release: any, check: any, unitSetup: any, toolchain: any, shardSource: string): void {
   const jobs = workflow.jobs;
-  auditUnitShardWorkflow(check, shardSource);
+  auditUnitShardWorkflow(check, unitSetup, toolchain, shardSource);
   assert.deepEqual(Object.keys(jobs), needed);
   assert.deepEqual(jobs.prepare.needs, 'provenance');
   assert.deepEqual(jobs.device.needs, ['provenance', 'prepare']);
@@ -705,7 +726,9 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
     const booted = source.indexOf('if [ "$boot" = 1 ] && [ -n "$emulator_pid" ]; then');
     assert.ok(read < exported && exported < booted && booted < source.indexOf('break', booted));
     assert.ok(source.includes('if [ -n "$emulator_pid" ] && ! kill -0 "$emulator_pid" 2>/dev/null; then'));
-    assert.ok(steps.findIndex((step: any) => step.name === 'Assert shell Node runtime') < steps.indexOf(boot));
+    const toolchainSetup = steps.find((step: any) => step.uses === './.github/actions/setup-toolchain');
+    assert.deepEqual(toolchainSetup.with, { node: 'true', bun: 'true', go: 'true' });
+    assert.ok(steps.indexOf(toolchainSetup) < steps.indexOf(boot));
     const uploads = steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@'));
     assert.equal(uploads.length, 1);
     assert.equal(uploads[0].with.path, '${{ runner.temp }}/herdr-mobile-output');
@@ -741,27 +764,26 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
   }],
   ['mobile XML bootstrap avoids hosted Azure mirror stalls and propagates setup failures', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
-    const check = runtime.YAML.parse(await readFile(repositoryPath('.github/workflows/check.yml'), 'utf8')) as any;
+    const unitSetup = runtime.YAML.parse(await readFile(repositoryPath('.github/actions/mobile-unit-setup/action.yml'), 'utf8')) as any;
     const ubuntuMirrors = 'https://archive.ubuntu.com/ubuntu/\tpriority:2\nhttps://security.ubuntu.com/ubuntu/\tpriority:3\n';
-    for (const job of ['mobile-unit-prepare', 'mobile-unit-shards', 'mobile-unit-aggregate']) {
-      const steps = check.jobs[job].steps.filter((step: any) => step.name === 'Install XML test tools');
-      assert.equal(steps.length, 1);
-      assert.equal(steps[0].if, undefined);
-      assert.equal(steps[0]['continue-on-error'], undefined);
-      for (const [mode, exitCode, operations] of [
-        ['ready', 0, ['mirror', 'update', 'install']],
-        ['mirror-failure', 1, ['mirror']],
-        ['update-failure', 100, ['mirror', 'update']],
-        ['update-timeout', 124, ['mirror', 'update']],
-        ['install-failure', 100, ['mirror', 'update', 'install']],
-        ['install-timeout', 124, ['mirror', 'update', 'install']],
-      ] as const) {
-        const root = await mkdtemp(join(tmpdir(), 'herdr-xml-bootstrap-'));
-        let passed = false;
-        try {
-          await writeFile(join(root, 'mirrors'), `http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n${ubuntuMirrors}`);
-          await writeFile(join(root, 'calls'), '');
-          await writeFile(join(root, 'sudo'), `#!${process.execPath}
+    const steps = unitSetup.runs.steps.filter((step: any) => step.name === 'Install XML test tools');
+    assert.equal(steps.length, 1);
+    assert.equal(steps[0].if, undefined);
+    assert.equal(steps[0]['continue-on-error'], undefined);
+    for (const [mode, exitCode, operations] of [
+      ['ready', 0, ['mirror', 'update', 'install']],
+      ['mirror-failure', 1, ['mirror']],
+      ['update-failure', 100, ['mirror', 'update']],
+      ['update-timeout', 124, ['mirror', 'update']],
+      ['install-failure', 100, ['mirror', 'update', 'install']],
+      ['install-timeout', 124, ['mirror', 'update', 'install']],
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), 'herdr-xml-bootstrap-'));
+      let passed = false;
+      try {
+        await writeFile(join(root, 'mirrors'), `http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n${ubuntuMirrors}`);
+        await writeFile(join(root, 'calls'), '');
+        await writeFile(join(root, 'sudo'), `#!${process.execPath}
 import assert from 'node:assert/strict';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -770,17 +792,17 @@ const root = process.env.FIXTURE;
 const mode = process.env.MODE;
 const record = (name) => appendFileSync(root + '/calls', name + '\\n');
 if (args[0] === 'sed') {
-  record('mirror');
-  assert.equal(args.length, 4);
-  assert.equal(args[1], '-i');
-  assert.equal(args[3], '/etc/apt/apt-mirrors.txt');
-  if (mode === 'mirror-failure') process.exit(1);
-  writeFileSync(root + '/mirrors', execFileSync('/usr/bin/sed', [args[2], root + '/mirrors']));
-  process.exit(0);
+record('mirror');
+assert.equal(args.length, 4);
+assert.equal(args[1], '-i');
+assert.equal(args[3], '/etc/apt/apt-mirrors.txt');
+if (mode === 'mirror-failure') process.exit(1);
+writeFileSync(root + '/mirrors', execFileSync('/usr/bin/sed', [args[2], root + '/mirrors']));
+process.exit(0);
 }
 if (readFileSync(root + '/mirrors', 'utf8').includes('azure.archive.ubuntu.com')) {
-  console.error('simulated hosted Azure mirror stall');
-  process.exit(124);
+console.error('simulated hosted Azure mirror stall');
+process.exit(124);
 }
 assert.deepEqual(args.slice(0, 4), ['timeout', '--kill-after=5s', '120s', 'apt-get']);
 assert.deepEqual(args.slice(4, 10), ['-o', 'Acquire::http::Timeout=15', '-o', 'Acquire::https::Timeout=15', '-o', 'Acquire::Retries=1']);
@@ -791,28 +813,27 @@ record(operation);
 if (mode === operation + '-failure') process.exit(100);
 if (mode === operation + '-timeout') process.exit(124);
 `, { mode: 0o700 });
-          const run = () => command('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', steps[0].run], 5_000, {
-            cwd: root,
-            env: { PATH: root, FIXTURE: root, MODE: mode, BUN_OPTIONS: '--no-env-file' },
-          });
-          if (exitCode === 0) await run();
-          else await assert.rejects(run, (error: unknown) => error instanceof CommandError && error.exitCode === exitCode && !error.timedOut);
-          assert.deepEqual((await readFile(join(root, 'calls'), 'utf8')).trim().split('\n'), operations, `${job}/${mode}`);
-          if (mode !== 'mirror-failure') assert.equal(await readFile(join(root, 'mirrors'), 'utf8'), ubuntuMirrors);
-          passed = true;
-        } finally {
-          if (passed) await rm(root, { recursive: true, force: true });
-          else console.error(`XML bootstrap fixture retained: ${root}`);
-        }
+        const run = () => command('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', steps[0].run], 5_000, {
+          cwd: root,
+          env: { PATH: root, FIXTURE: root, MODE: mode, BUN_OPTIONS: '--no-env-file' },
+        });
+        if (exitCode === 0) await run();
+        else await assert.rejects(run, (error: unknown) => error instanceof CommandError && error.exitCode === exitCode && !error.timedOut);
+        assert.deepEqual((await readFile(join(root, 'calls'), 'utf8')).trim().split('\n'), operations, mode);
+        if (mode !== 'mirror-failure') assert.equal(await readFile(join(root, 'mirrors'), 'utf8'), ubuntuMirrors);
+        passed = true;
+      } finally {
+        if (passed) await rm(root, { recursive: true, force: true });
+        else console.error(`XML bootstrap fixture retained: ${root}`);
       }
     }
   }],
   ['mobile workflow latest-release qualification and aggregation', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
     const parse = async (path: string) => runtime.YAML.parse(await readFile(repositoryPath(path), 'utf8')) as any;
-    const workflow = await parse('.github/workflows/mobile-ci.yml'), action = await parse('.github/actions/mobile-device-run/action.yml'), release = await parse('.github/workflows/release.yml'), check = await parse('.github/workflows/check.yml');
+    const workflow = await parse('.github/workflows/mobile-ci.yml'), action = await parse('.github/actions/mobile-device-run/action.yml'), release = await parse('.github/workflows/release.yml'), check = await parse('.github/workflows/check.yml'), unitSetup = await parse('.github/actions/mobile-unit-setup/action.yml'), toolchain = await parse('.github/actions/setup-toolchain/action.yml');
     const shardSource = await readFile(repositoryPath('tests/mobile/unit/test-shard-ci.ts'), 'utf8');
-    audit(workflow, action, release, check, shardSource);
+    audit(workflow, action, release, check, unitSetup, toolchain, shardSource);
     const healthy: Row[] = [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }];
     assert.equal(simulate(workflow, healthy).gate.outputs.qualification_status, 'PASS');
     for (const prerequisite of needed.filter(name => name !== 'gate')) for (const status of ['failure', 'cancelled', 'skipped'] as const) {
@@ -866,7 +887,7 @@ if (mode === operation + '-timeout') process.exit(124);
       assert.notEqual(render(document.concurrency.group, push), render(document.concurrency.group, { ...push, sha: 'new-push', run_id: 26 }));
       assert.notEqual(render(document.concurrency.group, push), render(document.concurrency.group, pr));
     }
-    const mutations: Array<(w: any, a: any, r: any, k: any) => void> = [
+    const mutations: Array<(w: any, a: any, r: any, k: any, u: any, t: any) => void> = [
       w => w.jobs.device.needs.push('environment_report'),
       w => w.jobs.device.strategy['fail-fast'] = true,
       w => w.jobs.device['timeout-minutes'] = 45,
@@ -899,15 +920,16 @@ if (mode === operation + '-timeout') process.exit(124);
       (_w, _a, _r, k) => k.jobs['mobile-unit-aggregate'].needs.pop(),
       (_w, _a, _r, k) => delete k.jobs['mobile-unit-shards'].if,
       (_w, _a, _r, k) => k.jobs['mobile-unit-shards'].strategy['fail-fast'] = true,
-      (_w, _a, _r, k) => k.jobs['mobile-unit-shards'].steps.find((s: any) => s.id === 'install-test-dependencies').run = 'true',
+      (_w, _a, _r, _k, u) => u.runs.steps.find((s: any) => s.id === 'install-test-dependencies').run = 'true',
       (_w, _a, _r, k) => k.jobs['mobile-unit-aggregate'].steps.find((s: any) => s.run?.includes('test-shard-ci.ts aggregate')).run = 'echo accepted',
-      (_w, _a, _r, k) => k.jobs['mobile-unit-shards'].steps.find((s: any) => s.uses?.startsWith('oven-sh/setup-bun@')).with['bun-version'] = '1.4.3',
+      (_w, _a, _r, _k, _u, t) => t.runs.steps.find((s: any) => s.uses?.startsWith('oven-sh/setup-bun@')).with['bun-version'] = '1.4.3',
+      (_w, _a, _r, k) => { const steps = k.jobs['mobile-unit-shards'].steps; steps.splice(steps.findIndex((s: any) => s.uses === './.github/actions/mobile-unit-setup'), 1); },
       (_w, _a, _r, k) => delete k.jobs.release.steps.find((s: any) => s.with?.name === 'release-bundles').with.overwrite,
     ];
     for (const [index, mutate] of mutations.entries()) {
-      const w = structuredClone(workflow), a = structuredClone(action), r = structuredClone(release), k = structuredClone(check);
-      mutate(w, a, r, k);
-      assert.throws(() => audit(w, a, r, k, shardSource), 'mutation ' + index);
+      const w = structuredClone(workflow), a = structuredClone(action), r = structuredClone(release), k = structuredClone(check), u = structuredClone(unitSetup), t = structuredClone(toolchain);
+      mutate(w, a, r, k, u, t);
+      assert.throws(() => audit(w, a, r, k, u, t, shardSource), 'mutation ' + index);
     }
     const matrixCommand = workflow.jobs.prepare.steps.find((s: any) => s.id === 'matrix').run;
     const manifest = JSON.parse(await readFile(repositoryPath('tests/mobile/baselines.json'), 'utf8'));

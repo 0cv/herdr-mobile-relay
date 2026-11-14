@@ -6,6 +6,7 @@ import { join, posix } from 'node:path';
 import { requireOwnedDevice } from './support/device';
 import { androidEventDetails, androidLogEvents, measuredAndroidEvents } from './android-events';
 import { CommandError, command, type CommandResult } from './support/process';
+import { option, required } from './support/cli';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 
 const ANDROID_PACKAGES = ['com.google.android.gms', 'com.google.android.trichromelibrary', 'com.android.chrome'] as const;
@@ -262,17 +263,6 @@ class AcquisitionDiagnostics {
       detail: redactText(detail).slice(0, ACQUISITION_PREVIEW_LIMIT) || undefined,
     };
   }
-}
-
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function required(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`ANDROID_ENVIRONMENT: missing ${name}`);
-  return value;
 }
 
 function sha256(value: string): string {

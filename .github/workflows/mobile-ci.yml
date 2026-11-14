@@ -72,17 +72,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: ./.github/actions/setup-toolchain
         with:
-          node-version: 26.13.0
-      - name: Assert shell Node runtime
-        run: |
-          set -euo pipefail
-          test "$(node --version)" = v26.13.0
-          test "$(command -v node)" = "$(node -p 'process.execPath')"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.4
+          node: 'true'
+          bun: 'true'
       - name: Validate source run and artifact
         id: validate
         env:
@@ -199,59 +192,11 @@ jobs:
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: ./.github/actions/setup-toolchain
         with:
-          node-version: 26.13.0
-      - name: Assert shell Node runtime
-        run: |
-          set -euo pipefail
-          test "$(node --version)" = v26.13.0
-          test "$(command -v node)" = "$(node -p 'process.execPath')"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.4
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.3'
-          cache: true
-      - name: Verify mobile toolchain declarations
-        run: |
-          jq -e '
-            .schema == 1 and
-            .node == "26.13.0" and
-            .bun == "1.4.4" and
-            .appium == "3.7.0" and
-            .appiumLogger == "2.0.11" and
-            .wda == "16.12.8" and
-            .drivers.uiautomator2 == "8.7.0" and
-            .drivers.xcuitest == "12.12.4" and
-            .android.systemImage == "system-images;android-35;google_apis;x86_64" and
-            .android.systemImagePolicy == "owned-google-apis-emulator" and
-            .android.vendingPolicy == "absent-or-disabled-user-0" and
-            .android.browserPackage == "com.android.chrome" and
-            .android.browserVersion == "131.0.6778.200 (677820038)" and
-            .android.browserSha256 == "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35a" and
-            (.android.browserSha256 | length == 64 and test("^[0-9a-f]{64}$")) and
-            .android.browserCertificateSha256 == "f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83" and
-            (.android.browserCertificateSha256 | length == 64 and test("^[0-9a-f]{64}$")) and
-            .android.browserCertificateSha1 == "38918a453d07199354f8b19af05ec6562ced5788" and
-            (.android.browserCertificateSha1 | length == 40 and test("^[0-9a-f]{40}$")) and
-            .android.trichromeLibraryPackage == "com.google.android.trichromelibrary" and
-            .android.trichromeLibraryVersion == "131.0.6778.200 (677820038)" and
-            .android.trichromeLibrarySha256 == "f7d82fa76a99f13980c4205484f4ae78742755d2e9b7276fd60c20e3cd7f9090" and
-            (.android.trichromeLibrarySha256 | length == 64 and test("^[0-9a-f]{64}$")) and
-            .android.trichromeLibraryCertificateSha256 == "b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1" and
-            (.android.trichromeLibraryCertificateSha256 | length == 64 and test("^[0-9a-f]{64}$")) and
-            .android.trichromeLibraryCertificateSha1 == "9524aa4a04aceeab425451e593ac639c942fb3cd" and
-            (.android.trichromeLibraryCertificateSha1 | length == 40 and test("^[0-9a-f]{40}$")) and
-            .ios.runner == "xcode-27" and
-            .ios.xcode == "/Applications/Xcode_27.app" and
-            .ios.xcodeVersion == "27.0" and
-            .ios.xcodeBuild == "27A266a" and
-            .ios.runtime == "iOS 27.0" and
-            .ios.deviceType == "iPhone 17"
-          ' tests/mobile/toolchains.json >/dev/null
-          test "$(bun --version)" = 1.4.4
+          node: 'true'
+          bun: 'true'
+          go: 'true'
       - name: Select latest-release device matrix
         id: matrix
         run: |
@@ -389,9 +334,9 @@ jobs:
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: ./.github/actions/setup-toolchain
         with:
-          bun-version: 1.4.4
+          bun: 'true'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: mobile-evidence-device-*-${{ github.run_attempt }}
@@ -455,22 +400,12 @@ jobs:
           pattern: mobile-evidence-device-*-${{ github.run_attempt }}
           path: evidence
           merge-multiple: false
-      - name: Install Node for final evidence validation
+      - name: Install Node and Bun for final evidence validation
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: ./.github/actions/setup-toolchain
         with:
-          node-version: 26.13.0
-      - name: Assert shell Node runtime
-        if: needs.provenance.result == 'success' && needs.device.result == 'success'
-        run: |
-          set -euo pipefail
-          test "$(node --version)" = v26.13.0
-          test "$(command -v node)" = "$(node -p 'process.execPath')"
-      - name: Install Bun for final evidence validation
-        if: needs.provenance.result == 'success' && needs.device.result == 'success'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.4
+          node: 'true'
+          bun: 'true'
       - name: Reject skipped or failed stages
         env:
           PROVENANCE_RESULT: ${{ needs.provenance.result }}

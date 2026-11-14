@@ -366,6 +366,16 @@ export function assertStylesheetMode(
   }
 }
 
+export async function readBundleSet(filename: string): Promise<BundleSet> {
+  const set = JSON.parse(await readFile(filename, 'utf8')) as BundleSet;
+  const directory = resolve(filename, '..');
+  return {
+    ...set,
+    candidate: { ...set.candidate, root: resolve(directory, set.candidate.root) },
+    baselines: set.baselines.map((bundle) => ({ ...bundle, root: resolve(directory, bundle.root) })),
+  };
+}
+
 export async function writeBundleSet(filename: string, set: BundleSet): Promise<void> {
   await writeFile(filename, `${JSON.stringify(set, null, 2)}\n`, { mode: 0o600 });
 }

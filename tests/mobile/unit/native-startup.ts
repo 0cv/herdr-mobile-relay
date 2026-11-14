@@ -525,14 +525,12 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       assert.equal(source.split('bun tests/mobile/support/ios-xctest.ts stop').length - 1, 1);
       assert.ok(!source.includes('simctl launch --terminate-running-process'));
       assert.ok(!source.includes("-name 'WebDriverAgentRunner_*.xctestrun' -print -quit"));
-      assert.ok(source.includes('IOS_PLATFORM_VERSION=27.0'));
+      assert.ok(source.includes("jq -r '.ios.runtime | ltrimstr(\"iOS \")' tests/mobile/toolchains.json"));
       assert.match(source, /if \[ "\$(?:WORKFLOW|MOBILE)_PLATFORM" = ios \]; then printf 'MOBILE_TIMING_SCALE=3\\n' >> "\$GITHUB_ENV"; fi/u);
       assert.ok(!source.includes('IOS_PLATFORM_VERSION=18.6'));
       assert.ok(!source.includes('Xcode_16.4'));
-      assert.ok(source.includes('xcode_application=/Applications/Xcode_27.app'));
-      assert.ok(source.includes('expected_xcode_version=27.0'));
-      assert.ok(source.includes('expected_xcode_build=27A266a'));
-      assert.ok(source.includes('IPHONEOS_DEPLOYMENT_TARGET=27.0'));
+      for (const key of ['xcode', 'xcodeVersion', 'xcodeBuild']) assert.ok(source.includes(`jq -r '.ios.${key}' tests/mobile/toolchains.json`));
+      assert.ok(source.includes('IPHONEOS_DEPLOYMENT_TARGET="$IOS_PLATFORM_VERSION"'));
       assert.doesNotMatch(source, /\b18\.[0-9]\b/u);
       assert.ok(source.indexOf('name: Finalize owned XCTest diagnostics') < source.indexOf('name: Sanitize bounded diagnostics'));
     }

@@ -3,19 +3,9 @@ import { existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { assertDistinctUpgrade, assertStylesheetMode, validateWebRoot, writeBundleSet, type BundleExpectation, type BundleSet, type PreparedBundle } from './support/artifacts';
+import { option, required } from './support/cli';
 import { command } from './support/process';
 import { prepareOutput, repositoryPath, repositoryRoot } from './support/paths';
-
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function required(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
-}
 
 type BuildMetadata = { version: string; assets: number };
 
