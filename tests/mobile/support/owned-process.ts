@@ -3,7 +3,6 @@ import { closeSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { isAbsolute } from 'node:path';
 import type { Duplex, Readable, Writable } from 'node:stream';
 
 export interface SpawnBinding {
@@ -17,21 +16,6 @@ export interface TargetExit {
   code: number | null;
   signal: NodeJS.Signals | null;
   launchError?: string;
-}
-
-export interface TerminalTargetCallbackReceipt extends SpawnBinding {
-  callback: 'spawn';
-}
-
-export interface TerminalTransport {
-  authorityControl: Writable;
-  authorityOutput: Readable;
-  targetCallback: Promise<TerminalTargetCallbackReceipt | undefined>;
-}
-
-export interface TerminalTarget {
-  cwd: string;
-  env: Record<string, string>;
 }
 
 export interface RetirementEvidence {
@@ -90,7 +74,6 @@ export interface OwnedProcess {
   failure: Promise<Error>;
   stopCause: Promise<string>;
   retirement: Promise<RetirementEvidence>;
-  terminalTransport?: TerminalTransport;
   binding?: SpawnBinding;
   readonly targetPID?: number;
   readonly spawnParentPID?: number;
@@ -110,33 +93,6 @@ export interface OwnedProcessOptions {
   observerStdout?: Writable;
   observerStderr?: Writable;
   observerSupervisor?: Writable;
-  terminalTransport?: boolean;
-  terminalTarget?: TerminalTarget;
-}
-
-function terminalTargetConfig(value: unknown): TerminalTarget | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const targetPrototype = Object.getPrototypeOf(value);
-  if (targetPrototype !== Object.prototype && targetPrototype !== null) return undefined;
-  const targetKeys = Reflect.ownKeys(value);
-  if (targetKeys.length !== 2 || !targetKeys.includes('cwd') || !targetKeys.includes('env')) return undefined;
-  const cwdDescriptor = Object.getOwnPropertyDescriptor(value, 'cwd');
-  const envDescriptor = Object.getOwnPropertyDescriptor(value, 'env');
-  if (!cwdDescriptor || !('value' in cwdDescriptor) || !envDescriptor || !('value' in envDescriptor)) return undefined;
-  const cwd: unknown = cwdDescriptor.value;
-  const environment: unknown = envDescriptor.value;
-  if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd) || cwd.includes('\0')
-    || !environment || typeof environment !== 'object' || Array.isArray(environment)) return undefined;
-  const prototype = Object.getPrototypeOf(environment);
-  if (prototype !== Object.prototype && prototype !== null) return undefined;
-  const env: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const key of Reflect.ownKeys(environment)) {
-    if (typeof key !== 'string' || !key || key.includes('=') || key.includes('\0')) return undefined;
-    const descriptor = Object.getOwnPropertyDescriptor(environment, key);
-    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string' || descriptor.value.includes('\0')) return undefined;
-    env[key] = descriptor.value;
-  }
-  return { cwd, env };
 }
 
 interface ControlRecord {
@@ -262,7 +218,6 @@ export class OwnedProcessHandle implements OwnedProcess {
   readonly failure: Promise<Error>;
   readonly stopCause: Promise<string>;
   readonly retirement: Promise<RetirementEvidence>;
-  readonly terminalTransport?: TerminalTransport;
   binding?: SpawnBinding;
   private readonly control: Duplex;
   private readonly input: Writable;
@@ -273,8 +228,6 @@ export class OwnedProcessHandle implements OwnedProcess {
   private readonly failureDeferred = deferred<Error>();
   private readonly stopCauseDeferred = deferred<string>();
   private readonly retirementDeferred = deferred<RetirementEvidence>();
-  private readonly terminalCallbackDeferred = deferred<TerminalTargetCallbackReceipt | undefined>();
-  private readonly terminalTarget?: TerminalTarget;
   private readonly supervisorClose = deferred<void>();
   private readonly inputClosedDeferred = deferred<void>();
   private readonly stdoutNaturalEnd = deferred<void>();
@@ -290,7 +243,6 @@ export class OwnedProcessHandle implements OwnedProcess {
   private readySettled = false;
   private targetStarted = false;
   private targetDispatchRequested = false;
-  private terminalCallbackObserved = false;
   private stdoutEnded = false;
   private stderrEnded = false;
   private stdoutClosed = false;
@@ -327,12 +279,6 @@ export class OwnedProcessHandle implements OwnedProcess {
       throw new Error('OWNED_PROCESS: provide a duration or an absolute hard deadline, not both');
     }
     if (options.hardDeadlineNs === undefined && options.timeoutMs === undefined) throw new Error('OWNED_PROCESS: finite lifetime is required');
-    const terminalTargetSupplied = Object.hasOwn(options, 'terminalTarget') || options.terminalTarget !== undefined;
-    if (terminalTargetSupplied) {
-      const terminalTarget = terminalTargetConfig(options.terminalTarget);
-      if (!options.terminalTransport || !terminalTarget) throw new Error('OWNED_PROCESS: invalid terminal target configuration');
-      this.terminalTarget = terminalTarget;
-    }
     const hardDeadlineNs = options.hardDeadlineNs === undefined
       ? callerDurationToRuntime(options.timeoutMs!, launchedAt, launchedAtCallerNs, callerNowNs)
       : callerDeadlineToRuntime(options.hardDeadlineNs, launchedAt, callerNowNs);
@@ -384,7 +330,6 @@ export class OwnedProcessHandle implements OwnedProcess {
     try {
       const stdio = ['pipe', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe',
         observerDescriptor(options.observerStdout), observerDescriptor(options.observerStderr), observerDescriptor(options.observerSupervisor)] satisfies NonNullable<SpawnOptions['stdio']>;
-      if (options.terminalTransport) stdio.push('pipe', 'pipe');
       const supervisorCommand = process.versions.bun ? 'bun' : 'node';
       const supervisorRuntimeArgs = process.versions.bun ? ['--no-env-file', '--experimental-strip-types'] : ['--experimental-strip-types'];
       supervisor = spawn(supervisorCommand, [...supervisorRuntimeArgs, runtime, '--supervisor',
@@ -422,25 +367,6 @@ export class OwnedProcessHandle implements OwnedProcess {
       if (this.leaseEndAwaitingStopAcknowledgement) this.endLease();
       this.fail(error instanceof Error ? error : new Error('OWNED_PROCESS: control channel failed'));
     });
-    if (options.terminalTransport) {
-      const authorityControl = writableStream(this.supervisor, 10);
-      const authorityOutput = readableStream(this.supervisor, 11);
-      this.terminalTransport = { authorityControl, authorityOutput, targetCallback: this.terminalCallbackDeferred.promise };
-      const failTerminalTransport = (error: Error) => {
-        this.fail(error);
-        this.stop('terminal-transport-failed');
-      };
-      authorityControl.on('error', error => failTerminalTransport(error instanceof Error ? error : new Error('OWNED_PROCESS: terminal authority channel failed')));
-      authorityControl.once('close', () => {
-        if (!authorityControl.writableFinished && !this.terminalCallbackObserved) {
-          failTerminalTransport(new Error('OWNED_PROCESS: terminal authority descriptor closed before target start'));
-        }
-      });
-      authorityOutput.on('error', error => failTerminalTransport(error instanceof Error ? error : new Error('OWNED_PROCESS: terminal output channel failed')));
-      authorityOutput.once('end', () => {
-        if (!this.terminalCallbackObserved) failTerminalTransport(new Error('OWNED_PROCESS: terminal output descriptor ended before target start'));
-      });
-    }
     this.control.on('end', () => {
       if (this.leaseEndAwaitingStopAcknowledgement) this.endLease();
       if (!this.retirementValue?.groupAbsent) this.fail(new Error('OWNED_PROCESS: supervisor control channel closed'));
@@ -597,7 +523,6 @@ export class OwnedProcessHandle implements OwnedProcess {
       this.readyDeferred.reject(error);
     }
     if (this.targetStarted || (this.targetDispatchRequested && !definitive)) return;
-    if (!this.terminalCallbackObserved) this.terminalCallbackDeferred.resolve(undefined);
     this.startedDeferred.resolve(undefined);
   }
 
@@ -649,8 +574,6 @@ export class OwnedProcessHandle implements OwnedProcess {
         executionDeadlineNs: (clockNs + (executionRemaining > 0n ? executionRemaining : 0n)).toString(),
         hardDeadlineNs: (clockNs + hardRemaining).toString(),
         killDelayMs: this.killDelayMs,
-        ...(this.terminalTransport ? { terminalTransport: true } : {}),
-        ...(this.terminalTarget ? { terminalTarget: this.terminalTarget } : {}),
       });
       return;
     }
@@ -669,18 +592,14 @@ export class OwnedProcessHandle implements OwnedProcess {
       const binding = { targetPID: record.targetPID, spawnParentPID: record.spawnParentPID, groupID: record.groupID, anchorPID: record.anchorPID };
       const validBinding = [binding.targetPID, binding.spawnParentPID, binding.groupID, binding.anchorPID]
         .every(value => Number.isSafeInteger(value) && Number(value) > 0);
-      if (this.targetStarted || !validBinding || (this.terminalTransport ? record.callback !== 'spawn' : record.callback !== undefined)) {
-        this.fail(new Error('OWNED_PROCESS: invalid target spawn binding or callback receipt'));
+      if (this.targetStarted || !validBinding || record.callback !== undefined) {
+        this.fail(new Error('OWNED_PROCESS: invalid target spawn binding'));
         this.stop('target-binding-invalid');
         return;
       }
       this.binding = binding as SpawnBinding;
       this.targetStarted = true;
       this.startedDeferred.resolve(this.binding);
-      if (this.terminalTransport) {
-        this.terminalCallbackObserved = true;
-        this.terminalCallbackDeferred.resolve({ ...this.binding, callback: 'spawn' });
-      }
       return;
     }
     if (record.type === 'target-exit') {

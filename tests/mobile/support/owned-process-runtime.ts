@@ -4,7 +4,6 @@ import { EventEmitter } from 'node:events';
 import { Socket } from 'node:net';
 import { constants as osConstants } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { isAbsolute } from 'node:path';
 import { createRequire } from 'node:module';
 import { Buffer } from 'node:buffer';
 import { StringDecoder } from 'node:string_decoder';
@@ -16,13 +15,6 @@ interface LaunchRequest {
   executionDeadlineNs: string;
   hardDeadlineNs: string;
   killDelayMs: number;
-  terminalTransport?: boolean;
-  terminalTarget?: TerminalTarget;
-}
-
-interface TerminalTarget {
-  cwd: string;
-  env: Record<string, string>;
 }
 
 type RecordValue = Record<string, unknown>;
@@ -103,31 +95,6 @@ export function createOwnedGroupPollOwner(options: {
       if (previous?.handle !== undefined) options.cancel(previous.handle);
     },
   };
-}
-
-function terminalTargetConfig(value: unknown): TerminalTarget | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const targetPrototype = Object.getPrototypeOf(value);
-  if (targetPrototype !== Object.prototype && targetPrototype !== null) return undefined;
-  const targetKeys = Reflect.ownKeys(value);
-  if (targetKeys.length !== 2 || !targetKeys.includes('cwd') || !targetKeys.includes('env')) return undefined;
-  const cwdDescriptor = Object.getOwnPropertyDescriptor(value, 'cwd');
-  const envDescriptor = Object.getOwnPropertyDescriptor(value, 'env');
-  if (!cwdDescriptor || !('value' in cwdDescriptor) || !envDescriptor || !('value' in envDescriptor)) return undefined;
-  const cwd: unknown = cwdDescriptor.value;
-  const environment: unknown = envDescriptor.value;
-  if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd) || cwd.includes('\0')
-    || !environment || typeof environment !== 'object' || Array.isArray(environment)) return undefined;
-  const environmentPrototype = Object.getPrototypeOf(environment);
-  if (environmentPrototype !== Object.prototype && environmentPrototype !== null) return undefined;
-  const env: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const key of Reflect.ownKeys(environment)) {
-    if (typeof key !== 'string' || !key || key.includes('=') || key.includes('\0')) return undefined;
-    const descriptor = Object.getOwnPropertyDescriptor(environment, key);
-    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string' || descriptor.value.includes('\0')) return undefined;
-    env[key] = descriptor.value;
-  }
-  return { cwd, env };
 }
 
 const closedDescriptors = new Set<number>();
@@ -1141,7 +1108,6 @@ function runAnchorManager(): void {
   const input = reader(6);
   const startupHardDeadlineNs = process.argv[3] || '';
   const supervisorPID = Number(process.argv[4]);
-  const terminalTransportEnabled = process.argv[5] === '--terminal-transport';
   const runtime = fileURLToPath(import.meta.url);
   let anchor: ChildProcess | undefined;
   let anchorControl: Duplex | undefined;
@@ -1185,30 +1151,6 @@ function runAnchorManager(): void {
     inputStopObserved = true;
     sendSupervisor({ type: 'manager-input-observation', event: 'stop', summary: inputObservation.snapshot() });
   };
-  let terminalDescriptorsClosed = false;
-  const closeTerminalDescriptors = () => {
-    if (!terminalTransportEnabled || terminalDescriptorsClosed) return;
-    terminalDescriptorsClosed = true;
-    closeDescriptor(7);
-    closeDescriptor(8);
-  };
-  if (terminalTransportEnabled) {
-    try {
-      if (!fstatSync(7).isSocket() || !fstatSync(8).isSocket()) throw new Error('terminal transport descriptors are unavailable');
-    } catch {
-      sendSupervisor({ type: 'terminal-transport-unavailable', reason: 'descriptor-unavailable' });
-      closeTerminalDescriptors();
-      input.destroy();
-      stdout.destroy();
-      stderr.destroy();
-      closeDescriptor(4);
-      closeDescriptor(5);
-      closeDescriptor(6);
-      control.destroy();
-      process.exitCode = 1;
-      return;
-    }
-  }
   const sendAnchor = (value: RecordValue) => {
     if (!anchorControl) pendingAnchorMessages.push(value);
     else send(anchorControl, value);
@@ -1261,7 +1203,6 @@ function runAnchorManager(): void {
     closing = true;
     sendSupervisor({ type: 'manager-input-observation', event: 'teardown', summary: inputObservation.snapshot() });
     sendSupervisor({ type: 'manager-teardown-started', anchorClosed, targetSpawned, targetClosed });
-    closeTerminalDescriptors();
     input.destroy();
     anchorControl?.destroy();
     control.destroy();
@@ -1325,7 +1266,7 @@ function runAnchorManager(): void {
     if (targetExecConfirmed || child.pid === undefined) return;
     targetExecConfirmed = true;
     sendSupervisor({ type: 'target-started', targetPID: child.pid, spawnParentPID: process.pid,
-      groupID, anchorPID, ...(terminalTransportEnabled ? { callback: 'spawn' } : {}) });
+      groupID, anchorPID });
     if (pendingExit) deliverTargetExit(pendingExit);
     if (pendingClose) deliverTargetClose(pendingClose);
   };
@@ -1381,13 +1322,10 @@ function runAnchorManager(): void {
     source.pipe(destination);
   };
   const launchTarget = async (message: RecordValue) => {
-    const terminalTargetSupplied = Object.hasOwn(message, 'terminalTarget');
-    const terminalTarget = terminalTargetSupplied ? terminalTargetConfig(message.terminalTarget) : undefined;
     if (targetSpawned || !anchorReady || groupID === undefined || typeof message.binary !== 'string'
       || !Array.isArray(message.args) || message.args.some(value => typeof value !== 'string')
-      || typeof message.executionDeadlineNs !== 'string' || !/^\d+$/u.test(message.executionDeadlineNs)
-      || (terminalTargetSupplied && (!terminalTransportEnabled || !terminalTarget))) {
-      sendTargetLaunchError('invalid target launch request or terminal target configuration');
+      || typeof message.executionDeadlineNs !== 'string' || !/^\d+$/u.test(message.executionDeadlineNs)) {
+      sendTargetLaunchError('invalid target launch request');
       sendNoChild();
       stop('invalid-target-launch', 'invalid target launch request from supervisor');
       return;
@@ -1415,17 +1353,14 @@ function runAnchorManager(): void {
         if (native.symbols.setpgid(0, groupID!) !== 0) throw new Error('anchor manager could not enter the target process group');
         let spawnFailure: unknown;
         try {
-          if (terminalTargetSupplied && !terminalTarget) throw new Error('invalid terminal target configuration');
           target = spawn(binary, args, {
             detached: false,
-            stdio: terminalTransportEnabled ? ['pipe', 'pipe', 'pipe', 7, 8] : ['pipe', 'pipe', 'pipe'],
-            cwd: terminalTarget ? terminalTarget.cwd : process.cwd(),
-            env: terminalTarget ? terminalTarget.env : process.env,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            cwd: process.cwd(),
+            env: process.env,
           });
         } catch (error) {
           spawnFailure = error;
-        } finally {
-          closeTerminalDescriptors();
         }
         const restoreFailed = native.symbols.setpgid(0, supervisorPID) !== 0;
         if (spawnFailure) throw spawnFailure;
@@ -1639,7 +1574,6 @@ function runSupervisor(): void {
   let anchorExited = false;
   let anchorManagerClosed = false;
   let targetExecConfirmed = false;
-  let terminalTargetCallbackObserved = false;
   let targetLaunchRequested = false;
   let targetProcessCreated = false;
   let targetNoChildObserved = false;
@@ -1762,10 +1696,6 @@ function runSupervisor(): void {
       observeStdout.end();
       observeStderr.end();
     }
-    if (config?.terminalTransport) {
-      closeDescriptor(10);
-      closeDescriptor(11);
-    }
     observer.close();
   };
   const retirementPrerequisites = () => {
@@ -1775,14 +1705,13 @@ function runSupervisor(): void {
         ? targetExit && targetClose && sourceStreamsRetired
         : targetUnconfirmedClose && (!targetSpawned || sourceStreamsRetired)))
       : !targetProcessCreated && !targetNoChildObserved;
-    const terminalCallbackSettled = !config?.terminalTransport || !targetExecConfirmed || terminalTargetCallbackObserved;
     const managerRelayRetired = anchorManagerPID === undefined
       || (managerStdoutEnded && managerStdoutClosed && managerStderrEnded && managerStderrClosed
         && managerOutputStates.stdout.finalAckSent && managerOutputStates.stderr.finalAckSent
         && managerOutputStates.stdout.received === managerOutputStates.stdout.expected
         && managerOutputStates.stderr.received === managerOutputStates.stderr.expected
         && !managerOutputStates.stdout.relayFailed && !managerOutputStates.stderr.relayFailed);
-    return { anchorClosed, anchorManagerClosed, groupAbsent, inputClosed, targetSettled, terminalCallbackSettled, managerRelayRetired,
+    return { anchorClosed, anchorManagerClosed, groupAbsent, inputClosed, targetSettled, managerRelayRetired,
       stdoutRetired: supervisorStdoutClosed && (supervisorStdoutFinished || !targetOutputRelayHealthy),
       stderrRetired: supervisorStderrClosed && (supervisorStderrFinished || !targetOutputRelayHealthy) };
   };
@@ -1790,7 +1719,7 @@ function runSupervisor(): void {
   const notifyRetirement = () => {
     const prerequisites = retirementPrerequisites();
     if (!prerequisites.anchorClosed || !prerequisites.anchorManagerClosed || !prerequisites.groupAbsent || !prerequisites.inputClosed
-      || !prerequisites.targetSettled || !prerequisites.terminalCallbackSettled || !prerequisites.managerRelayRetired || retirementSent) return;
+      || !prerequisites.targetSettled || !prerequisites.managerRelayRetired || retirementSent) return;
     if (!retirementOutputEndsRequested) {
       retirementOutputEndsRequested = true;
       stdout.end();
@@ -2053,21 +1982,14 @@ function runSupervisor(): void {
     const anchorStartupDeadlineNs = (BigInt(config.hardDeadlineNs) - startupReserveNs).toString();
     try {
       anchor = spawn('bun', ['--no-env-file', '--experimental-strip-types', fileURLToPath(import.meta.url), '--anchor-manager',
-        anchorStartupDeadlineNs, String(process.pid), ...(config.terminalTransport ? ['--terminal-transport'] : [])], {
+        anchorStartupDeadlineNs, String(process.pid)], {
         detached: false,
-        stdio: config.terminalTransport
-          ? ['ignore', 'ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 10, 11]
-          : ['ignore', 'ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
+        stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
         cwd: process.cwd(), env: process.env,
       });
     } catch (error) {
       stop('anchor-launch-error', error instanceof Error ? error.message : 'anchor manager could not be launched');
       return;
-    } finally {
-      if (config.terminalTransport) {
-        closeDescriptor(10);
-        closeDescriptor(11);
-      }
     }
     if (anchor.pid === undefined) {
       anchorLaunchFailed = true;
@@ -2100,19 +2022,6 @@ function runSupervisor(): void {
           'destinationFinish', 'destinationClose', 'destinationError', 'stop', 'teardown'].includes(message.event)) return;
         managerInputSummary = sanitizedInputPipeSummary(message.summary);
         recordObserver({ type: 'supervisor-manager-input-observation', event: message.event, summary: managerInputSummary });
-        return;
-      }
-      if (message.type === 'terminal-transport-unavailable') {
-        if (!config?.terminalTransport || targetLaunchRequested || targetProcessCreated) {
-          stop('terminal-transport-protocol-invalid', 'manager reported an unavailable terminal channel outside startup');
-          return;
-        }
-        anchorLaunchFailed = true;
-        const failure = 'terminal authority descriptors were absent, closed, or not connected sockets';
-        firstFailure ||= failure;
-        recordObserver({ type: 'supervisor-terminal-transport-unavailable' });
-        sendControl({ type: 'failure', reason: 'terminal-transport-unavailable', message: firstFailure });
-        stop('terminal-transport-unavailable', firstFailure);
         return;
       }
       if (message.type === 'manager-output-finished') {
@@ -2188,8 +2097,7 @@ function runSupervisor(): void {
         }
         targetLaunchRequested = true;
         send(anchorControl!, { type: 'launch-target', binary: config!.binary, args: config!.args,
-          executionDeadlineNs: anchorExecutionDeadlineNs,
-          ...(config!.terminalTarget ? { terminalTarget: config!.terminalTarget } : {}) });
+          executionDeadlineNs: anchorExecutionDeadlineNs });
         return;
       }
       if (message.type === 'anchor-exit') {
@@ -2242,18 +2150,13 @@ function runSupervisor(): void {
           || !Number.isSafeInteger(message.targetPID) || Number(message.targetPID) <= 0
           || Number(message.spawnParentPID) !== anchorManagerPID || Number(message.groupID) !== groupID
           || Number(message.anchorPID) !== anchorPID || values.some(value => !Number.isSafeInteger(value))
-          || (config?.terminalTransport ? message.callback !== 'spawn' || terminalTargetCallbackObserved : message.callback !== undefined)) {
-          stop('target-admission-failed', 'target exec identity did not match its actual manager, PID, group, and callback');
+          || message.callback !== undefined) {
+          stop('target-admission-failed', 'target exec identity did not match its actual manager, PID, and group');
           return;
         }
         targetExecConfirmed = true;
         recordObserver({ type: 'supervisor-target-started', targetPID: targetProcessPID,
           spawnParentPID: anchorManagerPID, groupID, anchorPID });
-        if (config?.terminalTransport) {
-          terminalTargetCallbackObserved = true;
-          recordObserver({ type: 'supervisor-terminal-target-callback', targetPID: targetProcessPID,
-            spawnParentPID: anchorManagerPID, groupID, anchorPID });
-        }
       }
       if (message.type === 'target-exit') {
         if (!targetExecConfirmed || targetExit) {
@@ -2399,15 +2302,11 @@ function runSupervisor(): void {
         || message.args.some(value => typeof value !== 'string')
         || message.args.some(value => value.includes('\0')) || message.binary.includes('\0')
         || typeof message.executionDeadlineNs !== 'string' || typeof message.hardDeadlineNs !== 'string'
-        || typeof message.killDelayMs !== 'number'
-        || (message.terminalTransport !== undefined && message.terminalTransport !== true)
-        || (Object.hasOwn(message, 'terminalTarget')
-          && (message.terminalTransport !== true || !terminalTargetConfig(message.terminalTarget)))) {
+        || typeof message.killDelayMs !== 'number') {
         stop('invalid-launch-request', 'invalid owned process launch configuration');
         return;
       }
-      const terminalTarget = Object.hasOwn(message, 'terminalTarget') ? terminalTargetConfig(message.terminalTarget) : undefined;
-      config = { ...message, ...(terminalTarget ? { terminalTarget } : {}) } as unknown as LaunchRequest;
+      config = message as unknown as LaunchRequest;
       const configuredExecution = BigInt(config.executionDeadlineNs);
       const configuredHard = BigInt(config.hardDeadlineNs);
       const startupExecutionDeadline = BigInt(startupExecutionDeadlineNs);
