@@ -14,6 +14,7 @@ import { AppiumClient } from '../support/webdriver';
 import { retainedFixture, kernelFixture } from './android-retained-fixture';
 import { gzipSync } from 'node:zlib';
 import { kernelReaderFixture } from './android-kernel-reader-fixture';
+import { inProcessOwnedPersistenceIO } from './android-measurement-doubles';
 
 export async function runAndroidRetainedLaunchRegressions(scenarios?: string[]): Promise<void> {
   for (const scenario of scenarios ?? ['boot', 'kernel-boot-acquisition', 'kernel-disabled', 'kernel-unreadable', 'kernel-missing', 'kernel-malformed', 'kernel-duplicate', 'kernel-conflicting', 'kernel-enabled-absent', 'kernel-disabled-fields', 'kernel-pid-duplicate', 'kernel-nspid-duplicate', 'kernel-nested', 'kernel-same-number-nested', 'healthy', 'pid-before', 'start-before', 'selected-window-loss', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-owner', 'replaced-session', 'missing-current', 'missing-handles', 'missing-context', 'refusal', 'timeout', 'malformed', 'wrong-id', 'wrong-component', 'wrong-scope', 'wrong-mac', 'ambiguous-shortcut', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document', 'zero-candidate', 'still-browser-confirmation', 'recorded-two-page']) {
@@ -414,7 +415,7 @@ else if (request === 'shell pm list packages') {
 `);
   await chmod(adb, 0o700);
   const budget = new PhaseBudget('retained-lifecycle', { timeoutMs: 600_000, recoveryLimit: 0, now: () => Date.now() + JSON.parse(readFileSync(file, 'utf8')).timeOffset });
-  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { plannedTerminationExitMs: 300 }, budget);
+  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), inProcessOwnedPersistenceIO(fixture.fixtureDirectory, { plannedTerminationExitMs: 300 }), budget);
   const kernel = await kernelReaderFixture(async command => {
     const s = await state();
     const pid = s.fault === 'changed-native-pid' ? '6539' : s.pid;
