@@ -67,6 +67,28 @@ func TestParseKimiSkillSettings(t *testing.T) {
 			wantDirs: []string{"~/quoted-key"},
 		},
 		{
+			name:     "comments and escaped quotes inside array",
+			data:     "extra_skill_dirs = [\"~/a\\\"b\", # first\n '/c,d', # second\n]\n",
+			wantDirs: []string{"~/a\"b", "/c,d"},
+		},
+		{
+			name:     "unterminated array keeps existing value",
+			seedDirs: []string{"~/keep"},
+			data:     "extra_skill_dirs = [\"~/a\"\n",
+			wantDirs: []string{"~/keep"},
+		},
+		{
+			name:     "unterminated string keeps existing value",
+			seedDirs: []string{"~/keep"},
+			data:     "extra_skill_dirs = [\"~/a]\n",
+			wantDirs: []string{"~/keep"},
+		},
+		{
+			name:     "single quoted key",
+			data:     "'extra_skill_dirs' = ['~/single']\n",
+			wantDirs: []string{"~/single"},
+		},
+		{
 			name:     "nested table key ignored",
 			seedDirs: []string{"~/keep"},
 			data:     "[agent]\nextra_skill_dirs = [\"~/ignored\"]\n",

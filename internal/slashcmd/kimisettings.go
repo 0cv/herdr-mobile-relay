@@ -78,106 +78,70 @@ func kimiArrayValue(value string) ([]string, bool) {
 	return items, true
 }
 
-// kimiArrayEnd returns the closing bracket outside strings and comments.
-func kimiArrayEnd(value string) int {
-	quote := byte(0)
-	for index := 1; index < len(value); index++ {
+// scanKimi walks value from index from, skipping comments, and calls visit for
+// every other byte with whether it belongs to a quoted string. It stops when
+// visit returns true and reports that index (or -1) and whether all quotes closed.
+func scanKimi(value string, from int, visit func(index int, quoted bool) bool) (int, bool) {
+	var quote byte
+	escaped := false
+	for index := from; index < len(value); index++ {
 		char := value[index]
-		if quote != 0 {
-			if quote == '"' && char == '\\' && index+1 < len(value) {
-				index++
-				continue
+		if quote == 0 && char == '#' {
+			newline := strings.IndexByte(value[index:], '\n')
+			if newline < 0 {
+				return -1, true
 			}
-			if char == quote {
-				quote = 0
-			}
+			index += newline - 1
 			continue
 		}
-		switch char {
-		case '\'', '"':
+		if visit(index, quote != 0 || char == '\'' || char == '"') {
+			return index, true
+		}
+		switch {
+		case escaped:
+			escaped = false
+		case quote == '"' && char == '\\':
+			escaped = true
+		case quote != 0 && char == quote:
+			quote = 0
+		case quote == 0 && (char == '\'' || char == '"'):
 			quote = char
-		case '#':
-			if newline := strings.IndexByte(value[index:], '\n'); newline >= 0 {
-				index += newline
-			} else {
-				return -1
-			}
-		case ']':
-			return index
 		}
 	}
-	return -1
+	return -1, quote == 0
+}
+
+// kimiArrayEnd returns the closing bracket outside strings and comments.
+func kimiArrayEnd(value string) int {
+	end, _ := scanKimi(value, 1, func(index int, quoted bool) bool {
+		return !quoted && value[index] == ']'
+	})
+	return end
 }
 
 func splitKimiArray(value string) ([]string, bool) {
 	var fields []string
-	start := 0
-	quote := byte(0)
-	for index := 0; index < len(value); index++ {
-		char := value[index]
-		if quote != 0 {
-			if quote == '"' && char == '\\' && index+1 < len(value) {
-				index++
-				continue
-			}
-			if char == quote {
-				quote = 0
-			}
-			continue
+	var field strings.Builder
+	_, closed := scanKimi(value, 0, func(index int, quoted bool) bool {
+		if quoted || value[index] != ',' {
+			field.WriteByte(value[index])
+			return false
 		}
-		switch char {
-		case '\'', '"':
-			quote = char
-		case '#':
-			end := strings.IndexByte(value[index:], '\n')
-			if end < 0 {
-				value = value[:index]
-				index = len(value)
-				continue
-			}
-			value = value[:index] + value[index+end:]
-			index--
-		case ',':
-			fields = append(fields, value[start:index])
-			start = index + 1
-		}
-	}
-	if quote != 0 {
+		fields = append(fields, field.String())
+		field.Reset()
+		return false
+	})
+	if !closed {
 		return nil, false
 	}
-	fields = append(fields, value[start:])
-	return fields, true
+	return append(fields, field.String()), true
 }
 
 func splitKimiAssignment(line string) (key, value string, ok bool) {
-	var quote byte
-	escaped := false
-	equals := -1
-	for index := 0; index < len(line); index++ {
-		current := line[index]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if quote == '"' && current == '\\' {
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if current == quote {
-				quote = 0
-			}
-			continue
-		}
-		switch current {
-		case '\'', '"':
-			quote = current
-		case '=':
-			equals = index
-			index = len(line)
-		}
-	}
-	if equals < 0 || quote != 0 {
+	equals, _ := scanKimi(line, 0, func(index int, quoted bool) bool {
+		return !quoted && line[index] == '='
+	})
+	if equals < 0 {
 		return "", "", false
 	}
 	rawKey := strings.TrimSpace(line[:equals])
@@ -185,27 +149,20 @@ func splitKimiAssignment(line string) (key, value string, ok bool) {
 	if rawKey == "" {
 		return "", "", false
 	}
-	if rawKey[0] == '\'' {
-		if len(rawKey) < 2 || rawKey[len(rawKey)-1] != '\'' {
+	if rawKey[0] == '\'' || rawKey[0] == '"' {
+		key, ok = unquoteKimiString(rawKey)
+		if !ok {
 			return "", "", false
 		}
-		key = rawKey[1 : len(rawKey)-1]
-	} else if rawKey[0] == '"' {
-		decoded, err := strconv.Unquote(rawKey)
-		if err != nil {
-			return "", "", false
-		}
-		key = decoded
-	} else {
-		for _, current := range rawKey {
-			if !(current == '_' || current == '-' || current >= 'A' && current <= 'Z' ||
-				current >= 'a' && current <= 'z' || current >= '0' && current <= '9') {
-				return "", "", false
-			}
-		}
-		key = rawKey
+		return key, value, true
 	}
-	return key, value, true
+	for _, current := range rawKey {
+		if !(current == '_' || current == '-' || current >= 'A' && current <= 'Z' ||
+			current >= 'a' && current <= 'z' || current >= '0' && current <= '9') {
+			return "", "", false
+		}
+	}
+	return rawKey, value, true
 }
 
 func unquoteKimiString(value string) (string, bool) {
