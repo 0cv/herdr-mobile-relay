@@ -103,18 +103,41 @@ type hookCommand struct {
 	Timeout int    `json:"timeout,omitempty"`
 }
 
-func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, error) {
+type hookAgent struct {
+	name        string
+	dir         string
+	file        string
+	event       string
+	rootKey     string
+	flat        bool
+	version     int
+	matcher     string
+	installNote string
+}
+
+var hookAgents = []hookAgent{
+	{name: "claude", dir: ".claude", file: "settings.json", event: "SessionStart", matcher: "^(startup|resume|clear|compact|fork)$"},
+	{
+		name: "codex", dir: ".codex", file: "hooks.json", event: "SessionStart",
+		installNote: "codex: start Codex with --no-daemon in herdr.app terminals; its Conversation appears after the first prompt",
+	},
+	{name: "cursor", dir: ".cursor", file: "hooks.json", event: "sessionStart", flat: true, version: 1},
+	{name: "qoder", dir: ".qoder", file: "settings.json", event: "SessionStart"},
+	{name: "agy", dir: filepath.Join(".gemini", "config"), file: "hooks.json", event: "SessionStart", rootKey: "herdr-mobile-relay"},
+}
+
+func editHooks(data []byte, agent hookAgent, binary string, install bool) ([]byte, bool, error) {
 	root, err := parseObject(data)
 	if err != nil {
 		return nil, false, err
 	}
-	command := "'" + strings.ReplaceAll(binary, "'", "'\"'\"'") + "' agent-session " + agent
-	if agent == "agy" {
-		found := root.get("herdr-mobile-relay") != nil
+	command := "'" + strings.ReplaceAll(binary, "'", "'\"'\"'") + "' agent-session " + agent.name
+	if agent.rootKey != "" {
+		found := root.get(agent.rootKey) != nil
 		if install {
-			root.set("herdr-mobile-relay", raw(object{{"SessionStart", raw([]hookCommand{{"command", command, 5}})}}))
+			root.set(agent.rootKey, raw(object{{agent.event, raw([]hookCommand{{"command", command, 5}})}}))
 		} else if found {
-			root.set("herdr-mobile-relay", nil)
+			root.set(agent.rootKey, nil)
 		} else {
 			return data, false, nil
 		}
@@ -127,19 +150,16 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 			return nil, false, fmt.Errorf("hooks: %w", err)
 		}
 	}
-	event := "SessionStart"
-	if agent == "cursor" {
-		event = "sessionStart"
-		if install && root.get("version") == nil {
-			root.set("version", raw(1))
-		}
+	if install && agent.version != 0 && root.get("version") == nil {
+		root.set("version", raw(agent.version))
 	}
 	var entries []json.RawMessage
-	if value := hooks.get(event); value != nil {
+	if value := hooks.get(agent.event); value != nil {
 		if err := json.Unmarshal(value, &entries); err != nil {
 			return nil, false, err
 		}
 	}
+	suffix := " agent-session " + agent.name
 	found := false
 	kept := make([]json.RawMessage, 0, len(entries)+1)
 	for _, entry := range entries {
@@ -147,14 +167,14 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 		if err != nil {
 			return nil, false, fmt.Errorf("SessionStart entry: %w", err)
 		}
-		if agent == "cursor" {
+		if agent.flat {
 			var command string
 			if value := obj.get("command"); value != nil {
 				if err := json.Unmarshal(value, &command); err != nil {
 					return nil, false, err
 				}
 			}
-			if strings.HasSuffix(strings.TrimSpace(command), " agent-session "+agent) {
+			if strings.HasSuffix(strings.TrimSpace(command), suffix) {
 				found = true
 			} else {
 				kept = append(kept, entry)
@@ -174,7 +194,7 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 			if err := json.Unmarshal(command, &hook); err != nil {
 				return nil, false, err
 			}
-			if hook.Type == "command" && strings.HasSuffix(strings.TrimSpace(hook.Command), " agent-session "+agent) {
+			if hook.Type == "command" && strings.HasSuffix(strings.TrimSpace(hook.Command), suffix) {
 				found = true
 				removed = true
 				continue
@@ -192,10 +212,10 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 	}
 	if install {
 		entry := object{}
-		if agent == "claude" {
-			entry.set("matcher", raw("^(startup|resume|clear|compact|fork)$"))
+		if agent.matcher != "" {
+			entry.set("matcher", raw(agent.matcher))
 		}
-		if agent == "cursor" {
+		if agent.flat {
 			entry.set("command", raw(command))
 		} else {
 			entry.set("hooks", raw([]hookCommand{{"command", command, 10}}))
@@ -206,9 +226,9 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 		return data, false, nil
 	}
 	if len(kept) == 0 {
-		hooks.set(event, nil)
+		hooks.set(agent.event, nil)
 	} else {
-		hooks.set(event, raw(kept))
+		hooks.set(agent.event, raw(kept))
 	}
 	if len(hooks) == 0 {
 		root.set("hooks", nil)
@@ -219,12 +239,53 @@ func editHooks(data []byte, agent, binary string, install bool) ([]byte, bool, e
 }
 
 func formatHooks(root object, found bool) ([]byte, bool, error) {
-	var out bytes.Buffer
-	if err := json.Indent(&out, raw(root), "", "  "); err != nil {
+	out, err := indentJSON(root)
+	if err != nil {
 		return nil, false, err
 	}
+	return out, found, nil
+}
+
+func indentJSON(root object) ([]byte, error) {
+	var out bytes.Buffer
+	if err := json.Indent(&out, raw(root), "", "  "); err != nil {
+		return nil, err
+	}
 	out.WriteByte('\n')
-	return out.Bytes(), found, nil
+	return out.Bytes(), nil
+}
+
+// configDirExists reports whether an agent's config directory is present.
+// A path that exists but is not a directory is an error.
+func configDirExists(dir string) (bool, error) {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%s: not a directory", dir)
+	}
+	return true, nil
+}
+
+// readJSONOrEmpty reads a config file, or an empty JSON object when the file
+// does not exist yet. The mode is the file's own, or 0600 for a new file.
+func readJSONOrEmpty(path string) (data []byte, mode os.FileMode, absent bool, err error) {
+	data, err = os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []byte("{}"), 0600, true, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return data, info.Mode().Perm(), false, nil
 }
 
 func Hooks(operation string, output io.Writer) error {
@@ -264,49 +325,28 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 			}
 		}
 	}
-	codexInstalled := false
 	type change struct {
 		path string
 		data []byte
 		mode os.FileMode
 	}
 	var changes []change
+	var notes []string
 	var feedback bytes.Buffer
-	for _, agent := range []string{"claude", "codex", "cursor", "qoder", "agy"} {
-		dir := filepath.Join(home, "."+agent)
-		if agent == "agy" {
-			dir = filepath.Join(home, ".gemini", "config")
-		}
-		name := "hooks.json"
-		if agent == "claude" || agent == "qoder" {
-			name = "settings.json"
-		}
-		path := filepath.Join(dir, name)
-		info, err := os.Stat(dir)
-		if os.IsNotExist(err) {
-			fmt.Fprintf(&feedback, "%s: config absent\n", agent)
-			continue
-		}
+	for _, agent := range hookAgents {
+		dir := filepath.Join(home, agent.dir)
+		path := filepath.Join(dir, agent.file)
+		exists, err := configDirExists(dir)
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
-			return fmt.Errorf("%s: not a directory", dir)
+		if !exists {
+			fmt.Fprintf(&feedback, "%s: config absent\n", agent.name)
+			continue
 		}
-		data, err := os.ReadFile(path)
-		absent := os.IsNotExist(err)
-		if err != nil && !absent {
+		data, mode, absent, err := readJSONOrEmpty(path)
+		if err != nil {
 			return err
-		}
-		mode := os.FileMode(0600)
-		if absent {
-			data = []byte("{}")
-		} else {
-			info, err = os.Stat(path)
-			if err != nil {
-				return err
-			}
-			mode = info.Mode().Perm()
 		}
 		updated, found, err := editHooks(data, agent, binary, operation == "install")
 		if err != nil {
@@ -321,15 +361,15 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 		switch operation {
 		case "install":
 			state = "installed"
-			if agent == "codex" {
-				codexInstalled = true
+			if agent.installNote != "" {
+				notes = append(notes, agent.installNote)
 			}
 		case "uninstall":
 			if !absent {
 				state = "not installed"
 			}
 		}
-		fmt.Fprintf(&feedback, "%s: %s\n", agent, state)
+		fmt.Fprintf(&feedback, "%s: %s\n", agent.name, state)
 		if operation == "status" {
 			continue
 		}
@@ -351,8 +391,8 @@ func manageHooks(home, binary string, refusedDirs []string, operation string, ou
 			return fmt.Errorf("%s: %w", c.path, err)
 		}
 	}
-	if codexInstalled {
-		fmt.Fprintln(&feedback, "codex: start Codex with --no-daemon in herdr.app terminals; its Conversation appears after the first prompt")
+	for _, note := range notes {
+		fmt.Fprintln(&feedback, note)
 	}
 	_, err := io.Copy(output, &feedback)
 	return err
