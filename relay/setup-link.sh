@@ -21,43 +21,17 @@ fi
 
 # A gateway-configured relay has no tunnel hostname and no cloudflared config:
 # the phone finds it through the gateway, so the link only needs the app origin.
-if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
+TRANSPORT="$(relay_transport "$ENV_FILE")"
+if [ "$TRANSPORT" = tailscale ]; then
     ADDRESS="$("$(relay_binary)" tailscale address --port "$RELAY_TAILSCALE_PORT")" || exit $?
-    HOST_LABEL="$(relay_host_label)"
-    RELAY_URL="wss://${ADDRESS#https://}"
-    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
-    PHONE_APP_BASE="$(choose_phone_app_base_url "$ADDRESS" "$ENV_FILE" stable)"
-    record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
-    ARMED=0
-    arm_setup_link "$ENV_FILE" || ARMED=$?
-    echo "🐑 Herdr Mobile Relay phone setup"
-    echo ""
-    print_phone_setup "$PHONE_APP_BASE/#$SETUP_FRAGMENT"
-    if [ "$PHONE_APP_BASE" != "$ADDRESS" ]; then
-        echo ""
-        echo "  Direct browser fallback:"
-        print_phone_setup_url "$ADDRESS/#$SETUP_FRAGMENT"
-    fi
-    echo ""
-    print_setup_link_arming "$ARMED"
+    print_pairing "$ENV_FILE" "wss://${ADDRESS#https://}" "$ADDRESS" stable "🐑 Herdr Mobile Relay phone setup"
     echo "  Tailscale Serve: $ADDRESS"
     exit 0
 fi
 
-GATEWAY_URL="$(gateway_url "$ENV_FILE")"
-if [ -n "$GATEWAY_URL" ]; then
-    HOST_LABEL="$(relay_host_label)"
-    SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
-    PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
-    record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
-
-    ARMED=0
-    arm_setup_link "$ENV_FILE" || ARMED=$?
-    echo "🐑 Herdr Mobile Relay phone setup"
-    echo ""
-    print_phone_setup "$PHONE_APP_BASE/#$SETUP_FRAGMENT"
-    echo ""
-    print_setup_link_arming "$ARMED"
+if [ "$TRANSPORT" = gateway ]; then
+    GATEWAY_URL="$(gateway_url "$ENV_FILE")"
+    print_pairing "$ENV_FILE" "" "" gateway "🐑 Herdr Mobile Relay phone setup"
     echo "  Gateway: $GATEWAY_URL"
     echo "  The relay must be running for the link to work:"
     echo "  make service-status"
@@ -87,25 +61,6 @@ if ! valid_hostname "$TUNNEL_HOST"; then
     exit 1
 fi
 
-HOST_LABEL="$(relay_host_label)"
-RELAY_URL="wss://$TUNNEL_HOST"
-SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
-PHONE_APP_FALLBACK="https://$TUNNEL_HOST"
-PHONE_APP_BASE="$(choose_phone_app_base_url "$PHONE_APP_FALLBACK" "$ENV_FILE" stable)"
-record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
-PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
-DIRECT_URL="$PHONE_APP_FALLBACK/#$SETUP_FRAGMENT"
-ARMED=0
-arm_setup_link "$ENV_FILE" || ARMED=$?
-echo "🐑 Herdr Mobile Relay phone setup"
-echo ""
-print_phone_setup "$PHONE_URL"
-if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
-    echo ""
-    echo "  Direct browser fallback:"
-    print_phone_setup_url "$DIRECT_URL"
-fi
-echo ""
-print_setup_link_arming "$ARMED"
+print_pairing "$ENV_FILE" "wss://$TUNNEL_HOST" "https://$TUNNEL_HOST" stable "🐑 Herdr Mobile Relay phone setup"
 echo "  The relay and tunnel must be running for the link to work:"
 echo "  make service-status"

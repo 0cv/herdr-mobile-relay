@@ -285,6 +285,14 @@ for KNOB in HERDR_GATEWAY_MAX_RELAYS HERDR_GATEWAY_MAX_CLIENTS; do
 done
 grep -Fq 'UDP 3478' "$BUNDLE_DIR/README.md" ||
     fail "bundle README does not mention UDP 3478"
+grep -Fq 'WebRTC → Deploy or Upgrade Your Own WebRTC Gateway → I already run a' "$BUNDLE_DIR/README.md" ||
+    fail "bundle README does not name the setup menu path to an existing gateway"
+! grep -Fq 'Choose Connection Method' "$BUNDLE_DIR/README.md" ||
+    fail "bundle README names a menu that no longer exists"
+grep -Fq 'image: ${HERDR_CADDY_IMAGE:-caddy:2-alpine}' "$BUNDLE_DIR/docker-compose.yml" ||
+    fail "compose file lost the Caddy image default"
+grep -Fq 'chown 65532:65532 /state' "$BUNDLE_DIR/docker-compose.yml" ||
+    fail "compose file does not hand the state volume to the gateway user"
 
 # Nothing may be recorded until a gateway actually answers.
 if grep -q '^HERDR_GATEWAY_URL=' "$HERDR_RELAY_ENV"; then

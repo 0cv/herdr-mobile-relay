@@ -205,7 +205,7 @@ esac
 echo ""
 
 ENV_FILE="${HERDR_RELAY_ENV:-$CONFIG_DIR/relay.env}"
-TAILSCALE_PORT="$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
+TAILSCALE_PORT="$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
 if [ -n "$TAILSCALE_PORT" ]; then
     PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
     if ! "$(relay_binary)" tailscale off --port "$TAILSCALE_PORT" --relay-port "${PORT:-$RELAY_DEFAULT_PORT}"; then

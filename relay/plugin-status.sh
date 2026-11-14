@@ -23,9 +23,9 @@ else
     echo "  Relay token:  missing — run the Quick Start action once"
 fi
 
+SERVICE_FILE="$(relay_service_file || true)"
 case "$(uname -s)" in
     Darwin)
-        SERVICE_FILE="$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist"
         if [ ! -f "$SERVICE_FILE" ]; then
             echo "  Service:      not installed"
         elif launchctl print "gui/$(id -u)/$RELAY_LAUNCHD_LABEL" >/dev/null 2>&1; then
@@ -35,7 +35,6 @@ case "$(uname -s)" in
         fi
         ;;
     Linux)
-        SERVICE_FILE="$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL"
         if [ ! -f "$SERVICE_FILE" ]; then
             echo "  Service:      not installed"
         else

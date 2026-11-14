@@ -69,8 +69,8 @@ fi
 # Each tunnel launch starts with an empty device list and re-arms the one-use
 # bootstrap invitation so the printed setup link pairs the phone again. A
 # gateway and Tailscale keep stable identities, so their pairings survive a restart.
-if [ -z "$GATEWAY_URL" ] && [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ] &&
-    [ -z "${HERDR_TAILSCALE_PORT:-}" ]; then
+if [ "${HERDR_DEV_TRANSPORT:-}" != tailscale ] &&
+    [ "$(relay_transport "$ENV_FILE")" = cloudflare ]; then
     export HERDR_RELAY_REARM_BOOTSTRAP=1
 fi
 
@@ -97,7 +97,7 @@ if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then
     exec "$SCRIPT_DIR/setup-link.sh"
 fi
 
-if [ -n "${HERDR_TAILSCALE_PORT:-}" ]; then
+if [ "$(relay_transport "$ENV_FILE")" = tailscale ]; then
     echo "✗ Always on Tailscale needs its background service. Run Always on Tailscale setup from the menu." >&2
     exit 1
 fi
@@ -126,20 +126,7 @@ if [ -n "$GATEWAY_URL" ]; then
     fi
     echo " ✓"
 
-    HOST_LABEL="$(relay_host_label)"
-    SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
-    PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
-    record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
-    PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
-
-    ARMED=0
-    arm_setup_link "$ENV_FILE" || ARMED=$?
-    echo ""
-    echo "✓ Relay ready!"
-    echo ""
-    print_phone_setup "$PHONE_URL"
-    echo ""
-    print_setup_link_arming "$ARMED"
+    print_pairing "$ENV_FILE" "" "" gateway $'\n✓ Relay ready!'
     echo "  No Cloudflare account, domain, or cloudflared install is involved."
     echo "  The gateway only copies encrypted frames it cannot read, and the phone"
     echo "  upgrades to a direct connection whenever the network allows it."
@@ -164,29 +151,8 @@ elif [ "${HERDR_DEV_TRANSPORT:-}" = tailscale ]; then
     fi
     TAILSCALE_ACTIVE=1
 
-    HOST_LABEL="$(relay_host_label)"
     RELAY_URL="wss://${URL#https://}"
-    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
-    PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE")"
-    if [ "$PHONE_APP_BASE" != "$URL" ]; then
-        record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
-    fi
-    PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
-    DIRECT_URL="$URL/#$SETUP_FRAGMENT"
-
-    ARMED=0
-    arm_setup_link "$ENV_FILE" || ARMED=$?
-    echo ""
-    echo "✓ Relay ready!"
-    echo ""
-    print_phone_setup "$PHONE_URL"
-    if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
-        echo ""
-        echo "  Direct browser fallback:"
-        print_phone_setup_url "$DIRECT_URL"
-    fi
-    echo ""
-    print_setup_link_arming "$ARMED"
+    print_pairing "$ENV_FILE" "$RELAY_URL" "$URL" stable $'\n✓ Relay ready!' 0
     echo "  The phone app and relay are both served through Tailscale."
     echo "  Keep this terminal open; press Ctrl-C to stop the dev tunnel."
     echo ""
@@ -254,29 +220,7 @@ elif command -v cloudflared >/dev/null 2>&1; then
         echo "  does not open on your phone, wait a minute and scan again."
     fi
 
-    HOST_LABEL="$(relay_host_label)"
-    RELAY_URL="wss://${URL#https://}"
-    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
-    PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE" temporary)"
-    if [ "$PHONE_APP_BASE" != "$URL" ]; then
-        record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
-    fi
-    PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
-    DIRECT_URL="$URL/#$SETUP_FRAGMENT"
-
-    ARMED=0
-    arm_setup_link "$ENV_FILE" || ARMED=$?
-    echo ""
-    echo "✓ Relay ready!"
-    echo ""
-    print_phone_setup "$PHONE_URL"
-    if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
-        echo ""
-        echo "  Direct browser fallback:"
-        print_phone_setup_url "$DIRECT_URL"
-    fi
-    echo ""
-    print_setup_link_arming "$ARMED"
+    print_pairing "$ENV_FILE" "wss://${URL#https://}" "$URL" temporary $'\n✓ Relay ready!' 0
     echo "  The phone app and relay are both served by this tunnel."
     echo "  The link configures this relay automatically and removes the token from the address bar."
     echo "  Keep this terminal open; press Ctrl-C here to stop the quick start."

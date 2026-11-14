@@ -118,6 +118,10 @@ EOF
         if [ -z "$HOST_PLUTIL" ]; then
             printf '#!/bin/sh\n[ "$1" = -lint ] && [ -s "$2" ]\n' > "$BIN/plutil"
         fi
+        cat > "$BIN/uname" <<'EOF'
+#!/bin/sh
+if [ "$1" = -s ]; then echo "$FAKE_PLATFORM"; else /usr/bin/uname "$@"; fi
+EOF
         cat > "$BIN/id" <<'EOF'
 #!/bin/sh
 if [ "$1" = -u ]; then printf '501\n'; else /usr/bin/id "$@"; fi
@@ -126,10 +130,12 @@ EOF
         export PATH="$BIN:$PATH"
         if [ "$initial" = active ]; then touch "$CASE/loaded"; fi
         if [ "$platform" = systemd ]; then
+            export FAKE_PLATFORM=Linux
             definition="$HOME/.config/systemd/user/herdr-mobile-relay$suffix.service"
             sibling="$HOME/.config/systemd/user/herdr-mobile-relay.service"
             script=install-systemd-user-service.sh
         else
+            export FAKE_PLATFORM=Darwin
             definition="$HOME/Library/LaunchAgents/com.herdr-mobile-relay$suffix.service.plist"
             sibling="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
             script=install-service.sh
@@ -145,6 +151,8 @@ EOF
         if bash "$REPO_DIR/relay/$script" > "$CASE/output" 2>&1; then
             if [ "$failure" != none ]; then echo "$platform accepted $failure failure" >&2; exit 1; fi
             test -n "$(sed -n 's/^HERDR_RELAY_INSTANCE_ID=//p' "$HERDR_RELAY_ENV")"
+            grep -F herdr-mobile-relay-service.sh "$definition" >/dev/null
+            ! grep -Fx 'previous definition' "$definition" >/dev/null
         else
             if [ "$failure" = none ]; then cat "$CASE/output" >&2; exit 1; fi
             if [ "$initial" = fresh ]; then

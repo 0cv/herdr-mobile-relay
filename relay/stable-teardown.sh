@@ -47,15 +47,10 @@ if [ -z "$MISROUTED_HOSTNAME" ] && [ -n "$HOSTNAME" ]; then
 fi
 
 
+SERVICE_FILE="$(relay_service_file || true)"
 case "$(uname -s)" in
-    Darwin)
-        SERVICE="$RELAY_LAUNCHD_LABEL"
-        SERVICE_FILE="$HOME/Library/LaunchAgents/$SERVICE.plist"
-        ;;
-    Linux)
-        SERVICE="$RELAY_SYSTEMD_LABEL"
-        SERVICE_FILE="$HOME/.config/systemd/user/$SERVICE"
-        ;;
+    Darwin) SERVICE="$RELAY_LAUNCHD_LABEL" ;;
+    Linux) SERVICE="$RELAY_SYSTEMD_LABEL" ;;
 esac
 
 if [ "${HERDR_STABLE_TEARDOWN_WRAPPED:-}" != 1 ]; then

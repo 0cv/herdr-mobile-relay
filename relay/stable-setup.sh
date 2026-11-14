@@ -112,11 +112,10 @@ confirm_existing_config_reuse() {
 }
 
 service_file_present() {
-    case "$(uname -s)" in
-        Darwin) [ -f "$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist" ] ;;
-        Linux) [ -f "$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL" ] ;;
-        *) return 1 ;;
-    esac
+    local service_file
+
+    service_file="$(relay_service_file)" || return 1
+    [ -f "$service_file" ]
 }
 
 
@@ -163,51 +162,6 @@ select_cloudflare_domain() {
             *) echo "Enter 1 or 2." ;;
         esac
     done
-}
-
-ensure_hostname_certificate_zone() {
-    local hostname="$1"
-    local cert_zone
-    local confirmation
-
-    cert_zone="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
-    if [ -z "$cert_zone" ]; then
-        echo "▸ The Cloudflare login domain could not be read; the created route will be verified exactly."
-        return
-    fi
-    if hostname_in_zone "$hostname" "$cert_zone"; then
-        return
-    fi
-
-    echo ""
-    echo "✗ The current Cloudflare login authorizes $cert_zone, not $hostname." >&2
-    echo "  Continuing would create $hostname.$cert_zone instead." >&2
-    case "${HERDR_STABLE_RELOGIN:-}" in
-        1|true) confirmation="y" ;;
-        0|false) confirmation="n" ;;
-        *)
-            if [ ! -t 0 ]; then
-                echo "  Run interactively to authorize the correct domain." >&2
-                return 1
-            fi
-            read -r -p "Sign in to Cloudflare for this hostname now? [Y/n] " confirmation ||
-                confirmation=""
-            ;;
-    esac
-    case "$confirmation" in
-        ""|y|Y|yes|YES) ;;
-        *) return 1 ;;
-    esac
-
-    if ! relogin_for_cloudflare_zone "$ORIGIN_CERT" "${hostname#*.}"; then
-        return 1
-    fi
-    cert_zone="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
-    if [ -z "$cert_zone" ] || ! hostname_in_zone "$hostname" "$cert_zone"; then
-        echo "✗ The new Cloudflare login still does not authorize $hostname." >&2
-        return 1
-    fi
-    echo "✓ Cloudflare authorized $cert_zone."
 }
 
 reconcile_dns_route_state() {
@@ -302,7 +256,7 @@ choose_hostname() {
             continue
         fi
 
-        if ! ensure_hostname_certificate_zone "$candidate"; then
+        if ! ensure_hostname_in_cloudflare_zone "$candidate" "$ORIGIN_CERT"; then
             [ -z "${HERDR_STABLE_HOSTNAME:-}" ] || return 1
             recorded_hostname=""
             continue

@@ -9,8 +9,8 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/usr
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 LABEL="$RELAY_SYSTEMD_LABEL"
-UNIT_DIR="$HOME/.config/systemd/user"
-UNIT_FILE="$UNIT_DIR/$LABEL"
+UNIT_FILE="$(relay_service_file)"
+UNIT_DIR="$(dirname "$UNIT_FILE")"
 . "$SCRIPT_DIR/native-install-transaction.sh"
 require_user_service_context
 

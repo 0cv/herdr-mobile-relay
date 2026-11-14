@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 adopt_installed_service_env
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 assert_service_env_matches "$ENV_FILE"
-RELAY_TAILSCALE_PORT="$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
+RELAY_TAILSCALE_PORT="$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)"
 if [ -z "$RELAY_TAILSCALE_PORT" ]; then
     echo "Always on Tailscale is not selected; nothing changed."
     exit 0
