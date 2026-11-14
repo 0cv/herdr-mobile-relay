@@ -81,10 +81,6 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         },
       });
     }
-    const nativeSetTimeout = window.setTimeout.bind(window);
-    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
-      nativeSetTimeout(handler, timeout === 3000 ? 30 : timeout, ...args)) as typeof window.setTimeout;
-
     const sockets: MockSocket[] = [];
     const commands: Record<string, unknown>[] = [];
     const socketCommands: Record<string, unknown>[][] = [];
@@ -605,6 +601,7 @@ test('hides backend-dependent launch and tab controls', async ({ page }) => {
 });
 
 test('guides an unpairable relay without ever dialing it', async ({ page }) => {
+  await page.clock.install();
   // A relay key that is not a usable relay key, with no enrolled credential:
   // nothing can be presented, so the app must not spend a dial finding out.
   await boot(page, [{ ...fedora, token: 'truncated-key' }]);
@@ -612,7 +609,7 @@ test('guides an unpairable relay without ever dialing it', async ({ page }) => {
   await expect(page.getByText('Fedora needs pairing. Import a device invitation link.')).toBeVisible();
   expect(await socketCount(page)).toBe(0);
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await page.waitForTimeout(80);
+  await page.clock.runFor(80);
   expect(await socketCount(page)).toBe(0);
 
   await page.getByRole('button', { name: 'Settings' }).click();
@@ -620,6 +617,7 @@ test('guides an unpairable relay without ever dialing it', async ({ page }) => {
 });
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
+  await page.clock.install();
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -754,7 +752,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   expect(targetBox).not.toBeNull();
   await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2);
   await page.mouse.down();
-  await page.waitForTimeout(750);
+  await page.clock.runFor(750);
   await expect(projectSlot).toHaveClass(/workspace-dragging/);
   await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height * .8, { steps: 4 });
   await page.mouse.up();
@@ -786,6 +784,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
 });
 
 test('groups working agents and synchronizes tab order in both directions', async ({ page }) => {
+  await page.clock.install();
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -817,7 +816,7 @@ test('groups working agents and synchronizes tab order in both directions', asyn
   expect(targetBox).not.toBeNull();
   await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2);
   await page.mouse.down();
-  await page.waitForTimeout(750);
+  await page.clock.runFor(750);
   await expect(working.locator('.workspace-tab.tab-dragging')).toHaveCount(1);
   await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height * .8, { steps: 4 });
   await page.mouse.up();
@@ -1036,6 +1035,7 @@ test('keeps device verification modal until native authentication succeeds', asy
 const IPHONE_SAFARI_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
 test('keeps an iOS setup link unredeemed for Home Screen installation', async ({ page }) => {
+  await page.clock.install();
   const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
   await boot(page, [], `/${setupHash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
 
@@ -1051,7 +1051,7 @@ test('keeps an iOS setup link unredeemed for Home Screen installation', async ({
       url: 'wss://relay-fedora.example.com',
       token: '0123456789abcdef0123456789abcdef',
     });
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect(await socketCount(page)).toBe(0);
 
   // Focus and reconnect requests must not spend the key either.
@@ -1062,7 +1062,7 @@ test('keeps an iOS setup link unredeemed for Home Screen installation', async ({
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
   await page.getByRole('button', { name: 'Reconnect All' }).click();
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect(await socketCount(page)).toBe(0);
 });
 
@@ -1587,6 +1587,7 @@ for (const search of ['', '?herdr_reload=update-1'] as const) {
 }
 
 test('an outdated build is not redirected again when the redirect lands on an outdated build', async ({ page }) => {
+  await page.clock.install();
   const documentRequests: string[] = [];
   let versionRequests = 0;
   page.on('request', (request) => {
@@ -1601,7 +1602,7 @@ test('an outdated build is not redirected again when the redirect lands on an ou
   }));
   await boot(page, [], STALE_ENTRY);
   await expect.poll(() => versionRequests).toBe(2);
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   await expect(page.locator('#stale-build')).toHaveCount(1);
   expect(new URL(page.url()).searchParams.get('herdr_reload')).toMatch(/^stale-/u);
   expect(documentRequests).toEqual([STALE_ENTRY, '/index.html', STALE_ENTRY]);
@@ -2213,6 +2214,7 @@ test('reports when Herdr clips older terminal history', async ({ page }) => {
 });
 
 test('applies relay-watched terminal deltas and pauses the watcher when hidden', async ({ page }) => {
+  await page.clock.install();
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2262,7 +2264,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   });
 
   const activeCommandCount = (await commands(page)).length;
-  await page.waitForTimeout(750);
+  await page.clock.runFor(750);
   expect(await commands(page)).toHaveLength(activeCommandCount);
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -2274,7 +2276,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
     pane_id: 'w1:p1',
   });
   const hiddenCommandCount = (await commands(page)).length;
-  await page.waitForTimeout(750);
+  await page.clock.runFor(750);
   expect(await commands(page)).toHaveLength(hiddenCommandCount);
   const terminal = page.getByRole('log');
   const cachedScreen = await terminal.locator('.term-screen').innerHTML();
@@ -2329,6 +2331,7 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
 });
 
 test('replaces a half-open socket immediately when a sleeping phone resumes', async ({ page }) => {
+  await page.clock.install();
   await boot(page, [fedora], '/', { answerHealthPings: false });
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2351,7 +2354,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await page.waitForTimeout(5_100);
+  await page.clock.runFor(5_100);
   await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
   await expect(page.getByRole('main', { name: 'Agent unavailable' })).toBeHidden();
   await expect(page.getByRole('log')).toContainText('cached terminal output');
@@ -2623,9 +2626,10 @@ test('followup defaults: Resize Session starts on with height off', async ({ pag
 });
 
 test('followup defaults: explicitly saved Resize Session off stays off', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'false'));
   await openSizedPane(page, 'Default off');
-  await page.waitForTimeout(300);
+  await page.clock.runFor(300);
   expect(await leaseCommands(page)).toHaveLength(0);
   await expectDesktopWidthLayout(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
@@ -2638,12 +2642,13 @@ test('followup defaults: explicitly saved Resize Session off stays off', async (
 });
 
 test('never leases on the legacy capability alone, even with consent saved', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => {
     localStorage.setItem('herdr_terminal_resize_session', 'true');
     localStorage.setItem('herdr_terminal_height_lease', 'true');
   });
   await openSizedPane(page, 'Legacy relay', ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands']);
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect(await leaseCommands(page)).toHaveLength(0);
   await expectDesktopWidthLayout(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
@@ -2658,6 +2663,7 @@ test('never leases on the legacy capability alone, even with consent saved', asy
 });
 
 test('opts in, leases with opt_in, and releases immediately when turned off in Settings', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'false'));
   await openSizedPane(page, 'Opt-in pane');
   expect(await leaseCommands(page)).toHaveLength(0);
@@ -2697,7 +2703,7 @@ test('opts in, leases with opt_in, and releases immediately when turned off in S
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await page.getByRole('button', { name: 'Open Opt-in pane on Fedora' }).click();
   await showWidePane(page, 0);
-  await page.waitForTimeout(300);
+  await page.clock.runFor(300);
   expect(await leaseCommands(page)).toHaveLength(1);
   await expectDesktopWidthLayout(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
@@ -2739,6 +2745,7 @@ test('leases the height only when the relay supports it and the height switch is
 });
 
 test('ignores a lease reply that lands after Resize Session was turned off', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -2768,13 +2775,14 @@ test('ignores a lease reply that lands after Resize Session was turned off', asy
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await page.getByRole('button', { name: 'Open Late reply on Fedora' }).click();
   await showWidePane(page, 0);
-  await page.waitForTimeout(300);
+  await page.clock.runFor(300);
   expect(await leaseCommands(page)).toHaveLength(1);
   await expectDesktopWidthLayout(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
 test('stays unleased across a reconnect after Resize Session is turned off', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await openSizedPane(page, 'Reconnect pane');
   await expect.poll(async () => (await leaseCommands(page)).length).toBe(1);
@@ -2793,12 +2801,13 @@ test('stays unleased across a reconnect after Resize Session is turned off', asy
   });
   await page.getByRole('button', { name: 'Open Reconnect pane on Fedora' }).click();
   await showWidePane(page, 1);
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect((await commandsForSocket(page, 1)).filter((command) => command.type === 'lease_pane_size')).toHaveLength(0);
   await expectDesktopWidthLayout(page);
 });
 
 test('keeps renewing an opted-in lease briefly while hidden and re-leases on return', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await openSizedPane(page, 'Hidden pane', ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta']);
   await expect.poll(async () => (await leaseCommands(page)).length).toBe(1);
@@ -2810,8 +2819,8 @@ test('keeps renewing an opted-in lease briefly while hidden and re-leases on ret
   // Desktop Safari reports an occluded window as hidden, so a hidden page
   // keeps renewing within the grace window instead of lapsing the lease on
   // every app switch. Grace expiry is unit-tested on the pure policy helper.
-  await page.waitForTimeout(11_000);
-  expect((await leaseCommands(page)).length).toBeGreaterThanOrEqual(2);
+  await page.clock.runFor(11_000);
+  await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThanOrEqual(2);
   expect(await releaseCommands(page)).toHaveLength(0);
 
   await page.evaluate(() => {
@@ -2824,6 +2833,7 @@ test('keeps renewing an opted-in lease briefly while hidden and re-leases on ret
 });
 
 test('keeps pane resizing off through hidden timers and refocus', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'false'));
   await openSizedPane(page, 'Sleeping pane', ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta']);
   await page.evaluate(() => {
@@ -2831,7 +2841,7 @@ test('keeps pane resizing off through hidden timers and refocus', async ({ page 
     document.dispatchEvent(new Event('visibilitychange'));
   });
   // Cross the ten-second renewal cadence. Off means no timer acquisition.
-  await page.waitForTimeout(11_000);
+  await page.clock.runFor(11_000);
   expect(await leaseCommands(page)).toHaveLength(0);
   expect(await releaseCommands(page)).toHaveLength(0);
   await page.evaluate(() => {
@@ -3528,6 +3538,7 @@ test('renders the raw pane window as terminal history', async ({ page }) => {
 });
 
 test('keeps the reader anchored while streamed output grows and unsticks on scroll-up', async ({ page }) => {
+  await page.clock.install();
   // Rows 401-700 are three-character rows: too short for anchor text
   // matching, so only correct index math can keep the reader anchored there.
   const historyRow = (index: number) => (index > 400 && index <= 700
@@ -3541,7 +3552,7 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
     format: 'ansi',
     content: historyRows[0],
   });
-  await page.waitForTimeout(300);
+  await page.clock.runFor(300);
 
   const streamedRows = Array.from({ length: 100 }, (_, index) => `anchored burst row ${index + 1}`);
   const stream = historyRows.concat(streamedRows);
@@ -3609,6 +3620,7 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
 });
 
 test('keeps a small scroll-up from the bottom while output streams', async ({ page }) => {
+  await page.clock.install();
   const rows = Array.from({ length: 220 }, (_, index) => `near-bottom row ${index + 1}`);
   await openOmpPane(page, 'Near bottom');
   const frame = (count: number) => server(page, 0, {
@@ -3638,7 +3650,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   expect(await bottomDistance()).toBeGreaterThan(10);
 
   // Long after the scroll, an agent keeps rewriting its last line.
-  await page.waitForTimeout(1_600);
+  await page.clock.runFor(1_600);
   const readingTop = await terminal.evaluate((element) => element.scrollTop);
   for (let tick = 1; tick <= 5; tick += 1) {
     await server(page, 0, {
@@ -3648,7 +3660,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
       content: rows.slice(0, 150).concat(`working ${tick}`).join('\n'),
     });
     await expect(terminal).toContainText(`working ${tick}`);
-    await page.waitForTimeout(200);
+    await page.clock.runFor(200);
   }
   expect(Math.abs(await terminal.evaluate((element) => element.scrollTop) - readingTop))
     .toBeLessThanOrEqual(1);
@@ -3689,6 +3701,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
 });
 
 test('renders rows after a long wheel scroll to just above the bottom', async ({ page }) => {
+  await page.clock.install();
   const rows = Array.from({ length: 1_000 }, (_, index) => `wheel row ${index + 1}`);
   await openOmpPane(page, 'Wheel jump');
   await server(page, 0, {
@@ -3701,7 +3714,7 @@ test('renders rows after a long wheel scroll to just above the bottom', async ({
   });
   await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
-  await page.waitForTimeout(300);
+  await page.clock.runFor(300);
 
   // One big wheel scroll lands 20px above the bottom.
   await terminal.evaluate((element) => {
@@ -3844,6 +3857,7 @@ test('opens the deployed build when a deploy removed the conversation view', asy
 });
 
 test('opens Terminal when the conversation view cannot load without a deploy', async ({ page }) => {
+  await page.clock.install();
   const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: false });
   await boot(page, [fedora]);
   await connectDeployedApp(page);
@@ -3855,7 +3869,7 @@ test('opens Terminal when the conversation view cannot load without a deploy', a
   await page.getByRole('button', { name: 'Conversation history' }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Conversation history could not be loaded' })).toBeVisible();
   for (const status of ['idle', 'working', 'idle', 'working', 'idle']) await server(page, 0, deployedAppAgents(status));
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect(deploy.versionRequests).toBe(checksBefore + 1);
 
   // The error belongs to that opening: opening the agent again from Search falls back to Terminal.
@@ -3883,6 +3897,7 @@ test('opens Terminal instead of reloading again once the automatic reloads are u
 
 for (const stage of ['version check', 'deploy check'] as const) {
   test(`does not reload a removed conversation view when the user leaves during the ${stage}`, async ({ page }) => {
+    await page.clock.install();
     await page.route('**/assets/ConversationHistory-*.js', (route) => route.fulfill({ status: 404, body: '' }));
     let releaseHeld: () => void = () => {};
     const held = new Promise<void>((resolve) => { releaseHeld = resolve; });
@@ -3915,7 +3930,7 @@ for (const stage of ['version check', 'deploy check'] as const) {
     // The deploy check reads the version twice before it decides to reload.
     const lastRequest = stage === 'version check' ? holdFrom : holdFrom + 1;
     await expect.poll(() => versionResponses).toBe(lastRequest);
-    await page.waitForTimeout(500);
+    await page.clock.runFor(500);
     expect(versionRequests).toBe(lastRequest);
     expect(reloads).toEqual([]);
   });
@@ -3951,6 +3966,7 @@ test('opens the deployed build when a deploy removed the terminal input controls
 });
 
 test('keeps an unsaved draft instead of reloading when a deploy removed the terminal input controls', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   const deploy = await removeLazyFile(page, 'ManualTerminalInput', { newerBuild: true });
   await boot(page, [fedora]);
@@ -3962,13 +3978,14 @@ test('keeps an unsaved draft instead of reloading when a deploy removed the term
   await markCurrentDocument(page);
   await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect(deploy.reloads).toEqual([]);
   expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
   await expect(prompt).toHaveValue('draft this phone has not saved');
 });
 
 test('keeps an unconfirmed terminal send fenced instead of reloading when a deploy removed the conversation view', async ({ page }) => {
+  await page.clock.install();
   const button = (name: string) => page.getByRole('button', { name, exact: true });
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: true });
@@ -3994,7 +4011,7 @@ test('keeps an unconfirmed terminal send fenced instead of reloading when a depl
   await button('Conversation history').click();
   const held = 'A newer app version is ready but was not loaded automatically. A send to a terminal is not confirmed yet';
   await expect(page.getByRole('alert').filter({ hasText: held })).toBeVisible();
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect(deploy.reloads).toEqual([]);
   expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
 
@@ -4009,6 +4026,7 @@ test('keeps an unconfirmed terminal send fenced instead of reloading when a depl
 });
 
 test('explains why a finished deploy did not reload over an unsaved draft', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   await page.route('**/version.json?*', (route) => route.fulfill({
     contentType: 'application/json',
@@ -4032,7 +4050,7 @@ test('explains why a finished deploy did not reload over an unsaved draft', asyn
   await markCurrentDocument(page);
   await server(page, 0, { type: 'app_deploy_status', app_deploy: { ...appDeploy, state: 'succeeded', target_version: APP_RELEASE } });
   await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   expect(reloads).toEqual([]);
   expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
   await expect(prompt).toHaveValue('draft this phone has not saved');
@@ -4863,8 +4881,9 @@ async function openFollowingConversation(page: Page, mode: 'conversation' | 'act
 
 for (const interaction of ['untouched', 'touch', 'return-to-end'] as const) {
   test(`conversation follow-the-end streams growing partials after ${interaction}`, async ({ page }) => {
+    await page.clock.install();
     const { list, entry, deliver, latestInView } = await openFollowingConversation(page);
-    await page.waitForTimeout(350);
+    await page.clock.runFor(350);
     if (interaction !== 'untouched') {
       await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
       if (interaction === 'return-to-end') {
@@ -7826,6 +7845,7 @@ for (const source of ['recorded_history', 'pi_events']) {
 }
 
 test('scroll intent: upward movement releases following and explicit bottom arrival restores it', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -7858,7 +7878,7 @@ test('scroll intent: upward movement releases following and explicit bottom arri
   await scrollConversationToBottom(page);
   await expect.poll(gap).toBeLessThan(2);
   await expect(page.locator('.conversation-jump')).toHaveCount(0);
-  await page.waitForTimeout(350);
+  await page.clock.runFor(350);
   await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
   await list.evaluate(element => { element.scrollBy(0, -200); element.dispatchEvent(new Event('scroll')); });
   expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
@@ -7890,6 +7910,7 @@ async function openSharedComposer(page: Page, mode: string, reader = false) {
 
 for (const mode of ['Conversation', 'Full history']) {
   test(`shared composer ${mode}: activity stays in the header without layout or focus changes`, async ({ page }) => {
+    await page.clock.install();
     await page.setViewportSize({ width: 320, height: 740 });
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const prompt = await openSharedComposer(page, mode);
@@ -7915,7 +7936,7 @@ for (const mode of ['Conversation', 'Full history']) {
       expect(Math.abs((await prompt.boundingBox())!.y - initialPrompt.y)).toBeLessThanOrEqual(2);
       await expect(prompt).toBeFocused();
     }
-    await page.waitForTimeout(350);
+    await page.clock.runFor(350);
     expect((await commands(page)).filter(command => command.type !== 'read_pane')).toEqual(requests);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
@@ -8130,6 +8151,7 @@ for (const mode of ['Conversation', 'Full history']) {
 }
 
 test('phone feedback integrated history loads on upward demand and explicit action with a stable anchor across view changes', async ({ page }) => {
+  await page.clock.install();
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { capabilities: ['conversation_history'] });
@@ -8149,7 +8171,7 @@ test('phone feedback integrated history loads on upward demand and explicit acti
   await page.getByRole('button', { name: 'Full history', exact: true }).click();
   expect(await reads()).toHaveLength(1);
   await setAutoCommands(page, false);
-  await page.waitForTimeout(300);
+  await page.clock.runFor(300);
   await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
   await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
   await expect.poll(async () => (await reads()).length).toBe(2);
@@ -8254,13 +8276,14 @@ test('followup combined notices and Pi bridge stay fenced across paging, modes a
 });
 
 test('followup remote tokenless relay refuses plaintext', async ({ page }) => {
+  await page.clock.install();
   await boot(page, [{ ...fedora, url: 'wss://remote.example' }]);
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByRole('heading', { name: 'Settings', level: 2, exact: true })).toBeVisible();
   expect(await socketCount(page)).toBe(0);
   await page.getByRole('button', { name: 'Reconnect All' }).click();
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await page.waitForTimeout(80);
+  await page.clock.runFor(80);
   expect(await socketCount(page)).toBe(0);
   expect(await commands(page)).toHaveLength(0);
 });
@@ -8381,6 +8404,7 @@ for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`foll
 });
 
 test('followup direct TLS device rejection stops retrying', async ({ page }) => {
+  await page.clock.install();
   const relay = { id: 'rejected-direct', label: 'Rejected direct', url: 'wss://relay.example.invalid', token: '', paired: true };
   await page.addInitScript(id => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: {
     [id]: { kind: 'credential', id: 'synthetic-credential', deviceId: 'synthetic-device', version: 1, secret: 'A'.repeat(43), role: 'controller', locale: 'en', issuedAt: Date.now() },
@@ -8396,7 +8420,7 @@ test('followup direct TLS device rejection stops retrying', async ({ page }) => 
     window.dispatchEvent(new Event('online'));
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await page.waitForTimeout(1500);
+  await page.clock.runFor(1_500);
   expect(await socketCount(page)).toBe(1);
   expect((await commands(page)).map(command => command.type)).toEqual(['e2ee_client_hello']);
   expect(await page.evaluate(saved => localStorage.getItem('herdr_device_auth_v1') === saved, before)).toBe(true);
