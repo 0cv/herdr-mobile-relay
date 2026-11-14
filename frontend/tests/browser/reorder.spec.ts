@@ -1,36 +1,17 @@
 import { expect, test } from '@playwright/test';
+import { installMockRelay, mockRelayCommands, mockRelayServer } from '../support/mock-relay-socket';
 
 for (const kind of ['tabs', 'workspaces'] as const) {
   for (const journey of ['geometry', 'gestures'] as const) {
   test(`${kind}: native mouse long-press ${journey} with mocked transport`, async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.setItem('herdr_relays', JSON.stringify([{ id: 'test', label: 'Test', url: 'ws://127.0.0.1:8871', token: '' }]));
-      class MockSocket {
-        static OPEN = 1;
-        static CONNECTING = 0;
-        static CLOSED = 3;
-        readyState = 0;
-        onopen: (() => void) | null = null;
-        onmessage: ((event: MessageEvent) => void) | null = null;
-        constructor() {
-          queueMicrotask(() => {
-            this.readyState = 1;
-            this.onopen?.();
-            this.server({ type: 'push_config', protocol: 3, host: 'test', capabilities: ['tab_reorder', 'workspace_management', 'workspace_reorder_block'] });
-            this.server({ type: 'workspaces', workspaces: [1, 2, 3].map((n) => ({ workspace_id: `w${n}`, number: n, label: `Workspace ${n}`, pane_count: 1, tab_count: 1, cwd: `/work/${n}` })) });
-            this.server({ type: 'agents', agents: [1, 2, 3].map((n) => ({ pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1, workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working', tab_id: `t${n}`, tab_number: n, tab_order: n, tab_label: `Tab ${n}` })) });
-          });
-        }
-        server(message: unknown) { this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(message) })); }
-        send(payload: string) {
-          const command = JSON.parse(payload);
-          if (command.type === 'tab_reorder' || command.type === 'workspace_reorder') {
-            document.body.dataset.reorder = JSON.stringify(command);
-          }
-        }
-        close() { this.readyState = 3; }
+    await installMockRelay(page, {
+      capabilities: ['tab_reorder', 'workspace_management', 'workspace_reorder_block'],
+      workspaces: [1, 2, 3].map((n) => ({ workspace_id: `w${n}`, number: n, label: `Workspace ${n}`, pane_count: 1, tab_count: 1, cwd: `/work/${n}` })),
+      agents: [1, 2, 3].map((n) => ({ pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1, workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working', tab_id: `t${n}`, tab_number: n, tab_order: n, tab_label: `Tab ${n}` })),
+    }, (command) => {
+      if (command.type === 'tab_reorder' || command.type === 'workspace_reorder') {
+        document.body.dataset.reorder = JSON.stringify(command);
       }
-      Object.defineProperty(window, 'WebSocket', { value: MockSocket });
     });
     await page.goto('/');
     if (kind === 'workspaces') await page.getByRole('button', { name: 'Manage workspaces' }).click();
@@ -151,35 +132,15 @@ test.afterEach(async ({ context }, info) => {
 });
 
 async function ownerClickFixture(page: import('@playwright/test').Page) {
-  await page.addInitScript(() => {
-    localStorage.setItem('herdr_relays', JSON.stringify([{ id: 'test', label: 'Test', url: 'ws://127.0.0.1:8871', token: '' }]));
-    class OwnerMockSocket {
-      static OPEN = 1;
-      static CONNECTING = 0;
-      static CLOSED = 3;
-      readyState = 0;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      constructor(url: string) {
-        if (new URL(url).href !== 'ws://127.0.0.1:8871/') throw new Error('Unexpected mock transport');
-        queueMicrotask(() => {
-          this.readyState = 1;
-          this.onopen?.();
-          this.server({ type: 'push_config', protocol: 3, host: 'test', capabilities: ['tab_reorder'] });
-          this.server({ type: 'agents', agents: [1, 2, 3].map(n => ({
-            pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1,
-            workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working',
-            tab_id: `t${n}`, tab_number: n, tab_order: n, tab_label: `Tab ${n}`,
-          })) });
-        });
-      }
-      server(message: unknown) { this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(message) })); }
-      send(payload: string) {
-        if (JSON.parse(payload).type === 'tab_reorder') document.body.dataset.unexpectedOwnerReorder = 'true';
-      }
-      close() { this.readyState = 3; }
-    }
-    Object.defineProperty(window, 'WebSocket', { value: OwnerMockSocket });
+  await installMockRelay(page, {
+    capabilities: ['tab_reorder'],
+    agents: [1, 2, 3].map(n => ({
+      pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1,
+      workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working',
+      tab_id: `t${n}`, tab_number: n, tab_order: n, tab_label: `Tab ${n}`,
+    })),
+  }, (command) => {
+    if (command.type === 'tab_reorder') document.body.dataset.unexpectedOwnerReorder = 'true';
   });
   await page.goto('/');
   await expect(page.locator('.workspace-tab')).toHaveCount(3);
@@ -286,57 +247,25 @@ for (const activation of ['click', 'Enter', 'Space'] as const) {
 }
 
 
-type AdmissionControl = {
-  history: Record<string, unknown>[];
-  settle(index: number, ok: boolean): void;
-  snapshot(ids: number[]): void;
-};
+function snapshot(ids: number[]) {
+  return {
+    workspaces: ids.map((n, i) => ({
+      workspace_id: `w${n}`, number: i + 1, label: `Workspace ${n}`, pane_count: 1, tab_count: 1, cwd: `/work/${n}`,
+    })),
+    agents: ids.map((n, i) => ({
+      pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1,
+      workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working',
+      tab_id: `t${n}`, tab_number: n, tab_order: i + 1, tab_label: `Tab ${n}`,
+    })),
+  };
+}
 
 for (const kind of ['tabs', 'workspaces'] as const) {
   for (const ok of [true, false]) {
     test(`${kind}: command admission hybrid mouse/keyboard then ${ok ? 'success' : 'rejection'}`, async ({ page }, info) => {
-      await page.addInitScript(() => {
-        localStorage.setItem('herdr_relays', JSON.stringify([{ id: 'test', label: 'Test', url: 'ws://127.0.0.1:8871', token: '' }]));
-        class AdmissionMockSocket {
-          static OPEN = 1;
-          static CONNECTING = 0;
-          static CLOSED = 3;
-          readyState = 0;
-          onopen: (() => void) | null = null;
-          onmessage: ((event: MessageEvent) => void) | null = null;
-          history: Record<string, unknown>[] = [];
-          constructor(url: string) {
-            if (new URL(url).href !== 'ws://127.0.0.1:8871/') throw new Error('Unexpected mock transport');
-            (window as unknown as { admission: AdmissionControl }).admission = this;
-            queueMicrotask(() => {
-              this.readyState = 1;
-              this.onopen?.();
-              this.server({ type: 'push_config', protocol: 3, host: 'test', capabilities: ['tab_reorder', 'workspace_management', 'workspace_reorder_block'] });
-              this.snapshot([1, 2, 3]);
-            });
-          }
-          server(message: unknown) { this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(message) })); }
-          snapshot(ids: number[]) {
-            this.server({ type: 'workspaces', workspaces: ids.map((n, i) => ({
-              workspace_id: `w${n}`, number: i + 1, label: `Workspace ${n}`, pane_count: 1, tab_count: 1, cwd: `/work/${n}`,
-            })) });
-            this.server({ type: 'agents', agents: ids.map((n, i) => ({
-              pane_id: `p${n}`, server_session_id: 'session', terminal_id: `terminal${n}`, generation: 1,
-              workspace_id: 'w1', project: 'project', agent: 'codex', status: 'working',
-              tab_id: `t${n}`, tab_number: n, tab_order: i + 1, tab_label: `Tab ${n}`,
-            })) });
-          }
-          settle(index: number, ok: boolean) {
-            this.server({ type: 'command_result', request_id: this.history[index].request_id, ok, error: ok ? undefined : 'Selected command refused' });
-          }
-          send(payload: string) {
-            const command = JSON.parse(payload);
-            if (command.type === 'tab_reorder' || command.type === 'workspace_reorder') this.history.push(command);
-            // Deliberately withhold every correlated result until the test settles it.
-          }
-          close() { this.readyState = 3; }
-        }
-        Object.defineProperty(window, 'WebSocket', { value: AdmissionMockSocket });
+      await installMockRelay(page, {
+        capabilities: ['tab_reorder', 'workspace_management', 'workspace_reorder_block'],
+        ...snapshot([1, 2, 3]),
       });
       await page.goto('/');
       if (kind === 'workspaces') await page.getByRole('button', { name: 'Manage workspaces' }).click();
@@ -351,16 +280,20 @@ for (const kind of ['tabs', 'workspaces'] as const) {
       const handle = (id: number) => slot(id).locator(kind === 'tabs' ? '.agent-open' : '.workspace-drag-handle');
       const order = () => slots.evaluateAll((nodes, kind) => nodes.map(node => Number((kind === 'tabs'
         ? (node as HTMLElement).dataset.tabId : (node as HTMLElement).dataset.workspaceKey)!.slice(1))), kind);
-      const history = () => page.evaluate(() => (window as unknown as { admission: AdmissionControl }).admission.history);
+      const history = async () => (await mockRelayCommands(page))
+        .filter(command => command.type === 'tab_reorder' || command.type === 'workspace_reorder');
       const key = (id: number) => handle(id).evaluate(node => node.dispatchEvent(new KeyboardEvent('keydown', {
         bubbles: true, cancelable: true, altKey: true, key: 'ArrowUp',
       })));
-      const snapshot = async (ids: number[]) => {
-        await page.evaluate(ids => (window as unknown as { admission: AdmissionControl }).admission.snapshot(ids), ids);
+      const reorderTo = async (ids: number[]) => {
+        const { workspaces, agents } = snapshot(ids);
+        await mockRelayServer(page, { type: 'workspaces', workspaces });
+        await mockRelayServer(page, { type: 'agents', agents });
         await expect.poll(order).toEqual(ids);
       };
-      const settle = (index: number, ok: boolean) => page.evaluate(({ index, ok }) =>
-        (window as unknown as { admission: AdmissionControl }).admission.settle(index, ok), { index, ok });
+      const settle = async (index: number, ok: boolean) => mockRelayServer(page, {
+        type: 'command_result', request_id: (await history())[index].request_id, ok, error: ok ? undefined : 'Selected command refused',
+      });
       const expected = (id: number, index: number, before = '') => kind === 'tabs'
         ? { type: 'tab_reorder', pane_id: `p${id}`, server_session_id: 'session',
           target: { relay_id: 'test', server_session_id: 'session', pane_id: `p${id}`, terminal_id: `terminal${id}`, generation: 1 }, insert_index: index, protocol: 3 }
@@ -431,16 +364,16 @@ for (const kind of ['tabs', 'workspaces'] as const) {
         await assertHistory([first]); // Busy owner retained, no queue/retry.
 
         await settle(0, ok);
-        if (ok) await snapshot([1, 3, 2]);
+        if (ok) await reorderTo([1, 3, 2]);
         else await expect.poll(order).toEqual([1, 2, 3]);
-        await snapshot([3, 1, 2]);
+        await reorderTo([3, 1, 2]);
         await drag(3);
         await page.mouse.up();
         const second = expected(3, 3);
         await assertHistory([first, second]);
         await expect.poll(order).toEqual([1, 2, 3]);
         await settle(1, true);
-        await snapshot([1, 2, 3]);
+        await reorderTo([1, 2, 3]);
         await key(3);
         await assertHistory([first, second, first]);
         await expect.poll(order).toEqual([1, 3, 2]);

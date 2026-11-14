@@ -8,21 +8,12 @@ import {
   unsavedPromptDraft,
 } from '$lib/prompt-drafts';
 import type { Agent } from '$lib/types';
+import { makeAgent } from '../support/relay';
 
 function agent(overrides: Partial<Agent> = {}): Agent {
-  return {
-    relay_id: 'relay-1',
-    relay_label: 'Fedora',
-    raw_pane_id: 'pane-1',
-    pane_id: 'relay-1::pane-1',
-    terminal_id: 'terminal-1',
-    server_session_id: 'server-1',
-    generation: 1,
-    agent_session_id: 'session-1',
-    agent: 'codex',
-    cwd: '/work/project',
-    ...overrides,
-  };
+  return makeAgent({
+    relay_id: 'relay-1', server_session_id: 'server-1', cwd: '/work/project', ...overrides,
+  });
 }
 
 describe('prompt drafts', () => {

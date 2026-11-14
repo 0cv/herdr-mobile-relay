@@ -14,21 +14,13 @@ import {
 import { currentView } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { Agent, ConversationPage } from '$lib/types';
+import { makeAgent } from '../support/relay';
 
 function agent(relayId = 'fedora', rawPaneId = 'pane-1', terminalId = 'terminal-1'): Agent {
-  return {
-    relay_id: relayId,
-    relay_label: relayId,
-    raw_pane_id: rawPaneId,
-    pane_id: `${relayId}::${rawPaneId}`,
-    server_session_id: 'primary',
-    terminal_id: terminalId,
-    generation: 1,
-    agent_session_id: 'session-1',
-    agent: 'codex',
-    project: `${relayId} project`,
-    status: 'working',
-  };
+  return makeAgent({
+    relay_id: relayId, relay_label: relayId, raw_pane_id: rawPaneId, terminal_id: terminalId,
+    project: `${relayId} project`, status: 'working',
+  });
 }
 
 function page(overrides: Partial<ConversationPage> = {}): ConversationPage {

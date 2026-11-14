@@ -8,23 +8,12 @@ import {
   parsePaneViewPreferenceKey,
 } from '$lib/agent-view';
 import type { Agent, RelayConnectionView } from '$lib/types';
+import { makeAgent } from '../support/relay';
 
 type Connection = Pick<RelayConnectionView, 'status' | 'inventory' | 'capabilities'>;
 
 function agent(overrides: Partial<Agent> = {}): Agent {
-  return {
-    relay_id: 'fedora',
-    relay_label: 'Fedora',
-    raw_pane_id: 'pane-1',
-    pane_id: 'fedora::pane-1',
-    server_session_id: 'primary',
-    terminal_id: 'terminal-1',
-    generation: 1,
-    agent_session_id: 'session-1',
-    conversation_history_available: true,
-    agent: 'codex',
-    ...overrides,
-  };
+  return makeAgent({ conversation_history_available: true, ...overrides });
 }
 
 function connection(overrides: Partial<Connection> = {}): Connection {
