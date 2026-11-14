@@ -27,7 +27,7 @@ const androidAllowlistedChildEnvironment = (directory: string): NodeJS.ProcessEn
 });
 export const sm59HistoricalCase = { run: '35556703407', childPid: '5820', product: 'INDETERMINATE', environment: 'FAIL', relation: 'UNPROVEN' } as const;
 export function measurementIdentity(overrides: Partial<MeasurementIdentity> = {}): MeasurementIdentity {
-  return { runId: '35556703407', attempt: '2', suite: 'smoke', platform: 'android', baseline: '0.20.10', scenario: 'historical',
+  return { runId: '35556703407', attempt: '2', platform: 'android', baseline: '0.20.10',
     sourceCommit: 'a'.repeat(40), sourceRunHeadSha: 'b'.repeat(40), candidateWebHash: 'c'.repeat(64), candidateBuild: 'd'.repeat(64), measurementId: 'android-test', ...overrides };
 }
 const dependencyFields = ['dynamic libraries', 'static library', 'SDK library', 'usesLibraries', 'usesStaticLibraries', 'usesSdkLibraries', 'usesOptionalLibraries', 'usesNativeLibraries', 'usesOptionalNativeLibraries', 'usesLibraryFiles', 'enabledComponents', 'disabledComponents', 'flags', 'splits', 'privateFlags', 'pkgFlags', 'privatePkgFlags', 'updateOwnerPackageName', 'apkSigningVersion'];
@@ -65,7 +65,25 @@ export function changePackage(input: EnvironmentInputBytes, mutate: (value: Andr
   if (rehash) rehashPackage(after.packages[name]);
   input.after = JSON.stringify(after);
 }
-export function observationsFixture(identity = measurementIdentity(), pid = '42', cold?: AndroidPlannedTermination): ProductObservations {
+function coldOperation(identity = measurementIdentity(), pid = '42'): AndroidPlannedTermination {
+  return { id: 'cold-1', measurementId: identity.measurementId, packageName: 'com.android.chrome', pid, processes: { [pid]: 'com.android.chrome' }, command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'], succeeded: true };
+}
+function releaseEnvironmentFixture(input: EnvironmentInputBytes, identity = measurementIdentity()): EnvironmentInputBytes {
+  const value = structuredClone(input);
+  const after = JSON.parse(value.after) as AndroidEnvironmentSnapshot;
+  delete after.measurement!.processes['42'];
+  after.measurement!.processes['43'] = 'com.android.chrome';
+  value.after = JSON.stringify(after);
+  value.operations = JSON.stringify([coldOperation(identity)]);
+  value.log = value.log.replace(marker(9, 'END', identity.measurementId),
+    marker(6, 'OP_BEGIN cold-1 com.android.chrome 42', identity.measurementId)
+    + marker(7, 'OP_END cold-1 com.android.chrome 42', identity.measurementId)
+    + '1789100408.000 546 546 I ActivityManager: Start proc 43:com.android.chrome/u0a146 for activity {com.android.chrome/Main}\n'
+    + marker(9, 'END', identity.measurementId));
+  value.collector = JSON.stringify({ bytes: Buffer.byteLength(value.log) });
+  return value;
+}
+export function observationsFixture(identity = measurementIdentity(), pid = '42', cold = coldOperation(identity, pid)): ProductObservations {
   const bootId = '11111111-1111-1111-1111-111111111111';
   const native = { pid, startTime: '12080', bootId, namespace: 'kernel-pid-namespaces-disabled' as const,
     kernelCapability: { mode: 'disabled' as const, source: '/proc/config.gz' as const, sha256: 'e'.repeat(64), compressedBytes: 100, configBytes: 200, compressedLimit: 262144 as const, configLimit: 2097152 as const, bootId, acquiredStartedAt: 1, acquiredFinishedAt: 2 } };
@@ -90,13 +108,11 @@ export function observationsFixture(identity = measurementIdentity(), pid = '42'
   perform('read', 'identity'); transition('pairing-navigation'); perform('mutation', 'control'); perform('read', 'preference'); checkpoint('paired');
   transition('update-activation'); perform('mutation', 'control'); perform('read', 'identity'); perform('read', 'completion'); checkpoint('candidate');
   transition('warm-launch'); perform('read', 'identity'); perform('read', 'preference');
-  if (identity.suite === 'release') {
-    perform('read', 'completion'); perform('mutation', 'control');
-    owner = 2;
-    append({ kind: 'cold-handoff', name: 'planned-cold', operation: 1, termination: cold });
-    native.pid = '43'; native.startTime = '13000'; lastInspection = 0;
-    perform('read', 'identity'); perform('read', 'preference'); checkpoint('lifecycle-complete');
-  }
+  perform('read', 'completion'); perform('mutation', 'control');
+  owner = 2;
+  append({ kind: 'cold-handoff', name: 'planned-cold', operation: 1, termination: cold });
+  native.pid = '43'; native.startTime = '13000'; lastInspection = 0;
+  perform('read', 'identity'); perform('read', 'preference'); checkpoint('lifecycle-complete');
   checkpoint('scenario-complete');
   return value;
 }
@@ -123,7 +139,7 @@ export function checkCLI(fixture: { root: string; environment?: NodeJS.ProcessEn
   writeFileSync(join(directory, 'android-environment-session.json'), JSON.stringify({ id: identity.measurementId }));
   writeFileSync(join(directory, 'identity.json'), JSON.stringify(identity));
   writeFileSync(join(directory, 'bundle-set.json'), JSON.stringify({ candidate: { provenance: { sourceCommit: identity.sourceCommit }, identity: { webHash: identity.candidateWebHash, build: identity.candidateBuild } } }));
-  const args = ['check', '--contract', contract, '--directory', directory, '--identity', join(directory, 'identity.json'), '--bundle-set', join(directory, 'bundle-set.json'), '--run-id', identity.runId, '--attempt', identity.attempt, '--suite', identity.suite, '--baseline', identity.baseline, '--scenario', identity.scenario, '--source-run-head-sha', identity.sourceRunHeadSha];
+  const args = ['check', '--contract', contract, '--directory', directory, '--identity', join(directory, 'identity.json'), '--bundle-set', join(directory, 'bundle-set.json'), '--run-id', identity.runId, '--attempt', identity.attempt, '--baseline', identity.baseline, '--source-run-head-sha', identity.sourceRunHeadSha];
   let passed = true, stderr = '';
   try { execFileSync(process.execPath, [process.env.ANDROID_ENVIRONMENT_SOURCE || repositoryPath('tests/mobile/android-environment.ts'), ...args], { env: { ...(fixture.environment || process.env), BUN_OPTIONS: '--no-env-file' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
   catch (error) { passed = false; stderr = String((error as { stderr?: string }).stderr || error); }
@@ -148,6 +164,7 @@ export async function producerFixture(): Promise<Record<string, any>> {
   return data;
 }
 export async function persistAndroidProof(directory: string, identity: MeasurementIdentity, input = environmentFixture(identity.measurementId)): Promise<{ environment_qualification: MobileResultContract['environment_qualification']; evidence: Record<string, unknown> }> {
+  input = releaseEnvironmentFixture(input, identity);
   for (const [key, leaf] of Object.entries(environmentLeaves)) await writeFile(join(directory, leaf), input[key as keyof EnvironmentInputBytes] ?? '');
   const assessment = assessAndroidEnvironment(input, identity);
   await writeSanitizedJson(join(directory, 'android-environment-check.json'), assessment);
@@ -165,12 +182,12 @@ export async function evidenceFixture(platform: 'android' | 'ios' = 'android', i
   const baseline = { version: '0.20.10', assets: 363, build: 'e'.repeat(64), entry: '/old/index.html', script: '/old.js', style: '/old.css', webHash: 'f'.repeat(64) };
   const candidate = { version: '0.21.0', assets: 370, build: identity.candidateBuild, entry: '/new/index.html', script: '/new.js', style: '/new.css', webHash: identity.candidateWebHash };
   const runtime = { standalone: true, provider: platform === 'ios' ? 'ios-home-screen' : 'android-standalone', nativeProvider: platform === 'ios' ? 'ios:com.apple.webapp' : 'android:com.android.chrome', nativeActivity: 'org.chromium.chrome.browser.webapps.WebappActivity', nativePid: '42', origin: 'https://fixture.test', url: 'https://fixture.test/', requiredAssetsReady: true, applicationInitialized: true, buildFromApplication: true };
-  const result = { ...resultContract(identity), platform, suite: 'smoke', baseline: identity.baseline, candidate: 'candidate-current', source_commit: identity.sourceCommit, source_run_head_sha: identity.sourceRunHeadSha, candidate_web_hash: identity.candidateWebHash,
-    origin: runtime.origin, initial_identity: { ...runtime, ...baseline }, final_identity: { ...runtime, ...candidate }, credential_preserved: true,
+  const result = { ...resultContract(identity), platform, baseline: identity.baseline, candidate: 'candidate-current', source_commit: identity.sourceCommit, source_run_head_sha: identity.sourceRunHeadSha, candidate_web_hash: identity.candidateWebHash,
+    origin: runtime.origin, initial_identity: { ...runtime, ...baseline }, final_identity: { ...runtime, ...candidate, nativePid: '43' }, lifecycle_launch_count: 1, credential_preserved: true,
     credential_evidence: { relays: Object.fromEntries(['alpha', 'beta'].map(name => [name, { invitationAuthCount: 1, credentialAuthCount: 2, credentialPseudonyms: [name], connections: 1 }])) }, preference_preserved: true,
     phone_completion: { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true }, faults_exercised: ['corrupt:/new.js'], fault_identity: { id: 'fault', generation: '1', kind: 'corrupt', path: '/new.js' }, fixture_requests: [{ release: 'candidate', path: '/new.js', fault: 'corrupt', fault_id: 'fault', fault_generation: '1' }],
     ...(platform === 'android' ? await persistAndroidProof(directory, identity, input) : { evidence: { driver: driverFixture(), teardown: { driver: driverFixture(true) } } }) };
-  const options: EvidenceValidationOptions = { contract: 'product', runId: identity.runId, attempt: identity.attempt, directory, matrix: [{ platform, baseline: identity.baseline, scenario: 'historical' }], suite: 'smoke', candidateCommit: identity.sourceCommit, sourceRunHeadSha: identity.sourceRunHeadSha, candidateWebHash: identity.candidateWebHash, candidateIdentity: candidate, baselineIdentities: [{ name: identity.baseline, identity: baseline }] };
+  const options: EvidenceValidationOptions = { contract: 'product', runId: identity.runId, attempt: identity.attempt, directory, matrix: [{ platform, baseline: identity.baseline }], candidateCommit: identity.sourceCommit, sourceRunHeadSha: identity.sourceRunHeadSha, candidateWebHash: identity.candidateWebHash, candidateIdentity: candidate, baselineIdentities: [{ name: identity.baseline, identity: baseline }] };
   const persist = () => writeSanitizedJson(join(directory, 'mobile-result.json'), result);
   await persist();
   return { directory, identity, result, options, persist };
@@ -182,7 +199,7 @@ async function platformObservationControl(): Promise<ProductObservations> {
   const { PhaseBudget } = await import('../support/budget');
   const handle = '753D4398F5ABC414D3DAABBF0B329743', startedAt = Date.now() - 1;
   const budget = new PhaseBudget('sm59-recorder-seam', { timeoutMs: 300_000, recoveryLimit: 0 });
-  let document = startedAt - 1, deferredNavigation = false, inspections = 0;
+  let document = startedAt - 1, deferredNavigation = false, inspections = 0, controlText = 'Load Update';
   const client = new AppiumClient('http://recorder.invalid', 30_000, async (input, init) => {
     const path = new URL(String(input)).pathname, body = init?.body ? JSON.parse(String(init.body)) : {};
     const response = (value: unknown) => Response.json({ value, sessionId: 'original' });
@@ -191,7 +208,7 @@ async function platformObservationControl(): Promise<ProductObservations> {
     if (path.endsWith('/window')) return response(handle);
     if (path.endsWith('/url')) return response('https://fixture.test/');
     if (path.endsWith('/elements')) return response([{ 'element-6066-11e4-a52e-4f735466cecf': 'button' }]);
-    if (path.endsWith('/text')) return response('Load Update');
+    if (path.endsWith('/text')) return response(controlText);
     if (path.endsWith('/click')) { deferredNavigation = true; return response(null); }
     if (path.endsWith('/execute/sync')) {
       if (body.script === 'mobile: inspectRetainedChromeTargets') {
@@ -229,9 +246,18 @@ async function platformObservationControl(): Promise<ProductObservations> {
   await platform.relaunchInstalledApp();
   await platform.readRunningIdentity();
   await platform.preferenceValue();
+  await platform.readUpdateCompletion();
+  controlText = 'Close';
+  await platform.clickDialogText('update-progress-dialog', 'Close');
+  const operation = coldOperation(measurementIdentity(), '123');
+  seam.retainedOwner = { ...seam.retainedOwner };
+  seam.productRecorder.handoff(seam.retainedOwner, () => [operation]);
+  await platform.readRunningIdentity();
+  await platform.preferenceValue();
+  platform.productCheckpoint('lifecycle-complete');
   platform.productCheckpoint('scenario-complete');
   const observations = platform.evidenceSnapshot().productObservations as ProductObservations;
-  validateProductObservations(observations, measurementIdentity());
+  validateProductObservations(observations, measurementIdentity(), [operation]);
   assert.equal(observations.records.filter(record => record.kind === 'inspection').length, inspections);
   assert.ok(observations.records.some(record => record.kind === 'document-change'));
   await client.close();
@@ -255,7 +281,7 @@ async function evidenceCLI(fixture: Awaited<ReturnType<typeof evidenceFixture>>,
   const { options } = fixture;
   const output = join(fixture.directory, 'public-summary.json'), summary = join(fixture.directory, 'step-summary.txt'), stepOutput = join(fixture.directory, 'step-output.txt');
   for (const path of [output, summary, stepOutput]) await writeFile(path, '');
-  const values = { '--contract': options.contract, '--directory': directory, '--run-id': options.runId, '--attempt': options.attempt, '--suite': options.suite,
+  const values = { '--contract': options.contract, '--directory': directory, '--run-id': options.runId, '--attempt': options.attempt,
     '--matrix': JSON.stringify(options.matrix), '--candidate-commit': options.candidateCommit, '--source-run-head-sha': options.sourceRunHeadSha,
     '--candidate-web-hash': options.candidateWebHash, '--candidate-identity': JSON.stringify(options.candidateIdentity), '--baseline-identities': JSON.stringify(options.baselineIdentities) };
   const child = spawnSync(process.execPath, [repositoryPath(`tests/mobile/validate-${report ? 'environment' : 'evidence'}.ts`), ...Object.entries(values).flat(), ...(report ? ['--output', output] : [])],
@@ -270,7 +296,7 @@ async function environmentCheckCLI(fixture: Awaited<ReturnType<typeof evidenceFi
   await writeFile(bundle, JSON.stringify({ candidate: { provenance: { sourceCommit: identity.sourceCommit }, identity: fixture.options.candidateIdentity } }));
   const child = spawnSync(process.execPath, [repositoryPath('tests/mobile/android-environment.ts'), 'check', '--contract', 'report', '--directory', fixture.directory,
     '--identity', join(fixture.directory, 'android-environment-identity.json'), '--bundle-set', bundle, '--run-id', identity.runId, '--attempt', identity.attempt,
-    '--suite', identity.suite, '--baseline', identity.baseline, '--scenario', identity.scenario, '--source-run-head-sha', identity.sourceRunHeadSha], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, BUN_OPTIONS: '--no-env-file' } });
+    '--baseline', identity.baseline, '--source-run-head-sha', identity.sourceRunHeadSha], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, BUN_OPTIONS: '--no-env-file' } });
   assert.equal(child.error, undefined);
   return child;
 }
@@ -299,7 +325,7 @@ class MeasurementCollectorMock implements OwnedProcess {
   retire(_reason: string): Promise<RetirementEvidence> { return this.retirement; }
 }
 
-export const measurementFailureCases = ['none', 'begin-snapshot', 'begin-marker', 'close', 'transport', 'log', 'collector', 'identity', 'check', 'completion', 'end-snapshot'] as const;
+export const measurementFailureCases = ['none', 'begin-snapshot', 'begin-marker', 'close', 'log', 'collector', 'identity', 'check', 'completion', 'end-snapshot'] as const;
 export async function measurementControl(failure: typeof measurementFailureCases[number]): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'sm59-measurement-'));
   const diagnostics = await import('./android-environment').catch(() => undefined);
@@ -309,6 +335,38 @@ export async function measurementControl(failure: typeof measurementFailureCases
   const failBegin = failure.startsWith('begin-');
   const io: Partial<AndroidMeasurementIO> = {
     boundedCommand: async (binary, args, timeout, options) => {
+      if (args.includes('--android-measurement-persist-json') || args.includes('--android-measurement-persist-text')) {
+        const request = JSON.parse(String(options.input));
+        const name = request.target.endsWith('.log') ? 'log' : request.target.match(/android-environment-(\w+)\.json$/u)![1];
+        trace.push(name);
+        if (name === failure) throw original;
+        if (failBegin && name === 'completion') throw new Error('injected-receipt');
+      }
+      if (args.includes('dumpsys')) {
+        const stdout = `Packages:
+  Package [com.google.android.gms] (fixture):
+    codePath=/system/app/browser
+    versionCode=1 minSdk=23 targetSdk=35
+    versionName=131.0.6778.200
+    installerPackageName=null
+    initiatingPackageName=null
+    originatingPackageName=null
+    packageSource=0
+    lastUpdateTime=2026-09-10 08:00:00
+    flags=[SYSTEM]
+    splits=[base]
+    User 0: installed=true hidden=false suspended=false stopped=false enabled=0
+      firstInstallTime=2026-09-10 08:00:00
+Queries:
+
+Compiler stats:
+  [com.google.android.gms]
+    (No recorded stats)
+`;
+        return { stdout, stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
+          childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0,
+          stdoutRetainedBytes: Buffer.byteLength(stdout), stderrRetainedBytes: 0, stdoutSha256: hash(stdout), stderrSha256: hash('') };
+      }
       if (args.includes('snapshot')) {
         const boundary = args[args.indexOf('--boundary') + 1];
         trace.push(`snapshot:${boundary}`);
@@ -322,8 +380,8 @@ export async function measurementControl(failure: typeof measurementFailureCases
           childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: 0, stderrBytes: 0,
           stdoutRetainedBytes: 0, stderrRetainedBytes: 0, stdoutSha256: hash(''), stderrSha256: hash('') };
       }
-      if (args.includes('--android-measurement-owner')) {
-        const stdout = 'BEGIN_OK\n';
+      if (args.includes('--android-measurement-owner') || args.includes('--gms-diagnostic-ownership')) {
+        const stdout = args.includes('--gms-diagnostic-ownership') ? 'OWNED\n' : 'BEGIN_OK\n';
         return { stdout, stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
           childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0,
           stdoutRetainedBytes: Buffer.byteLength(stdout), stderrRetainedBytes: 0, stdoutSha256: hash(stdout), stderrSha256: hash('') };
@@ -360,13 +418,14 @@ export async function measurementControl(failure: typeof measurementFailureCases
       return { stdout: '', stderr: '' } as Awaited<ReturnType<AndroidMeasurementIO['command']>>;
     },
     stopProcess: async () => { trace.push('close'); if (failure === 'close') throw original; if (failBegin) throw cleanup; return child.retire('measurement-finished').then(evidence => evidence); },
-    transport: { observe: () => undefined, finish: async () => { trace.push('transport'); if (failure === 'transport') throw original; }, failure: undefined },
-    writeFile: (async (path: any, data: any, options: any) => { trace.push(String(path).endsWith('.log') ? 'log' : 'session'); if (failure === 'log' && String(path).endsWith('.log')) throw original; return writeFile(path, data, options); }) as typeof writeFile,
     writeJson: async (path, data) => { const name = path.match(/android-environment-(\w+)\.json$/u)![1]; trace.push(name); if (name === failure) throw original; if (failBegin && name === 'completion') throw new Error('injected-receipt'); await writeSanitizedJson(path, data); },
   };
   const measurement = new AndroidEnvironmentMeasurement('emulator-5554', directory, 'unused-public-toolchains', io,
     new PhaseBudget('product-measurement-control', { timeoutMs: 600_000 }));
   measurement.bind(measurementIdentity({ measurementId: measurement.id }));
+  const stageBudget = new PhaseBudget('measurement-stages', { timeoutMs: 60_000 });
+  await measurement.observeGmsStage('after-device-start', stageBudget);
+  await measurement.observeGmsStage('before-measurement-begin', stageBudget);
   if (failBegin) {
     let caught: unknown;
     try { await measurement.begin(); } catch (error) { caught = error; }
@@ -374,14 +433,15 @@ export async function measurementControl(failure: typeof measurementFailureCases
     if (failure === 'begin-snapshot') assert.equal(caught, original);
     assert.equal(measurement.failureOutcome().errors[0], caught);
     assert.ok(measurement.failureOutcome().errors.includes(cleanup));
-    assert.ok(trace.indexOf('close') < trace.indexOf('transport'));
+    await measurement.finish();
     assert.ok(trace.includes('collector') && trace.includes('completion'));
     return;
   }
   await measurement.begin();
+  for (const stage of ['after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const) await measurement.observeGmsStage(stage, stageBudget);
   const outcome = await measurement.finish();
   assert.ok(trace.indexOf('snapshot:end') < trace.indexOf('close'));
-  for (const step of ['close', 'transport', 'log', 'collector', 'identity', 'check', 'completion']) assert.ok(trace.includes(step), `${failure}/${step}`);
+  for (const step of ['close', 'log', 'collector', 'identity', 'check', 'completion']) assert.ok(trace.includes(step), `${failure}/${step}`);
   if (failure === 'none') { assert.deepEqual(outcome.errors, []); assert.equal(outcome.assessment?.status, 'PASS'); assert.equal(outcome.assessmentSha256, hash(await readFile(join(directory, 'android-environment-check.json')))); }
   else assert.ok(outcome.errors.includes(original), failure);
   if (failure === 'none') {
@@ -461,7 +521,7 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       const input = environmentFixture();
       if (mode !== 'stable') changePackage(input, value => { if (mode === 'dump-noise') value.dumpSha256 = hash('noise'); else value.dependencyConfig[mode === 'disabled' ? 'disabledComponents' : 'enabledComponents'] = ['com.google.android.gms.PublicComponent']; });
       if (mode === 'equal-count-members') { const before = JSON.parse(input.before); before.packages['com.google.android.gms'].dependencyConfig.enabledComponents = ['com.google.android.gms.OtherComponent']; rehashPackage(before.packages['com.google.android.gms']); input.before = JSON.stringify(before); }
-      const check = assessAndroidEnvironment(input, measurementIdentity());
+      const check = assessAndroidEnvironment(releaseEnvironmentFixture(input), measurementIdentity());
       assert.equal(check.collection.status, 'PASS', JSON.stringify(check.collection));
       assert.equal(check.status, ['stable', 'dump-noise'].includes(mode) ? 'PASS' : 'FAIL');
       assert.equal(androidProductImpact(check, observationsFixture()).status, 'PASS');
@@ -506,21 +566,21 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
         else if (field === 'unknown-section') value.dependencyConfig.unknown = [];
         else value.dependencyConfig.enabledComponents = ['[REDACTED]'];
       }, field === 'chrome-components' ? 'com.android.chrome' : field === 'trichrome-components' ? 'com.google.android.trichromelibrary' : 'com.google.android.gms', !['hash', 'missing-hash'].includes(field));
-      const check = assessAndroidEnvironment(input, measurementIdentity());
+      const check = assessAndroidEnvironment(releaseEnvironmentFixture(input), measurementIdentity());
       assert.equal(androidProductImpact(check, observationsFixture()).status, 'FAIL', field);
       assert.notEqual(check.status, 'PASS', field);
     }
   }],
   ['Android product/environment SM59 03 adverse event relation', async () => {
     for (const owned of [false, true]) for (const initiator of [false, true]) {
-      const input = environmentFixture(), pid = '42';
+      const input = environmentFixture(), pid = owned ? '42' : '5820';
       const event = `1789100404.000 546 546 I ActivityManager: Killing ${pid}:com.android.chrome/u0a146 (adj 0): isolated not needed${initiator ? ' from pid 100' : ''}\n`;
       input.log = marker(0, 'START') + event + `1789100405.000 77 77 I Zygote: Process ${pid} exited due to signal 9 (Killed)\n` + marker(9, 'END');
       input.collector = JSON.stringify({ bytes: Buffer.byteLength(input.log) });
-      const check = assessAndroidEnvironment(input, measurementIdentity());
+      const check = assessAndroidEnvironment(releaseEnvironmentFixture(input), measurementIdentity());
       assert.equal(check.status, 'FAIL');
       assert.equal(check.eventCounts.fatalEvents, 2);
-      assert.equal(androidProductImpact(check, observationsFixture(measurementIdentity(), owned ? '42' : '43')).status, owned ? 'FAIL' : 'INDETERMINATE');
+      assert.equal(androidProductImpact(check, observationsFixture()).status, owned ? 'FAIL' : 'INDETERMINATE');
       assert.equal(check.nativeEvents[0].initiatorPid, initiator ? '100' : undefined);
     }
   }],
@@ -548,11 +608,11 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       if (mutation === 'signal') lines.splice(3, 0, '1789100403.500 5820 5820 I Process: Sending signal. PID: 5820 SIG: 9');
       if (mutation === 'reuse') lines.splice(2, 0, lines[1]);
       const log = marker(0, 'START') + lines.join('\n') + '\n' + marker(9, 'END');
-      const check = assessAndroidEnvironment({ ...input, log, collector: JSON.stringify({ bytes: Buffer.byteLength(log) }) }, measurementIdentity());
+      const check = assessAndroidEnvironment(releaseEnvironmentFixture({ ...input, log, collector: JSON.stringify({ bytes: Buffer.byteLength(log) }) }), measurementIdentity());
       assert.equal(check.normalRetirements.length, 0, mutation);
       for (const pid of ['42', '5820']) assert.notEqual(androidProductImpact(check, observationsFixture(measurementIdentity(), pid)).status, 'PASS', `${mutation}/${pid}`);
     }
-    const identity = measurementIdentity({ suite: 'release' });
+    const identity = measurementIdentity();
     const operation: AndroidPlannedTermination = { id: 'cold-1', measurementId: identity.measurementId, packageName: 'com.android.chrome', pid: '42', processes: { '42': 'com.android.chrome' }, command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'], succeeded: true };
     const observations = observationsFixture(identity, '42', operation);
     validateProductObservations(observations, identity, [operation]);
@@ -602,15 +662,17 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
     }
   }],
   ['Android product/environment SM59 05 observation and producer binding', async () => {
-    validateProductObservations(observationsFixture(), measurementIdentity());
+    validateProductObservations(observationsFixture(), measurementIdentity(), [coldOperation()]);
     const recorded = await platformObservationControl();
     for (const value of [observationsFixture(), recorded]) {
+      const planned = [coldOperation(value.identity, value.initialNative.pid)];
+      validateProductObservations(value, value.identity, planned);
       for (const operation of value.records.filter(record => record.kind === 'operation-begin')) {
-        assert.throws(() => validateProductObservations(withoutOperation(value, operation.ordinal), value.identity), /coverage/u);
+        assert.throws(() => validateProductObservations(withoutOperation(value, operation.ordinal), value.identity, planned), /coverage/u);
       }
       const collapsed = structuredClone(value), inspection = value.records.find(record => record.kind === 'inspection')!;
       collapsed.records = [value.records[0], inspection, ...value.records.filter(record => record.kind === 'checkpoint' && record.name !== 'measurement-start')].map((record, index) => ({ ...record, ordinal: index + 1, ...(record.kind === 'checkpoint' ? { completedOperations: 0, beforeInspection: index ? 2 : undefined } : {}) }));
-      assert.throws(() => validateProductObservations(collapsed, value.identity), /coverage/u);
+      assert.throws(() => validateProductObservations(collapsed, value.identity, planned), /coverage/u);
     }
     const unrecorded = structuredClone(recorded);
     unrecorded.records = unrecorded.records.filter(record => record.kind !== 'document-change');
@@ -621,12 +683,12 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       if (record.afterInspection) record.afterInspection = remap.get(record.afterInspection);
       if (record.kind === 'operation-end') record.operation = remap.get(record.operation!);
     }
-    assert.throws(() => validateProductObservations(unrecorded, unrecorded.identity), /coverage/u);
+    assert.throws(() => validateProductObservations(unrecorded, unrecorded.identity, [coldOperation(unrecorded.identity, unrecorded.initialNative.pid)]), /coverage/u);
     const betweenReads = observationsFixture();
     const nextRead = betweenReads.records.find(record => record.kind === 'operation-begin' && record.detail === 'completion')!;
     const before = betweenReads.records[nextRead.beforeInspection! - 1];
     before.document!++;
-    assert.throws(() => validateProductObservations(betweenReads, betweenReads.identity), /coverage/u);
+    assert.throws(() => validateProductObservations(betweenReads, betweenReads.identity, [coldOperation()]), /coverage/u);
 
     for (const field of ['target', 'document', 'owner', 'birth', 'boot', 'namespace', 'capability', 'pid', 'connection', 'fractional-connection', 'request', 'time', 'page-count', 'measurement', 'phase', 'last-checkpoint']) {
       const value = observationsFixture(), receipt = value.records[value.records.find(record => record.kind === 'operation-end')!.afterInspection! - 1];
@@ -646,7 +708,7 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       if (field === 'time') receipt.bounds![0].native[0].finishedAt = receipt.deadline! + 1;
       if (field === 'page-count') receipt.pageCount = 0;
       if (field === 'measurement') value.identity.attempt = '1';
-      assert.throws(() => validateProductObservations(value, measurementIdentity()), /coverage/u, field);
+      assert.throws(() => validateProductObservations(value, measurementIdentity(), [coldOperation()]), /coverage/u, field);
     }
     const directory = await mkdtemp(join(tmpdir(), 'sm59-producer-')), path = join(directory, 'producer.json'), original = await producerFixture();
     await writeFile(path, JSON.stringify(original)); await validateAndroidProducer(path);
@@ -849,7 +911,7 @@ if (state.runtimeKind !== 'bun' || state.setup !== 'installed' || state.wrapperS
       if (mode === 'overlap') { const index = value.records.findIndex(record => record.kind === 'operation-begin'); value.records[index + 1] = { ...value.records[index], ordinal: index + 2 }; }
       if (mode === 'limit') value.records = Array.from({ length: 1001 }, (_, index) => ({ ...value.records[0], ordinal: index + 1 }));
       if (mode === 'empty') value.records = [];
-      assert.throws(() => validateProductObservations(value, measurementIdentity()), /coverage/u, mode);
+      assert.throws(() => validateProductObservations(value, measurementIdentity(), [coldOperation()]), /coverage/u, mode);
     }
     const recorder = new AndroidProductRecorder(), owner = {};
     recorder.activate(measurementIdentity(), owner, observationsFixture().initialNative);
@@ -962,7 +1024,7 @@ if (state.runtimeKind !== 'bun' || state.setup !== 'installed' || state.wrapperS
     }
     const input = environmentFixture(); changePackage(input, value => { value.dependencyConfig.enabledComponents = ['com.google.android.gms.Visible']; });
     const fixture = await evidenceFixture('android', input);
-    const report = await collectEnvironmentReport({ ...fixture.options, matrix: [...fixture.options.matrix, { platform: 'ios', baseline: '0.20.10', scenario: 'historical' }] });
+    const report = await collectEnvironmentReport({ ...fixture.options, matrix: [...fixture.options.matrix, { platform: 'ios', baseline: '0.20.10' }] });
     assert.equal(report.incomplete, true); assert.equal(report.environment, 'FAIL'); assert.equal(report.rows.length, 2); assert.notEqual(report.product, 'PASS');
     await writeFile(join(fixture.directory, 'android-environment-log.json'), 'irrelevant public leaf');
     for (const leaf of ['android-environment-check.json', 'android-appium-integrity.json', 'android-environment-identity.json', 'android-environment-completion.json']) {
@@ -1009,7 +1071,7 @@ if (state.runtimeKind !== 'bun' || state.setup !== 'installed' || state.wrapperS
   ['Android product/environment SM59 11 public projection', async () => {
     const sentinel = 'PRIVATE_SENTINEL', input = environmentFixture();
     changePackage(input, value => { value.dependencyConfig.enabledComponents = Array.from({ length: 200 }, (_, index) => `com.google.android.gms.Public${String(index).padStart(3, '0')}`); });
-    const check = assessAndroidEnvironment(input, measurementIdentity());
+    const check = assessAndroidEnvironment(releaseEnvironmentFixture(input), measurementIdentity());
     check.nativeEvents.push({ kind: 'process-death', line: `1789100405.000 77 77 I Zygote: Process 5820 exited due to signal 9 (${sentinel})`, pid: '5820', processName: sentinel, reason: `https://private/#${sentinel}` });
     check.findings.push(...Array.from({ length: 80 }, () => ({ category: 'ADVERSE_DEATH' as const, packageName: sentinel })));
     const result = resultContract(); const projection = publicMobileSummary(result, check), bytes = JSON.stringify(projection);

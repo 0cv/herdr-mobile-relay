@@ -185,13 +185,12 @@ export function validateProductObservations(value: ProductObservations, identity
     paired: ['initial-install', 'pairing-navigation', 'identity', 'preference', 'mutation'],
     candidate: ['update-activation', 'identity', 'completion', 'mutation'],
     'lifecycle-complete': ['warm-launch', 'cold-launch', 'identity', 'completion', 'preference', 'mutation'],
-    'scenario-complete': identity.suite === 'smoke' ? ['warm-launch', 'identity', 'preference'] : [],
   };
   for (const [index, record] of value.records.entries()) {
     require(record.ordinal === index + 1);
     if (record.kind === 'cold-handoff') {
       const termination = planned[handoffs];
-      require(record.owner === owner + 1 && record.operation === ++handoffs && identity.suite === 'release' && operations.size === 0
+      require(record.owner === owner + 1 && record.operation === ++handoffs && operations.size === 0
         && checkpoints.has('candidate') && !checkpoints.has('lifecycle-complete'));
       require(termination?.succeeded === true && termination.measurementId === identity.measurementId && equal(record.termination, termination)
         && termination.pid === native?.pid && termination.processes[termination.pid] === termination.packageName);
@@ -221,7 +220,7 @@ export function validateProductObservations(value: ProductObservations, identity
       continue;
     }
     if (record.kind === 'checkpoint') {
-      const sequence = identity.suite === 'release' ? ['measurement-start', 'paired', 'candidate', 'lifecycle-complete', 'scenario-complete'] : ['measurement-start', 'paired', 'candidate', 'scenario-complete'];
+      const sequence = ['measurement-start', 'paired', 'candidate', 'lifecycle-complete', 'scenario-complete'];
       require(record.name === sequence[checkpoints.size] && (record.name === 'measurement-start' ? index === 0 : lastInspection?.name === 'installed-selected'));
       require(operations.size === 0 && record.completedOperations === completedOperations && record.beforeInspection === lastInspection?.ordinal);
       const required = requiredCoverage[record.name] || [];
@@ -287,9 +286,8 @@ export function validateProductObservations(value: ProductObservations, identity
       && association.before.completedAt <= association.after.startedAt && association.after.startedAt <= association.after.completedAt
       && association.after.completedAt <= after.startedAt);
   }
-  require(inspections > 0 && operations.size === 0 && handoffs === planned.length && handoffs === (identity.suite === 'release' ? 1 : 0));
-  for (const name of ['measurement-start', 'paired', 'candidate', 'scenario-complete']) require(checkpoints.has(name));
-  if (identity.suite === 'release') require(checkpoints.has('lifecycle-complete'));
+  require(inspections > 0 && operations.size === 0 && handoffs === planned.length && handoffs === 1);
+  for (const name of ['measurement-start', 'paired', 'candidate', 'lifecycle-complete', 'scenario-complete']) require(checkpoints.has(name));
 }
 
 export function publicMobileSummary(result: MobileResultContract, check?: AndroidEnvironmentCheck): Record<string, unknown> {
@@ -321,8 +319,8 @@ export function publicMobileSummary(result: MobileResultContract, check?: Androi
     relation: 'NOT_ESTABLISHED_BY_EVENT_ALONE',
   }));
   const summary = {
-    runId: result.identity.runId, attempt: result.identity.attempt, suite: result.identity.suite, platform: result.identity.platform,
-    baseline: result.identity.baseline, scenario: result.identity.scenario, sourceCommit: result.identity.sourceCommit,
+    runId: result.identity.runId, attempt: result.identity.attempt, platform: result.identity.platform,
+    baseline: result.identity.baseline, sourceCommit: result.identity.sourceCommit,
     sourceRunHeadSha: result.identity.sourceRunHeadSha, candidateWebHash: result.identity.candidateWebHash, candidateBuild: result.identity.candidateBuild,
     product: result.product.status, finalization: result.finalization.status, environment: status,
     collection: environment.platform === 'android' ? environment.collection : 'NOT_APPLICABLE',

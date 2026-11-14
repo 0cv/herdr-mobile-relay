@@ -265,8 +265,8 @@ jobs:
             const baseline = manifest.baselines.find(entry => entry.version !== candidate.version || entry.script !== candidate.script || entry.style !== candidate.style)?.name;
             if (!baseline) throw new Error("no distinct release baseline: candidate matches every listed release");
             const include = [
-              {platform: "android", runner: "ubuntu-24.04", baseline, scenario: "historical"},
-              {platform: "ios", runner: "xcode-27", baseline, scenario: "historical"}
+              {platform: "android", runner: "ubuntu-24.04", baseline},
+              {platform: "ios", runner: "xcode-27", baseline}
             ];
             console.log(`baseline=${baseline}`);
             console.log(`device_matrix=${JSON.stringify({include})}`);
@@ -364,8 +364,6 @@ jobs:
         with:
           platform: ${{ matrix.platform }}
           baseline: ${{ matrix.baseline }}
-          scenario: ${{ matrix.scenario }}
-          suite: release
           source_head_sha: ${{ needs.provenance.outputs.head_sha }}
           evidence_prefix: mobile-evidence-device
 
@@ -410,7 +408,7 @@ jobs:
           BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
         run: |
           bun tests/mobile/validate-environment.ts --contract product --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-            --directory evidence --matrix "$DEVICE_MATRIX" --suite release \
+            --directory evidence --matrix "$DEVICE_MATRIX" \
             --candidate-commit "$CANDIDATE_COMMIT" --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
             --candidate-web-hash "$CANDIDATE_WEB_HASH" --candidate-identity "$CANDIDATE_IDENTITY" \
             --baseline-identities "$BASELINE_IDENTITIES" --output environment-summary.json
@@ -424,7 +422,7 @@ jobs:
           BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
         run: |
           bun tests/mobile/validate-environment.ts --require-pass --contract qualified --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-            --directory evidence --matrix "$DEVICE_MATRIX" --suite release \
+            --directory evidence --matrix "$DEVICE_MATRIX" \
             --candidate-commit "$CANDIDATE_COMMIT" --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
             --candidate-web-hash "$CANDIDATE_WEB_HASH" --candidate-identity "$CANDIDATE_IDENTITY" \
             --baseline-identities "$BASELINE_IDENTITIES"
@@ -496,7 +494,7 @@ jobs:
           BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
         run: |
           bun tests/mobile/validate-evidence.ts --contract qualified --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-            --directory evidence --matrix "$DEVICE_MATRIX" --suite release \
+            --directory evidence --matrix "$DEVICE_MATRIX" \
             --candidate-commit "$CANDIDATE_COMMIT" --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
             --candidate-web-hash "$CANDIDATE_WEB_HASH" --candidate-identity "$CANDIDATE_IDENTITY" \
             --baseline-identities "$BASELINE_IDENTITIES"

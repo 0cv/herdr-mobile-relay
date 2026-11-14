@@ -19,7 +19,7 @@ import { isAndroidPackageProcess, isAndroidTerminationPackage } from './android-
 import type { AppiumClient } from './support/webdriver';
 import { ANDROID_TRANSPORT_TRIGGER_DEADLINE_MS, ANDROID_TRANSPORT_TRIGGER_FRESHNESS_MS, AndroidTransportObservation,
   AndroidTransportTriggerDetector, androidGuestEpochNanoseconds, transportAdbObservation,
-  type AndroidTransportCandidate, type AndroidTransportTestFixture, type AndroidTransportTrigger } from './support/android-transport';
+  type AndroidTransportCandidate, type AndroidTransportTrigger } from './support/android-transport';
 
 export interface AndroidMeasurementOutcome {
   assessment?: AndroidEnvironmentCheck;
@@ -30,8 +30,6 @@ export interface AndroidMeasurementOutcome {
 export interface AndroidMeasurementIO {
   command: typeof command;
   boundedCommand: typeof boundedCommand;
-  writeFile: typeof writeFile;
-  readFile: typeof readFile;
   writeJson: typeof writeSanitizedJson;
   stopProcess: (collector: OwnedProcess) => Promise<RetirementEvidence>;
   spawnCollector: () => OwnedProcess;
@@ -40,8 +38,7 @@ export interface AndroidMeasurementIO {
   collectorObserverSupervisor?: Writable;
   monotonicNow: () => number;
   plannedTerminationExitMs: number;
-  transport: Pick<AndroidTransportObservation, 'observe' | 'finish' | 'failure'>;
-  transportObservationFixture?: AndroidTransportTestFixture;
+  transportAdbObservation: typeof transportAdbObservation;
 }
 
 export type AndroidGmsObservationStage = 'after-device-start' | 'before-measurement-begin' | 'after-setup-url'
@@ -243,7 +240,6 @@ export class AndroidEnvironmentMeasurement {
   private started = false;
   private readonly operations: AndroidPlannedTermination[] = [];
   private identity?: MeasurementIdentity;
-  private requireGmsObservationsValue = false;
   private gmsStageIndex = 0;
   private gmsObservationsSequenceFailed = false;
   private readonly gmsObservations: AndroidGmsObservations = {
@@ -314,7 +310,6 @@ export class AndroidEnvironmentMeasurement {
     try { await operation(); } catch (error) { if (!this.errors.includes(error)) this.errors.push(error); }
   }
 
-  private readonly transport: AndroidMeasurementIO['transport'];
   private readonly io: AndroidMeasurementIO;
 
   private readonly collectorHardDeadlineNs?: bigint;
@@ -325,7 +320,7 @@ export class AndroidEnvironmentMeasurement {
       ? process.hrtime.bigint() + BigInt(Math.max(0, Math.floor(lifetime.remainingMs))) * 1_000_000n
       : undefined;
     const defaultStopCollector = (collector: OwnedProcess) => collector.retire('measurement-finished');
-    this.io = { command, boundedCommand, writeFile, readFile, writeJson: writeSanitizedJson, stopProcess: defaultStopCollector,
+    this.io = { command, boundedCommand, transportAdbObservation, writeJson: writeSanitizedJson, stopProcess: defaultStopCollector,
       spawnCollector: () => {
         if (this.collectorHardDeadlineNs === undefined) throw new Error('ANDROID_ENVIRONMENT: enclosing scenario lifetime is required for log collection');
         return spawnOwnedProcess('adb', ['-s', serial, 'logcat', '-b', 'main', '-b', 'system', '-v', 'epoch', '-T', '1'], {
@@ -337,8 +332,7 @@ export class AndroidEnvironmentMeasurement {
         });
       },
       monotonicNow: () => performance.now(), plannedTerminationExitMs: ANDROID_PLANNED_TERMINATION_EXIT_MS,
-      transport: new AndroidTransportObservation(serial, outputDir), ...io };
-    this.transport = this.io.transport;
+      ...io };
   }
 
   failureOutcome(): AndroidMeasurementOutcome {
@@ -346,13 +340,6 @@ export class AndroidEnvironmentMeasurement {
     const diagnosticFailure = this.gmsDiagnosticFailure();
     if (diagnosticFailure && !errors.some((error) => error instanceof Error && error.message === diagnosticFailure.message)) errors.push(diagnosticFailure);
     return { errors };
-  }
-
-  requireGmsObservations(): void {
-    if (this.started || this.finished || this.requireGmsObservationsValue || this.gmsFinalizationStarted) {
-      throw new Error('ANDROID_ENVIRONMENT: GMS observation requirement must be set once before begin');
-    }
-    this.requireGmsObservationsValue = true;
   }
 
   async observeGmsStage(stage: AndroidGmsObservationStage, budget: PhaseBudget): Promise<void> {
@@ -369,10 +356,6 @@ export class AndroidEnvironmentMeasurement {
       if (this.gmsObservations.stages.length < ANDROID_GMS_OBSERVATION_STAGES.length) this.gmsObservations.stages.push(entry);
       this.recordGmsError(message);
     };
-    if (!this.requireGmsObservationsValue) {
-      rejectStage('GMS stage observation requirement was not activated');
-      return;
-    }
     if (this.gmsStageInFlight) {
       rejectStage('GMS stage observation calls cannot overlap');
       return;
@@ -651,7 +634,7 @@ export class AndroidEnvironmentMeasurement {
 
   private startGmsFinalization(): Promise<void> {
     if (this.gmsFinalizationPromise) return this.gmsFinalizationPromise;
-    if (!this.requireGmsObservationsValue || this.gmsFinalizationComplete) return Promise.resolve();
+    if (this.gmsFinalizationComplete) return Promise.resolve();
     this.gmsFinalizationStarted = true;
     this.gmsFinalizationPromise = this.finalizeGmsObservationsOwned();
     return this.gmsFinalizationPromise;
@@ -924,7 +907,7 @@ export class AndroidEnvironmentMeasurement {
   private async beginMeasurement(signal: AbortSignal): Promise<void> {
     const deadline = this.io.monotonicNow() + ANDROID_BEGIN_TOTAL_TIMEOUT_MS;
     try {
-      if (this.requireGmsObservationsValue && (this.gmsStageIndex < 2 || this.gmsStageInFlight || this.gmsObservationsSequenceFailed)) {
+      if (this.gmsStageIndex < 2 || this.gmsStageInFlight || this.gmsObservationsSequenceFailed) {
         const error = new Error('ANDROID_ENVIRONMENT: begin requires both ordered pre-measurement GMS stage attempts');
         this.recordGmsError(error.message);
         throw error;
@@ -956,13 +939,9 @@ export class AndroidEnvironmentMeasurement {
           this.collector?.stop('collector-output-limit');
           return;
         }
-        if (this.requireGmsObservationsValue) {
-          const candidates = this.transportTrigger.observe(chunk, this.io.monotonicNow());
-          if (this.transportTrigger.failure) this.failTransportObservation(this.transportTrigger.failure);
-          for (const candidate of candidates) this.queueTransportCandidate(candidate);
-        } else {
-          try { this.transport.observe(chunk); } catch (error) { this.collectorFailure ||= error instanceof Error ? error : new Error('ANDROID_ENVIRONMENT: transport observation failed'); }
-        }
+        const candidates = this.transportTrigger.observe(chunk, this.io.monotonicNow());
+        if (this.transportTrigger.failure) this.failTransportObservation(this.transportTrigger.failure);
+        for (const candidate of candidates) this.queueTransportCandidate(candidate);
         this.chunks.push(chunk);
       };
       this.collector.stdout.on('data', this.collectorStdoutHandler);
@@ -983,8 +962,7 @@ export class AndroidEnvironmentMeasurement {
       this.transportObservationAbort?.abort(error);
       await this.closeCollector(signal);
       const completion = { passed: false, errors: this.errors.map(error => error instanceof Error ? error.message : String(error)) };
-      if (this.requireGmsObservationsValue) await this.attempt(() => this.persistOwnedJson('completion', completion, signal));
-      else await this.attempt(() => this.io.writeJson(this.path('completion'), completion));
+      await this.attempt(() => this.persistOwnedJson('completion', completion, signal));
       throw error;
     }
   }
@@ -1142,29 +1120,21 @@ export class AndroidEnvironmentMeasurement {
         this.collectorStderrHandler = undefined;
       }
     }
-    if (this.requireGmsObservationsValue) {
-      this.transportTrigger.finish();
-      if (this.transportTrigger.failure) this.failTransportObservation(this.transportTrigger.failure);
-    }
+    this.transportTrigger.finish();
+    if (this.transportTrigger.failure) this.failTransportObservation(this.transportTrigger.failure);
     let raw = Buffer.alloc(0);
     await this.attempt(async () => {
       raw = Buffer.concat(this.chunks);
       const text = raw.toString('utf8');
       if (!Buffer.from(text, 'utf8').equals(raw)) throw new Error('ANDROID_ENVIRONMENT: invalid collector UTF-8');
       const persisted = redactText(text);
-      if (this.requireGmsObservationsValue) {
-        await this.persistOwnedContents(join(this.outputDir, ANDROID_MEASUREMENT_LOG_FILE), persisted, 'text', signal);
-      } else {
-        await this.io.writeFile(join(this.outputDir, ANDROID_MEASUREMENT_LOG_FILE), Buffer.from(persisted), { mode: 0o600 });
-      }
+      await this.persistOwnedContents(join(this.outputDir, ANDROID_MEASUREMENT_LOG_FILE), persisted, 'text', signal);
       this.collectorPersistedBytes = Buffer.byteLength(persisted);
     });
-    if (this.requireGmsObservationsValue) {
-      if (signal?.aborted) this.transportObservationAbort?.abort(signal.reason);
-      if (this.transportObservationTask) await this.attempt(() => this.transportObservationTask!);
-    } else await this.attempt(() => this.transport.finish());
+    if (signal?.aborted) this.transportObservationAbort?.abort(signal.reason);
+    if (this.transportObservationTask) await this.attempt(() => this.transportObservationTask!);
     this.chunks = [];
-    if (!this.requireGmsObservationsValue || this.gmsFinalizationComplete) await this.writeCollectorSummary();
+    if (this.gmsFinalizationComplete) await this.writeCollectorSummary();
   }
 
   private queueTransportCandidate(candidate: AndroidTransportCandidate): void {
@@ -1206,7 +1176,7 @@ export class AndroidEnvironmentMeasurement {
       this.failTransportObservation('guest clock sampling missed the trigger deadline');
       return;
     }
-    const sample = await transportAdbObservation(this.serial, 'clock', this.io.transportObservationFixture?.adbPort ?? 5037,
+    const sample = await this.io.transportAdbObservation(this.serial, 'clock', 5037,
       clockTimeoutMs, signal);
     const sampleEpochText = sample.stdout.match(/^(\d{10}\.\d{9})\r?\n?$/u)?.[1];
     const sampleEpoch = sampleEpochText ? androidGuestEpochNanoseconds(sampleEpochText, true) : undefined;
@@ -1249,8 +1219,7 @@ export class AndroidEnvironmentMeasurement {
           maxBytes: 1_024,
           maxBytesPerStream: 512,
           cleanupReservationMs: 250,
-          input: JSON.stringify({ serial: this.serial, outputDir: this.outputDir, ...trigger,
-            ...(this.io.transportObservationFixture ? { fixture: this.io.transportObservationFixture } : {}) }),
+          input: JSON.stringify({ serial: this.serial, outputDir: this.outputDir, ...trigger }),
           signal,
         });
       const receipt = JSON.parse(result.stdout) as { failure?: string };
@@ -1264,8 +1233,8 @@ export class AndroidEnvironmentMeasurement {
   private async writeCollectorSummary(): Promise<void> {
     if (this.collectorSummaryWritten) return;
     const summary = {
-      bytes: this.collectorPersistedBytes, acquiredBytes: this.bytes, failure: this.collectorFailure?.message || (this.errors.length || this.gmsObservations.errors.length ? 'COLLECTION_FAILED' : undefined), transportObservationFailure: this.transportObservationFailure || this.transport.failure,
-      ...(this.requireGmsObservationsValue ? { gmsObservations: {
+      bytes: this.collectorPersistedBytes, acquiredBytes: this.bytes, failure: this.collectorFailure?.message || (this.errors.length || this.gmsObservations.errors.length ? 'COLLECTION_FAILED' : undefined), transportObservationFailure: this.transportObservationFailure,
+      gmsObservations: {
         file: ANDROID_GMS_OBSERVATION_FILE,
         stages: this.gmsObservations.stages.map(({ stage, outcome }) => ({ stage, outcome })),
         totalCommandOutputBytes: this.gmsObservations.totalCommandOutputBytes,
@@ -1279,18 +1248,17 @@ export class AndroidEnvironmentMeasurement {
         terminalConfirmation: this.gmsPublicationConfirmedSha256 ? 'confirmed' : 'unconfirmed',
         observationSha256: this.gmsPublicationConfirmedSha256,
         errors: this.gmsObservations.errors.length,
-      } } : {}),
+      },
     };
     try {
-      if (this.requireGmsObservationsValue) await this.persistOwnedJson('collector', summary);
-      else await this.io.writeJson(this.path('collector'), summary);
+      await this.persistOwnedJson('collector', summary);
       this.collectorSummaryWritten = true;
     } catch (error) {
       this.collectorSummaryFailed = true;
       this.errors.push(error);
       const retired = !(error instanceof BoundedCommandError)
         || (error.result.childExited && error.result.ownedProcessesExited && error.result.stdioClosed);
-      if (this.requireGmsObservationsValue && retired) {
+      if (retired) {
         try { await this.invalidateCollectorSummary(); }
         catch (cleanupError) { this.errors.push(cleanupError); }
       }
@@ -1310,7 +1278,7 @@ export class AndroidEnvironmentMeasurement {
 
   private async finishOwned(): Promise<AndroidMeasurementOutcome> {
     if (this.beginPromise) await this.beginPromise.catch(() => undefined);
-    if (this.requireGmsObservationsValue) await this.startGmsFinalization();
+    await this.startGmsFinalization();
     if (this.active) {
       await this.attempt(() => this.snapshot('end'));
       await this.attempt(() => this.waitForMarker('END'));
@@ -1321,8 +1289,7 @@ export class AndroidEnvironmentMeasurement {
     let assessmentSha256: string | undefined;
     await this.attempt(async () => {
       if (!this.identity) throw new Error('ANDROID_ENVIRONMENT: measurement identity missing');
-      if (this.requireGmsObservationsValue) await this.persistOwnedJson('identity', this.identity);
-      else await this.io.writeJson(this.path('identity'), this.identity);
+      await this.persistOwnedJson('identity', this.identity);
     });
     await this.attempt(async () => {
       if (!this.identity) throw new Error('ANDROID_ENVIRONMENT: measurement identity missing');
@@ -1332,15 +1299,8 @@ export class AndroidEnvironmentMeasurement {
         delete inputs.gmsObservations;
       }
       assessment = assessAndroidEnvironment(inputs, this.identity);
-      if (this.requireGmsObservationsValue) {
-        assessmentSha256 = await this.persistOwnedJson('check', assessment);
-        assessment = JSON.parse(`${JSON.stringify(sanitizeValue(assessment), null, 2)}\n`) as AndroidEnvironmentCheck;
-      } else {
-        await this.io.writeJson(this.path('check'), assessment);
-        const bytes = await this.io.readFile(this.path('check'));
-        assessmentSha256 = createHash('sha256').update(bytes).digest('hex');
-        assessment = JSON.parse(bytes.toString('utf8')) as AndroidEnvironmentCheck;
-      }
+      assessmentSha256 = await this.persistOwnedJson('check', assessment);
+      assessment = JSON.parse(`${JSON.stringify(sanitizeValue(assessment), null, 2)}\n`) as AndroidEnvironmentCheck;
       if (assessment.collection.status !== 'PASS') throw new Error('ANDROID_ENVIRONMENT: collection guarantee failed');
     });
     const completion = {
@@ -1348,9 +1308,7 @@ export class AndroidEnvironmentMeasurement {
       errors: this.errors.map(error => error instanceof Error ? error.message : String(error)),
       assessmentSha256,
     };
-    await this.attempt(() => this.requireGmsObservationsValue
-      ? this.persistOwnedJson('completion', completion)
-      : this.io.writeJson(this.path('completion'), completion));
+    await this.attempt(() => this.persistOwnedJson('completion', completion));
     return { assessment: assessment ? structuredClone(assessment) : undefined, assessmentSha256, errors: [...this.errors] };
   }
 }
@@ -1465,7 +1423,7 @@ async function runAndroidMeasurementOperations(): Promise<void> {
   process.stdout.write('BEGIN_OK\n');
 }
 
-async function runAndroidMeasurementPersistence(mode: 'json' | 'text', stallAfterPublication = false): Promise<void> {
+async function runAndroidMeasurementPersistence(mode: 'json' | 'text'): Promise<void> {
   const request = JSON.parse((await readBoundedStdin(ANDROID_LOG_LIMIT * 2 + 16_384)).toString('utf8')) as {
     directory?: string; target?: string; temporary?: string; contents?: string; expectedBytes?: number; expectedSha256?: string;
   };
@@ -1496,15 +1454,10 @@ async function runAndroidMeasurementPersistence(mode: 'json' | 'text', stallAfte
   const staged = await readFile(temporary);
   if (!staged.equals(expected)) throw new Error('Android measurement staged read-back is inconsistent');
   renameSync(temporary, target);
-  if (stallAfterPublication) {
-    process.on('SIGTERM', () => undefined);
-    setInterval(() => undefined, 1_000);
-    return;
-  }
   process.stdout.write(`${JSON.stringify({ byteLength: staged.byteLength, sha256: expectedSha256 })}\n`);
 }
 
-async function runGmsDiagnosticPersistence(stallAfterPublication = false): Promise<void> {
+async function runGmsDiagnosticPersistence(): Promise<void> {
   const progress = (step: string, detail = '') => {
     process.stderr.write(`GMS_WRITER_PROGRESS ${step} ${Math.round(process.uptime() * 1_000)}${detail}\n`);
   };
@@ -1535,11 +1488,6 @@ async function runGmsDiagnosticPersistence(stallAfterPublication = false): Promi
     throw new Error('GMS persistence read-back does not match sanitized bytes');
   }
   renameSync(temporary, target);
-  if (stallAfterPublication) {
-    process.on('SIGTERM', () => undefined);
-    setInterval(() => undefined, 1_000);
-    return;
-  }
   process.stdout.write(`${JSON.stringify({ byteLength: staged.byteLength, sha256: expectedSha256 })}\n`);
 }
 
@@ -1559,7 +1507,7 @@ async function runAndroidTransportObservation(): Promise<void> {
 async function runAndroidTransportObservationTrigger(): Promise<void> {
   const request = JSON.parse((await readBoundedStdin(4_096)).toString('utf8')) as {
     serial?: string; outputDir?: string; guestEpochSeconds?: string; triggeredAt?: string; anchorGuestEpochSeconds?: string;
-    guestClockSample?: { guestEpochSeconds?: string; startedAt?: string; endedAt?: string }; fixture?: AndroidTransportTestFixture;
+    guestClockSample?: { guestEpochSeconds?: string; startedAt?: string; endedAt?: string };
   };
   const guestEpochSeconds = request.guestEpochSeconds;
   const triggeredAt = request.triggeredAt;
@@ -1586,7 +1534,7 @@ async function runAndroidTransportObservationTrigger(): Promise<void> {
   } else if (request.anchorGuestEpochSeconds !== undefined) {
     throw new Error('Android transport trigger anchor is unbound to a guest clock sample');
   }
-  const transport = new AndroidTransportObservation(request.serial, request.outputDir, undefined, undefined, request.fixture);
+  const transport = new AndroidTransportObservation(request.serial, request.outputDir);
   await transport.observeTrigger({ guestEpochSeconds: guestEpochSeconds!, triggeredAt,
     ...(request.anchorGuestEpochSeconds ? { anchorGuestEpochSeconds: request.anchorGuestEpochSeconds } : {}),
     ...(guestClockSample ? { guestClockSample } : {}) });
@@ -1600,13 +1548,11 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
     '--android-measurement-session': runAndroidMeasurementSession,
     '--android-measurement-operations': runAndroidMeasurementOperations,
     '--android-measurement-persist-json': () => runAndroidMeasurementPersistence('json'),
-    '--android-measurement-persist-json-stall-after-publication': () => runAndroidMeasurementPersistence('json', true),
     '--android-measurement-persist-text': () => runAndroidMeasurementPersistence('text'),
     '--android-transport-observation': runAndroidTransportObservation,
     '--android-transport-observation-trigger': runAndroidTransportObservationTrigger,
     '--gms-diagnostic-ownership': () => runGmsDiagnosticOwnership(process.argv[3] || ''),
     '--gms-diagnostic-persist': runGmsDiagnosticPersistence,
-    '--gms-diagnostic-persist-stall-after-publication': () => runGmsDiagnosticPersistence(true),
   };
   const operation = modes[process.argv[2]];
   if (operation) {

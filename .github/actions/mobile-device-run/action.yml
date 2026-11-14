@@ -5,10 +5,6 @@ inputs:
     required: true
   baseline:
     required: true
-  scenario:
-    required: true
-  suite:
-    required: true
   source_head_sha:
     required: true
   evidence_prefix:
@@ -18,7 +14,6 @@ runs:
   steps:
     - name: Initialize private runner paths
       env:
-        WORKFLOW_SUITE: ${{ inputs.suite }}
         WORKFLOW_PLATFORM: ${{ inputs.platform }}
         SOURCE_HEAD_SHA: ${{ inputs.source_head_sha }}
       run: |
@@ -27,7 +22,6 @@ runs:
         private="$RUNNER_TEMP/herdr-mobile-private"
         output="$RUNNER_TEMP/herdr-mobile-output"
         mkdir -p "$private" "$output"
-        printf 'MOBILE_SUITE=%s\n' "$WORKFLOW_SUITE" >> "$GITHUB_ENV"
         printf 'MOBILE_PLATFORM=%s\n' "$WORKFLOW_PLATFORM" >> "$GITHUB_ENV"
         printf 'MOBILE_SOURCE_RUN_HEAD_SHA=%s\n' "$SOURCE_HEAD_SHA" >> "$GITHUB_ENV"
         printf 'MOBILE_PRIVATE=%s\n' "$private" >> "$GITHUB_ENV"
@@ -351,7 +345,6 @@ runs:
         bun run --cwd tests/mobile run -- \
           --bundle-set "$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json" \
           --baseline "${{ inputs.baseline }}" \
-          --suite "$MOBILE_SUITE" \
           --output "$MOBILE_OUTPUT" \
           --private-output "$MOBILE_PRIVATE"
       shell: bash
@@ -359,7 +352,6 @@ runs:
       if: always() && inputs.platform == 'android'
       env:
         EXPECTED_BASELINE: ${{ inputs.baseline }}
-        EXPECTED_SCENARIO: ${{ inputs.scenario }}
       run: |
         set -euo pipefail
         jq -e '.failure == null and .bytes > 0 and .bytes <= 104857600' "$MOBILE_OUTPUT/android-environment-collector.json"
@@ -367,7 +359,7 @@ runs:
         bun tests/mobile/android-environment.ts check --contract report \
           --directory "$MOBILE_OUTPUT" --identity "$MOBILE_OUTPUT/android-environment-identity.json" \
           --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-          --suite "$MOBILE_SUITE" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+          --baseline "$EXPECTED_BASELINE" \
           --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
       shell: bash
     - name: Finalize owned XCTest diagnostics
@@ -429,25 +421,23 @@ runs:
       if: always()
       env:
         EXPECTED_BASELINE: ${{ inputs.baseline }}
-        EXPECTED_SCENARIO: ${{ inputs.scenario }}
       run: |
         set -euo pipefail
         bundle_set="$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json"
         bun tests/mobile/validate-environment.ts --result "$MOBILE_OUTPUT/mobile-result.json" --output "$MOBILE_OUTPUT/public-summary.json" \
           --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-          --suite "$MOBILE_SUITE" --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+          --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" \
           --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
       shell: bash
     - name: Require strict Android environment qualification
       if: always() && inputs.platform == 'android'
       env:
         EXPECTED_BASELINE: ${{ inputs.baseline }}
-        EXPECTED_SCENARIO: ${{ inputs.scenario }}
       run: |
         set -euo pipefail
         bun tests/mobile/validate-environment.ts --require-pass --result "$MOBILE_OUTPUT/mobile-result.json" \
           --bundle-set "$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-          --suite "$MOBILE_SUITE" --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+          --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" \
           --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
       shell: bash
     - name: Upload mobile evidence

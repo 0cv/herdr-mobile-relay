@@ -59,7 +59,7 @@ The historical child5820 case remains product INDETERMINATE / environment FAIL;
 its target relation is unproved and no historical result is rewritten.
 
 `android-environment.ts check` requires `--contract report|qualification` and
-explicit current-run, attempt, suite, baseline, scenario, prepared bundle and head
+explicit current-run, attempt, baseline, prepared bundle and head
 arguments. It recomputes and compares the immutable schema-3 runner assessment;
 neither outer postcheck overwrites it. Input hashes bind sanitized persisted
 bytes; invalid UTF-8 is rejected before decoding can change their identity.
@@ -232,7 +232,7 @@ remains unproved. Deadlines and retirement evidence are unchanged.
 
 A manual dispatch requires `artifact_run_id`, a completed successful same-repository `check` push on `main` containing `release-bundles`; provide `source_commit` for a specific revision. Every dispatch runs both platforms with the release suite. External provenance verifies repository, workflow, push event, main branch, conclusion, source SHA, artifact name, archive checksums, manifest revision and expiration before devices are provisioned. Check and release calls bind to the caller's exact artifact without confusing a PR merge build with its head SHA; evidence records both identities.
 
-Preparation verifies the Linux candidate for Android and Darwin arm64 candidate for iOS against checksums, release manifests, descriptors, hashed assets and web-tree hashes. The gate validates the exact expected platform/baseline/suite/source/hash/native-provider rows for the current attempt. All uploads retain evidence for one day, including release bundles, prepared web trees and device results; expired inputs require a new recorded source run.
+Preparation verifies the Linux candidate for Android and Darwin arm64 candidate for iOS against checksums, release manifests, descriptors, hashed assets and web-tree hashes. The gate validates the exact expected platform/baseline/source/hash/native-provider rows for the current attempt. All uploads retain evidence for one day, including release bundles, prepared web trees and device results; expired inputs require a new recorded source run.
 
 Both platforms inject one bounded corrupt candidate-script response, prove it was consumed and phone completion was not acknowledged, then recover through the shipped Try again control without reinstalling or re-pairing. Phone acknowledgement is required. The runner closes the update dialog, returns from Settings to the fixture's alpha agent, and checks keyboard visibility and draft preservation alongside credentials, preferences, relay ownership, lifecycle launches and reload bounds. Evidence contains the result, screenshots, bounded redacted diagnostics and platform/toolchain identities. Secrets, setup fragments, relay credentials and control headers are redacted or deleted before upload. Synthetic bundle preparation and host browser cache-recovery tools remain available for local harness development, outside this device lane.
 

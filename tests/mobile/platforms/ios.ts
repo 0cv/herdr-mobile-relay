@@ -461,6 +461,14 @@ function nativeBoundsOverlap(left: NativeBounds, right: NativeBounds): boolean {
     && right.y < left.y + left.height;
 }
 
+export interface IOSPlatformIO {
+  navigationCommand: typeof command;
+  launchCollector: typeof collectIOSLaunchReceipt;
+  launchWrite: (path: string, text: string, options: { flag: string; mode: number }) => Promise<void>;
+  launchMkdir: (path: string, options: { recursive: true }) => Promise<unknown>;
+  diagnosticCommand: typeof commandOutput;
+}
+
 export class IOSPlatform implements MobilePlatform {
   readonly name = 'ios' as const;
   readonly driver: AppiumClient;
@@ -491,12 +499,8 @@ export class IOSPlatform implements MobilePlatform {
   private safariReserveExhaustion?: SafariReserveEvidence;
   private safariFirstFailure?: SafariNavigationFailureEvidence;
   private attachmentFirstRefusal?: Readonly<WebDriverRequestTiming>;
-  private navigationCommand = command;
   private launchObservation = new IOSLaunchObservation();
-  private launchCollector = collectIOSLaunchReceipt;
-  private launchWrite = writeFile;
-  private launchMkdir = mkdir;
-  private diagnosticCommand = commandOutput;
+  private readonly io: IOSPlatformIO;
   private failureCapture?: Promise<void>;
   private launchReceipt?: IOSLaunchReceipt;
   private nativeDiagnosticsBlocked = false;
@@ -508,7 +512,9 @@ export class IOSPlatform implements MobilePlatform {
     directory: iosReceiptWriteStatus('directory'), events: iosReceiptWriteStatus('events'), receipt: iosReceiptWriteStatus('receipt'),
   };
 
-  constructor(private readonly options: PlatformOptions) {
+  constructor(private readonly options: PlatformOptions, io: Partial<IOSPlatformIO> = {}) {
+    this.io = { navigationCommand: command, launchCollector: collectIOSLaunchReceipt, launchWrite: writeFile,
+      launchMkdir: mkdir, diagnosticCommand: commandOutput, ...io };
     this.udid = options.deviceId || process.env.IOS_SIMULATOR_UDID || '';
     this.origin = options.origin.replace(/\/$/, '');
     this.outputDir = options.outputDir;
@@ -577,7 +583,7 @@ export class IOSPlatform implements MobilePlatform {
     const startedAt = new Date().toISOString();
     this.diagnostics.record({ phase: 'ios-navigation', operation: 'simctl openurl started', timeoutMs, detail: { attempt: 1, startedAt } });
     try {
-      const result = await this.navigationCommand('xcrun', ['simctl', 'openurl', this.udid, url], timeoutMs, {
+      const result = await this.io.navigationCommand('xcrun', ['simctl', 'openurl', this.udid, url], timeoutMs, {
         budget: phase,
         label: 'simctl openurl setup URL',
       });
@@ -652,7 +658,7 @@ export class IOSPlatform implements MobilePlatform {
       return;
     }
     await this.navigationDiagnostic(phase, `${stage}-openurl-boot-state`, 3_000, async () => {
-      const result = await this.navigationCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], 3_000, { budget: phase });
+      const result = await this.io.navigationCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], 3_000, { budget: phase });
       const listing = JSON.parse(result.stdout) as { devices: Record<string, Array<{ udid: string; state: string; isAvailable: boolean }>> };
       const device = Object.values(listing.devices).flat().find((device) => device.udid === this.udid);
       if (!device) throw new Error('IOS_NAVIGATION_DIAGNOSTIC: owned simulator is absent from the available device listing');
@@ -682,7 +688,7 @@ export class IOSPlatform implements MobilePlatform {
     const start = `${startedAt.slice(0, 19).replace('T', ' ')}+0000`;
     const end = `${new Date(Date.parse(settledAt) + 1_000).toISOString().slice(0, 19).replace('T', ' ')}+0000`;
     await this.navigationDiagnostic(phase, 'openurl-host-log', 5_000, async () => {
-      const result = await this.navigationCommand('/usr/bin/log', [
+      const result = await this.io.navigationCommand('/usr/bin/log', [
         'show', '--style', 'compact', '--start', start, '--end', end,
         '--predicate', 'process == "simctl" OR process CONTAINS[c] "Simulator" OR process CONTAINS[c] "Safari" OR process CONTAINS[c] "WebKit" OR process == "lsd"',
       ], 5_000, { budget: phase });
@@ -1679,7 +1685,7 @@ export class IOSPlatform implements MobilePlatform {
     if (!failure) return true;
     this.omitLaunchLogs = true;
     try {
-      this.launchReceipt = await this.launchCollector(this.udid, failure, this.origin, {
+      this.launchReceipt = await this.io.launchCollector(this.udid, failure, this.origin, {
         clock: this.launchObservation.clock, queryEligible: !blocked && this.launchObservation.queryEligible,
       });
     } catch {
@@ -1690,12 +1696,12 @@ export class IOSPlatform implements MobilePlatform {
     this.refreshNativeDiagnosticsBlock();
     this.nativeDiagnosticsBlocked ||= this.launchReceipt.blockNativeDiagnostics;
     const clock = this.launchObservation.clock;
-    if (!await observeIOSReceiptWrite(this.launchPersistence.directory, clock, 0, () => this.launchMkdir(this.outputDir, { recursive: true }))) return false;
+    if (!await observeIOSReceiptWrite(this.launchPersistence.directory, clock, 0, () => this.io.launchMkdir(this.outputDir, { recursive: true }))) return false;
     const { eventsText, receiptText } = this.launchReceipt;
     if (!await observeIOSReceiptWrite(this.launchPersistence.events, clock, Buffer.byteLength(eventsText),
-      () => this.launchWrite(join(this.outputDir, 'ios-launch-owner-events.jsonl'), eventsText, { flag: 'wx', mode: 0o600 }))) return false;
+      () => this.io.launchWrite(join(this.outputDir, 'ios-launch-owner-events.jsonl'), eventsText, { flag: 'wx', mode: 0o600 }))) return false;
     return observeIOSReceiptWrite(this.launchPersistence.receipt, clock, Buffer.byteLength(receiptText),
-      () => this.launchWrite(join(this.outputDir, 'ios-launch-receipt.json'), receiptText, { flag: 'wx', mode: 0o600 }));
+      () => this.io.launchWrite(join(this.outputDir, 'ios-launch-receipt.json'), receiptText, { flag: 'wx', mode: 0o600 }));
   }
 
   private async captureEvidence(name: string): Promise<void> {
@@ -1735,7 +1741,7 @@ export class IOSPlatform implements MobilePlatform {
     for (const [suffix, args] of captures) {
       if (this.refreshNativeDiagnosticsBlock()) break;
       if (this.omitLaunchLogs && (suffix === 'simulator-log' || suffix === 'webkit-safari' || suffix === 'springboard')) continue;
-      const output = await this.diagnosticCommand('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
+      const output = await this.io.diagnosticCommand('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
       await writeBoundedText(join(this.outputDir, `${name}-ios-${suffix}.log`), output);
     }
   }

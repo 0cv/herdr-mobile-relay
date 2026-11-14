@@ -1386,8 +1386,8 @@ async function runCheck(): Promise<void> {
   const identity = await readCheckJson(required('--identity'), 64_000) as MeasurementIdentity;
   const bundles = await readCheckJson(required('--bundle-set'), 8_000_000);
   const session = await readCheckJson(join(directory, 'android-environment-session.json'), 64_000);
-  const expected = { runId: required('--run-id'), attempt: required('--attempt'), suite: required('--suite'), platform: 'android', baseline: required('--baseline'),
-    scenario: required('--scenario'), sourceCommit: bundles.candidate.provenance.sourceCommit, sourceRunHeadSha: required('--source-run-head-sha'),
+  const expected = { runId: required('--run-id'), attempt: required('--attempt'), platform: 'android', baseline: required('--baseline'),
+    sourceCommit: bundles.candidate.provenance.sourceCommit, sourceRunHeadSha: required('--source-run-head-sha'),
     candidateWebHash: bundles.candidate.identity.webHash, candidateBuild: bundles.candidate.identity.build, measurementId: session.id };
   if (!isDeepStrictEqual(identity, expected)) throw new Error('ANDROID_ENVIRONMENT: independent workflow identity mismatch');
   const result = assessAndroidEnvironment(await readEnvironmentInputs(directory), identity);
