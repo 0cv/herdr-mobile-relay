@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
-import { relocateDeclarationMap } from './declaration-map.ts';
+import { artifactReader, configureHome, hash, substitute, transpile, writeIntegrity, type Substitution } from '../support/appium-patch.ts';
 
 type RuntimePackage = {
   name: string; parent: string | null; condition: 'import' | 'require'; version: string;
@@ -24,14 +23,10 @@ const producerTargets = [
   { name: 'driver', package: 'uiautomator2', source: 'lib/driver.ts' },
 ];
 const authoredFiles = ['kernel-namespace.cjs', 'kernel-namespace.d.cts', 'adb-inspection.cjs', 'adb-inspection.d.cts', 'retained-inspection.cjs', 'retained-inspection.d.cts', 'target-inspection.cjs', 'target-inspection.d.cts'];
-const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
-const artifact = (name: string) => new URL(name, import.meta.url);
-const load = async <T>(name: string): Promise<T> => JSON.parse(await readFile(artifact(name), 'utf8')) as T;
+const { artifact, load } = artifactReader(import.meta.url);
 
 export async function configure(home: string): Promise<void> {
-  await mkdir(home, { recursive: true });
-  assert.deepEqual(await readdir(home), [], 'Android Appium home must be fresh');
-  for (const file of ['package.json', 'package-lock.json']) await writeFile(join(home, file), await readFile(artifact(file)));
+  await configureHome(home, ['package.json', 'package-lock.json'].map(file => [file, artifact(file)]), 'Android Appium home must be fresh');
 }
 
 async function effectiveInstallation(home: string, patched: boolean): Promise<Record<string, unknown>> {
@@ -43,7 +38,7 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
   const packages: Record<string, RuntimePackage> = { appium: await load<RuntimePackage>('appium-runtime-manifest.json'),
     ...await load<Record<string, RuntimePackage>>('runtime-manifest.json') };
   const producer = await load<ProducerManifest>('producer-manifest.json');
-  assert.deepEqual(Object.keys(producer.inputs).sort(), ['appium-runtime-manifest.json', 'declaration-map.ts', 'gate.ts', 'producer-transform.json', 'runtime-manifest.json'].sort(), 'Incomplete producer input contract');
+  assert.deepEqual(Object.keys(producer.inputs).sort(), ['../support/appium-patch.ts', 'appium-runtime-manifest.json', 'gate.ts', 'producer-transform.json', 'runtime-manifest.json'].sort(), 'Incomplete producer input contract');
   for (const [file, expected] of Object.entries(producer.inputs)) {
     assert.equal(hash(await readFile(artifact(file))), expected, `Changed producer input: ${file}`);
   }
@@ -64,7 +59,7 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
     }
   }
   const producerFiles = producerTargets.flatMap(target => [target.source,
-    ...['.js', '.js.map', '.d.ts', '.d.ts.map'].map(extension => `build/${target.source.replace(/\.ts$/, extension)}`),
+    ...['.js', '.js.map'].map(extension => `build/${target.source.replace(/\.ts$/, extension)}`),
   ].map(file => ({ file, package: target.package })));
   assert.deepEqual(Object.keys(producer.files).sort(), producerFiles.map(target => target.file).sort(), 'Incomplete producer artifacts');
   for (const { file, package: owner } of producerFiles) {
@@ -167,35 +162,19 @@ export async function patch(home: string): Promise<void> {
   await effectiveInstallation(home, false);
   const manifest = await load<ProducerManifest>('producer-manifest.json');
   assert.equal(ts.version, manifest.compiler, 'Unexpected source-map compiler');
-  const transform = await load<Record<string, Array<[string, string]>>>('producer-transform.json');
+  const transform = await load<Record<string, Substitution[]>>('producer-transform.json');
   const runtime = await load<Record<string, RuntimePackage>>('runtime-manifest.json');
   const installation = await realpath(home);
   const output = new Map<string, string>();
   assert.deepEqual(Object.keys(transform).sort(), producerTargets.map(target => target.name).sort(), 'Incomplete producer transformations');
   for (const { name, package: owner, source } of producerTargets) {
     const root = join(installation, runtime[owner].root);
-    const replacements = transform[name];
-    const original = await readFile(join(root, source), 'utf8');
-    let text = original;
-    for (const [before, after] of replacements) {
-      assert.equal(text.split(before).length, 2, `Nonunique producer transformation: ${source}`);
-      text = text.replace(before, after);
-    }
-    const result = ts.transpileModule(text, { fileName: source, compilerOptions: {
-      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, sourceMap: true, inlineSources: true,
-    } });
-    assert.ok(result.sourceMapText);
-    const map = JSON.parse(result.sourceMapText);
+    const text = substitute(await readFile(join(root, source), 'utf8'), transform[name], source);
     const runtimePath = `build/${source.replace(/\.ts$/, '.js')}`;
-    map.sources = [relative(dirname(runtimePath), source)];
-    const declarationPath = runtimePath.replace(/\.js$/, '.d.ts');
-    const declaration = await readFile(join(root, declarationPath), 'utf8');
-    output.set(declarationPath, declaration);
-    output.set(`${declarationPath}.map`, relocateDeclarationMap(source, original, text, declaration,
-      await readFile(join(root, `${declarationPath}.map`), 'utf8'), replacements));
+    const { code, map } = transpile(text, source, runtimePath);
     output.set(source, text);
-    output.set(runtimePath, result.outputText);
-    output.set(`${runtimePath}.map`, JSON.stringify(map));
+    output.set(runtimePath, code);
+    output.set(`${runtimePath}.map`, map);
   }
   assert.deepEqual([...output.keys()].sort(), Object.keys(manifest.files).sort());
   for (const [file, bytes] of output) {
@@ -207,7 +186,7 @@ export async function patch(home: string): Promise<void> {
     await writeFile(join(installation, runtime.android.root, file), await readFile(artifact(expected.source)));
   }
   const evidence = await effectiveInstallation(home, true);
-  await writeFile(join(home, 'retained-owner-integrity.json'), JSON.stringify(evidence, null, 2) + '\n');
+  await writeIntegrity(home, 'retained-owner-integrity.json', evidence);
 }
 
 export async function verify(home: string): Promise<void> {

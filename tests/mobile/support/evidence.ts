@@ -130,7 +130,7 @@ const sha256 = (bytes: Buffer | string) => createHash('sha256').update(bytes).di
 export async function validateAndroidProducer(path: string): Promise<void> {
   const data = JSON.parse((await boundedEvidenceFile(path, 8_000_000)).toString());
   const source = async (leaf: string) => {
-    if (!/^[a-zA-Z0-9.-]+$/u.test(leaf)) fail('invalid producer manifest source');
+    if (!/^(\.\.\/support\/)?[a-zA-Z0-9.-]+$/u.test(leaf)) fail('invalid producer manifest source');
     return readFile(new URL(`../android-appium/${leaf}`, import.meta.url));
   };
   const manifest = JSON.parse((await source('producer-manifest.json')).toString());
