@@ -12,7 +12,7 @@ adopt_installed_service_env
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"
-if [ -n "$(unset HERDR_TAILSCALE_PORT; env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
+if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
     echo "Always on Tailscale is already set up. Use Tailscale → Choose Phone App and Show QR, or Tailscale → Turn Always on Tailscale Off first." >&2
     exit 1
 fi

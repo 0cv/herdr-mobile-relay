@@ -652,6 +652,7 @@ node_bin_dir() {
 
     if [ -n "$env_file" ] && [ -f "$env_file" ]; then
         recorded="$(env_file_value "$env_file" HERDR_APP_DEPLOY_NODE_DIR)"
+        recorded="${recorded:-${HERDR_APP_DEPLOY_NODE_DIR:-}}"
     fi
     if on_path="$(command -v node 2>/dev/null)"; then
         on_path="$(dirname "$on_path")"
@@ -727,6 +728,7 @@ env_file_value() {
         return
     fi
     (
+        unset "$key"
         set -a
         # shellcheck source=/dev/null
         . "$env_file"
@@ -844,10 +846,10 @@ ensure_relay_env() {
     fi
 
     chmod 600 "$env_file"
-    if ! grep -q '^HERDR_RELAY_TOKEN=' "$env_file" || [ -z "$(env_file_value "$env_file" HERDR_RELAY_TOKEN)" ]; then
+    if [ -z "$(env_file_value "$env_file" HERDR_RELAY_TOKEN)" ]; then
         set_env_value_atomic "$env_file" HERDR_RELAY_TOKEN "$(generate_token)"
     fi
-    if ! grep -q '^HERDR_RELAY_INSTANCE_ID=' "$env_file" || [ -z "$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)" ]; then
+    if [ -z "$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)" ]; then
         set_env_value_atomic "$env_file" HERDR_RELAY_INSTANCE_ID "$(generate_instance_id)"
     fi
     if [ -n "$cloudflared_config" ]; then
@@ -876,7 +878,7 @@ load_relay_env() {
         return
     fi
     local recorded
-    recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$env_file" HERDR_RELAY_BACKEND)"
+    recorded="$(env_file_value "$env_file" HERDR_RELAY_BACKEND)"
     if [ -n "$recorded" ] && [ "$recorded" != "$HERDR_RELAY_BACKEND" ]; then
         echo "HERDR_RELAY_BACKEND disagrees with $env_file." >&2
         return 1
@@ -1869,7 +1871,7 @@ prepare_core_directory() {
 resolve_relay_instance() {
     local recorded="" selected="${HERDR_RELAY_BACKEND:-}"
     if [ -n "${HERDR_RELAY_ENV:-}" ] && [ -f "$HERDR_RELAY_ENV" ]; then
-        recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
+        recorded="$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
     fi
     if [ -n "$selected" ] && [ -n "$recorded" ] && [ "$selected" != "$recorded" ]; then
         echo "HERDR_RELAY_BACKEND disagrees with $HERDR_RELAY_ENV." >&2
@@ -1890,7 +1892,7 @@ resolve_relay_instance() {
     RELAY_TAILSCALE_PORT="${HERDR_TAILSCALE_PORT:-8443}"
     if [ "$HERDR_RELAY_BACKEND" = hc ]; then
         export HERDR_RELAY_ENV="${HERDR_RELAY_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay-hc/relay.env}"
-        recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
+        recorded="$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
         if [ -n "$recorded" ] && [ "$recorded" != hc ]; then
             echo "Core relay requires its own hc environment: $HERDR_RELAY_ENV" >&2
             return 1

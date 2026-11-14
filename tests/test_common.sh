@@ -46,6 +46,9 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
     set_env_value_atomic "$env_file" FIRST ''
     test "$(env_file_value "$env_file" FIRST)" = ''
     test "$(env_file_value "$env_file" SECOND)" = retained
+    test "$(env_file_value "$env_file" ABSENT)" = ''
+    test "$(ABSENT=exported env_file_value "$env_file" ABSENT)" = ''
+    test "$(SECOND=exported env_file_value "$env_file" SECOND)" = retained
     remove_env_value_if_equals_atomic "$env_file" SECOND different
     test "$(env_file_value "$env_file" SECOND)" = retained
     remove_env_value_if_equals_atomic "$env_file" FIRST ''
