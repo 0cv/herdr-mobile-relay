@@ -93,12 +93,7 @@ export class PaneSizeLease {
       this.error = '';
       return;
     }
-    if (!inputs.active) {
-      this.release(this.mounted);
-      this.error = '';
-      return;
-    }
-    if (inputs.questionMode) {
+    if (!inputs.active || inputs.questionMode) {
       this.release(this.mounted);
       this.error = '';
       return;
