@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -38,7 +37,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/hc"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
-	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
@@ -51,7 +49,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 	"github.com/0cv/herdr-mobile-relay/internal/speech"
-	"github.com/0cv/herdr-mobile-relay/internal/support"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
 	"github.com/0cv/herdr-mobile-relay/internal/upload"
@@ -1507,56 +1504,6 @@ func (s *Server) handleDisconnect(client *transport.ClientConn) {
 	_ = s.paneSizeM.ReleaseClient(releaseCtx, client.ID())
 }
 
-func (s *Server) handleUpdate(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound) {
-	reply := s.reply(client, inbound.RequestID, inbound.Type, "")
-	if s.cfg.Backend == "hc" {
-		reply.fail("Updates are managed by the TUI relay, not the hc backend")
-		return
-	}
-	switch inbound.Type {
-	case "check_update":
-		s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
-			"state":            "checking",
-			"current_version":  s.version,
-			"current_revision": s.revision,
-		}})
-		updateState := s.updateM.Check(ctx)
-		s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-		reply.complete(map[string]any{"update": updateState})
-	case "install_update":
-		deployAppFirst := s.appDeployM.Required()
-		expectedAppOrigin := ""
-		if deployAppFirst {
-			if originErr := s.appDeployM.ValidateOrigin(inbound.ExpectedOrigin); originErr != nil {
-				reply.failWithData(originErr.Error(), map[string]any{"update": s.updateM.State()})
-				break
-			}
-			expectedAppOrigin = inbound.ExpectedOrigin
-		}
-		job, updateState, scheduleErr := s.updateM.Schedule(
-			ctx,
-			inbound.ExpectedVersion,
-			inbound.ExpectedRevision,
-			deployAppFirst,
-			expectedAppOrigin,
-		)
-		if scheduleErr != nil {
-			reply.failWithData(scheduleErr.Error(), map[string]any{"update": updateState})
-			break
-		}
-		s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-		reply.schedule(map[string]any{"job": job, "update": updateState})
-	case "deploy_app_update":
-		job, deployState, scheduleErr := s.appDeployM.Schedule(ctx, inbound.ExpectedVersion, inbound.ExpectedRevision, inbound.ExpectedOrigin)
-		if scheduleErr != nil {
-			reply.failWithData(scheduleErr.Error(), map[string]any{"app_deploy": deployState})
-			break
-		}
-		s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
-		reply.schedule(map[string]any{"job": job, "app_deploy": deployState})
-	}
-}
-
 // Resize Session is a per-device opt-in. A PTY resize Herdr does not perform
 // leaves its grid at the layout size while the application draws at the
 // leased one, so the desktop and SSH views of a leased pane look garbled
@@ -1586,82 +1533,6 @@ func (s *Server) handlePaneSizeCommand(client *transport.ClientConn, inbound pro
 		return
 	}
 	reply.complete(map[string]any{"columns": columns, "rows": rows})
-}
-
-func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
-	capabilities := append([]string(nil), protocol.Capabilities...)
-	if s.cfg.Backend == "hc" {
-		capabilities = slices.DeleteFunc(capabilities, func(capability string) bool { return capability == "self_update" })
-	}
-	capabilities = append(capabilities, "pi_prompt_unconfirmed")
-	// Never the legacy pane_size_lease names: apps up to 0.22.7 lease
-	// automatically when they see them.
-	if s.paneSizeM.Available() {
-		capabilities = append(capabilities, protocol.PaneSizeOptInCapability, protocol.PaneSizeOptInRowsCapability)
-	}
-	if s.pushM != nil {
-		capabilities = append(capabilities, "typed_push", "push_policy")
-	}
-	if s.clipboardRead != nil {
-		capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
-	}
-	speechStatus := s.speechStatus()
-	if len(s.rememberSpeechLanguages(speechStatus.Languages)) > 0 {
-		capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
-	}
-	if speechStatus.ManagementSupported {
-		capabilities = append(capabilities, protocol.SpeechVoiceManagementCapability)
-	}
-	if herdrStatus.Supports(herdr.FeaturePaneRead) {
-		capabilities = append(capabilities, "pane_realtime_delta")
-	}
-	for _, feature := range []string{
-		herdr.FeatureWorkspaceManagement,
-		herdr.FeatureWorkspaceRename,
-		herdr.FeatureWorkspaceReorder,
-		herdr.FeatureWorktreeManagement,
-		herdr.FeatureTabRename,
-		herdr.FeatureAgentLaunch,
-		herdr.FeatureManualTerminalInput,
-		herdr.FeatureSecretInput,
-		herdr.FeatureSemanticInput,
-		herdr.FeaturePiIntegration,
-	} {
-		if herdrStatus.Supports(feature) {
-			capabilities = append(capabilities, feature)
-		}
-	}
-	if herdrStatus.Supports(herdr.FeatureTabMove) {
-		capabilities = append(capabilities, "tab_reorder")
-	}
-	if herdrStatus.Supports(herdr.FeatureWorkspaceMoveBlock) {
-		capabilities = append(capabilities, "workspace_reorder_block")
-	}
-	if s.cfg.Backend != "hc" && s.appDeployM.State().Configured {
-		capabilities = append(capabilities, "app_deploy")
-	}
-	if s.hybrid != nil && s.hybrid.directEnabled() {
-		capabilities = append(capabilities, "webrtc_direct")
-	}
-	if s.deviceAuth != nil {
-		capabilities = append(capabilities, "device_management")
-	}
-	return capabilities
-}
-
-func canonicalHTTPPath(raw string) bool {
-	if raw == "" || raw == "/" {
-		return true
-	}
-	if !strings.HasPrefix(raw, "/") || strings.Contains(raw, "\\") || strings.Contains(raw, "\x00") {
-		return false
-	}
-	for _, segment := range strings.Split(strings.TrimPrefix(raw, "/"), "/") {
-		if segment == "" || segment == "." || segment == ".." {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *Server) drainLifecycleWork() {
@@ -2419,98 +2290,6 @@ func isClaudeLike(agent string) bool {
 	return kind == agentkind.Claude || kind == agentkind.Qoder
 }
 
-func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		s.hub.HandleWebSocket(w, r)
-		return
-	}
-	if s.webH != nil {
-		s.webH.ServeHTTP(w, r)
-		return
-	}
-	http.NotFound(w, r)
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("X-Herdr-Relay-Instance", s.cfg.InstanceID)
-	fmt.Fprint(w, "ok\n")
-}
-
-func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	ready := s.ready
-	s.mu.RUnlock()
-
-	inventory := s.state.InventoryStatus()
-	delete(inventory, "message")
-
-	readiness := "starting"
-	if ready {
-		switch inventory["state"] {
-		case "ready":
-			readiness = "ready"
-		case "error":
-			readiness = "degraded"
-		}
-	}
-
-	resp := s.healthPayload(inventory)
-	resp["status"] = "ok"
-	resp["readiness"] = readiness
-	gateway := s.hybrid.status()
-	resp["gateway"] = gateway
-	resp["gateway_url"] = gateway["url"]
-	resp["gateway_version"] = gateway["version"]
-	resp["gateway_revision"] = gateway["revision"]
-	resp["gateway_available_version"] = s.gatewayAvailableVersion()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	ready := s.ready
-	s.mu.RUnlock()
-
-	inventory := s.state.InventoryStatus()
-	delete(inventory, "message")
-
-	status := "unavailable"
-	code := http.StatusServiceUnavailable
-	if ready && inventory["state"] == "ready" {
-		status = "ready"
-		code = http.StatusOK
-	}
-
-	resp := s.healthPayload(inventory)
-	resp["status"] = status
-
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Server) healthPayload(inventory map[string]any) map[string]any {
-	resp := map[string]any{
-		"inventory":       inventory,
-		"instance":        s.cfg.InstanceID,
-		"version":         s.version,
-		"release_version": s.version,
-		"revision":        s.revision,
-		"protocol":        protocol.Version,
-	}
-	if s.webH != nil {
-		resp["bundle_hash"] = s.webH.BundleHash()
-		resp["bundle_version"] = s.webH.BundleVersion()
-		resp["bundle_revision"] = s.webH.BundleRevision()
-		resp["bundle_build"] = s.webH.BundleBuild()
-	}
-	return resp
-}
-
 func (s *Server) pruneUploads(ctx context.Context) {
 	if s.uploadM == nil {
 		return
@@ -2798,87 +2577,6 @@ func (s *Server) currentPaneRevision(ctx context.Context, paneID string) (int64,
 	return 0, fmt.Errorf("pane %q was not found", paneID)
 }
 
-func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
-	vapidPublicKey := ""
-	if s.pushM != nil {
-		vapidPublicKey = s.pushM.VAPIDPublicKey()
-	}
-	committed := s.committedInventorySnapshot()
-	s.observeInventoryPublication("registration")
-	inventory := committed.status
-	herdrCapabilityStatus := s.herdrC.CapabilityStatus()
-	capabilities := s.effectiveCapabilitiesFor(herdrCapabilityStatus)
-	speechStatus := s.speechStatus()
-	speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
-	s.hub.Send(client, protocol.PushConfig{
-		Type:            "push_config",
-		VAPIDPublicKey:  vapidPublicKey,
-		Host:            s.hostname,
-		Home:            s.home,
-		Protocol:        protocol.Version,
-		Version:         s.version,
-		ReleaseVersion:  s.version,
-		Revision:        s.revision,
-		Update:          s.updateM.State(),
-		AppDeploy:       s.appDeployM.State(),
-		Capabilities:    capabilities,
-		HerdrStatus:     herdrCapabilityStatus,
-		SpeechLanguages: speechLanguages,
-		Inventory:       inventory,
-		AgentProfiles:   s.profiles.Profiles(),
-		HermesProfiles:  hermesprofiles.List(s.home),
-		Hybrid:          s.hybridDescriptor(),
-	})
-	s.hub.Send(client, map[string]any{
-		"type":   "agents",
-		"agents": committed.agents,
-	})
-	s.hub.Send(client, map[string]any{
-		"type":       "workspaces",
-		"workspaces": committed.workspaces,
-	})
-	s.hub.Send(client, map[string]any{
-		"type":       "activity_history",
-		"activities": s.recentActivities(500),
-	})
-	s.hub.Send(client, inventoryStatusMessage(inventory))
-}
-
-func (s *Server) requestAgentRefresh(client *transport.ClientConn) {
-	if client == nil {
-		return
-	}
-	// Queue the deferred refresh before waking the poller. A publication
-	// racing this handler can then drain it in the same ordered batch.
-	s.refreshMu.Lock()
-	s.refreshClients[client.ID()] = true
-	s.refreshMu.Unlock()
-	s.hub.SendBatchPrepared(client, func() []any {
-		committed := s.committedInventorySnapshot()
-		s.observeInventoryPublication("immediate")
-		return committed.messages()
-	})
-	s.poller.Wake()
-}
-
-func (s *Server) sendRequestedAgentRefreshes() {
-	s.refreshMu.Lock()
-	clientIDs := make([]string, 0, len(s.refreshClients))
-	for clientID := range s.refreshClients {
-		clientIDs = append(clientIDs, clientID)
-	}
-	clear(s.refreshClients)
-	s.refreshMu.Unlock()
-
-	for _, clientID := range clientIDs {
-		s.hub.SendBatchPreparedByID(clientID, func() []any {
-			committed := s.committedInventorySnapshot()
-			s.observeInventoryPublication("deferred")
-			return committed.messages()
-		})
-	}
-}
-
 func (s *Server) observeInventoryPublication(phase string) {
 	if s.inventoryPublicationObserver != nil {
 		s.inventoryPublicationObserver(phase)
@@ -3072,57 +2770,6 @@ func unchangedPaneResponse(message, response map[string]any) map[string]any {
 	}
 }
 
-type commandReply struct {
-	server    *Server
-	client    *transport.ClientConn
-	requestID string
-	action    string
-	paneID    string
-	audited   map[string]any
-}
-
-func (s *Server) reply(client *transport.ClientConn, requestID, action, paneID string) commandReply {
-	return commandReply{server: s, client: client, requestID: requestID, action: action, paneID: paneID}
-}
-
-func (s *Server) auditedReply(client *transport.ClientConn, request map[string]any, requestID, action, paneID string) commandReply {
-	reply := s.reply(client, requestID, action, paneID)
-	reply.audited = request
-	return reply
-}
-
-func (r commandReply) fail(message string) {
-	r.send(false, "failed", message, nil)
-}
-
-func (r commandReply) failWithData(message string, data any) {
-	r.send(false, "failed", message, data)
-}
-
-func (r commandReply) complete(data any) {
-	r.send(true, "completed", "", data)
-}
-
-func (r commandReply) schedule(data any) {
-	r.send(true, "scheduled", "", data)
-}
-
-func (r commandReply) send(ok bool, phase, publicError string, data any) {
-	result := &coordinator.CommandResult{
-		RequestID: r.requestID,
-		Action:    r.action,
-		OK:        ok,
-		Phase:     phase,
-		Error:     publicError,
-		PaneID:    r.paneID,
-		Data:      data,
-	}
-	if r.audited != nil {
-		r.server.recordWriteAudit(r.client, r.audited, result)
-	}
-	r.server.hub.Send(r.client, coordinator.CommandResultMessage(result))
-}
-
 func fitSlashCommandCatalog(catalog slashcmd.Catalog, requestID, action, paneID string) slashcmd.Catalog {
 	if slashCommandResultFits(catalog, requestID, action, paneID) {
 		return catalog
@@ -3166,45 +2813,6 @@ func slashCommandResultFits(catalog slashcmd.Catalog, requestID, action, paneID 
 	})
 	encoded, err := json.Marshal(message)
 	return err == nil && len(encoded) <= transport.MaxOutboundMessageBytes
-}
-
-func (s *Server) watchJobStates(ctx context.Context) {
-	updateState := serializedState(s.updateM.State())
-	deployState := serializedState(s.appDeployM.State())
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			nextUpdate := s.updateM.State()
-			if serialized := serializedState(nextUpdate); serialized != updateState {
-				updateState = serialized
-				s.hub.Broadcast(map[string]any{"type": "update_status", "update": nextUpdate})
-			}
-			nextDeploy := s.appDeployM.State()
-			if serialized := serializedState(nextDeploy); serialized != deployState {
-				deployState = serialized
-				s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": nextDeploy})
-			}
-		}
-	}
-}
-
-func (s *Server) updateCheckLoop(ctx context.Context) {
-	timer := time.NewTimer(5 * time.Minute)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			state := s.updateM.Check(ctx)
-			s.hub.Broadcast(map[string]any{"type": "update_status", "update": state})
-			timer.Reset(6 * time.Hour)
-		}
-	}
 }
 
 func serializedState(value any) string {
@@ -3417,128 +3025,6 @@ func auditInteger(value any) (int64, bool) {
 	}
 	return 0, false
 }
-func (s *Server) storePhoneAppOrigin(raw string) error {
-	if raw == "" {
-		return fmt.Errorf("origin is required")
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
-		return fmt.Errorf("origin must be an HTTPS origin")
-	}
-	if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("origin must not contain a path, query, or fragment")
-	}
-	origin := "https://" + parsed.Host
-	if err := os.MkdirAll(s.cfg.RuntimeDir, 0o700); err != nil {
-		return err
-	}
-	path := filepath.Join(s.cfg.RuntimeDir, "phone-app-origin")
-	temp := path + ".tmp"
-	if err := os.WriteFile(temp, []byte(origin+"\n"), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(temp, path)
-}
-
-func (s *Server) writeSupportLoop(ctx context.Context) {
-	s.writeSupportSnapshot()
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			s.writeSupportSnapshot()
-			return
-		case <-ticker.C:
-			s.writeSupportSnapshot()
-		}
-	}
-}
-
-func (s *Server) writeSupportSnapshot() {
-	if s.cfg.RuntimeDir == "" {
-		return
-	}
-	readiness := "starting"
-	if s.state.InventoryReady() {
-		readiness = "ready"
-	}
-	releaseDirectory := ""
-	if executable, err := os.Executable(); err == nil {
-		releaseDirectory = filepath.Dir(executable)
-	}
-	webHash, webVersion := "", ""
-	if s.webH != nil {
-		webHash = s.webH.BundleHash()
-		webVersion = s.webH.BundleVersion()
-	}
-	metrics := coordinator.SchedulerMetrics{}
-	activityFailures := uint64(0)
-	if s.dispatcher != nil {
-		metrics = s.dispatcher.Metrics()
-		activityFailures = s.dispatcher.ActivityFailures()
-	}
-	udpMetrics := coordinator.UDPMetrics{}
-	if s.udp != nil {
-		udpMetrics = s.udp.Metrics()
-	}
-	snapshot := support.Snapshot{
-		Version:          s.version,
-		Revision:         s.revision,
-		Protocol:         protocol.Version,
-		ReleaseDirectory: releaseDirectory,
-		WebHash:          webHash,
-		WebVersion:       webVersion,
-		Readiness:        readiness,
-		Inventory:        s.state.InventoryStatus(),
-		Components: map[string]string{
-			"http":        "running",
-			"poller":      "running",
-			"udp":         componentState(s.udp != nil),
-			"persistence": componentState(s.journal != nil),
-			"push":        componentState(s.pushM != nil),
-		},
-		Scheduler:        metrics,
-		Transport:        s.hub.Metrics(),
-		UDP:              udpMetrics,
-		ActivityFailures: activityFailures,
-		TopologyRetries:  s.state.TopologyRetryCount(),
-		PollFailures:     s.poller.ConsecutiveFailures(),
-		RecentErrors:     s.recentSafeErrors(),
-	}
-	if err := support.Write(s.cfg.RuntimeDir, snapshot); err != nil {
-		s.recordSafeError("support snapshot write failed", err)
-		s.logger.Debug("support snapshot write failed", "error", err)
-	}
-}
-
-func (s *Server) recordSafeError(component string, err error) {
-	message := strings.Join(strings.Fields(component), " ")
-	if err != nil {
-		detail := strings.Join(strings.Fields(err.Error()), " ")
-		runes := []rune(detail)
-		if len(runes) > 300 {
-			detail = string(runes[:300])
-		}
-		if detail != "" {
-			message += ": " + detail
-		}
-	}
-	message = time.Now().UTC().Format(time.RFC3339) + " " + message
-	s.mu.Lock()
-	s.errors = append(s.errors, message)
-	if len(s.errors) > 20 {
-		s.errors = append([]string(nil), s.errors[len(s.errors)-20:]...)
-	}
-	s.mu.Unlock()
-}
-
-func (s *Server) recentSafeErrors() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]string(nil), s.errors...)
-}
-
 func (s *Server) projectAgentResource(agent *coordinator.AgentState) {
 	if agent == nil {
 		return
@@ -3968,11 +3454,4 @@ func messageInt(value any, fallback int) int {
 		}
 	}
 	return fallback
-}
-
-func componentState(available bool) string {
-	if available {
-		return "running"
-	}
-	return "unavailable"
 }
