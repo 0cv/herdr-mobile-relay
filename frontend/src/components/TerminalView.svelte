@@ -118,7 +118,6 @@
   let virtualHeightCache = new Map<string, number>();
   const virtualIndex = new VirtualTerminalIndex();
   const wideGridOffsets = new Map<number, number>();
-  let wideGridOffsetsPane = '';
   let lastFormat = '';
   let lastContent = '';
   let lastPreserveLineEnds = false;
@@ -817,10 +816,6 @@
     const row = event.target;
     if (!(row instanceof HTMLElement) || row.dataset.terminalWideBlock === undefined || !terminalElement) return;
     const block = Number(row.dataset.terminalWideBlock);
-    if (wideGridOffsetsPane !== agent.pane_id) {
-      wideGridOffsets.clear();
-      wideGridOffsetsPane = agent.pane_id;
-    }
     if (wideGridOffsets.get(block) === row.scrollLeft) return;
     wideGridOffsets.set(block, row.scrollLeft);
     for (const sibling of terminalElement.querySelectorAll<HTMLElement>(`[data-terminal-wide-block="${block}"]`)) {
@@ -829,7 +824,7 @@
   }
 
   function restoreWideGridScroll() {
-    if (!terminalElement || wideGridOffsetsPane !== agent.pane_id) return;
+    if (!terminalElement) return;
     for (const row of terminalElement.querySelectorAll<HTMLElement>('[data-terminal-wide-block]')) {
       const offset = wideGridOffsets.get(Number(row.dataset.terminalWideBlock));
       if (offset && row.scrollLeft !== offset) row.scrollLeft = offset;
