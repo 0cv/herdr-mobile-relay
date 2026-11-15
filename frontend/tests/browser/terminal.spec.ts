@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { distanceFromBottom } from '../support/journey-device';
 import { commands, connectFedora, handshake, lastCommand, openAgent, openOmpPane, replyToPaneRead, server, setAutoCommands } from '../support/journey-relay';
 
 test('keeps Cursor filtering text-only across status updates and restores prompts after selecting', async ({ page }) => {
@@ -105,8 +106,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: promptContent,
   });
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   const beforeManual = (await commands(page)).findLast(command => command.type === 'read_pane')?.request_id;
   await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   const terminalInput = page.getByRole('textbox', { name: 'Terminal text', exact: true });
@@ -132,8 +132,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Old controls', agent: 'opencode' }],
   });
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Enter' })).toBeDisabled();
 
@@ -837,10 +836,9 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
     element.dispatchEvent(new Event('scroll'));
   });
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: `${longFrame}\nlatest output` });
-  expect(await terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  expect(await distanceFromBottom(terminal)).toBeGreaterThan(2);
   await terminal.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
-  await expect.poll(() => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
 
   await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from('png') });
   await expect(composer).toHaveValue(/Attachment: attachment:test-1/);

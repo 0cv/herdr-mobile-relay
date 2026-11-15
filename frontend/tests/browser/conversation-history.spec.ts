@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
+import { distanceFromBottom } from '../support/journey-device';
 import { commands, composerTarget, connectFedora, reply, server, setAutoCommands, setConversationFixture } from '../support/journey-relay';
 
 test('reads and replies from native conversation history', async ({ page }) => {
@@ -318,13 +319,11 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
   await page.getByRole('button', { name: 'Open Long conversation on Fedora' }).click();
   await page.getByRole('button', { name: 'Conversation history' }).click();
   const list = page.locator('.conversation-list');
-  const bottomGap = () => list.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight);
 
   await expect(page.getByText('Turn 60 heading')).toBeVisible();
   // A pin assertion is only meaningful while the transcript really overflows.
   expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight * 3)).toBe(true);
-  await expect.poll(bottomGap).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
 
   // Turns arriving while the reader sits at the end keep the end in view.
   const streamed = [...entries, {
@@ -332,7 +331,7 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
   }];
   await setConversationFixture(page, { entries: streamed, total: streamed.length });
   await expect(page.getByText('newest streamed question')).toBeVisible();
-  await expect.poll(bottomGap).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
 
   // Reading history wins over the pin: later turns must not yank the view.
   await list.evaluate(async (element) => {
@@ -350,7 +349,7 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
   await expect(page.locator('.conversation-source-status').filter({ hasText: 'of 62 loaded messages.' })).toBeAttached();
   await expect(list.locator('article').first()).toHaveAttribute('data-conversation-entry-id', readingAnchor!);
   expect(await list.evaluate(element => element.scrollTop)).toBeCloseTo(readingTop, 0);
-  expect(await bottomGap()).toBeGreaterThan(200);
+  expect(await distanceFromBottom(list)).toBeGreaterThan(200);
 
   // Scrolling back to the end restores the pin.
   await scrollConversationToBottom(page);
@@ -359,7 +358,7 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
   }];
   await setConversationFixture(page, { entries: final, total: final.length });
   await expect(page.getByText('final streamed question')).toBeVisible();
-  await expect.poll(bottomGap).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
 });
 
 test('loads older conversation automatically when scrolled near the top', async ({ page }) => {

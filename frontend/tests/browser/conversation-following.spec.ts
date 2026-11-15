@@ -1,6 +1,23 @@
 import { expect, test, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, reply, server, setConversationFixture, socketCount } from '../support/journey-relay';
+import { distanceFromBottom } from '../support/journey-device';
+import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, server, setConversationFixture, socketCount } from '../support/journey-relay';
+
+interface ConversationBatch {
+  after: number;
+  entries: Record<string, unknown>[];
+  sourceRevision: string;
+  capabilities: Record<string, unknown>;
+  remove?: string[];
+  state?: string;
+}
+
+async function deliverConversationBatch(page: Page, { after, entries, sourceRevision, capabilities, remove = [], state = 'generating' }: ConversationBatch) {
+  const updates = async () => (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after);
+  await expect.poll(async () => (await updates()).length).toBeGreaterThan(0);
+  const request = (await updates()).at(-1)!;
+  await server(page, 0, { type: 'command_result', action: 'get_conversation_updates', request_id: request.request_id, ok: true, phase: 'completed', data: { subscription_id: 'fixture-subscription', kind: 'batch', source_revision: sourceRevision, sequence: after + 1, entries, remove, state, capabilities } });
+}
 
 async function openFollowingConversation(page: Page, mode: 'conversation' | 'activity' = 'activity') {
   await page.addInitScript(value => localStorage.setItem('herdr-conversation-view', value), mode);
@@ -12,20 +29,15 @@ async function openFollowingConversation(page: Page, mode: 'conversation' | 'act
   await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'working', agent: 'pi', project: 'Streaming follow', conversation_history_available: true }] });
   await page.getByRole('button', { name: 'Open Streaming follow on Fedora' }).click();
   const list = page.locator('.conversation-list');
-  const gap = () => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
   await expect(list.locator('article').last()).toContainText('Follow seed 23');
-  await expect.poll(gap).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
   let sequence = 0;
-  const deliver = async (incoming: Record<string, unknown>[], remove: string[] = []) => {
-    await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === sequence).length).toBeGreaterThan(0);
-    const request = (await commands(page)).findLast(command => command.type === 'get_conversation_updates' && command.after === sequence)!;
-    await reply(page, request, { kind: 'batch', subscription_id: 'fixture-subscription', source_revision: 'stream:1', sequence: ++sequence, capabilities, state: 'generating', entries: incoming, remove });
-  };
+  const deliver = (incoming: Record<string, unknown>[], remove: string[] = []) => deliverConversationBatch(page, { after: sequence++, entries: incoming, remove, sourceRevision: 'stream:1', capabilities });
   const latestInView = async () => {
-    await expect.poll(gap).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
     expect(await list.locator('article').last().evaluate(element => element.getBoundingClientRect().bottom <= element.closest('.conversation-list')!.getBoundingClientRect().bottom + 2)).toBe(true);
   };
-  return { list, gap, entry, deliver, latestInView };
+  return { list, entry, deliver, latestInView };
 }
 
 for (const interaction of ['untouched', 'touch', 'return-to-end'] as const) {
@@ -38,7 +50,7 @@ for (const interaction of ['untouched', 'touch', 'return-to-end'] as const) {
       if (interaction === 'return-to-end') {
         await list.evaluate(element => { element.scrollTop -= 140; element.dispatchEvent(new Event('scroll')); });
         await list.evaluate(element => { element.scrollTop = element.scrollHeight - element.clientHeight - 18; element.dispatchEvent(new Event('scroll')); });
-        expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+        expect(await distanceFromBottom(list)).toBeGreaterThan(2);
         await scrollConversationToBottom(page);
       }
       await list.dispatchEvent('pointerup', { pointerType: 'touch' });
@@ -86,7 +98,7 @@ for (const heightChange of [-80, 80]) {
 }
 
 test('conversation follow-the-end leaves selection and restored reading positions alone', async ({ page }) => {
-  const { list, gap, entry, deliver, latestInView } = await openFollowingConversation(page);
+  const { list, entry, deliver, latestInView } = await openFollowingConversation(page);
   await deliver([entry('live:selection', 'Initial selection output')]);
   await expect(list.locator('[data-conversation-entry-id="live:selection"]')).toBeAttached();
   await latestInView();
@@ -104,7 +116,7 @@ test('conversation follow-the-end leaves selection and restored reading position
   await expect(list.locator('[data-conversation-entry-id="live:selection"]')).toBeAttached();
   expect(await page.evaluate(() => window.getSelection()!.toString())).toBe(selected);
   expect(await list.evaluate(element => element.scrollTop)).toBeCloseTo(top, 0);
-  expect(await gap()).toBeGreaterThan(100);
+  expect(await distanceFromBottom(list)).toBeGreaterThan(100);
   await page.evaluate(() => window.getSelection()?.removeAllRanges());
   await scrollConversationToBottom(page);
   await latestInView();
@@ -205,11 +217,7 @@ test('live conversation deltas preserve local reading, selection, tool expansion
     await expect(tool).toHaveAttribute('open', '');
     expect(await table.evaluate(element => element.scrollLeft)).toBe(horizontal);
   }
-  const deliver = async (after: number, batch: Record<string, unknown>) => {
-    await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after).length).toBeGreaterThan(0);
-    const request = (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after).at(-1)!;
-    await server(page, 0, { type: 'command_result', action: 'get_conversation_updates', request_id: request.request_id, ok: true, phase: 'completed', data: { subscription_id: 'fixture-subscription', kind: 'batch', source_revision: 'live-source:1', sequence: after + 1, entries: [], remove: [], state: 'generating', capabilities, ...batch } });
-  };
+  const deliver = (after: number, batch: { entries: Record<string, unknown>[]; remove?: string[]; state?: string }) => deliverConversationBatch(page, { after, sourceRevision: 'live-source:1', capabilities, ...batch });
   await deliver(0, { entries: [{ id: 'live:message', role: 'assistant', text: 'First partial', timestamp: '' }] });
   await expect(list.getByText('First partial', { exact: true })).toHaveCount(0);
   await expect(page.locator('.conversation-page > .conversation-source-status')).toHaveCount(0);
@@ -251,7 +259,7 @@ test('live conversation deltas preserve local reading, selection, tool expansion
   expect((await commands(page)).filter(command => command.type === 'get_conversation_history')).toHaveLength(1);
   await page.evaluate(() => window.getSelection()?.removeAllRanges());
   await scrollConversationToBottom(page);
-  await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
   await closeSocket(page, 0);
   await expect(list.getByText('Final response', { exact: true })).toHaveCount(1);
   const firstBeforeScroll = await list.locator('article').first().getAttribute('data-conversation-entry-id');
@@ -326,17 +334,13 @@ for (const source of ['recorded_history', 'pi_events']) {
     await showOlderConversationEntry(page, 'entry:0');
     await expect(list.getByText('Seed message 0', { exact: true })).toBeAttached();
     await scrollConversationToBottom(page);
-    await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
-    const deliver = async (after: number, incoming: Record<string, unknown>[]) => {
-      await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after).length).toBeGreaterThan(0);
-      const request = (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after).at(-1)!;
-      await server(page, 0, { type: 'command_result', action: 'get_conversation_updates', request_id: request.request_id, ok: true, phase: 'completed', data: { subscription_id: 'fixture-subscription', kind: 'batch', source_revision: 'follow:1', sequence: after + 1, entries: incoming, remove: [], state: 'recorded', capabilities } });
-    };
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
+    const deliver = (after: number, incoming: Record<string, unknown>[]) => deliverConversationBatch(page, { after, entries: incoming, sourceRevision: 'follow:1', capabilities, state: 'recorded' });
     await deliver(0, [{ id: 'entry:240', role: 'user', text: 'Appended prompt', timestamp: '' }, { id: 'entry:241', role: 'assistant', text: 'Appended intermediate', timestamp: '' }]);
     await expect(list.getByText('Appended intermediate', { exact: true })).toBeVisible();
     await deliver(1, [{ id: 'entry:242', role: 'assistant', text: '', timestamp: '', tools: [{ id: 'tail-tool', name: 'Appended tool', input: '{}', output: 'done' }] }]);
     await expect(list.locator('summary').filter({ hasText: 'Appended tool' })).toBeVisible();
-    await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
     expect(await list.locator('article').count()).toBeLessThanOrEqual(24);
     await list.evaluate(element => { element.dispatchEvent(new Event('pointerdown', { bubbles: true })); element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
     const anchor = await list.locator('article').first().getAttribute('data-conversation-entry-id');
@@ -382,7 +386,7 @@ for (const source of ['recorded_history', 'pi_events']) {
     await expect(list.locator('article').first()).toHaveAttribute('data-conversation-entry-id', 'window:12');
     const retained = list.locator(`[data-conversation-entry-id="${anchor}"]`);
     expect(Math.abs(await retained.evaluate(element => element.getBoundingClientRect().top) - await page.evaluate(() => (window as any).__bottomAnchorTop))).toBeLessThanOrEqual(2);
-    expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+    expect(await distanceFromBottom(list)).toBeGreaterThan(2);
     await scrollConversationToBottom(page);
     await expect(list.locator('[data-conversation-entry-id="window:639"]')).toBeVisible();
     await expect(list.locator('article')).toHaveCount(24);
@@ -452,20 +456,20 @@ for (const source of ['recorded_history', 'pi_events']) {
     const list = page.locator('.conversation-list');
 
     await expect(list.locator('article')).toHaveCount(24);
-    await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
     await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
     await expect(page.locator('.conversation-jump')).toHaveCount(0);
     for (const delta of [-8, -8, -8, 5, -4, 7]) {
-      const before = await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
+      const before = await distanceFromBottom(list);
       await list.evaluate((element, value) => { element.scrollBy(0, value); element.dispatchEvent(new Event('scroll')); }, delta);
       await expect(page.locator('.conversation-jump')).toHaveCount(0);
-      expect(Math.abs(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight) - (before - delta))).toBeLessThanOrEqual(2);
+      expect(Math.abs(await distanceFromBottom(list) - (before - delta))).toBeLessThanOrEqual(2);
     }
     await list.dispatchEvent('pointerup', { pointerType: 'touch' });
     await list.evaluate(element => { element.scrollBy(0, -160); element.dispatchEvent(new Event('scroll')); });
-    expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+    expect(await distanceFromBottom(list)).toBeGreaterThan(2);
     await scrollConversationToBottom(page);
-    await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
   });
 
   test(`scroll intent: wheel window and bottom arrival preserve reading and resume (${source})`, async ({ page, browserName }) => {
@@ -479,14 +483,13 @@ for (const source of ['recorded_history', 'pi_events']) {
     await page.getByRole('button', { name: 'Conversation history' }).click();
     await page.getByRole('button', { name: 'Full history', exact: true }).click();
     const list = page.locator('.conversation-list');
-    const gap = () => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
 
-    await expect.poll(gap).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
     await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
     await showOlderConversationEntry(page, 'scroll:0');
     await expect(list.locator('[data-conversation-entry-id="scroll:0"]')).toBeAttached();
     await scrollConversationToBottom(page);
-    await expect.poll(gap).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
     await page.waitForTimeout(350);
     const box = (await list.boundingBox())!;
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -499,19 +502,15 @@ for (const source of ['recorded_history', 'pi_events']) {
         }, delta);
       } else await page.mouse.wheel(0, delta);
     }
-    expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+    expect(await distanceFromBottom(list)).toBeGreaterThan(2);
     await page.waitForTimeout(100);
     const anchor = await list.locator('article').first().getAttribute('data-conversation-entry-id');
     const top = await list.evaluate(element => element.scrollTop);
-    const deliver = async (after: number, incoming: Record<string, unknown>[]) => {
-      await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after).length).toBeGreaterThan(0);
-      const request = (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after).at(-1)!;
-      await server(page, 0, { type: 'command_result', action: 'get_conversation_updates', request_id: request.request_id, ok: true, phase: 'completed', data: { subscription_id: 'fixture-subscription', kind: 'batch', source_revision: 'scroll:1', sequence: after + 1, entries: incoming, remove: [], state: 'generating', capabilities } });
-    };
+    const deliver = (after: number, incoming: Record<string, unknown>[]) => deliverConversationBatch(page, { after, entries: incoming, sourceRevision: 'scroll:1', capabilities });
     await deliver(0, [{ id: 'live:scroll', role: 'assistant', text: 'Provisional while reading', timestamp: '' }]);
     await expect(list.locator('article').first()).toHaveAttribute('data-conversation-entry-id', anchor!);
     expect(Math.abs(await list.evaluate(element => element.scrollTop) - top)).toBeLessThanOrEqual(2);
-    expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+    expect(await distanceFromBottom(list)).toBeGreaterThan(2);
     await deliver(1, [{ id: 'scroll:280', role: 'assistant', text: 'Committed while reading', timestamp: '' }]);
     await expect(list.locator('article').first()).toHaveAttribute('data-conversation-entry-id', anchor!);
     await scrollConversationToBottom(page);
@@ -530,13 +529,13 @@ for (const source of ['recorded_history', 'pi_events']) {
     });
     await list.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
     await page.evaluate(() => (window as any).__scrollTail);
-    await expect.poll(gap).toBeGreaterThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeGreaterThan(2);
     await scrollConversationToBottom(page);
-    await expect.poll(gap).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
     await expect(page.locator('.conversation-jump')).toHaveCount(0);
     await deliver(2, [{ id: 'scroll:281', role: 'assistant', text: 'Following after momentum', timestamp: '' }]);
     await expect(list.getByText('Following after momentum', { exact: true })).toBeVisible();
-    await expect.poll(gap).toBeLessThan(2);
+    await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
     expect(await list.locator('article').count()).toBeLessThanOrEqual(24);
     for (let after = 3; after <= 6; after++) {
       await page.waitForTimeout(100);
@@ -549,7 +548,7 @@ for (const source of ['recorded_history', 'pi_events']) {
       element.scrollBy(0, -240);
       element.dispatchEvent(new Event('scroll'));
     });
-    expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+    expect(await distanceFromBottom(list)).toBeGreaterThan(2);
   });
 }
 
@@ -562,13 +561,12 @@ test('scroll intent: upward movement releases following and explicit bottom arri
   await page.getByRole('button', { name: 'Open Momentum on Fedora' }).click();
   await page.getByRole('button', { name: 'Conversation history' }).click();
   const list = page.locator('.conversation-list');
-  const gap = () => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
-  await expect.poll(gap).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
   await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
   await list.evaluate(element => { element.scrollBy(0, -400); element.dispatchEvent(new Event('scroll')); });
   await list.dispatchEvent('pointerup', { pointerType: 'touch' });
 
-  expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  expect(await distanceFromBottom(list)).toBeGreaterThan(2);
   await list.evaluate(element => {
     (window as any).__momentumDone = new Promise<void>(resolve => {
       let count = 0;
@@ -581,12 +579,12 @@ test('scroll intent: upward movement releases following and explicit bottom arri
   });
   await list.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
   await page.evaluate(() => (window as any).__momentumDone);
-  await expect.poll(gap).toBeGreaterThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeGreaterThan(2);
   await scrollConversationToBottom(page);
-  await expect.poll(gap).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);
   await expect(page.locator('.conversation-jump')).toHaveCount(0);
   await page.clock.runFor(350);
   await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
   await list.evaluate(element => { element.scrollBy(0, -200); element.dispatchEvent(new Event('scroll')); });
-  expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  expect(await distanceFromBottom(list)).toBeGreaterThan(2);
 });

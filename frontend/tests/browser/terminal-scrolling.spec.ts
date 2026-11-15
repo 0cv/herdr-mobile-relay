@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { distanceFromBottom } from '../support/journey-device';
 import { openAgent, openOmpPane, server } from '../support/journey-relay';
 
 test('virtualizes terminal history and copies the latest response', async ({ page }) => {
@@ -96,21 +97,18 @@ test('virtualizes terminal history and copies the latest response', async ({ pag
   });
   await expect(screen).toHaveAttribute('data-terminal-row-count', '1002');
   await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(1001);
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   const viewport = page.viewportSize();
   expect(viewport).not.toBeNull();
   await page.setViewportSize({ width: viewport!.width, height: viewport!.height - 180 });
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   await terminal.evaluate((element) => {
     const view = element.closest<HTMLElement>('.terminal-view');
     if (!view) throw new Error('Terminal view is missing');
     view.style.height = `${view.clientHeight - 120}px`;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   await expect(page.getByRole('navigation', { name: 'Application' })
     .getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
   await expect(screen).toHaveAttribute('data-terminal-row-count', '1002');
@@ -164,8 +162,7 @@ test('keeps rapid streaming frames pinned to the latest terminal row', async ({ 
   });
 
   const terminal = page.getByRole('log');
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   let maxBottomDistance = 0;
   for (let frame = 1; frame <= 24; frame += 1) {
     const content = Array.from(
@@ -182,15 +179,13 @@ test('keeps rapid streaming frames pinned to the latest terminal row', async ({ 
     await page.waitForTimeout(8);
     maxBottomDistance = Math.max(
       maxBottomDistance,
-      await terminal.evaluate((element) =>
-        element.scrollHeight - element.scrollTop - element.clientHeight),
+      await distanceFromBottom(terminal),
     );
   }
 
   expect(maxBottomDistance).toBeLessThan(48);
   await expect(terminal).toContainText('streaming response chunk 24');
-  await expect.poll(async () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 });
 
@@ -319,7 +314,7 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
     element.scrollTop = element.scrollHeight / 2;
     element.dispatchEvent(new Event('scroll'));
   });
-  expect(await terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  expect(await distanceFromBottom(terminal)).toBeGreaterThan(2);
   const firstVisibleRow = () => terminal.evaluate((element) => {
     const top = element.getBoundingClientRect().top;
     const row = [...element.querySelectorAll('[data-terminal-row]')]
@@ -346,7 +341,7 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
     return row ? row.getBoundingClientRect().height : 20;
   });
   expect(Math.abs(after.offset - before.offset)).toBeLessThan(rowHeight);
-  expect(await terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  expect(await distanceFromBottom(terminal)).toBeGreaterThan(2);
 
   // Returning to the bottom re-engages sticky mode.
   await terminal.evaluate((element) => {
@@ -369,9 +364,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await frame(150);
   const terminal = page.getByRole('log');
   await expect(terminal).toContainText('near-bottom row 150');
-  const bottomDistance = () => terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight);
-  await expect.poll(bottomDistance).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
 
   // A finger drags the view up by less than the 48px "near the bottom" band.
   await terminal.evaluate((element) => {
@@ -379,12 +372,12 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
     element.scrollTop -= 20;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   await frame(151);
   await expect(terminal).toContainText('near-bottom row 151');
-  expect(await bottomDistance()).toBeGreaterThan(10);
+  expect(await distanceFromBottom(terminal)).toBeGreaterThan(10);
 
   // Long after the scroll, an agent keeps rewriting its last line.
   await page.clock.runFor(1_600);
@@ -401,7 +394,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   }
   expect(Math.abs(await terminal.evaluate((element) => element.scrollTop) - readingTop))
     .toBeLessThanOrEqual(1);
-  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   // Scrolling partway back down is still reading, not following.
@@ -411,18 +404,18 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   });
   await frame(152);
   await expect(terminal).toContainText('near-bottom row 152');
-  expect(await bottomDistance()).toBeGreaterThan(10);
+  expect(await distanceFromBottom(terminal)).toBeGreaterThan(10);
 
   await terminal.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
   await frame(200);
   await expect(terminal).toContainText('near-bottom row 200');
-  await expect.poll(bottomDistance).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
 
   await terminal.evaluate((element) => {
     element.scrollTop -= 20;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   // Reaching the bottom follows again, even when output lands before the scroll event.
@@ -433,7 +426,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await expect(terminal).toContainText('near-bottom row 203');
   await frame(220);
   await expect(terminal).toContainText('near-bottom row 220');
-  await expect.poll(bottomDistance).toBeLessThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeLessThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
@@ -449,7 +442,7 @@ test('renders rows after a long wheel scroll to just above the bottom', async ({
   await terminal.evaluate((element) => {
     element.scrollTop = element.scrollHeight / 2;
   });
-  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
   await page.clock.runFor(300);
 
@@ -467,8 +460,7 @@ test('renders rows after a long wheel scroll to just above the bottom', async ({
   });
   await expect.poll(visibleRow).toBe(true);
   // Being near the bottom is not a request to follow output.
-  expect(await terminal.evaluate((element) =>
-    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(10);
-  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  expect(await distanceFromBottom(terminal)).toBeGreaterThan(10);
+  await expect.poll(() => distanceFromBottom(terminal)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 });

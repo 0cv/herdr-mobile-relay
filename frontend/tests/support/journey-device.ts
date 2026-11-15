@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
 export const webRoot = process.env.HERDR_WEB_ROOT || 'dist';
 
@@ -36,4 +36,8 @@ export async function emulateIphoneSafari(page: Page) {
     Object.defineProperty(navigator, 'standalone', { configurable: true, value: false });
     Object.defineProperty(navigator, 'userAgent', { configurable: true, value: agent });
   }, IPHONE_SAFARI_UA);
+}
+
+export function distanceFromBottom(locator: Locator) {
+  return locator.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
 }
