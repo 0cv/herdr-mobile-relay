@@ -35,12 +35,12 @@ ingress:
 EOF
 printf '{"owner":"herdr-mobile-relay-stable-setup-v1","schema":1,"hostname":"relay-fedora.old.test"}\n' \
     > "$MOVE_STATE"
-cat > "$MOVE_BIN/cloudflared" <<'EOF'
+write_stub "$MOVE_BIN/cloudflared" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MOVE_ROUTE_LOG"
 exit 0
 EOF
-cat > "$MOVE_BIN/curl" <<'EOF'
+write_stub "$MOVE_BIN/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
     "--help all")
@@ -57,7 +57,7 @@ case "$*" in
 esac
 printf '{"status":"ok","instance":"same","version":"9.9.9","protocol":2}\n'
 EOF
-cat > "$MOVE_BIN/relay-stub" <<'EOF'
+write_stub "$MOVE_BIN/relay-stub" <<'EOF'
 #!/bin/sh
 case "$1 $2" in
     "stable-state health-match") exit 0 ;;
@@ -71,14 +71,13 @@ EOF
 printf '#!/bin/sh\nexit 0\n' > "$MOVE_BIN/service.sh"
 # change-hostname.sh reinstalls the service with the repository's service.sh,
 # so report it as not loaded instead of letting that reach this machine's relay.
-cat > "$MOVE_BIN/launchctl" <<'EOF'
+write_stub "$MOVE_BIN/launchctl" <<'EOF'
 #!/bin/sh
 case "$1 $2" in
     "print gui/"*/*) exit 1 ;;
 esac
 EOF
-chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl" "$MOVE_BIN/relay-stub" "$MOVE_BIN/service.sh" \
-    "$MOVE_BIN/launchctl"
+chmod 700 "$MOVE_BIN/service.sh"
 MOVE_STATE_RECORD="$WORK_DIR/state-hostname"
 export MOVE_STATE_RECORD
 reset_move_config() {
@@ -162,12 +161,11 @@ esac
 # not cover the zone. Believing it once left a live relay serving a hostname
 # that answered nowhere, so a mismatch must change nothing at all.
 reset_move_config
-cat > "$MOVE_BIN/cloudflared" <<'EOF'
+write_stub "$MOVE_BIN/cloudflared" <<'EOF'
 #!/bin/sh
 printf 'INF Added CNAME relay-fedora.new.test.old.test which will route to your tunnel\n'
 exit 0
 EOF
-chmod 700 "$MOVE_BIN/cloudflared"
 MOVE_OUTPUT="$(
     printf 'relay-fedora.new.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
@@ -187,16 +185,15 @@ grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" &&
 
 # A new name the edge never answers must not take the old one out of service.
 reset_move_config
-cat > "$MOVE_BIN/cloudflared" <<'EOF'
+write_stub "$MOVE_BIN/cloudflared" <<'EOF'
 #!/bin/sh
 printf 'INF Added CNAME relay-fedora.unreachable.test which will route to your tunnel\n'
 exit 0
 EOF
-cat > "$MOVE_BIN/curl" <<'EOF'
+write_stub "$MOVE_BIN/curl" <<'EOF'
 #!/bin/sh
 exit 6
 EOF
-chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl"
 MOVE_OUTPUT="$(
     printf 'relay-fedora.unreachable.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
@@ -225,7 +222,7 @@ MOVE_CERT="$MOVE_HOME/cert.pem"
     printf '{"zoneID":"zone1","apiToken":"token1","accountID":"acct1"}' | base64
     printf -- '-----END ARGO TUNNEL TOKEN-----\n'
 } > "$MOVE_CERT"
-cat > "$MOVE_BIN/curl" <<'EOF'
+write_stub "$MOVE_BIN/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
     *"/zones/zone1"*)
@@ -234,12 +231,11 @@ case "$*" in
     *) printf '{"status":"ok","instance":"same","version":"9.9.9","protocol":2}\n' ;;
 esac
 EOF
-cat > "$MOVE_BIN/cloudflared" <<'EOF'
+write_stub "$MOVE_BIN/cloudflared" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MOVE_ROUTE_LOG"
 exit 0
 EOF
-chmod 700 "$MOVE_BIN/curl" "$MOVE_BIN/cloudflared"
 MOVE_OUTPUT="$(
     printf 'relay-fedora.elsewhere.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \

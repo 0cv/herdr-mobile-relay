@@ -14,37 +14,7 @@ unset GH_TOKEN GITHUB_TOKEN
 mkdir -p "$WORK_DIR/config"
 NORMALIZE_BIN="$WORK_DIR/normalize/herdr-mobile-relay"
 mkdir -p "$(dirname "$NORMALIZE_BIN")"
-cat > "$NORMALIZE_BIN" <<'EOF'
-#!/bin/sh
-# Stands in for `herdr-mobile-relay normalize-origin --allow-loopback-http URL`:
-# a bare host defaults to HTTPS, plain HTTP is loopback-only, and credentials,
-# paths, queries, and fragments are rejected.
-test "$1" = "normalize-origin" || exit 2
-test "$2" = "--allow-loopback-http" || exit 2
-value="$3"
-case "$value" in
-    *://*) ;;
-    *) value="https://$value" ;;
-esac
-scheme="${value%%://*}"
-host="${value#*://}"
-host="${host%/}"
-case "$host" in
-    ''|*/*|*\?*|*'#'*|*@*) exit 1 ;;
-esac
-case "$scheme" in
-    https) ;;
-    http)
-        case "${host%%:*}" in
-            localhost|127.0.0.1|::1) ;;
-            *) exit 1 ;;
-        esac
-        ;;
-    *) exit 1 ;;
-esac
-printf '%s://%s\n' "$scheme" "$host"
-EOF
-chmod 700 "$NORMALIZE_BIN"
+write_origin_stub "$NORMALIZE_BIN"
 
 # The setup menu opens after every install, including upgrades, so it has to
 # report what exists before offering to change it: a stale phone app is exactly
@@ -62,7 +32,7 @@ printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\nHER
 printf "HERDR_GATEWAY_DEPLOY_HOST='gw-owned.example.test'\n" \
     > "$WORK_DIR/config/gateway-deploy"
 printf 'https://relay.example.test\n' > "$WORK_DIR/config/phone-app-origin"
-cat > "$MENU_BIN_DIR/curl" <<'EOF'
+write_stub "$MENU_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
     *127.0.0.1*healthz*) printf '{"status":"ok","release_version":"9.9.9","gateway_url":"wss://gw-b.example.test","gateway_version":"9.9.8","gateway_available_version":"9.9.10"}\n' ;;
@@ -71,7 +41,6 @@ case "$*" in
     *) exit 22 ;;
 esac
 EOF
-chmod 700 "$MENU_BIN_DIR/curl"
 # Entering an action and finishing it has to come back here, not end the pane:
 # WebRTC → Show Full Status shows the status, then the submenu is redrawn and q leaves. Without a terminal
 # the return prompt is skipped, so the input carries no extra newline.
@@ -131,11 +100,11 @@ cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-setup-menu.sh" \
     "$REFRESH_MENU_DIR/"
 printf "HERDR_GATEWAY_URL='wss://stale.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" \
     > "$REFRESH_MENU_ENV"
-cat > "$REFRESH_MENU_DIR/plugin-choose-transport.sh" <<'EOF'
+write_stub "$REFRESH_MENU_DIR/plugin-choose-transport.sh" <<'EOF'
 #!/bin/sh
 : > "$HERDR_RELAY_ENV"
 EOF
-cat > "$REFRESH_MENU_DIR/plugin-status.sh" <<'EOF'
+write_stub "$REFRESH_MENU_DIR/plugin-status.sh" <<'EOF'
 #!/bin/sh
 if [ "${HERDR_GATEWAY_URL+x}" = x ]; then
     printf 'stale=%s\n' "$HERDR_GATEWAY_URL" > "$REFRESH_MENU_MARKER"
@@ -143,8 +112,6 @@ else
     printf 'unset\n' > "$REFRESH_MENU_MARKER"
 fi
 EOF
-chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" \
-    "$REFRESH_MENU_DIR/plugin-status.sh"
 export REFRESH_MENU_MARKER
 printf '2\n1\n4\nq\n' |
     "${menu_isolation[@]}" HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
@@ -188,11 +155,10 @@ fi
 mv "$STALE_MENU_DIR" "$STALE_MENU_OLD"
 rm -rf "$STALE_MENU_OLD"
 mkdir -p "$STALE_MENU_DIR"
-cat > "$STALE_MENU_DIR/plugin-status.sh" <<'EOF'
+write_stub "$STALE_MENU_DIR/plugin-status.sh" <<'EOF'
 #!/bin/sh
 printf 'action ran\n' > "$STALE_MENU_MARKER"
 EOF
-chmod 700 "$STALE_MENU_DIR/plugin-status.sh"
 printf '2\n4\nq\n' >&7
 wait "$STALE_MENU_PID"
 exec 7>&-

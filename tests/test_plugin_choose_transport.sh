@@ -14,37 +14,7 @@ unset GH_TOKEN GITHUB_TOKEN
 mkdir -p "$WORK_DIR/config"
 NORMALIZE_BIN="$WORK_DIR/normalize/herdr-mobile-relay"
 mkdir -p "$(dirname "$NORMALIZE_BIN")"
-cat > "$NORMALIZE_BIN" <<'EOF'
-#!/bin/sh
-# Stands in for `herdr-mobile-relay normalize-origin --allow-loopback-http URL`:
-# a bare host defaults to HTTPS, plain HTTP is loopback-only, and credentials,
-# paths, queries, and fragments are rejected.
-test "$1" = "normalize-origin" || exit 2
-test "$2" = "--allow-loopback-http" || exit 2
-value="$3"
-case "$value" in
-    *://*) ;;
-    *) value="https://$value" ;;
-esac
-scheme="${value%%://*}"
-host="${value#*://}"
-host="${host%/}"
-case "$host" in
-    ''|*/*|*\?*|*'#'*|*@*) exit 1 ;;
-esac
-case "$scheme" in
-    https) ;;
-    http)
-        case "${host%%:*}" in
-            localhost|127.0.0.1|::1) ;;
-            *) exit 1 ;;
-        esac
-        ;;
-    *) exit 1 ;;
-esac
-printf '%s://%s\n' "$scheme" "$host"
-EOF
-chmod 700 "$NORMALIZE_BIN"
+write_origin_stub "$NORMALIZE_BIN"
 
 # Each flattened transport entry is complete: Community accepts the managed
 # candidate list without asking for addresses, retains an unavailable cold
@@ -56,7 +26,7 @@ CHOOSER_START_MARKER="$WORK_DIR/chooser-started"
 mkdir -p "$CHOOSER_BIN_DIR" "$CHOOSER_SCRIPT_DIR"
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-choose-transport.sh" \
     "$CHOOSER_SCRIPT_DIR/"
-cat > "$CHOOSER_BIN_DIR/curl" <<'EOF'
+write_stub "$CHOOSER_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 # Faithful enough for the probe: the health check reads the body from stdout,
 # and the latency probe asks for the body in --output with the timing on
@@ -82,10 +52,9 @@ case "$*" in
         ;;
 esac
 EOF
-chmod 700 "$CHOOSER_BIN_DIR/curl"
 CHOOSER_TRANSPORT_MARKER="$WORK_DIR/chooser-transport"
 export CHOOSER_TRANSPORT_MARKER
-cat > "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh" <<'EOF'
+write_stub "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh" <<'EOF'
 #!/bin/sh
 if [ "${HERDR_GATEWAY_URL+x}" = x ]; then
     printf 'gateway=%s\n' "$HERDR_GATEWAY_URL" > "$CHOOSER_TRANSPORT_MARKER"
@@ -94,7 +63,6 @@ else
 fi
 printf 'started\n' > "$CHOOSER_START_MARKER"
 EOF
-chmod 700 "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh"
 export CHOOSER_START_MARKER
 # The setup menu loads relay.env before running an action, so a policy left by
 # an earlier own-gateway setup is already exported here. Choosing Community has

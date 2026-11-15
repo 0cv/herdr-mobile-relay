@@ -17,7 +17,7 @@ DEPLOY_BIN="$WORK_DIR/deploy-bin"
 DEPLOY_ENV="$DEPLOY_HOME/relay.env"
 mkdir -p "$DEPLOY_HOME" "$DEPLOY_BIN"
 printf "HERDR_RELAY_TOKEN='deploy-token'\n" > "$DEPLOY_ENV"
-cat > "$DEPLOY_BIN/relay-stub" <<'EOF'
+write_stub "$DEPLOY_BIN/relay-stub" <<'EOF'
 #!/bin/sh
 case "$1 $2" in
     "normalize-origin --allow-loopback-http")
@@ -41,16 +41,15 @@ case "$1 $2" in
     *) exit 2 ;;
 esac
 EOF
-chmod 700 "$DEPLOY_BIN/relay-stub"
 printf '#!/bin/sh\nprintf "{}\\n"\n' > "$DEPLOY_BIN/npx"
-cat > "$DEPLOY_BIN/node" <<'EOF'
+write_stub "$DEPLOY_BIN/node" <<'EOF'
 #!/bin/sh
 [ "$1" = --version ] && { echo "v26.1.0"; exit 0; }
 exit 0
 EOF
 # Stands in for the Cloudflare API: records the attach request and reports the
 # domain as served from then on.
-cat > "$DEPLOY_BIN/curl" <<'EOF'
+write_stub "$DEPLOY_BIN/curl" <<'EOF'
 #!/bin/sh
 for argument in "$@"; do
     case "$argument" in
@@ -64,7 +63,7 @@ for argument in "$@"; do
 done
 printf '{"success":true}\n'
 EOF
-chmod 700 "$DEPLOY_BIN/npx" "$DEPLOY_BIN/node" "$DEPLOY_BIN/curl"
+chmod 700 "$DEPLOY_BIN/npx"
 DEPLOY_ATTACHED="$WORK_DIR/attached-domain"
 DEPLOY_ATTACH_LOG="$WORK_DIR/attach-url"
 export DEPLOY_ATTACHED DEPLOY_ATTACH_LOG

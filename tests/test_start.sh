@@ -27,11 +27,11 @@ mkdir -p "$START_SCRIPT_DIR" "$START_BIN_DIR"
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/start.sh" "$START_SCRIPT_DIR/"
 printf "HERDR_RELAY_TOKEN='start-token'\nHERDR_RELAY_INSTANCE_ID='start-instance'\n" \
     > "$START_ENV"
-cat > "$START_SCRIPT_DIR/setup-link.sh" <<'EOF'
+write_stub "$START_SCRIPT_DIR/setup-link.sh" <<'EOF'
 #!/bin/sh
 printf '%s\n' 'setup QR printed'
 EOF
-cat > "$START_BIN_DIR/systemctl" <<'EOF'
+write_stub "$START_BIN_DIR/systemctl" <<'EOF'
 #!/bin/sh
 case "$*" in
     "--user is-active --quiet herdr-mobile-relay.service")
@@ -45,7 +45,7 @@ case "$*" in
         ;;
 esac
 EOF
-cat > "$START_BIN_DIR/launchctl" <<'EOF'
+write_stub "$START_BIN_DIR/launchctl" <<'EOF'
 #!/bin/sh
 case "$1" in
     print) exit 0 ;;
@@ -53,11 +53,11 @@ case "$1" in
     *) exit 1 ;;
 esac
 EOF
-cat > "$START_BIN_DIR/curl" <<'EOF'
+write_stub "$START_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 printf '%s\n' '{"status":"ready","inventory":{"state":"ready"},"instance":"start-instance","version":"9.9.9","release_version":"9.9.9","revision":"test-revision","bundle_hash":"test-web","protocol":3}'
 EOF
-cat > "$START_BIN_DIR/herdr" <<'EOF'
+write_stub "$START_BIN_DIR/herdr" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
@@ -65,7 +65,7 @@ mkdir -p "$START_BIN_DIR/web"
 cp "$REPO_DIR/web/release.json" "$START_BIN_DIR/web/release.json"
 printf '%s\n' '{"version":"9.9.9","revision":"test-revision","web_hash":"test-web"}' \
     > "$START_BIN_DIR/release-manifest.json"
-cat > "$START_BIN_DIR/relay-bin" <<'EOF'
+write_stub "$START_BIN_DIR/relay-bin" <<'EOF'
 #!/bin/sh
 case "$1" in
     version) printf '%s\n' '{"version":"9.9.9","revision":"test-revision"}'; exit 0 ;;
@@ -74,8 +74,6 @@ esac
 printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1
 EOF
-chmod 700 "$START_SCRIPT_DIR/setup-link.sh" "$START_BIN_DIR/systemctl" \
-    "$START_BIN_DIR/launchctl" "$START_BIN_DIR/curl" "$START_BIN_DIR/herdr" "$START_BIN_DIR/relay-bin"
 export START_SERVICE_LOG START_RELAY_LOG
 START_OUTPUT="$(
     HOME="$START_HOME" \

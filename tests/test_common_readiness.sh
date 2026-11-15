@@ -14,15 +14,19 @@ unset GH_TOKEN GITHUB_TOKEN
 FAKE_LAUNCHCTL_DIR="$WORK_DIR/launchctl-bin"
 LAUNCHCTL_LOG="$WORK_DIR/launchctl.log"
 mkdir -p "$FAKE_LAUNCHCTL_DIR"
-cat > "$FAKE_LAUNCHCTL_DIR/sleep" <<'EOF'
+write_stub "$FAKE_LAUNCHCTL_DIR/sleep" <<'EOF'
 #!/bin/sh
 printf 'sleep %s\n' "$*" >> "$LAUNCHCTL_LOG"
 EOF
-chmod 700 "$FAKE_LAUNCHCTL_DIR/sleep"
 export LAUNCHCTL_LOG
 ensure_relay_test_binary "$WORK_DIR"
 export HERDR_RELAY_BIN="$HERDR_TEST_RELAY_BIN"
 export HERDR_RELAY_INSTANCE_ID=test
+
+ready_json() {
+    printf '{"status":"ready","inventory":{"state":"%s"},"instance":"%s","release_version":"%s","revision":"%s","bundle_hash":"%s","protocol":%s}' \
+        "${5:-ready}" "$1" "$2" "$3" "$4" "${6:-3}"
+}
 
 # The inferred-identity path reads the selected binary's sibling manifest,
 # never a fabricated field in web/release.json. Use the committed descriptor
@@ -41,7 +45,7 @@ fi
 READY_CURL_LOG="$WORK_DIR/readiness-curl.log"
 READY_ATTEMPTS="$WORK_DIR/readiness-attempts"
 READY_CURL_MODE=static
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown manifest-web)"
 : > "$READY_CURL_LOG"
 curl() {
     printf '%s\n' "$*" >> "$READY_CURL_LOG"
@@ -71,7 +75,7 @@ READY_DECOY_WEB="$WORK_DIR/readiness-decoy-web"
 mkdir -p "$READY_DECOY_WEB"
 printf '{"bundle_hash":"descriptor-decoy"}\n' > "$READY_DECOY_WEB/release.json"
 HERDR_WEB_ROOT="$READY_DECOY_WEB"
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown manifest-web)"
 : > "$READY_CURL_LOG"
 READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test)"
 test "$READY_OUTPUT" = "$READY_RESPONSE"
@@ -82,15 +86,15 @@ if wait_for_relay_health 8375 1 0 test >/dev/null 2>&1; then
 fi
 test -s "$READY_CURL_LOG"
 unset HERDR_WEB_ROOT
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown manifest-web)"
 
 for invalid_health in \
-    '{"status":"ready","inventory":{"state":"ready"},"instance":"wrong-instance","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}' \
-    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"wrong-version","revision":"unknown","bundle_hash":"manifest-web","protocol":3}' \
-    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"wrong-revision","bundle_hash":"manifest-web","protocol":3}' \
-    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"wrong-web","protocol":3}' \
-    '{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":2}' \
-    '{"status":"ready","inventory":{"state":"error"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'; do
+    "$(ready_json wrong-instance dev unknown manifest-web)" \
+    "$(ready_json test wrong-version unknown manifest-web)" \
+    "$(ready_json test dev wrong-revision manifest-web)" \
+    "$(ready_json test dev unknown wrong-web)" \
+    "$(ready_json test dev unknown manifest-web ready 2)" \
+    "$(ready_json test dev unknown manifest-web error)"; do
     READY_RESPONSE="$invalid_health"
     : > "$READY_CURL_LOG"
     if wait_for_relay_health 8375 1 0 test >/dev/null 2>&1; then
@@ -109,7 +113,7 @@ grep -q 'Start herdr-app or run hc server start' "$WORK_DIR/core-ready.err"
 
 # Preserve the bounded retry loop: an unready first reply is retried and a
 # matching reply on the second poll is returned unchanged.
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown manifest-web)"
 READY_CURL_MODE=retry
 rm -f "$READY_ATTEMPTS"
 : > "$READY_CURL_LOG"
@@ -161,14 +165,14 @@ test ! -s "$READY_CURL_LOG"
 
 # An explicit expected hash wins even when the manifest is absent or conflicts.
 rm "$READY_MANIFEST"
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"explicit-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown explicit-web)"
 READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test dev unknown explicit-web)"
 test "$READY_OUTPUT" = "$READY_RESPONSE"
 printf '{"web_hash":"conflicting-manifest-web"}\n' > "$READY_MANIFEST"
 READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test dev unknown explicit-web)"
 test "$READY_OUTPUT" = "$READY_RESPONSE"
 mv "$READY_MANIFEST_BACKUP" "$READY_MANIFEST"
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"manifest-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown manifest-web)"
 
 # An explicit binary override and the current symlink each select the sibling
 # manifest belonging to the chosen release, not another configured release.
@@ -180,7 +184,7 @@ cp "$REPO_DIR/web/release.json" "$READY_OVERRIDE/web/release.json"
 printf '{"web_hash":"override-web"}\n' > "$READY_OVERRIDE/release-manifest.json"
 HERDR_RELEASE_ROOT="$READY_RELEASE_ROOT"
 HERDR_RELAY_BIN="$READY_OVERRIDE/herdr-mobile-relay"
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"override-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown override-web)"
 READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test)"
 test "$READY_OUTPUT" = "$READY_RESPONSE"
 READY_CURRENT_ROOT="$WORK_DIR/readiness-current-root"
@@ -192,7 +196,7 @@ printf '{"web_hash":"current-web"}\n' > "$READY_CURRENT/release-manifest.json"
 ln -s releases/current-target "$READY_CURRENT_ROOT/current"
 unset HERDR_RELAY_BIN
 HERDR_RELEASE_ROOT="$READY_CURRENT_ROOT"
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"current-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown current-web)"
 READY_OUTPUT="$(wait_for_relay_health 8375 1 0 test)"
 test "$READY_OUTPUT" = "$READY_RESPONSE"
 
@@ -207,7 +211,7 @@ printf '{"web_hash":"packaged-web"}\n' > "$READY_PACKAGED/release-manifest.json"
 chmod 700 "$READY_PACKAGED/herdr-mobile-relay"
 HERDR_RELAY_BIN="$READY_OVERRIDE/herdr-mobile-relay"
 HERDR_RELEASE_ROOT="$READY_CURRENT_ROOT"
-READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test","release_version":"dev","revision":"unknown","bundle_hash":"packaged-web","protocol":3}'
+READY_RESPONSE="$(ready_json test dev unknown packaged-web)"
 READY_OUTPUT="$(
     . "$READY_PACKAGED/relay/common.sh"
     wait_for_relay_health 8375 1 0 test
@@ -217,7 +221,7 @@ test "$READY_OUTPUT" = "$READY_RESPONSE"
 unset -f curl
 HERDR_RELAY_BIN="$HERDR_TEST_RELAY_BIN"
 unset HERDR_RELEASE_ROOT HERDR_WEB_ROOT
-HEALTH='{"status":"ready","inventory":{"state":"ready"},"instance":"test","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
+HEALTH="$(ready_json test 0.9.0 abc123 web456)"
 verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
 if verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
     echo "release health accepted the wrong revision" >&2
@@ -225,8 +229,8 @@ if verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
 fi
 
 for invalid_health in \
-    '{"status":"ready","inventory":{"state":"ready"},"instance":"wrong-instance","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}' \
-    '{"status":"ready","inventory":{"state":"error"},"instance":"test","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'; do
+    "$(ready_json wrong-instance 0.9.0 abc123 web456)" \
+    "$(ready_json test 0.9.0 abc123 web456 error)"; do
     (
         curl() { printf '%s\n' "$invalid_health"; }
         if wait_for_relay_health 8375 1 0 test 0.9.0 abc123 web456; then
@@ -241,7 +245,7 @@ for invalid_health in \
 done
 
 HEALTH_ATTEMPTS="$WORK_DIR/health-attempts"
-cat > "$FAKE_LAUNCHCTL_DIR/curl" <<'EOF'
+write_stub "$FAKE_LAUNCHCTL_DIR/curl" <<'EOF'
 #!/bin/sh
 attempt=0
 if [ -f "$HEALTH_ATTEMPTS" ]; then
@@ -255,7 +259,6 @@ else
     printf '%s\n' '{"status":"ready","inventory":{"state":"ready"},"instance":"test","version":"0.9.0","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 fi
 EOF
-chmod 700 "$FAKE_LAUNCHCTL_DIR/curl"
 export HEALTH_ATTEMPTS
 EXACT_HEALTH="$(
     PATH="$FAKE_LAUNCHCTL_DIR:$PATH" \

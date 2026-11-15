@@ -23,7 +23,7 @@ ensure_relay_env "$ENV_FILE"
 # inside the fragment.
 FRAGMENT_BIN="$WORK_DIR/fragment/herdr-mobile-relay"
 mkdir -p "$(dirname "$FRAGMENT_BIN")"
-cat > "$FRAGMENT_BIN" <<'EOF'
+write_stub "$FRAGMENT_BIN" <<'EOF'
 #!/bin/sh
 # Stands in for `herdr-mobile-relay setup-fragment TOKEN LABEL [RELAY]`:
 # alphabetically sorted keys with percent-encoded values.
@@ -35,7 +35,6 @@ else
     printf 'label=%s&relay=%s&setup=%s\n' "$3" "$encoded" "$2"
 fi
 EOF
-chmod 700 "$FRAGMENT_BIN"
 
 GATEWAY_ENV="$WORK_DIR/config/gateway.env"
 printf "HERDR_GATEWAY_URL='wss://gw.example.test/'\n" > "$GATEWAY_ENV"
@@ -104,37 +103,7 @@ test -z "$(unset HERDR_GATEWAY_URL; gateway_urls "$WORK_DIR/config/relay.env")"
 # is stubbed the same way the fragment helper is above.
 NORMALIZE_BIN="$WORK_DIR/normalize/herdr-mobile-relay"
 mkdir -p "$(dirname "$NORMALIZE_BIN")"
-cat > "$NORMALIZE_BIN" <<'EOF'
-#!/bin/sh
-# Stands in for `herdr-mobile-relay normalize-origin --allow-loopback-http URL`:
-# a bare host defaults to HTTPS, plain HTTP is loopback-only, and credentials,
-# paths, queries, and fragments are rejected.
-test "$1" = "normalize-origin" || exit 2
-test "$2" = "--allow-loopback-http" || exit 2
-value="$3"
-case "$value" in
-    *://*) ;;
-    *) value="https://$value" ;;
-esac
-scheme="${value%%://*}"
-host="${value#*://}"
-host="${host%/}"
-case "$host" in
-    ''|*/*|*\?*|*'#'*|*@*) exit 1 ;;
-esac
-case "$scheme" in
-    https) ;;
-    http)
-        case "${host%%:*}" in
-            localhost|127.0.0.1|::1) ;;
-            *) exit 1 ;;
-        esac
-        ;;
-    *) exit 1 ;;
-esac
-printf '%s://%s\n' "$scheme" "$host"
-EOF
-chmod 700 "$NORMALIZE_BIN"
+write_origin_stub "$NORMALIZE_BIN"
 export HERDR_RELAY_BIN="$NORMALIZE_BIN"
 
 test "$(normalize_gateway_url gw.example.com)" = "wss://gw.example.com"

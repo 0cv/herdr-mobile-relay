@@ -21,7 +21,7 @@ STABLE_SWITCH_MARKER="$WORK_DIR/stable-switch-called"
 mkdir -p "$STABLE_SWITCH_DIR"
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-install-service.sh" \
     "$STABLE_SWITCH_DIR/"
-cat > "$STABLE_SWITCH_DIR/stable-setup.sh" <<'EOF'
+write_stub "$STABLE_SWITCH_DIR/stable-setup.sh" <<'EOF'
 #!/usr/bin/env bash
 if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$HERDR_RELAY_ENV" ||
     [ -n "${HERDR_GATEWAY_URL:-}" ]; then
@@ -33,7 +33,6 @@ if [ "${HERDR_STABLE_SETUP_WRAPPED:-}" != 1 ]; then
 fi
 printf 'called\n' > "$STABLE_SWITCH_MARKER"
 EOF
-chmod 700 "$STABLE_SWITCH_DIR/stable-setup.sh"
 printf "HERDR_GATEWAY_URL='wss://gw.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" \
     > "$STABLE_SWITCH_ENV"
 export STABLE_SWITCH_MARKER
