@@ -2,9 +2,7 @@ package coordinator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 	"time"
 
@@ -13,41 +11,16 @@ import (
 )
 
 func TestLifecycleStartsAgentInNestedWorkspaceCreateRootPane(t *testing.T) {
-	dir := t.TempDir()
-	writeScript(t, dir, "codex", "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	home := filepath.Join(dir, "home")
-	cwd := filepath.Join(home, "project")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatalf("create project directory: %v", err)
-	}
-	record := filepath.Join(dir, "invocations.log")
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"case \"$1 $2\" in\n"+
-		"  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n"+
-		"  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n"+
-		"  'workspace create') printf '%s\\n' '{\"result\":{\"type\":\"workspace_created\",\"workspace\":{\"workspace_id\":\"workspace-new\",\"label\":\"project\"},\"tab\":{\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\",\"label\":\"project\"},\"root_pane\":{\"pane_id\":\"pane-new\",\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"}}}' ;;\n"+
-		"  'tab rename') printf '%s\\n' '{\"result\":{\"tab_id\":\"tab-new\"}}' ;;\n"+
-		"  'agent start') printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"codex\",\"name\":\"project-codex\"}}}' ;;\n"+
-		"  *) exit 2 ;;\n"+
-		"esac\n")
-
-	resolver := profiles.NewResolver(filepath.Join(dir, "config"), nil)
-	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
-	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
-	lifecycle := &Lifecycle{
-		herdr:    herdr.NewClient(bin, socketPath),
-		profiles: resolver,
-		home:     home,
-	}
+	env := newLaunchEnv(t, "codex")
+	client := newLaunchFake()
+	lifecycle := &Lifecycle{herdr: client, profiles: profiles.NewResolver(env.config, nil), home: env.home}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	result, err := lifecycle.Start(ctx, profiles.Profile{ID: "codex", Kind: "codex"}, StartRequest{
 		ProfileID: "codex",
 		Name:      "project-codex",
-		Cwd:       cwd,
+		Cwd:       env.cwd,
 	})
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -56,50 +29,25 @@ func TestLifecycleStartsAgentInNestedWorkspaceCreateRootPane(t *testing.T) {
 		t.Fatalf("Start() pane_id = %q, want pane-new", result.PaneID)
 	}
 
-	invocations, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatalf("read invocations: %v", err)
-	}
-	if !strings.Contains(string(invocations), "agent start project-codex --kind codex --pane pane-new") {
-		t.Fatalf("agent was not started in created root pane:\n%s", invocations)
+	starts := client.callsTo("StartAgent")
+	if len(starts) != 1 || !reflect.DeepEqual(starts[0].Args[:3], []any{"project-codex", "codex", "pane-new"}) {
+		t.Fatalf("agent was not started in created root pane: %+v", client.recorded())
 	}
 }
 
 func TestLifecycleStartsAgentInExplicitWorkspace(t *testing.T) {
-	dir := t.TempDir()
-	writeScript(t, dir, "codex", "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	home := filepath.Join(dir, "home")
-	cwd := filepath.Join(home, "project")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	record := filepath.Join(dir, "invocations.log")
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"case \"$1 $2\" in\n"+
-		"  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n"+
-		"  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[{\"workspace_id\":\"workspace-existing\",\"label\":\"Project\"}]}}' ;;\n"+
-		"  'tab create') printf '%s\\n' '{\"result\":{\"type\":\"tab_created\",\"tab\":{\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-existing\"},\"root_pane\":{\"pane_id\":\"pane-new\",\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-existing\"}}}' ;;\n"+
-		"  'agent start') printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"codex\",\"name\":\"project-codex\"}}}' ;;\n"+
-		"  *) exit 2 ;;\n"+
-		"esac\n")
-	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
-	startInventorySocket(t, socketPath, []any{
-		map[string]any{"workspace_id": "workspace-existing", "label": "Project"},
-	}, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-existing"})
-	lifecycle := &Lifecycle{
-		herdr:    herdr.NewClient(bin, socketPath),
-		profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),
-		home:     home,
-	}
+	env := newLaunchEnv(t, "codex")
+	client := newLaunchFake()
+	client.target.WorkspaceID = "workspace-existing"
+	client.workspaces = []herdr.Workspace{{ID: "workspace-existing", Label: "Project"}}
+	lifecycle := &Lifecycle{herdr: client, profiles: profiles.NewResolver(env.config, nil), home: env.home}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := lifecycle.Start(ctx, profiles.Profile{ID: "codex", Kind: "codex"}, StartRequest{
 		ProfileID:   "codex",
 		WorkspaceID: "workspace-existing",
 		Name:        "project-codex",
-		Cwd:         cwd,
+		Cwd:         env.cwd,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -107,14 +55,11 @@ func TestLifecycleStartsAgentInExplicitWorkspace(t *testing.T) {
 	if result.WorkspaceID != "workspace-existing" || result.PaneID != "pane-new" {
 		t.Fatalf("result = %+v", result)
 	}
-	invocations, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
+	tabs := client.callsTo("TabCreate")
+	if len(tabs) != 1 || tabs[0].Args[0] != "workspace-existing" {
+		t.Fatalf("explicit workspace was not used: %+v", client.recorded())
 	}
-	if !strings.Contains(string(invocations), "tab create --workspace workspace-existing") {
-		t.Fatalf("explicit workspace was not used:\n%s", invocations)
-	}
-	if strings.Contains(string(invocations), "workspace create") {
-		t.Fatalf("unexpected workspace create:\n%s", invocations)
+	if client.count("WorkspaceCreate") != 0 {
+		t.Fatalf("unexpected workspace create: %+v", client.recorded())
 	}
 }

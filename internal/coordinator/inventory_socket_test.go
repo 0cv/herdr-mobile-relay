@@ -1,15 +1,10 @@
 package coordinator
 
 import (
-	"bufio"
-	"encoding/json"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
 func testSocketDir(t *testing.T) string {
@@ -44,50 +39,4 @@ func TestSocketFixtureDirectoryUsesSelectedTempAndCleanup(t *testing.T) {
 	if _, err := os.Lstat(directory); !os.IsNotExist(err) {
 		t.Fatalf("socket directory was not cleaned up: %v", err)
 	}
-}
-
-func startInventorySocket(t *testing.T, socketPath string, workspaces []any, panes ...herdr.Pane) {
-	t.Helper()
-	if workspaces == nil {
-		workspaces = []any{}
-	}
-	if panes == nil {
-		panes = []herdr.Pane{}
-	}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen inventory socket: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			func() {
-				defer conn.Close()
-				var request struct {
-					ID     string `json:"id"`
-					Method string `json:"method"`
-				}
-				if json.NewDecoder(bufio.NewReader(conn)).Decode(&request) != nil {
-					return
-				}
-				result := map[string]any{"type": "agent_list", "agents": []any{}}
-				switch request.Method {
-				case "workspace.list":
-					result = map[string]any{"type": "workspace_list", "workspaces": workspaces}
-				case "pane.list":
-					result = map[string]any{"type": "pane_list", "panes": panes}
-				case "workspace.close":
-					result = map[string]any{"type": "ok"}
-				case "agent.list":
-				default:
-					return
-				}
-				_ = json.NewEncoder(conn).Encode(map[string]any{"id": request.ID, "result": result})
-			}()
-		}
-	}()
 }

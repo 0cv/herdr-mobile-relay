@@ -40,15 +40,6 @@ func TestDispatcherRequiresDirectActionType(t *testing.T) {
 	}
 }
 
-func writeScript(t *testing.T, dir, name, body string) string {
-	t.Helper()
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	return p
-}
-
 func blockedEventID(t *testing.T, d *Dispatcher, paneID string) string {
 	t.Helper()
 	agent, ok := d.state.Agent(paneID)

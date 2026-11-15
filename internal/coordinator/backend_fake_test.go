@@ -32,8 +32,14 @@ type fakeBackend struct {
 	contents   map[string]string
 	readErr    error
 	agent      herdr.AgentInfo
-	created    herdr.CreateResult
 	status     herdr.ServerStatus
+
+	// target is the pane that workspace and tab creation make, and that a launch returns.
+	target herdr.Pane
+	// ready is what a launch reports about the new terminal being ready for a prompt.
+	ready bool
+	// inventoryOverrides are served by the next GetInventory calls, one per call, before the canned panes.
+	inventoryOverrides [][]herdr.Pane
 }
 
 func newFakeBackend() *fakeBackend {
@@ -66,6 +72,21 @@ func newTestScheduler(t *testing.T, capacity int) *Scheduler {
 		}
 	})
 	return scheduler
+}
+
+func startedFailure(message string) error {
+	return &herdr.OutcomeError{Started: true, Err: errors.New(message)}
+}
+
+func refusalByCode(code string) error {
+	return &herdr.OutcomeError{Started: true, Err: &herdr.CLIError{Code: code}}
+}
+
+func (b *fakeBackend) enableOneStepLaunch() {
+	b.update(func(b *fakeBackend) {
+		b.status.OneStepLaunch = true
+		b.status.Features = map[string]herdr.FeatureEvidence{herdr.FeatureAgentLaunch: {State: herdr.FeatureSupported}}
+	})
 }
 
 func (b *fakeBackend) update(change func(*fakeBackend)) {
@@ -119,6 +140,11 @@ func (b *fakeBackend) GetInventory(ctx context.Context) (*herdr.Inventory, error
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(b.inventoryOverrides) > 0 {
+		panes := b.inventoryOverrides[0]
+		b.inventoryOverrides = b.inventoryOverrides[1:]
+		return &herdr.Inventory{Panes: slices.Clone(panes)}, nil
+	}
 	return &herdr.Inventory{Panes: slices.Clone(b.panes)}, nil
 }
 
@@ -150,13 +176,24 @@ func (b *fakeBackend) TabList(ctx context.Context) ([]herdr.Tab, error) {
 }
 
 func (b *fakeBackend) WorkspaceCreate(ctx context.Context, cwd, label string) (*herdr.CreateResult, error) {
-	if err := b.invoke(ctx, "WorkspaceCreate", cwd, label); err != nil {
+	return b.createTarget(ctx, "WorkspaceCreate", cwd, label)
+}
+
+func (b *fakeBackend) TabCreate(ctx context.Context, workspaceID, cwd, label string) (*herdr.CreateResult, error) {
+	return b.createTarget(ctx, "TabCreate", workspaceID, cwd, label)
+}
+
+func (b *fakeBackend) createTarget(ctx context.Context, method string, args ...any) (*herdr.CreateResult, error) {
+	if err := b.invoke(ctx, method, args...); err != nil {
 		return nil, err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	created := b.created
-	return &created, nil
+	serving := slices.ContainsFunc(b.panes, func(pane herdr.Pane) bool { return pane.ID == b.target.ID })
+	if b.target.ID != "" && !serving {
+		b.panes = append(b.panes, b.target)
+	}
+	return &herdr.CreateResult{PaneID: b.target.ID, TabID: b.target.TabID, WorkspaceID: b.target.WorkspaceID}, nil
 }
 
 func (b *fakeBackend) WorkspaceRename(ctx context.Context, workspaceID, label string) error {
@@ -216,7 +253,21 @@ func (b *fakeBackend) SendText(ctx context.Context, paneID, text string) error {
 }
 
 func (b *fakeBackend) StartAgent(ctx context.Context, name, kind, paneID string, timeoutMs int, agentArgs ...string) (string, error) {
-	return "", b.invoke(ctx, "StartAgent", name, kind, paneID, timeoutMs, slices.Clone(agentArgs))
+	if err := b.invoke(ctx, "StartAgent", name, kind, paneID, timeoutMs, slices.Clone(agentArgs)); err != nil {
+		return "", err
+	}
+	return paneID, nil
+}
+
+func (b *fakeBackend) LaunchTerminal(ctx context.Context, argv []string, cwd, name, workspaceID, tabID string, waitReady bool) (*herdr.Pane, bool, error) {
+	if err := b.invoke(ctx, "LaunchTerminal", slices.Clone(argv), cwd, name, workspaceID, tabID, waitReady); err != nil {
+		return nil, false, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pane := b.target
+	pane.Cwd, pane.Name = cwd, name
+	return &pane, b.ready, nil
 }
 
 func (b *fakeBackend) PaneRun(ctx context.Context, paneID string, argv []string) error {

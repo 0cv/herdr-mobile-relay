@@ -3,12 +3,12 @@ package coordinator
 import (
 	"context"
 	"os"
-	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
@@ -32,16 +32,10 @@ func clearMessage() map[string]any {
 	return map[string]any{"type": "agent_clear", "request_id": "clear", "pane_id": "pane-old"}
 }
 
-func clearCalls(t *testing.T, f *launchFixture) string {
-	t.Helper()
-	data, err := os.ReadFile(f.calls)
-	if os.IsNotExist(err) {
-		return ""
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
+func callIndex(calls []fakeCall, method string, args ...any) int {
+	return slices.IndexFunc(calls, func(call fakeCall) bool {
+		return call.Method == method && hasArgPrefix(call, args)
+	})
 }
 
 func TestClearConfiguredOutcomes(t *testing.T) {
@@ -49,10 +43,10 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			options := launchFixtureOptions{}
 			if mode == "close-failure" {
-				options.close = "exit 2"
+				options.close = failCall("exit status 2")
 			}
 			if mode == "uncertain-start" {
-				options.start = "exit 2"
+				options.start = failCall("exit status 2")
 			}
 			f, old := newClearFixture(t, options)
 			switch mode {
@@ -77,11 +71,11 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				}
 			}
 			result := f.dispatcher.Handle(f.ctx, clearMessage())
-			calls := clearCalls(t, f)
+			calls := f.client.recorded()
 			switch mode {
 			case "no-profile", "invalid-cwd":
-				if result.OK || calls != "" {
-					t.Fatalf("refusal = %+v; calls %s", result, calls)
+				if result.OK || len(calls) != 0 {
+					t.Fatalf("refusal = %+v; calls %+v", result, calls)
 				}
 				if mode == "no-profile" && !strings.Contains(result.Error, "No launch profile matches") {
 					t.Fatalf("refusal message = %q", result.Error)
@@ -91,8 +85,8 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 					t.Fatalf("ownership changed: %v", err)
 				}
 			case "uncertain-start":
-				if result.OK || result.Phase != "dispatched_unknown" || strings.Contains(calls, "pane close") || !strings.Contains(calls, "agent start") {
-					t.Fatalf("uncertain = %+v; calls %s", result, calls)
+				if result.OK || result.Phase != "dispatched_unknown" || f.client.count("StopPane") != 0 || f.client.count("StartAgent") == 0 {
+					t.Fatalf("uncertain = %+v; calls %+v", result, calls)
 				}
 				if !f.dispatcher.profiles.OwnsTarget(old, "claude") {
 					t.Fatal("old ownership lost")
@@ -105,15 +99,15 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				if !ok || data["pane_id"] != f.target.PaneID || data["cwd"] != f.cwd {
 					t.Fatalf("replacement = %+v", result)
 				}
-				start, stop := strings.Index(calls, "agent start"), strings.Index(calls, "pane close pane-old")
-				if start < 0 || stop < start || strings.Count(calls, "workspace create") != 1 || strings.Count(calls, "pane close") != 1 {
-					t.Fatalf("order/count: %s", calls)
+				start, stop := callIndex(calls, "StartAgent"), callIndex(calls, "StopPane", "pane-old")
+				if start < 0 || stop < start || f.client.count("WorkspaceCreate") != 1 || f.client.count("StopPane") != 1 {
+					t.Fatalf("order/count: %+v", calls)
 				}
 				if !f.dispatcher.profiles.OwnsTarget(f.target, "claude") {
 					t.Fatal("replacement ownership missing")
 				}
-				if !strings.Contains(calls, "--kind claude") || strings.Contains(calls, "qodercli") {
-					t.Fatalf("replacement profile: %s", calls)
+				if callIndex(calls, "StartAgent", result.Data.(map[string]any)["name"], "claude") < 0 || f.client.count("StartAgent") != 1 {
+					t.Fatalf("replacement profile: %+v", calls)
 				}
 				if mode == "close-failure" {
 					if result.Phase != "completed_with_warning" || data["warning"] == nil || !f.dispatcher.profiles.OwnsTarget(old, "claude") {
@@ -126,26 +120,12 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				if !retry.OK || !retry.replayed {
 					t.Fatalf("retry = %+v", retry)
 				}
-				if clearCalls(t, f) != calls {
+				if !reflect.DeepEqual(f.client.recorded(), calls) {
 					t.Fatal("retry duplicated mutation")
 				}
 			}
 		})
 	}
-}
-
-type clearInventoryBackend struct {
-	backend.Backend
-	pane    herdr.Pane
-	checked bool
-}
-
-func (b *clearInventoryBackend) GetInventory(ctx context.Context) (*herdr.Inventory, error) {
-	if b.checked {
-		return b.Backend.GetInventory(ctx)
-	}
-	b.checked = true
-	return &herdr.Inventory{Panes: []herdr.Pane{b.pane}}, nil
 }
 
 func TestRepeatedClearDoesNotReuseTarget(t *testing.T) {
@@ -159,13 +139,12 @@ func TestRepeatedClearDoesNotReuseTarget(t *testing.T) {
 	if err := f.dispatcher.profiles.RememberVerified(old, "claude"); err != nil {
 		t.Fatal(err)
 	}
-	b := &clearInventoryBackend{Backend: f.dispatcher.herdr, pane: pane}
-	f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
+	f.client.update(func(b *fakeBackend) { b.inventoryOverrides = [][]herdr.Pane{{pane}} })
 	clearedAgain := f.dispatcher.Handle(f.ctx, map[string]any{"type": "agent_clear", "request_id": "clear-again", "pane_id": old.PaneID})
 	if !clearedAgain.OK {
 		t.Fatalf("clear again: %+v", clearedAgain)
 	}
-	if clearedAgain.Data.(map[string]any)["pane_id"] == old.PaneID || strings.Count(clearCalls(t, f), "agent start") != 2 {
+	if clearedAgain.Data.(map[string]any)["pane_id"] == old.PaneID || f.client.count("StartAgent") != 2 {
 		t.Fatalf("clear reused its target: %+v", clearedAgain)
 	}
 }
@@ -195,7 +174,7 @@ func TestClearWithoutWiringDoesNotMutate(t *testing.T) {
 				}
 			}
 			after, err := os.ReadFile(f.ownership)
-			if err != nil || string(before) != string(after) || clearCalls(t, f) != "" || d.state.TopologyGeneration() != topology {
+			if err != nil || string(before) != string(after) || len(f.client.recorded()) != 0 || d.state.TopologyGeneration() != topology {
 				t.Fatalf("unwired mutation: %v", err)
 			}
 		})
@@ -204,37 +183,16 @@ func TestClearWithoutWiringDoesNotMutate(t *testing.T) {
 
 func runClearSerialization(t *testing.T) {
 	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	home := filepath.Join(dir, "home")
-	cwd, config := filepath.Join(home, "project"), filepath.Join(dir, "config")
-	for _, path := range []string{cwd, filepath.Join(config, "herdr")} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", config)
-	t.Setenv("PATH", dir)
-	writeScript(t, dir, "claude", "#!/bin/sh\nexit 0\n")
-	if err := os.WriteFile(filepath.Join(config, "herdr", "agent-profiles.ini"), []byte("[profiles]\nclaude = Test Claude\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	resolver := profiles.NewResolver(config, nil)
-	if err := resolver.SetOwnershipPath(filepath.Join(dir, "ownership.json")); err != nil {
+	env := newLaunchEnv(t, "claude")
+	cwd := env.cwd
+	resolver := profiles.NewResolver(env.config, nil)
+	if err := resolver.SetOwnershipPath(env.ownership); err != nil {
 		t.Fatal(err)
 	}
 
 	recorder := newSerializationRecorder()
-	client := newFakeBackend()
-	target := herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new", Cwd: cwd}
-	client.created = herdr.CreateResult{PaneID: target.ID, TabID: target.TabID, WorkspaceID: target.WorkspaceID}
-	client.setHook("WorkspaceCreate", func(context.Context, fakeCall) error {
-		client.update(func(b *fakeBackend) { b.panes = append(b.panes, target) })
-		return nil
-	})
+	client := newLaunchFake()
+	client.target.Cwd = cwd
 	client.setHook("StartAgent", recorder.hook("agent_start", true))
 	state := NewState(testLogger())
 	old := profiles.PaneIdentity{PaneID: "pane-old", TerminalID: "terminal-old", TabID: "tab-old", WorkspaceID: "workspace-old"}

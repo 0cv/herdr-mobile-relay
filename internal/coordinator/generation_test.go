@@ -275,7 +275,7 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 		t.Fatalf("absent prompt result = %+v, want replaced-session failure", got)
 	}
 
-	client := newFakeBackend()
+	client := f.client
 	entered, release := make(chan struct{}), make(chan struct{})
 	var blocked atomic.Bool
 	client.setHook("CapabilityStatus", func(context.Context, fakeCall) error {
@@ -285,7 +285,6 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 		}
 		return nil
 	})
-	d.herdr = client
 	defer func() {
 		select {
 		case <-release:
@@ -311,8 +310,8 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 	if got := generationResult(t, f.ctx, results); got.OK || got.Error != ErrPaneReplaced.Error() {
 		t.Fatalf("absence-window clear result = %+v, want replaced-session failure", got)
 	}
-	if calls := clearCalls(t, f); calls != "" || len(client.recorded()) != 0 {
-		t.Fatalf("absence-window command reached replacement pane:\n%s\n%+v", calls, client.recorded())
+	if calls := client.recorded(); len(calls) != 0 {
+		t.Fatalf("absence-window command reached replacement pane: %+v", calls)
 	}
 	if generation := d.state.Generation(old.PaneID); generation != 2 {
 		t.Fatalf("replacement generation = %d, want distinct epoch 2", generation)

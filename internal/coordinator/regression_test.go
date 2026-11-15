@@ -3,7 +3,7 @@ package coordinator
 // Regression tests for the §10.3 stale-status pin and approval-ledger handling
 // across dispatched_unknown outcomes. Each asserts the observable invariant,
 // independent of the fix mechanism.
-// Helpers testLogger/ts/writeScript live in safety_test.go and dispatch_safety_test.go.
+// Helpers testLogger/ts live in safety_test.go.
 
 import (
 	"context"
