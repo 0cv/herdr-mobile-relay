@@ -1,0 +1,70 @@
+=== qodercli-accept-reject-plan agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:- Confirm the file exists via ls. Qoder has written up a plan and is ready to execute. Would you like to proceed? 1. Yes, start executing Keep current permission mode and begin implementation. 2. Yes, execute as Goal (auto) Autonomous execution with no interruptions. ❯ 3. Refuse and say something Write the exact feedback to send to the model. I don't know what to say ... 4. Reject plan Reject this plan without providing feedback. Ctrl+X to edit plan Command:Ctrl+X to edit plan Options:[Yes, start executing Yes, execute as Goal (auto) Refuse and say something Reject plan] ApprovalFocus:2 Interaction:<nil> ApprovalIdentity: approvalSource:
+ Context
+
+ User wants a dummy placeholder file created in the sample-project repo.
+
+ Plan
+
+ - Create /home/test/sample-project/dummy.txt with a single placeholder line.
+
+ Verification
+
+ - Confirm the file exists via ls.
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Qoder has written up a plan and is ready to execute. Would you like to proceed?
+
+   1. Yes, start executing
+      Keep current permission mode and begin implementation.
+   2. Yes, execute as Goal (auto)
+      Autonomous execution with no interruptions.
+ ❯ 3. Refuse and say something
+      Write the exact feedback to send to the model.
+      I don't know what to say ...
+   4. Reject plan}
+Classify.Interaction: nil
+ApprovalFingerprint: "932d36f7ead2adb12aea51f79d2b0d7388945f352b13c3fc1ef63f734bdde931"
+=== qodercli-accept-reject-plan agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:- Confirm the file exists via ls. Qoder has written up a plan and is ready to execute. Would you like to proceed? 1. Yes, start executing Keep current permission mode and begin implementation. 2. Yes, execute as Goal (auto) Autonomous execution with no interruptions. ❯ 3. Refuse and say something Write the exact feedback to send to the model. I don't know what to say ... 4. Reject plan Reject this plan without providing feedback. Ctrl+X to edit plan Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-accept-reject-plan agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:- Confirm the file exists via ls. Qoder has written up a plan and is ready to execute. Would you like to proceed? 1. Yes, start executing Keep current permission mode and begin implementation. 2. Yes, execute as Goal (auto) Autonomous execution with no interruptions. ❯ 3. Refuse and say something Write the exact feedback to send to the model. I don't know what to say ... 4. Reject plan Reject this plan without providing feedback. Ctrl+X to edit plan Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-accept-reject-plan agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:- Confirm the file exists via ls. Qoder has written up a plan and is ready to execute. Would you like to proceed? 1. Yes, start executing Keep current permission mode and begin implementation. 2. Yes, execute as Goal (auto) Autonomous execution with no interruptions. ❯ 3. Refuse and say something Write the exact feedback to send to the model. I don't know what to say ... 4. Reject plan Reject this plan without providing feedback. Ctrl+X to edit plan Command:Ctrl+X to edit plan Options:[Yes, start executing Yes, execute as Goal (auto) Refuse and say something Reject plan] ApprovalFocus:2 Interaction:<nil> ApprovalIdentity: approvalSource:
+ Context
+
+ User wants a dummy placeholder file created in the sample-project repo.
+
+ Plan
+
+ - Create /home/test/sample-project/dummy.txt with a single placeholder line.
+
+ Verification
+
+ - Confirm the file exists via ls.
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Qoder has written up a plan and is ready to execute. Would you like to proceed?
+
+   1. Yes, start executing
+      Keep current permission mode and begin implementation.
+   2. Yes, execute as Goal (auto)
+      Autonomous execution with no interruptions.
+ ❯ 3. Refuse and say something
+      Write the exact feedback to send to the model.
+      I don't know what to say ...
+   4. Reject plan}
+Classify.Interaction: nil
+ApprovalFingerprint: "932d36f7ead2adb12aea51f79d2b0d7388945f352b13c3fc1ef63f734bdde931"

@@ -1,0 +1,24 @@
+=== qodercli-add-directory agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Enter an absolute path, a path relative to the current working directory, or one starting with ~. /dev ❯ /dev/accel /dev/v4l /dev/snd /dev/vfio /dev/net /dev/mqueue /dev/hugepages ▼ /dev/block ↓↑ browse · Tab apply · Enter submit · Esc cancel Tab/←→ switch · ↑↓ navigate · Enter remove · x remove · Esc back Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-add-directory agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Enter an absolute path, a path relative to the current working directory, or one starting with ~. /dev ❯ /dev/accel /dev/v4l /dev/snd /dev/vfio /dev/net /dev/mqueue /dev/hugepages ▼ /dev/block ↓↑ browse · Tab apply · Enter submit · Esc cancel Tab/←→ switch · ↑↓ navigate · Enter remove · x remove · Esc back Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-add-directory agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Enter an absolute path, a path relative to the current working directory, or one starting with ~. /dev ❯ /dev/accel /dev/v4l /dev/snd /dev/vfio /dev/net /dev/mqueue /dev/hugepages ▼ /dev/block ↓↑ browse · Tab apply · Enter submit · Esc cancel Tab/←→ switch · ↑↓ navigate · Enter remove · x remove · Esc back Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-add-directory agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Enter an absolute path, a path relative to the current working directory, or one starting with ~. /dev ❯ /dev/accel /dev/v4l /dev/snd /dev/vfio /dev/net /dev/mqueue /dev/hugepages ▼ /dev/block ↓↑ browse · Tab apply · Enter submit · Esc cancel Tab/←→ switch · ↑↓ navigate · Enter remove · x remove · Esc back Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

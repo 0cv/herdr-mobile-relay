@@ -1,0 +1,24 @@
+=== qodercli-select-option agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule Permission rules are a tool name, optionally followed by a specifier in parentheses. e.g., WebFetch or Bash(ls:*) as ❯ AskUserQuestion Bash TaskCreate TaskGet TaskList TaskStop TaskUpdate Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-select-option agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule Permission rules are a tool name, optionally followed by a specifier in parentheses. e.g., WebFetch or Bash(ls:*) as ❯ AskUserQuestion Bash TaskCreate TaskGet TaskList TaskStop TaskUpdate Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-select-option agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule Permission rules are a tool name, optionally followed by a specifier in parentheses. e.g., WebFetch or Bash(ls:*) as ❯ AskUserQuestion Bash TaskCreate TaskGet TaskList TaskStop TaskUpdate Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-select-option agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule Permission rules are a tool name, optionally followed by a specifier in parentheses. e.g., WebFetch or Bash(ls:*) as ❯ AskUserQuestion Bash TaskCreate TaskGet TaskList TaskStop TaskUpdate Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
