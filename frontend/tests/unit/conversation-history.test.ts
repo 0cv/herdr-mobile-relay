@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { normalizeConversationPage } from '$lib/store';
+import { normalizeConversationPage } from '$lib/conversation-page';
 import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
 import {
   conversationIdentity,

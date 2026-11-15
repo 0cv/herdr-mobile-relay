@@ -293,13 +293,14 @@ func TestSamePaneIDReplacementBumpsGeneration(t *testing.T) {
 
 func TestFinishedNotificationOneShot(t *testing.T) {
 	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
+	s.CommitEvent("p1", "idle", 1000)
+	revision := s.Revision("p1")
 
-	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "idle"}}, s.RevisionCounter())
-
-	if !s.RegisterFinishedNotification("p1") {
+	if !s.RegisterFinishedNotificationForTransition("p1", revision) {
 		t.Error("first registration should return true")
 	}
-	if s.RegisterFinishedNotification("p1") {
+	if s.RegisterFinishedNotificationForTransition("p1", revision) {
 		t.Error("second registration should return false")
 	}
 }

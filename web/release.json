@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "version": "0.25.1",
-  "assets": 502,
-  "build": "cc4f3226c80407fd904ccefe3c18126c9d0e6b9751027ed498c4004486b78a28",
-  "entry": "/builds/0.25.1-502-cc4f3226c80407fd/index.html",
+  "assets": 504,
+  "build": "6b47817949189a6c564417d6d40ac98134604b002dbac182c0cfea4cf02522ca",
+  "entry": "/builds/0.25.1-504-6b47817949189a6c/index.html",
   "files": {
     "entry": {
-      "path": "builds/0.25.1-502-cc4f3226c80407fd/index.html",
-      "sha256": "c8b378c2536883864ee67b014f3e2ce01291307fd2ac599403f312d921f5ce2b",
-      "integrity": "sha256-yLN4wlNog4ZO5nsBTz4s4BKRMH/SrFmUA/MS2SH1zis=",
-      "brotli_sha256": "5103a324c02ddefabe41964af7dc7509d33f0768890a679e02b8bb27a8788722",
-      "brotli_integrity": "sha256-UQOjJMAt3vq+QZZK99x1CdM/B2iJCmeeAri7J6h4hyI="
+      "path": "builds/0.25.1-504-6b47817949189a6c/index.html",
+      "sha256": "f08b6c3f6089f40088b494e05deea3550a110ca77ba9e547da6ec183030c4d38",
+      "integrity": "sha256-8ItsP2CJ9ACItJTgXe6jVQoRDKd7qeVH2m7BgwMMTTg=",
+      "brotli_sha256": "d5efa1bb93945a1e0e1d860d6eac0bcea5a28e464d57866cabe40a6f7a98edd4",
+      "brotli_integrity": "sha256-1e+hu5OUWh4OHYYNbqwLzqWijkZNV4Zsq+QKb3qY7dQ="
     },
     "javascript": {
-      "path": "assets/app-7644d2097aa940572941f0ca8f96125ecbe2d015633f9702316cb62faeddcdb2.js",
-      "sha256": "7644d2097aa940572941f0ca8f96125ecbe2d015633f9702316cb62faeddcdb2",
-      "integrity": "sha256-dkTSCXqpQFcpQfDKj5YSXsvi0BVjP5cCMWy2L67dzbI=",
-      "brotli_sha256": "edcdbc1a72f638e9acbce39bc68b7c826d0ea6584747682a9b2a66600f97ad87",
-      "brotli_integrity": "sha256-7c28GnL2OOmsvOObxot8gm0OplhHR2gqmypmYA+XrYc="
+      "path": "assets/app-e0b3314173723971046566e1e2513225f67576e580428c481b97b3a4cfb8aa6c.js",
+      "sha256": "e0b3314173723971046566e1e2513225f67576e580428c481b97b3a4cfb8aa6c",
+      "integrity": "sha256-4LMxQXNyOXEEZWbh4lEyJfZ1duWAQoxIG5ezpM+4qmw=",
+      "brotli_sha256": "90ee1948fed7b5e788173bcd6e73bcbf0bf5665a8f6b6b63e4b59eeadd9b2f48",
+      "brotli_integrity": "sha256-kO4ZSP7XteeIFzvNbnO8vwv1ZlqPa2tj5LWe6t2bL0g="
     },
     "stylesheet": {
       "path": "assets/app-0784eefa3965ed73dc11dd991fa5db72fd8d0008570e8d486f048c37c9d7b915.css",

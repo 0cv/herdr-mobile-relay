@@ -102,7 +102,9 @@ go-check:
 
 backend-check: go-check shell-check production-path-audit
 
+shell-check: export HERDR_TEST_RELAY_BIN = $(CURDIR)/bin/shell-test/herdr-mobile-relay
 shell-check:
+	go build -o $(HERDR_TEST_RELAY_BIN) ./cmd/herdr-mobile-relay
 	bun test tests/pi-command-bridge.test.mjs tests/pi-prompt.test.mjs tests/pi-activity.test.mjs tests/pi-notices.test.mjs tests/pi-reload.test.mjs
 	bash tests/test_pi_commands.sh
 	bash tests/test_dev_pi_commands.sh
@@ -116,6 +118,14 @@ shell-check:
 	sh tests/test_download_credentials.sh
 	bash tests/test_service_credentials.sh
 	bash tests/test_common.sh
+	bash tests/test_common_readiness.sh
+	bash tests/test_common_gateway.sh
+	bash tests/test_configure_app_deploy.sh
+	bash tests/test_plugin_choose_transport.sh
+	bash tests/test_start.sh
+	bash tests/test_plugin_install_service.sh
+	bash tests/test_plugin_setup_menu.sh
+	bash tests/test_change_hostname.sh
 	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
 	sh tests/test_plugin_recovery.sh

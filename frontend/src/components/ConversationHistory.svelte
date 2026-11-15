@@ -36,7 +36,8 @@
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
   import { ConversationMessageStateStore } from '$lib/conversation-message-state';
   import { securityState } from '$lib/security';
-  import { CommandError, relayStore } from '$lib/store';
+  import { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
   import { stripAnsi } from '$lib/terminal';
   import { terminalTextInputMode } from '$lib/terminal-menu';
   import type { Agent, ConversationCapabilities, ConversationEntry, ConversationPage, TerminalFrame } from '$lib/types';

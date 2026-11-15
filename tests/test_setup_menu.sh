@@ -4,6 +4,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/herdr-menu-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+# shellcheck source=lib.sh
+. "$REPO_DIR/tests/lib.sh"
 unset HERDR_BIN_PATH
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data"
 export HERDR_PLUGIN_CONFIG_DIR="$WORK/plugin" HERDR_RELAY_ENV="$WORK/config/relay.env"
@@ -60,8 +62,6 @@ restore() { mv "$WORK/$1.hidden" "$WORK/bin/$1"; }
 
 menu() { printf '%b' "$1" | bash "$WORK/relay/plugin-setup-menu.sh"; }
 items() { printf '%s\n' "$1" | grep -E '^  [123bq]\. ' || true; }
-expect() { [[ "$1" == *"$2"* ]] || { printf 'Missing: %s\n' "$2" >&2; exit 1; }; }
-reject() { [[ "$1" != *"$2"* ]] || { printf 'Unexpected: %s\n' "$2" >&2; exit 1; }; }
 
 > "$HERDR_RELAY_ENV"
 without hc
