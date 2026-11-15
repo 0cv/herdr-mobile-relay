@@ -58,6 +58,7 @@ import {
   staleAgentRevision,
   stabilizeBlockedSnapshot,
 } from './agents';
+import { PaneStreams } from './pane-streams';
 import { reportAppAnomaly } from './crash-banner';
 import { CommandError, dispatchedUnknownError } from './command-error';
 import { normalizeConversationBatch, normalizeConversationPage } from './conversation-page';
@@ -79,10 +80,8 @@ import {
 } from './protocol';
 import {
   agentTargetPayload,
-  normalizeFrontendTargetRef,
   targetRefForAgent,
   targetRefMatchesAgent,
-  targetStoreKey,
 } from './resource-id';
 import { adoptRelaySpeech, isSpeechLanguage, type SpeechRequest } from './speech';
 import {
@@ -98,7 +97,6 @@ import type {
 import {
   clearPaneAgentViewOverridesForRelay,
   pruneHiddenServers,
-  terminalHistoryLines,
   terminalRefreshInterval,
   terminalResizeSession,
 } from './preferences';
@@ -138,7 +136,6 @@ const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
 const UTF8_ENCODER = new TextEncoder();
-const PANE_READ_RETRY_MS = 35_000;
 // A connect attempt older than this is replaced when a revalidation event
 // (wake, focus, online, network change) arrives. A healthy dial finishes its
 // two handshakes in a couple of seconds; one that predates the event usually
@@ -158,10 +155,6 @@ const KEEPALIVE_INTERVAL_MS = 120_000;
 // radio wakeups: the keepalive stops and the connection is left to lapse.
 // Becoming visible resets the bound and resumes the keepalive.
 const HIDDEN_KEEPALIVE_MAX_MS = 60 * 60_000;
-// Gateway-relayed traffic is metered project bandwidth. Cap scrollback while
-// honoring the user's refresh rate; acknowledged deltas keep idle frames off
-// the wire and make the selected cadence affordable during normal output.
-const RELAYED_HISTORY_LINES = 1_000;
 const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   answer_question: true,
   navigate_question: true,
@@ -241,7 +234,6 @@ class RelayStore {
   readonly agents = writable<Agent[]>([]);
   readonly workspaces = writable<RelayWorkspace[]>([]);
   readonly activities = writable<Activity[]>([]);
-  readonly terminalFrames = writable<Map<string, TerminalFrame>>(new Map());
   readonly responding = writable<Set<string>>(new Set());
   readonly toast = writable<ToastMessage | null>(null);
   readonly devices = writable<Map<string, DeviceSummary[]>>(new Map());
@@ -250,10 +242,16 @@ class RelayStore {
   readonly pushTests = writable<Map<string, PushTestState>>(new Map());
 
   private connectionsValue = new Map<string, RelayConnection>();
+  private readonly panes = new PaneStreams({
+    connection: (relayId) => this.connectionsValue.get(relayId),
+    agents: () => this.agentsValue,
+    sendRaw: (relayId, payload) => this.sendRaw(relayId, payload),
+    applyInteraction: (paneId, message) => this.mergePaneInteraction(paneId, message),
+  });
+  readonly terminalFrames = this.panes.frames;
   private agentsValue: Agent[] = [];
   private workspacesValue: RelayWorkspace[] = [];
   private activitiesValue: Activity[] = [];
-  private terminalFramesValue = new Map<string, TerminalFrame>();
   private respondingValue = new Set<string>();
   private devicesValue = new Map<string, DeviceSummary[]>();
   private pushPoliciesValue = new Map<string, DevicePushPolicy>();
@@ -261,17 +259,12 @@ class RelayStore {
   private blockedSnapshotMisses = new Map<string, number>();
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingUploads = new Map<string, PendingUpload>();
-  private pendingPaneReads = new Map<string, { requestId: string; requestedAt: number; startedAt: number }>();
-  private paneContentFingerprints = new Map<string, string>();
-  private secretObservations = new WeakMap<TerminalFrame, RelayConnection>();
   private secretReadAfter = new Map<string, number>();
-  private watchedPanes = new Map<string, Agent>();
   // Panes this phone may hold a size lease on, kept outside TerminalView so
   // turning Resize Session off can release panes whose view already closed
   // and are only in the relay's navigation grace.
   private ownedPaneLeases = new Map<string, Agent>();
   private paneLeaseEpoch = 0;
-  private paneWatchesStarted = new Set<string>();
   private slashCommandCache = new Map<string, SlashCommandCacheEntry>();
   private pendingSlashCommands = new Map<string, PendingSlashCommands>();
   private respondingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -290,7 +283,7 @@ class RelayStore {
     terminalRefreshInterval.subscribe((value) => {
       if (value === previousRefreshInterval) return;
       previousRefreshInterval = value;
-      this.restartPaneWatches();
+      this.panes.restartWatches();
     });
     terminalResizeSession.subscribe((enabled) => {
       if (!enabled) this.releaseAllPaneSizeLeases();
@@ -470,11 +463,8 @@ class RelayStore {
     this.responding.set(new Set());
     this.slashCommandCache.clear();
     this.pendingSlashCommands.clear();
-    this.pendingPaneReads.clear();
-    this.paneContentFingerprints.clear();
+    this.panes.reset();
     clearConversationPreviews();
-    this.watchedPanes.clear();
-    this.paneWatchesStarted.clear();
     this.ownedPaneLeases.clear();
   }
 
@@ -707,13 +697,11 @@ class RelayStore {
         // the old one, and reads sent while the transport was down were lost
         // silently. Re-read every watched pane so an open terminal streams
         // again within one round trip, not at the next resync interval.
-        for (const watched of this.watchedPanes.values()) {
-          if (watched.relay_id === relay.id) this.readPane(watched);
-        }
+        this.panes.rereadWatched(relay.id);
       }
       // A path switch changes the relayed-fidelity budget, so panes have to be
       // rewatched at the interval the new path can afford.
-      if (previousPath && previousPath !== connection.path) this.restartPaneWatches();
+      if (previousPath && previousPath !== connection.path) this.panes.restartWatches();
       return;
     }
     if (status === 'connecting') {
@@ -822,10 +810,7 @@ class RelayStore {
 
   disconnectRelay(id: string): void {
     this.clearSlashCommandCacheForRelay(id);
-    this.pendingPaneReads.clear();
-    for (const paneId of this.paneWatchesStarted) {
-      if (paneId.startsWith(`${id}::`)) this.paneWatchesStarted.delete(paneId);
-    }
+    this.panes.forgetRelay(id);
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
     connection.closed = true;
@@ -1072,10 +1057,10 @@ class RelayStore {
     ['agents', (relayId, message) => this.handleAgents(relayId, message)],
     ['blocked', (relayId, message) => this.handleBlocked(relayId, message)],
     ['agent_update', (relayId, message) => this.handleAgentUpdate(relayId, message)],
-    ['pane_unchanged', (relayId, message) => this.handlePaneUnchanged(relayId, message)],
-    ['pane_resync', (relayId, message) => this.handlePaneResync(relayId, message)],
-    ['pane_delta', (relayId, message) => this.handlePaneDelta(relayId, message)],
-    ['pane_content', (relayId, message) => this.handlePaneContent(relayId, message)],
+    ['pane_unchanged', (relayId, message) => this.panes.handleUnchanged(relayId, message)],
+    ['pane_resync', (relayId, message) => this.panes.handleResync(relayId, message)],
+    ['pane_delta', (relayId, message) => this.panes.handleDelta(relayId, message)],
+    ['pane_content', (relayId, message) => this.panes.handleContent(relayId, message)],
   ]);
 
   private handleMessage(relayId: string, message: Record<string, any>): void {
@@ -1345,143 +1330,6 @@ class RelayStore {
     this.publishAgents('agent update');
   }
 
-  private paneMessageContext(relayId: string, message: Record<string, any>) {
-    const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-    const agent = this.agentsValue.find((candidate) => candidate.pane_id === paneId)
-      || this.watchedPanes.get(paneId);
-    const hasTarget = Object.prototype.hasOwnProperty.call(message, 'target');
-    const target = !agent
-      ? null
-      : hasTarget
-        ? normalizeFrontendTargetRef({
-          ...(message.target as Record<string, unknown>),
-          relay_id: relayId,
-        })
-        : targetRefForAgent(agent);
-    const readKey = target && targetStoreKey(target);
-    const pendingRead = readKey ? this.pendingPaneReads.get(readKey) : undefined;
-    return {
-      paneId,
-      matches: !hasTarget || Boolean(target && agent && targetRefMatchesAgent(target, agent)),
-      staleRead: Boolean(message.request_id && message.request_id !== pendingRead?.requestId),
-      inputTarget: !message.error && hasTarget ? target : undefined,
-      completeRead: (): number | undefined => {
-        if (!readKey || !pendingRead || message.request_id !== pendingRead.requestId) return;
-        this.pendingPaneReads.delete(readKey);
-        return !message.error ? pendingRead.startedAt : undefined;
-      },
-    };
-  }
-
-  private handlePaneUnchanged(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches, staleRead, completeRead } = this.paneMessageContext(relayId, message);
-    if (staleRead || !matches) return;
-    completeRead();
-    if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
-      this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-    }
-    this.startPaneWatch(paneId);
-  }
-
-  private handlePaneResync(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches } = this.paneMessageContext(relayId, message);
-    if (!matches) return;
-    const watched = this.watchedPanes.get(paneId);
-    if (watched) this.readPane(watched, true);
-  }
-
-  private handlePaneDelta(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches, inputTarget } = this.paneMessageContext(relayId, message);
-    if (!matches) return;
-    const frame = this.terminalFramesValue.get(paneId);
-    const baseFingerprint = this.paneContentFingerprints.get(paneId);
-    const metadataOnly = baseFingerprint === message.base_fingerprint
-      && message.base_fingerprint === message.content_fingerprint
-      && Array.isArray(message.segments) && message.segments.length === 0;
-    const nextContent = frame && baseFingerprint === message.base_fingerprint
-      ? metadataOnly ? frame.content : applyPaneDelta(frame.content, message.segments)
-      : null;
-    const watched = this.watchedPanes.get(paneId);
-    if (nextContent === null || typeof message.content_fingerprint !== 'string') {
-      if (watched) this.readPane(watched, true);
-      return;
-    }
-    this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-    const deltaNoEcho = typeof message.no_echo === 'boolean' ? message.no_echo : frame?.noEcho;
-    this.terminalFramesValue.set(paneId, {
-      paneId,
-      content: nextContent,
-      receivedAt: performance.now(),
-      inputTarget,
-      target: typeof message.no_echo === 'boolean' ? inputTarget : undefined,
-      format: String(message.format || frame?.format || 'plain'),
-      truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
-      viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
-      viewportRows: typeof message.viewport_rows === 'number' ? message.viewport_rows : frame?.viewportRows,
-      noEcho: deltaNoEcho,
-      noEchoPrompt: deltaNoEcho
-        ? typeof message.no_echo_prompt === 'string' ? message.no_echo_prompt : frame?.noEchoPrompt
-        : undefined,
-      resizeSettling: message.resize_settling === true,
-    });
-    this.terminalFrames.set(new Map(this.terminalFramesValue));
-    this.mergePaneInteraction(paneId, message);
-    if (watched) this.acknowledgePaneFrame(watched, message.content_fingerprint);
-    return;
-  }
-
-  private handlePaneContent(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches, staleRead, inputTarget, completeRead } = this.paneMessageContext(relayId, message);
-    if (staleRead || !matches) return;
-    const readStartedAt = completeRead();
-    const connection = this.connectionsValue.get(relayId);
-    if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
-      this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-    }
-    const nextFrame: TerminalFrame = {
-      readStartedAt,
-      paneId,
-      content: typeof message.content === 'string' ? message.content : '(empty)',
-      receivedAt: performance.now(),
-      target: inputTarget,
-      inputTarget,
-      noEcho: typeof message.no_echo === 'boolean' ? message.no_echo : undefined,
-      format: String(message.format || 'plain'),
-    };
-    if (message.truncated === true) nextFrame.truncated = true;
-    if (message.viewport_only === true) nextFrame.viewportOnly = true;
-    if (typeof message.viewport_rows === 'number') nextFrame.viewportRows = message.viewport_rows;
-    if (message.no_echo === true) {
-      nextFrame.noEcho = true;
-      if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
-    }
-    if (message.resize_settling === true) nextFrame.resizeSettling = true;
-    if (connection && typeof nextFrame.noEcho === 'boolean' && Number.isFinite(readStartedAt)) this.secretObservations.set(nextFrame, connection);
-    this.terminalFramesValue.set(paneId, nextFrame);
-    this.terminalFrames.set(new Map(this.terminalFramesValue));
-    this.mergePaneInteraction(paneId, message);
-    const watched = this.watchedPanes.get(paneId);
-    const contentFingerprint = typeof message.content_fingerprint === 'string'
-      ? message.content_fingerprint
-      : '';
-    if (watched && message.ack_required && contentFingerprint) {
-      this.acknowledgePaneFrame(watched, contentFingerprint);
-    }
-    this.startPaneWatch(paneId);
-  }
-
-  private acknowledgePaneFrame(agent: Agent, contentFingerprint: string): void {
-    const identity = agentTargetPayload(agent);
-    if (!identity) return;
-    this.sendRaw(agent.relay_id, {
-      type: 'pane_applied',
-      pane_id: agent.raw_pane_id,
-      content_fingerprint: contentFingerprint,
-      ...identity,
-    });
-  }
-
-
   /**
    * Every agents publish flows through here because the home view keys its
    * cards by pane_id: one duplicate anywhere wedges Svelte's flush and every
@@ -1521,7 +1369,7 @@ class RelayStore {
     for (const paneId of this.blockedSnapshotMisses.keys()) {
       if (paneId.startsWith(`${relayId}::`)) this.blockedSnapshotMisses.delete(paneId);
     }
-    this.pendingPaneReads.clear();
+    this.panes.clearPendingReads();
     this.publishAgents('relay removal');
   }
 
@@ -1876,7 +1724,7 @@ class RelayStore {
       && connection?.status === 'connected' && capability.transport === connection.transport
       && connection.capabilities.includes('pi_prompt_unconfirmed') && this.deviceCredential(agent.relay_id)?.role === 'controller'
       && !this.hidden && document.visibilityState !== 'hidden' && frame && frame.noEcho === false
-      && frame === this.terminalFramesValue.get(agent.pane_id) && this.secretObservations.get(frame) === connection
+      && frame === this.panes.currentFrame(agent.pane_id) && this.panes.observedConnection(frame) === connection
       && frame.target && targetRefMatchesAgent(frame.target, agent) && age >= 0 && age < 3_000
       && Number.isFinite(frame.readStartedAt) && frame.readStartedAt! > capability.observedAt);
   }
@@ -1936,7 +1784,7 @@ class RelayStore {
     const connection = this.connectionsValue.get(agent.relay_id);
     const age = performance.now() - (frame?.receivedAt ?? NaN);
     return Boolean(frame && connection?.status === 'connected' && !this.hidden && document.visibilityState !== 'hidden'
-      && frame === this.terminalFramesValue.get(agent.pane_id) && this.secretObservations.get(frame) === connection
+      && frame === this.panes.currentFrame(agent.pane_id) && this.panes.observedConnection(frame) === connection
       && frame.noEcho === true && frame.target && targetRefMatchesAgent(frame.target, agent)
       && Number.isFinite(age) && age >= 0 && age < 3_000 && Number.isFinite(frame.readStartedAt)
       && frame.readStartedAt! > (this.secretReadAfter.get(agent.pane_id) ?? -Infinity));
@@ -1953,7 +1801,7 @@ class RelayStore {
     }
     const delivery = terminalInputDelivery(agent);
     if (!delivery.begin()) throw new CommandError('Check terminal input delivery before sending.');
-    this.secretObservations.delete(frame);
+    this.panes.forgetObservation(frame);
     let uncertain = true;
     try {
       const result = await this.sendToAgent(agent, { type: 'send_secret', text });
@@ -2291,85 +2139,16 @@ class RelayStore {
     void this.sendToAgent(agent, { type: 'unwatch_conversation', subscription_id: subscriptionId }, 3000).catch(() => {});
   }
 
-  /**
-   * Terminal history the active path can afford. Gateway-relayed traffic is
-   * metered project bandwidth, so it caps scrollback; every path honors the
-   * user's selected refresh interval.
-   */
-  private paneBudget(relayId: string): { lines: number; intervalMs: number } {
-    const lines = get(terminalHistoryLines);
-    const intervalMs = get(terminalRefreshInterval);
-    if (this.connectionsValue.get(relayId)?.path !== 'gateway') return { lines, intervalMs };
-    return { lines: Math.min(lines, RELAYED_HISTORY_LINES), intervalMs };
-  }
-
   readPane(agent: Agent, force = false, lines?: number): void {
-    const identity = agentTargetPayload(agent);
-    if (!identity) return;
-    const readKey = targetStoreKey(identity.target);
-    if (!readKey) return;
-    const pending = this.pendingPaneReads.get(readKey);
-    if (!force && pending && Date.now() - pending.requestedAt < PANE_READ_RETRY_MS) return;
-    this.paneWatchesStarted.delete(agent.pane_id);
-    const requestId = commandRequestId();
-    const startedAt = performance.now();
-    const sent = this.sendRaw(agent.relay_id, {
-      type: 'read_pane',
-      request_id: requestId,
-      pane_id: agent.raw_pane_id,
-      lines: lines ?? this.paneBudget(agent.relay_id).lines,
-      format: 'ansi',
-      content_fingerprint: force || lines !== undefined ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
-      ...identity,
-    });
-    if (sent) this.pendingPaneReads.set(readKey, { requestId, startedAt, requestedAt: Date.now() });
+    this.panes.readPane(agent, force, lines);
   }
 
   watchPane(agent: Agent): void {
-    this.watchedPanes.set(agent.pane_id, agent);
-    this.startPaneWatch(agent.pane_id);
+    this.panes.watchPane(agent);
   }
 
   unwatchPane(agent: Agent): void {
-    this.watchedPanes.delete(agent.pane_id);
-    this.paneWatchesStarted.delete(agent.pane_id);
-    const connection = this.connectionsValue.get(agent.relay_id);
-    const identity = agentTargetPayload(agent);
-    if (!connection?.capabilities.includes('pane_realtime_delta') || !identity) return;
-    this.sendRaw(agent.relay_id, {
-      type: 'unwatch_pane',
-      pane_id: agent.raw_pane_id,
-      ...identity,
-    });
-  }
-
-  private restartPaneWatches(): void {
-    for (const paneId of [...this.paneWatchesStarted]) {
-      this.paneWatchesStarted.delete(paneId);
-      this.startPaneWatch(paneId);
-    }
-  }
-
-  private startPaneWatch(paneId: string): void {
-    const agent = this.watchedPanes.get(paneId);
-    if (!agent || this.paneWatchesStarted.has(paneId)) return;
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('pane_realtime_delta')) return;
-    const contentFingerprint = this.paneContentFingerprints.get(paneId);
-    const identity = agentTargetPayload(agent);
-    const readKey = identity && targetStoreKey(identity.target);
-    if (!contentFingerprint || !identity || !readKey || this.pendingPaneReads.has(readKey)) return;
-    const budget = this.paneBudget(agent.relay_id);
-    const sent = this.sendRaw(agent.relay_id, {
-      type: 'watch_pane',
-      pane_id: agent.raw_pane_id,
-      lines: budget.lines,
-      interval_ms: budget.intervalMs,
-      format: 'ansi',
-      content_fingerprint: contentFingerprint,
-      ...identity,
-    });
-    if (sent) this.paneWatchesStarted.add(paneId);
+    this.panes.unwatchPane(agent);
   }
 
   requestAgents(): void {
@@ -2858,35 +2637,6 @@ function relayConnectionIdentityChanged(before: RelayConfig, after: RelayConfig)
     || before.gatewayRelayId !== after.gatewayRelayId
     || before.rendezvousKey !== after.rendezvousKey;
 }
-
-function applyPaneDelta(previous: string, value: unknown): string | null {
-  if (!Array.isArray(value)) return null;
-  const boundaries = [0];
-  for (let index = 0; index < previous.length; index += 1) {
-    if (previous.charCodeAt(index) === 10) boundaries.push(index + 1);
-  }
-  boundaries.push(previous.length);
-
-  const chunks: string[] = [];
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== 'object') return null;
-    const segment = candidate as Record<string, unknown>;
-    if (segment.copy_lines !== undefined) {
-      if (!Number.isInteger(segment.copy_lines) || Number(segment.copy_lines) <= 0) return null;
-      const copyLines = Number(segment.copy_lines);
-      const copyStart = segment.copy_start === undefined ? 0 : segment.copy_start;
-      if (!Number.isInteger(copyStart) || Number(copyStart) < 0) return null;
-      const copyEnd = Number(copyStart) + copyLines;
-      if (copyEnd > boundaries.length - 1) return null;
-      chunks.push(previous.slice(boundaries[Number(copyStart)], boundaries[copyEnd]));
-      continue;
-    }
-    if (typeof segment.text !== 'string') return null;
-    chunks.push(segment.text);
-  }
-  return chunks.join('');
-}
-
 
 function paneLeaseKey(agent: Agent): string {
   return `${agent.relay_id}\u0000${agent.pane_id}`;
