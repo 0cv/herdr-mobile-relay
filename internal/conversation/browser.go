@@ -1025,27 +1025,12 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 	if !ok {
 		return browseInvalidCursor(), nil
 	}
-	source, code := b.sourceFor(request.Scope, omo)
-	if code != "" {
-		return browseUnavailable(code, fileSourceReason(code, omo)), nil
+	source, failure := b.openCursorSource(ctx, request.Scope, cursor, start, end, omo)
+	if failure != nil {
+		return *failure, nil
 	}
 	defer source.close()
-	if source.revision != cursor.Revision || source.end < end {
-		return browseSourceChanged(), nil
-	}
-	digest, err := fileRangeDigestObserved(ctx, source.file, start, end, nil, func(bytes int64) error {
-		b.observePhysicalRead(bytes)
-		return nil
-	})
-	if err != nil {
-		if ctx.Err() != nil {
-			return browseRequestCancelled(), nil
-		}
-		return browseSourceChanged(), nil
-	}
-	if digest != cursor.RangeDigest {
-		return browseSourceChanged(), nil
-	}
+	digest := cursor.RangeDigest
 	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, end, digest, omo)
 	if err != nil {
 		return b.recordReadFailure(err), nil
@@ -1055,6 +1040,35 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 		request.Scope, source, projection.Entries, projection.Diagnostics, projection.Plan,
 		start, end, digest, boundary, false, request.Limit,
 	), nil
+}
+
+func (b *Browser) openCursorSource(ctx context.Context, scope BrowseScope, cursor browseCursor, start, end int64, omo bool) (fileSource, *BrowsePage) {
+	source, code := b.sourceFor(scope, omo)
+	if code != "" {
+		page := browseUnavailable(code, fileSourceReason(code, omo))
+		return fileSource{}, &page
+	}
+	fail := func(page BrowsePage) (fileSource, *BrowsePage) {
+		source.close()
+		return fileSource{}, &page
+	}
+	if source.revision != cursor.Revision || source.end < end {
+		return fail(browseSourceChanged())
+	}
+	digest, err := fileRangeDigestObserved(ctx, source.file, start, end, nil, func(bytes int64) error {
+		b.observePhysicalRead(bytes)
+		return nil
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return fail(browseRequestCancelled())
+		}
+		return fail(browseSourceChanged())
+	}
+	if digest != cursor.RangeDigest {
+		return fail(browseSourceChanged())
+	}
+	return source, nil
 }
 
 func parseCursorRange(cursor browseCursor) (start, end, boundary int64, ok bool) {
@@ -1086,9 +1100,9 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 	if !ok {
 		return browseInvalidCursor(), nil
 	}
-	source, code := b.sourceFor(request.Scope, omo)
-	if code != "" {
-		return browseUnavailable(code, fileSourceReason(code, omo)), nil
+	source, failure := b.openCursorSource(ctx, request.Scope, cursor, start, end, omo)
+	if failure != nil {
+		return *failure, nil
 	}
 	sourceOwned := true
 	defer func() {
@@ -1096,19 +1110,6 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 			source.close()
 		}
 	}()
-	if source.revision != cursor.Revision || source.end < end {
-		return browseSourceChanged(), nil
-	}
-	anchorDigest, err := fileRangeDigest(ctx, source.file, start, end)
-	if err != nil {
-		if ctx.Err() != nil {
-			return browseRequestCancelled(), nil
-		}
-		return browseSourceChanged(), nil
-	}
-	if anchorDigest != cursor.RangeDigest {
-		return browseSourceChanged(), nil
-	}
 	if cursor.JobID != "" {
 		job := b.job(cursor.JobID)
 		if job == nil {
