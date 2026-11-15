@@ -1,12 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { normalizeConversationPage } from '$lib/conversation-page';
 import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
 import {
   conversationIdentity,
   ConversationHistoryController,
+  HISTORY_ACTIVE_DEADLINE_MS,
   HISTORY_WIRE_PAGE_SIZE,
 } from '$lib/conversation-history';
-import type { Agent, ConversationEntry, ConversationPage } from '$lib/types';
+import type { Agent, ConversationEntry, ConversationHistoryRequest, ConversationPage } from '$lib/types';
 
 function agent(rawPaneId = 'pane-1'): Agent {
   return {
@@ -1045,5 +1046,262 @@ describe('history rejection paths', () => {
     } finally {
       controller.cancel();
     }
+  });
+});
+
+describe('history runaway guards', () => {
+  type ControllerOptions = import('$lib/conversation-history').ConversationHistoryControllerOptions;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const windowIds = ['u2', 'a2'];
+  const ids = (controller: ConversationHistoryController) => controller.state.entries.map(({ id }) => id);
+  const windowPage = () => page({
+    entries: [entry('u2', 'user'), entry('a2', 'assistant')],
+    hasMore: true,
+    nextCursor: 'older',
+    sourceRevision: 'r1',
+  });
+  const bridgeStep = (step: number, entries = [entry(`b${step}`, 'assistant', 'x')]) => page({
+    entries,
+    hasMore: true,
+    nextCursor: `c${step}`,
+    sourceRevision: 'r1',
+  });
+
+  function requestAfterWindow(reply: (call: number) => ConversationPage | Promise<ConversationPage>) {
+    let calls = 0;
+    return vi.fn(async (_target: Agent, _input: ConversationHistoryRequest) => (++calls === 1 ? windowPage() : reply(calls)));
+  }
+
+  function newController(request: ReturnType<typeof requestAfterWindow>, options: Partial<ControllerOptions> = {}) {
+    return new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {}, ...options });
+  }
+
+  async function loadWindow(request: ReturnType<typeof requestAfterWindow>, options: Partial<ControllerOptions> = {}) {
+    const controller = newController(request, options);
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(ids(controller)).toEqual(windowIds);
+    return controller;
+  }
+
+  async function bridgeStops(request: ReturnType<typeof requestAfterWindow>, options: Partial<ControllerOptions> = {}) {
+    const controller = await loadWindow(request, options);
+    controller.refresh();
+    await vi.waitFor(() => expect(controller.state.error).not.toBeNull(), { timeout: 5000 });
+    return controller;
+  }
+
+  function expectLatestPageRequested(request: ReturnType<typeof requestAfterWindow>, callIndex: number) {
+    expect(request.mock.calls[callIndex][1].cursor).toBeUndefined();
+    expect(request.mock.calls[callIndex][1]).toMatchObject({ retry: true });
+  }
+
+  it('pauses a bridge that keeps finding new records after the page limit and retries from the latest page', async () => {
+    const request = requestAfterWindow(call => bridgeStep(call));
+    const controller = await bridgeStops(request, { maxPagesPerDemand: 3 });
+    try {
+      expect(controller.state.error?.code).toBe('work_limit');
+      expect(controller.state.error?.retryable).toBe(true);
+      expect(request).toHaveBeenCalledTimes(4);
+      expect(ids(controller)).toEqual(windowIds);
+      controller.retry();
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(5));
+      expectLatestPageRequested(request, 4);
+      expect(ids(controller)).toEqual(windowIds);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  describe('preparation', () => {
+    const preparing = (progress: number) => page({
+      state: 'preparing',
+      hasMore: true,
+      nextCursor: 'prepared',
+      sourceRevision: 'r1',
+      progress: { phase: 'scanning', scanned_bytes: progress, source_bytes: 1_000_000 },
+    });
+
+    it('stops after 30 preparing pages with the same progress and continues from the same cursor', async () => {
+      let calls = 0;
+      const request = vi.fn(async (_target: Agent, _input: ConversationHistoryRequest) => {
+        calls++;
+        return calls <= 30 ? preparing(10) : page({ entries: [entry('u1', 'user'), entry('a1', 'assistant')], sourceRevision: 'r1' });
+      });
+      const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {}, preparationIntervalMs: 0 });
+      try {
+        controller.start();
+        await vi.waitFor(() => expect(controller.state.error?.code).toBe('preparation_stalled'));
+        expect(controller.state.error?.retryable).toBe(true);
+        expect(controller.state.preparationPolls).toBe(30);
+        expect(request).toHaveBeenCalledTimes(30);
+        controller.continuePreparation();
+        expect(controller.state.preparationPolls).toBe(0);
+        await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(31));
+        expect(request.mock.calls[30][1].cursor).toBe('prepared');
+        await vi.waitFor(() => expect(ids(controller)).toEqual(['u1', 'a1']));
+        expect(controller.state.error).toBeNull();
+      } finally {
+        controller.cancel();
+      }
+    });
+
+    it('keeps preparing past 30 pages while the progress changes', async () => {
+      let calls = 0;
+      const request = vi.fn(async (_target: Agent, _input: ConversationHistoryRequest) => {
+        calls++;
+        return calls <= 35 ? preparing(calls) : page({ entries: [entry('u1', 'user'), entry('a1', 'assistant')], sourceRevision: 'r1' });
+      });
+      const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {}, preparationIntervalMs: 0 });
+      try {
+        controller.start();
+        await vi.waitFor(() => expect(ids(controller)).toEqual(['u1', 'a1']));
+        expect(request).toHaveBeenCalledTimes(36);
+        expect(controller.state.error).toBeNull();
+      } finally {
+        controller.cancel();
+      }
+    });
+  });
+
+  describe('bridge stall', () => {
+    it('stops a bridge that returns a continuation cursor it has already seen', async () => {
+      const request = requestAfterWindow(call => (call === 4 ? bridgeStep(1, [entry('b4', 'assistant', 'x')]) : bridgeStep(call - 1)));
+      const controller = await bridgeStops(request);
+      try {
+        expect(controller.state.error?.code).toBe('stalled');
+        expect(controller.state.error?.retryable).toBe(false);
+        expect(controller.state.error?.message).toContain('repeated cursor');
+        expect(request).toHaveBeenCalledTimes(4);
+        expect(ids(controller)).toEqual(windowIds);
+        controller.retry();
+        expect(request).toHaveBeenCalledTimes(4);
+      } finally {
+        controller.cancel();
+      }
+    });
+
+    it('stops a bridge of 32 pages with new cursors and no new entries and offers retry', async () => {
+      const request = requestAfterWindow(call => bridgeStep(call, []));
+      const controller = await bridgeStops(request);
+      try {
+        expect(controller.state.error?.code).toBe('stalled');
+        expect(controller.state.error?.retryable).toBe(true);
+        expect(controller.state.error?.message).toContain('without finding more records');
+        expect(request).toHaveBeenCalledTimes(34);
+        expect(ids(controller)).toEqual(windowIds);
+      } finally {
+        controller.cancel();
+      }
+    });
+
+    it('keeps bridging when new entries arrive after 31 pages without any', async () => {
+      const request = requestAfterWindow(call => {
+        if (call < 34) return bridgeStep(call, []);
+        if (call === 34) return bridgeStep(call);
+        if (call === 35) return bridgeStep(call, []);
+        return page({ entries: [entry('u2', 'user'), entry('a2', 'assistant')], sourceRevision: 'r1' });
+      });
+      const controller = await loadWindow(request);
+      try {
+        controller.refresh();
+        await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(36), { timeout: 5000 });
+        await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+        expect(controller.state.error).toBeNull();
+        expect(ids(controller)).toEqual(['u2', 'a2', 'b34']);
+      } finally {
+        controller.cancel();
+      }
+    });
+  });
+
+  describe('work deadline', () => {
+    const settle = () => vi.advanceTimersByTimeAsync(0);
+    const jumpPastDeadline = () => vi.setSystemTime(Date.now() + HISTORY_ACTIVE_DEADLINE_MS);
+
+    async function loadWindowWithFakeTimers(request: ReturnType<typeof requestAfterWindow>) {
+      vi.useFakeTimers();
+      const controller = newController(request);
+      controller.start();
+      await settle();
+      expect(controller.state.requestPhase).toBe('idle');
+      expect(ids(controller)).toEqual(windowIds);
+      return controller;
+    }
+
+    function expectDeadlineKeptWindow(controller: ConversationHistoryController) {
+      expect(controller.state.error?.code).toBe('work_deadline');
+      expect(controller.state.error?.retryable).toBe(true);
+      expect(ids(controller)).toEqual(windowIds);
+      expect(controller.state.nextCursor).toBe('older');
+    }
+
+    it('stops between two pages of a bridge and retries from the latest page', async () => {
+      const request = requestAfterWindow(call => {
+        jumpPastDeadline();
+        return bridgeStep(call);
+      });
+      const controller = await loadWindowWithFakeTimers(request);
+      try {
+        controller.refresh();
+        await settle();
+        expectDeadlineKeptWindow(controller);
+        expect(request).toHaveBeenCalledTimes(2);
+        controller.retry();
+        await settle();
+        expect(request).toHaveBeenCalledTimes(3);
+        expectLatestPageRequested(request, 2);
+      } finally {
+        controller.cancel();
+      }
+    });
+
+    it('stops a request that never answers and retries the stored cursor', async () => {
+      const request = requestAfterWindow(() => new Promise<ConversationPage>(() => {}));
+      const controller = await loadWindowWithFakeTimers(request);
+      try {
+        controller.demandOlder();
+        await settle();
+        expect(request).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(HISTORY_ACTIVE_DEADLINE_MS);
+        expectDeadlineKeptWindow(controller);
+        controller.retry();
+        await settle();
+        expect(request).toHaveBeenCalledTimes(3);
+        expect(request.mock.calls[2][1]).toMatchObject({ cursor: 'older', retry: true });
+      } finally {
+        controller.cancel();
+      }
+    });
+
+    it('stops the wait after a preparing page when the clock is already past the deadline and retries the stored cursor', async () => {
+      const request = requestAfterWindow(() => {
+        jumpPastDeadline();
+        return page({
+          state: 'preparing',
+          hasMore: true,
+          nextCursor: 'older',
+          sourceRevision: 'r1',
+          progress: { phase: 'scanning', scanned_bytes: 1, source_bytes: 10 },
+        });
+      });
+      const controller = await loadWindowWithFakeTimers(request);
+      try {
+        controller.demandOlder();
+        await settle();
+        expectDeadlineKeptWindow(controller);
+        expect(request).toHaveBeenCalledTimes(2);
+        controller.retry();
+        await settle();
+        expect(request).toHaveBeenCalledTimes(3);
+        expect(request.mock.calls[2][1]).toMatchObject({ cursor: 'older', retry: true });
+      } finally {
+        controller.cancel();
+      }
+    });
   });
 });
