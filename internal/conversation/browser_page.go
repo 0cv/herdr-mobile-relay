@@ -49,19 +49,19 @@ func (b *Browser) memoryPage(
 	if potentialOlder {
 		next = func(nextBoundary int64) (string, error) {
 			if start > 0 {
-				return b.recentCursor(scope, source, rangeStart, rangeEnd, rangeDigest, nextBoundary)
+				return b.rangeCursor("recent", scope, source, rangeStart, rangeEnd, rangeDigest, nextBoundary)
 			}
 			prepareBoundary := rangeStart
 			if initial && len(entries) == 0 {
 				prepareBoundary = rangeEnd
 			}
-			return b.prepareCursor(scope, source, rangeStart, rangeEnd, rangeDigest, prepareBoundary)
+			return b.rangeCursor("prepare", scope, source, rangeStart, rangeEnd, rangeDigest, prepareBoundary)
 		}
 	}
 	fitted, omitted := b.fitProjected(selected, cursorCandidatePage(base, next))
 	if omitted > 0 {
 		base.HasMore = true
-		cursor, err := b.recentCursor(scope, source, rangeStart, rangeEnd, rangeDigest, fitted[0].Offset)
+		cursor, err := b.rangeCursor("recent", scope, source, rangeStart, rangeEnd, rangeDigest, fitted[0].Offset)
 		if err != nil {
 			return browseContinuationFailed()
 		}

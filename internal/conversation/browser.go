@@ -1021,16 +1021,8 @@ func (b *Browser) recordReadFailure(err error) BrowsePage {
 }
 
 func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseRequest, cursor browseCursor, omo bool) (BrowsePage, error) {
-	start, err := parseBrowseOffset(cursor.RangeStart)
-	if err != nil {
-		return browseInvalidCursor(), nil
-	}
-	end, err := parseBrowseOffset(cursor.RangeEnd)
-	if err != nil || end < start || cursor.RangeDigest == "" {
-		return browseInvalidCursor(), nil
-	}
-	boundary, err := parseBrowseOffset(cursor.Boundary)
-	if err != nil || boundary > end {
+	start, end, boundary, ok := parseCursorRange(cursor)
+	if !ok {
 		return browseInvalidCursor(), nil
 	}
 	source, code := b.sourceFor(request.Scope, omo)
@@ -1065,33 +1057,33 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 	), nil
 }
 
-func (b *Browser) recentCursor(scope BrowseScope, source fileSource, start, end int64, digest string, boundary int64) (string, error) {
-	return encodeBrowseCursor(b.key, browseCursor{
-		Mode: "recent", Scope: browseScopeID(scope), Revision: source.revision,
-		Boundary: browseOffset(boundary), RangeStart: browseOffset(start), RangeEnd: browseOffset(end),
-		RangeDigest: digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
-	})
+func parseCursorRange(cursor browseCursor) (start, end, boundary int64, ok bool) {
+	start, err := parseBrowseOffset(cursor.RangeStart)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	end, err = parseBrowseOffset(cursor.RangeEnd)
+	if err != nil || end < start || cursor.RangeDigest == "" {
+		return 0, 0, 0, false
+	}
+	boundary, err = parseBrowseOffset(cursor.Boundary)
+	if err != nil || boundary > end {
+		return 0, 0, 0, false
+	}
+	return start, end, boundary, true
 }
 
-func (b *Browser) prepareCursor(scope BrowseScope, source fileSource, start, end int64, digest string, boundary int64) (string, error) {
+func (b *Browser) rangeCursor(mode string, scope BrowseScope, source fileSource, start, end int64, digest string, boundary int64) (string, error) {
 	return encodeBrowseCursor(b.key, browseCursor{
-		Mode: "prepare", Scope: browseScopeID(scope), Revision: source.revision,
+		Mode: mode, Scope: browseScopeID(scope), Revision: source.revision,
 		Boundary: browseOffset(boundary), RangeStart: browseOffset(start), RangeEnd: browseOffset(end),
 		RangeDigest: digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 	})
 }
 
 func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cursor browseCursor, omo bool) (BrowsePage, error) {
-	start, err := parseBrowseOffset(cursor.RangeStart)
-	if err != nil {
-		return browseInvalidCursor(), nil
-	}
-	end, err := parseBrowseOffset(cursor.RangeEnd)
-	if err != nil || end < start || cursor.RangeDigest == "" {
-		return browseInvalidCursor(), nil
-	}
-	boundary, err := parseBrowseOffset(cursor.Boundary)
-	if err != nil || boundary > end {
+	start, end, boundary, ok := parseCursorRange(cursor)
+	if !ok {
 		return browseInvalidCursor(), nil
 	}
 	source, code := b.sourceFor(request.Scope, omo)
