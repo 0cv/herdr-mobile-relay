@@ -123,7 +123,7 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 		t.Fatalf("entries = %d, want 4 (tool-result and type 23 steps skipped): %#v", len(page.Entries), page.Entries)
 	}
 	user, firstCall, secondCall, final := page.Entries[0], page.Entries[1], page.Entries[2], page.Entries[3]
-	if user.Role != "user" || user.Text != "check the gateway" || user.ID != "0" || user.Timestamp == "" {
+	if user.Role != "user" || user.Text != "check the gateway" || user.ID != "0" || user.Timestamp != "1970-01-01T00:16:40.0000005Z" {
 		t.Fatalf("user entry = %#v", user)
 	}
 	if len(firstCall.Tools) != 1 || firstCall.Tools[0].Name != "run_command" || firstCall.Tools[0].State != "completed" ||
@@ -133,7 +133,7 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 	if secondCall.Text != "It was the memory watchdog." || len(secondCall.Tools) != 1 || secondCall.Tools[0].State != "running" {
 		t.Fatalf("running tool entry = %#v", secondCall)
 	}
-	if final.Role != "assistant" || final.Text != "Done." || strings.Contains(final.Text, "private thinking") {
+	if final.Role != "assistant" || final.Text != "Done." || final.Timestamp != "1970-01-01T00:16:44.0000005Z" || strings.Contains(final.Text, "private thinking") {
 		t.Fatalf("final entry = %#v", final)
 	}
 }

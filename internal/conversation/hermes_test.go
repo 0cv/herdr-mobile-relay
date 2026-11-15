@@ -100,8 +100,8 @@ COMMIT;`, sessionID, cwd, sessionID, sessionID, sessionID)
 	if tool.ID != "call_1" || tool.Name != "terminal" || tool.Input != `{"command":"pwd"}` || tool.Output != "command output" {
 		t.Fatalf("Hermes tool activity = %#v", tool)
 	}
-	if assistant.Timestamp == "" {
-		t.Fatal("Hermes assistant timestamp is empty")
+	if assistant.Timestamp != "1970-01-01T00:01:41Z" {
+		t.Fatalf("Hermes assistant timestamp = %q", assistant.Timestamp)
 	}
 	location := reader.Locate("hermes", cwd, sessionID)
 	if location.Path != database || location.Title != "Hermes title" {
