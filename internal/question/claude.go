@@ -1,0 +1,350 @@
+package question
+
+import (
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
+)
+
+var (
+	claudeReviewPattern      = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(\d+)\.\s*(submit answers|cancel)\s*$`)
+	claudeActiveTabPattern   = regexp.MustCompile(`\x1b\[[^m]*48[^m]*m`)
+	claudeSessionRulePattern = regexp.MustCompile(`^─{3,} \S.* ─$`)
+	claudeTaskPanelPattern   = regexp.MustCompile(
+		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*)$`,
+	)
+)
+
+func parseClaude(text string) *Interaction {
+	lines := cleanLines(text)
+	type row struct {
+		line     int
+		focus    bool
+		label    string
+		selected bool
+	}
+	var checkboxRows []row
+	for index, line := range lines {
+		match := checkboxPattern.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		checkboxRows = append(checkboxRows, row{
+			line:     index,
+			focus:    match[1] != "",
+			label:    textutil.Compact(match[4], 500),
+			selected: strings.TrimSpace(match[3]) != "",
+		})
+	}
+	submitIndex, submitFocus, submitLabel := -1, false, ""
+	chatIndex, chatFocus := -1, false
+	for index, line := range lines {
+		if match := submitPattern.FindStringSubmatch(line); match != nil {
+			submitIndex, submitFocus, submitLabel = index, match[1] != "", title(match[2])
+		}
+		if match := chatPattern.FindStringSubmatch(line); match != nil {
+			chatIndex, chatFocus = index, match[1] != ""
+		}
+	}
+	if len(checkboxRows) >= 2 && submitIndex >= 0 {
+		end := submitIndex
+		if chatIndex >= 0 && chatIndex < end {
+			end = chatIndex
+		}
+		all := make([]Option, 0, len(checkboxRows))
+		focus := Focus{Kind: "option"}
+		for index, item := range checkboxRows {
+			rowEnd := end
+			if index+1 < len(checkboxRows) {
+				rowEnd = checkboxRows[index+1].line
+			}
+			all = append(all, Option{
+				Index:       index,
+				Label:       strings.TrimSpace(selectedPattern.ReplaceAllString(item.label, "")),
+				Description: description(lines, item.line, rowEnd),
+				Selected:    item.selected || selectedPattern.MatchString(item.label),
+			})
+			if item.focus {
+				focus = Focus{Kind: "option", Index: index}
+			}
+		}
+		if submitFocus {
+			focus = Focus{Kind: "submit"}
+		}
+		if chatFocus {
+			focus = Focus{Kind: "chat"}
+		}
+		otherItem := all[len(all)-1]
+		options := all[:len(all)-1]
+		otherText := ""
+		if !otherPattern.MatchString(otherItem.Label) {
+			otherText = otherItem.Label
+		}
+		question := prompt(lines, checkboxRows[0].line)
+		current, total := claudePosition(text)
+		if submitLabel == "Submit" && current > 0 && current < total {
+			submitLabel = "Next"
+		}
+		interaction := &Interaction{
+			Kind:           "multi_select",
+			Question:       question,
+			Options:        options,
+			Other:          Other{Selected: otherItem.Selected, Text: otherText},
+			SubmitLabel:    submitLabel,
+			CanChat:        chatIndex >= 0,
+			CanGoBack:      current > 1,
+			QuestionIndex:  current,
+			QuestionTotal:  total,
+			Focus:          focus,
+			AllOptionCount: len(all),
+			Agent:          "claude",
+		}
+		interaction.ID = interactionID(interaction)
+		return interaction
+	}
+
+	if chatIndex < 0 {
+		return parseClaudeReview(text, lines)
+	}
+	var rows []row
+	expected := 1
+	for index, line := range lines[:chatIndex] {
+		match := menuPattern.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		number, _ := strconv.Atoi(match[2])
+		if number == 1 {
+			rows = nil
+			expected = 1
+		}
+		if number != expected {
+			continue
+		}
+		label := textutil.Compact(match[3], 500)
+		rows = append(rows, row{
+			line:     index,
+			focus:    match[1] != "",
+			label:    strings.TrimSpace(selectedPattern.ReplaceAllString(label, "")),
+			selected: selectedPattern.MatchString(label),
+		})
+		expected++
+	}
+	if len(rows) < 3 {
+		return nil
+	}
+	all := make([]Option, 0, len(rows))
+	focus := Focus{Kind: "option"}
+	for index, item := range rows {
+		rowEnd := chatIndex
+		if index+1 < len(rows) {
+			rowEnd = rows[index+1].line
+		}
+		all = append(all, Option{
+			Index:       index,
+			Label:       item.label,
+			Description: description(lines, item.line, rowEnd),
+			Selected:    item.selected,
+		})
+		if item.focus {
+			focus = Focus{Kind: "option", Index: index}
+		}
+	}
+	if chatFocus {
+		focus = Focus{Kind: "chat"}
+	}
+	otherItem := all[len(all)-1]
+	options := all[:len(all)-1]
+	otherText := ""
+	if !otherPattern.MatchString(otherItem.Label) {
+		otherText = otherItem.Label
+	}
+	current, total := claudePosition(text)
+	submitLabel = "Submit"
+	if current > 0 && current < total {
+		submitLabel = "Next"
+	}
+	interaction := &Interaction{
+		Kind:           "single_select",
+		Question:       prompt(lines, rows[0].line),
+		Options:        options,
+		Other:          Other{Selected: otherItem.Selected, Text: otherText},
+		SubmitLabel:    submitLabel,
+		CanChat:        true,
+		CanGoBack:      current > 1,
+		QuestionIndex:  current,
+		QuestionTotal:  total,
+		Focus:          focus,
+		AllOptionCount: len(all),
+		Agent:          "claude",
+	}
+	// Leftover typed text only marks the custom answer as chosen while no
+	// option row carries the confirmed selection; otherwise a stale note from
+	// an earlier visit would override the real answer.
+	if otherText != "" && !interaction.Other.Selected {
+		selectedElsewhere := false
+		for _, option := range options {
+			if option.Selected {
+				selectedElsewhere = true
+				break
+			}
+		}
+		if !selectedElsewhere {
+			interaction.Other.Selected = true
+		}
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
+func parseClaudeReview(text string, lines []string) *Interaction {
+	reviewIndex := -1
+	for index := len(lines) - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(lines[index]), "Review your answers") {
+			reviewIndex = index
+			break
+		}
+	}
+	if reviewIndex < 0 {
+		return nil
+	}
+
+	var options []Option
+	focus := Focus{Kind: "option"}
+	for index := reviewIndex + 1; index < len(lines); index++ {
+		match := claudeReviewPattern.FindStringSubmatch(lines[index])
+		if match == nil {
+			continue
+		}
+		number, _ := strconv.Atoi(match[2])
+		if number != len(options)+1 {
+			return nil
+		}
+		optionIndex := len(options)
+		options = append(options, Option{Index: optionIndex, Label: textutil.Compact(match[3], 500)})
+		if match[1] != "" {
+			focus = Focus{Kind: "option", Index: optionIndex}
+		}
+	}
+	if len(options) != 2 ||
+		!strings.EqualFold(options[0].Label, "Submit answers") ||
+		!strings.EqualFold(options[1].Label, "Cancel") {
+		return nil
+	}
+
+	var summary []SummaryEntry
+	prompt := ""
+	answerOpen := false
+	for _, line := range lines[reviewIndex+1:] {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "●"):
+			prompt = strings.TrimSpace(strings.TrimPrefix(trimmed, "●"))
+			answerOpen = false
+		case strings.HasPrefix(trimmed, "→") && prompt != "":
+			answer := strings.TrimSpace(strings.TrimPrefix(trimmed, "→"))
+			if answer == "__other__" {
+				answer = CustomAnswerPlaceholder
+			}
+			summary = append(summary, SummaryEntry{Question: strings.TrimSuffix(prompt, "?"), Answer: answer})
+			prompt = ""
+			answerOpen = true
+		case trimmed == "" || claudeReviewPattern.MatchString(line):
+			prompt = ""
+			answerOpen = false
+		case prompt != "":
+			// Long prompts wrap onto continuation lines in the terminal.
+			prompt += " " + trimmed
+		case answerOpen && len(summary) > 0:
+			summary[len(summary)-1].Answer += " " + trimmed
+		}
+	}
+	options[0].Description = summaryLines(summary, 1000)
+	options[0].Summary = summary
+
+	current, total := claudePosition(text)
+	if current < 1 || total < current {
+		current = len(summary) + 1
+		total = current
+	}
+	interaction := &Interaction{
+		Kind:           "single_select",
+		Question:       "Review your answers and choose what to do",
+		Options:        options,
+		Other:          Other{Hidden: true},
+		SubmitLabel:    "Continue",
+		CanGoBack:      strings.Contains(text, "←"),
+		QuestionIndex:  current,
+		QuestionTotal:  total,
+		Focus:          focus,
+		AllOptionCount: len(options),
+		Agent:          "claude",
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
+func prompt(lines []string, firstOption int) string {
+	start, end := -1, -1
+	for index := firstOption - 1; index >= 0; index-- {
+		line := lines[index]
+		lower := strings.ToLower(line)
+		boundary := line == "" || submitPattern.MatchString(line) || chatPattern.MatchString(line) ||
+			strings.Contains(lower, "enter to select") ||
+			(strings.Contains(line, "Submit") && strings.Contains(line, "→"))
+		if boundary {
+			if end >= 0 {
+				break
+			}
+			continue
+		}
+		if end < 0 {
+			end = index
+		}
+		start = index
+	}
+	if end < 0 {
+		return "Claude Code needs an answer"
+	}
+	return textutil.Compact(strings.Join(lines[start:end+1], " "), 1000)
+}
+
+func claudePosition(text string) (int, int) {
+	for _, raw := range strings.Split(text, "\n") {
+		clean := cleanLine(raw)
+		if !strings.Contains(clean, "→") || !strings.Contains(strings.ToLower(clean), "submit") {
+			continue
+		}
+		active := claudeActiveTabPattern.FindStringIndex(raw)
+		if active == nil {
+			return 0, 0
+		}
+		prefix := cleanLine(raw[:active[0]])
+		current := countMarks(prefix) + 1
+		beforeSubmit := clean
+		if index := strings.Index(strings.ToLower(beforeSubmit), "submit"); index >= 0 {
+			beforeSubmit = beforeSubmit[:index]
+		}
+		total := countMarks(beforeSubmit)
+		activeText := cleanLine(raw[active[1]:])
+		if !strings.ContainsAny(activeText, "☐☒☑✓✔") || total < current {
+			total++
+		}
+		if current >= 1 && total >= current {
+			return current, total
+		}
+	}
+	return 0, 0
+}
+
+func countMarks(value string) int {
+	count := 0
+	for _, char := range value {
+		if strings.ContainsRune("☐☒☑✓✔", char) {
+			count++
+		}
+	}
+	return count
+}

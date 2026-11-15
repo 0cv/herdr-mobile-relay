@@ -785,3 +785,24 @@ var agyMenuFocusPattern = regexp.MustCompile(`(?m)^(\s*)> (\d+\.\s)`)
 // agyStatusLinePattern matches the "Context [...]" usage bar Antigravity keeps
 // under its dialogs; it is chrome, not output newer than the menu.
 var agyStatusLinePattern = regexp.MustCompile(`^\s*Context \[`)
+
+var commandPattern = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
+
+func approvalCommand(lines []string) string {
+	command, fallback := "", ""
+	for _, line := range lines {
+		if line == "" || menuPattern.MatchString(line) || chromePattern.MatchString(line) ||
+			promptSkipPattern.MatchString(line) {
+			continue
+		}
+		if match := commandPattern.FindStringSubmatch(line); match != nil {
+			command = strings.TrimSpace(match[1])
+			continue
+		}
+		fallback = line
+	}
+	if command != "" {
+		return command
+	}
+	return fallback
+}
