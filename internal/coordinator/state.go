@@ -63,11 +63,12 @@ type AgentState struct {
 }
 
 type paneRecord struct {
-	agent        *AgentState
-	revision     int64
-	contentRev   int64
-	attentionRev int64
-	completion   completionState
+	agent            *AgentState
+	revision         int64
+	contentRev       int64
+	attentionRev     int64
+	completion       completionState
+	sessionDiscovery *sessionDiscovery
 }
 
 type completionState struct {
@@ -86,7 +87,6 @@ type State struct {
 	topologyGen        int64
 	revCounter         int64
 	generation         map[string]int64
-	sessionDiscoveries map[string]sessionDiscovery
 	triage             map[string]triageRecord
 	triagePath         string
 	inventoryReady     bool
@@ -128,13 +128,12 @@ type InventorySnapshot struct {
 
 func NewState(logger *slog.Logger) *State {
 	return &State{
-		panes:              make(map[string]*paneRecord),
-		generation:         make(map[string]int64),
-		sessionDiscoveries: make(map[string]sessionDiscovery),
-		pendingEvents:      make(map[string]pendingEvent),
-		logger:             logger,
-		triage:             make(map[string]triageRecord),
-		customAnswers:      make(map[string]map[string]string),
+		panes:         make(map[string]*paneRecord),
+		generation:    make(map[string]int64),
+		pendingEvents: make(map[string]pendingEvent),
+		logger:        logger,
+		triage:        make(map[string]triageRecord),
+		customAnswers: make(map[string]map[string]string),
 	}
 }
 
@@ -486,9 +485,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		}
 		replaced := exists && paneSessionReplaced(existing, incoming)
 		if exists && !replaced && existing.SessionID != incoming.SessionID {
-			delete(s.sessionDiscoveries, incoming.PaneID)
+			rec.sessionDiscovery = nil
 			if existing.SessionID == "" && incoming.SessionID != "" && existing.TerminalID != "" && existing.TerminalID == incoming.TerminalID {
-				s.sessionDiscoveries[incoming.PaneID] = sessionDiscovery{
+				rec.sessionDiscovery = &sessionDiscovery{
 					generation: s.generation[incoming.PaneID],
 					terminalID: incoming.TerminalID,
 					sessionID:  incoming.SessionID,
@@ -497,7 +496,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			s.generation[incoming.PaneID]++
 		}
 		if replaced {
-			delete(s.sessionDiscoveries, incoming.PaneID)
+			rec.sessionDiscovery = nil
 			topologyChanged = true
 			s.generation[incoming.PaneID]++
 			rec.completion = completionState{}
@@ -604,7 +603,6 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 
 	for id := range s.panes {
 		if !seen[id] {
-			delete(s.sessionDiscoveries, id)
 			s.generation[id]++
 			delete(s.panes, id)
 			delete(s.customAnswers, id)

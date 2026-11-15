@@ -49,21 +49,21 @@ func (s *State) finishLaunch(snapshot launchSnapshot, pane string) LaunchIdentit
 	baseline := snapshot.generations[pane]
 	generation := s.generation[pane]
 	identity := LaunchIdentity{Generation: baseline}
-	var agent *AgentState
-	if rec := s.panes[pane]; rec != nil {
-		agent = rec.agent
-	}
-	if agent != nil {
-		identity.TerminalID = agent.TerminalID
-		identity.SessionID = agent.SessionID
+	rec := s.panes[pane]
+	if rec != nil {
+		identity.TerminalID = rec.agent.TerminalID
+		identity.SessionID = rec.agent.SessionID
 	}
 	if generation == baseline {
 		identity.Valid = true
 		return identity
 	}
-	discovery, found := s.sessionDiscoveries[pane]
-	if !found || agent == nil || discovery.generation != baseline || generation != baseline+1 ||
-		discovery.terminalID != agent.TerminalID || discovery.sessionID != agent.SessionID {
+	if rec == nil || rec.sessionDiscovery == nil {
+		return identity
+	}
+	discovery := rec.sessionDiscovery
+	if discovery.generation != baseline || generation != baseline+1 ||
+		discovery.terminalID != rec.agent.TerminalID || discovery.sessionID != rec.agent.SessionID {
 		return identity
 	}
 	if terminal, existed := snapshot.terminals[pane]; existed && terminal != discovery.terminalID {
