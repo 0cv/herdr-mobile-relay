@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func secretReadSocket(t *testing.T, content string, fail bool, afterRead func()) string {
@@ -92,7 +93,7 @@ func TestSecretRechecksPromptBeforeAnyWrite(t *testing.T) {
 			defer client.Close()
 			d := NewDispatcher(client, state, nil, testLogger())
 			defer d.Close(context.Background())
-			result := d.Handle(context.Background(), map[string]any{"type": "send_secret", "pane_id": "pane-1", "request_id": "observed-secret", "text": "synthetic-value"})
+			result := d.Handle(context.Background(), protocol.Inbound{Type: "send_secret", PaneID: "pane-1", RequestID: "observed-secret", Text: "synthetic-value"})
 			if scenario == "valid" {
 				if !result.OK || len(recordedInvocations(t, record)) != 1 {
 					t.Fatalf("valid dispatch: %+v", result)

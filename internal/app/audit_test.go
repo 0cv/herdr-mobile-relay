@@ -82,6 +82,31 @@ func TestAuditAttemptKeepsAttributionWithoutPayloadContent(t *testing.T) {
 	}
 }
 
+func TestAuditCountsPromptTextBeforeAttachmentExpansion(t *testing.T) {
+	e := newFrameEnv(t)
+	target := e.target(t, "pane-1")
+	ref := e.uploadAttachment(t, target)
+	text := "Review this file:\nAttachment: " + ref
+
+	expectCommandResult(t, e.exchange(t, map[string]any{
+		"type": "submit_prompt", "target": target, "text": text,
+	}), "submit_prompt", true, "completed", "")
+
+	if prompts := e.backend.called("Prompt"); len(prompts) != 1 || strings.Contains(prompts[0], "Attachment: "+ref) {
+		t.Fatalf("prompts = %v, want the reference expanded", prompts)
+	}
+	attempts := e.auditAttempts(t)
+	last := attempts[len(attempts)-1]
+	if last.Action != "submit_prompt" || last.Details["text_bytes"] != float64(len(text)) {
+		t.Fatalf("last attempt = %#v, want submit_prompt with text_bytes %d", last, len(text))
+	}
+	for _, record := range readAuditRecords(t, e.cacheDir) {
+		if record.Stage == "result" && record.Details != nil {
+			t.Fatalf("result record kept details: %#v", record.Details)
+		}
+	}
+}
+
 func TestAuditAttemptCapsKeysAtThirtyTwo(t *testing.T) {
 	e := newFrameEnv(t)
 	keys := make([]string, 40)

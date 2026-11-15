@@ -71,12 +71,13 @@ func TestFrameSubmitPromptIgnoresTheLegacyPromptField(t *testing.T) {
 
 	var targetRef protocol.TargetRef
 	decodeInto(t, target, &targetRef)
-	message := map[string]any{"text": "Attachment: " + ref, "prompt": "Attachment: " + ref}
-	if err := e.server.expandPromptAttachmentReferences("submit_prompt", message, &targetRef); err != nil {
+	in := protocol.Inbound{Text: "Attachment: " + ref, Prompt: "Attachment: " + ref, Target: &targetRef}
+	expanded, err := e.server.expandPromptAttachmentReferences("submit_prompt", in)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if message["prompt"] != "Attachment: "+ref || message["text"] == "Attachment: "+ref {
-		t.Fatalf("message = %#v, want text expanded and prompt untouched", message)
+	if expanded.Prompt != "Attachment: "+ref || expanded.Text == "Attachment: "+ref {
+		t.Fatalf("inbound = %+v, want text expanded and prompt untouched", expanded)
 	}
 }
 

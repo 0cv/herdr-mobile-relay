@@ -17,6 +17,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func recordingSecretHerdr(t *testing.T, dir, record string) string {
@@ -60,9 +61,11 @@ func TestSendSecretDispatchesOneKeystrokeBatch(t *testing.T) {
 		_ = d.Close(context.Background())
 	})
 
-	result := d.Handle(context.Background(), map[string]any{
-		"type": "send_secret", "request_id": "secret-1", "pane_id": "pane-1",
-		"text": "hunter 2!",
+	result := d.Handle(context.Background(), protocol.Inbound{
+		Type:      "send_secret",
+		RequestID: "secret-1",
+		PaneID:    "pane-1",
+		Text:      "hunter 2!",
 	})
 	if !result.OK || result.Action != "send_secret" || result.Phase != "completed" {
 		t.Fatalf("send_secret result = %+v", result)
@@ -122,9 +125,11 @@ func TestSendSecretRejectsUnsendableSecrets(t *testing.T) {
 				_ = d.Close(context.Background())
 			})
 
-			result := d.Handle(context.Background(), map[string]any{
-				"type": "send_secret", "request_id": "secret-1", "pane_id": "pane-1",
-				"text": tt.text,
+			result := d.Handle(context.Background(), protocol.Inbound{
+				Type:      "send_secret",
+				RequestID: "secret-1",
+				PaneID:    "pane-1",
+				Text:      tt.text,
 			})
 			if result.OK {
 				t.Fatalf("send_secret accepted %q: %+v", tt.name, result)

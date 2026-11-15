@@ -17,6 +17,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const paneBusyEnvelope = `{"error":{"code":"agent_pane_busy",` +
@@ -241,10 +242,10 @@ func TestAgentStartFailureSurfacesTheKeptPane(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stopAfterRefusals(lifecycle, 2)
-	result := d.handleAgentStart(ctx, d.newCommandRequest(time.Now(), "request-1", "", map[string]any{
-		"profile_id": "codex",
-		"name":       "project-codex",
-		"cwd":        cwd,
+	result := d.handleAgentStart(ctx, d.newCommandRequest(time.Now(), "request-1", "", protocol.Inbound{
+		ProfileID: "codex",
+		Name:      "project-codex",
+		Cwd:       cwd,
 	}, nil))
 	if result.OK {
 		t.Fatal("agent_start reported success against a permanently refusing Herdr")

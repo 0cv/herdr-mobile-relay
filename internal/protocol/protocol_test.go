@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeCanonicalOperation(t *testing.T) {
@@ -31,6 +32,47 @@ func TestDecodeCanonicalOperation(t *testing.T) {
 				t.Fatalf("DecodeMap = %q, %v; want %q, invalid=%v", got.Type, err, tc.want, tc.invalid)
 			}
 		})
+	}
+}
+
+func TestDecodeMapFillsServerFields(t *testing.T) {
+	receivedAt := time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC)
+	got, err := DecodeMap(map[string]any{
+		"type":                "agent_stop",
+		"_server_sequence":    uint64(7),
+		"_server_received_at": receivedAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReceiptSequence != 7 || !got.ReceivedAt.Equal(receivedAt) {
+		t.Fatalf("receipt = %d at %s; want 7 at %s", got.ReceiptSequence, got.ReceivedAt, receivedAt)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(got.Raw, &raw); err != nil || raw["type"] != "agent_stop" || raw["_server_sequence"] != float64(7) {
+		t.Fatalf("raw = %s, %v", got.Raw, err)
+	}
+}
+
+func TestClientCannotSetServerFields(t *testing.T) {
+	frame := `{"type":"agent_stop","ReceiptSequence":9,"receipt_sequence":9,"ReceivedAt":"2026-01-02T03:04:05Z","received_at":"2026-01-02T03:04:05Z","Raw":"x","raw":"x"}`
+	var decoded Inbound
+	if err := json.Unmarshal([]byte(frame), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ReceiptSequence != 0 || !decoded.ReceivedAt.IsZero() || decoded.Raw != nil {
+		t.Fatalf("decoded = %+v; want no server fields", decoded)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(frame), &raw); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeMap(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReceiptSequence != 0 || !got.ReceivedAt.IsZero() {
+		t.Fatalf("decoded map = %+v; want no receipt", got)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestQueuedPromptRejectsObservedNativeSessionChange(t *testing.T) {
@@ -46,7 +47,7 @@ func TestQueuedPromptRejectsObservedNativeSessionChange(t *testing.T) {
 				return nil
 			})
 			go func() {
-				results <- d.HandleAdmitted(ctx, map[string]any{"type": "submit_prompt", "request_id": "stale", "pane_id": "pane", "text": "hello"}, func() { close(admitted) })
+				results <- d.HandleAdmitted(ctx, protocol.Inbound{Type: "submit_prompt", RequestID: "stale", PaneID: "pane", Text: "hello"}, func() { close(admitted) })
 			}()
 			<-admitted
 			if replacement == "revoked" {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestReviewInitialPromptSurvivesNormalSessionDiscovery(t *testing.T) {
@@ -40,7 +41,7 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 		}
 		return nil
 	})
-	message := map[string]any{"type": "agent_start", "request_id": "normal-discovery", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
+	message := protocol.Inbound{Type: "agent_start", RequestID: "normal-discovery", ProfileID: "claude", Name: "proj", Cwd: f.cwd, Prompt: "hello"}
 	go func() { resultCh <- d.Handle(ctx, message) }()
 	for {
 		if _, err := os.Stat(entered); err == nil {

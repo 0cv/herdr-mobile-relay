@@ -16,6 +16,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestTransitionActivityPreservesExtract(t *testing.T) {
@@ -112,15 +113,15 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 		// the herdr child starts and is then cancelled quickly.
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
-		return d.Handle(ctx, map[string]any{
-			"type":                 "respond",
-			"request_id":           "r1",
-			"pane_id":              "pane-1",
-			"event_id":             eventID,
-			"approval_fingerprint": fingerprint,
-			"choice":               choice,
-			"index":                float64(0),
-			"total":                float64(2),
+		return d.Handle(ctx, protocol.Inbound{
+			Type:                "respond",
+			RequestID:           "r1",
+			PaneID:              "pane-1",
+			EventID:             eventID,
+			ApprovalFingerprint: fingerprint,
+			Choice:              choice,
+			Index:               intPtr(0),
+			Total:               intPtr(2),
 		})
 	}
 

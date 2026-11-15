@@ -11,6 +11,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 type coreLaunchBackend struct {
@@ -120,7 +121,7 @@ func TestCoreClear(t *testing.T) {
 			b := &coreLaunchBackend{Backend: f.dispatcher.herdr, inventoryWorkspace: old.WorkspaceID, pane: herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID}}
 			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
 			message := clearMessage()
-			message["type"] = action
+			message.Type = action
 			result := f.dispatcher.Handle(f.ctx, message)
 			if !result.OK || !reflect.DeepEqual(b.calls, []string{"run", "kill:" + old.PaneID}) {
 				t.Fatalf("result=%+v calls=%v", result, b.calls)
@@ -158,7 +159,7 @@ func TestClearNamesDoNotCollide(t *testing.T) {
 	receivedAt := time.Now()
 	for i := range 2 {
 		f, _ := newClearFixture(t, launchFixtureOptions{})
-		result := f.dispatcher.handleClear(f.ctx, f.dispatcher.newCommandRequest(receivedAt.Add(time.Duration(i)), "clear", "pane-old", nil, nil))
+		result := f.dispatcher.handleClear(f.ctx, f.dispatcher.newCommandRequest(receivedAt.Add(time.Duration(i)), "clear", "pane-old", protocol.Inbound{}, nil))
 		if !result.OK {
 			t.Fatalf("clear: %+v", result)
 		}
@@ -185,7 +186,7 @@ func TestCoreLaunchPromptAndReplay(t *testing.T) {
 				b.promptErr = herdr.ErrDispatchedUnknown
 			}
 			f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
-			message := map[string]any{"type": "agent_start", "request_id": "core-launch", "profile_id": "claude", "name": "fixture", "cwd": f.cwd, "prompt": "hello"}
+			message := protocol.Inbound{Type: "agent_start", RequestID: "core-launch", ProfileID: "claude", Name: "fixture", Cwd: f.cwd, Prompt: "hello"}
 			result := f.dispatcher.Handle(f.ctx, message)
 			wantPhase := "completed"
 			wantCalls := []string{"run", "prompt"}

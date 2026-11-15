@@ -254,7 +254,8 @@ func (s *Server) handleQRCode(client *transport.ClientConn, inbound protocol.Inb
 }
 
 func (s *Server) handleDispatched(commandCtx context.Context, client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, coordinated bool, auditedWrite bool, admitted func()) {
-	if err := s.expandPromptAttachmentReferences(action, msg, inbound.Target); err != nil {
+	inbound, err := s.expandPromptAttachmentReferences(action, inbound)
+	if err != nil {
 		result := &coordinator.CommandResult{
 			RequestID: inbound.RequestID,
 			Action:    action,
@@ -267,9 +268,9 @@ func (s *Server) handleDispatched(commandCtx context.Context, client *transport.
 	}
 	var result *coordinator.CommandResult
 	if coordinated {
-		result = s.dispatcher.HandleAdmitted(commandCtx, msg, admitted)
+		result = s.dispatcher.HandleAdmitted(commandCtx, inbound, admitted)
 	} else {
-		result = s.dispatcher.Handle(commandCtx, msg)
+		result = s.dispatcher.Handle(commandCtx, inbound)
 	}
 	s.sendResult(client, msg, action, auditedWrite, result)
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 type filterSocketWrite struct {
@@ -175,7 +176,7 @@ func TestFilterDelayedRepaintConfirmsWithoutResending(t *testing.T) {
 		}
 		return ctx.Err()
 	}
-	result := d.Handle(context.Background(), map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": "gr"})
+	result := d.Handle(context.Background(), protocol.Inbound{Type: "send_filter_text", PaneID: "pane-1", Text: "gr"})
 	if !result.OK {
 		t.Fatalf("delayed repaint: %+v", result)
 	}
@@ -198,7 +199,7 @@ func TestFilterReadFailureAfterPrefixIsUnknown(t *testing.T) {
 	d, fake := newControlledFilterDispatcher(t)
 	fake.failReadsAfterWrite = true
 	d.testFilterWait = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
-	result := d.Handle(context.Background(), map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": "grok"})
+	result := d.Handle(context.Background(), protocol.Inbound{Type: "send_filter_text", PaneID: "pane-1", Text: "grok"})
 	assertFilterUnknown(t, result)
 	want := []filterSocketWrite{{"pane-1", "pane.send_keys", "g"}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
@@ -222,9 +223,11 @@ func TestFilterSchedulerDeadlineAfterPrefixIsUnknown(t *testing.T) {
 	receivedAt := time.Now().Add(-commandDeadline + 2*time.Second)
 	results := make(chan *CommandResult, 1)
 	go func() {
-		results <- d.Handle(context.Background(), map[string]any{
-			"type": "send_filter_text", "pane_id": "pane-1", "text": "gr",
-			"_server_received_at": receivedAt.Format(time.RFC3339Nano),
+		results <- d.Handle(context.Background(), protocol.Inbound{
+			Type:       "send_filter_text",
+			PaneID:     "pane-1",
+			Text:       "gr",
+			ReceivedAt: receivedAt,
 		})
 	}()
 	var effectCtx context.Context
@@ -283,7 +286,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 	}
 	filterResult := make(chan *CommandResult, 1)
 	go func() {
-		filterResult <- d.Handle(context.Background(), map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": "gr"})
+		filterResult <- d.Handle(context.Background(), protocol.Inbound{Type: "send_filter_text", PaneID: "pane-1", Text: "gr"})
 	}()
 	select {
 	case <-entered:
@@ -293,7 +296,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 	admitted := make(chan struct{})
 	sameResult := make(chan *CommandResult, 1)
 	go func() {
-		sameResult <- d.HandleAdmitted(context.Background(), map[string]any{"type": "send_input", "pane_id": "pane-1", "text": "same"}, func() { close(admitted) })
+		sameResult <- d.HandleAdmitted(context.Background(), protocol.Inbound{Type: "send_input", PaneID: "pane-1", Text: "same"}, func() { close(admitted) })
 	}()
 	select {
 	case <-admitted:
@@ -302,7 +305,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 	}
 	otherResult := make(chan *CommandResult, 1)
 	go func() {
-		otherResult <- d.Handle(context.Background(), map[string]any{"type": "send_input", "pane_id": "pane-2", "text": "other"})
+		otherResult <- d.Handle(context.Background(), protocol.Inbound{Type: "send_input", PaneID: "pane-2", Text: "other"})
 	}()
 	if result := receiveFilterResult(t, otherResult); !result.OK {
 		t.Fatalf("other pane blocked: %+v", result)

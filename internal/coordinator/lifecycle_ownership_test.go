@@ -11,6 +11,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 type launchOwnershipFixture struct {
@@ -144,7 +145,7 @@ func TestLifecyclePersistsShellOwnershipBeforeAgentDiscovery(t *testing.T) {
 			if err := os.WriteFile(f.nextPane, []byte("pane-replacement"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			cleared := d.handleClear(ctx, d.newCommandRequest(time.Now(), "clear-test", result.PaneID, nil, nil))
+			cleared := d.handleClear(ctx, d.newCommandRequest(time.Now(), "clear-test", result.PaneID, protocol.Inbound{}, nil))
 			if !cleared.OK {
 				t.Fatalf("Clear after restart = %+v", cleared)
 			}

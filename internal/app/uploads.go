@@ -18,31 +18,27 @@ func (s *Server) validateUploadTarget(target protocol.TargetRef) error {
 	}
 	return nil
 }
-func (s *Server) expandPromptAttachmentReferences(action string, message map[string]any, target *protocol.TargetRef) error {
-	if action != "submit_prompt" {
-		return nil
+func (s *Server) expandPromptAttachmentReferences(action string, inbound protocol.Inbound) (protocol.Inbound, error) {
+	if action != "submit_prompt" || !strings.Contains(inbound.Text, "Attachment: ") {
+		return inbound, nil
 	}
-	value, ok := message["text"].(string)
-	if !ok || !strings.Contains(value, "Attachment: ") {
-		return nil
-	}
-	lines := strings.Split(value, "\n")
+	lines := strings.Split(inbound.Text, "\n")
 	for index, line := range lines {
 		ref, found := strings.CutPrefix(strings.TrimSpace(line), "Attachment: ")
 		if !found || !validAttachmentReference(ref) {
 			continue
 		}
-		if target == nil || s.uploadM == nil {
-			return &upload.Error{Code: "attachment_reference_invalid"}
+		if inbound.Target == nil || s.uploadM == nil {
+			return inbound, &upload.Error{Code: "attachment_reference_invalid"}
 		}
-		attachment, err := s.uploadM.Resolve(*target, ref)
+		attachment, err := s.uploadM.Resolve(*inbound.Target, ref)
 		if err != nil {
-			return &upload.Error{Code: "attachment_reference_invalid"}
+			return inbound, &upload.Error{Code: "attachment_reference_invalid"}
 		}
 		lines[index] = "Attachment: " + attachment.Path
 	}
-	message["text"] = strings.Join(lines, "\n")
-	return nil
+	inbound.Text = strings.Join(lines, "\n")
+	return inbound, nil
 }
 
 func validAttachmentReference(value string) bool {

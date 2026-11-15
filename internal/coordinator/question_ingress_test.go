@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -47,12 +48,12 @@ func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
 	admitted := make(chan struct{})
 	questionDone := make(chan *CommandResult, 1)
 	go func() {
-		questionDone <- dispatcher.HandleAdmitted(t.Context(), map[string]any{
-			"type":             "answer_question",
-			"request_id":       "question",
-			"pane_id":          "pane-1",
-			"interaction_id":   interaction.ID,
-			"selected_indices": []any{float64(0)},
+		questionDone <- dispatcher.HandleAdmitted(t.Context(), protocol.Inbound{
+			Type:            "answer_question",
+			RequestID:       "question",
+			PaneID:          "pane-1",
+			InteractionID:   interaction.ID,
+			SelectedIndices: []int{0},
 		}, func() { close(admitted) })
 	}()
 
@@ -69,11 +70,11 @@ func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
 
 	promptCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	prompt := dispatcher.Handle(promptCtx, map[string]any{
-		"type":       "submit_prompt",
-		"request_id": "prompt",
-		"pane_id":    "pane-2",
-		"text":       "continue",
+	prompt := dispatcher.Handle(promptCtx, protocol.Inbound{
+		Type:      "submit_prompt",
+		RequestID: "prompt",
+		PaneID:    "pane-2",
+		Text:      "continue",
 	})
 	if !prompt.OK {
 		t.Fatalf("unrelated pane command was blocked behind question validation: %+v", prompt)

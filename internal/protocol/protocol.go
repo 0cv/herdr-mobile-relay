@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
@@ -244,6 +245,9 @@ type Inbound struct {
 	Candidate            string          `json:"candidate,omitempty"`
 	SDPMid               string          `json:"sdp_mid,omitempty"`
 	SDPMLineIndex        int             `json:"sdp_mline_index,omitempty"`
+	ReceiptSequence      uint64          `json:"-"`
+	ReceivedAt           time.Time       `json:"-"`
+	Raw                  json.RawMessage `json:"-"`
 }
 
 func DecodeMap(raw map[string]any) (Inbound, error) {
@@ -258,6 +262,14 @@ func DecodeMap(raw map[string]any) (Inbound, error) {
 	if message.Type == "" {
 		return Inbound{}, fmt.Errorf("message type is required")
 	}
+	var server struct {
+		Sequence   uint64 `json:"_server_sequence"`
+		ReceivedAt string `json:"_server_received_at"`
+	}
+	_ = json.Unmarshal(data, &server)
+	message.ReceiptSequence = server.Sequence
+	message.ReceivedAt, _ = time.Parse(time.RFC3339Nano, server.ReceivedAt)
+	message.Raw = data
 	return message, nil
 }
 

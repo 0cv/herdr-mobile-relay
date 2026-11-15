@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,7 @@ import (
 func TestAgentStartRetryReplaysInitialPromptWarning(t *testing.T) {
 	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: "exit 1"})
 	d, record := f.dispatcher, f.calls
-	message := map[string]any{"type": "agent_start", "request_id": "warning", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
+	message := protocol.Inbound{Type: "agent_start", RequestID: "warning", ProfileID: "claude", Name: "proj", Cwd: f.cwd, Prompt: "hello"}
 	first, second := d.Handle(f.ctx, message), d.Handle(f.ctx, message)
 	f.assertCalls(t, 1)
 	if !second.replayed || first.Phase != "completed_with_warning" || second.Phase != first.Phase {
@@ -31,7 +32,7 @@ func TestAgentStartRetryReplaysInitialPromptWarning(t *testing.T) {
 func TestLateLaunchReceivesFreshPromptBudget(t *testing.T) {
 	f := newLaunchFixture(t)
 	d, record := f.dispatcher, f.calls
-	result := d.handleAgentStart(f.ctx, d.newCommandRequest(time.Now().Add(-13*time.Second), "late", "", map[string]any{"profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}, nil))
+	result := d.handleAgentStart(f.ctx, d.newCommandRequest(time.Now().Add(-13*time.Second), "late", "", protocol.Inbound{ProfileID: "claude", Name: "proj", Cwd: f.cwd, Prompt: "hello"}, nil))
 	f.assertLaunch(t, result)
 	f.assertCalls(t, 1)
 	if result.Phase != "completed" {
@@ -55,7 +56,7 @@ func TestInitialQoderPromptUsesTextAndEnter(t *testing.T) {
 			}
 			f := newLaunchFixtureWithOptions(t, launchFixtureOptions{enter: enter})
 			d, record := f.dispatcher, f.calls
-			message := map[string]any{"type": "agent_start", "request_id": "qoder", "profile_id": "qodercli", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
+			message := protocol.Inbound{Type: "agent_start", RequestID: "qoder", ProfileID: "qodercli", Name: "proj", Cwd: f.cwd, Prompt: "hello"}
 			result := d.Handle(f.ctx, message)
 			want := "completed"
 			if failEnter {
@@ -85,7 +86,7 @@ func TestInitialPromptBlocksDuplicateCompletion(t *testing.T) {
 	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: fmt.Sprintf(": > %q; while [ ! -f %q ]; do /bin/sleep 0.01; done; exit 1", entered, release)})
 	d := f.dispatcher
 	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
-	message := map[string]any{"type": "agent_start", "request_id": "blocked", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
+	message := protocol.Inbound{Type: "agent_start", RequestID: "blocked", ProfileID: "claude", Name: "proj", Cwd: f.cwd, Prompt: "hello"}
 	first, duplicate := make(chan *CommandResult, 1), make(chan *CommandResult, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()

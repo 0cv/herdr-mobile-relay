@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 // assertSerializationTrace is shared by the regression and labelled overlay controls.
@@ -96,9 +97,9 @@ printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
 				agent.TabID != "tab-1" || agent.WorkspaceID != "workspace-1" || agent.Agent != "claude" || agent.Status != "idle" {
 				t.Fatalf("invalid committed identity/session: %+v, %d, %v", agent, generation, active)
 			}
-			messages := []map[string]any{
-				{"type": "submit_prompt", "request_id": "a", "pane_id": "pane-1", "text": "one"},
-				{"type": "send_keys", "request_id": "b", "pane_id": "pane-1", "keys": []any{"x"}},
+			messages := []protocol.Inbound{
+				{Type: "submit_prompt", RequestID: "a", PaneID: "pane-1", Text: "one"},
+				{Type: "send_keys", RequestID: "b", PaneID: "pane-1", Keys: []string{"x"}},
 			}
 			events := []string{"submit_prompt agent prompt pane-1 one\n", "send_keys pane send-keys pane-1 x\n"}
 			if first == "send_keys" {
@@ -179,7 +180,7 @@ printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
 				select {
 				case result := <-results[i]:
 					if result == nil || !result.OK || result.Phase != "completed" || result.Error != "" ||
-						result.RequestID != messages[i]["request_id"] || result.Action != messages[i]["type"] || result.PaneID != "pane-1" {
+						result.RequestID != messages[i].RequestID || result.Action != messages[i].Type || result.PaneID != "pane-1" {
 						t.Fatalf("intended successful command %d: %+v", i, result)
 					}
 					t.Logf("successful command %d: %+v", i, result)

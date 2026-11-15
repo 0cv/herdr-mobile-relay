@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -70,10 +71,15 @@ Context [░░░░░░░░] 11.1k/1M (1%) │ 5h [░░░░░░░�
 				}
 			})
 			fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
-			result := d.Handle(context.Background(), map[string]any{
-				"type": "respond", "request_id": "agy-approval", "pane_id": "pane-1",
-				"event_id": blockedEventID(t, d, "pane-1"), "approval_fingerprint": fingerprint,
-				"choice": choice, "index": float64(0), "total": float64(len(classification.Options)),
+			result := d.Handle(context.Background(), protocol.Inbound{
+				Type:                "respond",
+				RequestID:           "agy-approval",
+				PaneID:              "pane-1",
+				EventID:             blockedEventID(t, d, "pane-1"),
+				ApprovalFingerprint: fingerprint,
+				Choice:              choice,
+				Index:               intPtr(0),
+				Total:               intPtr(len(classification.Options)),
 			})
 			data, err := os.ReadFile(record)
 			if err != nil {

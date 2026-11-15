@@ -117,6 +117,9 @@ func TestFrameAnswerQuestionSelection(t *testing.T) {
 		"null":                  {"selected_indices": nil},
 		"negative":              {"selected_indices": []int{-1}},
 		"negative after a good": {"selected_indices": []int{0, -1}},
+		"null element":          {"selected_indices": []any{nil}},
+		"null after a good":     {"selected_indices": []any{0, nil}},
+		"null before a good":    {"selected_indices": []any{nil, 2}},
 	} {
 		t.Run(name+" is refused", func(t *testing.T) {
 			e, id := newQuestionFrameEnv(t, "blocked")
@@ -382,4 +385,30 @@ func TestFrameAgentStartReadsHermesProfile(t *testing.T) {
 	if len(calls) != 1 || !strings.HasPrefix(calls[0], "LaunchTerminal worker ") || !strings.HasSuffix(calls[0], "hermes -p work") {
 		t.Fatalf("launch calls = %v, want hermes started with its profile", calls)
 	}
+}
+
+func TestFrameCoordinatorFieldsMatchWithoutRegardToLetterCase(t *testing.T) {
+	t.Run("Keys on send_keys", func(t *testing.T) {
+		e := newFrameEnv(t)
+		expectCommandResult(t, e.exchange(t, map[string]any{"type": "send_keys", "Keys": []string{"x"}}), "send_keys", true, "completed", "")
+		if got := e.backend.called("SendKeys"); !slices.Equal(got, []string{"SendKeys pane-1 x"}) {
+			t.Fatalf("send keys = %v", got)
+		}
+	})
+	t.Run("Index on respond", func(t *testing.T) {
+		e, fields := newApprovalFrameEnv(t)
+		agent, _ := e.server.state.Agent("pane-1")
+		fields["choice"], fields["Index"] = agent.Options[1], 1
+		expectCommandResult(t, e.exchange(t, fields), "approval", true, "accepted", "")
+		if got := e.backend.called("SendKeys"); len(got) != 1 {
+			t.Fatalf("send keys = %v, want one call for the second option", got)
+		}
+	})
+	t.Run("Text on send_input", func(t *testing.T) {
+		e := newFrameEnv(t)
+		expectCommandResult(t, e.exchange(t, map[string]any{"type": "send_input", "Text": "hello"}), "send_input", true, "completed", "")
+		if got := e.backend.called("SendInput"); !slices.Equal(got, []string{`SendInput pane-1 text="hello" keys=`}) {
+			t.Fatalf("send input = %v", got)
+		}
+	})
 }
