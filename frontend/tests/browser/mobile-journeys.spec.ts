@@ -15,6 +15,19 @@ interface RelayFixture {
   token: string;
 }
 
+declare global {
+  interface Window {
+    __relayCommands: Record<string, unknown>[];
+    __relaySockets: Array<{ send(message: string): void }>;
+    __relaySocketCommands(index: number): Record<string, unknown>[];
+    __relayServer(index: number, message: unknown): void;
+    __relayClose(index: number, code?: number): void;
+    __relayAutoCommands(enabled: boolean): void;
+    __relayNextInteraction(interaction: Record<string, unknown>): void;
+    __relayConversationFixture(fixture: ConversationFixture | null): void;
+  }
+}
+
 interface BootOptions {
   standalone?: boolean;
   navigatorStandalone?: boolean;
@@ -498,7 +511,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
 
 async function socketCount(page: Page) {
   try {
-    return await page.evaluate(() => (window as any).__relaySockets.length as number);
+    return await page.evaluate(() => window.__relaySockets.length);
   } catch (error) {
     // WebKit can tear down the old document between page.reload() and the
     // first poll against the new one. Let expect.poll observe the replacement
@@ -509,11 +522,11 @@ async function socketCount(page: Page) {
 }
 
 async function server(page: Page, index: number, message: unknown) {
-  await page.evaluate(({ socketIndex, payload }) => (window as any).__relayServer(socketIndex, payload), { socketIndex: index, payload: message });
+  await page.evaluate(({ socketIndex, payload }) => window.__relayServer(socketIndex, payload), { socketIndex: index, payload: message });
 }
 
 async function commands(page: Page) {
-  return page.evaluate(() => (window as any).__relayCommands as Record<string, unknown>[]);
+  return page.evaluate(() => window.__relayCommands);
 }
 
 async function updateProgressPlan(page: Page): Promise<Record<string, unknown> | null> {
@@ -526,19 +539,19 @@ async function updateProgressPlan(page: Page): Promise<Record<string, unknown> |
 }
 
 async function commandsForSocket(page: Page, index: number) {
-  return page.evaluate((socketIndex) => {
-    const harnessWindow = window as unknown as {
-      __relaySocketCommands(next: number): Record<string, unknown>[];
-    };
-    return harnessWindow.__relaySocketCommands(socketIndex);
-  }, index);
+  return page.evaluate((socketIndex) => window.__relaySocketCommands(socketIndex), index);
 }
 
 async function setAutoCommands(page: Page, enabled: boolean) {
-  await page.evaluate((value) => {
-    const harnessWindow = window as unknown as { __relayAutoCommands(next: boolean): void };
-    harnessWindow.__relayAutoCommands(value);
-  }, enabled);
+  await page.evaluate((value) => window.__relayAutoCommands(value), enabled);
+}
+
+async function closeSocket(page: Page, index: number, code?: number) {
+  await page.evaluate(({ socketIndex, closeCode }) => window.__relayClose(socketIndex, closeCode), { socketIndex: index, closeCode: code });
+}
+
+async function setNextInteraction(page: Page, interaction: Record<string, unknown>) {
+  await page.evaluate((value) => window.__relayNextInteraction(value), interaction);
 }
 
 interface ConversationFixture {
@@ -562,12 +575,7 @@ interface ConversationFixture {
 }
 
 async function setConversationFixture(page: Page, fixture: ConversationFixture | null) {
-  await page.evaluate((value) => {
-    const harnessWindow = window as unknown as {
-      __relayConversationFixture(next: ConversationFixture | null): void;
-    };
-    harnessWindow.__relayConversationFixture(value);
-  }, fixture);
+  await page.evaluate((value) => window.__relayConversationFixture(value), fixture);
 }
 
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
@@ -1280,7 +1288,7 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
   await expect(page.getByRole('status').filter({ hasText: /protocol v1/ })).toBeVisible();
   expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
 
-  await page.evaluate(() => (window as any).__relayClose(0));
+  await closeSocket(page, 0);
   await expect.poll(() => socketCount(page)).toBe(2);
 });
 
@@ -1942,10 +1950,7 @@ test('resumes fleet progress and updates the second relay automatically', async 
     update: { ...availableUpdate, state: 'restarting' },
   });
   await expect(progress).toContainText('Restarting relay…');
-  await page.evaluate(() => {
-    const relayWindow = window as unknown as { __relayClose(index: number): void };
-    relayWindow.__relayClose(0);
-  });
+  await closeSocket(page, 0);
   await expect.poll(() => socketCount(page)).toBe(3);
   await handshake(page, 2, {
     release_version: APP_RELEASE,
@@ -2792,7 +2797,7 @@ test('stays unleased across a reconnect after Resize Session is turned off', asy
     .some((command) => command.immediate === true)).toBe(true);
   await page.getByRole('button', { name: 'Back', exact: true }).click();
 
-  await page.evaluate(() => (window as any).__relayClose(0));
+  await closeSocket(page, 0);
   await expect.poll(() => socketCount(page)).toBe(2);
   await handshake(page, 1, { capabilities: optInCapabilities });
   await server(page, 1, {
@@ -3691,7 +3696,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   // Reaching the bottom follows again, even when output lands before the scroll event.
   await terminal.evaluate((element, message) => {
     element.scrollTop = element.scrollHeight;
-    (window as any).__relayServer(0, message);
+    window.__relayServer(0, message);
   }, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: rows.slice(0, 203).join('\n') });
   await expect(terminal).toContainText('near-bottom row 203');
   await frame(220);
@@ -3835,7 +3840,7 @@ async function markCurrentDocument(page: Page) {
 async function waitForReloadedDocument(page: Page) {
   await expect.poll(async () => {
     try {
-      return await page.evaluate(() => !(window as any).__beforeReload && (window as any).__relaySockets?.length === 1);
+      return await page.evaluate(() => !(window as any).__beforeReload && window.__relaySockets?.length === 1);
     } catch {
       return false;
     }
@@ -6473,7 +6478,7 @@ test('keeps the third single choice checked across live pane transitions', async
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
   await expect(page.getByRole('radio', { name: /Backoff plus signals/ })).toBeChecked();
 
-  await page.evaluate(() => (window as any).__relayAutoCommands(false));
+  await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Next' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
   const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
@@ -6526,10 +6531,10 @@ test('keeps normal single-select answers across repeated question navigation', a
 
   await page.getByRole('textbox', { name: 'Other answer' }).fill('Hello');
   await expect(page.getByRole('radio', { name: 'Other' })).toBeChecked();
-  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
+  await setNextInteraction(page, second);
   await page.getByRole('button', { name: 'Next' }).click();
   await expect(page.getByRole('group', { name: 'Choose offline scope' })).toBeVisible();
-  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), {
+  await setNextInteraction(page, {
     ...first, can_go_back: false, other: { ...first.other, selected: true, text: 'Hello' },
   });
   await page.getByRole('button', { name: 'Previous' }).click();
@@ -6537,10 +6542,10 @@ test('keeps normal single-select answers across repeated question navigation', a
   await page.getByRole('radio', { name: 'Backoff plus signals' }).click();
   await expect(page.getByRole('textbox', { name: 'Other answer' })).toHaveValue('');
 
-  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
+  await setNextInteraction(page, second);
   await page.getByRole('button', { name: 'Next' }).click();
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
-  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), {
+  await setNextInteraction(page, {
     ...first,
     options: first.options.map((option) => ({ ...option, selected: option.index === 2 })),
     other: { ...first.other, selected: false, text: '' },
@@ -6570,7 +6575,7 @@ test('does not report failed question navigation as opened', async ({ page }) =>
     }],
   });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
-  await page.evaluate(() => (window as any).__relayAutoCommands(false));
+  await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Previous' }).click();
   const navigation = (await commands(page)).find((command) => command.type === 'navigate_question')!;
   await server(page, 0, {
@@ -7533,7 +7538,7 @@ test('live conversation deltas preserve local reading, selection, tool expansion
   await page.evaluate(() => window.getSelection()?.removeAllRanges());
   await scrollConversationToBottom(page);
   await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
-  await page.evaluate(() => (window as any).__relayClose(0));
+  await closeSocket(page, 0);
   await expect(list.getByText('Final response', { exact: true })).toHaveCount(1);
   const firstBeforeScroll = await list.locator('article').first().getAttribute('data-conversation-entry-id');
   await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
@@ -8260,7 +8265,7 @@ test('followup combined notices and Pi bridge stay fenced across paging, modes a
     localStorage.removeItem('herdr_device_auth_v1');
     return saved;
   });
-  await page.evaluate(() => (window as any).__relayClose(0));
+  await closeSocket(page, 0);
   await expect.poll(() => socketCount(page)).toBe(2);
   await page.evaluate(saved => localStorage.setItem('herdr_device_auth_v1', saved!), mockCredential);
   await handshake(page, 1, { capabilities });
@@ -8412,7 +8417,7 @@ test('followup direct TLS device rejection stops retrying', async ({ page }) => 
   await boot(page, [relay]);
   await expect.poll(async () => (await commands(page)).filter(command => command.type === 'e2ee_client_hello').length).toBe(1);
   const before = await page.evaluate(() => localStorage.getItem('herdr_device_auth_v1'));
-  await page.evaluate(() => (window as any).__relayClose(0, 4401));
+  await closeSocket(page, 0, 4401);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByText('This computer refused this device. Import a new invitation link, or remove and add the relay.', { exact: true })).toBeVisible();
   await page.evaluate(() => {
@@ -8430,7 +8435,7 @@ test('followup raw development close stays recoverable', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
-  await page.evaluate(() => (window as any).__relayClose(0, 4401));
+  await closeSocket(page, 0, 4401);
   await expect.poll(() => socketCount(page)).toBe(2);
   await handshake(page, 1);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -8525,7 +8530,7 @@ test('hidden secret requires correlated observation and never retries uncertain 
   await observe();
   await expect(input).toBeEnabled();
   await input.fill('synthetic-browser-value');
-  await page.evaluate(() => (window as unknown as { __relayAutoCommands: (enabled: boolean) => void }).__relayAutoCommands(false));
+  await setAutoCommands(page, false);
   await send.click();
   await expect(input).toHaveValue('');
   const secret = (await commands(page)).find(command => command.type === 'send_secret')!;
@@ -8904,7 +8909,7 @@ type OverlapReplyGate = {
 
 async function installOverlapReplyGate(page: Page) {
   await page.evaluate(() => {
-    const socket = (window as unknown as { __relaySockets: object[] }).__relaySockets[0];
+    const socket = window.__relaySockets[0];
     const prototype = Object.getPrototypeOf(socket) as { server(message: Record<string, unknown>): void };
     const original = prototype.server;
     let heldCancel = false;
@@ -9084,7 +9089,7 @@ for (const mode of ['Conversation', 'Full history']) {
     await instrumentUploadRead(page, 'hold');
     const prompt = await openSharedComposer(page, mode);
     await page.evaluate(() => {
-      const socket = (window as unknown as { __relaySockets: Array<{ send(message: string): void }> }).__relaySockets[0];
+      const socket = window.__relaySockets[0];
       const original = socket.send;
       const fault: ImmediateCancelSendFault = {
         attempts: [],
