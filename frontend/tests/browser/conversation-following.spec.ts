@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { distanceFromBottom } from '../support/journey-device';
+import { distanceFromBottom, saveDeviceCredential } from '../support/journey-device';
 import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, server, setConversationFixture, socketCount } from '../support/journey-relay';
 
 interface ConversationBatch {
@@ -397,7 +397,7 @@ for (const source of ['recorded_history', 'pi_events']) {
     await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
     await boot(page, [fedora]);
     await expect.poll(() => socketCount(page)).toBe(1);
-    await page.evaluate(() => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43), deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now() } } })));
+    await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
     await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity', 'pane_size_opt_in', 'pane_size_opt_in_rows'] });
     await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'primary', terminal_id: 'fixture-terminal', generation: 1, agent_session_id: 'reader-session', status: 'working', project: 'Reader conversation', agent: 'pi', cwd: '/fixture', conversation_history_available: true }] });
     const capabilities = { source, active_branch: source === 'pi_events' };

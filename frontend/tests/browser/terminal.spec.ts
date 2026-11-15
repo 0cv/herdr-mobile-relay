@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { distanceFromBottom } from '../support/journey-device';
+import { distanceFromBottom, saveDeviceCredential, setPageVisibility } from '../support/journey-device';
 import { commands, connectFedora, handshake, lastCommand, openAgent, openOmpPane, replyToPaneRead, server, setAutoCommands } from '../support/journey-relay';
 
 test('keeps Cursor filtering text-only across status updates and restores prompts after selecting', async ({ page }) => {
@@ -214,10 +214,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   const activeCommandCount = (await commands(page)).length;
   await page.clock.runFor(750);
   expect(await commands(page)).toHaveLength(activeCommandCount);
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'hidden');
   await expect.poll(async () =>
     (await commands(page)).findLast((command) => command.type === 'unwatch_pane')).toMatchObject({
     type: 'unwatch_pane',
@@ -228,10 +225,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   expect(await commands(page)).toHaveLength(hiddenCommandCount);
   const terminal = page.getByRole('log');
   const cachedScreen = await terminal.locator('.term-screen').innerHTML();
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'visible');
   await expect.poll(async () =>
     (await commands(page)).findLast((command) => command.type === 'read_pane')).toMatchObject({
     type: 'read_pane',
@@ -368,23 +362,7 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   // A reader never leases, even opted in on a relay that supports it.
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await connectFedora(page, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
-  await page.evaluate(() => {
-    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-      version: 1,
-      relays: {
-        fedora: {
-          kind: 'credential',
-          id: 'credential-reader',
-          version: 1,
-          secret: 'R'.repeat(43),
-          deviceId: 'device-reader',
-          role: 'reader',
-          locale: 'en',
-          issuedAt: Date.now(),
-        },
-      },
-    }));
-  });
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
   // Push a fresh connection snapshot so App's derived reader-role state observes
   // the persisted credential before the agent view is rendered.
   await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_opt_in'] });

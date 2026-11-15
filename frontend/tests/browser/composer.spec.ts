@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { APP_METADATA, emulateStandalone } from '../support/journey-device';
+import { APP_METADATA, emulateStandalone, saveDeviceCredential } from '../support/journey-device';
 import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, openAgent, openSharedComposer, reply, replyToPaneRead, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
@@ -399,7 +399,7 @@ for (const mode of ['Conversation', 'Full history']) {
 test('followup combined notices and Pi bridge stay fenced across paging, modes and reconnect', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await page.evaluate(() => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'synthetic-controller', version: 1, secret: 'C'.repeat(43), deviceId: 'synthetic-controller', role: 'controller', locale: 'en', issuedAt: Date.now() } } })));
+  await saveDeviceCredential(page, { id: 'synthetic-controller', deviceId: 'synthetic-controller', secret: 'C'.repeat(43), role: 'controller' });
   const capabilities = ['conversation_history', 'conversation_activity', 'pi_prompt_unconfirmed', 'manual_terminal_input'];
   await handshake(page, 0, { capabilities });
   const target = { ...composerTarget, agent_session_id: 'followup-pi' };
@@ -473,7 +473,7 @@ test('followup Pi sends are exclusive across pages', async ({ page, context }) =
     await view.addInitScript(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }));
     await boot(view, [fedora]);
     await expect.poll(() => socketCount(view)).toBe(1);
-    await view.evaluate(() => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'synthetic-controller', version: 1, secret: 'C'.repeat(43), deviceId: 'synthetic-controller', role: 'controller', locale: 'en', issuedAt: Date.now() } } })));
+    await saveDeviceCredential(view, { id: 'synthetic-controller', deviceId: 'synthetic-controller', secret: 'C'.repeat(43), role: 'controller' });
     await setAutoCommands(view, false);
     await handshake(view, 0, { capabilities });
     await server(view, 0, { type: 'agents', agents: [agent] });
@@ -510,11 +510,10 @@ for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`foll
   const capabilities = ['conversation_history', 'conversation_activity', 'pi_prompt_unconfirmed', 'manual_terminal_input'];
   const target = { ...composerTarget, agent_session_id: `reload-pi-${phase}` };
   const agent = { ...target, status: 'blocked', attention_kind: 'unknown', project: 'Reload Pi', agent: 'pi', conversation_history_available: true };
-  const credential = JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'synthetic-controller', version: 1, secret: 'C'.repeat(43), deviceId: 'synthetic-controller', role: 'controller', locale: 'en', issuedAt: Date.now() } } });
   const respond = (request: Record<string, unknown>, data: unknown, phase = 'completed', ok = true) => reply(page, request, data, { phase, ok, error: ok ? '' : 'Synthetic uncertain delivery' });
   const admit = async () => {
     await expect.poll(() => socketCount(page)).toBe(1);
-    await page.evaluate(saved => localStorage.setItem('herdr_device_auth_v1', saved), credential);
+    await saveDeviceCredential(page, { id: 'synthetic-controller', deviceId: 'synthetic-controller', secret: 'C'.repeat(43), role: 'controller' });
     await setAutoCommands(page, false);
     await handshake(page, 0, { capabilities });
     await server(page, 0, { type: 'agents', agents: [agent] });

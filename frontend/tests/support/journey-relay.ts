@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test';
+import { saveDeviceCredential } from './journey-device';
 
 export interface RelayFixture {
   id: string;
@@ -534,7 +535,7 @@ export const composerTarget = { server_session_id: 'primary', pane_id: 'w1:p1', 
 export async function openSharedComposer(page: Page, mode: string, reader = false) {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  if (reader) await page.evaluate(() => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43), deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now() } } })));
+  if (reader) await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
   await handshake(page, 0, { capabilities: ['conversation_history', 'attention_classification', 'structured_questions', 'slash_commands', 'secret_input'] });
   await setConversationFixture(page, { entries: [{ id: 'composer-answer', role: 'assistant', text: 'Composer history stays readable', timestamp: '' }], total: 1 });
   await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'Shared composer', agent: 'codex', conversation_history_available: true }] });

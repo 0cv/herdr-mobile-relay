@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { saveDeviceCredential } from '../support/journey-device';
 import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 test('downloads a missing relay speech voice from Settings', async ({ page }) => {
@@ -105,9 +106,7 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
 for (const role of ['controller', 'reader']) test(`followup Pi Integration setting is ${role === 'reader' ? 'read-only for readers' : 'controller-controlled with per-profile results'}`, async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await page.evaluate(role => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: { fedora: {
-    kind: 'credential', id: 'synthetic-setting', version: 1, secret: 'S'.repeat(43), deviceId: 'synthetic-setting', role, locale: 'en', issuedAt: Date.now(),
-  } } })), role);
+  await saveDeviceCredential(page, { id: 'synthetic-setting', deviceId: 'synthetic-setting', secret: 'S'.repeat(43), role });
   await setAutoCommands(page, false);
   await handshake(page, 0, { capabilities: ['pi_integration'] });
   await page.getByRole('button', { name: /^Settings(?:,|$)/ }).click();

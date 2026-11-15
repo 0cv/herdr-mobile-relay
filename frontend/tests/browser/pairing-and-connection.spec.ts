@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { emulateIphoneSafari, emulateStandalone } from '../support/journey-device';
+import { emulateIphoneSafari, emulateStandalone, setPageVisibility } from '../support/journey-device';
 import { boot, closeSocket, commands, commandsForSocket, connectFedora, fedora, handshake, server, setAutoCommands, socketCount, type RelayFixture } from '../support/journey-relay';
 
 test('guides an unpairable relay without ever dialing it', async ({ page }) => {
@@ -248,10 +248,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await expect(terminal).toContainText('cached terminal output');
   const cachedScreen = await terminal.locator('.term-screen').innerHTML();
 
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'hidden');
   await page.clock.runFor(5_100);
   await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
   await expect(page.getByRole('main', { name: 'Agent unavailable' })).toBeHidden();
@@ -260,10 +257,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
 
   // A half-open socket answers nothing, including refocus reads.
   await setAutoCommands(page, false);
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'visible');
   await expect.poll(() => socketCount(page), { timeout: 12_000 }).toBe(2);
   await setAutoCommands(page, true);
   await handshake(page, 1, {

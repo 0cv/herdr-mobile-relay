@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { saveDeviceCredential } from '../support/journey-device';
 import { commands, connectFedora, handshake, reply, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 for (const provider of ['claude', 'codex', 'opencode', 'qoder', 'pi', 'omp', 'omo', 'hermes', 'cursor', 'kimi']) {
@@ -439,17 +440,7 @@ test('default agent view: empty and failed pages do not trigger fallback', async
 test('pane view override: readers can change it while mutation actions stay disabled', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   await connectFedora(page, { capabilities: ['conversation_history', 'tab_rename', 'agent_launch'] });
-  await page.evaluate(() => {
-    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-      version: 1,
-      relays: {
-        fedora: {
-          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
-          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
-        },
-      },
-    }));
-  });
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
   await handshake(page, 0, { capabilities: ['conversation_history', 'tab_rename', 'agent_launch'] });
   await server(page, 0, {
     type: 'agents',

@@ -1,18 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { distanceFromBottom } from '../support/journey-device';
+import { captureClipboard, copiedText, distanceFromBottom } from '../support/journey-device';
 import { openAgent, openOmpPane, server } from '../support/journey-relay';
 
 test('virtualizes terminal history and copies the latest response', async ({ page }) => {
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        async writeText(text: string) {
-          Reflect.set(window, '__copiedTerminal', text);
-        },
-      },
-    });
-  });
+  await captureClipboard(page);
   await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Long history', agent: 'opencode' });
   const content = Array.from({ length: 1_000 }, (_, index) => {
     const row = `row ${String(index + 1).padStart(4, '0')}`;
@@ -136,8 +127,7 @@ test('virtualizes terminal history and copies the latest response', async ({ pag
   await expect(fullTranscript).toHaveValue(/Final response line one\./);
   await expect(responseTranscript).toHaveValue(finalResponse);
   await copyButton.click();
-  await expect.poll(() => page.evaluate(() =>
-    Reflect.get(window, '__copiedTerminal'))).toBe(finalResponse);
+  await expect.poll(() => copiedText(page)).toBe(finalResponse);
   await expect(page.getByRole('status').filter({ hasText: 'Final response copied.' })).toBeVisible();
   await page.evaluate(() => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });

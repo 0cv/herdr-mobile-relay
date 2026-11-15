@@ -1,17 +1,9 @@
 import { expect, test } from '@playwright/test';
+import { captureClipboard, copiedText, saveDeviceCredential } from '../support/journey-device';
 import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, openAgent, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 test('copies visible terminal output when no completed response is available', async ({ page }) => {
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        async writeText(text: string) {
-          Reflect.set(window, '__copiedTerminal', text);
-        },
-      },
-    });
-  });
+  await captureClipboard(page);
   await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Shell output', agent: 'codex' });
   const visibleOutput = 'shell output\nsecond line';
   await server(page, 0, {
@@ -25,8 +17,7 @@ test('copies visible terminal output when no completed response is available', a
   await expect(fullTranscript).toHaveValue(visibleOutput);
   await expect(responseTranscript).toHaveValue('');
   await page.getByRole('button', { name: 'Copy', exact: true }).click();
-  await expect.poll(() => page.evaluate(() =>
-    Reflect.get(window, '__copiedTerminal'))).toBe(visibleOutput);
+  await expect.poll(() => copiedText(page)).toBe(visibleOutput);
   await expect(page.getByRole('status').filter({ hasText: 'Copied the visible terminal output.' })).toBeVisible();
   await page.evaluate(() => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
@@ -41,16 +32,7 @@ test('copies visible terminal output when no completed response is available', a
 });
 
 test('uses relay response copy before parser and surfaces failures', async ({ page }) => {
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        async writeText(text: string) {
-          Reflect.set(window, '__copiedTerminal', text);
-        },
-      },
-    });
-  });
+  await captureClipboard(page);
   await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Remote copy', agent: 'claude' }, {
     capabilities: [
       'attention_classification',
@@ -93,11 +75,11 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
   await expect(copyButton).toBeEnabled();
   await expect(copyButton).toHaveAccessibleName('Copy');
   await expect(page.getByRole('status').filter({ hasText: 'Agent did not confirm a copied response' })).toBeVisible();
-  expect(await page.evaluate(() => Reflect.get(window, '__copiedTerminal'))).toBeUndefined();
+  expect(await copiedText(page)).toBeUndefined();
 
   await setAutoCommands(page, true);
   await copyButton.click();
-  await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedTerminal')))
+  await expect.poll(() => copiedText(page))
     .toBe('# Remote markdown response\n\n- Exact copied output');
   await expect(responseTranscript).toHaveValue('Parsed terminal response.');
   await expect(page.getByRole('region', { name: 'Copied agent response' })).toBeVisible();
@@ -186,17 +168,7 @@ test('speak reports the relay copy failure when no parser can read the pane', as
 test('a reader speaks the latest transcript turn without the relay copy command', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await page.evaluate(() => {
-    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-      version: 1,
-      relays: {
-        fedora: {
-          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
-          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
-        },
-      },
-    }));
-  });
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
   await handshake(page, 0, {
     capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
     speech_languages: ['en'],

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { setPageVisibility } from '../support/journey-device';
 import { closeSocket, commands, commandsForSocket, connectFedora, handshake, openAgent, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 const optInCapabilities = ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'];
@@ -233,10 +234,7 @@ test('keeps renewing an opted-in lease briefly while hidden and re-leases on ret
   await openSizedPane(page, 'Hidden pane', ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta']);
   await expect.poll(async () => (await leaseCommands(page)).length).toBe(1);
 
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'hidden');
   // Desktop Safari reports an occluded window as hidden, so a hidden page
   // keeps renewing within the grace window instead of lapsing the lease on
   // every app switch. Grace expiry is unit-tested on the pure policy helper.
@@ -244,10 +242,7 @@ test('keeps renewing an opted-in lease briefly while hidden and re-leases on ret
   await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThanOrEqual(2);
   expect(await releaseCommands(page)).toHaveLength(0);
 
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'visible');
   await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThanOrEqual(3);
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
@@ -257,18 +252,12 @@ test('keeps pane resizing off through hidden timers and refocus', async ({ page 
   await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'false'));
   await openSizedPane(page, 'Sleeping pane', ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta']);
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'hidden');
   // Cross the ten-second renewal cadence. Off means no timer acquisition.
   await page.clock.runFor(11_000);
   expect(await leaseCommands(page)).toHaveLength(0);
   expect(await releaseCommands(page)).toHaveLength(0);
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await setPageVisibility(page, 'visible');
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
   expect(await leaseCommands(page)).toHaveLength(0);

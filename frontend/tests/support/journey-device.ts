@@ -41,3 +41,37 @@ export async function emulateIphoneSafari(page: Page) {
 export function distanceFromBottom(locator: Locator) {
   return locator.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
 }
+
+export function saveDeviceCredential(page: Page, credential: { id: string; deviceId: string; secret: string; role: string }) {
+  return page.evaluate(
+    credential => localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: { fedora: { kind: 'credential', version: 1, locale: 'en', issuedAt: Date.now(), ...credential } },
+    })),
+    credential,
+  );
+}
+
+export function captureClipboard(page: Page) {
+  return page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        async writeText(text: string) {
+          Reflect.set(window, '__copiedText', text);
+        },
+      },
+    });
+  });
+}
+
+export function copiedText(page: Page) {
+  return page.evaluate(() => Reflect.get(window, '__copiedText') as string | undefined);
+}
+
+export function setPageVisibility(page: Page, state: 'hidden' | 'visible') {
+  return page.evaluate(state => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: state });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, state);
+}

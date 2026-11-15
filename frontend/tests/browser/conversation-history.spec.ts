@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { distanceFromBottom } from '../support/journey-device';
+import { captureClipboard, copiedText, distanceFromBottom } from '../support/journey-device';
 import { commands, composerTarget, connectFedora, reply, server, setAutoCommands, setConversationFixture } from '../support/journey-relay';
 
 test('reads and replies from native conversation history', async ({ page }) => {
@@ -8,16 +8,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
     localStorage.setItem('herdr_default_agent_view', 'terminal');
     localStorage.setItem('herdr-conversation-view', 'conversation');
   });
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        async writeText(text: string) {
-          Reflect.set(window, '__copiedConversation', text);
-        },
-      },
-    });
-  });
+  await captureClipboard(page);
   await connectFedora(page, {
     capabilities: [
       'attention_classification',
@@ -52,7 +43,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByText('middle retained answer')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeVisible();
   await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
-  await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
+  await expect.poll(() => copiedText(page))
     .toBe('# middle retained answer');
   // The compact view keeps only user prompts and final answers. Full history
   // owns both superseded prose and the tool activity attached to it.
