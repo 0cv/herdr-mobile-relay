@@ -251,9 +251,12 @@ workspace membership. It closes panes but never removes Git checkouts or
 branches. Worktree removal remains a separate destructive operation with its
 own dirty-checkout confirmation.
 
-Use the fake Herdr binary or a temporary Unix socket fixture for tests. Do not
-run production Herdr commands or mutate production state while checking these
-paths.
+Coordinator tests use the in-process `fakeBackend` (`internal/coordinator/backend_fake_test.go`),
+which records calls and runs per-method hooks. The poller and event stream tests
+that need the Herdr socket wire use `startSocketFixture`
+(`internal/coordinator/socket_fixture_test.go`). Black-box tests keep the
+`cmd/fake-herdr` binary. Do not run production Herdr commands or mutate
+production state while checking these paths.
 
 ## Core backend
 

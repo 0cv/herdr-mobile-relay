@@ -366,12 +366,7 @@ func TestAcknowledgeOnlyBroadcastsDisplayedStatusChanges(t *testing.T) {
 	state.CommitInventory([]*AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "blocked",
 	}}, state.RevisionCounter())
-	d := NewDispatcher(nil, state, nil, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = d.Close(ctx)
-	})
+	d := newTestDispatcher(t, nil, state)
 	updates := make(chan AgentUpdate, 2)
 	d.SetBroadcast(func(message any) {
 		if update, ok := message.(AgentUpdate); ok {

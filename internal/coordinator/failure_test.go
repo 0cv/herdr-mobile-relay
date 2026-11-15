@@ -26,8 +26,7 @@ func TestPaneAndTopologyFailuresAgreeOnPhase(t *testing.T) {
 		{"deadline", context.DeadlineExceeded, "not_started"},
 		{"unclassified", errors.New("private"), "failed"},
 	}
-	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	d := newTestDispatcher(t, nil, NewState(testLogger()))
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := d.failErr("r", "send_keys", "pane", tt.err); got.Phase != tt.phase {

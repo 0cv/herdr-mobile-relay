@@ -20,8 +20,7 @@ import (
 func TestDispatcherRequiresDirectActionType(t *testing.T) {
 	for _, admitted := range []bool{false, true} {
 		for _, typ := range []string{"", "command"} {
-			d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-			t.Cleanup(func() { _ = d.Close(context.Background()) })
+			d := newTestDispatcher(t, nil, NewState(testLogger()))
 			message := map[string]any{"type": typ, "action": "send_secret", "request_id": "unsupported", "pane_id": "pane", "text": "fixture"}
 			var result *CommandResult
 			signals := 0

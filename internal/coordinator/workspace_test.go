@@ -10,12 +10,7 @@ import (
 )
 
 func TestDirtyWorktreeRemovalOffersExplicitForceRetry(t *testing.T) {
-	dispatcher := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = dispatcher.Close(ctx)
-	})
+	dispatcher := newTestDispatcher(t, nil, NewState(testLogger()))
 
 	result := dispatcher.failTopologyErr("remove-1", "worktree_remove", "", &herdr.OutcomeError{
 		Started: true,

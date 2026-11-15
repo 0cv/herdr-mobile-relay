@@ -49,8 +49,7 @@ func TestTopologyOutcomePrecedence(t *testing.T) {
 			data           any
 		}{c, "workspace_close", started(cli(c, "private")), "not_started", herdr.RefusalMessage(c), code(c)})
 	}
-	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	d := newTestDispatcher(t, nil, NewState(testLogger()))
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Exercise errors.As/Is through both wrapping and nested joins.
@@ -64,8 +63,7 @@ func TestTopologyOutcomePrecedence(t *testing.T) {
 }
 
 func TestTopologyMoveBlockRefusal(t *testing.T) {
-	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	d := newTestDispatcher(t, nil, NewState(testLogger()))
 	for _, started := range []bool{false, true} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("started=%t/partial=%t", started, partial), func(t *testing.T) {
@@ -91,8 +89,7 @@ func TestTopologyMoveBlockRefusal(t *testing.T) {
 
 // Partial application is an explicit safety override, including read/list errors.
 func TestTopologyPartialOutcomePrecedence(t *testing.T) {
-	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	d := newTestDispatcher(t, nil, NewState(testLogger()))
 	for _, action := range []string{"workspace_reorder", "worktree_list"} {
 		for _, cause := range []error{
 			&herdr.CLIError{Code: "dirty_worktree_requires_force", Message: "dirty"},

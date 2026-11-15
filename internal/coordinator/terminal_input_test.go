@@ -27,8 +27,7 @@ func TestManualTerminalNativeFixture(t *testing.T) {
 	defer client.Close()
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "native-dialog", TerminalID: "native-terminal", Agent: "pi", Status: "blocked", AttentionKind: "unknown"}}, state.RevisionCounter())
-	d := NewDispatcher(client, state, nil, testLogger())
-	defer d.Close(context.Background())
+	d := newTestDispatcher(t, client, state)
 	text := "  /literal-command 界😀  "
 	result := d.Handle(context.Background(), map[string]any{"type": "send_terminal_text", "request_id": "native-text", "pane_id": "native-dialog", "text": text})
 	if !result.OK {
