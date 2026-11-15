@@ -1,12 +1,14 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
@@ -409,6 +411,16 @@ func TestFrameCoordinatorFieldsMatchWithoutRegardToLetterCase(t *testing.T) {
 		e.exchange(t, map[string]any{"type": "read_pane", "Lines": 120, "Format": "ansi"})
 		if got := e.backend.called("Read"); !slices.Equal(got, []string{"ReadPaneRecent pane-1 lines=120 format=ansi"}) {
 			t.Fatalf("reads = %v, want 120 ansi lines", got)
+		}
+	})
+	t.Run("Limit on get_activity", func(t *testing.T) {
+		e := newFrameEnv(t)
+		for index := range 5 {
+			e.server.activityView = append(e.server.activityView, activity.Entry{ID: fmt.Sprintf("entry-%d", index), Kind: "input", Status: "sent", Summary: "sent"})
+		}
+		response := e.exchange(t, map[string]any{"type": "get_activity", "Limit": 2})
+		if activities, _ := response["activities"].([]any); len(activities) != 2 {
+			t.Fatalf("activities = %#v, want the last two entries", response["activities"])
 		}
 	})
 	t.Run("Text on send_input", func(t *testing.T) {
