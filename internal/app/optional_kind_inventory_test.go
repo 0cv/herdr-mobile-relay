@@ -3,15 +3,11 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
-	"github.com/coder/websocket"
 )
 
 func TestOptionalKindInventoryPublication(t *testing.T) {
@@ -30,13 +26,7 @@ func TestOptionalKindInventoryPublication(t *testing.T) {
 		}
 	}
 	server.hub.SetOnConnect(func(client *transport.ClientConn) { server.sendConnectionSnapshot(client) })
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
+	conn := dialHub(t, server)
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {

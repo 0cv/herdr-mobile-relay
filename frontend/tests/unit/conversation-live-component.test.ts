@@ -5,7 +5,8 @@ import ConversationHistory from '$components/ConversationHistory.svelte';
 import { clearConversationPreviews } from '$lib/conversation-cache';
 import { conversationIdentity } from '$lib/conversation-history';
 import { targetRefForAgent } from '$lib/resource-id';
-import { CommandError, relayStore } from '$lib/store';
+import { CommandError } from '$lib/command-error';
+import { relayStore } from '$lib/store';
 import type { Agent, ConversationBatch, ConversationPage } from '$lib/types';
 import { deferred } from '../support/relay';
 

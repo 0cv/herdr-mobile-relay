@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,7 +17,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/hc"
 	"github.com/0cv/herdr-mobile-relay/internal/piintegration"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
-	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
 
@@ -102,33 +99,23 @@ func TestHCRefusesOwnerCommandsWithoutInvokingManagers(t *testing.T) {
 	s.updateM = nil
 	s.appDeployM = nil
 	s.piIntegration = piintegration.New(nil, func() []string { panic("Pi integration invoked") })
-	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
-		defer admitted()
-		inbound, err := protocol.DecodeMap(msg)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		if inbound.Type == "set_pi_integration" {
-			s.handlePiIntegration(context.Background(), client, inbound, msg)
-		} else {
-			s.handleUpdate(context.Background(), client, inbound)
-		}
-	})
-	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
-	defer server.Close()
-	defer s.hub.Shutdown(context.Background())
+	useProductionHandler(t, s)
+	conn, client := connectedClient(t, s)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
 	for _, action := range []string{"set_pi_integration", "check_update", "install_update", "deploy_app_update"} {
-		request, _ := json.Marshal(map[string]any{"type": action, "request_id": action, "protocol": protocol.Version, "enabled": true, "instance": "core"})
-		if err := conn.Write(ctx, websocket.MessageText, request); err != nil {
-			t.Fatal(err)
+		message := map[string]any{"type": action, "request_id": action, "protocol": protocol.Version, "enabled": true, "instance": "core"}
+		if action == "set_pi_integration" {
+			inbound, err := protocol.DecodeMap(message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.handlePiIntegration(ctx, client, inbound, message)
+		} else {
+			request, _ := json.Marshal(message)
+			if err := conn.Write(ctx, websocket.MessageText, request); err != nil {
+				t.Fatal(err)
+			}
 		}
 		_, data, err := conn.Read(ctx)
 		if err != nil {

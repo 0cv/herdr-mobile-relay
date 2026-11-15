@@ -1,10 +1,13 @@
 import { tick } from 'svelte';
 import { cleanup, render } from '@testing-library/svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
 import { relayStore } from '$lib/store';
+import { reorderWorkspaceBlock } from '$lib/workspace-commands';
 import type { Agent, CommandResult, RelayConnectionView, RelayWorkspace } from '$lib/types';
+
+vi.mock('$lib/workspace-commands', async original => ({ ...await original<typeof import('$lib/workspace-commands')>(), reorderWorkspaceBlock: vi.fn() }));
 
 const connection = {
   status: 'connected', inventory: { state: 'ready' },
@@ -34,6 +37,10 @@ function pointerClick(node: HTMLElement) {
   return event;
 }
 
+beforeEach(() => {
+  vi.mocked(reorderWorkspaceBlock).mockReset();
+});
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -49,7 +56,7 @@ async function geometryFixture(kind: 'tabs' | 'workspaces', sourceIndex: number)
   vi.stubGlobal('scrollY', 300);
   vi.spyOn(window, 'scrollBy').mockImplementation(() => {});
   const tabMove = vi.spyOn(relayStore, 'reorderTab').mockReturnValue(new Promise<CommandResult>(() => {}));
-  const workspaceMove = vi.spyOn(relayStore, 'reorderWorkspaceBlock').mockReturnValue(new Promise<CommandResult>(() => {}));
+  const workspaceMove = vi.mocked(reorderWorkspaceBlock).mockReturnValue(new Promise<CommandResult>(() => {}));
   relayStore.relayConfigs.set([{ id: 'test', label: 'Test', url: 'ws://test', token: '' }]);
   relayStore.connections.set(new Map([['test', connection as never]]));
   relayStore.workspaces.set(workspaces);
@@ -154,7 +161,7 @@ async function gestureFixture(kind: 'tabs' | 'workspaces', readOnly = false) {
   const vibrate = vi.fn();
   vi.stubGlobal('navigator', { ...navigator, vibrate });
   const tabMove = vi.spyOn(relayStore, 'reorderTab').mockReturnValue(new Promise<CommandResult>(() => {}));
-  const workspaceMove = vi.spyOn(relayStore, 'reorderWorkspaceBlock').mockReturnValue(new Promise<CommandResult>(() => {}));
+  const workspaceMove = vi.mocked(reorderWorkspaceBlock).mockReturnValue(new Promise<CommandResult>(() => {}));
   relayStore.relayConfigs.set([{ id: 'test', label: 'Test', url: 'ws://test', token: '' }]);
   relayStore.connections.set(new Map([['test', connection as never]]));
   relayStore.workspaces.set(workspaces);

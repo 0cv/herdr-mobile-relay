@@ -3,8 +3,9 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-native-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
-export NATIVE_HELPER="$WORK_DIR/helper"
-go build -o "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay"
+# shellcheck source=lib.sh
+. "$REPO_DIR/tests/lib.sh"
+ensure_relay_test_binary "$WORK_DIR"
 # plutil ships only with macOS. Elsewhere the launchd cases get a stand-in
 # that still rejects a missing or empty staged plist.
 HOST_PLUTIL="$(command -v plutil || true)"
@@ -55,7 +56,7 @@ for platform in systemd launchd; do
 #!/bin/sh
 case "$1" in
 version) printf '{"version":"version","revision":"revision"}\n' ;;
-verify-readiness) exec "$NATIVE_HELPER" "$@" ;;
+verify-readiness) exec "$HERDR_TEST_RELAY_BIN" "$@" ;;
 *) exit 1 ;;
 esac
 EOF

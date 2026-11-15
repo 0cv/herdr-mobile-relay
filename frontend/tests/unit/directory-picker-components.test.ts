@@ -1,10 +1,17 @@
 import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import LaunchView from '$components/LaunchView.svelte';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
 import { relayStore } from '$lib/store';
+import { createWorkspace } from '$lib/workspace-commands';
 import type { DirectoryListing, RelayConnectionView } from '$lib/types';
+
+vi.mock('$lib/workspace-commands', async original => ({ ...await original<typeof import('$lib/workspace-commands')>(), createWorkspace: vi.fn() }));
+
+beforeEach(() => {
+  vi.mocked(createWorkspace).mockReset();
+});
 
 const work: DirectoryListing = {
   current: { path: '/home/test/work', label: '~/work' },
@@ -130,7 +137,7 @@ it('Launch owns selection, focus and submission while navigating the directory p
 it('Workspace keeps the directory picker open and owns label and create submission', async () => {
   const user = userEvent.setup();
   const dirs = fixture();
-  const create = vi.spyOn(relayStore, 'createWorkspace').mockResolvedValue({} as never);
+  const create = vi.mocked(createWorkspace).mockResolvedValue({} as never);
   const { container } = render(WorkspaceManager);
   await waitFor(() => expect(dirs.requests).toHaveLength(1));
   dirs.succeed(0, work);

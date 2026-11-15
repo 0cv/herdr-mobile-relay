@@ -5,7 +5,7 @@ import { brotliDecompressSync } from 'node:zlib';
 import versions from '../build-versions.json' with { type: 'json' };
 import { releaseCompressedAssets } from './compressed-assets.mjs';
 import { validatePagesHeaders, validatePagesRedirects } from './pages-policy.ts';
-import { appScriptPattern, appStylePattern, appScriptPathPattern, appStylePathPattern, lazyScriptPattern, productVersionFromManifest } from './release-rules.ts';
+import { appScriptPattern, appStylePattern, appScriptPathPattern, appStylePathPattern, lazyScriptPattern, productVersionFromManifest, releaseEntryPath } from './release-rules.ts';
 
 const root = resolve(process.argv[2] || 'dist');
 const pluginManifest = await readFile(new URL('../../herdr-plugin.toml', import.meta.url), 'utf8');
@@ -47,7 +47,7 @@ if (versions.withdrawnScripts.includes(descriptor.files?.javascript?.path)) {
   throw new Error(`Release uses withdrawn application script: ${descriptor.files.javascript.path}`);
 }
 
-const compressedAssets = await releaseCompressedAssets(root);
+const compressedAssets = await releaseCompressedAssets(root, releaseEntryPath(descriptor));
 for (const relative of compressedAssets) {
   const source = await readFile(join(root, relative));
   const compressed = await readFile(join(root, `${relative}.br`));
