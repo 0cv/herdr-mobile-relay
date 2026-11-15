@@ -555,14 +555,14 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 		return
 	}
 	agent.SessionName = ""
-	// Every other consumer of a pane's reported session (Reader.Read,
+	// Every other consumer of a pane's reported session (Reader.ReadLatest,
 	// latestConversationResponse, the activity backfill path) TrimSpaces it
 	// before deciding anything. Trimming once here, before it reaches
 	// SessionID or the resolver, is what keeps a whitespace-only value from
 	// looking like a real session id: untrimmed, it survives the `== ""`
 	// checks below and can still reach the resolver's empty-id
 	// sole-transcript heuristic, inventing a title over a conversation view
-	// that Reader.Read reports as unavailable.
+	// that Reader.ReadLatest reports as unavailable.
 	sessionID := strings.TrimSpace(agent.Session)
 	if conversation.IsKimi(agent.Agent) && agent.ConversationReason != "" {
 		sessionID = ""
@@ -2280,11 +2280,11 @@ func (s *Server) latestConversationResponse(agent, sessionID string, project con
 	if s.conversationM == nil || conversation.IsKimi(agent) || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
 	}
-	page, err := s.conversationM.ReadLatest(agent, project, sessionID, 1)
-	if err != nil || !page.Available || len(page.Entries) == 0 {
+	entries, err := s.conversationM.ReadLatest(agent, project, sessionID, 1)
+	if err != nil || len(entries) == 0 {
 		return ""
 	}
-	entry := page.Entries[len(page.Entries)-1]
+	entry := entries[len(entries)-1]
 	if entry.Role != "assistant" || strings.TrimSpace(entry.Text) == "" {
 		return ""
 	}
@@ -2297,12 +2297,12 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 		if !exists || current.Agent != agent || current.SessionID != sessionID || current.Cwd != cwd || s.conversationM == nil {
 			return ""
 		}
-		page, err := s.readAgentConversation(ctx, current, 1)
-		if err != nil || !page.Available {
+		entries, err := s.readAgentConversation(ctx, current, 1)
+		if err != nil {
 			return ""
 		}
-		if len(page.Entries) > 0 {
-			entry := page.Entries[len(page.Entries)-1]
+		if len(entries) > 0 {
+			entry := entries[len(entries)-1]
 			if entry.Role == "assistant" && strings.TrimSpace(entry.Text) != "" {
 				return entry.Text
 			}
@@ -3827,7 +3827,7 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 	for _, agent := range s.state.Snapshot() {
 		agents[agent.PaneID] = agent
 	}
-	pages := make(map[string]conversation.Page)
+	pages := make(map[string][]conversation.Entry)
 	for index := range entries {
 		entry := entries[index]
 		if strings.ToLower(strings.TrimSpace(entry.Kind)) != "finished" {
@@ -3851,23 +3851,23 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		if conversation.IsKimi(agentName) && agents[entry.PaneID] == nil {
 			continue
 		}
-		var page conversation.Page
+		var conversationEntries []conversation.Entry
 		if current := agents[entry.PaneID]; current != nil && conversation.IsKimi(current.Agent) {
 			var err error
-			page, err = s.readAgentConversation(context.Background(), current, 200)
-			if err != nil || !page.Available {
+			conversationEntries, err = s.readAgentConversation(context.Background(), current, 200)
+			if err != nil {
 				continue
 			}
 		} else {
 			cacheKey := agentName + "\x00" + project.CWD + "\x00" + project.ForegroundCWD + "\x00" + sessionID
 			var loaded bool
-			page, loaded = pages[cacheKey]
+			conversationEntries, loaded = pages[cacheKey]
 			if !loaded {
-				page, _ = s.conversationM.ReadLatest(agentName, project, sessionID, 200)
-				pages[cacheKey] = page
+				conversationEntries, _ = s.conversationM.ReadLatest(agentName, project, sessionID, 200)
+				pages[cacheKey] = conversationEntries
 			}
 		}
-		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {
+		if response := conversationResponseAt(conversationEntries, int64(entry.Timestamp)); response != "" {
 			entries[index].Extract = response
 		}
 	}

@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -65,7 +66,7 @@ func TestProjectSessionWithPunctuationWithoutCWDFile(t *testing.T) {
 				t.Fatalf("location = %#v, want %s", got, path)
 			}
 			page, err := reader.ReadLatest(agent, ProjectContext{CWD: cwd}, testSessionID, 80)
-			if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "hello" {
+			if err != nil || len(page) != 1 || page[0].Text != "hello" {
 				t.Fatalf("page = %#v, error = %v", page, err)
 			}
 		})
@@ -86,12 +87,12 @@ func TestClaudeConversationFiltersInjectedAndSidechainRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 2 {
+	if len(page) != 2 {
 		t.Fatalf("page = %#v, want two visible turns", page)
 	}
-	if page.Entries[0].Role != "user" || page.Entries[0].Text != "hello" ||
-		page.Entries[1].Role != "assistant" || page.Entries[1].Text != "answer" {
-		t.Fatalf("entries = %#v", page.Entries)
+	if page[0].Role != "user" || page[0].Text != "hello" ||
+		page[1].Role != "assistant" || page[1].Text != "answer" {
+		t.Fatalf("entries = %#v", page)
 	}
 }
 
@@ -109,8 +110,8 @@ func TestCodexConversationUsesResponseItemsWithoutDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 2 || page.Entries[0].Text != "build it" || page.Entries[1].Text != "done" {
-		t.Fatalf("entries = %#v", page.Entries)
+	if len(page) != 2 || page[0].Text != "build it" || page[1].Text != "done" {
+		t.Fatalf("entries = %#v", page)
 	}
 }
 
@@ -126,17 +127,14 @@ func TestPiConversationConfinesReportedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("entries = %#v", page.Entries)
+	if len(page) != 2 {
+		t.Fatalf("entries = %#v", page)
 	}
 
 	external := filepath.Join(t.TempDir(), "outside.jsonl")
 	writeRows(t, external, map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "outside"}})
-	outside, err := reader.ReadLatest("pi", ProjectContext{}, external, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outside.Available {
+	_, err = reader.ReadLatest("pi", ProjectContext{}, external, 80)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatal("path outside the pi session root was served")
 	}
 
@@ -144,11 +142,8 @@ func TestPiConversationConfinesReportedPath(t *testing.T) {
 	if err := os.Symlink(external, link); err != nil {
 		t.Fatal(err)
 	}
-	linked, err := reader.ReadLatest("pi", ProjectContext{}, link, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if linked.Available {
+	_, err = reader.ReadLatest("pi", ProjectContext{}, link, 80)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatal("symlink outside the pi session root was served")
 	}
 }
@@ -217,10 +212,10 @@ func TestClaudeConversationAssociatesToolResultsWithCallingTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 1 || len(page.Entries[0].Tools) != 1 {
-		t.Fatalf("entries = %#v", page.Entries)
+	if len(page) != 1 || len(page[0].Tools) != 1 {
+		t.Fatalf("entries = %#v", page)
 	}
-	tool := page.Entries[0].Tools[0]
+	tool := page[0].Tools[0]
 	if tool.ID != "tool-1" || tool.Name != "Read" ||
 		!strings.Contains(tool.Input, `"path":"README.md"`) ||
 		tool.Output != "file contents" || tool.Error {
@@ -242,11 +237,11 @@ func TestClaudeConversationKeepsArrayShapedUserPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 1 {
+	if len(page) != 1 {
 		t.Fatalf("page = %#v, want one visible turn", page)
 	}
-	if page.Entries[0].Role != "user" || page.Entries[0].Text != "hi" {
-		t.Fatalf("entries = %#v", page.Entries)
+	if page[0].Role != "user" || page[0].Text != "hi" {
+		t.Fatalf("entries = %#v", page)
 	}
 }
 
@@ -273,11 +268,11 @@ func TestClaudeConversationDropsToolResultOnlyUserRowButKeepsToolOutput(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 1 || page.Entries[0].Role != "assistant" {
-		t.Fatalf("entries = %#v, want only the calling assistant turn", page.Entries)
+	if len(page) != 1 || page[0].Role != "assistant" {
+		t.Fatalf("entries = %#v, want only the calling assistant turn", page)
 	}
-	if len(page.Entries[0].Tools) != 1 || page.Entries[0].Tools[0].Output != "file contents" {
-		t.Fatalf("tools = %#v, want the tool output attached", page.Entries[0].Tools)
+	if len(page[0].Tools) != 1 || page[0].Tools[0].Output != "file contents" {
+		t.Fatalf("tools = %#v, want the tool output attached", page[0].Tools)
 	}
 }
 
@@ -297,8 +292,8 @@ func TestClaudeConversationFiltersArrayShapedEnvelopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 0 {
-		t.Fatalf("entries = %#v, want the injected envelope filtered", page.Entries)
+	if len(page) != 0 {
+		t.Fatalf("entries = %#v, want the injected envelope filtered", page)
 	}
 }
 
@@ -325,10 +320,10 @@ func TestClaudeConversationKeepsOnlyTextFromMixedUserBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("entries = %#v, want the assistant call and the user prompt", page.Entries)
+	if len(page) != 2 {
+		t.Fatalf("entries = %#v, want the assistant call and the user prompt", page)
 	}
-	entry := page.Entries[1]
+	entry := page[1]
 	if entry.Role != "user" || entry.Text != "now summarise it" {
 		t.Fatalf("entry = %#v, want only the text block", entry)
 	}
@@ -351,8 +346,8 @@ func TestClaudeConversationDropsEmptyArrayUserRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 0 {
-		t.Fatalf("entries = %#v, want no turn for an empty content array", page.Entries)
+	if len(page) != 0 {
+		t.Fatalf("entries = %#v, want no turn for an empty content array", page)
 	}
 }
 
@@ -377,11 +372,11 @@ func TestClaudeConversationRendersArrayShapedSlashCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("entries = %#v, want both command rows", page.Entries)
+	if len(page) != 2 {
+		t.Fatalf("entries = %#v, want both command rows", page)
 	}
-	if page.Entries[0].Text != "/clear x" || page.Entries[1].Text != "/clear x" {
-		t.Fatalf("entries = %#v, want array and string forms rendered identically", page.Entries)
+	if page[0].Text != "/clear x" || page[1].Text != "/clear x" {
+		t.Fatalf("entries = %#v, want array and string forms rendered identically", page)
 	}
 }
 
@@ -408,13 +403,13 @@ func TestClaudeConversationDropsEnvelopeBlocksAfterTheFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("entries = %#v, want the prompt and the answer", page.Entries)
+	if len(page) != 2 {
+		t.Fatalf("entries = %#v, want the prompt and the answer", page)
 	}
-	if got := page.Entries[0].Text; got != "please refactor the parser" {
+	if got := page[0].Text; got != "please refactor the parser" {
 		t.Errorf("user text = %q, want the prompt block only", got)
 	}
-	for _, entry := range page.Entries {
+	for _, entry := range page {
 		if strings.Contains(entry.Text, "INJECTED-SECRET") {
 			t.Fatalf("injected system-reminder block reached the conversation view: %q", entry.Text)
 		}
@@ -439,8 +434,8 @@ func TestClaudeConversationKeepsPromptWhenEnvelopeComesFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 1 || page.Entries[0].Text != "the actual question" {
-		t.Fatalf("entries = %#v, want only the real prompt text", page.Entries)
+	if len(page) != 1 || page[0].Text != "the actual question" {
+		t.Fatalf("entries = %#v, want only the real prompt text", page)
 	}
 }
 
@@ -456,7 +451,7 @@ func TestClaudeConversationReadForSelectsCurrentProjectOnDuplicateID(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "current response" {
+	if len(page) != 1 || page[0].Text != "current response" {
 		t.Fatalf("page = %#v, want the transcript from the current project only", page)
 	}
 }
@@ -481,7 +476,7 @@ func TestClaudeConversationReadForDistinguishesDottedProjectDirectory(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != test.want {
+			if len(page) != 1 || page[0].Text != test.want {
 				t.Fatalf("page = %#v, want %q from the selected project directory", page, test.want)
 			}
 		})
@@ -502,10 +497,7 @@ func TestClaudeConversationReadForRejectsProjectDirectoryEscape(t *testing.T) {
 	}
 
 	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, testSessionID, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page.Available {
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("page = %#v, want an escaping project symlink rejected", page)
 	}
 }
@@ -544,12 +536,12 @@ func TestClaudeConversationHidesHarnessGeneratedUserRows(t *testing.T) {
 		user("u13", nil, []any{map[string]any{"type": "text", "text": "[Request interrupted by user] block form"}}),
 	)
 
-	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
+	entries, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := make([]string, 0, len(page.Entries))
-	for _, entry := range page.Entries {
+	got := make([]string, 0, len(entries))
+	for _, entry := range entries {
 		got = append(got, entry.Text)
 	}
 	want := []string{

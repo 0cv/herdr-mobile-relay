@@ -6,6 +6,7 @@ package conversation
 // unrelated parsing work.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,8 +31,8 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !profilePage.Available || len(profilePage.Entries) != 2 ||
-		profilePage.Entries[0].Text != "from profile root" || profilePage.Entries[1].Text != "profile answer" {
+	if len(profilePage) != 2 ||
+		profilePage[0].Text != "from profile root" || profilePage[1].Text != "profile answer" {
 		t.Fatalf("profile page = %#v, want two entries resolved from the additional root", profilePage)
 	}
 
@@ -43,7 +44,7 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !homePage.Available || len(homePage.Entries) != 1 || homePage.Entries[0].Text != "from home root" {
+	if len(homePage) != 1 || homePage[0].Text != "from home root" {
 		t.Fatalf("home page = %#v, want the home-default root to still resolve alongside the configured list", homePage)
 	}
 }
@@ -51,10 +52,7 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 func TestClaudeConversationUnavailableWhenSessionMissingFromAllRoots(t *testing.T) {
 	reader, _ := testReader(t)
 	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page.Available {
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("page = %#v, want unavailable", page)
 	}
 }
@@ -77,11 +75,8 @@ func TestPiConversationConfinesReportedPathAcrossMultipleRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := reader.ReadLatest("pi", ProjectContext{}, link, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page.Available {
+	_, err := reader.ReadLatest("pi", ProjectContext{}, link, 80)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatal("symlink inside a configured root pointing outside every root was served")
 	}
 }
@@ -102,8 +97,8 @@ func TestOMPConversationResolvesFromConfiguredProfileRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 2 ||
-		page.Entries[0].Text != "question" || page.Entries[1].Text != "response" {
+	if len(page) != 2 ||
+		page[0].Text != "question" || page[1].Text != "response" {
 		t.Fatalf("page = %#v, want the omp profile root to resolve", page)
 	}
 }
@@ -133,7 +128,7 @@ func TestClaudeConversationEarliestRootWinsForDuplicateSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "earlier root copy" {
+	if len(page) != 1 || page[0].Text != "earlier root copy" {
 		t.Fatalf("page = %#v, want the earliest configured root's copy served over the home default's", page)
 	}
 }
@@ -155,7 +150,7 @@ func TestOMPConversationDiscoversProfileCreatedAfterReaderConstructed(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "question" {
+	if len(page) != 1 || page[0].Text != "question" {
 		t.Fatalf("page = %#v, want the profile created after NewReader to be discovered", page)
 	}
 }
@@ -185,7 +180,7 @@ func TestClaudeConversationSearchesSymlinkedProjectDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "via symlinked project directory" {
+	if len(page) != 1 || page[0].Text != "via symlinked project directory" {
 		t.Fatalf("page = %#v, want the symlinked project directory to be searched", page)
 	}
 }
@@ -214,7 +209,7 @@ func TestReaderKeepsLocatedDuplicateStableAcrossRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Entries[0].Text != "second root" {
+	if page[0].Text != "second root" {
 		t.Fatalf("page = %#v, want the originally located transcript", page)
 	}
 }

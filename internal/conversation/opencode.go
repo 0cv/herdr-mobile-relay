@@ -396,18 +396,15 @@ func (r *openCodeReader) runRows(ctx context.Context, database, query string, li
 // directory, and `opencode -s` resumes them there from any launch directory,
 // so the pane cwd is not evidence of ownership. Codex and Pi likewise resolve
 // by session ID alone.
-func (r *Reader) readOpenCode(sessionID string, limit int) (Page, error) {
+func (r *Reader) readOpenCode(sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	limit = clampPageLimit(limit)
-	entries, hasMore, corrupt, metadata, code := r.openCode.readContext(context.Background(), sessionID, "", limit)
+	entries, _, _, _, code := r.openCode.readContext(context.Background(), sessionID, "", limit)
 	if code != "" {
-		return unavailableCode(code, "OpenCode conversation history is unavailable."), nil
+		return nil, ErrUnavailable
 	}
 	normalizeEntriesForResponse(entries)
-	return Page{
-		Available: true, Entries: append([]Entry(nil), entries...),
-		HasMore: hasMore, Total: metadata.Total, SourceCorrupt: corrupt,
-	}, nil
+	return append([]Entry(nil), entries...), nil
 }
 
 func validOpenCodeSessionID(value string) bool {

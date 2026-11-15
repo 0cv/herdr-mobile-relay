@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,16 +59,16 @@ func TestKimiInferredDuplicateRootArchiveCursor(t *testing.T) {
 		t.Fatalf("cross-root cursor=%+v %v", stale, err)
 	}
 	bound, err := reader.ReadKimiSource(t.Context(), next, 1)
-	if err != nil || !bound.Available || len(bound.Entries) != 1 || !strings.Contains(bound.Entries[0].Text, "ROOT_B") {
+	if err != nil || len(bound) != 1 || !strings.Contains(bound[0].Text, "ROOT_B") {
 		t.Fatalf("source-bound read=%+v %v", bound, err)
 	}
 	obsolete, err := reader.ReadKimiSource(t.Context(), scope, 1)
-	if err != nil || obsolete.Available || len(obsolete.Entries) != 0 {
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("obsolete source read=%+v %v", obsolete, err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if page, err := reader.ReadKimiSource(ctx, next, 1); err == nil || len(page.Entries) != 0 {
+	if entries, err := reader.ReadKimiSource(ctx, next, 1); err == nil || len(entries) != 0 {
 		t.Fatal("canceled source read exported entries")
 	}
 	reported := scope
@@ -77,14 +78,14 @@ func TestKimiInferredDuplicateRootArchiveCursor(t *testing.T) {
 		t.Fatalf("reported-ID policy changed=%+v %v", old, err)
 	}
 	legacy, err := reader.ReadLatest("kimi", project, id, 1)
-	if err != nil || !legacy.Available || !strings.Contains(legacy.Entries[0].Text, "ROOT_A") {
+	if err != nil || len(legacy) == 0 || !strings.Contains(legacy[0].Text, "ROOT_A") {
 		t.Fatal("reported-ID reader policy changed")
 	}
 	if err := os.Remove(location.Path); err != nil {
 		t.Fatal(err)
 	}
-	missing, err := reader.ReadKimiSource(t.Context(), next, 1)
-	if err != nil || missing.Available || len(missing.Entries) != 0 {
+	_, err = reader.ReadKimiSource(t.Context(), next, 1)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatal("missing selected source fell back to archived duplicate")
 	}
 }

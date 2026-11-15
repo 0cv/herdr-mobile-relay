@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,13 +117,13 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 		}
 	}
 	page, err := reader.ReadLatest("agy", ProjectContext{CWD: t.TempDir()}, session, 80)
-	if err != nil || !page.Available {
+	if err != nil {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
-	if len(page.Entries) != 4 {
-		t.Fatalf("entries = %d, want 4 (tool-result and type 23 steps skipped): %#v", len(page.Entries), page.Entries)
+	if len(page) != 4 {
+		t.Fatalf("entries = %d, want 4 (tool-result and type 23 steps skipped): %#v", len(page), page)
 	}
-	user, firstCall, secondCall, final := page.Entries[0], page.Entries[1], page.Entries[2], page.Entries[3]
+	user, firstCall, secondCall, final := page[0], page[1], page[2], page[3]
 	if user.Role != "user" || user.Text != "check the gateway" || user.ID != "0" || user.Timestamp != "1970-01-01T00:16:40.0000005Z" {
 		t.Fatalf("user entry = %#v", user)
 	}
@@ -142,7 +143,7 @@ func TestAgyReaderRejectsUnsafeSessions(t *testing.T) {
 	reader, _, _ := agyFixture(t)
 	for _, session := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
 		page, err := reader.ReadLatest("agy", ProjectContext{CWD: ""}, session, 10)
-		if err != nil || page.Available || len(page.Entries) != 0 {
+		if !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("session %q page = %#v, err = %v", session, page, err)
 		}
 	}

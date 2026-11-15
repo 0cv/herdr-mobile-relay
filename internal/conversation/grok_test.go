@@ -141,13 +141,13 @@ func (f *grokFixture) write(t *testing.T, path string) {
 	writeRows(t, path, f.rows...)
 }
 
-func readGrok(t *testing.T, reader *Reader, limit int) Page {
+func readGrok(t *testing.T, reader *Reader, limit int) []Entry {
 	t.Helper()
-	page, err := reader.ReadLatest("grok", ProjectContext{CWD: grokCWD}, testSessionID, limit)
+	entries, err := reader.ReadLatest("grok", ProjectContext{CWD: grokCWD}, testSessionID, limit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return page
+	return entries
 }
 
 func readGrokBrowser(t *testing.T, reader *Reader, limit int) BrowsePage {
@@ -269,7 +269,7 @@ func TestGrokCLIIntegration(t *testing.T) {
 	t.Setenv("GROK_HOME", state)
 	t.Setenv("HERDR_GROK_CONFIG_DIRS", "")
 	reader := NewReader(home)
-	readGenerated := func(output []byte) (Page, string, string) {
+	readGenerated := func(output []byte) ([]Entry, string, string) {
 		t.Helper()
 		var response struct {
 			SessionID string `json:"sessionId"`
@@ -281,17 +281,17 @@ func TestGrokCLIIntegration(t *testing.T) {
 		if location.Path == "" || containedRegularFile(location.Path, state) == "" {
 			t.Fatal("production lookup did not locate the isolated live updates.jsonl")
 		}
-		page, err := reader.ReadLatest("grok", ProjectContext{CWD: work}, response.SessionID, 80)
+		entries, err := reader.ReadLatest("grok", ProjectContext{CWD: work}, response.SessionID, 80)
 		scope := BrowseScope{Provider: "grok", CWD: work, SessionID: response.SessionID}
 		browsed, browseErr := newTestBrowser(t, reader, DefaultBrowserOptions()).ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 80})
-		if err != nil || !page.Available || browseErr != nil || browsed.Diagnostics.CorruptRecords > 0 {
+		if err != nil || browseErr != nil || browsed.Diagnostics.CorruptRecords > 0 {
 			t.Fatal("production reader did not parse the isolated live history")
 		}
-		return page, location.Path, response.SessionID
+		return entries, location.Path, response.SessionID
 	}
-	page, _, firstSession := readGenerated(output)
+	entries, _, firstSession := readGenerated(output)
 	user, assistant := false, false
-	for _, entry := range page.Entries {
+	for _, entry := range entries {
 		user = user || entry.Role == "user" && strings.Contains(entry.Text, "HERDR_GROK_DISPOSABLE_CHECK")
 		assistant = assistant || entry.Role == "assistant" && strings.TrimSpace(entry.Text) != ""
 		if len(entry.Tools) != 0 {
@@ -321,7 +321,7 @@ func TestGrokCLIIntegration(t *testing.T) {
 		}
 		t.Fatal("isolated edit exchange failed or timed out; command output withheld")
 	}
-	page, path, editSession := readGenerated(output)
+	entries, path, editSession := readGenerated(output)
 	if editSession == firstSession {
 		t.Fatal("edit exchange reused a session")
 	}
@@ -378,7 +378,7 @@ func TestGrokCLIIntegration(t *testing.T) {
 		t.Fatal("generated edit did not contain SearchReplace.EditsApplied.tool_output_for_prompt")
 	}
 	matched := false
-	for _, entry := range page.Entries {
+	for _, entry := range entries {
 		for _, tool := range entry.Tools {
 			matched = matched || !tool.Error && tool.Output == editOutput
 		}
@@ -407,29 +407,29 @@ func TestGrokReadsNormalSession(t *testing.T) {
 
 	page := readGrok(t, reader, 80)
 	browsed := readGrokBrowser(t, reader, 80)
-	if !page.Available || len(page.Entries) != 3 || browsed.Total == nil || *browsed.Total != 3 || browsed.HasMore || browsed.Diagnostics.CorruptRecords != 0 {
+	if len(page) != 3 || browsed.Total == nil || *browsed.Total != 3 || browsed.HasMore || browsed.Diagnostics.CorruptRecords != 0 {
 		t.Fatalf("page = %#v, browsed = %#v, want 3 available entries", page, browsed)
 	}
-	assertEntry(t, page.Entries[0], "user", "list the files", 0)
-	assertEntry(t, page.Entries[1], "assistant", "I'll check.", 1)
-	assertEntry(t, page.Entries[2], "assistant", "There are two files.", 0)
-	tool := page.Entries[1].Tools[0]
+	assertEntry(t, page[0], "user", "list the files", 0)
+	assertEntry(t, page[1], "assistant", "I'll check.", 1)
+	assertEntry(t, page[2], "assistant", "There are two files.", 0)
+	tool := page[1].Tools[0]
 	if tool.ID != "call-1" || tool.Name != "list_dir" || tool.Input != `{"path":"."}` || tool.Output != "a.go\nb.go" || tool.Error {
 		t.Fatalf("tool = %#v, want list_dir with its result", tool)
 	}
-	if page.Entries[0].Timestamp != "2027-01-15T08:00:02.25Z" {
-		t.Fatalf("timestamp = %q, want agentTimestampMs in RFC3339", page.Entries[0].Timestamp)
+	if page[0].Timestamp != "2027-01-15T08:00:02.25Z" {
+		t.Fatalf("timestamp = %q, want agentTimestampMs in RFC3339", page[0].Timestamp)
 	}
 	seen := map[string]bool{}
-	for _, entry := range page.Entries {
+	for _, entry := range page {
 		if entry.ID == "" || seen[entry.ID] {
-			t.Fatalf("entry IDs = %#v, want unique non-empty IDs", page.Entries)
+			t.Fatalf("entry IDs = %#v, want unique non-empty IDs", page)
 		}
 		seen[entry.ID] = true
 	}
 	again := readGrok(t, reader, 80)
-	for index := range page.Entries {
-		if again.Entries[index].ID != page.Entries[index].ID {
+	for index := range page {
+		if again[index].ID != page[index].ID {
 			t.Fatal("entry IDs must be stable across reads")
 		}
 	}
@@ -449,13 +449,13 @@ func TestGrokKeepsHistoryBeforeCompaction(t *testing.T) {
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 	page := readGrok(t, reader, 80)
-	if len(page.Entries) != 4 {
-		t.Fatalf("entries = %#v, want the turns on both sides of the compaction", page.Entries)
+	if len(page) != 4 {
+		t.Fatalf("entries = %#v, want the turns on both sides of the compaction", page)
 	}
-	assertEntry(t, page.Entries[0], "user", "first question", 0)
-	assertEntry(t, page.Entries[1], "assistant", "first answer", 0)
-	assertEntry(t, page.Entries[2], "user", "second question", 0)
-	assertEntry(t, page.Entries[3], "assistant", "second answer", 0)
+	assertEntry(t, page[0], "user", "first question", 0)
+	assertEntry(t, page[1], "assistant", "first answer", 0)
+	assertEntry(t, page[2], "user", "second question", 0)
+	assertEntry(t, page[3], "assistant", "second answer", 0)
 }
 
 func TestGrokMessageSentWhileWorking(t *testing.T) {
@@ -474,15 +474,15 @@ func TestGrokMessageSentWhileWorking(t *testing.T) {
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 	page := readGrok(t, reader, 80)
-	if len(page.Entries) != 4 {
-		t.Fatalf("entries = %#v, want 4", page.Entries)
+	if len(page) != 4 {
+		t.Fatalf("entries = %#v, want 4", page)
 	}
-	assertEntry(t, page.Entries[0], "user", "run the tests", 0)
-	assertEntry(t, page.Entries[1], "assistant", "Running them.", 1)
-	assertEntry(t, page.Entries[2], "user", "also run vet", 0)
-	assertEntry(t, page.Entries[3], "assistant", "Tests pass; running vet next.", 0)
-	if page.Entries[1].Tools[0].Output != "ok" {
-		t.Fatalf("tool = %#v, want result attached to the earlier call", page.Entries[1].Tools[0])
+	assertEntry(t, page[0], "user", "run the tests", 0)
+	assertEntry(t, page[1], "assistant", "Running them.", 1)
+	assertEntry(t, page[2], "user", "also run vet", 0)
+	assertEntry(t, page[3], "assistant", "Tests pass; running vet next.", 0)
+	if page[1].Tools[0].Output != "ok" {
+		t.Fatalf("tool = %#v, want result attached to the earlier call", page[1].Tools[0])
 	}
 }
 
@@ -500,11 +500,11 @@ func TestGrokParallelToolResultsOutOfOrderAndFailure(t *testing.T) {
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 	page := readGrok(t, reader, 80)
-	if len(page.Entries) != 2 {
-		t.Fatalf("entries = %#v, want user and one tool entry", page.Entries)
+	if len(page) != 2 {
+		t.Fatalf("entries = %#v, want user and one tool entry", page)
 	}
-	assertEntry(t, page.Entries[1], "assistant", "", 3)
-	tools := page.Entries[1].Tools
+	assertEntry(t, page[1], "assistant", "", 3)
+	tools := page[1].Tools
 	if tools[0].ID != "call-a" || tools[0].Output != "file not found" || !tools[0].Error {
 		t.Fatalf("tool a = %#v, want failed result", tools[0])
 	}
@@ -555,7 +555,7 @@ func TestGrokUserQueryMarkup(t *testing.T) {
 				if want == "" {
 					want = tc.text
 				}
-				assertGrokTexts(t, readGrok(t, reader, 80).Entries, "user:"+want)
+				assertGrokTexts(t, readGrok(t, reader, 80), "user:"+want)
 			})
 		}
 		t.Run(fmt.Sprintf("tagged=%t/chunk joins", tagged), func(t *testing.T) {
@@ -569,7 +569,7 @@ func TestGrokUserQueryMarkup(t *testing.T) {
 			}
 			reader, home := testReader(t)
 			f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-			assertGrokTexts(t, readGrok(t, reader, 80).Entries, "user:Explain <user_query>hello</user_query>\nand preserve this suffix")
+			assertGrokTexts(t, readGrok(t, reader, 80), "user:Explain <user_query>hello</user_query>\nand preserve this suffix")
 		})
 	}
 }
@@ -589,14 +589,14 @@ func TestGrokUserChunks(t *testing.T) {
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 	page := readGrok(t, reader, 80)
-	if len(page.Entries) != 5 {
-		t.Fatalf("entries = %#v, want 5", page.Entries)
+	if len(page) != 5 {
+		t.Fatalf("entries = %#v, want 5", page)
 	}
-	assertEntry(t, page.Entries[0], "user", "/always-approve", 0)
-	assertEntry(t, page.Entries[1], "user", "describe the screenshot\nand keep it short", 0)
-	assertEntry(t, page.Entries[2], "assistant", "It shows a form.", 0)
-	assertEntry(t, page.Entries[3], "assistant", "The task finished.", 0)
-	assertEntry(t, page.Entries[4], "user", "untagged follow-up without a wrapper", 0)
+	assertEntry(t, page[0], "user", "/always-approve", 0)
+	assertEntry(t, page[1], "user", "describe the screenshot\nand keep it short", 0)
+	assertEntry(t, page[2], "assistant", "It shows a form.", 0)
+	assertEntry(t, page[3], "assistant", "The task finished.", 0)
+	assertEntry(t, page[4], "user", "untagged follow-up without a wrapper", 0)
 }
 
 func TestGrokCorruptAndPartialRecords(t *testing.T) {
@@ -612,7 +612,7 @@ func TestGrokCorruptAndPartialRecords(t *testing.T) {
 	_ = file.Close()
 
 	page := readGrok(t, reader, 80)
-	if len(page.Entries) != 3 || !grokBrowserCorrupt(t, reader) {
+	if len(page) != 3 || !grokBrowserCorrupt(t, reader) {
 		t.Fatalf("page = %#v, want valid entries kept and corruption reported", page)
 	}
 }

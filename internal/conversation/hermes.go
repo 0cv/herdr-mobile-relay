@@ -424,32 +424,23 @@ func hermesTimestamp(value float64) string {
 	return time.Unix(0, int64(value*float64(time.Second))).UTC().Format(time.RFC3339Nano)
 }
 
-func (r *Reader) readHermesFor(agent, cwd, sessionID string, limit int) (Page, error) {
+func (r *Reader) readHermesFor(agent, cwd, sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !safeSessionID(sessionID) {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	limit = clampPageLimit(limit)
 	location := r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
 	if location.Path == "" {
-		if _, code := r.hermes.databases(); code != "" {
-			return unavailableCode(code, "Hermes conversation history is unavailable."), nil
-		}
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+		return nil, ErrUnavailable
 	}
-	entries, hasMore, corrupt, metadata, code := r.hermes.readFromContext(context.Background(), location.Path, sessionID, "", limit)
+	entries, _, _, metadata, code := r.hermes.readFromContext(context.Background(), location.Path, sessionID, "", limit)
 	if code != "" {
-		return unavailableCode(code, "Hermes conversation history is unavailable."), nil
+		return nil, ErrUnavailable
 	}
 	if cwd != "" && metadata.CWD != "" && !sameHermesDirectory(cwd, metadata.CWD) {
-		return unavailableCode("invalid_session", "This conversation belongs to a different workspace."), nil
+		return nil, ErrUnavailable
 	}
 	normalizeEntriesForResponse(entries)
-	return Page{
-		Available:     true,
-		Entries:       append([]Entry(nil), entries...),
-		HasMore:       hasMore,
-		Total:         metadata.Total,
-		SourceCorrupt: corrupt,
-	}, nil
+	return append([]Entry(nil), entries...), nil
 }

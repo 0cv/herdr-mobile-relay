@@ -5,38 +5,33 @@ import (
 	"os"
 )
 
-func (r *Reader) ReadKimiSource(ctx context.Context, scope BrowseScope, limit int) (Page, error) {
+func (r *Reader) ReadKimiSource(ctx context.Context, scope BrowseScope, limit int) ([]Entry, error) {
 	if err := ctx.Err(); err != nil {
-		return Page{}, err
+		return nil, err
 	}
 	if !IsKimi(scope.Provider) || !scope.InferredSession || scope.SessionID == "" || scope.SelectionReason != "" || scope.SelectionSource == "" {
-		return unavailableCode("source_changed", kimiReason("source_changed")), nil
+		return nil, ErrUnavailable
 	}
 	r.kimiMu.Lock()
 	defer r.kimiMu.Unlock()
 	id, location, code := r.SelectKimiSession(ProjectContext{CWD: scope.CWD, ForegroundCWD: scope.ForegroundCWD}, "")
 	if code != "" || id != scope.SessionID || KimiSourceIdentity(location) != scope.SelectionSource {
-		return unavailableCode("source_changed", kimiReason("source_changed")), nil
+		return nil, ErrUnavailable
 	}
 	info, err := os.Stat(location.Path)
 	if err != nil {
-		return unavailableCode("source_unavailable", kimiReason("source_unavailable")), nil
+		return nil, ErrUnavailable
 	}
 	projection, _, code := r.readKimiLocation(ctx, location)
 	if err := ctx.Err(); err != nil {
-		return Page{}, err
+		return nil, err
 	}
 	after, err := os.Stat(location.Path)
 	if err != nil || !os.SameFile(info, after) || kimiStatToken(after, false) != kimiStatToken(info, false) || !r.KimiSelectionCurrent(scope) {
-		return unavailableCode("source_changed", kimiReason("source_changed")), nil
+		return nil, ErrUnavailable
 	}
 	if code != "" {
-		return unavailableCode(code, kimiReason(code)), nil
+		return nil, ErrUnavailable
 	}
-	return kimiPage(projection, limit), nil
-}
-
-func kimiPage(projection kimiProjection, limit int) Page {
-	entries := latest(projection.entries, limit)
-	return Page{Available: true, Entries: entries, Total: len(projection.entries), HasMore: len(entries) < len(projection.entries), ContinuationIncomplete: projection.diagnostics.ContinuationIncomplete, ContinuationReason: projection.diagnostics.ContinuationReason}
+	return latest(projection.entries, limit), nil
 }

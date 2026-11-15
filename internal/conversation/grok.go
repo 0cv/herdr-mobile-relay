@@ -665,20 +665,20 @@ func validGrokCursor(before string) bool {
 	return err == nil && value >= 0
 }
 
-func (r *Reader) readGrokFor(project ProjectContext, sessionID string, limit int) (Page, error) {
+func (r *Reader) readGrokFor(project ProjectContext, sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !safeSessionID(sessionID) {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	location := r.LocateWithProject("grok", project, sessionID)
 	if location.Path == "" {
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+		return nil, ErrUnavailable
 	}
 	projection, err := parseGrokUpdates(context.Background(), location)
 	if err != nil {
-		return Page{}, fmt.Errorf("read conversation log: %w", err)
+		return nil, fmt.Errorf("read conversation log: %w", err)
 	}
 	page := latest(projection.Entries, limit)
 	normalizeEntriesForResponse(page)
-	return Page{Available: true, Entries: page, HasMore: len(page) < len(projection.Entries), Total: len(projection.Entries), SourceCorrupt: projection.Corrupt > 0}, nil
+	return page, nil
 }

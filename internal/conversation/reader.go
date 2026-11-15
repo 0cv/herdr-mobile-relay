@@ -67,31 +67,7 @@ type Entry struct {
 	Truncated bool           `json:"truncated,omitempty"`
 }
 
-type Page struct {
-	Available              bool          `json:"available"`
-	ReasonCode             string        `json:"reason_code,omitempty"`
-	Reason                 string        `json:"reason,omitempty"`
-	Entries                []Entry       `json:"entries"`
-	HasMore                bool          `json:"has_more"`
-	Total                  int           `json:"total"`
-	FileTruncated          bool          `json:"file_truncated,omitempty"`
-	SourceCorrupt          bool          `json:"source_corrupt,omitempty"`
-	ContinuationIncomplete bool          `json:"continuation_incomplete,omitempty"`
-	ContinuationReason     string        `json:"continuation_reason,omitempty"`
-	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
-}
-
-func (page Page) MarshalJSON() ([]byte, error) {
-	type wirePage Page
-	var total *int
-	if page.Total != UnknownTotal {
-		total = &page.Total
-	}
-	return json.Marshal(struct {
-		wirePage
-		Total *int `json:"total"`
-	}{wirePage(page), total})
-}
+var ErrUnavailable = errors.New("conversation source is unavailable")
 
 type locationKey struct {
 	Agent         string
@@ -160,15 +136,15 @@ func Supported(agent string) bool {
 // ReadLatest resolves a conversation with the pane and, for Claude Code,
 // foreground directory hints. Once the anchor is located, Claude continuation
 // descendants stay in that anchor's project and root.
-func (r *Reader) ReadLatest(agent string, project ProjectContext, sessionID string, limit int) (Page, error) {
+func (r *Reader) ReadLatest(agent string, project ProjectContext, sessionID string, limit int) ([]Entry, error) {
 	project = NormalizeProjectContext(agent, project)
 	kind := agentkind.Of(agent)
 	if kind == agentkind.Kimi {
 		projection, _, code := r.readKimi(context.Background(), project, sessionID)
 		if code != "" {
-			return unavailableCode(code, kimiReason(code)), nil
+			return nil, ErrUnavailable
 		}
-		return kimiPage(projection, limit), nil
+		return latest(projection.entries, limit), nil
 	}
 	if kind == agentkind.Hermes {
 		return r.readHermesFor(agent, project.CWD, sessionID, limit)
@@ -186,32 +162,24 @@ func (r *Reader) ReadLatest(agent string, project ProjectContext, sessionID stri
 		return r.readGrokFor(project, sessionID, limit)
 	}
 	if !Supported(agent) {
-		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
+		return nil, ErrUnavailable
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	location := r.LocateWithProject(agent, project, sessionID)
 	if location.Path == "" {
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+		return nil, ErrUnavailable
 	}
 	if agentkind.Of(agent) == agentkind.Claude {
 		return r.readClaudeChain(sessionID, location, limit)
 	}
-	text, clipped, err := loadTail(location.Path, maxConversationBytes)
+	text, _, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
-		return Page{}, fmt.Errorf("read conversation log: %w", err)
+		return nil, fmt.Errorf("read conversation log: %w", err)
 	}
-	entries := parseTranscript(agent, text)
-	pageEntries := latest(entries, limit)
-	return Page{
-		Available:     true,
-		Entries:       pageEntries,
-		HasMore:       len(pageEntries) < len(entries),
-		Total:         len(entries),
-		FileTruncated: clipped,
-	}, nil
+	return latest(parseTranscript(agent, text), limit), nil
 }
 
 func clampPageLimit(limit int) int {
@@ -224,10 +192,6 @@ func clampPageLimit(limit int) int {
 func latest(entries []Entry, limit int) []Entry {
 	start := max(0, len(entries)-clampPageLimit(limit))
 	return append([]Entry(nil), entries[start:]...)
-}
-
-func unavailableCode(code, reason string) Page {
-	return Page{Available: false, ReasonCode: code, Reason: reason, Entries: []Entry{}}
 }
 
 // LocateWithProject returns the exact contained transcript selected for the

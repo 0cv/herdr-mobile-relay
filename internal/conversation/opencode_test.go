@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,7 +104,7 @@ INSERT INTO part VALUES('part-two','message-one','not-json');`, cwd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || len(page.Entries) != 1 {
+	if len(page) != 1 {
 		t.Fatalf("partially corrupt OpenCode page = %#v", page)
 	}
 	browsed := browseOpenCode(t, reader, "ses_corrupt", "", defaultPageSize)
@@ -167,9 +168,9 @@ INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, sessionDi
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	for name, pane := range panes {
 		t.Run(name, func(t *testing.T) {
-			page, err := reader.ReadLatest("opencode", ProjectContext{CWD: pane}, "ses_resumed", defaultPageSize)
-			if err != nil || !page.Available || len(page.Entries) != 2 || page.Entries[1].Text != "newer" {
-				t.Fatalf("pane read = %#v, err = %v", page, err)
+			entries, err := reader.ReadLatest("opencode", ProjectContext{CWD: pane}, "ses_resumed", defaultPageSize)
+			if err != nil || len(entries) != 2 || entries[1].Text != "newer" {
+				t.Fatalf("pane read = %#v, err = %v", entries, err)
 			}
 			scope := BrowseScope{Provider: "opencode", CWD: pane, SessionID: "ses_resumed"}
 			latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
@@ -182,7 +183,7 @@ INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, sessionDi
 			}
 		})
 	}
-	if page, err := reader.ReadLatest("opencode", ProjectContext{CWD: panes["sibling"]}, "ses_absent", defaultPageSize); err != nil || page.Available {
+	if page, err := reader.ReadLatest("opencode", ProjectContext{CWD: panes["sibling"]}, "ses_absent", defaultPageSize); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("unknown session read = %#v, err = %v", page, err)
 	}
 	if page := browseOpenCode(t, reader, "ses_absent", "", defaultPageSize); page.Available || page.ReasonCode != "invalid_session" {
@@ -296,13 +297,13 @@ func TestOpenCodeV2FreshStoreReadsVisibleTurns(t *testing.T) {
 	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, root)
 	page, err := reader.ReadLatest("opencode", ProjectContext{}, "ses_fresh", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 2 {
+	if err != nil || len(page) != 2 {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_fresh", "", defaultPageSize); !browsed.Available || browsed.Diagnostics.CorruptRecords != 0 || browsed.HasMore || browsed.Total != nil || len(browsed.Entries) != 2 {
 		t.Fatalf("browser page = %#v", browsed)
 	}
-	user, assistantEntry := page.Entries[0], page.Entries[1]
+	user, assistantEntry := page[0], page[1]
 	if user.Role != "user" || user.Text != "hello" || user.ID != "m1" {
 		t.Fatalf("user entry = %#v", user)
 	}
@@ -342,7 +343,7 @@ func TestOpenCodeV2RealToolCallsKeepBlocksApartAndFlagFailedExits(t *testing.T) 
 	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, root)
 	page, err := reader.ReadLatest("opencode", ProjectContext{}, "ses_tools", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 2 || len(page.Entries[1].Tools) != 4 {
+	if err != nil || len(page) != 2 || len(page[1].Tools) != 4 {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_tools", "", defaultPageSize); browsed.Diagnostics.CorruptRecords != 0 {
@@ -357,7 +358,7 @@ func TestOpenCodeV2RealToolCallsKeepBlocksApartAndFlagFailedExits(t *testing.T) 
 		{"shell", "foo\nExited with code 3", true},
 		{"read", "Read file notes.txt, lines 1-3\n1: alpha\n2: beta\n3: gamma", false},
 	}
-	for index, tool := range page.Entries[1].Tools {
+	for index, tool := range page[1].Tools {
 		if tool.Name != want[index].name || tool.Output != want[index].output || tool.Error != want[index].err {
 			t.Errorf("tool %d = name %q output %q error %v, want %+v", index, tool.Name, tool.Output, tool.Error, want[index])
 		}
@@ -375,14 +376,14 @@ func TestOpenCodeV1ShellExitCodeMarksToolFailed(t *testing.T) {
 	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, root)
 	page, err := reader.ReadLatest("opencode", ProjectContext{}, "ses_exit", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 1 || len(page.Entries[0].Tools) != 4 {
+	if err != nil || len(page) != 1 || len(page[0].Tools) != 4 {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_exit", "", defaultPageSize); browsed.Diagnostics.CorruptRecords != 0 {
 		t.Fatalf("browser page = %#v", browsed)
 	}
 	for index, want := range []bool{false, true, false, false} {
-		if tool := page.Entries[0].Tools[index]; tool.Error != want {
+		if tool := page[0].Tools[index]; tool.Error != want {
 			t.Errorf("tool %s error = %v, want %v", tool.ID, tool.Error, want)
 		}
 	}
@@ -462,29 +463,29 @@ INSERT INTO session_v2(id,directory,title,agent) VALUES('ses_hidden','/work','D'
 	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, root)
 	page, err := reader.ReadLatest("opencode", ProjectContext{}, "ses_migrated", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "migrated copy" {
+	if err != nil || len(page) != 1 || page[0].Text != "migrated copy" {
 		t.Fatalf("migrated page = %#v, err = %v", page, err)
 	}
 	page, err = reader.ReadLatest("opencode", ProjectContext{}, "ses_unmigrated", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "only legacy" {
+	if err != nil || len(page) != 1 || page[0].Text != "only legacy" {
 		t.Fatalf("unmigrated page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_unmigrated", "", defaultPageSize); browsed.Total == nil || *browsed.Total != 1 {
 		t.Fatalf("unmigrated browser page = %#v", browsed)
 	}
 	page, err = reader.ReadLatest("opencode", ProjectContext{}, "ses_emptyv2", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 0 {
+	if err != nil || len(page) != 0 {
 		t.Fatalf("empty page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_emptyv2", "", defaultPageSize); !browsed.Available || browsed.Total != nil || browsed.ReasonCode != "" {
 		t.Fatalf("empty browser page = %#v", browsed)
 	}
 	page, err = reader.ReadLatest("opencode", ProjectContext{}, "ses_hidden", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 0 {
+	if err != nil || len(page) != 0 {
 		t.Fatalf("hidden-only page = %#v, err = %v", page, err)
 	}
 	page, err = reader.ReadLatest("opencode", ProjectContext{}, "ses_absent", defaultPageSize)
-	if err != nil || page.Available {
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("absent page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_absent", "", defaultPageSize); browsed.Available || browsed.ReasonCode != "invalid_session" {
@@ -501,7 +502,7 @@ func TestOpenCodeV2CorruptRowKeepsOtherEntries(t *testing.T) {
 	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, root)
 	page, err := reader.ReadLatest("opencode", ProjectContext{}, "ses_badrow", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 2 || page.Entries[0].Text != "before" || page.Entries[1].Text != "after" {
+	if err != nil || len(page) != 2 || page[0].Text != "before" || page[1].Text != "after" {
 		t.Fatalf("corrupt page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_badrow", "", defaultPageSize); browsed.Diagnostics.CorruptRecords != 1 || len(browsed.Entries) != 2 {
@@ -536,7 +537,7 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 		t.Fatalf("older page after append = %#v, err = %v", older, err)
 	}
 	page, err := reader.ReadLatest("opencode", ProjectContext{CWD: cwd}, "ses_browser2", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 3 || page.Entries[2].Text != "appended" {
+	if err != nil || len(page) != 3 || page[2].Text != "appended" {
 		t.Fatalf("pane read = %#v, err = %v", page, err)
 	}
 }
@@ -587,7 +588,7 @@ func TestOpenCodeUnknownLayoutFails(t *testing.T) {
 	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), "CREATE TABLE unrelated(id TEXT);")
 	reader := openCodeFixtureReader(t, root)
 	page, err := reader.ReadLatest("opencode", ProjectContext{}, "ses_unknown", defaultPageSize)
-	if err != nil || page.Available {
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("unknown layout page = %#v, err = %v", page, err)
 	}
 	if browsed := browseOpenCode(t, reader, "ses_unknown", "", defaultPageSize); browsed.State != BrowseFailed || browsed.ReasonCode != "query_failed" {

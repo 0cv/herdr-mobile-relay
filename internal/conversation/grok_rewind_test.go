@@ -64,7 +64,7 @@ func TestGrokRetainedRewindFixture(t *testing.T) {
 	prompt := func(word string) string {
 		return "user:Reply with exactly the word " + word + " and nothing else. Do not use tools."
 	}
-	assertGrokTexts(t, page.Entries, prompt("ONE"), "assistant:ONE", prompt("TWO"), "assistant:TWO", prompt("FOUR"), "assistant:FOUR")
+	assertGrokTexts(t, page, prompt("ONE"), "assistant:ONE", prompt("TWO"), "assistant:TWO", prompt("FOUR"), "assistant:FOUR")
 	if grokBrowserCorrupt(t, reader) {
 		t.Fatal("a mapped rewind marker is not corruption")
 	}
@@ -89,8 +89,8 @@ func TestGrokRewindCountsTurnsByPosition(t *testing.T) {
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 	page := readGrok(t, reader, 80)
-	assertGrokTexts(t, page.Entries, "user:/always-approve", "user:first", "assistant:first reply", "user:replacement", "assistant:replacement reply")
-	if page.Entries[2].Tools[0].Output != "late result" || grokBrowserCorrupt(t, reader) {
+	assertGrokTexts(t, page, "user:/always-approve", "user:first", "assistant:first reply", "user:replacement", "assistant:replacement reply")
+	if page[2].Tools[0].Output != "late result" || grokBrowserCorrupt(t, reader) {
 		t.Fatalf("page = %#v, want the kept tool call to receive its result", page)
 	}
 }
@@ -113,7 +113,7 @@ func TestGrokRewindUntaggedTurnsAndRepeatedRewinds(t *testing.T) {
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 	page := readGrok(t, reader, 80)
-	assertGrokTexts(t, page.Entries, "user:first\nfirst continued", "assistant:first reply", "user:fifth")
+	assertGrokTexts(t, page, "user:first\nfirst continued", "assistant:first reply", "user:fifth")
 }
 
 func TestGrokRewindWithUnmappedTargetIsIgnored(t *testing.T) {
@@ -125,7 +125,7 @@ func TestGrokRewindWithUnmappedTargetIsIgnored(t *testing.T) {
 		f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 		page := readGrok(t, reader, 80)
-		assertGrokTexts(t, page.Entries, "user:question 0", "assistant:answer 0", "user:question 1", "assistant:answer 1")
+		assertGrokTexts(t, page, "user:question 0", "assistant:answer 0", "user:question 1", "assistant:answer 1")
 		if !grokBrowserCorrupt(t, reader) {
 			t.Fatalf("target %v: want the unmapped marker reported as corrupt", target)
 		}
@@ -186,7 +186,7 @@ func TestGrokOversizedRecordIsReportedSeparately(t *testing.T) {
 	})
 
 	page := readGrok(t, reader, 80)
-	assertGrokTexts(t, page.Entries, "user:question 0", "assistant:answer 0", "user:after the large record")
+	assertGrokTexts(t, page, "user:question 0", "assistant:answer 0", "user:after the large record")
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
 	browsed, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 80})
@@ -215,7 +215,7 @@ func TestGrokRawOutputText(t *testing.T) {
 
 	page := readGrok(t, reader, 80)
 	want := []string{"a.go\nb.go", "task done", "plain text", "result text", "Applied edit"}
-	tools := page.Entries[1].Tools
+	tools := page[1].Tools
 	for index := range want {
 		if tools[index].Output != want[index] {
 			t.Fatalf("tool %d output = %q, want %q", index, tools[index].Output, want[index])

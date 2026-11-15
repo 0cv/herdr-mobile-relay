@@ -413,29 +413,18 @@ func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64
 	return string(data), clipped, nil
 }
 
-func continuationDiagnostic(reason string) (bool, string) {
-	switch reason {
-	case continuationReasonMissingSource, continuationReasonInvalidLink, continuationReasonAmbiguous, continuationReasonCycle, continuationReasonLimit, continuationReasonPartial:
-		return true, reason
-	default:
-		return false, ""
-	}
-}
-
-func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) (Page, error) {
+func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) ([]Entry, error) {
 	chain, err := resolveClaudeChain(context.Background(), anchor, sessionID)
 	if err != nil {
-		return Page{}, fmt.Errorf("resolve Claude conversation chain: %w", err)
+		return nil, fmt.Errorf("resolve Claude conversation chain: %w", err)
 	}
 	if len(chain.Segments) == 0 {
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+		return nil, ErrUnavailable
 	}
 	groups := make([][]Entry, len(chain.Segments))
 	remaining := int64(maxConversationBytes)
-	clipped := false
 	for index := len(chain.Segments) - 1; index >= 0; index-- {
 		if remaining <= 0 {
-			clipped = true
 			break
 		}
 		segment := chain.Segments[index]
@@ -446,10 +435,8 @@ func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) (
 		text, segmentClipped, readErr := readCapturedSegment(context.Background(), segment, budget)
 		if readErr != nil {
 			if index == len(chain.Segments)-1 {
-				return Page{}, fmt.Errorf("read Claude conversation segment: %w", readErr)
+				return nil, fmt.Errorf("read Claude conversation segment: %w", readErr)
 			}
-			chain.IncompleteReason = continuationReasonMissingSource
-			clipped = true
 			break
 		}
 		entries := parseTranscript("claude", text)
@@ -459,13 +446,9 @@ func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) (
 			consumed = remaining
 		}
 		remaining -= consumed
-		clipped = clipped || segmentClipped
 		if segmentClipped {
 			// The tail of this segment is readable, but no older segment can be
 			// certified within the shared 16 MiB legacy budget.
-			if index > 0 {
-				clipped = true
-			}
 			break
 		}
 	}
@@ -473,12 +456,5 @@ func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) (
 	for _, group := range groups {
 		entries = append(entries, group...)
 	}
-	pageEntries := latest(entries, limit)
-	page := Page{
-		Available: true, Entries: pageEntries, HasMore: len(pageEntries) < len(entries), Total: len(entries), FileTruncated: clipped,
-	}
-	if chain.IncompleteReason != "" {
-		page.ContinuationIncomplete, page.ContinuationReason = continuationDiagnostic(chain.IncompleteReason)
-	}
-	return page, nil
+	return latest(entries, limit), nil
 }

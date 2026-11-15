@@ -308,25 +308,19 @@ func agyTimestamp(step []pbField) string {
 	return time.Unix(int64(seconds), int64(nanos)).UTC().Format(time.RFC3339Nano)
 }
 
-func (r *Reader) readAgyFor(sessionID string, limit int) (Page, error) {
+func (r *Reader) readAgyFor(sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !canonicalSessionID.MatchString(sessionID) {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	location, code := r.agy.locateContext(sessionID)
 	if code != "" {
-		return unavailableCode(code, "Antigravity conversation history is unavailable."), nil
+		return nil, ErrUnavailable
 	}
-	entries, hasMore, corrupt, _, code := r.agy.readFromContext(context.Background(), location.Path, "", limit)
+	entries, _, _, _, code := r.agy.readFromContext(context.Background(), location.Path, "", limit)
 	if code != "" {
-		return unavailableCode(code, "Antigravity conversation history is unavailable."), nil
+		return nil, ErrUnavailable
 	}
 	normalizeEntriesForResponse(entries)
-	return Page{
-		Available:     true,
-		Entries:       append([]Entry(nil), entries...),
-		HasMore:       hasMore,
-		Total:         UnknownTotal,
-		SourceCorrupt: corrupt,
-	}, nil
+	return append([]Entry(nil), entries...), nil
 }

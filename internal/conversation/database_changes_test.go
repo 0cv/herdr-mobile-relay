@@ -156,10 +156,10 @@ func TestDatabaseReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
 	read := func() []Entry {
 		t.Helper()
 		page, err := reader.ReadLatest(scope.Provider, ProjectContext{CWD: root}, session, 10)
-		if err != nil || !page.Available {
+		if err != nil {
 			t.Fatalf("read failed: %+v %v", page, err)
 		}
-		return page.Entries
+		return page
 	}
 	if entries := read(); len(entries) != 1 {
 		t.Fatalf("seed entries = %+v", entries)
@@ -233,10 +233,10 @@ func TestAgyReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
 	read := func() []Entry {
 		t.Helper()
 		page, err := reader.ReadLatest(scope.Provider, ProjectContext{CWD: root}, scope.SessionID, 10)
-		if err != nil || !page.Available {
+		if err != nil {
 			t.Fatalf("read failed: %+v %v", page, err)
 		}
-		return page.Entries
+		return page
 	}
 	if entries := read(); len(entries) != 1 || entries[0].Text != "seed" {
 		t.Fatalf("seed entries = %+v", entries)

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,22 +94,19 @@ func TestTitleAndTranscriptAgreeForANonDefaultProfile(t *testing.T) {
 	writeClaudeTranscript(t, filepath.Join(profile, "projects", "-work-app", invariantSession+".jsonl"), "Profile Title")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", cwd, invariantSession)
-	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: cwd}, invariantSession, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: cwd}, invariantSession, 80)
 
 	if title == "" {
 		t.Errorf("title did not resolve from the configured profile")
 	}
-	if !page.Available {
-		t.Errorf("transcript did not resolve from the configured profile: reason=%q", page.Reason)
+	if err != nil {
+		t.Errorf("transcript did not resolve from the configured profile: %v", err)
 	}
-	if title != "" && !page.Available {
-		t.Fatalf("INVARIANT BROKEN: title %q resolved while the transcript reported %q", title, page.Reason)
+	if title != "" && err != nil {
+		t.Fatalf("INVARIANT BROKEN: title %q resolved while the transcript reported %v", title, err)
 	}
-	if page.Available && len(page.Entries) != 2 {
-		t.Errorf("page entries = %d, want the prompt and the answer", len(page.Entries))
+	if err == nil && len(entries) != 2 {
+		t.Errorf("entries = %d, want the prompt and the answer", len(entries))
 	}
 }
 
@@ -122,12 +120,9 @@ func TestTitleAndTranscriptAgreeForTheHomeDefault(t *testing.T) {
 	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Home Title")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", cwd, invariantSession)
-	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: cwd}, invariantSession, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if title == "" || !page.Available {
-		t.Fatalf("INVARIANT BROKEN: title=%q available=%v reason=%q", title, page.Available, page.Reason)
+	_, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: cwd}, invariantSession, 80)
+	if title == "" || err != nil {
+		t.Fatalf("INVARIANT BROKEN: title=%q err=%v", title, err)
 	}
 }
 
@@ -178,15 +173,12 @@ func TestTitleAndTranscriptFailTogetherWhenNoRootHasTheSession(t *testing.T) {
 	}
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
-	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
 	if title != "" {
 		t.Errorf("title = %q, want empty when no root holds the session", title)
 	}
-	if page.Available {
-		t.Errorf("transcript resolved from nowhere: %#v", page.Entries)
+	if !errors.Is(err, conversation.ErrUnavailable) {
+		t.Errorf("transcript resolved from nowhere: entries=%#v err=%v", entries, err)
 	}
 }
 
@@ -211,27 +203,23 @@ func TestLegacyConfigDirDoesNotSplitTitleFromTranscript(t *testing.T) {
 	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Home Title")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
-	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
-	if err != nil {
-		t.Fatal(err)
+	_, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
+	if title != "" && err != nil {
+		t.Fatalf("INVARIANT BROKEN, the reported bug: title %q resolved while the transcript reported %v",
+			title, err)
 	}
-	if title != "" && !page.Available {
-		t.Fatalf("INVARIANT BROKEN, the reported bug: title %q resolved while the transcript reported %q",
-			title, page.Reason)
-	}
-	if title == "" || !page.Available {
-		t.Fatalf("both halves should resolve: title=%q available=%v reason=%q", title, page.Available, page.Reason)
+	if title == "" || err != nil {
+		t.Fatalf("both halves should resolve: title=%q err=%v", title, err)
 	}
 }
 
 func TestMissingSessionIDIsUnavailable(t *testing.T) {
 	clearAgentEnv(t)
-	page, err := conversation.NewReader(t.TempDir()).ReadLatest("claude", conversation.ProjectContext{}, "", 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page.Available {
-		t.Fatalf("page = %#v, want unavailable without a session id", page)
+	home := t.TempDir()
+	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Home Title")
+	entries, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, "", 80)
+	if !errors.Is(err, conversation.ErrUnavailable) {
+		t.Fatalf("entries = %#v, err = %v, want unavailable without a session id", entries, err)
 	}
 }
 
@@ -255,16 +243,13 @@ func TestTitleAndTranscriptComeFromTheSameRootForADuplicateSessionID(t *testing.
 		"Second Root Title", "second root answer")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
-	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
+	entries, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if !page.Available {
-		t.Fatalf("transcript did not resolve at all: reason=%q", page.Reason)
+		t.Fatalf("transcript did not resolve at all: %v", err)
 	}
 
 	var answers []string
-	for _, entry := range page.Entries {
+	for _, entry := range entries {
 		if entry.Role == "assistant" {
 			answers = append(answers, entry.Text)
 		}
@@ -354,12 +339,11 @@ func TestTitleAndTranscriptInvariantAcrossSupportedAgents(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if title == "" || !page.Available {
-				t.Fatalf("INVARIANT BROKEN for %s: title=%q available=%v reason=%q",
-					fixture.agent, title, page.Available, page.Reason)
+			if title == "" {
+				t.Fatalf("INVARIANT BROKEN for %s: title did not resolve", fixture.agent)
 			}
-			if len(page.Entries) != 2 {
-				t.Fatalf("%s page entries = %d, want user and assistant turns", fixture.agent, len(page.Entries))
+			if len(page) != 2 {
+				t.Fatalf("%s page entries = %d, want user and assistant turns", fixture.agent, len(page))
 			}
 		})
 	}

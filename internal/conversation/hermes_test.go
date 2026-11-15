@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,11 +178,11 @@ func TestHermesReaderBindsWorkspace(t *testing.T) {
 	}
 	reader := browser.reader
 	own, err := reader.ReadLatest("hermes", ProjectContext{CWD: scope.CWD}, sessionID, 80)
-	if err != nil || !own.Available || len(own.Entries) != 1 {
+	if err != nil || len(own) != 1 {
 		t.Fatalf("own workspace page = %#v, err = %v", own, err)
 	}
 	wrongWorkspace, err := reader.ReadLatest("hermes", ProjectContext{CWD: other}, sessionID, 80)
-	if err != nil || wrongWorkspace.Available || len(wrongWorkspace.Entries) != 0 {
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Hermes wrong-workspace page = %#v, err = %v", wrongWorkspace, err)
 	}
 }
@@ -228,16 +229,13 @@ COMMIT;`, sessionID, cwd, sessionID, sessionID, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available {
-		t.Fatalf("Hermes page unavailable: %#v", page)
+	if len(page) != 2 {
+		t.Fatalf("Hermes page entries=%d, want two conversation turns: %#v", len(page), page)
 	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("Hermes page entries=%d, want two conversation turns: %#v", len(page.Entries), page.Entries)
+	if page[0].Role != "user" || page[0].Text != "question" {
+		t.Fatalf("Hermes user entry = %#v", page[0])
 	}
-	if page.Entries[0].Role != "user" || page.Entries[0].Text != "question" {
-		t.Fatalf("Hermes user entry = %#v", page.Entries[0])
-	}
-	assistant := page.Entries[1]
+	assistant := page[1]
 	if assistant.Role != "assistant" || assistant.Text != "answer" || len(assistant.Tools) != 1 {
 		t.Fatalf("Hermes assistant entry = %#v", assistant)
 	}
@@ -326,11 +324,11 @@ func TestHermesReaderUsesCachedDatabaseForTitleAndContent(t *testing.T) {
 	databaseA := filepath.Join(rootA, "state.db")
 	createHermesTestDatabase(t, databaseA, sessionID, cwd, "Title A",
 		fmt.Sprintf("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','Transcript A',100,1,0);", sessionID))
-	page, err := reader.ReadLatest("hermes", ProjectContext{CWD: cwd}, sessionID, 80)
+	entries, err := reader.ReadLatest("hermes", ProjectContext{CWD: cwd}, sessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 1 || page.Entries[0].Text != "Transcript B" {
-		t.Fatalf("Hermes cached transcript = %#v, want database B content", page)
+	if len(entries) != 1 || entries[0].Text != "Transcript B" {
+		t.Fatalf("Hermes cached transcript = %#v, want database B content", entries)
 	}
 }

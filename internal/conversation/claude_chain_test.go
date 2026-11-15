@@ -72,9 +72,9 @@ func TestClaudeChainLatestAndOlderSegments(t *testing.T) {
 		map[string]any{"type": "user", "uuid": "b1", "message": map[string]any{"content": "b1"}},
 		map[string]any{"type": "assistant", "uuid": "b2", "message": map[string]any{"content": "b2"}},
 	)
-	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, a, 1)
-	if err != nil || len(page.Entries) != 1 || page.Entries[0].Text != "b2" {
-		t.Fatalf("latest = %#v, err=%v", page, err)
+	entries, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, a, 1)
+	if err != nil || len(entries) != 1 || entries[0].Text != "b2" {
+		t.Fatalf("latest = %#v, err=%v", entries, err)
 	}
 
 	options := DefaultBrowserOptions()
@@ -135,7 +135,7 @@ func TestClaudeChainEmptyContinuationKeepsParentVisible(t *testing.T) {
 	)
 	writeRows(t, filepath.Join(root, child+".jsonl"))
 	legacy, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, anchor, 10)
-	if err != nil || len(legacy.Entries) != 1 || legacy.Entries[0].Text != "parent answer" {
+	if err != nil || len(legacy) != 1 || legacy[0].Text != "parent answer" {
 		t.Fatalf("empty child legacy page = %#v, err=%v", legacy, err)
 	}
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
