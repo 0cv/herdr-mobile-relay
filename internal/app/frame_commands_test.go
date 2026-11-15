@@ -389,6 +389,26 @@ func TestFrameAgentStartReadsHermesProfile(t *testing.T) {
 	}
 }
 
+func TestFrameLastOfTwoMatchingKeysWins(t *testing.T) {
+	for name, tc := range map[string]struct {
+		frame string
+		want  string
+	}{
+		"upper case last":   {`{"type":"send_keys","request_id":"r","protocol":3,"pane_id":"pane-1","keys":["a"],"Keys":["b"]}`, "SendKeys pane-1 b"},
+		"lower case last":   {`{"type":"send_keys","request_id":"r","protocol":3,"pane_id":"pane-1","Keys":["b"],"keys":["a"]}`, "SendKeys pane-1 a"},
+		"repeated key last": {`{"type":"send_keys","request_id":"r","protocol":3,"pane_id":"pane-1","keys":["a"],"keys":["b"]}`, "SendKeys pane-1 b"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newFrameEnv(t)
+			sendRawFrame(t, e.conn, []byte(tc.frame))
+			expectCommandResult(t, readFrame(t, e.conn), "send_keys", true, "completed", "")
+			if got := e.backend.called("SendKeys"); !slices.Equal(got, []string{tc.want}) {
+				t.Fatalf("send keys = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFrameCoordinatorFieldsMatchWithoutRegardToLetterCase(t *testing.T) {
 	t.Run("Keys on send_keys", func(t *testing.T) {
 		e := newFrameEnv(t)

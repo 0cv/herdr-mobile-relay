@@ -373,10 +373,7 @@ func newPiFrameEnv(t *testing.T) *frameEnv {
 func (e *frameEnv) piPromptFrame(t *testing.T, fields map[string]any) map[string]any {
 	t.Helper()
 	frame := frameWithDefaults(fields)
-	inbound, err := protocol.DecodeMap(frame)
-	if err != nil {
-		t.Fatal(err)
-	}
+	inbound := inboundFromMap(t, frame)
 	e.recordAttempt(inbound)
 	result := e.server.handlePiPrompt(t.Context(), e.client, inbound, func() {})
 	e.server.hub.Send(e.client, coordinator.CommandResultMessage(result))
@@ -389,10 +386,7 @@ func (e *frameEnv) piIntegrationFrame(t *testing.T, fields map[string]any) map[s
 	for key, value := range fields {
 		frame[key] = value
 	}
-	inbound, err := protocol.DecodeMap(frame)
-	if err != nil {
-		t.Fatal(err)
-	}
+	inbound := inboundFromMap(t, frame)
 	e.recordAttempt(inbound)
 	e.server.handlePiIntegration(t.Context(), e.client, inbound)
 	return readFrame(t, e.conn)
@@ -445,6 +439,7 @@ func TestFramePiPromptAcceptsOnlyPromptKeys(t *testing.T) {
 	for _, extra := range []map[string]any{
 		{"keys": []string{"Enter"}}, {"prompt": "x"}, {"secret": true}, {"attachments": []string{"x"}}, {"label": "x"}, {"workspace_id": "w"},
 		{"no_echo": true}, {"images": []string{"x"}}, {"action": "send_keys"},
+		{"_server_sequence": 1}, {"_server_received_at": "2026-01-02T03:04:05Z"},
 	} {
 		for _, base := range []map[string]any{
 			{"type": "get_pi_prompt_capability", "target": target},
@@ -486,6 +481,7 @@ func TestFramePiIntegrationAcceptsOnlyItsKeys(t *testing.T) {
 	for _, extra := range []map[string]any{
 		{"path": "/tmp/pi"}, {"profiles": []string{"x"}}, {"target": map[string]any{"pane_id": "pane-1"}},
 		{"pane_id": "pane-1"}, {"server_session_id": protocol.PrimaryServerSessionID}, {"text": "remote"}, {"action": "set_pi_integration"},
+		{"_server_sequence": 1}, {"_server_received_at": "2026-01-02T03:04:05Z"},
 	} {
 		expectCommandResult(t, set(extra), "set_pi_integration", false, "failed", mismatch)
 	}

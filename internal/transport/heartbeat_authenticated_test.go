@@ -11,6 +11,7 @@ import (
 	"testing/synctest"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestAuthenticatedHeartbeatWhileHandlersSaturated(t *testing.T) {
@@ -48,19 +49,19 @@ func TestAuthenticatedHeartbeatWhileHandlersSaturated(t *testing.T) {
 					hub.SetOnConnect(func(client *ClientConn) { registered <- client })
 					started := make(chan struct{}, handlerCapacity)
 					handled := make(chan string, 8)
-					hub.SetHandler(func(client *ClientConn, message map[string]any, admitted func()) {
+					hub.SetHandler(func(client *ClientConn, message protocol.Inbound, admitted func()) {
 						identity, authenticated := client.Identity()
 						if !authenticated || identity.Role != "controller" || identity.DeviceID != "device-test" {
 							t.Error("application handler did not retain the authenticated controller identity")
 						}
 						defer admitted()
-						if message["type"] == "get_conversation_history" {
+						if message.Type == "get_conversation_history" {
 							admitted()
 							started <- struct{}{}
 							<-release
 							return
 						}
-						handled <- message["type"].(string)
+						handled <- message.Type
 					})
 					done := make(chan struct{})
 					go func() { hub.Serve(t.Context(), conn); close(done) }()

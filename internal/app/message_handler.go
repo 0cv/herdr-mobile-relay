@@ -14,11 +14,10 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
-func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn, msg map[string]any, admitted func()) {
+func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound, admitted func()) {
 	defer admitted()
-	inbound, err := protocol.DecodeMap(msg)
-	if err != nil {
-		s.rejectMessage(client, admitted, protocol.DecodeFailureResponse(msg))
+	if inbound.Invalid {
+		s.rejectMessage(client, admitted, protocol.DecodeFailureResponse(inbound.RequestID))
 		return
 	}
 	scope, knownAction := protocol.ScopeFor(inbound)

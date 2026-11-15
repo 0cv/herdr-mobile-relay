@@ -1,78 +1,102 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestDecodeCanonicalOperation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		raw     map[string]any
+		frame   string
 		want    string
 		invalid bool
 	}{
-		{"type only", map[string]any{"type": "send_secret"}, "send_secret", false},
-		{"type determines action", map[string]any{"type": "send_secret", "action": "refresh_agents"}, "send_secret", false},
-		{"action only", map[string]any{"action": "send_secret"}, "", true},
-		{"command envelope", map[string]any{"type": "command", "action": "send_secret"}, "command", false},
-		{"missing", map[string]any{}, "", true},
-		{"unknown", map[string]any{"type": "unknown"}, "unknown", false},
-		{"nonstring type", map[string]any{"type": 1, "action": "send_secret"}, "", true},
-		{"nonstring action ignored", map[string]any{"type": "send_secret", "action": 1}, "send_secret", false},
+		{"type only", `{"type":"send_secret"}`, "send_secret", false},
+		{"type determines action", `{"type":"send_secret","action":"refresh_agents"}`, "send_secret", false},
+		{"action only", `{"action":"send_secret"}`, "", true},
+		{"command envelope", `{"type":"command","action":"send_secret"}`, "command", false},
+		{"missing", `{}`, "", true},
+		{"unknown", `{"type":"unknown"}`, "unknown", false},
+		{"nonstring type", `{"type":1,"action":"send_secret"}`, "", true},
+		{"nonstring action ignored", `{"type":"send_secret","action":1}`, "send_secret", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := DecodeMap(tc.raw)
-			if (err != nil) != tc.invalid || got.Type != tc.want {
-				t.Fatalf("DecodeMap = %q, %v; want %q, invalid=%v", got.Type, err, tc.want, tc.invalid)
+			got, err := DecodeFrame([]byte(tc.frame))
+			if err != nil || got.Invalid != tc.invalid || got.Type != tc.want {
+				t.Fatalf("DecodeFrame = %q, invalid=%v, %v; want %q, invalid=%v", got.Type, got.Invalid, err, tc.want, tc.invalid)
 			}
 		})
 	}
 }
 
-func TestDecodeMapFillsServerFields(t *testing.T) {
-	receivedAt := time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC)
-	got, err := DecodeMap(map[string]any{
-		"type":                "agent_stop",
-		"_server_sequence":    uint64(7),
-		"_server_received_at": receivedAt.Format(time.RFC3339Nano),
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestDecodeFrameRefusesMalformedFrames(t *testing.T) {
+	for name, frame := range map[string]string{
+		"invalid UTF-8":  "{\"type\":\"agent_stop\",\"text\":\"\xff\"}",
+		"malformed JSON": `{"type":`,
+		"truncated":      `{"type":"agent_stop"`,
+		"null":           `null`,
+		"array":          `[{"type":"agent_stop"}]`,
+		"string":         `"agent_stop"`,
+		"empty":          ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeFrame([]byte(frame)); err == nil {
+				t.Fatalf("DecodeFrame(%q) succeeded", frame)
+			}
+		})
 	}
-	if got.ReceiptSequence != 7 || !got.ReceivedAt.Equal(receivedAt) {
-		t.Fatalf("receipt = %d at %s; want 7 at %s", got.ReceiptSequence, got.ReceivedAt, receivedAt)
+}
+
+func TestDecodeFrameKeepsRequestIDOfInvalidFrames(t *testing.T) {
+	for name, tc := range map[string]struct {
+		frame     string
+		requestID string
+	}{
+		"wrong typed field":      {`{"type":"read_pane","request_id":"r1","lines":"many"}`, "r1"},
+		"missing type":           {`{"request_id":"r2"}`, "r2"},
+		"wrong typed request id": {`{"type":"read_pane","request_id":7,"lines":1}`, ""},
+		"fractional number":      {`{"type":"read_pane","request_id":"r3","lines":30.0}`, "r3"},
+		"exponent number":        {`{"type":"tab_reorder","request_id":"r4","insert_index":1e1}`, "r4"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := DecodeFrame([]byte(tc.frame))
+			if err != nil || !got.Invalid || got.RequestID != tc.requestID {
+				t.Fatalf("DecodeFrame = %+v, %v; want invalid with request id %q", got, err, tc.requestID)
+			}
+		})
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(got.Raw, &raw); err != nil || raw["type"] != "agent_stop" || raw["_server_sequence"] != float64(7) {
-		t.Fatalf("raw = %s, %v", got.Raw, err)
+}
+
+func TestDecodeFrameKeepsTheFrame(t *testing.T) {
+	frame := []byte(` {"type":"agent_stop","request_id":"r1"} `)
+	got, err := DecodeFrame(frame)
+	if err != nil || got.Invalid || string(got.Raw) != string(frame) {
+		t.Fatalf("DecodeFrame = %+v, %v", got, err)
+	}
+}
+
+func TestDecodeFrameTakesTheLastOfTwoMatchingKeys(t *testing.T) {
+	got, err := DecodeFrame([]byte(`{"type":"send_keys","keys":["a"],"Keys":["b"]}`))
+	if err != nil || len(got.Keys) != 1 || got.Keys[0] != "b" {
+		t.Fatalf("keys = %v, %v; want [b]", got.Keys, err)
 	}
 }
 
 func TestClientCannotSetServerFields(t *testing.T) {
-	frame := `{"type":"agent_stop","ReceiptSequence":9,"receipt_sequence":9,"ReceivedAt":"2026-01-02T03:04:05Z","received_at":"2026-01-02T03:04:05Z","Raw":"x","raw":"x"}`
-	var decoded Inbound
-	if err := json.Unmarshal([]byte(frame), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.ReceiptSequence != 0 || !decoded.ReceivedAt.IsZero() || decoded.Raw != nil {
-		t.Fatalf("decoded = %+v; want no server fields", decoded)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(frame), &raw); err != nil {
-		t.Fatal(err)
-	}
-	got, err := DecodeMap(raw)
+	frame := `{"type":"agent_stop","_server_sequence":9,"_server_received_at":"2026-01-02T03:04:05Z","ReceiptSequence":9,"receipt_sequence":9,"ReceivedAt":"2026-01-02T03:04:05Z","received_at":"2026-01-02T03:04:05Z","Raw":"x","raw":"x","Invalid":true,"invalid":true}`
+	got, err := DecodeFrame([]byte(frame))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ReceiptSequence != 0 || !got.ReceivedAt.IsZero() {
-		t.Fatalf("decoded map = %+v; want no receipt", got)
+	if got.ReceiptSequence != 0 || !got.ReceivedAt.IsZero() || got.Invalid || string(got.Raw) != frame {
+		t.Fatalf("decoded = %+v; want no server fields", got)
 	}
 }
 
@@ -105,21 +129,35 @@ func TestEveryInboundFixtureDecodesAsV3Action(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(entries) != len(inboundFixtureFields) {
+		t.Fatalf("%d inbound fixtures, %d expectations", len(entries), len(inboundFixtureFields))
+	}
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
+		want, expected := inboundFixtureFields[entry.Name()]
+		if !expected {
+			t.Fatalf("%s: no expected fields", entry.Name())
 		}
 		data, err := os.ReadFile(filepath.Join(root, entry.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		var raw map[string]any
-		if err := json.Unmarshal(data, &raw); err != nil {
-			t.Fatalf("%s: %v", entry.Name(), err)
+		message, err := DecodeFrame(data)
+		if err != nil || message.Invalid {
+			t.Fatalf("%s: %+v, %v", entry.Name(), message, err)
 		}
-		message, err := DecodeMap(raw)
-		if err != nil {
-			t.Fatalf("%s: %v", entry.Name(), err)
+		if string(message.Raw) != string(data) {
+			t.Fatalf("%s: raw frame was not kept", entry.Name())
+		}
+		message.Raw = nil
+		if message.Subscription != nil {
+			var compact bytes.Buffer
+			if err := json.Compact(&compact, message.Subscription); err != nil {
+				t.Fatalf("%s: %v", entry.Name(), err)
+			}
+			message.Subscription = compact.Bytes()
+		}
+		if !reflect.DeepEqual(message, want) {
+			t.Fatalf("%s: decoded %+v, want %+v", entry.Name(), message, want)
 		}
 		if _, known := ClassifyAction(message.Type); !known {
 			t.Fatalf("%s: action %q is not classified", entry.Name(), message.Type)
@@ -130,12 +168,100 @@ func TestEveryInboundFixtureDecodesAsV3Action(t *testing.T) {
 	}
 }
 
+func intPointer(value int) *int { return &value }
+
+var uploadTarget = &TargetRef{ServerSessionID: "primary", PaneID: "pane-1", TerminalID: "terminal-1", Generation: 1}
+
+var inboundFixtureFields = map[string]Inbound{
+	"acknowledge_pane.json": {Type: "acknowledge_pane", RequestID: "req-006", Protocol: 3, PaneID: "pane-1"},
+	"agent_clear.json":      {Type: "agent_clear", RequestID: "req-005", Protocol: 3, PaneID: "pane-1"},
+	"agent_rename.json":     {Type: "agent_rename", RequestID: "req-rename", Protocol: 3, PaneID: "pane-1", Name: "123"},
+	"agent_start.json": {
+		Type: "agent_start", RequestID: "req-004", Protocol: 3, ProfileID: "claude", Name: "fix-bug",
+		Cwd: "/home/user/project", WorkspaceID: "w1", Prompt: "Fix the failing test",
+	},
+	"agent_stop.json": {Type: "agent_stop", RequestID: "req-stop", Protocol: 3, PaneID: "pane-1"},
+	"answer_question.json": {
+		Type: "answer_question", RequestID: "req-question-answer", Protocol: 3, PaneID: "pane-1",
+		InteractionID: "interaction-1", SelectedIndices: []int{0},
+	},
+	"approval.json": {
+		Type: "respond", RequestID: "req-003", Protocol: 3, PaneID: "pane-1", EventID: "evt-abc123",
+		ApprovalFingerprint: "5105fbe5b6e54a57b38dbf8bd73848409bbcfacbb4c055879bdb8e30c7cc46f8",
+		Choice:              "Approve once", Index: intPointer(0), Total: intPointer(2),
+	},
+	"cancel_speech.json": {
+		Type: "cancel_speech", Protocol: 3, PaneID: "pane-1", SpeechRequestID: "speech-1",
+		Target: &TargetRef{ServerSessionID: "primary", PaneID: "pane-1", TerminalID: "terminal-1", Generation: 4, AgentSessionID: "agent-session-1"},
+	},
+	"check_update.json": {Type: "check_update", RequestID: "req-check-update"},
+	"clarify_question.json": {
+		Type: "clarify_question", RequestID: "req-question-chat", Protocol: 3, PaneID: "pane-1", InteractionID: "interaction-3",
+	},
+	"clear_activities.json": {Type: "clear_activities", RequestID: "req-clear-activities", Protocol: 3},
+	"deploy_app_update.json": {
+		Type: "deploy_app_update", RequestID: "req-deploy", Protocol: 3, ExpectedVersion: "0.9.0",
+		ExpectedRevision: "0123456789abcdef0123456789abcdef01234567", ExpectedOrigin: "https://app.example.test",
+	},
+	"get_activity.json": {Type: "get_activity", Limit: 500},
+	"install_update.json": {
+		Type: "install_update", RequestID: "req-install-update", ExpectedVersion: "0.9.0",
+		ExpectedRevision: "0123456789abcdef0123456789abcdef01234567", ExpectedOrigin: "https://app.example.test",
+	},
+	"keys.json":             {Type: "send_keys", RequestID: "req-002", Protocol: 3, PaneID: "pane-1", Keys: []string{"Enter"}},
+	"lease_pane_size.json":  {Type: "lease_pane_size", RequestID: "req-lease-size", Protocol: 3, PaneID: "pane-1", Columns: 84, Rows: 48, OptIn: true},
+	"list_directories.json": {Type: "list_directories", RequestID: "req-directories", Path: "/home/user/project"},
+	"list_slash_commands.json": {
+		Type: "list_slash_commands", RequestID: "req-commands", PaneID: "pane-1",
+	},
+	"navigate_question.json": {
+		Type: "navigate_question", RequestID: "req-question-navigate", Protocol: 3, PaneID: "pane-1",
+		InteractionID: "interaction-2", Direction: "previous",
+	},
+	"prompt.json": {Type: "submit_prompt", RequestID: "req-001", Protocol: 3, PaneID: "pane-1", Text: "Hello, fix the bug in main.go"},
+	"push_subscribe.json": {
+		Type: "push_subscribe", Protocol: 3, ClientID: "device-1:relay-1", ReplaceEndpoints: []string{},
+		Subscription: json.RawMessage(`{"endpoint":"https://push.example.test/subscription","keys":{"p256dh":"test-p256dh","auth":"test-auth"}}`),
+	},
+	"push_unsubscribe.json": {
+		Type: "push_unsubscribe", Protocol: 3, ClientID: "device-1:relay-1", Endpoints: []string{"https://push.example.test/subscription"},
+	},
+	"read_pane.json":           {Type: "read_pane", RequestID: "req-read", PaneID: "pane-1", Lines: intPointer(80), Format: "ansi"},
+	"refresh_agents.json":      {Type: "refresh_agents"},
+	"register_app_origin.json": {Type: "register_app_origin", Protocol: 3, Origin: "https://app.example.test"},
+	"release_pane_size.json":   {Type: "release_pane_size", RequestID: "req-release-size", Protocol: 3, PaneID: "pane-1"},
+	"send_secret.json":         {Type: "send_secret", RequestID: "req-secret", Protocol: 3, PaneID: "pane-1", Text: "correct horse"},
+	"send_terminal_text.json": {
+		Type: "send_terminal_text", RequestID: "req-terminal-text", Protocol: 3, PaneID: "pane-1",
+		Target: &TargetRef{ServerSessionID: "primary", PaneID: "pane-1", TerminalID: "terminal-1", Generation: 1, AgentSessionID: " opaque/session 界 "},
+		Text:   "  /arbitrary 界😀  ",
+	},
+	"tab_reorder.json":   {Type: "tab_reorder", RequestID: "req-tab-reorder", Protocol: 3, PaneID: "pane-1", InsertIndex: intPointer(2)},
+	"upload_begin.json":  {Type: "upload_begin", RequestID: "req-upload-begin", Protocol: 3, Target: uploadTarget},
+	"upload_cancel.json": {Type: "upload_cancel", RequestID: "req-upload-cancel", Protocol: 3, Target: uploadTarget},
+	"upload_chunk.json": {
+		Type: "upload_chunk", RequestID: "req-upload-chunk", Protocol: 3, Target: uploadTarget, Data: "iVBORw0KGgo=",
+	},
+	"upload_finish.json":    {Type: "upload_finish", RequestID: "req-upload-finish", Protocol: 3, Target: uploadTarget},
+	"workspace_close.json":  {Type: "workspace_close", RequestID: "req-workspace-close", Protocol: 3, WorkspaceID: "w1"},
+	"workspace_create.json": {Type: "workspace_create", RequestID: "req-workspace-create", Protocol: 3, Cwd: "/home/user/project", Label: "Project"},
+	"workspace_rename.json": {Type: "workspace_rename", RequestID: "req-workspace-rename", Protocol: 3, WorkspaceID: "w1", Label: "Renamed Project"},
+	"workspace_reorder.json": {
+		Type: "workspace_reorder", RequestID: "req-workspace-reorder", Protocol: 3, WorkspaceIDs: []string{"w1", "w2"}, BeforeWorkspaceID: "w5",
+	},
+	"worktree_create.json": {
+		Type: "worktree_create", RequestID: "req-worktree-create", Protocol: 3, WorkspaceID: "w1", Branch: "fix/issue-14", Base: "main", Label: "Issue 14",
+	},
+	"worktree_list.json": {Type: "worktree_list", RequestID: "req-worktree-list", Protocol: 3, WorkspaceID: "w1"},
+	"worktree_open.json": {
+		Type: "worktree_open", RequestID: "req-worktree-open", Protocol: 3, WorkspaceID: "w1",
+		Path: "/home/user/worktrees/project/issue-14", Label: "Issue 14",
+	},
+	"worktree_remove.json": {Type: "worktree_remove", RequestID: "req-worktree-remove", Protocol: 3, WorkspaceID: "w2"},
+}
+
 func TestUnversionedActionCannotBypassProtocolGate(t *testing.T) {
-	message, err := DecodeMap(map[string]any{
-		"type":       "agent_stop",
-		"request_id": "unversioned",
-		"pane_id":    "pane-1",
-	})
+	message, err := DecodeFrame([]byte(`{"type":"agent_stop","request_id":"unversioned","pane_id":"pane-1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +276,7 @@ func TestUnversionedActionCannotBypassProtocolGate(t *testing.T) {
 }
 
 func TestInstallUpdateRemainsBootstrapCompatible(t *testing.T) {
-	message, err := DecodeMap(map[string]any{"type": "install_update"})
+	message, err := DecodeFrame([]byte(`{"type":"install_update"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,9 +320,7 @@ func TestPushConfigFixtureHasRequiredCutoverFields(t *testing.T) {
 }
 
 func TestDecodeFailureUsesStableError(t *testing.T) {
-	response := DecodeFailureResponse(map[string]any{
-		"type": "agent_start", "request_id": "r1",
-	})
+	response := DecodeFailureResponse("r1")
 	apiError, ok := response["error"].(ApiError)
 	if response["type"] != "error" || response["request_id"] != "r1" || !ok ||
 		apiError.Code != "invalid_request" {
@@ -265,7 +389,11 @@ func TestInboundDecodesCompositeScope(t *testing.T) {
 			"generation":        2,
 		},
 	}
-	inbound, err := DecodeMap(raw)
+	frame, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound, err := DecodeFrame(frame)
 	if err != nil {
 		t.Fatal(err)
 	}

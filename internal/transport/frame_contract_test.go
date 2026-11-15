@@ -11,6 +11,7 @@ import (
 	"testing/synctest"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 type frameFixture struct {
@@ -18,7 +19,7 @@ type frameFixture struct {
 	conn     *pipeConn
 	peer     *e2eeSession
 	outbound chan []byte
-	handled  chan map[string]any
+	handled  chan protocol.Inbound
 	readDone chan struct{}
 }
 
@@ -32,7 +33,7 @@ func newFrameFixture(t *testing.T, secure, hold bool) *frameFixture {
 	hub := NewHub(&config.Config{}, logger)
 	t.Cleanup(hub.CloseAll)
 	f := &frameFixture{
-		hub: hub, outbound: make(chan []byte, 256), handled: make(chan map[string]any, 256),
+		hub: hub, outbound: make(chan []byte, 256), handled: make(chan protocol.Inbound, 256),
 		readDone: make(chan struct{}),
 	}
 	var serverSession *e2eeSession
@@ -55,7 +56,7 @@ func newFrameFixture(t *testing.T, secure, hold bool) *frameFixture {
 	t.Cleanup(cancel)
 	client := &ClientConn{id: "synthetic", conn: f.conn, secure: serverSession, ctx: ctx, cancel: cancel,
 		logger: logger, done: make(chan struct{}), buf: newSendBuffer(clientOutboundMaxItems, clientOutboundMaxBytes)}
-	hub.SetHandler(func(client *ClientConn, message map[string]any, admitted func()) {
+	hub.SetHandler(func(client *ClientConn, message protocol.Inbound, admitted func()) {
 		f.handled <- message
 		if hold {
 			<-client.ctx.Done()
@@ -142,7 +143,7 @@ func TestFrameContractRefusesFramesThatAreNotJSONObjects(t *testing.T) {
 					t.Fatal("a plain connection was closed by a refused frame")
 				}
 				f.deliver(t, []byte(`{"type":"refresh_agents","request_id":"after"}`))
-				if len(f.handled) != 1 || (<-f.handled)["request_id"] != "after" {
+				if len(f.handled) != 1 || (<-f.handled).RequestID != "after" {
 					t.Fatal("the connection no longer delivers frames after a refused one")
 				}
 			})

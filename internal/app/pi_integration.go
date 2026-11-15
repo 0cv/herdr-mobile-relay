@@ -28,8 +28,8 @@ func (s *Server) refreshPiIntegration() {
 }
 
 var (
-	piPromptKeys      = []string{"type", "protocol", "request_id", "target", "pane_id", "server_session_id", "client_id", "text", "pi_prompt_lease", "_server_received_at", "_server_sequence"}
-	piIntegrationKeys = []string{"type", "protocol", "request_id", "client_id", "instance", "enabled", "_server_received_at", "_server_sequence"}
+	piPromptKeys      = []string{"type", "protocol", "request_id", "target", "pane_id", "server_session_id", "client_id", "text", "pi_prompt_lease"}
+	piIntegrationKeys = []string{"type", "protocol", "request_id", "client_id", "instance", "enabled"}
 )
 
 func piFrameKeysAllowed(inbound protocol.Inbound) bool {

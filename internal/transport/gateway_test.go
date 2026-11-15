@@ -23,6 +23,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/framing"
 	"github.com/0cv/herdr-mobile-relay/internal/gatewaywire"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const gatewayTestRelayKey = "0123456789abcdef0123456789abcdef"
@@ -240,7 +241,7 @@ type gatewayHarness struct {
 	relayID       string
 	rendezvousKey []byte
 	connected     chan *ClientConn
-	received      chan map[string]any
+	received      chan protocol.Inbound
 }
 
 func newGatewayHarness(t *testing.T, maxClients int) *gatewayHarness {
@@ -266,10 +267,10 @@ func newGatewayHarnessWithBackoff(t *testing.T, maxClients int, backoffBase time
 		relayID:       relayID,
 		rendezvousKey: rendezvousKey,
 		connected:     make(chan *ClientConn, 4),
-		received:      make(chan map[string]any, 4),
+		received:      make(chan protocol.Inbound, 4),
 	}
 	hub.SetOnConnect(func(client *ClientConn) { harness.connected <- client })
-	hub.SetHandler(func(_ *ClientConn, message map[string]any, admitted func()) {
+	hub.SetHandler(func(_ *ClientConn, message protocol.Inbound, admitted func()) {
 		admitted()
 		harness.received <- message
 	})
@@ -524,8 +525,8 @@ func TestGatewayClientServesAuthenticatedConnection(t *testing.T) {
 	phone.sendMessage(t, `{"type":"refresh_agents"}`)
 	select {
 	case message := <-harness.received:
-		if message["type"] != "refresh_agents" {
-			t.Fatalf("received type = %v, want refresh_agents", message["type"])
+		if message.Type != "refresh_agents" {
+			t.Fatalf("received type = %v, want refresh_agents", message.Type)
 		}
 	case <-time.After(gatewayTestTimeout):
 		t.Fatal("hub never received the phone message")
@@ -1161,10 +1162,16 @@ func TestGatewayFragmentsFramesAboveTheWireCap(t *testing.T) {
 	phone.sendMessage(t, string(message))
 	select {
 	case received := <-harness.received:
-		if received["type"] != "refresh_agents" {
-			t.Fatalf("received type = %v, want refresh_agents", received["type"])
+		if received.Type != "refresh_agents" {
+			t.Fatalf("received type = %v, want refresh_agents", received.Type)
 		}
-		padding, _ := received["padding"].(string)
+		var fields struct {
+			Padding string `json:"padding"`
+		}
+		if err := json.Unmarshal(received.Raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		padding := fields.Padding
 		if len(padding) != len(uploaded) || padding != uploaded {
 			t.Fatalf("uploaded padding of %d bytes did not survive reassembly, want %d bytes",
 				len(padding), len(uploaded))
@@ -1200,8 +1207,8 @@ func TestGatewayFramingViolationClosesOnlyThatConnection(t *testing.T) {
 	survivor.sendMessage(t, `{"type":"refresh_agents"}`)
 	select {
 	case received := <-harness.received:
-		if received["type"] != "refresh_agents" {
-			t.Fatalf("received type = %v, want refresh_agents", received["type"])
+		if received.Type != "refresh_agents" {
+			t.Fatalf("received type = %v, want refresh_agents", received.Type)
 		}
 	case <-time.After(gatewayTestTimeout):
 		t.Fatal("surviving connection stopped delivering to the hub")

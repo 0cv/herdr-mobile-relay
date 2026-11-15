@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -248,28 +250,28 @@ type Inbound struct {
 	ReceiptSequence      uint64          `json:"-"`
 	ReceivedAt           time.Time       `json:"-"`
 	Raw                  json.RawMessage `json:"-"`
+	Invalid              bool            `json:"-"`
 }
 
-func DecodeMap(raw map[string]any) (Inbound, error) {
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return Inbound{}, err
+func DecodeFrame(frame []byte) (Inbound, error) {
+	if !utf8.Valid(frame) {
+		return Inbound{}, errors.New("message is not valid UTF-8")
+	}
+	if trimmed := bytes.TrimLeft(frame, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+		return Inbound{}, errors.New("message must be a JSON object")
 	}
 	var message Inbound
-	if err := json.Unmarshal(data, &message); err != nil {
-		return Inbound{}, err
+	if err := json.Unmarshal(frame, &message); err != nil {
+		var syntaxErr *json.SyntaxError
+		if errors.As(err, &syntaxErr) {
+			return Inbound{}, err
+		}
+		message.Invalid = true
 	}
 	if message.Type == "" {
-		return Inbound{}, fmt.Errorf("message type is required")
+		message.Invalid = true
 	}
-	var server struct {
-		Sequence   uint64 `json:"_server_sequence"`
-		ReceivedAt string `json:"_server_received_at"`
-	}
-	_ = json.Unmarshal(data, &server)
-	message.ReceiptSequence = server.Sequence
-	message.ReceivedAt, _ = time.Parse(time.RFC3339Nano, server.ReceivedAt)
-	message.Raw = data
+	message.Raw = frame
 	return message, nil
 }
 
@@ -444,8 +446,7 @@ func IncompatibleResponse(message Inbound) map[string]any {
 	})
 }
 
-func DecodeFailureResponse(raw map[string]any) map[string]any {
-	requestID, _ := raw["request_id"].(string)
+func DecodeFailureResponse(requestID string) map[string]any {
 	return ErrorResponse(requestID, NewApiError(ErrorInvalidRequest, nil))
 }
 

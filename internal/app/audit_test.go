@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"slices"
@@ -79,6 +80,19 @@ func TestAuditAttemptKeepsAttributionWithoutPayloadContent(t *testing.T) {
 	}
 	if details["index"] != float64(2) || details["insert_index"] != float64(3) {
 		t.Fatalf("index = %#v, insert_index = %#v", details["index"], details["insert_index"])
+	}
+}
+
+func TestAuditDigestIsTheHashOfTheReceivedFrame(t *testing.T) {
+	e := newFrameEnv(t)
+	frame := []byte(`{ "request_id" : "digest-1", "type":"send_keys",  "protocol":3, "pane_id":"pane-1", "keys":["a"] }`)
+	sendRawFrame(t, e.conn, frame)
+	expectCommandResult(t, readFrame(t, e.conn), "send_keys", true, "completed", "")
+
+	details := e.auditAttempt(t, "send_keys").Details
+	sum := sha256.Sum256(frame)
+	if details["payload_sha256"] != hex.EncodeToString(sum[:]) || details["payload_bytes"] != float64(len(frame)) {
+		t.Fatalf("digest = %v over %v bytes, want %x over %d bytes", details["payload_sha256"], details["payload_bytes"], sum, len(frame))
 	}
 }
 

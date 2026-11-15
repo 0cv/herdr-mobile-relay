@@ -12,11 +12,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/coder/websocket"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const (
@@ -55,13 +55,13 @@ func (c *ClientConn) Context() context.Context { return c.ctx }
 // TransportGateway, or TransportWebRTC.
 func (c *ClientConn) Transport() string { return c.transport }
 
-type MessageHandler func(client *ClientConn, msg map[string]any, admitted func())
+type MessageHandler func(client *ClientConn, message protocol.Inbound, admitted func())
 type ConnectHandler func(client *ClientConn)
 type DisconnectHandler func(client *ClientConn)
 
 type inboundMessage struct {
 	client  *ClientConn
-	message map[string]any
+	message protocol.Inbound
 }
 
 type Metrics struct {
@@ -271,7 +271,7 @@ func (h *Hub) readPump(client *ClientConn) {
 				return
 			}
 		}
-		message, err := decodeWebSocketMessage(data)
+		message, err := protocol.DecodeFrame(data)
 		if err != nil {
 			if client.secure != nil {
 				client.logger.Debug("invalid encrypted message rejected")
@@ -279,44 +279,37 @@ func (h *Hub) readPump(client *ClientConn) {
 			}
 			continue
 		}
-		if len(message) == 1 && message["type"] == "ping" {
+		if message.Type == "ping" && isBarePing(data) {
 			h.Send(client, map[string]any{"type": "pong"})
 			continue
 		}
 		h.receiptMu.Lock()
-		message["_server_sequence"] = h.receiptSequence.Add(1)
-		message["_server_received_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		message.ReceiptSequence = h.receiptSequence.Add(1)
+		message.ReceivedAt = time.Now().UTC()
 		h.submitMessage(client, message)
 		h.receiptMu.Unlock()
 	}
 }
 
-func decodeWebSocketMessage(data []byte) (map[string]any, error) {
-	if !utf8.Valid(data) {
-		return nil, errors.New("message is not valid UTF-8")
+func isBarePing(frame []byte) bool {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(frame, &keys); err != nil || len(keys) != 1 {
+		return false
 	}
-	var message map[string]any
-	if err := json.Unmarshal(data, &message); err != nil {
-		return nil, err
-	}
-	if message == nil {
-		return nil, errors.New("message must be a JSON object")
-	}
-	return message, nil
+	value, ok := keys["type"]
+	return ok && string(value) == `"ping"`
 }
 
-func (h *Hub) submitMessage(client *ClientConn, message map[string]any) {
+func (h *Hub) submitMessage(client *ClientConn, message protocol.Inbound) {
 	select {
 	case h.orderedIngress <- inboundMessage{client: client, message: message}:
 		observeAtomicMax(&h.ingressHighWater, uint64(len(h.orderedIngress)))
 	default:
 		h.ingressRejected.Add(1)
-		requestID, _ := message["request_id"].(string)
-		action, _ := message["type"].(string)
 		h.Send(client, map[string]any{
 			"type":       "command_result",
-			"request_id": requestID,
-			"action":     action,
+			"request_id": message.RequestID,
+			"action":     message.Type,
 			"ok":         false,
 			"phase":      "not_started",
 			"error":      "Relay is busy; command was not sent",
