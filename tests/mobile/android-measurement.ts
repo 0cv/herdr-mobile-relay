@@ -1491,19 +1491,6 @@ async function runGmsDiagnosticPersistence(): Promise<void> {
   process.stdout.write(`${JSON.stringify({ byteLength: staged.byteLength, sha256: expectedSha256 })}\n`);
 }
 
-async function runAndroidTransportObservation(): Promise<void> {
-  const request = JSON.parse((await readBoundedStdin(ANDROID_LOG_LIMIT * 2 + 16_384)).toString('utf8')) as {
-    serial?: string; outputDir?: string; log?: string;
-  };
-  if (!request.serial || !request.outputDir || typeof request.log !== 'string' || Buffer.byteLength(request.log) > ANDROID_LOG_LIMIT) {
-    throw new Error('Android transport observation request is malformed');
-  }
-  const transport = new AndroidTransportObservation(request.serial, request.outputDir);
-  transport.observe(Buffer.from(request.log));
-  await transport.finish();
-  process.stdout.write(`${JSON.stringify({ failure: transport.failure })}\n`);
-}
-
 async function runAndroidTransportObservationTrigger(): Promise<void> {
   const request = JSON.parse((await readBoundedStdin(4_096)).toString('utf8')) as {
     serial?: string; outputDir?: string; guestEpochSeconds?: string; triggeredAt?: string; anchorGuestEpochSeconds?: string;
@@ -1549,7 +1536,6 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
     '--android-measurement-operations': runAndroidMeasurementOperations,
     '--android-measurement-persist-json': () => runAndroidMeasurementPersistence('json'),
     '--android-measurement-persist-text': () => runAndroidMeasurementPersistence('text'),
-    '--android-transport-observation': runAndroidTransportObservation,
     '--android-transport-observation-trigger': runAndroidTransportObservationTrigger,
     '--gms-diagnostic-ownership': () => runGmsDiagnosticOwnership(process.argv[3] || ''),
     '--gms-diagnostic-persist': runGmsDiagnosticPersistence,
