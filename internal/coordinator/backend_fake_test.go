@@ -200,6 +200,10 @@ func (b *fakeBackend) WorkspaceRename(ctx context.Context, workspaceID, label st
 	return b.invoke(ctx, "WorkspaceRename", workspaceID, label)
 }
 
+func (b *fakeBackend) WorkspaceMoveBlock(ctx context.Context, workspaceIDs []string, beforeWorkspaceID string) error {
+	return b.invoke(ctx, "WorkspaceMoveBlock", slices.Clone(workspaceIDs), beforeWorkspaceID)
+}
+
 func (b *fakeBackend) WorkspaceClose(ctx context.Context, workspaceID string, closeGroup bool) error {
 	return b.invoke(ctx, "WorkspaceClose", workspaceID, closeGroup)
 }

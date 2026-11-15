@@ -2,14 +2,10 @@ package coordinator
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
@@ -114,49 +110,16 @@ func TestTopologyPartialOutcomePrecedence(t *testing.T) {
 }
 
 func TestTopologyMoveBlockSocketRefusal(t *testing.T) {
-	socket := filepath.Join(testSocketDir(t), "sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	done := make(chan error, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			done <- err
-			return
-		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		var request struct {
-			ID     string `json:"id"`
-			Method string `json:"method"`
-			Params struct {
-				WorkspaceIDs []string `json:"workspace_ids"`
-				Before       string   `json:"before_workspace_id"`
-			} `json:"params"`
-		}
-		if err := json.NewDecoder(conn).Decode(&request); err != nil {
-			done <- err
-			return
-		}
-		if request.Method != "workspace.move_block" || !reflect.DeepEqual(request.Params.WorkspaceIDs, []string{"w1"}) || request.Params.Before != "w2" {
-			done <- fmt.Errorf("unexpected request: %+v", request)
-			return
-		}
-		done <- json.NewEncoder(conn).Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": "workspace_move_block_failed", "message": " selection changed "}})
-	}()
-	client := herdr.NewClient("/binary/must-not-run", socket)
-	t.Cleanup(func() { _ = client.Close() })
-	d := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	client := newFakeBackend()
+	client.setHook("WorkspaceMoveBlock", func(context.Context, fakeCall) error {
+		return &herdr.CLIError{Code: "workspace_move_block_failed", Message: " selection changed "}
+	})
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 	d.state.CommitWorkspaces([]herdr.Workspace{{ID: "w1"}, {ID: "w2"}})
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	got := d.HandleWorkspaceReorderBlock(ctx, "move-1", []string{"w1"}, "w2")
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	got := d.HandleWorkspaceReorderBlock(t.Context(), "move-1", []string{"w1"}, "w2")
+	want := []fakeCall{{Method: "WorkspaceMoveBlock", Args: []any{[]string{"w1"}, "w2"}}}
+	if calls := client.recorded(); !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %+v, want %+v", calls, want)
 	}
 	if got.OK || got.Phase != "not_started" || got.Error != "selection changed" || !reflect.DeepEqual(got.Data, map[string]any{"code": "workspace_move_block_failed"}) {
 		t.Fatalf("result = %+v", got)

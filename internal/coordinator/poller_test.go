@@ -1,12 +1,8 @@
 package coordinator
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -117,7 +113,7 @@ func TestAgentsFromTopologyPreservesForegroundCwd(t *testing.T) {
 func TestPollerEventCommitPublishesRecoveryAfterPausedEnrichment(t *testing.T) {
 	state := testState()
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
-	socket := startPollerTestSocket(t, func(string) (any, string) {
+	socket := startSocketFixture(t, func(string) (any, string) {
 		return map[string]any{"type": "agent_list", "agents": []herdr.Pane{{ID: "pane-1", Agent: "codex", Status: "idle"}}}, ""
 	})
 	client := herdr.NewClient("unused", socket)
@@ -251,75 +247,44 @@ func TestHydrateWorkspaceCwdsKeepsShellOnlyWorkspaceLaunchable(t *testing.T) {
 }
 
 func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
-	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	serverDone := make(chan error, 1)
-	go func() {
-		defer listener.Close()
-		subscriptions := 0
-		snapshots := 0
-		for range 7 {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				serverDone <- acceptErr
-				return
+	subscriptions := 0
+	snapshots := 0
+	var requests socketRequestLog
+	socketPath := startSocketFixture(t, func(method string) (any, string) {
+		switch method {
+		case "events.subscribe":
+			subscriptions++
+			return map[string]any{"type": "subscription_started"}, ""
+		case "agent.list":
+			return pollerSuccessResult(method), ""
+		case "session.snapshot":
+			snapshots++
+			workspaces := []any{
+				map[string]any{"workspace_id": "w1", "label": "Project"},
 			}
-			func() {
-				defer conn.Close()
-				var request struct {
-					ID     string `json:"id"`
-					Method string `json:"method"`
-				}
-				if decodeErr := json.NewDecoder(bufio.NewReader(conn)).Decode(&request); decodeErr != nil {
-					serverDone <- decodeErr
-					return
-				}
-				switch request.Method {
-				case "events.subscribe":
-					subscriptions++
-					_ = json.NewEncoder(conn).Encode(map[string]any{
-						"id": request.ID, "result": map[string]any{"type": "subscription_started"},
-					})
-					if subscriptions == 1 {
-						_ = json.NewEncoder(conn).Encode(map[string]any{
-							"event": "workspace.created",
-							"data": map[string]any{
-								"workspace": map[string]any{"workspace_id": "w2", "label": "Buffered"},
-							},
-						})
-					}
-				case "agent.list":
-					_ = json.NewEncoder(conn).Encode(map[string]any{
-						"id": request.ID, "result": pollerSuccessResult(request.Method),
-					})
-				case "session.snapshot":
-					snapshots++
-					workspaces := []any{
-						map[string]any{"workspace_id": "w1", "label": "Project"},
-					}
-					if snapshots == 2 {
-						workspaces = append(workspaces,
-							map[string]any{"workspace_id": "w3", "label": "Created Offline"},
-						)
-					}
-					_ = json.NewEncoder(conn).Encode(map[string]any{
-						"id": request.ID,
-						"result": map[string]any{
-							"type":     "session_snapshot",
-							"snapshot": map[string]any{"workspaces": workspaces},
-						},
-					})
-				default:
-					serverDone <- fmt.Errorf("unexpected event method %q", request.Method)
-				}
-			}()
+			if snapshots == 2 {
+				workspaces = append(workspaces,
+					map[string]any{"workspace_id": "w3", "label": "Created Offline"},
+				)
+			}
+			return map[string]any{
+				"type":     "session_snapshot",
+				"snapshot": map[string]any{"workspaces": workspaces},
+			}, ""
+		default:
+			return nil, "unexpected_method"
 		}
-		serverDone <- nil
-	}()
+	}, withRequestLog(&requests), withExtraLines(func(method string) []any {
+		if method != "events.subscribe" || subscriptions != 1 {
+			return nil
+		}
+		return []any{map[string]any{
+			"event": "workspace.created",
+			"data": map[string]any{
+				"workspace": map[string]any{"workspace_id": "w2", "label": "Buffered"},
+			},
+		}}
+	}))
 
 	state := testState()
 	client := herdr.NewClient("missing-herdr", socketPath)
@@ -363,7 +328,7 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 	if reconnects != 2 {
 		t.Fatalf("reconnect waits = %d, want 2", reconnects)
 	}
-	if err := <-serverDone; err != nil {
-		t.Fatal(err)
+	if got := requests.recorded(); len(got) != 7 {
+		t.Fatalf("requests = %v, want 7", got)
 	}
 }
