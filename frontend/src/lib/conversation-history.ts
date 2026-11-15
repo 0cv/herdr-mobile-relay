@@ -468,7 +468,7 @@ export class ConversationHistoryController {
         this.readyPages++;
         this.emit();
         if (requestedCursor && page.nextCursor === requestedCursor && !this.rawProgressThisPage) {
-          this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
+          this.pauseOnRepeatedCursor();
           return;
         }
         if (!this.bridgeActive) {
@@ -481,7 +481,7 @@ export class ConversationHistoryController {
           return;
         }
         if (this.seenReadyCursors.has(continuationCursor)) {
-          this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
+          this.pauseOnRepeatedCursor();
           return;
         }
         this.seenReadyCursors.add(continuationCursor);
@@ -534,14 +534,23 @@ export class ConversationHistoryController {
     };
   }
 
-  private restoreOlderContinuation(value: OlderContinuation, restoreNetworkSnapshot = true, restorePlan = true, restoreDiagnostics = true): void {
+  private restoreOlderCursor(value: OlderContinuation): void {
     this.stateValue.nextCursor = value.nextCursor;
     this.stateValue.hasMore = value.hasMore;
     this.stateValue.snapshotId = value.snapshotId;
     this.stateValue.beginningReached = value.beginningReached;
-    if (restorePlan) this.stateValue.omoPlan = value.omoPlan;
-    if (restoreDiagnostics) this.stateValue.diagnostics = value.diagnostics;
-    if (restoreNetworkSnapshot) this.networkSnapshotId = value.snapshotId;
+  }
+
+  private restoreOlderContinuation(value: OlderContinuation): void {
+    this.restoreOlderCursor(value);
+    this.stateValue.omoPlan = value.omoPlan;
+    this.stateValue.diagnostics = value.diagnostics;
+    this.networkSnapshotId = value.snapshotId;
+  }
+
+  private keepCursor(requestedCursor: string, page?: ConversationPage): void {
+    this.stateValue.nextCursor = page?.nextCursor || requestedCursor || this.stateValue.nextCursor;
+    this.stateValue.hasMore = Boolean(this.stateValue.nextCursor || page?.hasMore);
   }
 
   private acceptPage(page: ConversationPage, demand: Demand, requestedCursor: string): { accepted: boolean } {
@@ -572,9 +581,6 @@ export class ConversationHistoryController {
     }
     if (page.mode === 'snapshot' && !page.snapshotId) {
       return this.rejectPage('invalid_page', 'Conversation history returned an incomplete snapshot identity.', false, requestedCursor);
-    }
-    if (!isFreshHead && demand === 'refresh' && previousSource && page.sourceRevision && previousSource !== page.sourceRevision) {
-      return this.rejectPage('source_changed', 'The conversation source changed while history was being refreshed.', false, requestedCursor);
     }
     if (page.sourceRevision === this.liveSourceRevision && page.sequence !== undefined && page.sequence < this.liveSequence) {
       const currentEntries = new Map(this.rawEntries.map(entry => [entry.id, entry]));
@@ -615,10 +621,7 @@ export class ConversationHistoryController {
       };
       this.stateValue.requestPhase = 'idle';
       if (olderContinuationBefore) this.restoreOlderContinuation(olderContinuationBefore);
-      else if (!this.restoreBridgeAfterFailure()) {
-        this.stateValue.nextCursor = page.nextCursor || requestedCursor || this.stateValue.nextCursor;
-        this.stateValue.hasMore = Boolean(this.stateValue.nextCursor) || page.hasMore;
-      }
+      else if (!this.restoreBridgeAfterFailure()) this.keepCursor(requestedCursor, page);
       this.stateValue.contextSearching = false;
       this.emit();
       return { accepted: false };
@@ -645,10 +648,7 @@ export class ConversationHistoryController {
         };
         this.stateValue.requestPhase = 'idle';
         this.stateValue.contextSearching = false;
-        if (!this.restoreBridgeAfterFailure()) {
-          this.stateValue.nextCursor = page.nextCursor || requestedCursor || this.stateValue.nextCursor;
-          this.stateValue.hasMore = Boolean(this.stateValue.nextCursor) || page.hasMore;
-        }
+        if (!this.restoreBridgeAfterFailure()) this.keepCursor(requestedCursor, page);
         this.emit();
         return { accepted: false };
       }
@@ -689,11 +689,10 @@ export class ConversationHistoryController {
     if (pageState === 'preparing') {
       // Preparation pages are status, not content. An empty preparation page
       // must not erase a warm preview or replace the fresh lane with nothing.
-      if (olderContinuationBefore) this.restoreOlderContinuation(olderContinuationBefore, false, true, false);
-      else {
-        this.stateValue.nextCursor = page.nextCursor || requestedCursor || this.stateValue.nextCursor;
-        this.stateValue.hasMore = Boolean(page.hasMore || this.stateValue.nextCursor);
-      }
+      if (olderContinuationBefore) {
+        this.restoreOlderCursor(olderContinuationBefore);
+        this.stateValue.omoPlan = olderContinuationBefore.omoPlan;
+      } else this.keepCursor(requestedCursor, page);
       this.stateValue.error = null;
       this.stateValue.available = true;
       this.stateValue.contextSearching = true;
@@ -719,8 +718,11 @@ export class ConversationHistoryController {
     if (preservedOlderLane && !replacedWindow) {
       // A fresh head may use a different cursor chain. Keep the accepted older
       // boundary visible and usable while that head is merged or bridged.
-      this.restoreOlderContinuation(preservedOlderLane, !this.bridgeActive, false, false);
-      if (!this.bridgeActive) this.bridgeRestore = null;
+      this.restoreOlderCursor(preservedOlderLane);
+      if (!this.bridgeActive) {
+        this.networkSnapshotId = preservedOlderLane.snapshotId;
+        this.bridgeRestore = null;
+      }
     } else {
       this.stateValue.nextCursor = page.nextCursor || '';
       this.stateValue.hasMore = Boolean(page.hasMore || this.stateValue.nextCursor);
@@ -881,10 +883,7 @@ export class ConversationHistoryController {
   }
 
   private rejectPage(code: string, message: string, retryable: boolean, requestedCursor: string): { accepted: boolean } {
-    if (!this.restoreBridgeAfterFailure()) {
-      this.stateValue.nextCursor = requestedCursor || this.stateValue.nextCursor;
-      this.stateValue.hasMore = Boolean(this.stateValue.nextCursor);
-    }
+    if (!this.restoreBridgeAfterFailure()) this.keepCursor(requestedCursor);
     this.stateValue.error = { code, message, retryable };
     this.stateValue.requestPhase = 'idle';
     this.stateValue.contextSearching = false;
@@ -909,6 +908,10 @@ export class ConversationHistoryController {
       return false;
     }
     return this.canContinue(demandEpoch, abort);
+  }
+
+  private pauseOnRepeatedCursor(): void {
+    this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
   }
 
   private finishDemand(): void {
@@ -938,7 +941,7 @@ export class ConversationHistoryController {
     abort: AbortController,
     request: ConversationHistoryRequest,
   ): Promise<ConversationPage> {
-    const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
+    const remaining = remainingWorkMs(startedAt);
     if (remaining <= 0) {
       throw { error: workDeadlineError() };
     }
@@ -967,7 +970,7 @@ export class ConversationHistoryController {
   private async wait(milliseconds: number, epoch: number, abort: AbortController, startedAt?: number): Promise<void> {
     if (milliseconds <= 0) return;
     if (startedAt !== undefined) {
-      const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
+      const remaining = remainingWorkMs(startedAt);
       if (remaining <= 0) {
         throw { error: workDeadlineError() };
       }
@@ -1134,6 +1137,10 @@ function mergeDiagnostics(
     ...(next?.continuation_reason || previous?.continuation_reason
       ? { continuation_reason: next?.continuation_reason || previous?.continuation_reason } : {}),
   };
+}
+
+function remainingWorkMs(startedAt: number): number {
+  return HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
 }
 
 function workDeadlineError(): ConversationBrowseError {
