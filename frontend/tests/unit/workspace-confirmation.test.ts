@@ -2,7 +2,8 @@ import { render, screen, within, fireEvent } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
-import { CommandError, relayStore } from '$lib/store';
+import { CommandError } from '$lib/command-error';
+import { relayStore } from '$lib/store';
 import type { CommandResult, RelayConnectionView, RelayWorkspace } from '$lib/types';
 
 beforeEach(() => {

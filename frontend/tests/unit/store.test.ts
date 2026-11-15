@@ -23,7 +23,9 @@ import {
 import { paneViewPreferenceKey } from '$lib/agent-view';
 import { closeCurrentView, currentView, initializeRouter, navigate } from '$lib/router';
 import { SLASH_COMMAND_MAX_ENTRIES } from '$lib/slash-command-limits';
-import { normalizeConversationPage, relayStore, CommandError } from '$lib/store';
+import { CommandError } from '$lib/command-error';
+import { normalizeConversationPage } from '$lib/conversation-page';
+import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';

@@ -1,6 +1,7 @@
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { relayStore, CommandError } from '$lib/store';
+import { CommandError } from '$lib/command-error';
+import { relayStore } from '$lib/store';
 import type { RelayTransport } from '$lib/transports';
 import { MockWebSocket, connectRelay, makeAgent } from '../support/relay';
 

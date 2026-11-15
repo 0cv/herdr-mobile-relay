@@ -9,7 +9,8 @@
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import { navigate } from '$lib/router';
-  import { CommandError, relayStore } from '$lib/store';
+  import { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
   import { informativePath, relayWorkspaceTrees, workspaceProvenance, type RelayWorkspaceTree } from '$lib/workspaces';
   import type { RelayWorkspace, WorktreeListing } from '$lib/types';
 

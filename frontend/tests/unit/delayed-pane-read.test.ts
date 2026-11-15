@@ -1,7 +1,8 @@
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setTerminalHistoryLines } from '$lib/preferences';
-import { CommandError, relayStore } from '$lib/store';
+import { CommandError } from '$lib/command-error';
+import { relayStore } from '$lib/store';
 import { createHybridTransport } from '$lib/transports/path-manager';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, CommandResult, QuestionDraft, QuestionInteraction, RelayConfig } from '$lib/types';
