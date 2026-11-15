@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, connectFedora, fedora, handshake, openAgent, server, setAutoCommands, setConversationFixture, setNextInteraction, socketCount } from '../support/journey-relay';
+import { boot, commands, connectFedora, fedora, handshake, lastCommand, openAgent, reply, server, setAutoCommands, setConversationFixture, setNextInteraction, socketCount } from '../support/journey-relay';
 
 test('handles approvals, chained questions, and notification routing', async ({ page }) => {
   const target = encodeURIComponent(JSON.stringify({
@@ -553,14 +553,14 @@ test('keeps the third single choice checked across live pane transitions', async
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
   const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: second });
-  await server(page, 0, { type: 'command_result', request_id: answer.request_id, ok: true, phase: 'advanced', data: { interaction: second } });
+  await reply(page, answer, { interaction: second }, { phase: 'advanced' });
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 
   await page.getByRole('button', { name: /Previous/ }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'navigate_question').length).toBe(1);
   const navigation = (await commands(page)).find((command) => command.type === 'navigate_question')!;
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first });
-  await server(page, 0, { type: 'command_result', request_id: navigation.request_id, ok: true, phase: 'navigated', data: { interaction: first } });
+  await reply(page, navigation, { interaction: first }, { phase: 'navigated' });
   await server(page, 0, { type: 'agents', agents: [agent] });
   for (let refresh = 0; refresh < 20; refresh += 1) {
     await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first });
@@ -654,11 +654,10 @@ test('does not report failed question navigation as opened', async ({ page }) =>
 
 test('answers a hidden terminal prompt without storing the value anywhere', async ({ page }) => {
   await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Secret app', agent: 'codex' }, { capabilities: ['attention_classification', 'secret_input'] });
-  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'read_pane').length).toBeGreaterThan(0);
-  const secretRead = (await commands(page)).findLast(command => command.type === 'read_pane');
+  const secretRead = await lastCommand(page, 'read_pane');
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
-    request_id: secretRead!.request_id, target: secretRead!.target,
+    request_id: secretRead.request_id, target: secretRead.target,
     content: 'make install\n[sudo] password for cv:',
     no_echo: true, no_echo_prompt: '[sudo] password for cv:',
   });
@@ -772,7 +771,7 @@ test('hidden secret requires correlated observation and never retries uncertain 
   await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
   await expect(send).toBeDisabled();
   await expect(page.getByText(/Delivery is uncertain/)).toBeVisible({ timeout: 20_000 });
-  await server(page, 0, { type: 'command_result', request_id: secret.request_id, phase: 'completed', ok: true });
+  await reply(page, secret, undefined);
   await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
   await observe();
   await expect(page.getByRole('button', { name: 'I checked the terminal', exact: true })).toBeEnabled();

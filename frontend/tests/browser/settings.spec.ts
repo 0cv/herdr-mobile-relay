@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, server, setAutoCommands, socketCount } from '../support/journey-relay';
+import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 test('downloads a missing relay speech voice from Settings', async ({ page }) => {
   await connectFedora(page, {
@@ -111,18 +111,12 @@ for (const role of ['controller', 'reader']) test(`followup Pi Integration setti
   await setAutoCommands(page, false);
   await handshake(page, 0, { capabilities: ['pi_integration'] });
   await page.getByRole('button', { name: /^Settings(?:,|$)/ }).click();
-  const last = async (type: string) => {
-    await expect.poll(async () => (await commands(page)).filter(command => command.type === type).length).toBeGreaterThan(0);
-    return (await commands(page)).findLast(command => command.type === type)!;
-  };
-  const respond = (request: Record<string, unknown>, enabled: boolean) => server(page, 0, {
-    type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed', data: {
-      instance: 'synthetic-setting-manager', enabled,
-      profiles: [{ path: '/synthetic/pi/agent', status: enabled ? 'installed' : 'not installed' },
-        { path: '/synthetic/refused/agent', status: 'refused', reason: 'Unowned directory' }],
-    },
+  const respond = (request: Record<string, unknown>, enabled: boolean) => reply(page, request, {
+    instance: 'synthetic-setting-manager', enabled,
+    profiles: [{ path: '/synthetic/pi/agent', status: enabled ? 'installed' : 'not installed' },
+      { path: '/synthetic/refused/agent', status: 'refused', reason: 'Unowned directory' }],
   });
-  await respond(await last('get_pi_integration'), role === 'reader');
+  await respond(await lastCommand(page, 'get_pi_integration'), role === 'reader');
   const toggle = page.getByRole('switch', { name: 'Pi Integration', exact: true });
   await expect(page.getByText(/Reload Pi to activate changes/)).toBeVisible();
   await expect(page.getByText('/synthetic/refused/agent: refused — Unowned directory', { exact: true })).toBeVisible();
@@ -136,7 +130,7 @@ for (const role of ['controller', 'reader']) test(`followup Pi Integration setti
     await expect(toggle).not.toBeChecked();
     await expect(toggle).toBeEnabled();
     await toggle.click();
-    const install = await last('set_pi_integration');
+    const install = await lastCommand(page, 'set_pi_integration');
     expect(install.enabled).toBe(true);
     expect(install.instance).toBe('synthetic-setting-manager');
     expect(Object.keys(install).sort()).toEqual(['client_id', 'enabled', 'instance', 'protocol', 'request_id', 'type']);
@@ -145,7 +139,7 @@ for (const role of ['controller', 'reader']) test(`followup Pi Integration setti
     await expect(page.getByText('/synthetic/pi/agent: installed', { exact: true })).toBeVisible();
     await toggle.click();
     await expect.poll(async () => (await commands(page)).filter(command => command.type === 'set_pi_integration').length).toBe(2);
-    const remove = await last('set_pi_integration');
+    const remove = await lastCommand(page, 'set_pi_integration');
     expect(remove.enabled).toBe(false);
     await respond(remove, false);
     await expect(toggle).not.toBeChecked();

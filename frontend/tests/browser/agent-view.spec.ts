@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { commands, connectFedora, handshake, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
+import { commands, connectFedora, handshake, reply, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 for (const provider of ['claude', 'codex', 'opencode', 'qoder', 'pi', 'omp', 'omo', 'hermes', 'cursor', 'kimi']) {
 test(`default agent view: fresh ${provider} openings use clean Conversation`, async ({ page }) => {
@@ -85,7 +85,7 @@ for (const attention of ['idle', 'question', 'approval', 'pending']) {
     await button('Send text').click();
     const attempt = (await commands(page)).findLast(command => command.type === 'send_terminal_text')!;
     expect(attempt).toMatchObject({ pane_id: 'w1:p1', text: 'private phone terminal attempt', target: { server_session_id: 'primary', terminal_id: 'terminal-w1:p1', generation: 1, agent_session_id: 'phone-controls-session' } });
-    const unknown = () => server(page, 0, { type: 'command_result', request_id: attempt.request_id, ok: true, phase: 'dispatched_unknown' });
+    const unknown = () => reply(page, attempt, undefined, { phase: 'dispatched_unknown' });
     if (attention !== 'pending') await unknown();
     await setAutoCommands(page, true);
     await button('Conversation history').click();

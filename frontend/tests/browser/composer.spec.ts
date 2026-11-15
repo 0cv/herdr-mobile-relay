@@ -1,6 +1,6 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { APP_METADATA, emulateStandalone } from '../support/journey-device';
-import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, openAgent, openSharedComposer, replyToPaneRead, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
+import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, openAgent, openSharedComposer, reply, replyToPaneRead, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
   await connectFedora(page);
@@ -17,9 +17,7 @@ test('discovers slash commands per terminal and fills them before sending', asyn
   await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Codex app');
   await jump.getByRole('button', { name: /Codex app/ }).click();
   const codexComposer = page.getByRole('combobox', { name: 'Prompt' });
-  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'read_pane').length).toBeGreaterThan(0);
-  const slashRead = (await commands(page)).findLast(command => command.type === 'read_pane')!;
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: slashRead.request_id, target: slashRead.target, format: 'plain', content: 'Ready for normal input', no_echo: false });
+  await replyToPaneRead(page, 'Ready for normal input');
   await expect(page.getByRole('log')).toContainText('Ready for normal input');
   const restingComposerBox = await codexComposer.boundingBox();
   await codexComposer.fill('/');
@@ -82,8 +80,7 @@ test('keeps a large slash catalog responsive in the installed PWA', async ({ pag
   const composer = page.getByRole('combobox', { name: 'Prompt' });
   await setAutoCommands(page, false);
   await composer.fill('/');
-  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_slash_commands').length).toBe(1);
-  const catalogRequest = (await commands(page)).find(command => command.type === 'list_slash_commands')!;
+  const catalogRequest = await lastCommand(page, 'list_slash_commands');
   const catalog: Record<string, unknown>[] = Array.from({ length: 4096 }, (_, index) => ({
     command: `/catalog-${String(index).padStart(4, '0')}`,
     description: 'D'.repeat(240),
@@ -91,7 +88,7 @@ test('keeps a large slash catalog responsive in the installed PWA', async ({ pag
     source: 'personal',
   }));
   catalog[350] = { command: '/late-command', description: 'Late command', argument_hint: 'H'.repeat(120), source: 'personal' };
-  await server(page, 0, { type: 'command_result', request_id: catalogRequest.request_id, ok: true, phase: 'completed', data: { commands: catalog, truncated: false } });
+  await reply(page, catalogRequest, { commands: catalog, truncated: false });
   const popover = page.getByRole('region', { name: 'Command suggestions' });
   await expect(popover).toBeVisible();
   await expect(popover.getByRole('option')).toHaveCount(200);
@@ -219,7 +216,7 @@ for (const mode of ['Conversation', 'Full history']) {
       await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'working', updated_at: update });
       await server(page, 0, { type: 'pong' });
     }
-    await server(page, 0, { type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed', data: { commands: [{ command: '/help', description: 'Help', source: 'builtin' }], truncated: false } });
+    await reply(page, request, { commands: [{ command: '/help', description: 'Help', source: 'builtin' }], truncated: false });
     await expect(page.getByRole('listbox')).toHaveAttribute('aria-busy', 'false');
     expect((await commands(page)).filter(command => command.type === 'list_slash_commands')).toHaveLength(1);
     await page.getByRole('button', { name: 'Refresh commands' }).click();
@@ -410,30 +407,24 @@ test('followup combined notices and Pi bridge stay fenced across paging, modes a
   await server(page, 0, { type: 'agents', agents: [agent] });
   await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Open Followup Pi on Fedora' }).click();
-  const last = async (type: string) => {
-    await expect.poll(async () => (await commands(page)).filter(command => command.type === type).length).toBeGreaterThan(0);
-    return (await commands(page)).findLast(command => command.type === type)!;
-  };
-  const respond = (request: Record<string, unknown>, data: unknown, phase = 'completed') => server(page, 0, { type: 'command_result', request_id: request.request_id, ok: true, phase, data });
   const notice = { id: 'pi:notice', role: 'assistant', kind: 'notice', timestamp: '', text: 'Generic extension request <img src=x onerror=alert(1)>' };
   const base = { available: true, total: null, state: 'ready', mode: 'native', snapshot_id: 'snapshot', source_revision: 'followup:1', capabilities: { source: 'pi_events', active_branch: true } };
-  await respond(await last('get_conversation_history'), { ...base, entries: [notice], has_more: true, next_cursor: 'older', subscription_id: 'subscription', sequence: 0 });
+  await reply(page, await lastCommand(page, 'get_conversation_history'), { ...base, entries: [notice], has_more: true, next_cursor: 'older', subscription_id: 'subscription', sequence: 0 });
   await expect(page.getByText(notice.text)).toBeVisible();
   await expect(page.locator('.conversation-notice img')).toHaveCount(0);
   await expect(page.locator('.app-header > .status-dot')).toBeVisible();
-  await respond(await last('get_pi_prompt_capability'), { capability: 'pi_prompt_unconfirmed', lease: { instance: 'a'.repeat(64), pane: 'w1:p1', session: 'followup-pi', pid: 42, incarnation: 'b'.repeat(36), token: 'c'.repeat(36), connection: 'synthetic', target_key: 'target', expires_at: Date.now() + 15000 } });
-  const read = await last('read_pane');
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content: 'Unrecognized Pi dialog', no_echo: false });
+  await reply(page, await lastCommand(page, 'get_pi_prompt_capability'), { capability: 'pi_prompt_unconfirmed', lease: { instance: 'a'.repeat(64), pane: 'w1:p1', session: 'followup-pi', pid: 42, incarnation: 'b'.repeat(36), token: 'c'.repeat(36), connection: 'synthetic', target_key: 'target', expires_at: Date.now() + 15000 } });
+  await replyToPaneRead(page, 'Unrecognized Pi dialog');
   const prompt = page.getByRole('combobox', { name: 'Prompt', exact: true });
   await prompt.fill('/orchestrate-answer synthetic guidance');
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Send prompt', exact: true }).click();
   const sentAt = Date.now();
-  await respond(await last('send_pi_prompt_unconfirmed'), { sent_at: sentAt }, 'unconfirmed');
+  await reply(page, await lastCommand(page, 'send_pi_prompt_unconfirmed'), { sent_at: sentAt }, { phase: 'unconfirmed' });
   await expect(page.getByText('Sent to Pi — not confirmed', { exact: true })).toBeVisible();
   await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_history' && !command.cursor).length).toBe(2);
   const unrelated = { id: 'pi:unrelated-user', role: 'user', timestamp: new Date(sentAt + 1).toISOString(), text: '/orchestrate-answer synthetic guidance' };
-  await respond(await last('get_conversation_history'), { ...base, entries: [notice, unrelated], has_more: true, next_cursor: 'older', subscription_id: 'subscription', sequence: 0 });
+  await reply(page, await lastCommand(page, 'get_conversation_history'), { ...base, entries: [notice, unrelated], has_more: true, next_cursor: 'older', subscription_id: 'subscription', sequence: 0 });
   await expect(page.getByText(unrelated.text, { exact: true })).toBeVisible();
   await expect(page.getByText('Sent to Pi — not confirmed', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
@@ -441,10 +432,10 @@ test('followup combined notices and Pi bridge stay fenced across paging, modes a
   await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_history' && command.cursor === 'older').length).toBe(1);
   const older = (await commands(page)).findLast(command => command.type === 'get_conversation_history' && command.cursor === 'older')!;
   expect(older.cursor).toBe('older');
-  await respond(older, { ...base, entries: [{ ...notice, id: 'pi:older', text: 'Older generic notice' }], has_more: false, next_cursor: '' });
+  await reply(page, older, { ...base, entries: [{ ...notice, id: 'pi:older', text: 'Older generic notice' }], has_more: false, next_cursor: '' });
   await expect(page.getByText('Older generic notice', { exact: true })).toBeVisible();
-  const updates = await last('get_conversation_updates');
-  await respond(updates, { kind: 'batch', subscription_id: 'subscription', source_revision: 'followup:1', sequence: 1, state: 'live', capabilities: base.capabilities, remove: [], entries: [{ ...notice, id: 'pi:live', text: 'Live generic notice' }, { ...unrelated, id: 'pi:unrelated-live-user' }] });
+  const updates = await lastCommand(page, 'get_conversation_updates');
+  await reply(page, updates, { kind: 'batch', subscription_id: 'subscription', source_revision: 'followup:1', sequence: 1, state: 'live', capabilities: base.capabilities, remove: [], entries: [{ ...notice, id: 'pi:live', text: 'Live generic notice' }, { ...unrelated, id: 'pi:unrelated-live-user' }] });
   await page.getByRole('button', { name: 'Full history', exact: true }).click();
   await expect(page.getByText('Live generic notice', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Conversation', exact: true }).click();
@@ -477,11 +468,6 @@ test('followup Pi sends are exclusive across pages', async ({ page, context }) =
   const agent = { ...target, status: 'blocked', attention_kind: 'unknown', project: 'Atomic Pi', agent: 'pi', conversation_history_available: true };
   const second = await context.newPage();
   const pages = [page, second];
-  const last = async (view: Page, type: string) => {
-    await expect.poll(async () => (await commands(view)).filter(command => command.type === type).length).toBeGreaterThan(0);
-    return (await commands(view)).findLast(command => command.type === type)!;
-  };
-  const respond = (view: Page, request: Record<string, unknown>, data: unknown, phase = 'completed') => server(view, 0, { type: 'command_result', request_id: request.request_id, ok: true, phase, data });
   for (const view of pages) {
     if (view === second) await page.evaluate(() => localStorage.removeItem('herdr_device_auth_v1'));
     await view.addInitScript(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }));
@@ -492,10 +478,9 @@ test('followup Pi sends are exclusive across pages', async ({ page, context }) =
     await handshake(view, 0, { capabilities });
     await server(view, 0, { type: 'agents', agents: [agent] });
     await view.getByRole('button', { name: 'Open Atomic Pi on Fedora' }).click();
-    await respond(view, await last(view, 'get_conversation_history'), { available: true, total: null, entries: [], has_more: false, state: 'ready', mode: 'native', source_revision: 'atomic:1' });
-    await respond(view, await last(view, 'get_pi_prompt_capability'), { capability: 'pi_prompt_unconfirmed', lease: { instance: 'a'.repeat(64), pane: 'w1:p1', session: 'atomic-pi', pid: 42, incarnation: 'b'.repeat(36), token: 'c'.repeat(36), connection: 'synthetic', target_key: 'target', expires_at: Date.now() + 15000 } });
-    const read = await last(view, 'read_pane');
-    await server(view, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content: 'Unrecognized Pi dialog', no_echo: false });
+    await reply(view, await lastCommand(view, 'get_conversation_history'), { available: true, total: null, entries: [], has_more: false, state: 'ready', mode: 'native', source_revision: 'atomic:1' });
+    await reply(view, await lastCommand(view, 'get_pi_prompt_capability'), { capability: 'pi_prompt_unconfirmed', lease: { instance: 'a'.repeat(64), pane: 'w1:p1', session: 'atomic-pi', pid: 42, incarnation: 'b'.repeat(36), token: 'c'.repeat(36), connection: 'synthetic', target_key: 'target', expires_at: Date.now() + 15000 } });
+    await replyToPaneRead(view, 'Unrecognized Pi dialog');
     await view.getByRole('combobox', { name: 'Prompt', exact: true }).fill('one simultaneous reply');
     await expect(view.getByRole('button', { name: 'Send prompt', exact: true })).toBeEnabled();
   }
@@ -511,7 +496,7 @@ test('followup Pi sends are exclusive across pages', async ({ page, context }) =
   await loser.getByRole('button', { name: 'I checked — allow another send', exact: true }).click();
   await expect.poll(markers).toEqual(['unknown']);
   await expect.poll(held).toBe(1);
-  await respond(winner, await last(winner, 'send_pi_prompt_unconfirmed'), { sent_at: Date.now() }, 'unconfirmed');
+  await reply(winner, await lastCommand(winner, 'send_pi_prompt_unconfirmed'), { sent_at: Date.now() }, { phase: 'unconfirmed' });
   await expect.poll(held).toBe(0);
   await loser.getByRole('button', { name: 'I checked — allow another send', exact: true }).click();
   await expect.poll(markers).toEqual([]);
@@ -526,11 +511,7 @@ for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`foll
   const target = { ...composerTarget, agent_session_id: `reload-pi-${phase}` };
   const agent = { ...target, status: 'blocked', attention_kind: 'unknown', project: 'Reload Pi', agent: 'pi', conversation_history_available: true };
   const credential = JSON.stringify({ version: 1, relays: { fedora: { kind: 'credential', id: 'synthetic-controller', version: 1, secret: 'C'.repeat(43), deviceId: 'synthetic-controller', role: 'controller', locale: 'en', issuedAt: Date.now() } } });
-  const last = async (type: string) => {
-    await expect.poll(async () => (await commands(page)).filter(command => command.type === type).length).toBeGreaterThan(0);
-    return (await commands(page)).findLast(command => command.type === type)!;
-  };
-  const respond = (request: Record<string, unknown>, data: unknown, resultPhase = 'completed', ok = true) => server(page, 0, { type: 'command_result', request_id: request.request_id, ok, phase: resultPhase, error: ok ? '' : 'Synthetic uncertain delivery', data });
+  const respond = (request: Record<string, unknown>, data: unknown, phase = 'completed', ok = true) => reply(page, request, data, { phase, ok, error: ok ? '' : 'Synthetic uncertain delivery' });
   const admit = async () => {
     await expect.poll(() => socketCount(page)).toBe(1);
     await page.evaluate(saved => localStorage.setItem('herdr_device_auth_v1', saved), credential);
@@ -539,10 +520,9 @@ for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`foll
     await server(page, 0, { type: 'agents', agents: [agent] });
   };
   const ready = async () => {
-    await respond(await last('get_conversation_history'), { available: true, total: null, entries: [{ id: 'pi:notice', role: 'assistant', kind: 'notice', timestamp: '', text: 'Reload-safe extension request' }], has_more: false, state: 'ready', mode: 'native', source_revision: 'reload:1' });
-    await respond(await last('get_pi_prompt_capability'), { capability: 'pi_prompt_unconfirmed', lease: { instance: 'a'.repeat(64), pane: 'w1:p1', session: target.agent_session_id, pid: 42, incarnation: 'b'.repeat(36), token: 'c'.repeat(36), connection: 'synthetic', target_key: 'target', expires_at: Date.now() + 15000 } });
-    const read = await last('read_pane');
-    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content: 'Unrecognized Pi dialog', no_echo: false });
+    await reply(page, await lastCommand(page, 'get_conversation_history'), { available: true, total: null, entries: [{ id: 'pi:notice', role: 'assistant', kind: 'notice', timestamp: '', text: 'Reload-safe extension request' }], has_more: false, state: 'ready', mode: 'native', source_revision: 'reload:1' });
+    await reply(page, await lastCommand(page, 'get_pi_prompt_capability'), { capability: 'pi_prompt_unconfirmed', lease: { instance: 'a'.repeat(64), pane: 'w1:p1', session: target.agent_session_id, pid: 42, incarnation: 'b'.repeat(36), token: 'c'.repeat(36), connection: 'synthetic', target_key: 'target', expires_at: Date.now() + 15000 } });
+    await replyToPaneRead(page, 'Unrecognized Pi dialog');
   };
   const reload = async () => {
     await page.evaluate(() => localStorage.removeItem('herdr_device_auth_v1'));
@@ -559,7 +539,7 @@ for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`foll
   await prompt.fill('one private reply');
   await expect(send).toBeEnabled();
   await send.click();
-  const request = await last('send_pi_prompt_unconfirmed');
+  const request = await lastCommand(page, 'send_pi_prompt_unconfirmed');
   expect(await markers()).toEqual(['unknown']);
   if (phase !== 'pending') {
     await respond(request, { sent_at: Date.now() }, phase, phase === 'unconfirmed');

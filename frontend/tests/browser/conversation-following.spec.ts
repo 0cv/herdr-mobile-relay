@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, server, setConversationFixture, socketCount } from '../support/journey-relay';
+import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, reply, server, setConversationFixture, socketCount } from '../support/journey-relay';
 
 async function openFollowingConversation(page: Page, mode: 'conversation' | 'activity' = 'activity') {
   await page.addInitScript(value => localStorage.setItem('herdr-conversation-view', value), mode);
@@ -19,7 +19,7 @@ async function openFollowingConversation(page: Page, mode: 'conversation' | 'act
   const deliver = async (incoming: Record<string, unknown>[], remove: string[] = []) => {
     await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === sequence).length).toBeGreaterThan(0);
     const request = (await commands(page)).findLast(command => command.type === 'get_conversation_updates' && command.after === sequence)!;
-    await server(page, 0, { type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed', data: { kind: 'batch', subscription_id: 'fixture-subscription', source_revision: 'stream:1', sequence: ++sequence, capabilities, state: 'generating', entries: incoming, remove } });
+    await reply(page, request, { kind: 'batch', subscription_id: 'fixture-subscription', source_revision: 'stream:1', sequence: ++sequence, capabilities, state: 'generating', entries: incoming, remove });
   };
   const latestInView = async () => {
     await expect.poll(gap).toBeLessThan(2);

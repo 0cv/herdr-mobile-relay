@@ -24,13 +24,6 @@ export interface BootOptions {
   answerHealthPings?: boolean;
 }
 
-export async function replyToPaneRead(page: Page, content = 'Ready', noEcho = false) {
-  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'read_pane').length).toBeGreaterThan(0);
-  const read = (await commands(page)).findLast(command => command.type === 'read_pane')!;
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content, no_echo: noEcho });
-  return read.request_id;
-}
-
 export async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
   await page.addInitScript(({ savedRelays, answerHealthPings }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
@@ -453,6 +446,23 @@ export async function commandsForSocket(page: Page, index: number) {
   return page.evaluate((socketIndex) => window.__relaySocketCommands(socketIndex), index);
 }
 
+export async function lastCommand(page: Page, type: string, socketIndex?: number) {
+  const ofType = async () => (await (socketIndex === undefined ? commands(page) : commandsForSocket(page, socketIndex))).filter(command => command.type === type);
+  await expect.poll(async () => (await ofType()).length).toBeGreaterThan(0);
+  return (await ofType()).at(-1)!;
+}
+
+export async function reply(page: Page, request: Record<string, unknown>, data: unknown, options: { socketIndex?: number; phase?: string; ok?: boolean; error?: string } = {}) {
+  const { socketIndex = 0, phase = 'completed', ok = true, error } = options;
+  await server(page, socketIndex, { type: 'command_result', request_id: request.request_id, ok, phase, ...(error === undefined ? {} : { error }), data });
+}
+
+export async function replyToPaneRead(page: Page, content = 'Ready', noEcho = false) {
+  const read = await lastCommand(page, 'read_pane');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content, no_echo: noEcho });
+  return read.request_id;
+}
+
 export async function setAutoCommands(page: Page, enabled: boolean) {
   await page.evaluate((value) => window.__relayAutoCommands(value), enabled);
 }
@@ -532,8 +542,6 @@ export async function openSharedComposer(page: Page, mode: string, reader = fals
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await page.getByRole('button', { name: mode, exact: true }).click();
   await expect(page.locator('.prompt-composer > .draft-status')).toHaveCount(0);
-  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'read_pane').length).toBeGreaterThan(0);
-  const read = (await commands(page)).findLast(command => command.type === 'read_pane')!;
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content: 'Ready', no_echo: false });
+  await replyToPaneRead(page);
   return page.getByRole('combobox', { name: 'Prompt', exact: true });
 }

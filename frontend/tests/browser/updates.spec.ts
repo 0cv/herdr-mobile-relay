@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { APP_METADATA, APP_RELEASE, emulateStandalone, webRoot } from '../support/journey-device';
-import { boot, closeSocket, commands, commandsForSocket, connectFedora, fedora, handshake, openAgent, server, setAutoCommands, socketCount } from '../support/journey-relay';
+import { boot, closeSocket, commands, commandsForSocket, connectFedora, fedora, handshake, openAgent, reply, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 async function updateProgressPlan(page: Page): Promise<Record<string, unknown> | null> {
   try {
@@ -87,13 +87,7 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
   )).toBe(true);
   const checkUpdate = (await commandsForSocket(page, 0)).find((command) => command.type === 'check_update');
   if (checkUpdate) {
-    await server(page, 0, {
-      type: 'command_result',
-      request_id: checkUpdate.request_id,
-      ok: true,
-      phase: 'completed',
-      data: { update: availableUpdate },
-    });
+    await reply(page, checkUpdate, { update: availableUpdate });
   }
   await expect.poll(async () => (await commandsForSocket(page, 0)).some(
     (command) => command.type === 'install_update',
@@ -226,26 +220,20 @@ test('checks every self-updating relay automatically after connection', async ({
     const check = (await commandsForSocket(page, index)).find(
       (command) => command.type === 'check_update',
     )!;
-    await server(page, index, {
-      type: 'command_result',
-      request_id: check.request_id,
-      ok: true,
-      phase: 'confirmed',
-      data: {
-        update: {
-          state: 'available',
-          current_version: '0.0.1',
-          current_revision: 'abc1234',
-          available_version: APP_RELEASE,
-          available_revision: 'f'.repeat(12),
-          target_revision: 'f'.repeat(40),
-          upstream_version: APP_RELEASE,
-          checked_at: 124,
-          can_install: true,
-          mode: 'local',
-        },
+    await reply(page, check, {
+      update: {
+        state: 'available',
+        current_version: '0.0.1',
+        current_revision: 'abc1234',
+        available_version: APP_RELEASE,
+        available_revision: 'f'.repeat(12),
+        target_revision: 'f'.repeat(40),
+        upstream_version: APP_RELEASE,
+        checked_at: 124,
+        can_install: true,
+        mode: 'local',
       },
-    });
+    }, { socketIndex: index, phase: 'confirmed' });
   }
 
   await page.getByRole('button', { name: 'Settings, relay update available' }).click();
@@ -312,13 +300,7 @@ test('keeps update controls steady while app and relay checks are in flight', as
   const check = (await commandsForSocket(page, 0))
     .filter((command) => command.type === 'check_update')
     .at(-1)!;
-  await server(page, 0, {
-    type: 'command_result',
-    request_id: check.request_id,
-    ok: true,
-    phase: 'confirmed',
-    data: { update: availableUpdate },
-  });
+  await reply(page, check, { update: availableUpdate }, { phase: 'confirmed' });
   await expect(checkButton).toBeEnabled();
   await expect(checkButton).toHaveText('Check for Updates');
 });
@@ -374,22 +356,16 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
       mode: 'local',
     },
   });
-  await server(page, 0, {
-    type: 'command_result',
-    request_id: install.request_id,
-    ok: true,
-    phase: 'scheduled',
-    data: {
-      update: {
-        state: 'scheduled',
-        current_version: '0.7.0',
-        current_revision: 'abc1234',
-        available_version: '0.8.0',
-        target_revision: 'f'.repeat(40),
-        mode: 'local',
-      },
+  await reply(page, install, {
+    update: {
+      state: 'scheduled',
+      current_version: '0.7.0',
+      current_revision: 'abc1234',
+      available_version: '0.8.0',
+      target_revision: 'f'.repeat(40),
+      mode: 'local',
     },
-  });
+  }, { phase: 'scheduled' });
   await expect(progress).toContainText('Update scheduled…');
 
   await server(page, 0, {
@@ -931,7 +907,7 @@ test('keeps an unconfirmed terminal send fenced instead of reloading when a depl
   await page.getByLabel('Terminal text', { exact: true }).fill('sent at most once');
   await button('Send text').click();
   const attempt = (await commands(page)).findLast(command => command.type === 'send_terminal_text')!;
-  await server(page, 0, { type: 'command_result', request_id: attempt.request_id, ok: true, phase: 'dispatched_unknown' });
+  await reply(page, attempt, undefined, { phase: 'dispatched_unknown' });
   await setAutoCommands(page, true);
   await expect(page.getByText(/^Delivery is uncertain\./)).toBeVisible();
   await markCurrentDocument(page);

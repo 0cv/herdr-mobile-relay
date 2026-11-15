@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { commands, composerTarget, connectFedora, server, setAutoCommands, setConversationFixture } from '../support/journey-relay';
+import { commands, composerTarget, connectFedora, reply, server, setAutoCommands, setConversationFixture } from '../support/journey-relay';
 
 test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
@@ -747,7 +747,7 @@ test('phone feedback integrated history loads on upward demand and explicit acti
   const anchor = list.locator('[data-conversation-entry-id="integrated-48"]');
   const offset = async () => (await anchor.boundingBox())!.y - (await list.boundingBox())!.y;
   const before = await offset();
-  await server(page, 0, { type: 'command_result', request_id: older.request_id, ok: true, phase: 'completed', data: { available: true, entries: entries.slice(24, 48), has_more: true, next_cursor: 'older-0', state: 'ready', mode: 'snapshot', snapshot_id: 'snapshot-1', source_revision: 'integrated:1' } });
+  await reply(page, older, { available: true, entries: entries.slice(24, 48), has_more: true, next_cursor: 'older-0', state: 'ready', mode: 'snapshot', snapshot_id: 'snapshot-1', source_revision: 'integrated:1' });
   await expect(list.locator('[data-conversation-entry-id="integrated-36"]')).toBeAttached();
   await expect.poll(async () => Math.abs(await offset() - before)).toBeLessThanOrEqual(2);
   await expect(list.locator('.conversation-entry')).toHaveCount(24);

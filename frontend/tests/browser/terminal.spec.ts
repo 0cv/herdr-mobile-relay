@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { commands, connectFedora, handshake, openAgent, openOmpPane, replyToPaneRead, server, setAutoCommands } from '../support/journey-relay';
+import { commands, connectFedora, handshake, lastCommand, openAgent, openOmpPane, replyToPaneRead, server, setAutoCommands } from '../support/journey-relay';
 
 test('keeps Cursor filtering text-only across status updates and restores prompts after selecting', async ({ page }) => {
   await openAgent(page, { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' });
@@ -176,9 +176,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Realtime app', agent: 'codex' }, {
     capabilities: ['attention_classification', 'pane_realtime_delta', 'slash_commands'],
   });
-  await expect.poll(async () =>
-    (await commands(page)).some((command) => command.type === 'read_pane')).toBe(true);
-  const initialRead = (await commands(page)).findLast(command => command.type === 'read_pane')!;
+  const initialRead = await lastCommand(page, 'read_pane');
   await server(page, 0, {
     request_id: initialRead.request_id, target: initialRead.target,
     type: 'pane_content',
