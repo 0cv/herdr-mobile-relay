@@ -1,3 +1,4 @@
+import { bytesToHex } from '@noble/hashes/utils.js';
 import type {
   ActionReceipt,
   ActionReceiptPhase,
@@ -153,4 +154,11 @@ export function parsePushOpenTarget(value: unknown, relayId: string): FrontendTa
     generation: target.generation,
     agent_session_id: target.agent_session_id,
   });
+}
+
+export function commandRequestId(): string {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
 }

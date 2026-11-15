@@ -302,8 +302,6 @@ type prunedRecovery struct {
 	results   []DeliveryResult
 }
 
-type recoverPrunedFunc func([]DeliveryResult) (bool, error)
-
 func (q *durableQueue) recoverPrunedWhileProcessing(recoveries []prunedRecovery, now time.Time) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -378,114 +376,18 @@ func (q *durableQueue) restorePrunedWhileProcessing(results []DeliveryResult, no
 	return dirty
 }
 
-type currentEventFunc func(PushEventKey) bool
+func newDeliveryResult(entry queueEntry, disposition DeliveryDisposition, attempts int) DeliveryResult {
+	return DeliveryResult{
+		Key: entry.Event.Key, Endpoint: entry.Subscription.Endpoint,
+		Disposition: disposition, Attempts: attempts,
+		Event: entry.Event, Subscription: entry.Subscription,
+	}
+}
 
-type queueSender func(context.Context, Subscription, []byte) error
-
-func (q *durableQueue) processDueWithRecovery(
-	ctx context.Context,
-	now time.Time,
-	current currentEventFunc,
-	send queueSender,
-	accepted func(PushEventKey, time.Time) error,
-	recoverPruned recoverPrunedFunc,
-) ([]DeliveryResult, error) {
-	q.process.Lock()
-	defer q.process.Unlock()
-	entries := q.dueEntries(now)
-	results := make([]DeliveryResult, 0, len(entries))
-	terminalSubscriptions := make(map[string]bool)
-	dirty := false
-	flush := func() error {
-		if !dirty {
-			return nil
-		}
-		q.mu.Lock()
-		err := q.writeState(q.state)
-		q.mu.Unlock()
-		if err == nil {
-			dirty = false
-		}
-		return err
-	}
-	finish := func(cause error) ([]DeliveryResult, error) {
-		if recoverPruned != nil {
-			recovered, err := recoverPruned(results)
-			dirty = recovered || dirty
-			if err != nil {
-				dirty = q.restorePrunedWhileProcessing(results, now) || dirty
-				if persistErr := flush(); persistErr != nil {
-					return results, persistErr
-				}
-				return results, err
-			}
-		}
-		if err := flush(); err != nil {
-			return results, err
-		}
-		return results, cause
-	}
-	for _, snapshot := range entries {
-		if ctx.Err() != nil {
-			return finish(ctx.Err())
-		}
-		subscriptionKey := snapshot.Subscription.DeviceID + "\x00" + snapshot.Subscription.Endpoint
-		if terminalSubscriptions[subscriptionKey] {
-			dirty = q.finishInMemory(snapshot.ID, snapshot, DeliveryPruned, now) || dirty
-			results = append(results, DeliveryResult{
-				Key: snapshot.Event.Key, Endpoint: snapshot.Subscription.Endpoint,
-				Disposition: DeliveryPruned, Attempts: snapshot.Attempts,
-				Event: snapshot.Event, Subscription: snapshot.Subscription,
-			})
-			continue
-		}
-		if !now.Before(snapshot.Event.ExpiresAt) {
-			dirty = q.finishInMemory(snapshot.ID, snapshot, DeliveryExpired, now) || dirty
-			results = append(results, DeliveryResult{Key: snapshot.Event.Key, Endpoint: snapshot.Subscription.Endpoint, Disposition: DeliveryExpired, Attempts: snapshot.Attempts})
-			continue
-		}
-		if current == nil || !current(snapshot.Event.Key) {
-			dirty = q.finishInMemory(snapshot.ID, snapshot, DeliveryStale, now) || dirty
-			results = append(results, DeliveryResult{Key: snapshot.Event.Key, Endpoint: snapshot.Subscription.Endpoint, Disposition: DeliveryStale, Attempts: snapshot.Attempts})
-			continue
-		}
-		err := send(ctx, snapshot.Subscription, snapshot.Event.Payload)
-		if err != nil && ctx.Err() != nil {
-			return finish(ctx.Err())
-		}
-		attempts := snapshot.Attempts + 1
-		if err == nil {
-			dirty = q.finishInMemory(snapshot.ID, snapshot, DeliveryAccepted, now) || dirty
-			if accepted != nil {
-				if err := accepted(snapshot.Event.Key, now); err != nil {
-					return finish(err)
-				}
-			}
-			results = append(results, DeliveryResult{Key: snapshot.Event.Key, Endpoint: snapshot.Subscription.Endpoint, Disposition: DeliveryAccepted, Attempts: attempts})
-			continue
-		}
-		if isTerminalError(err) {
-			terminalSubscriptions[subscriptionKey] = true
-			dirty = q.finishInMemory(snapshot.ID, snapshot, DeliveryPruned, now) || dirty
-			results = append(results, DeliveryResult{
-				Key: snapshot.Event.Key, Endpoint: snapshot.Subscription.Endpoint,
-				Disposition: DeliveryPruned, Attempts: attempts,
-				Event: snapshot.Event, Subscription: snapshot.Subscription,
-			})
-			continue
-		}
-		if retryablePushError(err) && attempts < maxDeliveryAttempts {
-			next := now.Add(retryDelay(attempts))
-			if next.Before(snapshot.Event.ExpiresAt) {
-				dirty = q.rescheduleInMemory(snapshot.ID, snapshot, attempts, next) || dirty
-				results = append(results, DeliveryResult{Key: snapshot.Event.Key, Endpoint: snapshot.Subscription.Endpoint, Disposition: DeliveryRetrying, Attempts: attempts, NextAttempt: next})
-				continue
-			}
-		}
-		dirty = q.finishInMemory(snapshot.ID, snapshot, DeliveryDropped, now) || dirty
-		results = append(results, DeliveryResult{Key: snapshot.Event.Key, Endpoint: snapshot.Subscription.Endpoint, Disposition: DeliveryDropped, Attempts: attempts})
-	}
-	return finish(nil)
+func (q *durableQueue) write() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.writeState(q.state)
 }
 
 func (q *durableQueue) dueEntries(now time.Time) []queueEntry {

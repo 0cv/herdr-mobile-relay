@@ -4,7 +4,8 @@ import ConversationHistory from '$components/ConversationHistory.svelte';
 import { conversationEntries } from '$lib/conversation';
 import { clearConversationPreviews } from '$lib/conversation-cache';
 import { ConversationHistoryController } from '$lib/conversation-history';
-import { normalizeConversationBatch, normalizeConversationPage, relayStore } from '$lib/store';
+import { normalizeConversationBatch, normalizeConversationPage } from '$lib/conversation-page';
+import { relayStore } from '$lib/store';
 import { targetRefForAgent } from '$lib/resource-id';
 import type { Agent, ConversationBatch, ConversationEntry, ConversationPage } from '$lib/types';
 

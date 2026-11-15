@@ -1,7 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import Button from '$components/ui/Button.svelte';
-  import { CommandError, relayStore } from '$lib/store';
+  import { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
   import {
     answerFailureToast,
     createQuestionDraft,

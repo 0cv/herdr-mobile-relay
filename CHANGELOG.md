@@ -22,6 +22,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- When loading conversation history stops after its two-minute limit, the status
+  line now always shows why, instead of sometimes staying on "Loading
+  conversation context…" or showing nothing.
 - The README in a generated gateway bundle now names the current setup menu path
   to an already running gateway.
 - Cloudflare setup links, status, and hostname changes now read quoted tunnel

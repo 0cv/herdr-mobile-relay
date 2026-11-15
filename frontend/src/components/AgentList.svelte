@@ -20,7 +20,8 @@
   } from '$lib/agents';
   import { hiddenServers, homeLayout, setServerHidden } from '$lib/preferences';
   import { answerFailureToast, returnedInteraction } from '$lib/questions';
-  import { relayStore, type CommandError } from '$lib/store';
+  import type { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
   import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 

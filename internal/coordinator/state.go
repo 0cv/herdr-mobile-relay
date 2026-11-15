@@ -591,9 +591,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		}
 		if prev == "blocked" && cp.Status == "blocked" &&
 			(previousAttention != cp.AttentionKind ||
-				attentionChanged && cp.AttentionKind == question.AttentionApproval) &&
-			s.onTransition != nil {
-			s.onTransition(cp.PaneID, cp.Agent, cp.Project, cp.Status, s.revision[cp.PaneID])
+				attentionChanged && cp.AttentionKind == question.AttentionApproval) {
+			s.fireTransition(cp.PaneID, cp.Status)
 		}
 	}
 
@@ -785,6 +784,14 @@ func copyBlockedDetails(destination, source *AgentState) {
 	destination.InteractionID = source.InteractionID
 }
 
+func (s *State) fireTransition(paneID, status string) {
+	if s.onTransition == nil {
+		return
+	}
+	a := s.agents[paneID]
+	s.onTransition(paneID, a.Agent, a.Project, status, s.revision[paneID])
+}
+
 // registerTransition implements the once-per-cycle notification state machine.
 // Blocked notifications fire only on actual transitions into "blocked" (§16.13).
 // Completion (working/blocked → idle) marks the pane as unseen-done (§9.8).
@@ -799,21 +806,11 @@ func (s *State) registerTransition(
 			delete(s.finishedNotif, paneID)
 			delete(s.completionRev, paneID)
 		}
-		if status == "blocked" && prev != "blocked" && s.onTransition != nil {
-			a := s.agents[paneID]
-			agent, project := "", ""
-			if a != nil {
-				agent, project = a.Agent, a.Project
-			}
-			s.onTransition(paneID, agent, project, status, s.revision[paneID])
+		if status == "blocked" && prev != "blocked" {
+			s.fireTransition(paneID, status)
 		}
-		if status == "working" && prev != "working" && s.onTransition != nil {
-			a := s.agents[paneID]
-			agent, project := "", ""
-			if a != nil {
-				agent, project = a.Agent, a.Project
-			}
-			s.onTransition(paneID, agent, project, status, s.revision[paneID])
+		if status == "working" && prev != "working" {
+			s.fireTransition(paneID, status)
 		}
 		return
 	}
@@ -823,14 +820,7 @@ func (s *State) registerTransition(
 			delete(s.ackDone, paneID)
 			s.unseenDone[paneID] = true
 			s.completionRev[paneID] = s.revision[paneID]
-			if s.onTransition != nil {
-				a := s.agents[paneID]
-				agent, project := "", ""
-				if a != nil {
-					agent, project = a.Agent, a.Project
-				}
-				s.onTransition(paneID, agent, project, status, s.revision[paneID])
-			}
+			s.fireTransition(paneID, status)
 		}
 		return
 	}
@@ -844,14 +834,7 @@ func (s *State) registerTransition(
 		delete(s.ackDone, paneID)
 		s.unseenDone[paneID] = true
 		s.completionRev[paneID] = s.revision[paneID]
-		if s.onTransition != nil {
-			a := s.agents[paneID]
-			agent, project := "", ""
-			if a != nil {
-				agent, project = a.Agent, a.Project
-			}
-			s.onTransition(paneID, agent, project, status, s.revision[paneID])
-		}
+		s.fireTransition(paneID, status)
 	}
 }
 
