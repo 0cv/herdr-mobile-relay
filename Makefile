@@ -102,7 +102,9 @@ go-check:
 
 backend-check: go-check shell-check production-path-audit
 
+shell-check: export HERDR_TEST_RELAY_BIN = $(CURDIR)/bin/shell-test/herdr-mobile-relay
 shell-check:
+	go build -o $(HERDR_TEST_RELAY_BIN) ./cmd/herdr-mobile-relay
 	bun test tests/pi-command-bridge.test.mjs tests/pi-prompt.test.mjs tests/pi-activity.test.mjs tests/pi-notices.test.mjs tests/pi-reload.test.mjs
 	bash tests/test_pi_commands.sh
 	bash tests/test_dev_pi_commands.sh

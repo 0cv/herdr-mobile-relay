@@ -7,6 +7,8 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
+# shellcheck source=lib.sh
+. "$REPO_DIR/tests/lib.sh"
 
 (
     for hostname in relay.example.test RELAY.EXAMPLE.TEST. \
@@ -757,8 +759,8 @@ sed -n '8p' "$LAUNCHCTL_LOG" |
     grep -Fx "kickstart -k $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
 test "$(wc -l < "$LAUNCHCTL_LOG" | tr -d ' ')" = "8"
 
-go build -o "$WORK_DIR/readiness-helper" "$REPO_DIR/cmd/herdr-mobile-relay"
-export HERDR_RELAY_BIN="$WORK_DIR/readiness-helper"
+ensure_relay_test_binary "$WORK_DIR"
+export HERDR_RELAY_BIN="$HERDR_TEST_RELAY_BIN"
 export HERDR_RELAY_INSTANCE_ID=test
 
 # The inferred-identity path reads the selected binary's sibling manifest,
@@ -767,7 +769,7 @@ export HERDR_RELAY_INSTANCE_ID=test
 READY_RELEASE_ROOT="$WORK_DIR/readiness-releases"
 READY_RELEASE="$READY_RELEASE_ROOT/releases/manifest-release"
 mkdir -p "$READY_RELEASE/web"
-cp "$WORK_DIR/readiness-helper" "$READY_RELEASE/herdr-mobile-relay"
+cp "$HERDR_TEST_RELAY_BIN" "$READY_RELEASE/herdr-mobile-relay"
 cp "$REPO_DIR/web/release.json" "$READY_RELEASE/web/release.json"
 printf '{"version":"dev","revision":"unknown","web_hash":"manifest-web"}\n' \
     > "$READY_RELEASE/release-manifest.json"
@@ -912,7 +914,7 @@ READY_RESPONSE='{"status":"ready","inventory":{"state":"ready"},"instance":"test
 READY_OVERRIDE_ROOT="$WORK_DIR/readiness-override-root"
 READY_OVERRIDE="$READY_OVERRIDE_ROOT/releases/override"
 mkdir -p "$READY_OVERRIDE/web"
-cp "$WORK_DIR/readiness-helper" "$READY_OVERRIDE/herdr-mobile-relay"
+cp "$HERDR_TEST_RELAY_BIN" "$READY_OVERRIDE/herdr-mobile-relay"
 cp "$REPO_DIR/web/release.json" "$READY_OVERRIDE/web/release.json"
 printf '{"web_hash":"override-web"}\n' > "$READY_OVERRIDE/release-manifest.json"
 HERDR_RELEASE_ROOT="$READY_RELEASE_ROOT"
@@ -923,7 +925,7 @@ test "$READY_OUTPUT" = "$READY_RESPONSE"
 READY_CURRENT_ROOT="$WORK_DIR/readiness-current-root"
 READY_CURRENT="$READY_CURRENT_ROOT/releases/current-target"
 mkdir -p "$READY_CURRENT/web"
-cp "$WORK_DIR/readiness-helper" "$READY_CURRENT/herdr-mobile-relay"
+cp "$HERDR_TEST_RELAY_BIN" "$READY_CURRENT/herdr-mobile-relay"
 cp "$REPO_DIR/web/release.json" "$READY_CURRENT/web/release.json"
 printf '{"web_hash":"current-web"}\n' > "$READY_CURRENT/release-manifest.json"
 ln -s releases/current-target "$READY_CURRENT_ROOT/current"
@@ -938,7 +940,7 @@ test "$READY_OUTPUT" = "$READY_RESPONSE"
 READY_PACKAGED="$WORK_DIR/readiness-packaged"
 mkdir -p "$READY_PACKAGED/relay" "$READY_PACKAGED/web"
 cp "$REPO_DIR/relay/common.sh" "$READY_PACKAGED/relay/common.sh"
-cp "$WORK_DIR/readiness-helper" "$READY_PACKAGED/herdr-mobile-relay"
+cp "$HERDR_TEST_RELAY_BIN" "$READY_PACKAGED/herdr-mobile-relay"
 cp "$REPO_DIR/web/release.json" "$READY_PACKAGED/web/release.json"
 printf '{"web_hash":"packaged-web"}\n' > "$READY_PACKAGED/release-manifest.json"
 chmod 700 "$READY_PACKAGED/herdr-mobile-relay"
@@ -952,7 +954,7 @@ READY_OUTPUT="$(
 test "$READY_OUTPUT" = "$READY_RESPONSE"
 
 unset -f curl
-HERDR_RELAY_BIN="$WORK_DIR/readiness-helper"
+HERDR_RELAY_BIN="$HERDR_TEST_RELAY_BIN"
 unset HERDR_RELEASE_ROOT HERDR_WEB_ROOT
 HEALTH='{"status":"ready","inventory":{"state":"ready"},"instance":"test","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
@@ -1395,12 +1397,11 @@ mkdir -p "$START_BIN_DIR/web"
 cp "$REPO_DIR/web/release.json" "$START_BIN_DIR/web/release.json"
 printf '%s\n' '{"version":"9.9.9","revision":"test-revision","web_hash":"test-web"}' \
     > "$START_BIN_DIR/release-manifest.json"
-export HERDR_TEST_READINESS_BIN="$WORK_DIR/readiness-helper"
 cat > "$START_BIN_DIR/relay-bin" <<'EOF'
 #!/bin/sh
 case "$1" in
     version) printf '%s\n' '{"version":"9.9.9","revision":"test-revision"}'; exit 0 ;;
-    verify-readiness) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
+    verify-readiness) exec "$HERDR_TEST_RELAY_BIN" "$@" ;;
 esac
 printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1
@@ -1705,13 +1706,13 @@ cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
 
 LINK_OUTPUT="$(
     HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
-        HERDR_RELAY_BIN="$WORK_DIR/readiness-helper" HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_RELAY_BIN="$HERDR_TEST_RELAY_BIN" HERDR_RELAY_ENV="$MOVE_ENV" \
         HERDR_PHONE_APP_URL=relay bash "$REPO_DIR/relay/setup-link.sh"
 )"
 grep -Fq 'relay=wss%3A%2F%2Frelay-fedora.old.test&' <<< "$LINK_OUTPUT"
 LINK_OUTPUT="$(
     HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
-        HERDR_RELAY_BIN="$WORK_DIR/readiness-helper" HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_RELAY_BIN="$HERDR_TEST_RELAY_BIN" HERDR_RELAY_ENV="$MOVE_ENV" \
         HERDR_PHONE_APP_URL=relay bash "$REPO_DIR/relay/setup-link.sh" \
         'WSS://RELAY-FEDORA.OLD.TEST./setup'
 )"
