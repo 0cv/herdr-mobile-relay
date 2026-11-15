@@ -62,11 +62,15 @@ type AgentState struct {
 	ForegroundCwd                string                 `json:"-"`
 }
 
+type paneRecord struct {
+	agent *AgentState
+}
+
 type TransitionCallback func(paneID, agent, project, status string, revision int64)
 
 type State struct {
 	mu                 sync.RWMutex
-	agents             map[string]*AgentState
+	panes              map[string]*paneRecord
 	workspaces         []herdr.Workspace
 	revision           map[string]int64
 	contentRev         map[string]int64
@@ -120,7 +124,7 @@ type InventorySnapshot struct {
 
 func NewState(logger *slog.Logger) *State {
 	return &State{
-		agents:             make(map[string]*AgentState),
+		panes:              make(map[string]*paneRecord),
 		revision:           make(map[string]int64),
 		contentRev:         make(map[string]int64),
 		attentionRev:       make(map[string]int64),
@@ -291,15 +295,13 @@ func (s *State) Generation(paneID string) int64 {
 func (s *State) PaneSession(paneID string) (int64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, active := s.agents[paneID]
-	return s.generation[paneID], active
+	return s.generation[paneID], s.panes[paneID] != nil
 }
 
 func (s *State) PaneSessionCurrent(paneID string, generation int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, active := s.agents[paneID]
-	return active && s.generation[paneID] == generation
+	return s.panes[paneID] != nil && s.generation[paneID] == generation
 }
 
 func (s *State) BumpGeneration(paneID string) {
@@ -311,17 +313,17 @@ func (s *State) BumpGeneration(paneID string) {
 func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	agent := s.agents[paneID]
-	return agent != nil && agent.Status == status && s.revision[paneID] == revision
+	rec := s.panes[paneID]
+	return rec != nil && rec.agent.Status == status && s.revision[paneID] == revision
 }
 
 func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	agent := s.agents[paneID]
-	return agent != nil &&
-		agent.Status == "blocked" &&
-		agent.BlockedEventID == eventID &&
+	rec := s.panes[paneID]
+	return rec != nil &&
+		rec.agent.Status == "blocked" &&
+		rec.agent.BlockedEventID == eventID &&
 		s.generation[paneID] == generation
 }
 
@@ -333,22 +335,22 @@ func (s *State) AttentionTransitionCurrent(
 ) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	agent := s.agents[paneID]
-	return agent != nil &&
-		agent.Status == "blocked" &&
-		agent.BlockedEventID == eventID &&
+	rec := s.panes[paneID]
+	return rec != nil &&
+		rec.agent.Status == "blocked" &&
+		rec.agent.BlockedEventID == eventID &&
 		s.generation[paneID] == generation &&
-		string(agent.AttentionKind) == attentionKind &&
+		string(rec.agent.AttentionKind) == attentionKind &&
 		s.attentionRev[paneID] == attentionRevision
 }
 
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	agent := s.agents[paneID]
-	return agent != nil &&
-		(!attentionStatuses[agent.Status] ||
-			agent.Status == "blocked" && agent.AttentionKind == question.AttentionChat) &&
+	rec := s.panes[paneID]
+	return rec != nil &&
+		(!attentionStatuses[rec.agent.Status] ||
+			rec.agent.Status == "blocked" && rec.agent.AttentionKind == question.AttentionChat) &&
 		s.completionRev[paneID] == revision
 }
 
@@ -414,11 +416,12 @@ func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
 		if incoming == nil {
 			continue
 		}
-		existing, exists := s.agents[incoming.PaneID]
-		if !exists || paneSessionReplaced(existing, incoming) {
+		rec := s.panes[incoming.PaneID]
+		if rec == nil || paneSessionReplaced(rec.agent, incoming) {
 			topology[index] = incoming
 			continue
 		}
+		existing := rec.agent
 		cp := *incoming
 		cp.Status = existing.Status
 		if existing.Status == "blocked" {
@@ -452,11 +455,11 @@ func (s *State) CommitPoll(
 
 func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 	initialSnapshot := !s.inventoryReady
-	topologyChanged := len(agents) != len(s.agents)
+	topologyChanged := len(agents) != len(s.panes)
 	if !topologyChanged {
 		for _, agent := range agents {
-			existing, exists := s.agents[agent.PaneID]
-			if !exists || paneSessionReplaced(existing, agent) {
+			rec := s.panes[agent.PaneID]
+			if rec == nil || paneSessionReplaced(rec.agent, agent) {
 				topologyChanged = true
 				break
 			}
@@ -478,7 +481,12 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		seen[incoming.PaneID] = true
 
 		cp := *incoming
-		existing, exists := s.agents[incoming.PaneID]
+		rec := s.panes[incoming.PaneID]
+		exists := rec != nil
+		var existing *AgentState
+		if exists {
+			existing = rec.agent
+		}
 		replaced := exists && paneSessionReplaced(existing, incoming)
 		if exists && !replaced && existing.SessionID != incoming.SessionID {
 			delete(s.sessionDiscoveries, incoming.PaneID)
@@ -575,7 +583,11 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			previousAttention = existing.AttentionKind
 		}
 		s.revision[incoming.PaneID] = s.revCounter
-		s.agents[incoming.PaneID] = &cp
+		if rec == nil {
+			rec = &paneRecord{}
+			s.panes[incoming.PaneID] = rec
+		}
+		rec.agent = &cp
 		s.registerTransition(incoming.PaneID, prev, cp.Status, previousAttention)
 		if !exists && (doneStatuses[cp.Status] || cp.Status == "idle") {
 			if cp.LastActiveAt > cp.LastSeenAt {
@@ -596,11 +608,11 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		}
 	}
 
-	for id := range s.agents {
+	for id := range s.panes {
 		if !seen[id] {
 			delete(s.sessionDiscoveries, id)
 			s.generation[id]++
-			delete(s.agents, id)
+			delete(s.panes, id)
 			delete(s.revision, id)
 			delete(s.contentRev, id)
 			delete(s.attentionRev, id)
@@ -661,8 +673,8 @@ func (s *State) CommitEventForSession(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	agent, exists := s.agents[paneID]
-	if !exists {
+	rec := s.panes[paneID]
+	if rec == nil {
 		if len(s.pendingEvents) >= 128 {
 			var oldestID string
 			var oldest time.Time
@@ -682,13 +694,13 @@ func (s *State) CommitEventForSession(
 		}
 		return false
 	}
-	if !eventIdentityMatches(agent, tabID, workspaceID) {
+	if !eventIdentityMatches(rec.agent, tabID, workspaceID) {
 		return false
 	}
 	s.revCounter++
 	s.revision[paneID] = s.revCounter
 
-	a := agent
+	a := rec.agent
 	before := *a
 	before.Options = append([]string(nil), a.Options...)
 	prev := a.Status
@@ -788,7 +800,7 @@ func (s *State) fireTransition(paneID, status string) {
 	if s.onTransition == nil {
 		return
 	}
-	a := s.agents[paneID]
+	a := s.panes[paneID].agent
 	s.onTransition(paneID, a.Agent, a.Project, status, s.revision[paneID])
 }
 
@@ -874,13 +886,14 @@ func (s *State) CommitAttentionClassification(
 ) (*AgentState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	agent := s.agents[paneID]
-	if agent == nil || agent.Status != "blocked" ||
-		agent.BlockedEventID != eventID ||
+	rec := s.panes[paneID]
+	if rec == nil || rec.agent.Status != "blocked" ||
+		rec.agent.BlockedEventID != eventID ||
 		s.generation[paneID] != generation ||
 		s.contentRev[paneID] != contentRevision {
 		return nil, false
 	}
+	agent := rec.agent
 	if classification.Kind == "" {
 		classification.Kind = question.AttentionUnknown
 	}
@@ -958,10 +971,11 @@ func (s *State) AcknowledgePane(paneID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	agent, exists := s.agents[paneID]
-	if !exists {
+	rec := s.panes[paneID]
+	if rec == nil {
 		return false
 	}
+	agent := rec.agent
 	agent.LastSeenAt = max(time.Now().UnixMilli(), agent.LastActiveAt)
 	if s.unseenDone[paneID] || doneStatuses[agent.Status] {
 		delete(s.unseenDone, paneID)
@@ -977,10 +991,11 @@ func (s *State) DisplayedStatus(paneID string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	a, ok := s.agents[paneID]
-	if !ok {
+	rec := s.panes[paneID]
+	if rec == nil {
 		return ""
 	}
+	a := rec.agent
 	if doneStatuses[a.Status] && s.ackDone[paneID] {
 		return "idle"
 	}
@@ -997,9 +1012,9 @@ func (s *State) Snapshot() []*AgentState {
 }
 
 func (s *State) snapshotLocked() []*AgentState {
-	result := make([]*AgentState, 0, len(s.agents))
-	for _, a := range s.agents {
-		cp := a.Clone()
+	result := make([]*AgentState, 0, len(s.panes))
+	for _, rec := range s.panes {
+		cp := rec.agent.Clone()
 		cp.StateRevision = s.revision[cp.PaneID]
 		cp.Generation = s.generation[cp.PaneID]
 		if doneStatuses[cp.Status] && s.ackDone[cp.PaneID] {
@@ -1010,7 +1025,7 @@ func (s *State) snapshotLocked() []*AgentState {
 		}
 		result = append(result, cp)
 	}
-	// s.agents is a map; without an explicit order every snapshot serializes
+	// s.panes is a map; without an explicit order every snapshot serializes
 	// differently, which defeats broadcast dedupe and hands clients a
 	// re-shuffled payload each poll.
 	sort.Slice(result, func(i, j int) bool { return result[i].PaneID < result[j].PaneID })
@@ -1111,11 +1126,11 @@ func workspacesEqual(left, right []herdr.Workspace) bool {
 func (s *State) Agent(paneID string) (*AgentState, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	agent, ok := s.agents[paneID]
-	if !ok {
+	rec := s.panes[paneID]
+	if rec == nil {
 		return nil, false
 	}
-	copy := agent.Clone()
+	copy := rec.agent.Clone()
 	copy.StateRevision = s.revision[paneID]
 	copy.Generation = s.generation[paneID]
 	return copy, true
@@ -1148,7 +1163,7 @@ func (s *State) AttentionRevision(paneID string) int64 {
 func (s *State) AgentCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.agents)
+	return len(s.panes)
 }
 
 func (s *State) TopologyRetryCount() uint64 {
@@ -1163,10 +1178,10 @@ func (s *State) RegisterFinishedNotificationForTransition(
 ) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	agent := s.agents[paneID]
-	if agent == nil ||
-		(attentionStatuses[agent.Status] &&
-			!(agent.Status == "blocked" && agent.AttentionKind == question.AttentionChat)) ||
+	rec := s.panes[paneID]
+	if rec == nil ||
+		(attentionStatuses[rec.agent.Status] &&
+			!(rec.agent.Status == "blocked" && rec.agent.AttentionKind == question.AttentionChat)) ||
 		s.completionRev[paneID] != revision || s.finishedNotif[paneID] {
 		return false
 	}

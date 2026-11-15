@@ -21,12 +21,12 @@ type sessionDiscovery struct {
 func (s *State) beginLaunch() launchSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	snapshot := launchSnapshot{generations: make(map[string]int64, len(s.generation)), terminals: make(map[string]string, len(s.agents))}
+	snapshot := launchSnapshot{generations: make(map[string]int64, len(s.generation)), terminals: make(map[string]string, len(s.panes))}
 	for pane, generation := range s.generation {
 		snapshot.generations[pane] = generation
 	}
-	for pane, agent := range s.agents {
-		snapshot.terminals[pane] = agent.TerminalID
+	for pane, rec := range s.panes {
+		snapshot.terminals[pane] = rec.agent.TerminalID
 	}
 	return snapshot
 }
@@ -37,7 +37,7 @@ func (s *State) launchIdentityCurrent(pane string, identity LaunchIdentity) erro
 	if !identity.Valid || s.generation[pane] != identity.Generation {
 		return ErrPaneReplaced
 	}
-	if agent := s.agents[pane]; agent != nil && identity.TerminalID != "" && agent.TerminalID != identity.TerminalID {
+	if rec := s.panes[pane]; rec != nil && identity.TerminalID != "" && rec.agent.TerminalID != identity.TerminalID {
 		return ErrPaneReplaced
 	}
 	return nil
@@ -49,7 +49,10 @@ func (s *State) finishLaunch(snapshot launchSnapshot, pane string) LaunchIdentit
 	baseline := snapshot.generations[pane]
 	generation := s.generation[pane]
 	identity := LaunchIdentity{Generation: baseline}
-	agent := s.agents[pane]
+	var agent *AgentState
+	if rec := s.panes[pane]; rec != nil {
+		agent = rec.agent
+	}
 	if agent != nil {
 		identity.TerminalID = agent.TerminalID
 		identity.SessionID = agent.SessionID
