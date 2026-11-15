@@ -2918,33 +2918,35 @@ func transitionPushQueue(t *testing.T, s *Server) func() []push.Payload {
 		t.Fatal(err)
 	}
 	s.pushM = manager
-	return func() []push.Payload {
-		t.Helper()
-		data, err := os.ReadFile(filepath.Join(directory, "queue.json"))
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		var queue struct {
-			Entries map[string]struct {
-				Event push.PushEvent `json:"event"`
-			} `json:"entries"`
-		}
-		if err := json.Unmarshal(data, &queue); err != nil {
-			t.Fatal(err)
-		}
-		payloads := make([]push.Payload, 0, len(queue.Entries))
-		for _, entry := range queue.Entries {
-			var payload push.Payload
-			if err := json.Unmarshal(entry.Event.Payload, &payload); err != nil {
-				t.Fatal(err)
-			}
-			payloads = append(payloads, payload)
-		}
-		return payloads
+	return func() []push.Payload { return queuedPushPayloads(t, directory) }
+}
+
+func queuedPushPayloads(t *testing.T, directory string) []push.Payload {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(directory, "queue.json"))
+	if os.IsNotExist(err) {
+		return nil
 	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queue struct {
+		Entries map[string]struct {
+			Event push.PushEvent `json:"event"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &queue); err != nil {
+		t.Fatal(err)
+	}
+	payloads := make([]push.Payload, 0, len(queue.Entries))
+	for _, entry := range queue.Entries {
+		var payload push.Payload
+		if err := json.Unmarshal(entry.Event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
 }
 
 type recordingTransitionBroadcast struct {
