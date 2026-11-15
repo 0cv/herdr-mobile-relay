@@ -1,6 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { appScriptPattern, appStylePattern, lazyScriptPattern, releaseEntryPath } from './release-rules.ts';
+import { appScriptPattern, appStylePattern, lazyScriptPattern } from './release-rules.ts';
 
 // Stable resources are compressed explicitly. The application entry resources
 // are digest-addressed, so discover their names instead of reintroducing a
@@ -18,10 +18,8 @@ export const compressedAssets = [
   'icons/icon.svg',
 ];
 
-export async function releaseCompressedAssets(root) {
+export async function releaseCompressedAssets(root, entry) {
   const assets = await readdir(join(root, 'assets'));
-  const descriptor = JSON.parse(await readFile(join(root, 'release.json'), 'utf8'));
-  const entry = releaseEntryPath(descriptor);
   const contentAddressed = assets
     .filter((name) => appScriptPattern.test(name) || appStylePattern.test(name))
     .map((name) => `assets/${name}`);

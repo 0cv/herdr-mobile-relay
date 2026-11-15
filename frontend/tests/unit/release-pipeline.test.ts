@@ -42,7 +42,6 @@ beforeAll(() => {
   delete env.HERDR_DEV_RUNTIME;
   run(join(frontend, 'node_modules/.bin/vite'), ['build', '--outDir', root, '--emptyOutDir'], env);
   run('bun', ['scripts/finalize-build.mjs', root], env);
-  run('bun', ['scripts/compress-assets.mjs', root], env);
 }, 180_000);
 
 afterAll(() => {
