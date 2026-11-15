@@ -50,3 +50,35 @@ func TestCommandListCommandsReturnsFreshSlice(t *testing.T) {
 		t.Fatal("commands() must not share storage with the list or the builtins")
 	}
 }
+
+func commandListNames(list *commandList) []string {
+	names := []string{}
+	for _, command := range list.commands() {
+		names = append(names, command.Command+"|"+command.Source)
+	}
+	return names
+}
+
+func TestCommandListSetReplacesInPlace(t *testing.T) {
+	list := newCommandList([]Command{{Command: "/a", Source: "builtin"}, {Command: "/b", Source: "builtin"}}, false)
+	list.set([]Command{{Command: "/a", Source: "custom"}, {Command: "/c", Source: "custom"}})
+
+	want := []string{"/a|custom", "/b|builtin", "/c|custom"}
+	if got := commandListNames(list); !slices.Equal(got, want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+}
+
+func TestCommandListRemoveThenSetAppendsAtEnd(t *testing.T) {
+	list := newCommandList([]Command{{Command: "/a", Source: "builtin"}, {Command: "/b", Source: "builtin"}, {Command: "/c", Source: "builtin"}}, false)
+	list.remove([]string{"/a", "/missing"})
+	if got, want := commandListNames(list), []string{"/b|builtin", "/c|builtin"}; !slices.Equal(got, want) {
+		t.Fatalf("after remove commands = %v, want %v", got, want)
+	}
+	list.set([]Command{{Command: "/a", Source: "custom"}})
+
+	want := []string{"/b|builtin", "/c|builtin", "/a|custom"}
+	if got := commandListNames(list); !slices.Equal(got, want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+}

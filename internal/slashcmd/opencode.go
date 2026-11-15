@@ -42,17 +42,17 @@ func (p *openCodeProvider) Builtins() []Command { return openCodeBuiltins }
 
 func (p *openCodeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	commands := append([]Command(nil), openCodeBuiltins...)
+	list := newCommandList(openCodeBuiltins, false)
+	builtinNames := make(map[string]bool, len(openCodeBuiltins))
+	for _, builtin := range openCodeBuiltins {
+		builtinNames[builtin.Command] = true
+	}
 	config := os.Getenv("XDG_CONFIG_HOME")
 	if !filepath.IsAbs(config) {
 		config = filepath.Join(ctx.Home, ".config")
 	}
 	roots := []string{filepath.Join(config, "opencode")}
 	roots = append(roots, findProjectDirs(ctx.Cwd, []string{".opencode"})...)
-	indices := make(map[string]int)
-	for i, command := range commands {
-		indices[command.Command] = i
-	}
 	budget, visits := maxCustomFiles, maxEntries
 	truncated := false
 	for i, root := range roots {
@@ -64,19 +64,14 @@ func (p *openCodeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			found, clipped := reader.openCodeCommandDir(filepath.Join(root, leaf), source, &budget, &visits)
 			truncated = truncated || clipped
 			for _, command := range found {
-				index, exists := indices[command.Command]
-				if exists {
-					if commands[index].Source != "builtin" {
-						commands[index] = command
-					}
+				if builtinNames[command.Command] {
 					continue
 				}
-				indices[command.Command] = len(commands)
-				commands = append(commands, command)
+				list.set([]Command{command})
 			}
 		}
 	}
-	return commands, truncated || reader.truncated
+	return list.commands(), truncated || reader.truncated
 }
 
 var openCodeCommandName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*(/[A-Za-z0-9][A-Za-z0-9._:-]*)*$`)

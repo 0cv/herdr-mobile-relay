@@ -70,23 +70,11 @@ func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
 	truncated := false
 	budget := maxCustomFiles
-	active := make(map[string]Command, len(claudeBuiltins))
-	order := make([]string, 0, len(claudeBuiltins))
+	list := newCommandList(claudeBuiltins, false)
 	apply := func(commands []Command, suppressed []string) {
-		for _, name := range suppressed {
-			if _, exists := active[name]; exists {
-				delete(active, name)
-				order = removeCommandName(order, name)
-			}
-		}
-		for _, command := range commands {
-			if _, exists := active[command.Command]; !exists {
-				order = append(order, command.Command)
-			}
-			active[command.Command] = command
-		}
+		list.remove(suppressed)
+		list.set(commands)
 	}
-	apply(claudeBuiltins, nil)
 
 	if ctx.Cwd != "" {
 		projectDirs := findProjectDirs(ctx.Cwd, []string{".claude"})
@@ -114,26 +102,11 @@ func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	truncated = truncated || trunc
 
 	apply(nil, reader.claudeSkillOverrides(ctx))
-	commands := make([]Command, 0, len(order))
-	for _, name := range order {
-		if command, exists := active[name]; exists {
-			commands = append(commands, command)
-		}
-	}
 
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated || reader.truncated
-}
-
-func removeCommandName(values []string, name string) []string {
-	for index, value := range values {
-		if value == name {
-			return append(values[:index], values[index+1:]...)
-		}
-	}
-	return values
+	return list.commands(), truncated || reader.truncated
 }
 
 // claudeSkillOverrides reads skillOverrides from Claude's settings files.

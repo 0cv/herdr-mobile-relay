@@ -1,6 +1,9 @@
 package slashcmd
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 type commandList struct {
 	foldCase bool
@@ -18,21 +21,42 @@ func newCommandList(builtins []Command, foldCase bool) *commandList {
 	return list
 }
 
-func (l *commandList) key(command Command) string {
+func (l *commandList) key(name string) string {
 	if l.foldCase {
-		return strings.ToLower(command.Command)
+		return strings.ToLower(name)
 	}
-	return command.Command
+	return name
 }
 
 func (l *commandList) addIfAbsent(commands []Command) {
 	for _, command := range commands {
-		key := l.key(command)
+		key := l.key(command.Command)
 		if _, exists := l.byKey[key]; exists {
 			continue
 		}
 		l.order = append(l.order, key)
 		l.byKey[key] = command
+	}
+}
+
+func (l *commandList) set(commands []Command) {
+	for _, command := range commands {
+		key := l.key(command.Command)
+		if _, exists := l.byKey[key]; !exists {
+			l.order = append(l.order, key)
+		}
+		l.byKey[key] = command
+	}
+}
+
+func (l *commandList) remove(names []string) {
+	for _, name := range names {
+		key := l.key(name)
+		if _, exists := l.byKey[key]; !exists {
+			continue
+		}
+		delete(l.byKey, key)
+		l.order = slices.DeleteFunc(l.order, func(existing string) bool { return existing == key })
 	}
 }
 
