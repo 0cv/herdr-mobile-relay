@@ -7,9 +7,10 @@ CASES=""
 TEST_COUNT=0
 TEST_BIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-stable-bin.XXXXXX")"
 TEST_RELAY_BIN="$TEST_BIN_DIR/herdr-mobile-relay"
-GOMODCACHE="${GOMODCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-mod}" \
-    GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-cache}" \
-    go build -o "$TEST_RELAY_BIN" "$ROOT/cmd/herdr-mobile-relay"
+# shellcheck source=lib.sh
+. "$ROOT/tests/lib.sh"
+ensure_relay_test_binary "$TEST_BIN_DIR"
+[ "$HERDR_TEST_RELAY_BIN" = "$TEST_RELAY_BIN" ] || cp "$HERDR_TEST_RELAY_BIN" "$TEST_RELAY_BIN"
 mkdir -p "$TEST_BIN_DIR/web"
 cp "$ROOT/web/release.json" "$TEST_BIN_DIR/web/release.json"
 printf '{"version":"dev","revision":"unknown","web_hash":"test-web"}\n' \

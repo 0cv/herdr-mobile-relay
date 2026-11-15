@@ -4,8 +4,9 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-build-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
-export HERDR_TEST_READINESS_BIN="$WORK_DIR/readiness-helper"
-go build -o "$HERDR_TEST_READINESS_BIN" "$REPO_DIR/cmd/herdr-mobile-relay"
+# shellcheck source=lib.sh
+. "$REPO_DIR/tests/lib.sh"
+ensure_relay_test_binary "$WORK_DIR"
 
 TEST_HOME="$WORK_DIR/home"
 RELEASE_ROOT="$TEST_HOME/releases"
@@ -63,7 +64,7 @@ printf '{\n  "version": "%s",\n  "revision": "new-revision",\n  "web_hash": "new
 cat > "$NEW_RELEASE/herdr-mobile-relay" <<'EOF'
 #!/bin/sh
 case "$1" in
-    verify-readiness) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
+    verify-readiness) exec "$HERDR_TEST_RELAY_BIN" "$@" ;;
     verify-release) exit 0 ;;
     activate-release)
         root=$2
