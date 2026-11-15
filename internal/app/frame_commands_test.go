@@ -212,6 +212,7 @@ func TestFrameSendInputNeedsTextOrKeys(t *testing.T) {
 		"keys only":        {map[string]any{"keys": []string{"Enter"}}, `SendInput pane-1 text="" keys=Enter`},
 		"text and keys":    {map[string]any{"text": "hello", "keys": []string{"Enter"}}, `SendInput pane-1 text="hello" keys=Enter`},
 		"text, empty keys": {map[string]any{"text": "hello", "keys": []string{}}, `SendInput pane-1 text="hello" keys=`},
+		"text, null keys":  {map[string]any{"text": "hello", "keys": nil}, `SendInput pane-1 text="hello" keys=`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newFrameEnv(t)
@@ -225,7 +226,6 @@ func TestFrameSendInputNeedsTextOrKeys(t *testing.T) {
 	for name, fields := range map[string]map[string]any{
 		"neither":                 {},
 		"null keys":               {"keys": nil},
-		"null keys with text":     {"keys": nil, "text": "hello"},
 		"empty keys":              {"keys": []string{}},
 		"an unsupported key":      {"keys": []string{"Hyper+Enter"}},
 		"an empty key":            {"keys": []string{""}},

@@ -34,7 +34,7 @@ func validPiIntegrationRequest(message map[string]any, instance string) bool {
 	}
 	for key := range message {
 		switch key {
-		case "type", "action", "protocol", "request_id", "client_id", "instance", "enabled", "_server_received_at", "_server_sequence":
+		case "type", "protocol", "request_id", "client_id", "instance", "enabled", "_server_received_at", "_server_sequence":
 		default:
 			return false
 		}

@@ -66,7 +66,7 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	coordinated := scope.Action.Coordinated
 	auditedWrite := scope.Action.Audited
 	if auditedWrite {
-		s.recordWriteAudit(client, msg, nil)
+		s.recordWriteAudit(client, msg, action, nil)
 	}
 	if !coordinated {
 		admitted()
@@ -89,7 +89,7 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 		s.handlePiIntegration(commandCtx, client, inbound, msg)
 	case "get_pi_prompt_capability", "send_pi_prompt_unconfirmed":
 		result := s.handlePiPrompt(commandCtx, client, inbound, msg, admitted)
-		s.sendResult(client, msg, auditedWrite, result)
+		s.sendResult(client, msg, action, auditedWrite, result)
 	case "check_update", "install_update", "deploy_app_update":
 		s.handleUpdate(ctx, client, inbound)
 	case "lease_pane_size", "release_pane_size":
@@ -220,9 +220,9 @@ func (s *Server) rejectMessage(client *transport.ClientConn, admitted func(), re
 	s.hub.Send(client, response)
 }
 
-func (s *Server) sendResult(client *transport.ClientConn, msg map[string]any, auditedWrite bool, result *coordinator.CommandResult) {
+func (s *Server) sendResult(client *transport.ClientConn, msg map[string]any, action string, auditedWrite bool, result *coordinator.CommandResult) {
 	if auditedWrite {
-		s.recordWriteAudit(client, msg, result)
+		s.recordWriteAudit(client, msg, action, result)
 	}
 	s.hub.Send(client, coordinator.CommandResultMessage(result))
 }
@@ -262,7 +262,7 @@ func (s *Server) handleDispatched(commandCtx context.Context, client *transport.
 			Error:     "One or more attachments are no longer available for this agent",
 			PaneID:    inbound.PaneID,
 		}
-		s.sendResult(client, msg, auditedWrite, result)
+		s.sendResult(client, msg, action, auditedWrite, result)
 		return
 	}
 	var result *coordinator.CommandResult
@@ -271,5 +271,5 @@ func (s *Server) handleDispatched(commandCtx context.Context, client *transport.
 	} else {
 		result = s.dispatcher.Handle(commandCtx, msg)
 	}
-	s.sendResult(client, msg, auditedWrite, result)
+	s.sendResult(client, msg, action, auditedWrite, result)
 }

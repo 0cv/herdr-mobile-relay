@@ -69,7 +69,7 @@ func (s *Server) handleTopology(commandCtx context.Context, client *transport.Cl
 			)
 		}
 	})
-	s.sendResult(client, msg, auditedWrite, result)
+	s.sendResult(client, msg, action, auditedWrite, result)
 }
 
 func (s *Server) handleWorkspaceInspect(client *transport.ClientConn, inbound protocol.Inbound) {

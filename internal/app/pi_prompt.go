@@ -15,7 +15,7 @@ import (
 func validPiPromptRequest(message map[string]any) bool {
 	for key := range message {
 		switch key {
-		case "type", "action", "protocol", "request_id", "target", "pane_id", "server_session_id", "client_id", "text", "pi_prompt_lease", "_server_received_at", "_server_sequence":
+		case "type", "protocol", "request_id", "target", "pane_id", "server_session_id", "client_id", "text", "pi_prompt_lease", "_server_received_at", "_server_sequence":
 		default:
 			return false
 		}

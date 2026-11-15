@@ -203,8 +203,7 @@ type Inbound struct {
 	OtherSelected        bool            `json:"other_selected,omitempty"`
 	OtherText            string          `json:"other_text,omitempty"`
 	Direction            string          `json:"direction,omitempty"`
-	Lines                int             `json:"lines,omitempty"`
-	Before               string          `json:"before,omitempty"`
+	Lines                *int            `json:"lines,omitempty"`
 	Cursor               string          `json:"cursor,omitempty"`
 	SubscriptionID       string          `json:"subscription_id,omitempty"`
 	Observe              bool            `json:"observe,omitempty"`
@@ -218,8 +217,6 @@ type Inbound struct {
 	Immediate            bool            `json:"immediate,omitempty"`
 	Format               string          `json:"format,omitempty"`
 	Path                 string          `json:"path,omitempty"`
-	Filename             string          `json:"filename,omitempty"`
-	MIME                 string          `json:"mime,omitempty"`
 	Data                 string          `json:"data,omitempty"`
 	ClientID             string          `json:"client_id,omitempty"`
 	ReplaceEndpoints     []string        `json:"replace_endpoints,omitempty"`
@@ -235,6 +232,18 @@ type Inbound struct {
 	Snoozed              bool            `json:"snoozed,omitempty"`
 	Visible              bool            `json:"visible,omitempty"`
 	Unlocked             bool            `json:"unlocked,omitempty"`
+	ActivityLabel        string          `json:"activity_label,omitempty"`
+	HermesProfile        string          `json:"hermes_profile,omitempty"`
+	Language             string          `json:"language,omitempty"`
+	SpeechRequestID      string          `json:"speech_request_id,omitempty"`
+	ContentFingerprint   string          `json:"content_fingerprint,omitempty"`
+	IntervalMS           int             `json:"interval_ms,omitempty"`
+	Enabled              *bool           `json:"enabled,omitempty"`
+	Instance             string          `json:"instance,omitempty"`
+	SDP                  string          `json:"sdp,omitempty"`
+	Candidate            string          `json:"candidate,omitempty"`
+	SDPMid               string          `json:"sdp_mid,omitempty"`
+	SDPMLineIndex        int             `json:"sdp_mline_index,omitempty"`
 }
 
 func DecodeMap(raw map[string]any) (Inbound, error) {

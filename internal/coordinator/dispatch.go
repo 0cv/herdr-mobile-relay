@@ -406,7 +406,7 @@ func (d *Dispatcher) handleKeys(ctx context.Context, req commandRequest) *Comman
 func (d *Dispatcher) handleInput(ctx context.Context, req commandRequest) *CommandResult {
 	var keys []string
 	var err error
-	if rawKeys, present := req.message["keys"]; present {
+	if rawKeys := req.message["keys"]; rawKeys != nil {
 		keys, err = stringSlice(rawKeys)
 	}
 	input, inputErr := herdr.ValidatePaneInput(herdr.PaneInput{

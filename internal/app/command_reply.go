@@ -51,7 +51,7 @@ func (r commandReply) send(ok bool, phase, publicError string, data any) {
 		Data:      data,
 	}
 	if r.audited != nil {
-		r.server.recordWriteAudit(r.client, r.audited, result)
+		r.server.recordWriteAudit(r.client, r.audited, r.action, result)
 	}
 	r.server.hub.Send(r.client, coordinator.CommandResultMessage(result))
 }

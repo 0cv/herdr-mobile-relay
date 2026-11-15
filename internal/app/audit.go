@@ -19,13 +19,10 @@ func serializedState(value any) string {
 func (s *Server) recordWriteAudit(
 	client *transport.ClientConn,
 	message map[string]any,
+	action string,
 	result *coordinator.CommandResult,
 ) {
-	if s.auditLog == nil {
-		return
-	}
-	action := auditAction(message)
-	if action == "" {
+	if s.auditLog == nil || action == "" {
 		return
 	}
 	requestID, _ := message["request_id"].(string)
@@ -46,7 +43,7 @@ func (s *Server) recordWriteAudit(
 		ClientID:     clientID,
 		ConnectionID: client.ID(),
 		PaneID:       paneID,
-		Details:      auditWriteDetails(message),
+		Details:      auditWriteDetails(message, action),
 	}
 	if agent, ok := s.state.Agent(paneID); ok {
 		record.Agent = agent.Agent
@@ -76,13 +73,7 @@ func (s *Server) recordWriteAudit(
 	}
 }
 
-func auditAction(message map[string]any) string {
-	action, _ := message["type"].(string)
-	return action
-}
-
-func auditWriteDetails(message map[string]any) map[string]any {
-	action := auditAction(message)
+func auditWriteDetails(message map[string]any, action string) map[string]any {
 	if action == "" {
 		return nil
 	}
@@ -112,7 +103,7 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	stringLimits := map[string]int{
 		"name": 256, "label": 256, "profile_id": 160, "workspace_id": 160,
 		"before_workspace_id": 160, "cwd": 1024, "path": 1024, "branch": 512,
-		"base": 512, "filename": 512, "mime": 128, "activity_label": 256,
+		"base": 512, "activity_label": 256,
 	}
 	for key, limit := range stringLimits {
 		if value, ok := message[key].(string); ok && value != "" {
@@ -129,11 +120,11 @@ func auditWriteDetails(message map[string]any) map[string]any {
 			details[key] = value
 		}
 	}
-	if force, ok := message["force"].(bool); ok {
-		details["force"] = force
+	if force, _ := message["force"].(bool); force {
+		details["force"] = true
 	}
-	if closeGroup, ok := message["close_group"].(bool); ok {
-		details["close_group"] = closeGroup
+	if closeGroup, _ := message["close_group"].(bool); closeGroup {
+		details["close_group"] = true
 	}
 	if workspaceIDs := auditWorkspaceIDList(message["workspace_ids"]); len(workspaceIDs) > 0 {
 		details["workspace_ids"] = workspaceIDs

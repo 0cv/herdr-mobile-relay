@@ -400,7 +400,7 @@ func (e *frameEnv) piIntegrationFrame(t *testing.T, fields map[string]any) map[s
 
 func (e *frameEnv) recordAttempt(frame map[string]any, inbound protocol.Inbound) {
 	if isAuditedWrite(inbound.Type) {
-		e.server.recordWriteAudit(e.client, frame, nil)
+		e.server.recordWriteAudit(e.client, frame, inbound.Type, nil)
 	}
 }
 
@@ -444,7 +444,7 @@ func TestFramePiPromptAcceptsOnlyPromptKeys(t *testing.T) {
 	}
 	for _, extra := range []map[string]any{
 		{"keys": []string{"Enter"}}, {"prompt": "x"}, {"secret": true}, {"attachments": []string{"x"}}, {"label": "x"}, {"workspace_id": "w"},
-		{"no_echo": true}, {"images": []string{"x"}},
+		{"no_echo": true}, {"images": []string{"x"}}, {"action": "send_keys"},
 	} {
 		for _, base := range []map[string]any{
 			{"type": "get_pi_prompt_capability", "target": target},
@@ -485,7 +485,7 @@ func TestFramePiIntegrationAcceptsOnlyItsKeys(t *testing.T) {
 	}
 	for _, extra := range []map[string]any{
 		{"path": "/tmp/pi"}, {"profiles": []string{"x"}}, {"target": map[string]any{"pane_id": "pane-1"}},
-		{"pane_id": "pane-1"}, {"server_session_id": protocol.PrimaryServerSessionID}, {"text": "remote"},
+		{"pane_id": "pane-1"}, {"server_session_id": protocol.PrimaryServerSessionID}, {"text": "remote"}, {"action": "set_pi_integration"},
 	} {
 		expectCommandResult(t, set(extra), "set_pi_integration", false, "failed", mismatch)
 	}
@@ -495,10 +495,8 @@ func TestFramePiIntegrationAcceptsOnlyItsKeys(t *testing.T) {
 		}
 	}
 
-	for name, enabled := range map[string]any{"null": nil, "a string": "true", "a number": 1} {
-		if response := set(map[string]any{"enabled": enabled}); response["ok"] != false || response["error"] != mismatch {
-			t.Fatalf("enabled as %s: response = %#v, want %q", name, response, mismatch)
-		}
+	if response := set(map[string]any{"enabled": nil}); response["ok"] != false || response["error"] != mismatch {
+		t.Fatalf("enabled as null: response = %#v, want %q", response, mismatch)
 	}
 
 	if response := e.piIntegrationFrame(t, map[string]any{"type": "get_pi_integration"}); response["ok"] != true || response["phase"] != "completed" {

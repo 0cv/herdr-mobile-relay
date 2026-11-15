@@ -22,28 +22,26 @@ func (s *Server) expandPromptAttachmentReferences(action string, message map[str
 	if action != "submit_prompt" {
 		return nil
 	}
-	for _, field := range []string{"text", "prompt"} {
-		value, ok := message[field].(string)
-		if !ok || !strings.Contains(value, "Attachment: ") {
+	value, ok := message["text"].(string)
+	if !ok || !strings.Contains(value, "Attachment: ") {
+		return nil
+	}
+	lines := strings.Split(value, "\n")
+	for index, line := range lines {
+		ref, found := strings.CutPrefix(strings.TrimSpace(line), "Attachment: ")
+		if !found || !validAttachmentReference(ref) {
 			continue
 		}
-		lines := strings.Split(value, "\n")
-		for index, line := range lines {
-			ref, found := strings.CutPrefix(strings.TrimSpace(line), "Attachment: ")
-			if !found || !validAttachmentReference(ref) {
-				continue
-			}
-			if target == nil || s.uploadM == nil {
-				return &upload.Error{Code: "attachment_reference_invalid"}
-			}
-			attachment, err := s.uploadM.Resolve(*target, ref)
-			if err != nil {
-				return &upload.Error{Code: "attachment_reference_invalid"}
-			}
-			lines[index] = "Attachment: " + attachment.Path
+		if target == nil || s.uploadM == nil {
+			return &upload.Error{Code: "attachment_reference_invalid"}
 		}
-		message[field] = strings.Join(lines, "\n")
+		attachment, err := s.uploadM.Resolve(*target, ref)
+		if err != nil {
+			return &upload.Error{Code: "attachment_reference_invalid"}
+		}
+		lines[index] = "Attachment: " + attachment.Path
 	}
+	message["text"] = strings.Join(lines, "\n")
 	return nil
 }
 
@@ -179,9 +177,10 @@ func decodeUploadRequest(message map[string]any, destination any) error {
 }
 
 func (s *Server) sendUploadResult(client *transport.ClientConn, message map[string]any, requestID, messageType string, result any) {
-	s.recordWriteAudit(client, message, &coordinator.CommandResult{
+	action := strings.TrimSuffix(messageType, "_result")
+	s.recordWriteAudit(client, message, action, &coordinator.CommandResult{
 		RequestID: requestID,
-		Action:    strings.TrimSuffix(messageType, "_result"),
+		Action:    action,
 		OK:        true,
 		Phase:     "completed",
 		Data:      result,
@@ -203,9 +202,10 @@ func (s *Server) sendUploadError(client *transport.ClientConn, message map[strin
 	} else if cause != nil && cause.Error() == "upload_unavailable" {
 		code = "attachment_upload_unavailable"
 	}
-	s.recordWriteAudit(client, message, &coordinator.CommandResult{
+	action := strings.TrimSuffix(messageType, "_result")
+	s.recordWriteAudit(client, message, action, &coordinator.CommandResult{
 		RequestID: requestID,
-		Action:    strings.TrimSuffix(messageType, "_result"),
+		Action:    action,
 		OK:        false,
 		Phase:     "failed",
 		Error:     code,
