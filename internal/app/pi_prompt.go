@@ -12,17 +12,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
-func validPiPromptRequest(message map[string]any) bool {
-	for key := range message {
-		switch key {
-		case "type", "protocol", "request_id", "target", "pane_id", "server_session_id", "client_id", "text", "pi_prompt_lease", "_server_received_at", "_server_sequence":
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 func runtimePiPromptIdentity(ctx context.Context, reader paneProcessReader, socket, pane, session string) (pibridge.Identity, error) {
 	instance, err := pibridge.Instance(socket)
 	if err != nil {
@@ -39,10 +28,10 @@ func runtimePiPromptIdentity(ctx context.Context, reader paneProcessReader, sock
 	return pibridge.Identity{Instance: instance, Pane: pane, Session: session, PID: pid}, nil
 }
 
-func (s *Server) handlePiPrompt(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound, message map[string]any, admitted func()) *coordinator.CommandResult {
+func (s *Server) handlePiPrompt(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound, admitted func()) *coordinator.CommandResult {
 	result := &coordinator.CommandResult{RequestID: inbound.RequestID, Action: inbound.Type, PaneID: inbound.PaneID, Phase: "not_started", Error: "Pi prompt capability is unavailable for this target"}
 	agent, exists := s.state.Agent(inbound.PaneID)
-	if !exists || !coordinator.PiPromptEligible(agent) || inbound.Target == nil || inbound.RequestID == "" || !validPiPromptRequest(message) {
+	if !exists || !coordinator.PiPromptEligible(agent) || inbound.Target == nil || inbound.RequestID == "" || !piFrameKeysAllowed(inbound) {
 		return result
 	}
 	targetBytes, err := json.Marshal(inbound.Target)

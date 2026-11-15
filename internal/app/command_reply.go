@@ -2,6 +2,7 @@ package app
 
 import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -11,16 +12,16 @@ type commandReply struct {
 	requestID string
 	action    string
 	paneID    string
-	audited   map[string]any
+	audited   *protocol.Inbound
 }
 
 func (s *Server) reply(client *transport.ClientConn, requestID, action, paneID string) commandReply {
 	return commandReply{server: s, client: client, requestID: requestID, action: action, paneID: paneID}
 }
 
-func (s *Server) auditedReply(client *transport.ClientConn, request map[string]any, requestID, action, paneID string) commandReply {
-	reply := s.reply(client, requestID, action, paneID)
-	reply.audited = request
+func (s *Server) auditedReply(client *transport.ClientConn, inbound protocol.Inbound, paneID string) commandReply {
+	reply := s.reply(client, inbound.RequestID, inbound.Type, paneID)
+	reply.audited = &inbound
 	return reply
 }
 
@@ -51,7 +52,7 @@ func (r commandReply) send(ok bool, phase, publicError string, data any) {
 		Data:      data,
 	}
 	if r.audited != nil {
-		r.server.recordWriteAudit(r.client, r.audited, r.action, result)
+		r.server.recordWriteAudit(r.client, *r.audited, result)
 	}
 	r.server.hub.Send(r.client, coordinator.CommandResultMessage(result))
 }

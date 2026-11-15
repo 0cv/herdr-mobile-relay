@@ -27,8 +27,8 @@ func (s *Server) handleDeviceList(client *transport.ClientConn, inbound protocol
 	})
 }
 
-func (s *Server) handleCreateDeviceInvitation(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, identity transport.AuthenticatedIdentity, authenticated bool) {
-	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+func (s *Server) handleCreateDeviceInvitation(client *transport.ClientConn, inbound protocol.Inbound, identity transport.AuthenticatedIdentity, authenticated bool) {
+	reply := s.auditedReply(client, inbound, "")
 	if s.deviceAuth == nil || !authenticated {
 		reply.fail(deviceManagementUnavailable)
 		return
@@ -41,8 +41,8 @@ func (s *Server) handleCreateDeviceInvitation(client *transport.ClientConn, inbo
 	reply.complete(map[string]any{"invitation": invitation})
 }
 
-func (s *Server) handleRenameDevice(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string) {
-	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+func (s *Server) handleRenameDevice(client *transport.ClientConn, inbound protocol.Inbound) {
+	reply := s.auditedReply(client, inbound, "")
 	if s.deviceAuth == nil {
 		reply.fail(deviceManagementUnavailable)
 		return
@@ -59,8 +59,8 @@ func (s *Server) handleRenameDevice(client *transport.ClientConn, inbound protoc
 	reply.complete(map[string]any{"device": credential})
 }
 
-func (s *Server) handleRevokeDevice(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string) {
-	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+func (s *Server) handleRevokeDevice(client *transport.ClientConn, inbound protocol.Inbound) {
+	reply := s.auditedReply(client, inbound, "")
 	if s.deviceAuth == nil {
 		reply.fail(deviceManagementUnavailable)
 		return
@@ -86,8 +86,8 @@ func (s *Server) handleRevokeDevice(client *transport.ClientConn, inbound protoc
 	reply.complete(map[string]any{"device": credential})
 }
 
-func (s *Server) handleResetDevices(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, identity transport.AuthenticatedIdentity, authenticated bool) {
-	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+func (s *Server) handleResetDevices(client *transport.ClientConn, inbound protocol.Inbound, identity transport.AuthenticatedIdentity, authenticated bool) {
+	reply := s.auditedReply(client, inbound, "")
 	if s.deviceAuth == nil || !authenticated {
 		reply.fail(deviceManagementUnavailable)
 		return

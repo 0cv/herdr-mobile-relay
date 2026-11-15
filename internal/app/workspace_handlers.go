@@ -11,7 +11,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/workspace"
 )
 
-func (s *Server) handleTopology(commandCtx context.Context, client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, auditedWrite bool, admitted func()) {
+func (s *Server) handleTopology(commandCtx context.Context, client *transport.ClientConn, inbound protocol.Inbound, action string, auditedWrite bool, admitted func()) {
 	// The dispatcher signals admitted() as soon as it holds the
 	// topology ordering lock; the Herdr command itself must not
 	// block the hub's global ordered ingress.
@@ -69,7 +69,7 @@ func (s *Server) handleTopology(commandCtx context.Context, client *transport.Cl
 			)
 		}
 	})
-	s.sendResult(client, msg, action, auditedWrite, result)
+	s.sendResult(client, inbound, auditedWrite, result)
 }
 
 func (s *Server) handleWorkspaceInspect(client *transport.ClientConn, inbound protocol.Inbound) {

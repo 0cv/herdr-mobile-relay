@@ -377,8 +377,8 @@ func (e *frameEnv) piPromptFrame(t *testing.T, fields map[string]any) map[string
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.recordAttempt(frame, inbound)
-	result := e.server.handlePiPrompt(t.Context(), e.client, inbound, frame, func() {})
+	e.recordAttempt(inbound)
+	result := e.server.handlePiPrompt(t.Context(), e.client, inbound, func() {})
 	e.server.hub.Send(e.client, coordinator.CommandResultMessage(result))
 	return readFrame(t, e.conn)
 }
@@ -393,14 +393,14 @@ func (e *frameEnv) piIntegrationFrame(t *testing.T, fields map[string]any) map[s
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.recordAttempt(frame, inbound)
-	e.server.handlePiIntegration(t.Context(), e.client, inbound, frame)
+	e.recordAttempt(inbound)
+	e.server.handlePiIntegration(t.Context(), e.client, inbound)
 	return readFrame(t, e.conn)
 }
 
-func (e *frameEnv) recordAttempt(frame map[string]any, inbound protocol.Inbound) {
+func (e *frameEnv) recordAttempt(inbound protocol.Inbound) {
 	if isAuditedWrite(inbound.Type) {
-		e.server.recordWriteAudit(e.client, frame, inbound.Type, nil)
+		e.server.recordWriteAudit(e.client, inbound, nil)
 	}
 }
 

@@ -110,7 +110,7 @@ func TestHCRefusesOwnerCommandsWithoutInvokingManagers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s.handlePiIntegration(ctx, client, inbound, message)
+			s.handlePiIntegration(ctx, client, inbound)
 		} else {
 			request, _ := json.Marshal(message)
 			if err := conn.Write(ctx, websocket.MessageText, request); err != nil {

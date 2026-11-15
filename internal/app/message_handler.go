@@ -66,7 +66,7 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	coordinated := scope.Action.Coordinated
 	auditedWrite := scope.Action.Audited
 	if auditedWrite {
-		s.recordWriteAudit(client, msg, action, nil)
+		s.recordWriteAudit(client, inbound, nil)
 	}
 	if !coordinated {
 		admitted()
@@ -86,10 +86,10 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	})
 	switch action {
 	case "get_pi_integration", "set_pi_integration":
-		s.handlePiIntegration(commandCtx, client, inbound, msg)
+		s.handlePiIntegration(commandCtx, client, inbound)
 	case "get_pi_prompt_capability", "send_pi_prompt_unconfirmed":
-		result := s.handlePiPrompt(commandCtx, client, inbound, msg, admitted)
-		s.sendResult(client, msg, action, auditedWrite, result)
+		result := s.handlePiPrompt(commandCtx, client, inbound, admitted)
+		s.sendResult(client, inbound, auditedWrite, result)
 	case "check_update", "install_update", "deploy_app_update":
 		s.handleUpdate(ctx, client, inbound)
 	case "lease_pane_size", "release_pane_size":
@@ -117,13 +117,13 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	case "device_list":
 		s.handleDeviceList(client, inbound, action, identity, authenticated)
 	case "create_device_invitation":
-		s.handleCreateDeviceInvitation(client, inbound, msg, action, identity, authenticated)
+		s.handleCreateDeviceInvitation(client, inbound, identity, authenticated)
 	case "rename_device":
-		s.handleRenameDevice(client, inbound, msg, action)
+		s.handleRenameDevice(client, inbound)
 	case "revoke_device":
-		s.handleRevokeDevice(client, inbound, msg, action)
+		s.handleRevokeDevice(client, inbound)
 	case "reset_devices":
-		s.handleResetDevices(client, inbound, msg, action, identity, authenticated)
+		s.handleResetDevices(client, inbound, identity, authenticated)
 	case "get_activity":
 		s.handleGetActivity(client, inbound)
 	case "clear_activities":
@@ -131,16 +131,16 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 			s.hub.Send(client, coordinator.CommandResultMessage(result))
 		})
 	case "upload_begin":
-		s.handleUploadBegin(client, inbound.RequestID, msg)
+		s.handleUploadBegin(client, inbound)
 	case "upload_chunk":
-		s.handleUploadChunk(client, inbound.RequestID, msg)
+		s.handleUploadChunk(client, inbound)
 	case "upload_finish":
-		s.handleUploadFinish(client, inbound.RequestID, msg)
+		s.handleUploadFinish(client, inbound)
 	case "upload_cancel":
-		s.handleUploadCancel(client, inbound.RequestID, msg)
+		s.handleUploadCancel(client, inbound)
 	case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
 		"worktree_list", "worktree_create", "worktree_open", "worktree_remove":
-		s.handleTopology(commandCtx, client, inbound, msg, action, auditedWrite, admitted)
+		s.handleTopology(commandCtx, client, inbound, action, auditedWrite, admitted)
 	case "list_directories":
 		listing := fsutil.ListDirectories(inbound.Path, s.home)
 		s.reply(client, inbound.RequestID, "list_directories", "").complete(listing)
@@ -186,7 +186,7 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	case "webrtc_offer", "webrtc_ice", "webrtc_close":
 		s.handleWebRTCSignal(commandCtx, client, inbound)
 	default:
-		s.handleDispatched(commandCtx, client, inbound, msg, action, coordinated, auditedWrite, admitted)
+		s.handleDispatched(commandCtx, client, inbound, action, coordinated, auditedWrite, admitted)
 	}
 }
 
@@ -212,9 +212,9 @@ func (s *Server) rejectMessage(client *transport.ClientConn, admitted func(), re
 	s.hub.Send(client, response)
 }
 
-func (s *Server) sendResult(client *transport.ClientConn, msg map[string]any, action string, auditedWrite bool, result *coordinator.CommandResult) {
+func (s *Server) sendResult(client *transport.ClientConn, inbound protocol.Inbound, auditedWrite bool, result *coordinator.CommandResult) {
 	if auditedWrite {
-		s.recordWriteAudit(client, msg, action, result)
+		s.recordWriteAudit(client, inbound, result)
 	}
 	s.hub.Send(client, coordinator.CommandResultMessage(result))
 }
@@ -244,8 +244,8 @@ func (s *Server) handleQRCode(client *transport.ClientConn, inbound protocol.Inb
 	})
 }
 
-func (s *Server) handleDispatched(commandCtx context.Context, client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, coordinated bool, auditedWrite bool, admitted func()) {
-	inbound, err := s.expandPromptAttachmentReferences(action, inbound)
+func (s *Server) handleDispatched(commandCtx context.Context, client *transport.ClientConn, received protocol.Inbound, action string, coordinated bool, auditedWrite bool, admitted func()) {
+	inbound, err := s.expandPromptAttachmentReferences(action, received)
 	if err != nil {
 		result := &coordinator.CommandResult{
 			RequestID: inbound.RequestID,
@@ -254,7 +254,7 @@ func (s *Server) handleDispatched(commandCtx context.Context, client *transport.
 			Error:     "One or more attachments are no longer available for this agent",
 			PaneID:    inbound.PaneID,
 		}
-		s.sendResult(client, msg, action, auditedWrite, result)
+		s.sendResult(client, received, auditedWrite, result)
 		return
 	}
 	var result *coordinator.CommandResult
@@ -263,5 +263,5 @@ func (s *Server) handleDispatched(commandCtx context.Context, client *transport.
 	} else {
 		result = s.dispatcher.Handle(commandCtx, inbound)
 	}
-	s.sendResult(client, msg, action, auditedWrite, result)
+	s.sendResult(client, received, auditedWrite, result)
 }

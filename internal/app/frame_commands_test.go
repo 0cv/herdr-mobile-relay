@@ -423,6 +423,13 @@ func TestFrameCoordinatorFieldsMatchWithoutRegardToLetterCase(t *testing.T) {
 			t.Fatalf("activities = %#v, want the last two entries", response["activities"])
 		}
 	})
+	t.Run("Force on worktree_remove is audited", func(t *testing.T) {
+		e := newFrameEnv(t)
+		e.exchange(t, map[string]any{"type": "worktree_remove", "workspace_id": "w1", "Force": true})
+		if details := e.auditAttempt(t, "worktree_remove").Details; details["force"] != true {
+			t.Fatalf("details = %#v, want force listed", details)
+		}
+	})
 	t.Run("Text on send_input", func(t *testing.T) {
 		e := newFrameEnv(t)
 		expectCommandResult(t, e.exchange(t, map[string]any{"type": "send_input", "Text": "hello"}), "send_input", true, "completed", "")
