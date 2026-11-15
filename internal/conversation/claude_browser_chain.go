@@ -1922,13 +1922,9 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 	base := BrowsePage{Available: true, State: BrowseReady, Mode: BrowseSnapshot,
 		SourceRevision: view.publicRevision, SnapshotID: view.snapshotID, Entries: []Entry{}, Total: nil,
 		Diagnostics: mergeBrowseDiagnostics(view.diagnostics, diagnostics)}
-	selected, omitted := b.fitProjected(base, entries, func(nextBoundary int64) (string, error) {
+	selected, omitted := b.fitProjected(entries, cursorCandidatePage(base, func(nextBoundary int64) (string, error) {
 		return b.claudeChainCursor(scope, chain, segmentIndex, nextBoundary, true)
-	})
-	toolsOmitted, payloadsOmitted := browseOmissions(entries, selected)
-	base.Diagnostics.OmittedTools += toolsOmitted
-	base.Diagnostics.OmittedPayloads += payloadsOmitted
-	base.Entries = projectedEntries(selected)
+	}))
 	if omitted > 0 || hasMore {
 		base.HasMore = true
 		if len(selected) > 0 {
@@ -1952,7 +1948,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 			base.HasMore = true
 		}
 	}
-	return b.enforcePageBudget(base)
+	return b.finishFittedPage(base, entries, selected)
 }
 
 func mergeBrowseDiagnostics(left, right BrowseDiagnostics) BrowseDiagnostics {

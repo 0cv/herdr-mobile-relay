@@ -1202,13 +1202,9 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 	}
 	baseTotal := total
 	base.Total = &baseTotal
-	selected, omitted := b.fitProjected(base, entries, func(nextBoundary int64) (string, error) {
+	selected, omitted := b.fitProjected(entries, cursorCandidatePage(base, func(nextBoundary int64) (string, error) {
 		return b.snapshotCursor(scope, job, nextBoundary)
-	})
-	toolsOmitted, payloadsOmitted := browseOmissions(entries, selected)
-	base.Diagnostics.OmittedTools += toolsOmitted
-	base.Diagnostics.OmittedPayloads += payloadsOmitted
-	base.Entries = projectedEntries(selected)
+	}))
 	if omitted > 0 || hasMore {
 		base.HasMore = true
 		if len(selected) > 0 {
@@ -1222,7 +1218,7 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 	} else {
 		base.NextCursor = ""
 	}
-	return b.enforcePageBudget(base), nil
+	return b.finishFittedPage(base, entries, selected), nil
 }
 
 func (b *Browser) snapshotCursor(scope BrowseScope, job *browseJob, boundary int64) (string, error) {

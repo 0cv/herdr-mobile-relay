@@ -58,11 +58,7 @@ func (b *Browser) memoryPage(
 			return b.prepareCursor(scope, source, rangeStart, rangeEnd, rangeDigest, prepareBoundary)
 		}
 	}
-	fitted, omitted := b.fitProjected(base, selected, next)
-	toolsOmitted, payloadsOmitted := browseOmissions(selected, fitted)
-	base.Diagnostics.OmittedTools += toolsOmitted
-	base.Diagnostics.OmittedPayloads += payloadsOmitted
-	base.Entries = projectedEntries(fitted)
+	fitted, omitted := b.fitProjected(selected, cursorCandidatePage(base, next))
 	if omitted > 0 {
 		base.HasMore = true
 		cursor, err := b.recentCursor(scope, source, rangeStart, rangeEnd, rangeDigest, fitted[0].Offset)
@@ -85,7 +81,7 @@ func (b *Browser) memoryPage(
 		}
 		base.NextCursor = cursor
 	}
-	return b.enforcePageBudget(base)
+	return b.finishFittedPage(base, selected, fitted)
 }
 
 func projectedEntries(entries []projectedEntry) []Entry {
@@ -144,21 +140,40 @@ func (b *Browser) enforcePageBudget(page BrowsePage) BrowsePage {
 	return page
 }
 
-func (b *Browser) fitProjected(base BrowsePage, entries []projectedEntry, next func(int64) (string, error)) ([]projectedEntry, int) {
+func (b *Browser) finishFittedPage(page BrowsePage, original, fitted []projectedEntry) BrowsePage {
+	toolsOmitted, payloadsOmitted := browseOmissions(original, fitted)
+	page.Diagnostics.OmittedTools += toolsOmitted
+	page.Diagnostics.OmittedPayloads += payloadsOmitted
+	page.Entries = projectedEntries(fitted)
+	return b.enforcePageBudget(page)
+}
+
+func cursorCandidatePage(base BrowsePage, next func(int64) (string, error)) func([]projectedEntry, int) (BrowsePage, error) {
+	return func(candidate []projectedEntry, _ int) (BrowsePage, error) {
+		page := base
+		page.Entries = projectedEntries(candidate)
+		if next == nil {
+			return page, nil
+		}
+		cursor, err := next(candidate[0].Offset)
+		if err != nil {
+			return page, err
+		}
+		page.NextCursor = cursor
+		page.HasMore = true
+		return page, nil
+	}
+}
+
+func (b *Browser) fitProjected(entries []projectedEntry, candidatePage func(candidate []projectedEntry, omitted int) (BrowsePage, error)) ([]projectedEntry, int) {
 	if len(entries) == 0 {
 		return nil, 0
 	}
 	for omitted := 0; omitted < len(entries); omitted++ {
 		candidate := entries[omitted:]
-		page := base
-		page.Entries = projectedEntries(candidate)
-		if next != nil {
-			cursor, err := next(candidate[0].Offset)
-			if err != nil {
-				continue
-			}
-			page.NextCursor = cursor
-			page.HasMore = true
+		page, err := candidatePage(candidate, omitted)
+		if err != nil {
+			continue
 		}
 		if b.pageSize(page) <= browseResponseBytes {
 			return candidate, omitted
@@ -166,15 +181,6 @@ func (b *Browser) fitProjected(base BrowsePage, entries []projectedEntry, next f
 	}
 	last := entries[len(entries)-1]
 	last.Entry = boundBrowseEntry(last.Entry, browseResponseBytes)
-	page := base
-	page.Entries = []Entry{last.Entry}
-	if next != nil {
-		cursor, err := next(last.Offset)
-		if err == nil {
-			page.NextCursor = cursor
-			page.HasMore = true
-		}
-	}
 	return []projectedEntry{last}, len(entries) - 1
 }
 
@@ -316,28 +322,15 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 			ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 		})
 	}
-	selected := projected
-	omitted := 0
-	for from := 0; from < len(projected); from++ {
-		candidate := projected[from:]
+	selected, omitted := b.fitProjected(projected, func(candidate []projectedEntry, omitted int) (BrowsePage, error) {
 		page := base
 		page.Entries = projectedEntries(candidate)
-		page.HasMore = potentialOlder || from > 0
+		page.HasMore = potentialOlder || omitted > 0
 		if page.HasMore {
 			page.NextCursor, _ = cursorFor(candidate[0].Entry)
 		}
-		if b.pageSize(page) <= browseResponseBytes {
-			selected, omitted = candidate, from
-			break
-		}
-		if from == len(projected)-1 {
-			selected, omitted = []projectedEntry{{Offset: candidate[0].Offset, Entry: boundBrowseEntry(candidate[0].Entry, browseResponseBytes)}}, from
-		}
-	}
-	toolsOmitted, payloadsOmitted := browseOmissions(projected, selected)
-	base.Diagnostics.OmittedTools += toolsOmitted
-	base.Diagnostics.OmittedPayloads += payloadsOmitted
-	base.Entries = projectedEntries(selected)
+		return page, nil
+	})
 	if omitted > 0 || potentialOlder {
 		base.HasMore = true
 		anchor := Entry{}
@@ -350,5 +343,5 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 			return failPage("source_corrupt", "The native conversation cursor was not available.", false)
 		}
 	}
-	return b.enforcePageBudget(base)
+	return b.finishFittedPage(base, projected, selected)
 }
