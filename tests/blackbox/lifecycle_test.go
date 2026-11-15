@@ -10,11 +10,8 @@ package blackbox
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,55 +23,7 @@ import (
 // inventory never becomes ready. /health (static liveness) still returns 200.
 func startRelayBrokenHerdr(t *testing.T) string {
 	t.Helper()
-	tmpDir := t.TempDir()
-
-	relayBin := filepath.Join(tmpDir, "relay")
-	build := exec.Command("go", "build", "-o", relayBin, "./cmd/herdr-mobile-relay")
-	build.Dir = repoRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build relay: %v\n%s", err, out)
-	}
-
-	webDir := filepath.Join(tmpDir, "web")
-	os.MkdirAll(webDir, 0o755)
-	os.WriteFile(filepath.Join(webDir, "index.html"), []byte("<html></html>"), 0o644)
-
-	port := freePort(t)
-	pluginPort := freePort(t)
-
-	cmd := exec.Command(relayBin)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("HERDR_RELAY_PORT=%d", port),
-		fmt.Sprintf("HERDR_RELAY_PLUGIN_PORT=%d", pluginPort),
-		"HERDR_RELAY_HOST=127.0.0.1",
-		"HERDR_RELAY_TOKEN=",
-		"HERDR_RELAY_INSTANCE_ID=broken-test",
-		"HERDR_BIN=/bin/false", // every herdr call exits 1 → inventory never ready
-		fmt.Sprintf("HERDR_SOCKET_PATH=%s", filepath.Join(tmpDir, "missing.sock")),
-		"HERDR_RELAY_POLL_INTERVAL=0.5",
-		fmt.Sprintf("HERDR_WEB_ROOT=%s", webDir),
-		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(tmpDir, "config")),
-		stubLaunchctlPath(t),
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	t.Cleanup(func() {
-		cmd.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() { cmd.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			cmd.Process.Kill()
-		}
-	})
-
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForStatus(t, base, "/health", http.StatusOK)
-	return base
+	return startRelay(t, relayOptions{instanceID: "broken-test", brokenHerdr: true}).httpBase
 }
 
 // §13.1: /readyz must return 200 only after a successful Herdr inventory.
@@ -130,14 +79,7 @@ func TestHealthzIncludesBundleIdentity(t *testing.T) {
 func TestWebSocketClosesGracefullyOnShutdown(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusInternalError, "")
+	ctx, conn := dial(t, env, 15*time.Second)
 
 	// Let the handshake settle, then ask the relay to shut down.
 	time.Sleep(500 * time.Millisecond)

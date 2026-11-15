@@ -17,6 +17,8 @@ import (
 	"github.com/coder/websocket"
 )
 
+const defaultScenario = `{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
+
 type TestEnv struct {
 	relayCmd       *exec.Cmd
 	fakeBin        string
@@ -30,72 +32,76 @@ type TestEnv struct {
 	httpBase       string
 }
 
-func setupEnv(t *testing.T) *TestEnv {
-	scenario := `{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
-	return setupEnvWithScenario(t, scenario)
+type relayOptions struct {
+	scenario    string
+	instanceID  string
+	token       string
+	brokenHerdr bool
+	env         []string
 }
 
-func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
+func setupEnv(t *testing.T) *TestEnv {
+	return startRelay(t, relayOptions{})
+}
+
+func startRelay(t *testing.T, opts relayOptions) *TestEnv {
 	t.Helper()
 
+	if opts.scenario == "" {
+		opts.scenario = defaultScenario
+	}
+	if opts.instanceID == "" {
+		opts.instanceID = "blackbox-test"
+	}
+
 	tmpDir := t.TempDir()
-
-	// Build fake-herdr
-	fakeBin := filepath.Join(tmpDir, "fake-herdr")
-	build := exec.Command("go", "build", "-o", fakeBin, "./cmd/fake-herdr")
-	build.Dir = repoRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build fake-herdr: %v\n%s", err, out)
-	}
-
-	// Build relay
-	relayBin := filepath.Join(tmpDir, "herdr-mobile-relay")
-	buildRelay := exec.Command("go", "build", "-o", relayBin, "./cmd/herdr-mobile-relay")
-	buildRelay.Dir = repoRoot(t)
-	if out, err := buildRelay.CombinedOutput(); err != nil {
-		t.Fatalf("build relay: %v\n%s", err, out)
-	}
 	port := freePort(t)
 	pluginPort := freePort(t)
 	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
-	socketListener := startInventorySocket(t, socketPath, scenario)
-
-	// Write scenario file
 	scenarioPath := filepath.Join(tmpDir, "scenario.json")
-	os.WriteFile(scenarioPath, []byte(scenario), 0o644)
-
-	webDir := filepath.Join(repoRoot(t), "web")
-
-	env := &TestEnv{
-		fakeBin:        fakeBin,
-		tmpDir:         tmpDir,
-		operationsLog:  filepath.Join(tmpDir, "operations.jsonl"),
-		socketPath:     socketPath,
-		socketListener: socketListener,
-		port:           port,
-		pluginPort:     pluginPort,
-		wsURL:          fmt.Sprintf("ws://127.0.0.1:%d/ws", port),
-		httpBase:       fmt.Sprintf("http://127.0.0.1:%d", port),
+	if err := os.WriteFile(scenarioPath, []byte(opts.scenario), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	env.relayCmd = exec.Command(relayBin)
+	env := &TestEnv{
+		fakeBin:       builtBinaries.fakeHerdr,
+		tmpDir:        tmpDir,
+		operationsLog: filepath.Join(tmpDir, "operations.jsonl"),
+		socketPath:    socketPath,
+		port:          port,
+		pluginPort:    pluginPort,
+		wsURL:         fmt.Sprintf("ws://127.0.0.1:%d/ws", port),
+		httpBase:      fmt.Sprintf("http://127.0.0.1:%d", port),
+	}
+
+	herdrBin := builtBinaries.fakeHerdr
+	readyPath := "/readyz"
+	if opts.brokenHerdr {
+		herdrBin = "/bin/false"
+		readyPath = "/health"
+	} else {
+		env.socketListener = startInventorySocket(t, socketPath, opts.scenario)
+	}
+
+	env.relayCmd = exec.Command(builtBinaries.relay)
 	env.relayCmd.Env = append(os.Environ(),
 		fmt.Sprintf("HERDR_RELAY_PORT=%d", port),
 		fmt.Sprintf("HERDR_RELAY_PLUGIN_PORT=%d", pluginPort),
 		"HERDR_RELAY_HOST=127.0.0.1",
-		"HERDR_RELAY_TOKEN=",
-		"HERDR_RELAY_INSTANCE_ID=blackbox-test",
-		fmt.Sprintf("HERDR_BIN=%s", fakeBin),
-		fmt.Sprintf("HERDR_WEB_ROOT=%s", webDir),
-		fmt.Sprintf("HERDR_RELAY_POLL_INTERVAL=0.5"),
-		fmt.Sprintf("FAKE_HERDR_SCENARIO=%s", scenarioPath),
-		fmt.Sprintf("FAKE_HERDR_OPERATIONS=%s", env.operationsLog),
-		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(tmpDir, "config")),
-		fmt.Sprintf("XDG_CACHE_HOME=%s", filepath.Join(tmpDir, "cache")),
-		fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(tmpDir, "data")),
-		fmt.Sprintf("HERDR_SOCKET_PATH=%s", env.socketPath),
+		"HERDR_RELAY_TOKEN="+opts.token,
+		"HERDR_RELAY_INSTANCE_ID="+opts.instanceID,
+		"HERDR_BIN="+herdrBin,
+		"HERDR_WEB_ROOT="+filepath.Join(repoRoot(t), "web"),
+		"HERDR_RELAY_POLL_INTERVAL=0.5",
+		"FAKE_HERDR_SCENARIO="+scenarioPath,
+		"FAKE_HERDR_OPERATIONS="+env.operationsLog,
+		"XDG_CONFIG_HOME="+filepath.Join(tmpDir, "config"),
+		"XDG_CACHE_HOME="+filepath.Join(tmpDir, "cache"),
+		"XDG_DATA_HOME="+filepath.Join(tmpDir, "data"),
+		"HERDR_SOCKET_PATH="+socketPath,
 		stubLaunchctlPath(t),
 	)
+	env.relayCmd.Env = append(env.relayCmd.Env, opts.env...)
 	env.relayCmd.Stdout = os.Stdout
 	env.relayCmd.Stderr = os.Stderr
 
@@ -104,18 +110,25 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 	}
 
 	t.Cleanup(func() {
-		env.relayCmd.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() { env.relayCmd.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			env.relayCmd.Process.Kill()
+		stopProcess(env.relayCmd)
+		if env.socketListener != nil {
+			_ = env.socketListener.Close()
 		}
-		_ = env.socketListener.Close()
 	})
-	waitForStatus(t, env.httpBase, "/readyz", http.StatusOK)
+	waitForStatus(t, env.httpBase, readyPath, http.StatusOK)
 	return env
+}
+
+func dial(t *testing.T, env *TestEnv, timeout time.Duration) (context.Context, *websocket.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
+	return ctx, conn
 }
 
 func startInventorySocket(t *testing.T, socketPath, scenario string) net.Listener {
@@ -287,15 +300,25 @@ func stubLaunchctlPath(t *testing.T) string {
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	// Walk up from test dir to find go.mod
-	dir, _ := os.Getwd()
+	root, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func findRepoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
+			return dir, nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatal("cannot find repo root")
+			return "", fmt.Errorf("cannot find repo root")
 		}
 		dir = parent
 	}
@@ -358,14 +381,7 @@ func TestStaticServing(t *testing.T) {
 func TestWebSocketConnectAndReceiveAgents(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	// Should receive agents broadcast from poller within a few poll intervals
 	deadline := time.After(5 * time.Second)
@@ -416,15 +432,8 @@ func TestWebSocketConnectAndReceiveAgents(t *testing.T) {
 func TestWebSocketRejectsDisallowedOrigin(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	// With no token configured and no allowed origins, any origin should be rejected
 	// But our test env has no token and no origin restriction configured,
 	// so this tests the basic connect path works
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial should succeed with no origin header: %v", err)
-	}
-	conn.Close(websocket.StatusNormalClosure, "")
+	dial(t, env, 5*time.Second)
 }

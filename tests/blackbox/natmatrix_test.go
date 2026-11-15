@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -101,7 +100,7 @@ func TestNATMatrixHolePunching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("locate the test binary for the phone namespace: %v", err)
 	}
-	bins := buildNATBinaries(t)
+	bins := prepareNATBinaries(t)
 
 	for _, cell := range natMatrixCells {
 		t.Run(cell.name, func(t *testing.T) {
@@ -160,30 +159,18 @@ func natVerdict(direct bool) string {
 	return "RELAYED"
 }
 
-// buildNATBinaries compiles the binaries once for the whole matrix and writes
-// the fake-Herdr fixtures the relay serves.
-func buildNATBinaries(t *testing.T) natBinaries {
+// prepareNATBinaries writes the fake-Herdr fixtures the relay serves next to
+// the binaries built for the whole test run.
+func prepareNATBinaries(t *testing.T) natBinaries {
 	t.Helper()
-	root := repoRoot(t)
 	dir := t.TempDir()
 
 	bins := natBinaries{
-		gateway:  filepath.Join(dir, "herdr-gateway"),
-		relay:    filepath.Join(dir, "herdr-mobile-relay"),
-		herdr:    filepath.Join(dir, "fake-herdr"),
+		gateway:  builtBinaries.gateway,
+		relay:    builtBinaries.relay,
+		herdr:    builtBinaries.fakeHerdr,
 		scenario: filepath.Join(dir, "scenario.json"),
 		webRoot:  filepath.Join(dir, "web"),
-	}
-	for out, pkg := range map[string]string{
-		bins.gateway: "./cmd/herdr-gateway",
-		bins.relay:   "./cmd/herdr-mobile-relay",
-		bins.herdr:   "./cmd/fake-herdr",
-	} {
-		build := exec.Command("go", "build", "-o", out, pkg)
-		build.Dir = root
-		if combined, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", pkg, err, combined)
-		}
 	}
 
 	scenario := `{"panes":[{"pane_id":"pane-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
