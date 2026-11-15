@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/audit"
 	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
@@ -127,17 +128,24 @@ func (b *frameBackend) PaneProcessInfoFresh(_ context.Context, paneID string) (*
 }
 
 type frameEnv struct {
-	server  *Server
-	backend *frameBackend
-	conn    *websocket.Conn
-	client  *transport.ClientConn
+	server   *Server
+	backend  *frameBackend
+	conn     *websocket.Conn
+	client   *transport.ClientConn
+	cacheDir string
 }
 
 // newFrameEnv starts a server with the real handler and dispatcher behind one
 // connected client. Pane pane-1 is a working Claude agent with a tab.
 func newFrameEnv(t *testing.T, agents ...*coordinator.AgentState) *frameEnv {
 	t.Helper()
-	s := testServerWithCacheDir(t.TempDir())
+	cacheDir := t.TempDir()
+	s := testServerWithCacheDir(cacheDir)
+	auditLog, err := audit.Open(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.auditLog = auditLog
 	fake := &frameBackend{content: "ready\n"}
 	s.herdrC = fake
 	journal, err := activity.OpenJournal(t.TempDir())
@@ -155,7 +163,7 @@ func newFrameEnv(t *testing.T, agents ...*coordinator.AgentState) *frameEnv {
 	s.state.CommitInventory(agents, s.state.RevisionCounter())
 	useProductionHandler(t, s)
 	conn, client := connectedClient(t, s)
-	return &frameEnv{server: s, backend: fake, conn: conn, client: client}
+	return &frameEnv{server: s, backend: fake, conn: conn, client: client, cacheDir: cacheDir}
 }
 
 // exchange sends one frame for pane-1 and returns the next frame received.

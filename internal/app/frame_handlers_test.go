@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -368,6 +369,7 @@ func newPiFrameEnv(t *testing.T) *frameEnv {
 
 // Pi actions are controller-only and a test connection cannot authenticate,
 // so these frames enter at the Pi handlers, after the gate in the message handler.
+// The audit attempt is written first, as the message handler does for audited writes.
 func (e *frameEnv) piPromptFrame(t *testing.T, fields map[string]any) map[string]any {
 	t.Helper()
 	frame := frameWithDefaults(fields)
@@ -375,6 +377,7 @@ func (e *frameEnv) piPromptFrame(t *testing.T, fields map[string]any) map[string
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.recordAttempt(frame, inbound)
 	result := e.server.handlePiPrompt(t.Context(), e.client, inbound, frame, func() {})
 	e.server.hub.Send(e.client, coordinator.CommandResultMessage(result))
 	return readFrame(t, e.conn)
@@ -390,8 +393,15 @@ func (e *frameEnv) piIntegrationFrame(t *testing.T, fields map[string]any) map[s
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.recordAttempt(frame, inbound)
 	e.server.handlePiIntegration(t.Context(), e.client, inbound, frame)
 	return readFrame(t, e.conn)
+}
+
+func (e *frameEnv) recordAttempt(frame map[string]any, inbound protocol.Inbound) {
+	if isAuditedWrite(inbound.Type) {
+		e.server.recordWriteAudit(e.client, frame, nil)
+	}
 }
 
 func (e *frameEnv) forgetBackendCalls() {
@@ -434,6 +444,7 @@ func TestFramePiPromptAcceptsOnlyPromptKeys(t *testing.T) {
 	}
 	for _, extra := range []map[string]any{
 		{"keys": []string{"Enter"}}, {"prompt": "x"}, {"secret": true}, {"attachments": []string{"x"}}, {"label": "x"}, {"workspace_id": "w"},
+		{"no_echo": true}, {"images": []string{"x"}},
 	} {
 		for _, base := range []map[string]any{
 			{"type": "get_pi_prompt_capability", "target": target},
@@ -481,6 +492,12 @@ func TestFramePiIntegrationAcceptsOnlyItsKeys(t *testing.T) {
 	for name, instance := range map[string]string{"another relay": "other-relay", "no instance": ""} {
 		if response := set(map[string]any{"instance": instance}); response["ok"] != false || response["error"] != mismatch {
 			t.Fatalf("%s: response = %#v, want %q", name, response, mismatch)
+		}
+	}
+
+	for name, enabled := range map[string]any{"null": nil, "a string": "true", "a number": 1} {
+		if response := set(map[string]any{"enabled": enabled}); response["ok"] != false || response["error"] != mismatch {
+			t.Fatalf("enabled as %s: response = %#v, want %q", name, response, mismatch)
 		}
 	}
 
@@ -574,5 +591,45 @@ func TestFrameWebRTCOfferLosesItsTerminatorOnlyWhenTrimmed(t *testing.T) {
 	response := e.exchange(t, map[string]any{"type": "webrtc_offer", "sdp": trimmed})
 	if response["type"] != "command_result" || response["ok"] != false {
 		t.Fatalf("an offer without its final terminator got %#v, want a refusal", response)
+	}
+}
+
+type logCapture struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (c *logCapture) Write(data []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.text.Write(data)
+}
+
+func (c *logCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.text.String()
+}
+
+func TestFrameWebRTCCandidateReachesTheICEHandlerVerbatim(t *testing.T) {
+	e := newWebRTCFrameEnv(t)
+	logs := &logCapture{}
+	e.server.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if answer := e.exchange(t, map[string]any{"type": "webrtc_offer", "sdp": browserOffer(t)}); answer["type"] != "webrtc_answer" {
+		t.Fatalf("answer = %#v", answer)
+	}
+
+	sendFrame(t, e.conn, frameWithDefaults(map[string]any{
+		"type": "webrtc_ice", "candidate": "candidate:1 1 udp 2130706431 192.0.2.1 4444 typ host", "sdp_mid": "0", "sdp_mline_index": 3,
+	}))
+	e.settle(t)
+	if strings.Contains(logs.String(), "webrtc candidate rejected") {
+		t.Fatalf("a valid candidate was refused: %s", logs.String())
+	}
+
+	sendFrame(t, e.conn, frameWithDefaults(map[string]any{"type": "webrtc_ice", "candidate": "not a candidate", "sdp_mid": "0", "sdp_mline_index": 0}))
+	e.settle(t)
+	if !strings.Contains(logs.String(), "webrtc candidate rejected") {
+		t.Fatalf("a candidate that is not valid never reached the ICE handler: %s", logs.String())
 	}
 }
