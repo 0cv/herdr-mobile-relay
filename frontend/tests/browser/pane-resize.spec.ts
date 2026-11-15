@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { boot, closeSocket, commands, commandsForSocket, fedora, handshake, server, setAutoCommands, socketCount } from '../support/journey-relay';
+import { closeSocket, commands, commandsForSocket, connectFedora, handshake, openAgent, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 const optInCapabilities = ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'];
 
@@ -12,14 +12,7 @@ async function releaseCommands(page: Page) {
 }
 
 async function openSizedPane(page: Page, project: string, capabilities = optInCapabilities) {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }, { capabilities });
   await showWidePane(page, 0);
 }
 
@@ -177,9 +170,7 @@ test('leases the height only when the relay supports it and the height switch is
 test('ignores a lease reply that lands after Resize Session was turned off', async ({ page }) => {
   await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: optInCapabilities });
+  await connectFedora(page, { capabilities: optInCapabilities });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Late reply', agent: 'omp' }],
@@ -284,9 +275,7 @@ test('keeps pane resizing off through hidden timers and refocus', async ({ page 
 });
 
 test('estimates fixed row heights for a controller pane', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['attention_classification', 'slash_commands'],
   });
   await server(page, 0, {
@@ -321,14 +310,7 @@ test('estimates fixed row heights for a controller pane', async ({ page }) => {
 });
 
 test('keeps box-drawn controller rows aligned at the desktop width', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Older relay app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Older relay app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Older relay app', agent: 'omp' });
   const border = `╭${'─'.repeat(98)}╮`;
   const rightBorder = (content: string) => `${content.padEnd(99)}│`;
   await server(page, 0, {

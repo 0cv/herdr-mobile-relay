@@ -501,15 +501,20 @@ export async function handshake(page: Page, index: number, overrides: Record<str
 
 export const fedora = { id: 'fedora', label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' };
 
-export async function openOmpPane(page: Page, project: string) {
+export async function connectFedora(page: Page, handshakeOverrides: Record<string, unknown> = {}) {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['attention_classification', 'slash_commands'] });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
+  await handshake(page, 0, handshakeOverrides);
+}
+
+export async function openAgent(page: Page, agent: { project: string } & Record<string, unknown>, handshakeOverrides: Record<string, unknown> = {}) {
+  await connectFedora(page, handshakeOverrides);
+  await server(page, 0, { type: 'agents', agents: [agent] });
+  await page.getByRole('button', { name: `Open ${agent.project} on Fedora` }).click();
+}
+
+export async function openOmpPane(page: Page, project: string) {
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }, { capabilities: ['attention_classification', 'slash_commands'] });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
 }

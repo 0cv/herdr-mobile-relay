@@ -1,11 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 import { APP_METADATA, emulateStandalone } from '../support/journey-device';
-import { boot, closeSocket, commands, composerTarget, fedora, handshake, openSharedComposer, replyToPaneRead, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
+import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, openAgent, openSharedComposer, replyToPaneRead, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -80,14 +78,7 @@ test('discovers slash commands per terminal and fills them before sending', asyn
 
 test('keeps a large slash catalog responsive in the installed PWA', async ({ page }) => {
   await emulateStandalone(page, { navigatorStandalone: true });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Large catalog app', agent: 'codex', cwd: '/home/test/large' }],
-  });
-  await page.getByRole('button', { name: 'Open Large catalog app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Large catalog app', agent: 'codex', cwd: '/home/test/large' });
   const composer = page.getByRole('combobox', { name: 'Prompt' });
   await setAutoCommands(page, false);
   await composer.fill('/');
@@ -129,14 +120,7 @@ test('keeps a large slash catalog responsive in the installed PWA', async ({ pag
 });
 
 test('scales and expands the prompt composer for multiline text', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Composer app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Composer app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Composer app', agent: 'codex' });
 
   const composer = page.getByRole('combobox', { name: 'Prompt' });
   await composer.fill('One line');
@@ -603,9 +587,7 @@ for (const phase of ['unconfirmed', 'dispatched_unknown', 'pending']) test(`foll
 });
 
 test('followup blocked Pi without a bridge points to Settings without fallback input', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history', 'pi_integration', 'manual_terminal_input'] });
+  await connectFedora(page, { capabilities: ['conversation_history', 'pi_integration', 'manual_terminal_input'] });
   await setConversationFixture(page, { entries: [{ id: 'setting-notice', role: 'assistant', kind: 'notice', text: 'Synthetic extension question', timestamp: '' }], total: 1 });
   await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, agent_session_id: 'setting-pi', status: 'blocked', attention_kind: 'unknown', project: 'Setting Pi', agent: 'pi', conversation_history_available: true }] });
   await page.getByRole('button', { name: 'Open Setting Pi on Fedora', exact: true }).click();

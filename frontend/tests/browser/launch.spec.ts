@@ -1,10 +1,8 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, commandsForSocket, fedora, handshake, server, setAutoCommands, socketCount } from '../support/journey-relay';
+import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 test('hides backend-dependent launch and tab controls', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: [] });
+  await connectFedora(page, { capabilities: [] });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p2', status: 'working', project: 'relay', agent: 'codex' }],
@@ -61,9 +59,7 @@ test('ignores a directory result after switching computers', async ({ page }) =>
 });
 
 test('waits for a dotted directory selection before launching', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     agent_profiles: [{ id: 'claude', label: 'Claude Code' }],
   });
   await page.getByRole('button', { name: 'Start agent' }).click();
@@ -110,9 +106,7 @@ test('waits for a dotted directory selection before launching', async ({ page })
 });
 
 test('keeps a newly launched agent open when its native session is discovered', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { agent_profiles: [{ id: 'pi', label: 'Pi' }] });
+  await connectFedora(page, { agent_profiles: [{ id: 'pi', label: 'Pi' }] });
   await page.getByRole('button', { name: 'Start agent' }).click();
   await expect.poll(async () => (await commands(page)).some((command) => command.type === 'list_directories')).toBe(true);
   const listing = (await commands(page)).find((command) => command.type === 'list_directories')!;
@@ -143,9 +137,7 @@ test('keeps a newly launched agent open when its native session is discovered', 
 });
 
 test('launches and manages agent lifecycle commands', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     agent_profiles: [
       { id: 'qodercli', label: 'Qoder' },
       { id: 'opencode', label: 'OpenCode' },
@@ -331,9 +323,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
 });
 
 test('directory picker in Launch keeps internal focus open and closes after selection', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await page.getByRole('button', { name: 'Start agent' }).click();
   await page.getByLabel('Agent', { exact: true }).selectOption('codex');
   await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(1);
@@ -384,9 +374,7 @@ test('directory picker in Launch keeps internal focus open and closes after sele
 });
 
 test('directory picker in Workspace stays open across navigation and label focus', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['directory_browser', 'workspace_management'] });
+  await connectFedora(page, { capabilities: ['directory_browser', 'workspace_management'] });
   await server(page, 0, { type: 'workspaces', workspaces: [] });
   await server(page, 0, { type: 'agents', agents: [] });
   await page.getByRole('button', { name: 'Manage workspaces' }).click();

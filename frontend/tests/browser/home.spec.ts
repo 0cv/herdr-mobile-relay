@@ -1,11 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, fedora, handshake, server, socketCount } from '../support/journey-relay';
+import { commands, connectFedora, server, socketCount } from '../support/journey-relay';
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
   await page.clock.install();
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['tab_rename', 'agent_launch', 'attention_classification', 'directory_browser', 'workspace_management', 'workspace_reorder_block', 'worktree_management'],
   });
   const parent = {
@@ -170,9 +168,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
 
 test('groups working agents and synchronizes tab order in both directions', async ({ page }) => {
   await page.clock.install();
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['tab_rename', 'agent_launch', 'attention_classification', 'tab_reorder'],
   });
   const agents = [
@@ -225,9 +221,7 @@ test('groups working agents and synchronizes tab order in both directions', asyn
 });
 
 test('defaults to the mixed workspace layout and separates state sections on demand', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['tab_rename', 'agent_launch', 'attention_classification'] });
+  await connectFedora(page, { capabilities: ['tab_rename', 'agent_launch', 'attention_classification'] });
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -288,9 +282,7 @@ test('defaults to the mixed workspace layout and separates state sections on dem
 });
 
 test('keeps activity cards inside the page and confirms permanent deletion', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'activity_history',
     activities: [
@@ -337,9 +329,7 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
 });
 
 test('sizes captured activity text with terminal typography', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   const fullResponse = Array.from({ length: 16 }, (_, index) => `Response line ${index + 1}`).join('\n');
   await server(page, 0, {
     type: 'activity_history',
@@ -382,9 +372,7 @@ test('sizes captured activity text with terminal typography', async ({ page }) =
 });
 
 test('sorts a cold idle snapshot by the latest Herdr activity', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -413,9 +401,7 @@ test('sorts a cold idle snapshot by the latest Herdr activity', async ({ page })
 });
 
 test('keeps an opened workspace expanded across tab navigation and inventory refreshes', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   const agents = [
     {
       pane_id: 'w1:p1',
@@ -456,9 +442,7 @@ test('keeps an opened workspace expanded across tab navigation and inventory ref
 });
 
 test('shows inventory failure instead of zero agents and recovers without reconnecting', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     inventory: {
       state: 'error',
       error_code: 'topology_churn',
@@ -493,9 +477,7 @@ test('shows inventory failure instead of zero agents and recovers without reconn
 
 test('uses a workspace agent rail in a tablet terminal', async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -538,9 +520,7 @@ test('uses a workspace agent rail in a tablet terminal', async ({ page }) => {
 });
 
 test('resets the home page scroll offset before opening a terminal', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: Array.from({ length: 20 }, (_, index) => ({

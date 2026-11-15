@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { boot, commands, composerTarget, fedora, handshake, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
+import { commands, composerTarget, connectFedora, server, setAutoCommands, setConversationFixture } from '../support/journey-relay';
 
 test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
@@ -17,9 +17,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
       },
     });
   });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: [
       'attention_classification',
       'clear_activities',
@@ -185,9 +183,7 @@ test('shows tool-only agent turns only in full history and decodes their argumen
     localStorage.setItem('herdr_default_agent_view', 'terminal');
     localStorage.setItem('herdr-conversation-view', 'conversation');
   });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: [
       'attention_classification',
       'clear_activities',
@@ -274,9 +270,7 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
     window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
       nativeSetInterval(handler, timeout === 5000 ? 60 : timeout, ...args)) as typeof window.setInterval;
   });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: [
       'attention_classification',
       'structured_questions',
@@ -370,9 +364,7 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
 
 test('loads older conversation automatically when scrolled near the top', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['attention_classification', 'structured_questions', 'slash_commands', 'conversation_history'],
   });
   await server(page, 0, {
@@ -442,9 +434,7 @@ test('loads older conversation automatically when scrolled near the top', async 
 
 test('retains a Claude continuation cursor through repeated preparation', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['attention_classification', 'conversation_history'],
   });
   await server(page, 0, {
@@ -531,9 +521,7 @@ test('retains a Claude continuation cursor through repeated preparation', async 
 
 test('accepts the first Claude continuation and rejects a replacement cursor', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -605,9 +593,7 @@ test('accepts the first Claude continuation and rejects a replacement cursor', a
 for (const availability of ['available', 'no-capability', 'no-directory'] as const) {
   test(`Conversation workspace button is compact and ${availability}`, async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 740 });
-    await boot(page, [fedora]);
-    await expect.poll(() => socketCount(page)).toBe(1);
-    await handshake(page, 0, { capabilities: ['conversation_history', ...(availability !== 'no-capability' ? ['workspace_inspection'] : [])] });
+    await connectFedora(page, { capabilities: ['conversation_history', ...(availability !== 'no-capability' ? ['workspace_inspection'] : [])] });
     await setConversationFixture(page, { entries: [{ id: 'workspace:answer', timestamp: '', role: 'assistant', text: 'Workspace conversation' }], total: 1 });
     await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'Conversation workspace with a long title', agent: 'pi', cwd: availability === 'no-directory' ? '' : '/work/mobile', conversation_history_available: true }] });
     await page.getByRole('button', { name: 'Open Conversation workspace with a long title on Fedora' }).click();
@@ -640,9 +626,7 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
 }
 
 test('inspects workspace files and Git changes without write controls', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: [
       'attention_classification',
       'clear_activities',
@@ -737,9 +721,7 @@ test('inspects workspace files and Git changes without write controls', async ({
 
 test('phone feedback integrated history loads on upward demand and explicit action with a stable anchor across view changes', async ({ page }) => {
   await page.clock.install();
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   const entries = Array.from({ length: 72 }, (_, index) => ({ id: `integrated-${index}`, timestamp: '', role: index % 2 ? 'assistant' : 'user', text: `Integrated message ${index} ` + 'anchor content '.repeat(30) }));
   await setConversationFixture(page, { entries: entries.slice(48), total: 72, sourceRevision: 'integrated:1', hasMore: true, nextCursor: 'older-24', pages: {
     'older-24': { entries: entries.slice(24, 48), hasMore: true, nextCursor: 'older-0' },

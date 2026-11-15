@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, fedora, handshake, server, setAutoCommands, setConversationFixture, setNextInteraction, socketCount } from '../support/journey-relay';
+import { boot, commands, connectFedora, fedora, handshake, openAgent, server, setAutoCommands, setConversationFixture, setNextInteraction, socketCount } from '../support/journey-relay';
 
 test('handles approvals, chained questions, and notification routing', async ({ page }) => {
   const target = encodeURIComponent(JSON.stringify({
@@ -136,14 +136,7 @@ test(resizeWhileHidden
     options: [{ index: 0, label: 'Direct' }, { index: 1, label: 'Staged' }],
     submit_label: 'Submit', can_go_back: false, question_index: 1, question_total: 1,
   };
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Live chat', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Live chat on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Live chat', agent: 'codex' });
   const terminal = page.getByRole('log');
   const content = Array.from({ length: 140 }, (_, index) => `conversation line ${index + 1}`).join('\n');
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content });
@@ -216,14 +209,7 @@ test('shows a live plan question immediately without reopening the agent', async
     other: { label: 'None of the above', placeholder: 'Add details' },
     submit_label: 'Next', can_go_back: false, question_index: 1, question_total: 3,
   };
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Plan app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Plan app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Plan app', agent: 'codex' });
   const questionContent = 'Question 1/3 (3 unanswered)\nWhere should the new app live?';
   await server(page, 0, {
     type: 'pane_content',
@@ -262,17 +248,10 @@ test('keeps a nonfinal question mounted when a transient frame is confirmed', as
     ...first, id: 'q2', question: 'Choose device coverage',
     submit_label: 'Submit', can_go_back: true, question_index: 2,
   };
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{
-      pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question',
-      project: 'Questions', agent: 'claude', interaction: first,
-    }],
+  await openAgent(page, {
+    pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question',
+    project: 'Questions', agent: 'claude', interaction: first,
   });
-  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
   await setAutoCommands(page, false);
   await page.getByRole('radio', { name: 'Repository' }).click();
   await page.getByRole('button', { name: 'Next' }).click();
@@ -296,9 +275,7 @@ test('keeps a nonfinal question mounted when a transient frame is confirmed', as
 test('shows long approval choices in full on touch-sized buttons', async ({ page }) => {
   const long = 'Yes, allow all edits during this session (shift+tab to cycle)';
   const path = 'Yes, and always allow ./frontend/src/components/AgentListWithAVeryLongUnbrokenFileName.svelte';
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Long choice', agent: 'claude', options: [long, path, 'No'] }],
@@ -336,9 +313,7 @@ test('answers a short single-choice question from its card in one tap', async ({
     options: [{ index: 0, label: 'One' }, { index: 1, label: 'Two' }, { index: 2, label: 'Three' }],
   };
   const followUp = { ...short, id: 'follow-up', question: 'Which region?', options: [{ index: 0, label: 'Asia' }, { index: 1, label: 'Europe' }] };
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -402,9 +377,7 @@ test('treats a follow-up question from the answer form like the card does', asyn
     submit_label: 'Submit', question_index: 1, question_total: 1,
   };
   const followUp = { ...lone, id: 'follow-up', question: 'Which region?', options: [{ index: 0, label: 'Asia' }, { index: 1, label: 'Europe' }] };
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone }],
@@ -456,9 +429,7 @@ test('keeps one-tap answers working with missing option indexes and explains dis
     id: 'unindexed', kind: 'single_select', question: 'Which side?',
     options: [{ label: 'Left' }, { label: 'Right' }], submit_label: 'Submit', question_index: 1, question_total: 1,
   };
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     inventory: { state: 'error', error_code: 'topology_churn', message: 'Agent inventory is changing too quickly.', last_attempt_at: 1, last_success_at: 0, stale: true },
   });
   await server(page, 0, {
@@ -494,9 +465,7 @@ test('restores structured questions from the cached agent snapshot after reload'
     }],
   };
 
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, snapshot);
   await expect(page.getByRole('button', { name: 'Choose answer (2)' })).toBeVisible();
 
@@ -522,9 +491,7 @@ test('restores a confirmed choice after navigating away from an incomplete draft
     options: [{ index: 0, label: 'App shell' }], submit_label: 'Next', can_go_back: true,
   };
 
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude' }] });
   await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: first });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
@@ -570,11 +537,7 @@ test('keeps the third single choice checked across live pane transitions', async
     interaction: first,
   };
 
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [agent] });
-  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
+  await openAgent(page, agent);
   await expect(page.getByRole('main', { name: 'Questions for Questions' })).toBeVisible();
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Refresh terminal' })).toHaveCount(0);
@@ -610,9 +573,7 @@ test('keeps the third single choice checked across live pane transitions', async
 });
 
 test('keeps normal single-select answers across repeated question navigation', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   const first = {
     id: 'stable-reconnect', kind: 'single_select', question: 'Choose reconnect behavior',
     options: [
@@ -671,17 +632,10 @@ test('does not report failed question navigation as opened', async ({ page }) =>
     options: [{ index: 0, label: 'Backend' }, { index: 1, label: 'Everything' }],
     submit_label: 'Submit', can_go_back: true, question_index: 2, question_total: 2,
   };
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{
-      pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'codex',
-      interaction: second,
-    }],
+  await openAgent(page, {
+    pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'codex',
+    interaction: second,
   });
-  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
   await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Previous' }).click();
   const navigation = (await commands(page)).find((command) => command.type === 'navigate_question')!;
@@ -699,14 +653,7 @@ test('does not report failed question navigation as opened', async ({ page }) =>
 });
 
 test('answers a hidden terminal prompt without storing the value anywhere', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['attention_classification', 'secret_input'] });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Secret app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Secret app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Secret app', agent: 'codex' }, { capabilities: ['attention_classification', 'secret_input'] });
   await expect.poll(async () => (await commands(page)).filter(command => command.type === 'read_pane').length).toBeGreaterThan(0);
   const secretRead = (await commands(page)).findLast(command => command.type === 'read_pane');
   await server(page, 0, {
@@ -738,9 +685,7 @@ test('answers a hidden terminal prompt without storing the value anywhere', asyn
 });
 
 test('keeps a saved draft across a hidden prompt but never persists what it hides', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['attention_classification', 'secret_input'] });
+  await connectFedora(page, { capabilities: ['attention_classification', 'secret_input'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Draft app', agent: 'codex', agent_session_id: 'draft-session' }],
@@ -789,14 +734,7 @@ test('keeps a saved draft across a hidden prompt but never persists what it hide
 });
 
 test('names a hidden prompt a relay cannot answer', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Old relay', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Old relay on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Old relay', agent: 'codex' });
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'Enter passphrase:',
     no_echo: true, no_echo_prompt: 'Enter passphrase:',
@@ -809,9 +747,7 @@ test('names a hidden prompt a relay cannot answer', async ({ page }) => {
 });
 
 test('hidden secret requires correlated observation and never retries uncertain delivery across views', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['secret_input', 'manual_terminal_input', 'conversation_history'] });
+  await connectFedora(page, { capabilities: ['secret_input', 'manual_terminal_input', 'conversation_history'] });
   await setConversationFixture(page, { entries: [{ id: 'secret-history', role: 'assistant', timestamp: '', text: 'Synthetic secret input history' }], total: 1 });
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Secret safety', agent: 'codex', agent_session_id: 'secret-safety-session', conversation_history_available: true }] });
   await page.getByRole('button', { name: 'Open Secret safety on Fedora' }).click();

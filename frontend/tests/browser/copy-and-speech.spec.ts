@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, commandsForSocket, fedora, handshake, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
+import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, openAgent, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 test('copies visible terminal output when no completed response is available', async ({ page }) => {
   await page.addInitScript(() => {
@@ -12,14 +12,7 @@ test('copies visible terminal output when no completed response is available', a
       },
     });
   });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Shell output', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Shell output on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Shell output', agent: 'codex' });
   const visibleOutput = 'shell output\nsecond line';
   await server(page, 0, {
     type: 'pane_content',
@@ -58,9 +51,7 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
       },
     });
   });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Remote copy', agent: 'claude' }, {
     capabilities: [
       'attention_classification',
       'clear_activities',
@@ -71,11 +62,6 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
       'agent_response_copy',
     ],
   });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Remote copy', agent: 'claude' }],
-  });
-  await page.getByRole('button', { name: 'Open Remote copy on Fedora' }).click();
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -121,9 +107,7 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
 });
 
 test('reads a response aloud in the language the relay has a voice for', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
     speech_languages: ['en'],
   });
@@ -165,17 +149,10 @@ test('reads a response aloud in the language the relay has a voice for', async (
 });
 
 test('speak reports the relay copy failure when no parser can read the pane', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Spoken omp', agent: 'omp' }, {
     capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
     speech_languages: ['en'],
   });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Spoken omp', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Spoken omp on Fedora' }).click();
   // omp draws no response marker the phone can parse, so the relay's /copy
   // transaction is the only source of text.
   await server(page, 0, {
@@ -254,19 +231,12 @@ test('a reader speaks the latest transcript turn without the relay copy command'
 });
 
 test('uses relay response copy and allows dismissing the markdown preview', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Terminal app', agent: 'codex' }, {
     capabilities: [
       'attention_classification', 'clear_activities', 'directory_browser', 'self_update',
       'structured_questions', 'slash_commands', 'agent_response_copy',
     ],
   });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Terminal app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'remote copy fixture',
   });
@@ -297,19 +267,12 @@ test('uses relay response copy and allows dismissing the markdown preview', asyn
 });
 
 test('surfaces relay response-copy failures instead of parsing terminal output', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Terminal app', agent: 'codex' }, {
     capabilities: [
       'attention_classification', 'clear_activities', 'directory_browser', 'self_update',
       'structured_questions', 'slash_commands', 'agent_response_copy',
     ],
   });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Terminal app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'parser fallback must not run',
   });

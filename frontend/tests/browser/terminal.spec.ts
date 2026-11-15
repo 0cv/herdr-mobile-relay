@@ -1,15 +1,8 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, fedora, handshake, openOmpPane, replyToPaneRead, server, setAutoCommands, socketCount } from '../support/journey-relay';
+import { commands, connectFedora, handshake, openAgent, openOmpPane, replyToPaneRead, server, setAutoCommands } from '../support/journey-relay';
 
 test('keeps Cursor filtering text-only across status updates and restores prompts after selecting', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
-  });
-  await page.getByRole('button', { name: 'Open Cursor picker on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' });
   const footer = 'Type to filter • Enter to select • Tab to edit';
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: `Available models\n${footer}`,
@@ -65,9 +58,7 @@ test('keeps Cursor filtering text-only across status updates and restores prompt
 });
 
 test('centers plan keys and enables text only for the terminal editor', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['structured_questions', 'slash_commands', 'manual_terminal_input'],
   });
   await server(page, 0, {
@@ -159,14 +150,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
 });
 
 test('reports when Herdr clips older terminal history', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Clipped app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Clipped app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Clipped app', agent: 'codex' });
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -189,16 +173,9 @@ test('reports when Herdr clips older terminal history', async ({ page }) => {
 
 test('applies relay-watched terminal deltas and pauses the watcher when hidden', async ({ page }) => {
   await page.clock.install();
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Realtime app', agent: 'codex' }, {
     capabilities: ['attention_classification', 'pane_realtime_delta', 'slash_commands'],
   });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Realtime app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Realtime app on Fedora' }).click();
   await expect.poll(async () =>
     (await commands(page)).some((command) => command.type === 'read_pane')).toBe(true);
   const initialRead = (await commands(page)).findLast(command => command.type === 'read_pane')!;
@@ -282,9 +259,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
 });
 
 test('resets drafts and terminal output when moving to another agent', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -305,14 +280,7 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
 });
 
 test('keeps Claude desktop prompt and status in the shared terminal output', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Wrapped status', agent: 'claude' }],
-  });
-  await page.getByRole('button', { name: 'Open Wrapped status on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Wrapped status', agent: 'claude' });
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
     content: [
@@ -334,9 +302,7 @@ test('keeps Claude desktop prompt and status in the shared terminal output', asy
 });
 
 test('keeps wide controller panes aligned and horizontally scrollable', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['attention_classification', 'slash_commands'],
   });
   await server(page, 0, {
@@ -404,9 +370,7 @@ test('keeps wide controller panes aligned and horizontally scrollable', async ({
 test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
   // A reader never leases, even opted in on a relay that supports it.
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
+  await connectFedora(page, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
   await page.evaluate(() => {
     localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
       version: 1,
@@ -463,14 +427,7 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
 });
 
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Unsafe retry app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Unsafe retry app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Unsafe retry app', agent: 'codex' });
   const prompt = page.getByRole('combobox', { name: 'Prompt' });
   await prompt.fill('run this only once');
   await setAutoCommands(page, false);
@@ -490,14 +447,7 @@ test('does not repopulate prompts after an unsafe dispatch failure', async ({ pa
 });
 
 test('preserves unsafe prompt state for older relays without error data', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Legacy retry app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Legacy retry app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Legacy retry app', agent: 'codex' });
   const prompt = page.getByRole('combobox', { name: 'Prompt' });
   await prompt.fill('run this only once');
   await setAutoCommands(page, false);
@@ -516,14 +466,7 @@ test('preserves unsafe prompt state for older relays without error data', async 
 });
 
 test('keeps the Pi desktop UI separate from the generic mobile composer', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Pi app', agent: 'pi' }],
-  });
-  await page.getByRole('button', { name: 'Open Pi app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Pi app', agent: 'pi' });
   const rule = '─'.repeat(120);
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
@@ -560,14 +503,7 @@ test('keeps the Pi desktop UI separate from the generic mobile composer', async 
 });
 
 test('keeps the Codex picker in the shared terminal with generic controls', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Codex placeholder', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Codex placeholder on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Codex placeholder', agent: 'codex' });
   const background = '\u001b[48;2;61;64;64m                    \u001b[0m';
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
@@ -600,14 +536,7 @@ test('keeps the Codex picker in the shared terminal with generic controls', asyn
 });
 
 test('finds and highlights matches across virtualized terminal output', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Search app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Search app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Search app', agent: 'codex' });
   const lines = Array.from({ length: 320 }, (_, index) => {
     if (index === 24) return 'needle early result';
     if (index === 286) return 'needle late result';
@@ -651,11 +580,7 @@ test('keeps the terminal key row compact on touch screens', async ({ page }) => 
 });
 
 test('refreshes agents on return home and preserves shared terminal behavior', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 }] });
-  await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 });
   await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
   const attachFiles = page.getByRole('button', { name: 'Attach files' });
   const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
@@ -943,14 +868,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
 });
 
 test('interrupts and sends function keys from the terminal pad', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Pad app', agent: 'codex' }],
-  });
-  await page.getByRole('button', { name: 'Open Pad app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Pad app', agent: 'codex' });
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'a shell at rest',
   });

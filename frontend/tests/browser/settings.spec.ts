@@ -1,10 +1,8 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, commandsForSocket, fedora, handshake, server, setAutoCommands, socketCount } from '../support/journey-relay';
+import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 test('downloads a missing relay speech voice from Settings', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     capabilities: ['attention_classification', 'slash_commands', 'speech_voice_management'],
     speech_languages: ['en'],
   });

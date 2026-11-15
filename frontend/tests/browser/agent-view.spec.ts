@@ -1,11 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { boot, commands, fedora, handshake, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
+import { commands, connectFedora, handshake, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
 for (const provider of ['claude', 'codex', 'opencode', 'qoder', 'pi', 'omp', 'omo', 'hermes', 'cursor', 'kimi']) {
 test(`default agent view: fresh ${provider} openings use clean Conversation`, async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -56,9 +54,7 @@ test(`default agent view: fresh ${provider} openings use clean Conversation`, as
 for (const attention of ['idle', 'question', 'approval', 'pending']) {
   test(`phone Conversation controls: ${attention} delivery stays fenced across view changes`, async ({ page }) => {
     const button = (name: string) => page.getByRole('button', { name, exact: true });
-    await boot(page, [fedora]);
-    await expect.poll(() => socketCount(page)).toBe(1);
-    await handshake(page, 0, { capabilities: ['conversation_history', 'manual_terminal_input', 'structured_questions', 'attention_classification'] });
+    await connectFedora(page, { capabilities: ['conversation_history', 'manual_terminal_input', 'structured_questions', 'attention_classification'] });
     const settled = ['idle', 'pending'].includes(attention);
     const phoneAgents = (inspecting: boolean) => ({ type: 'agents', agents: [{
       pane_id: 'w1:p1', status: settled && !inspecting ? 'idle' : 'blocked', project: 'Phone controls', agent: 'pi',
@@ -132,9 +128,7 @@ for (const attention of ['idle', 'question', 'approval', 'pending']) {
 }
 
 test('default agent view: stored Terminal wins across reload', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Terminal', exact: true }).click();
   expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('terminal');
@@ -150,9 +144,7 @@ test('default agent view: stored Terminal wins across reload', async ({ page }) 
 });
 
 test('default agent view: Conversation opens directly and persists across reload', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -207,9 +199,7 @@ test('conversation loads while the browser reports offline over a live relay', a
     Object.defineProperty(Navigator.prototype, 'onLine', { configurable: true, get: () => false });
     localStorage.setItem('herdr_default_agent_view', 'conversation');
   });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -231,9 +221,7 @@ test('conversation loads while the browser reports offline over a live relay', a
 });
 
 test('pane view override: both directions, inheritance, and explicit equal values', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [
@@ -291,9 +279,7 @@ test('pane view override: both directions, inheritance, and explicit equal value
 });
 
 test('default agent view: metadata fallback stays silent and does not switch later', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: [] });
+  await connectFedora(page, { capabilities: [] });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Unavailable metadata', agent: 'unknown', agent_session_id: '' }],
@@ -316,9 +302,7 @@ test('default agent view: metadata fallback stays silent and does not switch lat
 });
 
 test('default agent view: unavailable initial page replaces history without an extra entry', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -351,9 +335,7 @@ test('default agent view: unavailable initial page replaces history without an e
 });
 
 test('default agent view: stale automatic responses cannot redirect Settings', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -384,9 +366,7 @@ test('default agent view: stale automatic responses cannot redirect Settings', a
 });
 
 test('default agent view: manual switching ignores preferences and keeps explicit unavailable history', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -421,9 +401,7 @@ test('default agent view: manual switching ignores preferences and keeps explici
 });
 
 test('default agent view: empty and failed pages do not trigger fallback', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -460,9 +438,7 @@ test('default agent view: empty and failed pages do not trigger fallback', async
 
 test('pane view override: readers can change it while mutation actions stay disabled', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history', 'tab_rename', 'agent_launch'] });
+  await connectFedora(page, { capabilities: ['conversation_history', 'tab_rename', 'agent_launch'] });
   await page.evaluate(() => {
     localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
       version: 1,

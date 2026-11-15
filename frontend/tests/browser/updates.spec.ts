@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { APP_METADATA, APP_RELEASE, emulateStandalone, webRoot } from '../support/journey-device';
-import { boot, closeSocket, commands, commandsForSocket, fedora, handshake, server, setAutoCommands, socketCount } from '../support/journey-relay';
+import { boot, closeSocket, commands, commandsForSocket, connectFedora, fedora, handshake, openAgent, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 async function updateProgressPlan(page: Page): Promise<Record<string, unknown> | null> {
   try {
@@ -869,9 +869,7 @@ for (const stage of ['version check', 'deploy check'] as const) {
 
 test('opens the deployed build when a deploy removed the launch form', async ({ page }) => {
   const deploy = await removeLazyFile(page, 'LaunchView', { newerBuild: true, missingRequests: 1 });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await markCurrentDocument(page);
   await page.getByRole('button', { name: 'Start agent' }).click();
   await waitForReloadedDocument(page);
@@ -920,9 +918,7 @@ test('keeps an unconfirmed terminal send fenced instead of reloading when a depl
   const button = (name: string) => page.getByRole('button', { name, exact: true });
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: true });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history', 'manual_terminal_input'] });
+  await connectFedora(page, { capabilities: ['conversation_history', 'manual_terminal_input'] });
   await server(page, 0, deployedAppAgents('blocked'));
   await button('Open Deployed app on Fedora').click();
   await button('Keyboard').click();
@@ -1004,11 +1000,7 @@ test('opens the deployed build when a deploy removed the question controls', asy
     });
   };
   const deploy = await removeLazyFile(page, 'QuestionForm', { newerBuild: true, missingRequests: 1 });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Question app', agent: 'codex' }] });
-  await page.getByRole('button', { name: 'Open Question app on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Question app', agent: 'codex' });
   await markCurrentDocument(page);
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Which build?', content_fingerprint: 'question' });
   await server(page, 0, {

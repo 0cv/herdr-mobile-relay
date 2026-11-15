@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { emulateIphoneSafari, emulateStandalone } from '../support/journey-device';
-import { boot, closeSocket, commands, commandsForSocket, fedora, handshake, server, setAutoCommands, socketCount, type RelayFixture } from '../support/journey-relay';
+import { boot, closeSocket, commands, commandsForSocket, connectFedora, fedora, handshake, server, setAutoCommands, socketCount, type RelayFixture } from '../support/journey-relay';
 
 test('guides an unpairable relay without ever dialing it', async ({ page }) => {
   await page.clock.install();
@@ -154,9 +154,7 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
 });
 
 test('rechecks Herdr terminal compatibility and wraps actual failures on mobile', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     herdr_status: {
       server_version: '0.9.0',
       generation: 1,
@@ -204,9 +202,7 @@ test('rechecks Herdr terminal compatibility and wraps actual failures on mobile'
 });
 
 test('reconnects and blocks mutations for an incompatible relay protocol', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
+  await connectFedora(page, {
     protocol: 1,
     version: 'old',
     capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'structured_questions', 'slash_commands'],
@@ -352,9 +348,7 @@ test('followup direct TLS device rejection stops retrying', async ({ page }) => 
 });
 
 test('followup raw development close stays recoverable', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await connectFedora(page);
   await closeSocket(page, 0, 4401);
   await expect.poll(() => socketCount(page)).toBe(2);
   await handshake(page, 1);

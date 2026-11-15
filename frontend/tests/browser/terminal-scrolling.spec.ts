@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { boot, fedora, handshake, openOmpPane, server, socketCount } from '../support/journey-relay';
+import { openAgent, openOmpPane, server } from '../support/journey-relay';
 
 test('virtualizes terminal history and copies the latest response', async ({ page }) => {
   await page.addInitScript(() => {
@@ -12,14 +12,7 @@ test('virtualizes terminal history and copies the latest response', async ({ pag
       },
     });
   });
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Long history', agent: 'opencode' }],
-  });
-  await page.getByRole('button', { name: 'Open Long history on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Long history', agent: 'opencode' });
   const content = Array.from({ length: 1_000 }, (_, index) => {
     const row = `row ${String(index + 1).padStart(4, '0')}`;
     return index % 50 === 0 ? `${row} ${'wrapped content '.repeat(32).trimEnd()}` : row;
@@ -161,14 +154,7 @@ test('virtualizes terminal history and copies the latest response', async ({ pag
 });
 
 test('keeps rapid streaming frames pinned to the latest terminal row', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Streaming', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Streaming on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Streaming', agent: 'omp' });
   const initial = Array.from({ length: 200 }, (_, index) => `stream history ${index + 1}`).join('\n');
   await server(page, 0, {
     type: 'pane_content',
@@ -209,14 +195,7 @@ test('keeps rapid streaming frames pinned to the latest terminal row', async ({ 
 });
 
 test('virtualizes large ANSI grids on a controller pane', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'ANSI grid history', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open ANSI grid history on Fedora' }).click();
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'ANSI grid history', agent: 'omp' });
   const content = Array.from({ length: 600 }, (_, index) => {
     if (index % 20 === 0) return `╭${'─'.repeat(98)}╮`;
     if (index % 20 === 1) {

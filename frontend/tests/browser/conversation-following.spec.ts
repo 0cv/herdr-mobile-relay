@@ -1,12 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { boot, closeSocket, commands, composerTarget, fedora, handshake, server, setConversationFixture, socketCount } from '../support/journey-relay';
+import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, server, setConversationFixture, socketCount } from '../support/journey-relay';
 
 async function openFollowingConversation(page: Page, mode: 'conversation' | 'activity' = 'activity') {
   await page.addInitScript(value => localStorage.setItem('herdr-conversation-view', value), mode);
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity'] });
+  await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity'] });
   const capabilities = { source: 'pi_events', active_branch: true };
   const entry = (id: string, text: string, role = 'assistant') => ({ id, text, role, timestamp: '' });
   const entries = Array.from({ length: 24 }, (_, index) => entry(`follow:${index}`, `Follow seed ${index}\n\n${'wrapped history '.repeat(index === 0 ? 500 : 12)}`, index % 2 ? 'assistant' : 'user'));
@@ -174,9 +172,7 @@ for (const mode of ['conversation', 'activity'] as const) {
 
 test('live conversation deltas preserve local reading, selection, tool expansion and table offsets', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity'] });
+  await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity'] });
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'primary', terminal_id: 'fixture-terminal', generation: 1, agent_session_id: 'fixture-session', status: 'working', project: 'Live reading', agent: 'pi', cwd: '/fixture', conversation_history_available: true }] });
   const capabilities = { source: 'pi_events', active_branch: true };
   const entries = Array.from({ length: 100 }, (_, index) => ({ id: `pi:${index}`, timestamp: '', role: index % 2 ? 'assistant' : 'user', text: `Paragraph ${index}: ${'stable historical reading '.repeat(12)}` }));
@@ -266,9 +262,7 @@ test('live conversation deltas preserve local reading, selection, tool expansion
 
 test('loaded windows retain tool expansion and table offsets without leaking state to another target', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   const target = { pane_id: 'w1:p1', server_session_id: 'primary', terminal_id: 'terminal-1', generation: 1, agent_session_id: 'state-session', status: 'working', project: 'Window A', agent: 'pi', cwd: '/fixture', conversation_history_available: true };
   await server(page, 0, { type: 'agents', agents: [target, { ...target, pane_id: 'w1:p2', terminal_id: 'terminal-2', agent_session_id: 'other-session', project: 'Window B' }] });
   const entries = Array.from({ length: 240 }, (_, index) => ({ id: `pi:${index}`, timestamp: '', role: index % 2 ? 'assistant' : 'user', text: `Window message ${index}` }));
@@ -309,9 +303,7 @@ test('loaded windows retain tool expansion and table offsets without leaking sta
 for (const source of ['recorded_history', 'pi_events']) {
   test(`scroll to bottom follows staggered ${source} appends after older paging`, async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-    await boot(page, [fedora]);
-    await expect.poll(() => socketCount(page)).toBe(1);
-    await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity'] });
+    await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity'] });
     await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'primary', terminal_id: 'fixture-terminal', generation: 1, agent_session_id: 'fixture-session', status: 'working', project: 'Follow window', agent: source === 'pi_events' ? 'pi' : 'codex', cwd: '/fixture', conversation_history_available: true }] });
     const capabilities = { source, active_branch: source === 'pi_events' };
     const entries = Array.from({ length: 240 }, (_, index) => ({ id: `entry:${index}`, timestamp: '', role: index % 2 ? 'assistant' : 'user', text: `Seed message ${index}` }));
@@ -354,9 +346,7 @@ for (const source of ['recorded_history', 'pi_events']) {
   });
 
   test(`bottom scrolling traverses multiple bounded loaded windows (${source})`, async ({ page }) => {
-    await boot(page, [fedora]);
-    await expect.poll(() => socketCount(page)).toBe(1);
-    await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity'] });
+    await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity'] });
     const capabilities = { source, active_branch: source === 'pi_events' };
     const entries = Array.from({ length: 640 }, (_, index) => ({ id: `window:${index}`, timestamp: '', role: index % 2 ? 'assistant' : 'user', text: `Bounded message ${index} ` + 'reading anchor '.repeat(8) }));
     await setConversationFixture(page, { entries: entries.slice(440), total: 640, sourceRevision: 'windows:1', capabilities, sequence: 0, hasMore: true, nextCursor: 'window-240', pages: {
@@ -451,9 +441,7 @@ for (const source of ['recorded_history', 'pi_events']) {
 for (const source of ['recorded_history', 'pi_events']) {
   test(`scroll intent: small touch movements stay unpinned until the actual bottom (${source})`, async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem("herdr_default_agent_view", "terminal"));
-    await boot(page, [fedora]);
-    await expect.poll(() => socketCount(page)).toBe(1);
-    await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity'] });
+    await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity'] });
     await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'primary', terminal_id: 'scroll-terminal', generation: 1, agent_session_id: 'scroll-session', status: 'working', project: 'Scroll intent', agent: source === 'pi_events' ? 'pi' : 'codex', conversation_history_available: true }] });
     const capabilities = { source, active_branch: source === 'pi_events' };
     const entries = Array.from({ length: 120 }, (_, index) => ({ id: `scroll:${index}`, timestamp: '', role: index % 2 ? 'assistant' : 'user', text: `Scroll message ${index} ` + 'wrapped history '.repeat(12) }));
@@ -482,9 +470,7 @@ for (const source of ['recorded_history', 'pi_events']) {
 
   test(`scroll intent: wheel window and bottom arrival preserve reading and resume (${source})`, async ({ page, browserName }) => {
     await page.addInitScript(() => localStorage.setItem("herdr_default_agent_view", "terminal"));
-    await boot(page, [fedora]);
-    await expect.poll(() => socketCount(page)).toBe(1);
-    await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity'] });
+    await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity'] });
     await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'primary', terminal_id: 'scroll-terminal', generation: 1, agent_session_id: 'scroll-session', status: 'working', project: 'Scroll window', agent: source === 'pi_events' ? 'pi' : 'codex', conversation_history_available: true }] });
     const capabilities = { source, active_branch: source === 'pi_events' };
     const entries = Array.from({ length: 280 }, (_, index) => ({ id: `scroll:${index}`, timestamp: '', role: index % 2 ? 'assistant' : 'user', text: `Scroll message ${index} ` + 'wrapped history '.repeat(12) }));
@@ -570,9 +556,7 @@ for (const source of ['recorded_history', 'pi_events']) {
 test('scroll intent: upward movement releases following and explicit bottom arrival restores it', async ({ page }) => {
   await page.clock.install();
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await connectFedora(page, { capabilities: ['conversation_history'] });
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Momentum', agent: 'pi', conversation_history_available: true, agent_session_id: 'momentum-session' }] });
   await setConversationFixture(page, { entries: Array.from({ length: 80 }, (_, index) => ({ id: `momentum:${index}`, role: index % 2 ? 'assistant' : 'user', text: `Momentum ${index} ` + 'wrapped text '.repeat(15), timestamp: '' })), total: 80 });
   await page.getByRole('button', { name: 'Open Momentum on Fedora' }).click();
