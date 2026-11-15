@@ -16,6 +16,11 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
+const (
+	jobSourceChangedMessage = "The conversation source changed while it was being prepared."
+	jobNoInterestMessage    = "History preparation paused because no client is waiting for it."
+)
+
 type expiredJob struct {
 	index      *snapshotIndex
 	sourceFile *os.File
@@ -743,20 +748,16 @@ func (b *Browser) runJob(job *browseJob) {
 	}
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || !os.SameFile(job.source.info, info) || capturedStamp.compare(info) == sourceChanged {
-		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+		b.failJobSourceChanged(job)
 		return
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(job.source.path); resolveErr != nil || filepath.Clean(resolved) != filepath.Clean(job.source.path) || containedRegularFile(job.source.path, job.source.location.Root) != job.source.path {
-		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+		b.failJobSourceChanged(job)
 		return
 	}
 	if chainContextID != "" {
 		if err := b.validateClaudeChainJobEvidence(file, job.source.end, chainIdentity, chainEvidence); err != nil {
-			if errors.Is(err, context.Canceled) {
-				b.failJob(job, "request_cancelled", "History preparation was cancelled.", true)
-			} else {
-				b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
-			}
+			b.failJobEvidence(job, err)
 			return
 		}
 		// Keep the evidence fence immediately adjacent to the indexing pass. A
@@ -796,7 +797,7 @@ func (b *Browser) runJob(job *browseJob) {
 		eof := false
 		for len(batch) < maxBatchRecords && batchBytes < maxBatchBytes {
 			if !b.jobHasInterest(job) {
-				b.failJob(job, "index_failed", "History preparation paused because no client is waiting for it.", true)
+				b.failJobNoInterest(job)
 				return
 			}
 			record, nextErr := records.Next()
@@ -811,9 +812,9 @@ func (b *Browser) runJob(job *browseJob) {
 				if errors.Is(nextErr, context.Canceled) {
 					code, message = "request_cancelled", "History preparation was cancelled."
 				} else if errors.Is(nextErr, errJSONLSourceTruncated) {
-					code, retryable, message = "source_changed", false, "The conversation source changed while it was being prepared."
+					code, retryable, message = "source_changed", false, jobSourceChangedMessage
 				} else if errors.Is(nextErr, errJSONLCheckpoint) {
-					message = "History preparation paused because no client is waiting for it."
+					message = jobNoInterestMessage
 				}
 				b.failJob(job, code, message, retryable)
 				return
@@ -858,7 +859,7 @@ func (b *Browser) runJob(job *browseJob) {
 	expectedRangeDigest := job.rangeDigest
 	job.mu.RUnlock()
 	if chainDigest && expectedRangeDigest != "" && firstDigest != expectedRangeDigest {
-		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+		b.failJobSourceChanged(job)
 		return
 	}
 	b.observe(browserObservation{kind: "source_read", bytes: job.source.end})
@@ -869,20 +870,16 @@ func (b *Browser) runJob(job *browseJob) {
 		return nil
 	}, b.observeBackgroundRead)
 	if errors.Is(digestErr, errJSONLCheckpoint) {
-		b.failJob(job, "index_failed", "History preparation paused because no client is waiting for it.", true)
+		b.failJobNoInterest(job)
 		return
 	}
 	if digestErr != nil || firstDigest != secondDigest {
-		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+		b.failJobSourceChanged(job)
 		return
 	}
 	if chainDigest {
 		if err := b.validateClaudeChainJobEvidence(file, job.source.end, chainIdentity, chainEvidence); err != nil {
-			if errors.Is(err, context.Canceled) {
-				b.failJob(job, "request_cancelled", "History preparation was cancelled.", true)
-			} else {
-				b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
-			}
+			b.failJobEvidence(job, err)
 			return
 		}
 	}
@@ -892,7 +889,7 @@ func (b *Browser) runJob(job *browseJob) {
 		job.mu.Unlock()
 	}
 	if err := validateSnapshotSource(job.source); err != nil {
-		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+		b.failJobSourceChanged(job)
 		return
 	}
 	if agentkind.Of(job.scope.Provider) == agentkind.OMO {
@@ -908,12 +905,12 @@ func (b *Browser) runJob(job *browseJob) {
 		}
 	}
 	if !b.jobHasInterest(job) {
-		b.failJob(job, "index_failed", "History preparation paused because no client is waiting for it.", true)
+		b.failJobNoInterest(job)
 		return
 	}
 	metadata, metadataErr := job.index.metadata()
 	if metadataErr != nil {
-		b.failJob(job, "index_failed", "The prepared conversation index is corrupt.", true)
+		b.failJobIndexCorrupt(job)
 		return
 	}
 	count, countErr := job.index.countWithCheckpoint(func() error {
@@ -923,11 +920,11 @@ func (b *Browser) runJob(job *browseJob) {
 		return nil
 	})
 	if errors.Is(countErr, errJSONLCheckpoint) {
-		b.failJob(job, "index_failed", "History preparation paused because no client is waiting for it.", true)
+		b.failJobNoInterest(job)
 		return
 	}
 	if countErr != nil {
-		b.failJob(job, "index_failed", "The prepared conversation index is corrupt.", true)
+		b.failJobIndexCorrupt(job)
 		return
 	}
 	metadata.State = "ready"
@@ -941,7 +938,7 @@ func (b *Browser) runJob(job *browseJob) {
 	metadata.Plan = plan
 	metadata.UpdatedAt = time.Now().UTC()
 	if !b.jobHasInterest(job) {
-		b.failJob(job, "index_failed", "History preparation paused because no client is waiting for it.", true)
+		b.failJobNoInterest(job)
 		return
 	}
 	if code := b.writeWithCapacity(job, "finalize", "The prepared conversation index could not be finalized.", func() error {
@@ -984,6 +981,26 @@ func (b *Browser) jobHasInterest(job *browseJob) bool {
 	job.mu.RLock()
 	defer job.mu.RUnlock()
 	return time.Since(job.lastInterest) <= b.options.InterestLease
+}
+
+func (b *Browser) failJobSourceChanged(job *browseJob) {
+	b.failJob(job, "source_changed", jobSourceChangedMessage, false)
+}
+
+func (b *Browser) failJobNoInterest(job *browseJob) {
+	b.failJob(job, "index_failed", jobNoInterestMessage, true)
+}
+
+func (b *Browser) failJobIndexCorrupt(job *browseJob) {
+	b.failJob(job, "index_failed", "The prepared conversation index is corrupt.", true)
+}
+
+func (b *Browser) failJobEvidence(job *browseJob, err error) {
+	if errors.Is(err, context.Canceled) {
+		b.failJob(job, "request_cancelled", "History preparation was cancelled.", true)
+		return
+	}
+	b.failJobSourceChanged(job)
 }
 
 func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) {
