@@ -118,6 +118,8 @@ shell-check:
 	sh tests/test_download_credentials.sh
 	bash tests/test_service_credentials.sh
 	bash tests/test_common.sh
+	bash tests/test_common_readiness.sh
+	bash tests/test_common_gateway.sh
 	bash tests/test_configure_app_deploy.sh
 	bash tests/test_plugin_choose_transport.sh
 	bash tests/test_start.sh
