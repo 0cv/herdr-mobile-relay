@@ -4,9 +4,14 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
 import { CommandError } from '$lib/command-error';
 import { relayStore } from '$lib/store';
+import { closeWorkspace, removeWorktree } from '$lib/workspace-commands';
 import type { CommandResult, RelayConnectionView, RelayWorkspace } from '$lib/types';
 
+vi.mock('$lib/workspace-commands', async original => ({ ...await original<typeof import('$lib/workspace-commands')>(), closeWorkspace: vi.fn(), removeWorktree: vi.fn() }));
+
 beforeEach(() => {
+  vi.mocked(closeWorkspace).mockReset();
+  vi.mocked(removeWorktree).mockReset();
   relayStore.relayConfigs.set([{ id: 'test', label: 'Test', url: 'wss://test', token: '' }]);
   relayStore.connections.set(new Map([['test', {
     status: 'connected', inventory: { state: 'ready' },
@@ -28,8 +33,8 @@ afterEach(() => {
 
 it.each(['Close', 'Close Group', 'Remove Worktree'])('%s opens with safe Cancel focus and Enter does not mutate', async name => {
   const user = userEvent.setup();
-  const close = vi.spyOn(relayStore, 'closeWorkspace').mockRejectedValue(Object.assign(new CommandError('Group consent required'), { data: { code: 'workspace_group_close_required' } }));
-  const remove = vi.spyOn(relayStore, 'removeWorktree');
+  const close = vi.mocked(closeWorkspace).mockRejectedValue(Object.assign(new CommandError('Group consent required'), { data: { code: 'workspace_group_close_required' } }));
+  const remove = vi.mocked(removeWorktree);
   render(WorkspaceManager);
   await user.click(screen.getAllByRole('button', { name: name === 'Close Group' ? 'Close' : name })[0]);
   if (name === 'Close Group') {
@@ -47,7 +52,7 @@ it.each(['Close', 'Close Group', 'Remove Worktree'])('%s opens with safe Cancel 
 it('focuses enabled Cancel after a busy removal refusal, without force consent', async () => {
   const user = userEvent.setup();
   let reject!: (reason: unknown) => void;
-  const remove = vi.spyOn(relayStore, 'removeWorktree').mockReturnValue(new Promise<CommandResult>((_, fail) => { reject = fail; }));
+  const remove = vi.mocked(removeWorktree).mockReturnValue(new Promise<CommandResult>((_, fail) => { reject = fail; }));
   render(WorkspaceManager);
   await user.click(screen.getByRole('button', { name: 'Remove Worktree' }));
   const dialog = screen.getByRole('dialog');
@@ -65,7 +70,7 @@ it('focuses enabled Cancel after a busy removal refusal, without force consent',
 it.each(['cancel', 'click'])('dismissal by %s while busy fences a late refusal', async event => {
   const user = userEvent.setup();
   let reject!: (reason: unknown) => void;
-  const remove = vi.spyOn(relayStore, 'removeWorktree').mockReturnValue(new Promise<CommandResult>((_, fail) => { reject = fail; }));
+  const remove = vi.mocked(removeWorktree).mockReturnValue(new Promise<CommandResult>((_, fail) => { reject = fail; }));
   render(WorkspaceManager);
   await user.click(screen.getByRole('button', { name: 'Remove Worktree' }));
   const dialog = screen.getByRole('dialog');

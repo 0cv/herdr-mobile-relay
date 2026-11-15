@@ -127,11 +127,6 @@ import type {
   TerminalFrame,
   TargetRef,
   ToastMessage,
-  WorkspaceFile,
-  WorkspaceGitDiff,
-  WorkspaceGitStatus,
-  WorkspaceTree,
-  WorktreeListing,
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
 const BOOTSTRAP_PAIRING_SESSION_PREFIX = 'herdr_browser_pairing:';
@@ -1984,134 +1979,6 @@ class RelayStore {
     return this.sendToAgent(agent, { type: 'tab_reorder', insert_index: insertIndex });
   }
 
-  private workspaceManagementAvailable(relayId: string, capability = 'workspace_management'): RelayConnection {
-    const connection = this.connectionsValue.get(relayId);
-    if (!connection?.capabilities.includes(capability)
-      && !(['workspace_rename', 'workspace_reorder'].includes(capability) && connection?.capabilities.includes('workspace_management'))) {
-      throw new CommandError(capability === 'worktree_management'
-        ? 'This relay does not support worktree management'
-        : 'This relay does not support workspace management');
-    }
-    return connection;
-  }
-
-  async createWorkspace(relayId: string, cwd: string, label: string): Promise<CommandResult> {
-    this.workspaceManagementAvailable(relayId);
-    const result = await this.sendCommand(relayId, { type: 'workspace_create', cwd, label }, 45_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async renameWorkspace(workspace: RelayWorkspace, label: string): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'workspace_rename');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'workspace_rename', workspace_id: workspace.workspace_id, label,
-    });
-    this.requestAgents();
-    return result;
-  }
-
-  async reorderWorkspaceBlock(
-    relayId: string,
-    workspaceIds: string[],
-    beforeWorkspaceId: string,
-    legacyInsertIndex: number,
-  ): Promise<CommandResult> {
-    const connection = this.workspaceManagementAvailable(relayId, 'workspace_reorder');
-    if (!workspaceIds.length || new Set(workspaceIds).size !== workspaceIds.length) {
-      throw new CommandError('Workspace selection is invalid');
-    }
-    const payload = connection.capabilities.includes('workspace_reorder_block')
-      ? {
-          type: 'workspace_reorder',
-          workspace_ids: workspaceIds,
-          before_workspace_id: beforeWorkspaceId,
-        }
-      : workspaceIds.length === 1 && Number.isInteger(legacyInsertIndex) && legacyInsertIndex >= 0
-        ? {
-            type: 'workspace_reorder',
-            workspace_id: workspaceIds[0],
-            insert_index: legacyInsertIndex,
-          }
-        : null;
-    if (!payload) {
-      throw new CommandError('Update Herdr to reorder a workspace with linked worktrees');
-    }
-    const result = await this.sendCommand(relayId, payload);
-    this.requestAgents();
-    return result;
-  }
-
-  async closeWorkspace(
-    workspace: RelayWorkspace,
-    options: { closeGroup?: boolean; expectedWorkspaceIds?: string[] } = {},
-  ): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id);
-    const payload: Record<string, unknown> = {
-      type: 'workspace_close',
-      workspace_id: workspace.workspace_id,
-    };
-    if (options.closeGroup === true) {
-      payload.close_group = true;
-      payload.expected_workspace_ids = options.expectedWorkspaceIds || [];
-    }
-    const result = await this.sendCommand(workspace.relay_id, payload, 30_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async listWorktrees(workspace: RelayWorkspace): Promise<WorktreeListing> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_list', workspace_id: workspace.workspace_id,
-    }, 30_000);
-    const listing = result.data as unknown as WorktreeListing;
-    if (!listing?.source || !Array.isArray(listing.worktrees)) {
-      throw new CommandError('Relay returned an invalid worktree listing');
-    }
-    return listing;
-  }
-
-  async createWorktree(
-    workspace: RelayWorkspace,
-    options: { branch: string; base?: string; label?: string },
-  ): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_create',
-      workspace_id: workspace.workspace_id,
-      branch: options.branch,
-      base: options.base || '',
-      label: options.label || '',
-    }, 75_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async openWorktree(
-    workspace: RelayWorkspace,
-    options: { path?: string; branch?: string; label?: string },
-  ): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_open',
-      workspace_id: workspace.workspace_id,
-      path: options.path || '',
-      branch: options.branch || '',
-      label: options.label || '',
-    }, 75_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async removeWorktree(workspace: RelayWorkspace, force = false): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_remove', workspace_id: workspace.workspace_id, force,
-    }, 75_000);
-    this.requestAgents();
-    return result;
-  }
 
   async checkRelayUpdate(relayId: string): Promise<void> {
     const connection = this.connectionsValue.get(relayId);
@@ -2812,55 +2679,6 @@ class RelayStore {
     return this.applySpeechVoices(relayId, connection, result.data);
   }
 
-  private workspaceInspectionAvailable(agent: Agent): void {
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('workspace_inspection')) {
-      throw new CommandError('This relay does not support workspace inspection.');
-    }
-    if (!String(agent.cwd || '').trim()) {
-      throw new CommandError('This agent does not report a workspace path.');
-    }
-  }
-
-  async loadWorkspaceTree(agent: Agent): Promise<WorkspaceTree> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_tree' }, 20_000);
-    const data = result.data as unknown as WorkspaceTree;
-    if (!data || typeof data.root !== 'string' || !Array.isArray(data.entries)) {
-      throw new CommandError('Relay returned an invalid workspace tree.');
-    }
-    return data;
-  }
-
-  async loadWorkspaceFile(agent: Agent, path: string): Promise<WorkspaceFile> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_file', path }, 20_000);
-    const data = result.data as unknown as WorkspaceFile;
-    if (!data || data.path !== path || !['text', 'image'].includes(data.kind)) {
-      throw new CommandError('Relay returned an invalid workspace preview.');
-    }
-    return data;
-  }
-
-  async loadWorkspaceGitStatus(agent: Agent): Promise<WorkspaceGitStatus> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_git_status' }, 20_000);
-    const data = result.data as unknown as WorkspaceGitStatus;
-    if (!data || typeof data.available !== 'boolean' || !Array.isArray(data.files)) {
-      throw new CommandError('Relay returned an invalid Git status.');
-    }
-    return data;
-  }
-
-  async loadWorkspaceGitDiff(agent: Agent, path: string): Promise<WorkspaceGitDiff> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_git_diff', path }, 20_000);
-    const data = result.data as unknown as WorkspaceGitDiff;
-    if (!data || data.path !== path || typeof data.diff !== 'string') {
-      throw new CommandError('Relay returned an invalid Git diff.');
-    }
-    return data;
-  }
 
   async loadSlashCommands(agent: Agent, refresh = false): Promise<SlashCommandCatalog> {
     const connection = this.connectionsValue.get(agent.relay_id);

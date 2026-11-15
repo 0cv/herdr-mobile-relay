@@ -11,6 +11,7 @@
   import { navigate } from '$lib/router';
   import { CommandError } from '$lib/command-error';
   import { relayStore } from '$lib/store';
+  import * as workspaceCommands from '$lib/workspace-commands';
   import { informativePath, relayWorkspaceTrees, workspaceProvenance, type RelayWorkspaceTree } from '$lib/workspaces';
   import type { RelayWorkspace, WorktreeListing } from '$lib/types';
 
@@ -196,7 +197,7 @@
     if (!relayId || isReadOnly(relayId) || !cwd || !label.trim()) return;
     busy = true;
     try {
-      await relayStore.createWorkspace(relayId, cwd, label.trim());
+      await workspaceCommands.createWorkspace(relayId, cwd, label.trim());
       setStatus(`Created workspace ${label.trim()}.`);
       label = '';
       closeCreateWorkspace();
@@ -235,7 +236,7 @@
     if (isReadOnly(workspace.relay_id) || !renameLabel.trim()) return;
     busy = true;
     try {
-      await relayStore.renameWorkspace(workspace, renameLabel.trim());
+      await workspaceCommands.renameWorkspace(workspace, renameLabel.trim());
       setStatus(`Renamed workspace to ${renameLabel.trim()}.`);
       await finishRename();
     } catch (caught) {
@@ -330,7 +331,7 @@
       const legacyInsertIndex = beforeWorkspaceID
         ? relayWorkspaces.findIndex((workspace) => workspace.workspace_id === beforeWorkspaceID)
         : relayWorkspaces.length;
-      await relayStore.reorderWorkspaceBlock(
+      await workspaceCommands.reorderWorkspaceBlock(
         tree.workspace.relay_id,
         tree.workspaceIds,
         beforeWorkspaceID,
@@ -403,12 +404,12 @@
     busy = true;
     try {
       if (action.kind === 'close' || action.kind === 'close_group') {
-        await relayStore.closeWorkspace(action.workspace, action.kind === 'close_group'
+        await workspaceCommands.closeWorkspace(action.workspace, action.kind === 'close_group'
           ? { closeGroup: true, expectedWorkspaceIds: action.workspaceIDs }
           : undefined);
         setStatus(`Closed workspace${action.kind === 'close_group' ? ' group' : ''} ${action.workspace.label}.`);
       } else {
-        await relayStore.removeWorktree(action.workspace, action.force);
+        await workspaceCommands.removeWorktree(action.workspace, action.force);
         setStatus(`Removed worktree ${action.workspace.label}.`);
       }
       cancelConfirm();
@@ -471,7 +472,7 @@
     worktreeError = '';
     worktreeLoading = true;
     try {
-      const listing = await relayStore.listWorktrees(workspace);
+      const listing = await workspaceCommands.listWorktrees(workspace);
       // A slower listing for a previously shown workspace must not land
       // under the dialog's current title; its Open buttons would then send
       // paths from one repository with another one's workspace id.
@@ -511,7 +512,7 @@
     if (!workspace || isReadOnly(workspace.relay_id) || !branch.trim()) return;
     busy = true;
     try {
-      await relayStore.createWorktree(workspace, {
+      await workspaceCommands.createWorktree(workspace, {
         branch: branch.trim(),
         base: base.trim(),
         label: worktreeLabel.trim(),
@@ -540,7 +541,7 @@
     if (!workspace || isReadOnly(workspace.relay_id)) return;
     busy = true;
     try {
-      await relayStore.openWorktree(workspace, { path });
+      await workspaceCommands.openWorktree(workspace, { path });
       setStatus(`Opened worktree ${labelValue}.`);
       await refreshWorktrees(workspace);
     } catch (caught) {

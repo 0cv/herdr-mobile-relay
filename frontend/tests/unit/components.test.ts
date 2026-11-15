@@ -2,7 +2,7 @@ import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
 import ConversationHistory from '$components/ConversationHistory.svelte';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
@@ -12,6 +12,7 @@ import TerminalView from '$components/TerminalView.svelte';
 import LaunchView from '$components/LaunchView.svelte';
 import { CommandError } from '$lib/command-error';
 import { relayStore } from '$lib/store';
+import { closeWorkspace, listWorktrees, reorderWorkspaceBlock } from '$lib/workspace-commands';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { reloadRisk } from '$lib/reload-guard';
@@ -42,7 +43,15 @@ function launchConnection(agentProfiles: AgentProfile[], hermesProfiles: string[
   } as unknown as RelayConnectionView;
 }
 
+vi.mock('$lib/workspace-commands', async original => ({ ...await original<typeof import('$lib/workspace-commands')>(), reorderWorkspaceBlock: vi.fn(), closeWorkspace: vi.fn(), listWorktrees: vi.fn() }));
+
 describe('accessible Svelte interactions', () => {
+  beforeEach(() => {
+    vi.mocked(reorderWorkspaceBlock).mockReset();
+    vi.mocked(closeWorkspace).mockReset();
+    vi.mocked(listWorktrees).mockReset();
+  });
+
   it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
     const user = userEvent.setup();
     const relay = { id: 'invited', label: 'Invited', url: 'wss://invited.example', token: '' };
@@ -1273,7 +1282,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.connections.set(new Map([['fedora', connection as never]]));
     relayStore.workspaces.set([workspace('w1', 'One'), workspace('w2', 'Two')]);
     // A never-settling reorder keeps the optimistic order pending under test.
-    const reorder = vi.spyOn(relayStore, 'reorderWorkspaceBlock')
+    const reorder = vi.mocked(reorderWorkspaceBlock)
       .mockReturnValue(new Promise<CommandResult>(() => {}));
     try {
       const { container } = render(WorkspaceManager);
@@ -1316,7 +1325,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
     relayStore.connections.set(new Map([['fedora', connection as never]]));
     relayStore.workspaces.set([primary, child]);
-    const close = vi.spyOn(relayStore, 'closeWorkspace')
+    const close = vi.mocked(closeWorkspace)
       .mockRejectedValueOnce(Object.assign(
         new CommandError('Close the workspace group explicitly'),
         { data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] } },
@@ -1377,7 +1386,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.workspaces.set([alphaPrimary, alphaChild, betaPrimary, betaChild]);
     let rejectClose!: (reason?: unknown) => void;
     const pending = new Promise<CommandResult>((_resolve, reject) => { rejectClose = reject; });
-    const close = vi.spyOn(relayStore, 'closeWorkspace').mockReturnValue(pending);
+    const close = vi.mocked(closeWorkspace).mockReturnValue(pending);
     try {
       render(WorkspaceManager);
       await vi.waitFor(() => expect(screen.getAllByRole('button', { name: 'Close' }).length).toBeGreaterThan(0));
@@ -1420,7 +1429,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
     relayStore.connections.set(new Map([['fedora', connection as never]]));
     relayStore.workspaces.set([primary, child]);
-    const close = vi.spyOn(relayStore, 'closeWorkspace').mockRejectedValue(
+    const close = vi.mocked(closeWorkspace).mockRejectedValue(
       Object.assign(new CommandError('Close the workspace group explicitly'), {
         data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] },
       }),
@@ -1627,7 +1636,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.workspaces.set([workspace('w1', 'One'), workspace('w2', 'Two')]);
     let releaseFirst = (_: WorktreeListing) => {};
     const first = new Promise<WorktreeListing>((resolve) => { releaseFirst = resolve; });
-    const list = vi.spyOn(relayStore, 'listWorktrees')
+    const list = vi.mocked(listWorktrees)
       .mockImplementationOnce(() => first)
       .mockImplementationOnce(() => Promise.resolve(listing('two', 'feature-two')));
     try {

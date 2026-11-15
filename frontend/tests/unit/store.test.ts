@@ -26,6 +26,7 @@ import { SLASH_COMMAND_MAX_ENTRIES } from '$lib/slash-command-limits';
 import { CommandError } from '$lib/command-error';
 import { normalizeConversationPage } from '$lib/conversation-page';
 import { relayStore } from '$lib/store';
+import { closeWorkspace, createWorkspace, listWorktrees, renameWorkspace, reorderWorkspaceBlock } from '$lib/workspace-commands';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
@@ -461,11 +462,11 @@ describe('relay command store', () => {
 
     const workspace = get(relayStore.workspaces)[0];
     if (!capabilities.includes('workspace_management')) {
-      await expect(relayStore.createWorkspace(workspace.relay_id, '/tmp/project', 'New')).rejects.toThrow('workspace management');
-      await expect(relayStore.closeWorkspace(workspace)).rejects.toThrow('workspace management');
-      await expect(relayStore.listWorktrees(workspace)).rejects.toThrow('worktree management');
+      await expect(createWorkspace(workspace.relay_id, '/tmp/project', 'New')).rejects.toThrow('workspace management');
+      await expect(closeWorkspace(workspace)).rejects.toThrow('workspace management');
+      await expect(listWorktrees(workspace)).rejects.toThrow('worktree management');
     }
-    const rename = relayStore.renameWorkspace(workspace, 'Renamed');
+    const rename = renameWorkspace(workspace, 'Renamed');
     const renameCommand = JSON.parse(socket.sent.at(-1)!);
     expect(renameCommand).toMatchObject({
       type: 'workspace_rename',
@@ -482,7 +483,7 @@ describe('relay command store', () => {
     });
     await expect(rename).resolves.toMatchObject({ ok: true });
 
-    const reorder = relayStore.reorderWorkspaceBlock(workspace.relay_id, ['w1', 'w2'], 'w5', 2);
+    const reorder = reorderWorkspaceBlock(workspace.relay_id, ['w1', 'w2'], 'w5', 2);
     const reorderCommand = JSON.parse(socket.sent.at(-1)!);
     expect(reorderCommand).toMatchObject({
       type: 'workspace_reorder',
@@ -508,7 +509,7 @@ describe('relay command store', () => {
       agent_profiles: [],
       inventory: { state: 'ready' },
     });
-    const legacyReorder = relayStore.reorderWorkspaceBlock(workspace.relay_id, ['w1'], '', 2);
+    const legacyReorder = reorderWorkspaceBlock(workspace.relay_id, ['w1'], '', 2);
     const legacyCommand = JSON.parse(socket.sent.at(-1)!);
     expect(legacyCommand).toMatchObject({
       type: 'workspace_reorder',
@@ -526,7 +527,7 @@ describe('relay command store', () => {
     });
     await expect(legacyReorder).resolves.toMatchObject({ ok: true });
 
-    const listing = relayStore.listWorktrees(workspace);
+    const listing = listWorktrees(workspace);
     const listCommand = JSON.parse(socket.sent.at(-1)!);
     expect(listCommand).toMatchObject({ type: 'worktree_list', workspace_id: 'w1', protocol: 3 });
     socket.message({
@@ -3622,12 +3623,12 @@ describe('relay command store', () => {
       cwd: '/home/user/project',
     } as RelayWorkspace;
 
-    const workspaceError = await relayStore.createWorkspace(relayId, '/home/user/project', 'Project')
+    const workspaceError = await createWorkspace(relayId, '/home/user/project', 'Project')
       .then(() => null, (caught) => caught as CommandError);
     expect(workspaceError?.message).toBe('This relay does not support workspace management');
     expect(workspaceError?.data?.dispatched_unknown).toBeUndefined();
 
-    const worktreeError = await relayStore.listWorktrees(workspace)
+    const worktreeError = await listWorktrees(workspace)
       .then(() => null, (caught) => caught as CommandError);
     expect(worktreeError?.message).toBe('This relay does not support worktree management');
     expect(worktreeError?.data?.dispatched_unknown).toBeUndefined();
