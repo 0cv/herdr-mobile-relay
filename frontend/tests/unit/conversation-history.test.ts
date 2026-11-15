@@ -1305,3 +1305,101 @@ describe('history runaway guards', () => {
     });
   });
 });
+
+describe('history lanes', () => {
+  type ConversationRequest = import('$lib/conversation-history').ConversationHistoryControllerOptions['request'];
+
+  const ids = (controller: ConversationHistoryController) => controller.state.entries.map(({ id }) => id);
+  const plan = (name: string) => ({ available: true, phases: [{ name, tasks: [] }], truncated: false });
+
+  async function loadWindow(request: ConversationRequest) {
+    const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(ids(controller)).toEqual(['u2', 'a2']);
+    return controller;
+  }
+
+  const windowPage = (overrides: Partial<ConversationPage> = {}) => page({
+    entries: [entry('u2', 'user'), entry('a2', 'assistant')],
+    hasMore: true,
+    nextCursor: 'older',
+    sourceRevision: 'r1',
+    ...overrides,
+  });
+
+  it('replaces the loaded window with a disjoint refreshed head that has no more pages', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(windowPage())
+      .mockResolvedValueOnce(page({ entries: [entry('n1', 'user'), entry('n2', 'assistant')], sourceRevision: 'r1' }));
+    const controller = await loadWindow(request);
+    try {
+      controller.refresh();
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(ids(controller)).toEqual(['n1', 'n2']));
+      expect(controller.state.error).toBeNull();
+      expect(controller.state.nextCursor).toBe('');
+      expect(controller.state.hasMore).toBe(false);
+      expect(controller.state.beginningReached).toBe(true);
+      expect(controller.state.latestGapOutstanding).toBe(false);
+      expect(controller.state.contextSearching).toBe(false);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('replaces the loaded window with a bridge that reaches the source start without overlap', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(windowPage())
+      .mockResolvedValueOnce(page({ entries: [entry('n3', 'assistant')], hasMore: true, nextCursor: 'bridge', sourceRevision: 'r1' }))
+      .mockResolvedValueOnce(page({ entries: [entry('n1', 'user'), entry('n2', 'assistant')], sourceRevision: 'r1' }));
+    const controller = await loadWindow(request);
+    try {
+      controller.refresh();
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() => expect(ids(controller)).toEqual(['n1', 'n2', 'n3']));
+      expect(request.mock.calls[2][1]).toMatchObject({ cursor: 'bridge' });
+      expect(controller.state.error).toBeNull();
+      expect(controller.state.nextCursor).toBe('');
+      expect(controller.state.hasMore).toBe(false);
+      expect(controller.state.beginningReached).toBe(true);
+      expect(controller.state.latestGapOutstanding).toBe(false);
+      expect(controller.state.contextSearching).toBe(false);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('restores the established older lane when a page fails during a bridge', async () => {
+    const windowPlan = plan('window');
+    let failBridge: (value: ConversationPage) => void = () => {};
+    const request = vi.fn()
+      .mockResolvedValueOnce(windowPage({ mode: 'snapshot', snapshotId: 'snapshot-1', omoPlan: windowPlan }))
+      .mockResolvedValueOnce(page({
+        entries: [entry('n1', 'assistant')], hasMore: true, nextCursor: 'bridge', sourceRevision: 'r1', omoPlan: plan('live'),
+      }))
+      .mockImplementationOnce(() => new Promise<ConversationPage>(resolve => { failBridge = resolve; }));
+    const controller = await loadWindow(request);
+    try {
+      controller.refresh();
+      await vi.waitFor(() => expect(controller.state.contextSearching).toBe(true));
+      expect(controller.state.latestGapOutstanding).toBe(true);
+      expect(controller.state.omoPlan).toEqual(plan('live'));
+      failBridge(page({
+        state: 'failed', sourceRevision: 'r1', error: { code: 'upstream_failed', message: 'Bridge page failed.', retryable: true },
+      }));
+      await vi.waitFor(() => expect(controller.state.error).not.toBeNull());
+      expect(request.mock.calls[2][1]).toMatchObject({ cursor: 'bridge' });
+      expect(controller.state.error).toMatchObject({ code: 'upstream_failed', retryable: true });
+      expect(ids(controller)).toEqual(['u2', 'a2']);
+      expect(controller.state.nextCursor).toBe('older');
+      expect(controller.state.hasMore).toBe(true);
+      expect(controller.state.snapshotId).toBe('snapshot-1');
+      expect(controller.state.omoPlan).toEqual(windowPlan);
+      expect(controller.state.latestGapOutstanding).toBe(false);
+      expect(controller.state.contextSearching).toBe(false);
+    } finally {
+      controller.cancel();
+    }
+  });
+});
