@@ -629,15 +629,7 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 		PaneID: "pane-1", Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground", SessionID: anchor,
 		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
 	}}, server.state.RevisionCounter())
-	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-		defer admitted()
-		inbound, decodeErr := protocol.DecodeMap(message)
-		if decodeErr != nil {
-			t.Errorf("decode history command: %v", decodeErr)
-			return
-		}
-		server.handleConversationHistory(client, inbound)
-	})
+	useProductionHandler(t, server)
 	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
 	defer httpServer.Close()
 	defer func() {
@@ -737,15 +729,7 @@ func TestConversationHistoryRejectsForegroundChangeDuringRead(t *testing.T) {
 		close(readEntered)
 		<-releaseRead
 	}
-	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-		defer admitted()
-		inbound, decodeErr := protocol.DecodeMap(message)
-		if decodeErr != nil {
-			t.Errorf("decode history command: %v", decodeErr)
-			return
-		}
-		server.handleConversationHistory(client, inbound)
-	})
+	useProductionHandler(t, server)
 	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
 	defer httpServer.Close()
 	defer func() {
@@ -2219,15 +2203,7 @@ func TestCopyResponseError(t *testing.T) {
 }
 func openCopyTestClient(t *testing.T, s *Server) *websocket.Conn {
 	t.Helper()
-	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-		defer admitted()
-		if message["type"] != "copy_agent_response" {
-			return
-		}
-		requestID, _ := message["request_id"].(string)
-		paneID, _ := message["pane_id"].(string)
-		s.copyAgentResponse(client, requestID, paneID)
-	})
+	useProductionHandler(t, s)
 	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
@@ -2247,7 +2223,7 @@ func openCopyTestClient(t *testing.T, s *Server) *websocket.Conn {
 func sendCopyRequest(t *testing.T, conn *websocket.Conn, requestID, paneID string) map[string]any {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{
-		"type": "copy_agent_response", "request_id": requestID, "pane_id": paneID,
+		"type": "copy_agent_response", "request_id": requestID, "pane_id": paneID, "protocol": protocol.Version,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2284,28 +2260,7 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		}
 		return []byte("RIFFfakewav"), nil
 	}
-	// Mirrors the production gate: an action missing from the protocol
-	// catalog is rejected as unknown_action before any dispatch case runs.
-	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-		defer admitted()
-		if message["type"] != "speak_text" {
-			return
-		}
-		inbound, err := protocol.DecodeMap(message)
-		if err != nil {
-			t.Errorf("decode speak_text: %v", err)
-			return
-		}
-		if _, known := protocol.ScopeFor(inbound); !known {
-			t.Error("speak_text is not a registered protocol action")
-			return
-		}
-		requestID, _ := message["request_id"].(string)
-		speechRequestID, _ := message["speech_request_id"].(string)
-		text, _ := message["text"].(string)
-		language, _ := message["language"].(string)
-		s.speakText(client, requestID, speechRequestID, text, language)
-	})
+	useProductionHandler(t, s)
 	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
@@ -2323,6 +2278,7 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		t.Helper()
 		payload, err := json.Marshal(map[string]any{
 			"type":       "speak_text",
+			"protocol":   protocol.Version,
 			"request_id": "req-1",
 			"text":       text,
 			"language":   language,
@@ -2386,18 +2342,7 @@ func TestCancelSpeechStopsRelaySynthesis(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-		admitted()
-		action, _ := message["type"].(string)
-		speechRequestID, _ := message["speech_request_id"].(string)
-		switch action {
-		case "speak_text":
-			requestID, _ := message["request_id"].(string)
-			s.speakText(client, requestID, speechRequestID, "stop this", "en")
-		case "cancel_speech":
-			s.cancelSpeech(client.ID(), speechRequestID)
-		}
-	})
+	useProductionHandler(t, s)
 	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
@@ -2413,9 +2358,9 @@ func TestCancelSpeechStopsRelaySynthesis(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := conn.Write(ctx, websocket.MessageText, []byte(
-		`{"type":"speak_text","request_id":"speak-1","speech_request_id":"speech-1"}`,
-	)); err != nil {
+	if err := conn.Write(ctx, websocket.MessageText, []byte(fmt.Sprintf(
+		`{"type":"speak_text","protocol":%d,"request_id":"speak-1","speech_request_id":"speech-1","text":"stop this","language":"en"}`, protocol.Version,
+	))); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -2423,9 +2368,9 @@ func TestCancelSpeechStopsRelaySynthesis(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("speech synthesis did not start")
 	}
-	if err := conn.Write(ctx, websocket.MessageText, []byte(
-		`{"type":"cancel_speech","speech_request_id":"speech-1"}`,
-	)); err != nil {
+	if err := conn.Write(ctx, websocket.MessageText, []byte(fmt.Sprintf(
+		`{"type":"cancel_speech","protocol":%d,"speech_request_id":"speech-1"}`, protocol.Version,
+	))); err != nil {
 		t.Fatal(err)
 	}
 	_, data, err := conn.Read(ctx)
@@ -2475,34 +2420,7 @@ func TestSpeechVoiceManagementOverTheWire(t *testing.T) {
 		delete(installed, language)
 		return nil
 	}
-	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-		defer admitted()
-		action, _ := message["type"].(string)
-		requestID, _ := message["request_id"].(string)
-		language, _ := message["language"].(string)
-		inbound, err := protocol.DecodeMap(message)
-		if err != nil {
-			t.Errorf("decode %s: %v", action, err)
-			return
-		}
-		scope, known := protocol.ScopeFor(inbound)
-		if !known {
-			t.Errorf("%s is not a registered protocol action", action)
-			return
-		}
-		switch action {
-		case "speech_voices_list":
-			if scope.Action.Class != protocol.ActionReadOnly {
-				t.Error("listing voices must stay a read-only action")
-			}
-			s.reply(client, requestID, action, "").complete(s.speechVoicePayload(nil))
-		case "speech_voice_install", "speech_voice_remove":
-			if scope.Action.Class != protocol.ActionMutating {
-				t.Errorf("%s must be a mutating action so readers cannot run it", action)
-			}
-			s.changeSpeechVoice(client, requestID, action, language)
-		}
-	})
+	useProductionHandler(t, s)
 	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
@@ -2560,6 +2478,15 @@ func TestSpeechVoiceManagementOverTheWire(t *testing.T) {
 			state[language], _ = voice["installed"].(bool)
 		}
 		return state
+	}
+
+	if metadata, known := protocol.ClassifyAction("speech_voices_list"); !known || metadata.Class != protocol.ActionReadOnly {
+		t.Error("listing voices must stay a read-only action")
+	}
+	for _, action := range []string{"speech_voice_install", "speech_voice_remove"} {
+		if metadata, known := protocol.ClassifyAction(action); !known || metadata.Class != protocol.ActionMutating {
+			t.Errorf("%s must be a mutating action so readers cannot run it", action)
+		}
 	}
 
 	listed := exchange(map[string]any{"type": "speech_voices_list", "request_id": "list-1"})
