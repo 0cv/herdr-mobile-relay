@@ -10,18 +10,14 @@ import (
 func (b *Browser) memoryPage(
 	scope BrowseScope,
 	source fileSource,
-	entries []projectedEntry,
-	diagnostics BrowseDiagnostics,
-	plan *OMOTodoState,
-	rangeStart, rangeEnd int64,
-	rangeDigest string,
-	boundary int64,
+	projection recentProjection,
+	captured capturedRange,
 	initial bool,
 	limit int,
 ) BrowsePage {
-	eligible := make([]projectedEntry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Offset < boundary {
+	eligible := make([]projectedEntry, 0, len(projection.Entries))
+	for _, entry := range projection.Entries {
+		if entry.Offset < captured.boundary {
 			eligible = append(eligible, entry)
 		}
 	}
@@ -30,18 +26,18 @@ func (b *Browser) memoryPage(
 		start = 0
 	}
 	selected := append([]projectedEntry(nil), eligible[start:]...)
-	potentialOlder := start > 0 || rangeStart > 0
+	potentialOlder := start > 0 || captured.start > 0
 	base := BrowsePage{
 		Available: true, State: BrowseReady, Mode: BrowseRecent,
-		SourceRevision: source.revision, Entries: []Entry{}, Diagnostics: diagnostics, OMOPlan: boundTodoPlan(plan, browseResponseBytes/4),
+		SourceRevision: source.revision, Entries: []Entry{}, Diagnostics: projection.Diagnostics, OMOPlan: boundTodoPlan(projection.Plan, browseResponseBytes/4),
 	}
-	if rangeStart == 0 {
-		total := len(entries)
+	if captured.start == 0 {
+		total := len(projection.Entries)
 		base.Total = &total
 	} else {
 		base.Reason = "Showing recent messages. Older history can be loaded from this computer."
 	}
-	if !potentialOlder && len(selected) == 0 && initial && rangeStart > 0 {
+	if !potentialOlder && len(selected) == 0 && initial && captured.start > 0 {
 		potentialOlder = true
 	}
 
@@ -49,19 +45,19 @@ func (b *Browser) memoryPage(
 	if potentialOlder {
 		next = func(nextBoundary int64) (string, error) {
 			if start > 0 {
-				return b.rangeCursor("recent", scope, source, rangeStart, rangeEnd, rangeDigest, nextBoundary)
+				return b.rangeCursor("recent", scope, source, captured.withBoundary(nextBoundary))
 			}
-			prepareBoundary := rangeStart
-			if initial && len(entries) == 0 {
-				prepareBoundary = rangeEnd
+			prepareBoundary := captured.start
+			if initial && len(projection.Entries) == 0 {
+				prepareBoundary = captured.end
 			}
-			return b.rangeCursor("prepare", scope, source, rangeStart, rangeEnd, rangeDigest, prepareBoundary)
+			return b.rangeCursor("prepare", scope, source, captured.withBoundary(prepareBoundary))
 		}
 	}
 	fitted, omitted := b.fitProjected(selected, cursorCandidatePage(base, next))
 	if omitted > 0 {
 		base.HasMore = true
-		cursor, err := b.rangeCursor("recent", scope, source, rangeStart, rangeEnd, rangeDigest, fitted[0].Offset)
+		cursor, err := b.rangeCursor("recent", scope, source, captured.withBoundary(fitted[0].Offset))
 		if err != nil {
 			return browseContinuationFailed()
 		}
@@ -75,7 +71,7 @@ func (b *Browser) memoryPage(
 		base.NextCursor = cursor
 	} else if potentialOlder {
 		base.HasMore = true
-		cursor, err := next(boundary)
+		cursor, err := next(captured.boundary)
 		if err != nil {
 			return browseContinuationFailed()
 		}

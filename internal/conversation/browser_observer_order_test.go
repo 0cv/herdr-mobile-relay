@@ -209,7 +209,7 @@ func TestChainDigestMismatchFailsBeforeVerificationRead(t *testing.T) {
 		reads++
 		mu.Unlock()
 	})
-	job, page := b.createJob(scope, source, 0, source.end, source.end, "not-the-captured-digest", "chain", 0, claudeChainJobBinding{})
+	job, page := b.createJob(scope, source, capturedRange{end: source.end, boundary: source.end, digest: "not-the-captured-digest"}, claudeChainJobBinding{contextID: "chain"})
 	if job == nil || page != nil {
 		source.close()
 		t.Fatalf("job = %v, page = %v", job, page)
@@ -410,8 +410,8 @@ func TestBrowserChainQueueAdmissionHookFollowsWakeupAndUnlock(t *testing.T) {
 		lockFree = append(lockFree, free)
 		mu.Unlock()
 	})
-	job, page := b.createJob(scope, source, 0, source.end, source.end, digest, "chain", 0,
-		claudeChainJobBinding{footerStart: 0, footerEnd: source.end, footerDigest: digest})
+	job, page := b.createJob(scope, source, capturedRange{end: source.end, boundary: source.end, digest: digest},
+		claudeChainJobBinding{contextID: "chain", footerStart: 0, footerEnd: source.end, footerDigest: digest})
 	if job == nil || page != nil {
 		source.close()
 		t.Fatalf("job = %v, page = %v", job, page)

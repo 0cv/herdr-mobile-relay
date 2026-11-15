@@ -989,8 +989,7 @@ func (b *Browser) readRecentFilePage(ctx context.Context, request BrowseRequest,
 	}
 	projection.Diagnostics.SourceTruncated = start > 0
 	return b.memoryPage(
-		request.Scope, source, projection.Entries, projection.Diagnostics, projection.Plan,
-		start, source.end, digest, source.end, true, request.Limit,
+		request.Scope, source, projection, capturedRange{start: start, end: source.end, boundary: source.end, digest: digest}, true, request.Limit,
 	), nil
 }
 
@@ -1021,28 +1020,24 @@ func (b *Browser) recordReadFailure(err error) BrowsePage {
 }
 
 func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseRequest, cursor browseCursor, omo bool) (BrowsePage, error) {
-	start, end, boundary, ok := parseCursorRange(cursor)
+	captured, ok := parseCursorRange(cursor)
 	if !ok {
 		return browseInvalidCursor(), nil
 	}
-	source, failure := b.openCursorSource(ctx, request.Scope, cursor, start, end, omo)
+	source, failure := b.openCursorSource(ctx, request.Scope, cursor, captured, omo)
 	if failure != nil {
 		return *failure, nil
 	}
 	defer source.close()
-	digest := cursor.RangeDigest
-	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, end, digest, omo)
+	projection, err := b.projectRecentRange(ctx, request.Scope, source, captured.start, captured.end, captured.digest, omo)
 	if err != nil {
 		return b.recordReadFailure(err), nil
 	}
-	projection.Diagnostics.SourceTruncated = start > 0
-	return b.memoryPage(
-		request.Scope, source, projection.Entries, projection.Diagnostics, projection.Plan,
-		start, end, digest, boundary, false, request.Limit,
-	), nil
+	projection.Diagnostics.SourceTruncated = captured.start > 0
+	return b.memoryPage(request.Scope, source, projection, captured, false, request.Limit), nil
 }
 
-func (b *Browser) openCursorSource(ctx context.Context, scope BrowseScope, cursor browseCursor, start, end int64, omo bool) (fileSource, *BrowsePage) {
+func (b *Browser) openCursorSource(ctx context.Context, scope BrowseScope, cursor browseCursor, captured capturedRange, omo bool) (fileSource, *BrowsePage) {
 	source, code := b.sourceFor(scope, omo)
 	if code != "" {
 		page := browseUnavailable(code, fileSourceReason(code, omo))
@@ -1052,10 +1047,10 @@ func (b *Browser) openCursorSource(ctx context.Context, scope BrowseScope, curso
 		source.close()
 		return fileSource{}, &page
 	}
-	if source.revision != cursor.Revision || source.end < end {
+	if source.revision != cursor.Revision || source.end < captured.end {
 		return fail(browseSourceChanged())
 	}
-	digest, err := fileRangeDigestObserved(ctx, source.file, start, end, nil, func(bytes int64) error {
+	digest, err := fileRangeDigestObserved(ctx, source.file, captured.start, captured.end, nil, func(bytes int64) error {
 		b.observePhysicalRead(bytes)
 		return nil
 	})
@@ -1071,36 +1066,46 @@ func (b *Browser) openCursorSource(ctx context.Context, scope BrowseScope, curso
 	return source, nil
 }
 
-func parseCursorRange(cursor browseCursor) (start, end, boundary int64, ok bool) {
-	start, err := parseBrowseOffset(cursor.RangeStart)
-	if err != nil {
-		return 0, 0, 0, false
-	}
-	end, err = parseBrowseOffset(cursor.RangeEnd)
-	if err != nil || end < start || cursor.RangeDigest == "" {
-		return 0, 0, 0, false
-	}
-	boundary, err = parseBrowseOffset(cursor.Boundary)
-	if err != nil || boundary > end {
-		return 0, 0, 0, false
-	}
-	return start, end, boundary, true
+type capturedRange struct {
+	start, end, boundary int64
+	digest               string
 }
 
-func (b *Browser) rangeCursor(mode string, scope BrowseScope, source fileSource, start, end int64, digest string, boundary int64) (string, error) {
+func (r capturedRange) withBoundary(boundary int64) capturedRange {
+	r.boundary = boundary
+	return r
+}
+
+func parseCursorRange(cursor browseCursor) (capturedRange, bool) {
+	start, err := parseBrowseOffset(cursor.RangeStart)
+	if err != nil {
+		return capturedRange{}, false
+	}
+	end, err := parseBrowseOffset(cursor.RangeEnd)
+	if err != nil || end < start || cursor.RangeDigest == "" {
+		return capturedRange{}, false
+	}
+	boundary, err := parseBrowseOffset(cursor.Boundary)
+	if err != nil || boundary > end {
+		return capturedRange{}, false
+	}
+	return capturedRange{start: start, end: end, boundary: boundary, digest: cursor.RangeDigest}, true
+}
+
+func (b *Browser) rangeCursor(mode string, scope BrowseScope, source fileSource, captured capturedRange) (string, error) {
 	return encodeBrowseCursor(b.key, browseCursor{
 		Mode: mode, Scope: browseScopeID(scope), Revision: source.revision,
-		Boundary: browseOffset(boundary), RangeStart: browseOffset(start), RangeEnd: browseOffset(end),
-		RangeDigest: digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
+		Boundary: browseOffset(captured.boundary), RangeStart: browseOffset(captured.start), RangeEnd: browseOffset(captured.end),
+		RangeDigest: captured.digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 	})
 }
 
 func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cursor browseCursor, omo bool) (BrowsePage, error) {
-	start, end, boundary, ok := parseCursorRange(cursor)
+	captured, ok := parseCursorRange(cursor)
 	if !ok {
 		return browseInvalidCursor(), nil
 	}
-	source, failure := b.openCursorSource(ctx, request.Scope, cursor, start, end, omo)
+	source, failure := b.openCursorSource(ctx, request.Scope, cursor, captured, omo)
 	if failure != nil {
 		return *failure, nil
 	}
@@ -1115,12 +1120,12 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 		if job == nil {
 			return failPage("cursor_expired", "This preparation cursor has expired. Start browsing again from the latest messages.", true), nil
 		}
-		if !b.jobMatches(job, request.Scope, source, start, end, boundary, cursor.RangeDigest) {
+		if !b.jobMatches(job, request.Scope, source, captured) {
 			return browseInvalidConversationCursor(), nil
 		}
 		return b.continueJob(ctx, request, job)
 	}
-	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, "", -1, claudeChainJobBinding{})
+	job, page := b.createJob(request.Scope, source, captured, claudeChainJobBinding{segment: -1})
 	if page != nil {
 		return *page, nil
 	}

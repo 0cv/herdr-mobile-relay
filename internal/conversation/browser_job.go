@@ -127,21 +127,23 @@ func (b *Browser) releaseJob(job *browseJob) {
 	job.mu.Unlock()
 }
 
-func (b *Browser) jobMatches(job *browseJob, scope BrowseScope, source fileSource, start, end, boundary int64, digest string) bool {
+func (b *Browser) jobMatches(job *browseJob, scope BrowseScope, source fileSource, captured capturedRange) bool {
 	job.mu.RLock()
 	defer job.mu.RUnlock()
 	return !job.retired && job.scopeID == browseScopeID(scope) && job.source.revision == source.revision &&
-		job.rangeStart == start && job.rangeEnd == end && job.boundary == boundary && job.rangeDigest == digest
+		job.rangeStart == captured.start && job.rangeEnd == captured.end && job.boundary == captured.boundary && job.rangeDigest == captured.digest
 }
 
 type claudeChainJobBinding struct {
+	contextID      string
+	segment        int
 	footerStart    int64
 	footerEnd      int64
 	footerDigest   string
 	observedRanges []claudeRangeEvidence
 }
 
-func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, chainContextID string, chainSegment int, binding claudeChainJobBinding) (*browseJob, *BrowsePage) {
+func (b *Browser) createJob(scope BrowseScope, source fileSource, captured capturedRange, binding claudeChainJobBinding) (*browseJob, *BrowsePage) {
 	if b.cacheErr != nil {
 		page := failPage("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true)
 		return nil, &page
@@ -155,7 +157,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		}
 	}()
 	scopeID := browseScopeID(scope)
-	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%d", scopeID, source.revision, start, end, boundary, digest, chainContextID, chainSegment)
+	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%d", scopeID, source.revision, captured.start, captured.end, captured.boundary, captured.digest, binding.contextID, binding.segment)
 	b.mu.Lock()
 	if b.closing {
 		b.mu.Unlock()
@@ -199,7 +201,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	if code := b.ensureCapacity(request, nil, "admission", true); code != "" {
 		return nil, capacityFailurePage(code)
 	}
-	index, code, err := b.openSnapshotWithCapacity(request, "admission", snapshotID, source, boundary)
+	index, code, err := b.openSnapshotWithCapacity(request, "admission", snapshotID, source, captured.boundary)
 	if err != nil {
 		page := failPage("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true)
 		return nil, &page
@@ -217,8 +219,8 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	binding.observedRanges = append([]claudeRangeEvidence(nil), binding.observedRanges...)
 	job := &browseJob{
 		id: id, dedupKey: dedupKey, scope: scope, scopeID: scopeID, source: source,
-		boundary: boundary, rangeStart: start, rangeEnd: end, rangeDigest: digest,
-		chainContextID: chainContextID, chainSegment: chainSegment,
+		boundary: captured.boundary, rangeStart: captured.start, rangeEnd: captured.end, rangeDigest: captured.digest,
+		chainContextID: binding.contextID, chainSegment: binding.segment,
 		chainFooterStart: binding.footerStart, chainFooterEnd: binding.footerEnd,
 		chainFooterDigest: binding.footerDigest, chainObservedRanges: binding.observedRanges,
 		snapshotID: snapshotID, index: index, state: BrowsePreparing, phase: "queued",
@@ -226,8 +228,8 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	}
 	job.cursor, err = encodeBrowseCursor(b.key, browseCursor{
 		Mode: "prepare", Scope: scopeID, Revision: source.revision, JobID: id,
-		Boundary: browseOffset(boundary), RangeStart: browseOffset(start), RangeEnd: browseOffset(end),
-		RangeDigest: digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
+		Boundary: browseOffset(captured.boundary), RangeStart: browseOffset(captured.start), RangeEnd: browseOffset(captured.end),
+		RangeDigest: captured.digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 	})
 	if err != nil {
 		b.mu.Unlock()
@@ -243,7 +245,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	b.unlockCapacity()
 	capacityLocked = false
 	b.signalWake()
-	if chainContextID != "" {
+	if binding.contextID != "" {
 		b.observe(browserObservation{kind: "chain_queue_admission", job: job})
 	}
 	return job, nil
