@@ -80,7 +80,7 @@ func TestOMOReadFollowsGrowthAndSkipsOversizedRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = fmt.Fprintln(file, strings.Repeat("x", maxOMOTodoBytes+1)); err != nil {
+	if _, err = fmt.Fprintln(file, strings.Repeat("x", 512*1024+1)); err != nil {
 		file.Close()
 		t.Fatal(err)
 	}

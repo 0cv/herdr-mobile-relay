@@ -134,9 +134,9 @@ func TestClaudeChainEmptyContinuationKeepsParentVisible(t *testing.T) {
 		map[string]any{"type": "continued-in", "sessionId": anchor, "continuedInSessionId": child},
 	)
 	writeRows(t, filepath.Join(root, child+".jsonl"))
-	legacy, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, anchor, 10)
-	if err != nil || len(legacy) != 1 || legacy[0].Text != "parent answer" {
-		t.Fatalf("empty child legacy page = %#v, err=%v", legacy, err)
+	latest, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, anchor, 10)
+	if err != nil || len(latest) != 1 || latest[0].Text != "parent answer" {
+		t.Fatalf("empty child latest entries = %#v, err=%v", latest, err)
 	}
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}, Limit: 10})

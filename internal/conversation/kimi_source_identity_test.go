@@ -77,8 +77,8 @@ func TestKimiInferredDuplicateRootArchiveCursor(t *testing.T) {
 	if err != nil || !old.Available || !strings.Contains(old.Entries[0].Text, "ROOT_A") {
 		t.Fatalf("reported-ID policy changed=%+v %v", old, err)
 	}
-	legacy, err := reader.ReadLatest("kimi", project, id, 1)
-	if err != nil || len(legacy) == 0 || !strings.Contains(legacy[0].Text, "ROOT_A") {
+	latest, err := reader.ReadLatest("kimi", project, id, 1)
+	if err != nil || len(latest) == 0 || !strings.Contains(latest[0].Text, "ROOT_A") {
 		t.Fatal("reported-ID reader policy changed")
 	}
 	if err := os.Remove(location.Path); err != nil {

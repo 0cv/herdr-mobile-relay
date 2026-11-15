@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	maxOMOTodoBytes     = 512 * 1024
 	maxOMOIdentityBytes = 1024 * 1024
 	maxOMOPhases        = 128
 	maxOMOTasks         = 1000

@@ -31,7 +31,7 @@ func assertLatestReply(t *testing.T, entries []Entry, err error, want latestRepl
 	}
 }
 
-func TestReadWithProjectLatestEntriesForJSONLProviders(t *testing.T) {
+func TestReadLatestEntriesForJSONLProviders(t *testing.T) {
 	const cwd = "/work"
 	piMessages := func() []map[string]any {
 		return []map[string]any{
@@ -97,7 +97,7 @@ func claudeToolRows() []map[string]any {
 	}
 }
 
-func TestReadWithProjectLatestEntriesFollowClaudeChain(t *testing.T) {
+func TestReadLatestEntriesFollowClaudeChain(t *testing.T) {
 	reader, home := testReader(t)
 	child := "123e4567-e89b-12d3-a456-426614174001"
 	root := filepath.Join(home, ".claude", "projects", "-work")
@@ -114,7 +114,7 @@ func TestReadWithProjectLatestEntriesFollowClaudeChain(t *testing.T) {
 	assertLatestReply(t, page, err, latestReplyWant{"latest reply", "2026-08-12T10:00:01Z", "Read", "file body"})
 }
 
-func TestReadWithProjectLatestEntriesForOMO(t *testing.T) {
+func TestReadLatestEntriesForOMO(t *testing.T) {
 	home := t.TempDir()
 	cwd := "/work/project"
 	sessionID := "session-latest"
@@ -132,7 +132,7 @@ func TestReadWithProjectLatestEntriesForOMO(t *testing.T) {
 	assertLatestReply(t, entries, err, latestReplyWant{"latest reply", "2026-09-02T12:00:01Z", "read", "file body"})
 }
 
-func TestReadWithProjectLatestEntriesForOpenCode(t *testing.T) {
+func TestReadLatestEntriesForOpenCode(t *testing.T) {
 	root := t.TempDir()
 	assistant := `{"time":{"created":1792068926669},"agent":"build","content":[` +
 		`{"type":"text","text":"latest reply"},` +
@@ -146,7 +146,7 @@ func TestReadWithProjectLatestEntriesForOpenCode(t *testing.T) {
 	assertLatestReply(t, entries, err, latestReplyWant{"latest reply", "2026-10-15T12:55:26.669Z", "read", "file body"})
 }
 
-func TestReadWithProjectLatestEntriesForKimi(t *testing.T) {
+func TestReadLatestEntriesForKimi(t *testing.T) {
 	root, home := t.TempDir(), t.TempDir()
 	t.Setenv(agentroots.KimiCodeListEnv, root)
 	t.Setenv("KIMI_CODE_HOME", "")
@@ -160,7 +160,7 @@ func TestReadWithProjectLatestEntriesForKimi(t *testing.T) {
 	assertLatestReply(t, entries, err, latestReplyWant{"latest reply", "2026-08-14T04:00:02Z", "read", "file body"})
 }
 
-func TestReadWithProjectLatestEntriesForCodex(t *testing.T) {
+func TestReadLatestEntriesForCodex(t *testing.T) {
 	reader, home := testReader(t)
 	path := filepath.Join(home, ".codex", "sessions", "2026", "08", "12", "rollout-2026-08-12T10-00-00-"+testSessionID+".jsonl")
 	writeRows(t, path,

@@ -26,7 +26,7 @@ func TestJSONLProjectionMemoryIndexCharacterization(t *testing.T) {
 	t.Run("cursor-timestamp-precedence", pmTimestamps)
 	t.Run("framed-record-diagnostics", pmDiagnostics)
 	t.Run("owned-file-crlf-boundaries-and-unterminated-json", pmFraming)
-	t.Run("revision-offset-raw-and-legacy-occurrence-identity", pmIdentity)
+	t.Run("revision-offset-and-raw-identity", pmIdentity)
 	t.Run("omo-observations-and-accumulation-without-writes", pmPlans)
 	t.Run("result-before-call-latest-registration-and-no-buffering", pmOrdering)
 	t.Run("exact-supplied-agent-association-separation", pmAgentKeys)

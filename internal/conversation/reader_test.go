@@ -439,7 +439,7 @@ func TestClaudeConversationKeepsPromptWhenEnvelopeComesFirst(t *testing.T) {
 	}
 }
 
-func TestClaudeConversationReadForSelectsCurrentProjectOnDuplicateID(t *testing.T) {
+func TestClaudeConversationReadLatestSelectsCurrentProjectOnDuplicateID(t *testing.T) {
 	reader, home := testReader(t)
 	projects := filepath.Join(home, ".claude", "projects")
 	writeRows(t, filepath.Join(projects, "-old", testSessionID+".jsonl"),
@@ -456,7 +456,7 @@ func TestClaudeConversationReadForSelectsCurrentProjectOnDuplicateID(t *testing.
 	}
 }
 
-func TestClaudeConversationReadForDistinguishesDottedProjectDirectory(t *testing.T) {
+func TestClaudeConversationReadLatestDistinguishesDottedProjectDirectory(t *testing.T) {
 	reader, home := testReader(t)
 	projects := filepath.Join(home, ".claude", "projects")
 	writeRows(t, filepath.Join(projects, "-home-cv-Development-test-com", testSessionID+".jsonl"),
@@ -483,7 +483,7 @@ func TestClaudeConversationReadForDistinguishesDottedProjectDirectory(t *testing
 	}
 }
 
-func TestClaudeConversationReadForRejectsProjectDirectoryEscape(t *testing.T) {
+func TestClaudeConversationReadLatestRejectsProjectDirectoryEscape(t *testing.T) {
 	reader, home := testReader(t)
 	external := filepath.Join(t.TempDir(), "external-project")
 	writeRows(t, filepath.Join(external, testSessionID+".jsonl"),
