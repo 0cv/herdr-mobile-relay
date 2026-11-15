@@ -1141,10 +1141,7 @@ func (s *Server) handleRevokeDevice(client *transport.ClientConn, inbound protoc
 		return
 	}
 	s.forgetPushTest(credential.DeviceID)
-	var pushCleanupErr error
-	if s.pushM != nil {
-		pushCleanupErr = s.pushM.RemoveDevice(credential.DeviceID)
-	}
+	pushCleanupErr := s.pushM.RemoveDevice(credential.DeviceID)
 	time.AfterFunc(250*time.Millisecond, func() {
 		s.hub.DisconnectCredential(credential.CredentialID, credential.Version)
 	})
@@ -1170,11 +1167,9 @@ func (s *Server) handleResetDevices(client *transport.ClientConn, inbound protoc
 		s.forgetPushTest(credential.DeviceID)
 	}
 	var resetPushErr error
-	if s.pushM != nil {
-		for _, credential := range credentials {
-			if pushErr := s.pushM.RemoveDevice(credential.DeviceID); pushErr != nil && resetPushErr == nil {
-				resetPushErr = pushErr
-			}
+	for _, credential := range credentials {
+		if pushErr := s.pushM.RemoveDevice(credential.DeviceID); pushErr != nil && resetPushErr == nil {
+			resetPushErr = pushErr
 		}
 	}
 	time.AfterFunc(250*time.Millisecond, func() {
@@ -1273,28 +1268,23 @@ func (s *Server) handlePushTestDevice(ctx context.Context, client *transport.Cli
 
 func (s *Server) handlePushSubscribe(client *transport.ClientConn, inbound protocol.Inbound, identity transport.AuthenticatedIdentity) {
 	ok := false
-	if s.pushM != nil {
-		var sub push.Subscription
-		if json.Unmarshal(inbound.Subscription, &sub) == nil {
-			sub.ClientID = inbound.ClientID
-			sub.DeviceID = identity.DeviceID
-			sub.Locale = identity.Locale
-			// The authenticated connection does not currently carry a
-			// trusted browser platform. Defaulting to no actions is safe;
-			// never infer an actionable platform from client JSON.
-			sub.Platform = push.PlatformOther
-			sub.UserAgent = ""
-			ok = s.pushM.Subscribe(sub, inbound.ReplaceEndpoints) == nil
-		}
+	var sub push.Subscription
+	if json.Unmarshal(inbound.Subscription, &sub) == nil {
+		sub.ClientID = inbound.ClientID
+		sub.DeviceID = identity.DeviceID
+		sub.Locale = identity.Locale
+		// The authenticated connection does not currently carry a
+		// trusted browser platform. Defaulting to no actions is safe;
+		// never infer an actionable platform from client JSON.
+		sub.Platform = push.PlatformOther
+		sub.UserAgent = ""
+		ok = s.pushM.Subscribe(sub, inbound.ReplaceEndpoints) == nil
 	}
 	s.hub.Send(client, map[string]any{"type": "push_subscribed", "ok": ok})
 }
 
 func (s *Server) handlePushUnsubscribe(client *transport.ClientConn, inbound protocol.Inbound, identity transport.AuthenticatedIdentity) {
-	ok := false
-	if s.pushM != nil {
-		ok = s.pushM.UnsubscribeDevice(identity.DeviceID, inbound.Endpoints, inbound.ClientID) == nil
-	}
+	ok := s.pushM.UnsubscribeDevice(identity.DeviceID, inbound.Endpoints, inbound.ClientID) == nil
 	s.hub.Send(client, map[string]any{"type": "push_unsubscribed", "ok": ok})
 }
 
@@ -1503,7 +1493,7 @@ func (s *Server) handleDispatched(commandCtx context.Context, client *transport.
 func (s *Server) handleDisconnect(client *transport.ClientConn) {
 	s.stopConversationFeed(client.ID(), "")
 	s.stopPaneWatch(client.ID(), "")
-	if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
+	if identity, authenticated := client.Identity(); authenticated {
 		s.pushM.SetViewedPane(identity.DeviceID, nil)
 	}
 	if s.hybrid != nil {
