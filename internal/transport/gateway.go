@@ -28,12 +28,7 @@ const (
 	gatewayProbeTieWindow     = 20 * time.Millisecond
 	gatewayReadLimit          = int64(gatewaywire.HeaderSize + gatewaywire.MaxFramePayload)
 	gatewayWriteQueue         = 64
-	gatewayConnQueue          = 32
 	gatewayDefaultMaxClients  = 8
-
-	// gatewayStallSweep is how often a logical connection whose inbound frame
-	// assembly stopped making progress is looked for.
-	gatewayStallSweep = 5 * time.Second
 
 	gatewayBackoffBase   = 1 * time.Second
 	gatewayBackoffMax    = 60 * time.Second
@@ -117,7 +112,7 @@ type GatewayClient struct {
 	probe           func(context.Context, string) (time.Duration, error)
 	mu              sync.Mutex
 	active          int
-	conns           map[uint32]*gatewayConn
+	conns           map[uint32]*ChunkConn
 	registered      bool
 	lastError       string
 	lastNotice      string
@@ -182,7 +177,7 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 		probeTimeout:      gatewayProbeTimeout,
 		healthInterval:    gatewayHealthInterval,
 		probe:             measureGatewayRTT,
-		conns:             make(map[uint32]*gatewayConn),
+		conns:             make(map[uint32]*ChunkConn),
 	}, nil
 }
 

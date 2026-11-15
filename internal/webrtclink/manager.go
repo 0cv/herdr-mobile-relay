@@ -21,6 +21,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/0cv/herdr-mobile-relay/internal/framing"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -35,10 +36,6 @@ const (
 	// maxRemoteCandidates bounds the trickled candidates accepted per session;
 	// further candidates are dropped, not errors.
 	maxRemoteCandidates = 64
-
-	// stallSweepInterval is how often partially received frames are checked
-	// against framing.StallTimeout.
-	stallSweepInterval = 5 * time.Second
 
 	// stunDiscoveryTimeout bounds one address-discovery round trip against the
 	// gateway's STUN listener.
@@ -424,7 +421,7 @@ func (m *Manager) Outcomes() Outcomes {
 
 // goServe hands an open connection to the hub on its own goroutine, tracked so
 // Close waits for it. It reports false once the Manager is closing.
-func (m *Manager) goServe(s *session, conn *dataChannelConn) bool {
+func (m *Manager) goServe(s *session, conn *transport.ChunkConn) bool {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -444,7 +441,7 @@ func (m *Manager) goServe(s *session, conn *dataChannelConn) bool {
 // sweep abandons sessions whose inbound frame assembly stalled.
 func (m *Manager) sweep() {
 	defer m.wg.Done()
-	ticker := time.NewTicker(stallSweepInterval)
+	ticker := time.NewTicker(framing.StallSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -463,7 +460,7 @@ func (m *Manager) sweepStalled(now time.Time) {
 	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 	for _, s := range live {
-		if conn := s.connection(); conn != nil && conn.stalled(now) {
+		if conn := s.connection(); conn != nil && conn.Stalled(now) {
 			s.close("inbound frame assembly stalled")
 		}
 	}
@@ -482,7 +479,7 @@ type session struct {
 
 	mu         sync.Mutex
 	pc         *webrtc.PeerConnection
-	conn       *dataChannelConn
+	conn       *transport.ChunkConn
 	candidates int
 	pending    []Candidate
 	closed     bool
@@ -653,7 +650,7 @@ func (s *session) flushPendingCandidates() {
 	}
 }
 
-func (s *session) connection() *dataChannelConn {
+func (s *session) connection() *transport.ChunkConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.conn
@@ -716,7 +713,8 @@ func (s *session) handleDataChannel(dc *webrtc.DataChannel) {
 		return
 	}
 
-	conn := newDataChannelConn(dc, func(reason string) { s.close(reason) })
+	pacer := newDataChannelConn(dc, func(reason string) { s.close(reason) })
+	conn := pacer.conn
 
 	s.mu.Lock()
 	if s.closed || s.conn != nil {
@@ -728,8 +726,8 @@ func (s *session) handleDataChannel(dc *webrtc.DataChannel) {
 	s.mu.Unlock()
 
 	dc.SetBufferedAmountLowThreshold(resumeBufferedAmount)
-	dc.OnBufferedAmountLow(conn.signalLowWater)
-	dc.OnMessage(conn.handleMessage)
+	dc.OnBufferedAmountLow(pacer.signalLowWater)
+	dc.OnMessage(pacer.handleMessage)
 	dc.OnClose(func() { go s.close("datachannel closed") })
 	dc.OnError(func(error) { go s.close("datachannel failed") })
 	dc.OnOpen(func() {
@@ -759,7 +757,7 @@ func (s *session) close(reason string) {
 		s.manager.countOutcome(nominated)
 
 		if conn != nil {
-			conn.shutdown()
+			conn.Shutdown()
 		}
 		if pc != nil {
 			if err := pc.Close(); err != nil {

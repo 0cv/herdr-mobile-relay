@@ -193,9 +193,6 @@ func (h *harness) setupSnapshot() string {
 			session.mu.Unlock()
 			state["relay"] = peer.diagnostics.peerSetupState(pc)
 			state["relay_datachannel_callback_reached"] = conn != nil
-			if conn != nil {
-				state["relay_channel"] = conn.dc.ReadyState().String()
-			}
 		} else {
 			state["relay_session_missing"] = true
 		}

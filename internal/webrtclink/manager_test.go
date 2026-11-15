@@ -557,11 +557,103 @@ func TestManagerSweepsStalledAssembly(t *testing.T) {
 	}
 }
 
+// openServedConn negotiates one session and returns the hub-side connection
+// together with the browser peer once its DataChannel is open.
+func openServedConn(t *testing.T, h *harness) (transport.FrameConn, *browserPeer) {
+	t.Helper()
+	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
+	peer := h.negotiate(t, key, dataChannelLabel)
+	conn := h.awaitServe(t)
+	select {
+	case <-peer.opened:
+	case <-time.After(testTimeout):
+		t.Fatal("browser data channel never opened")
+	}
+	return conn, peer
+}
+
 func TestDataChannelConnRejectsOversizedFrame(t *testing.T) {
-	conn := newDataChannelConn(nil, func(string) {})
+	h := newHarness(t, 0)
+	conn, _ := openServedConn(t, h)
+
 	err := conn.WriteFrame(context.Background(), make([]byte, framing.MaxLogicalBytes+1))
 	if !errors.Is(err, framing.ErrFrameTooLarge) {
 		t.Fatalf("write oversized frame = %v, want %v", err, framing.ErrFrameTooLarge)
+	}
+}
+
+func TestDataChannelConnConcurrentWritersKeepFramesIntact(t *testing.T) {
+	h := newHarness(t, 0)
+	conn, peer := openServedConn(t, h)
+
+	const writers = 2
+	const framesPerWriter = 2
+	frameFor := func(writer, seq int) []byte {
+		return bytes.Repeat([]byte{byte(writer), byte(seq)}, 150_000)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for writer := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for seq := range framesPerWriter {
+				if err := conn.WriteFrame(ctx, frameFor(writer, seq)); err != nil {
+					t.Errorf("writer %d frame %d: %v", writer, seq, err)
+					return
+				}
+			}
+		}()
+	}
+
+	next := make([]int, writers)
+	for range writers * framesPerWriter {
+		frame := peer.awaitFrame(t)
+		if len(frame) == 0 {
+			t.Fatal("browser received an empty frame")
+		}
+		writer, seq := int(frame[0]), int(frame[1])
+		if writer >= writers || seq != next[writer] || !bytes.Equal(frame, frameFor(writer, seq)) {
+			t.Fatalf("browser received a corrupt or out of order frame from writer %d at position %d", writer, seq)
+		}
+		next[writer]++
+	}
+	wg.Wait()
+}
+
+func TestDataChannelConnDeliversFrameAbovePauseThreshold(t *testing.T) {
+	h := newHarness(t, 0)
+	conn, peer := openServedConn(t, h)
+
+	frame := make([]byte, pauseBufferedAmount+1<<20)
+	for i := range frame {
+		frame[i] = byte(i * 7)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	if err := conn.WriteFrame(ctx, frame); err != nil {
+		t.Fatalf("write frame above the pause threshold: %v", err)
+	}
+	if got := peer.awaitFrame(t); !bytes.Equal(got, frame) {
+		t.Fatalf("browser received %d bytes, want %d matching bytes", len(got), len(frame))
+	}
+}
+
+func TestManagerClosesSessionOnInboundQueueOverflow(t *testing.T) {
+	h := newHarness(t, 0)
+	conn, peer := openServedConn(t, h)
+
+	// The test never reads from conn, so complete frames pile up unread.
+	for range 64 {
+		if err := peer.dc.Send(framing.Chunk(nil, []byte("unread"), framing.WebRTCChunkSize)[0]); err != nil {
+			break
+		}
+	}
+
+	h.awaitSessionCount(t, 0)
+	if err := conn.WriteFrame(context.Background(), []byte("late")); !errors.Is(err, transport.ErrFrameConnClosed) {
+		t.Fatalf("write after overflow = %v, want ErrFrameConnClosed", err)
 	}
 }
 

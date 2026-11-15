@@ -17,10 +17,11 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/framing"
 )
 
 const (
-	wsMaxReadBytes         = 21 * 1024 * 1024
+	wsMaxReadBytes         = framing.MaxLogicalBytes
 	wsSendTimeout          = 5 * time.Second
 	wsCloseTimeout         = 1 * time.Second
 	handlerCapacity        = 32

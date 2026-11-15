@@ -93,7 +93,7 @@ func (s *gatewaySession) writeLoop() {
 // relay by going quiet mid-sequence. It ends with the session.
 func (s *gatewaySession) sweepLoop() {
 	defer s.serveWG.Done()
-	ticker := time.NewTicker(gatewayStallSweep)
+	ticker := time.NewTicker(framing.StallSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -145,12 +145,12 @@ func (s *gatewaySession) healthLoop(base string) {
 // making progress before now.
 func (c *GatewayClient) sweepStalled(now time.Time) {
 	for connID, conn := range c.liveConns() {
-		if !conn.stalled(now) {
+		if !conn.Stalled(now) {
 			continue
 		}
 		c.logger.Debug("gateway connection evicted for a stalled frame assembly",
 			"conn_id", connID)
-		conn.pipe.Close(CloseGoingAway, gatewayReasonSlow)
+		conn.Close(CloseGoingAway, gatewayReasonSlow)
 	}
 }
 
@@ -210,51 +210,32 @@ func (s *gatewaySession) handleOpen(connID uint32, payload []byte) {
 		return
 	}
 
-	var conn *gatewayConn
-	// The ctx is unused: enqueue never blocks, and the shared writer bounds the
-	// actual socket write with frameWriteTimeout.
-	send := func(_ context.Context, frame []byte) error {
-		// Reachable only for a frame the hub built above the logical cap every
-		// transport shares; the gateway's own per-frame cap is what the chunks
-		// below stay under.
-		if len(frame) > framing.MaxLogicalBytes {
-			return fmt.Errorf("frame of %d bytes exceeds the logical frame limit of %d",
-				len(frame), framing.MaxLogicalBytes)
-		}
-		// The chunks of one logical frame must reach the single writer
-		// goroutine contiguously and in order: the peer reassembles START..END
-		// per connection and rejects anything else.
-		conn.sendMu.Lock()
-		defer conn.sendMu.Unlock()
-		conn.chunks = framing.Chunk(conn.chunks[:0], frame, framing.GatewayChunkSize)
-		for _, part := range conn.chunks {
-			// EncodeFrame copies the chunk, so the shared chunk buffer is free
-			// to be reused by the next send once every part is queued.
+	var conn *ChunkConn
+	conn = NewChunkConn(ChunkConnOptions{
+		Name:      TransportGateway,
+		ChunkSize: framing.GatewayChunkSize,
+		// The ctx is unused: enqueue never blocks, and the shared writer bounds
+		// the actual socket write with frameWriteTimeout.
+		SendPart: func(_ context.Context, part []byte) error {
 			err := s.enqueue(gatewaywire.EncodeFrame(gatewaywire.OpData, connID, part))
-			if err == nil {
-				continue
-			}
 			if errors.Is(err, errGatewayWriteQueueFull) {
 				// The queue is full, so OpClose cannot be sent either; drop the
 				// connection locally and let the gateway observe the eviction.
 				// Dropping it also keeps the truncated chunk sequence from ever
 				// being mistaken for a complete frame.
 				s.client.removeConn(connID, conn)
-				conn.pipe.Shutdown()
+				conn.Shutdown()
 			}
 			return err
-		}
-		return nil
-	}
-	closeConn := func(status CloseStatus, reason string) {
-		s.client.removeConn(connID, conn)
-		if status == CloseUnauthorized {
-			reason = DeviceUnauthorizedReason
-		}
-		_ = s.enqueue(gatewaywire.EncodeFrame(gatewaywire.OpClose, connID, closeReasonBytes(reason)))
-	}
-	conn = &gatewayConn{recv: framing.NewReassembler(framing.GatewayChunkSize)}
-	conn.pipe = newPipeConn(CodecBinary, TransportGateway, gatewayConnQueue, send, closeConn)
+		},
+		OnClose: func(status CloseStatus, reason string) {
+			s.client.removeConn(connID, conn)
+			if status == CloseUnauthorized {
+				reason = DeviceUnauthorizedReason
+			}
+			_ = s.enqueue(gatewaywire.EncodeFrame(gatewaywire.OpClose, connID, closeReasonBytes(reason)))
+		},
+	})
 
 	if !s.client.addConn(connID, conn) {
 		s.reject(connID, gatewayReasonBusy)
@@ -265,7 +246,7 @@ func (s *gatewaySession) handleOpen(connID uint32, payload []byte) {
 	s.serveWG.Add(1)
 	go func() {
 		defer s.serveWG.Done()
-		s.client.hub.Serve(s.ctx, conn.pipe)
+		s.client.hub.Serve(s.ctx, conn)
 		s.client.removeConn(connID, conn)
 	}()
 }
@@ -278,28 +259,23 @@ func (s *gatewaySession) handleData(connID uint32, payload []byte) {
 		s.reject(connID, gatewayReasonUnknownConn)
 		return
 	}
-	frame, err := conn.push(payload)
-	if err != nil {
+	err := conn.Receive(payload)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrInboundQueueFull):
+		s.client.logger.Debug("gateway connection evicted for falling behind", "conn_id", connID)
+		conn.Close(CloseGoingAway, gatewayReasonSlow)
+	default:
 		// A framing violation is one phone's fault: every other connection on
 		// this link keeps running. Nothing derived from the chunk is logged.
 		s.client.logger.Debug("gateway chunk framing rejected", "conn_id", connID)
-		conn.pipe.Close(CloseGoingAway, gatewayReasonFraming)
-		return
-	}
-	if frame == nil {
-		return
-	}
-	// Push already returned a frame that owns its bytes, so the hub needs no
-	// copy of the reused read buffer.
-	if !conn.pipe.Deliver(frame) {
-		s.client.logger.Debug("gateway connection evicted for falling behind", "conn_id", connID)
-		conn.pipe.Close(CloseGoingAway, gatewayReasonSlow)
+		conn.Close(CloseGoingAway, gatewayReasonFraming)
 	}
 }
 
 func (s *gatewaySession) handleClose(connID uint32) {
 	if conn := s.client.takeConn(connID); conn != nil {
-		conn.pipe.Shutdown()
+		conn.Shutdown()
 	}
 }
 
