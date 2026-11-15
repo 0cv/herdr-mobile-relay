@@ -708,6 +708,21 @@ func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, sourc
 	return nil
 }
 
+type jobCapture struct {
+	file           *os.File
+	chainContextID string
+	chainIdentity  string
+	chainEvidence  []claudeRangeEvidence
+}
+
+type jobScan struct {
+	firstDigest string
+	diagnostics BrowseDiagnostics
+	plan        *OMOTodoState
+	todoSeen    bool
+	todoValid   bool
+}
+
 func (b *Browser) runJob(job *browseJob) {
 	defer b.workerWG.Done()
 	defer func() {
@@ -726,6 +741,26 @@ func (b *Browser) runJob(job *browseJob) {
 			b.failJob(job, "index_failed", "History preparation failed on this computer.", true)
 		}
 	}()
+	captured, ok := b.captureJobSource(job)
+	if !ok {
+		return
+	}
+	scan, ok := b.scanJobRecords(job, captured.file)
+	if !ok {
+		return
+	}
+	secondDigest, ok := b.verifyJobSource(job, captured, scan.firstDigest)
+	if !ok {
+		return
+	}
+	count, ok := b.finalizeJobIndex(job, &scan, secondDigest)
+	if !ok {
+		return
+	}
+	b.publishJob(job, captured.file, scan, count, secondDigest)
+}
+
+func (b *Browser) captureJobSource(job *browseJob) (jobCapture, bool) {
 	if job.chainContextID != "" {
 		b.observe(browserObservation{kind: "chain_worker_before_capture"})
 	}
@@ -733,32 +768,34 @@ func (b *Browser) runJob(job *browseJob) {
 	job.phase = "scanning"
 	job.scannedBytes = 0
 	job.sourceBytes = job.source.end
-	file := job.source.file
-	chainContextID := job.chainContextID
-	chainEvidence := append([]claudeRangeEvidence(nil), job.chainObservedRanges...)
-	chainIdentity := fileIdentity(job.source.info)
+	captured := jobCapture{
+		file:           job.source.file,
+		chainContextID: job.chainContextID,
+		chainIdentity:  fileIdentity(job.source.info),
+		chainEvidence:  append([]claudeRangeEvidence(nil), job.chainObservedRanges...),
+	}
 	capturedStamp := job.source.stamp()
 	job.mu.Unlock()
-	if chainContextID != "" {
-		b.observeChainWorkerCapture(chainEvidence)
+	if captured.chainContextID != "" {
+		b.observeChainWorkerCapture(captured.chainEvidence)
 	}
-	if file == nil {
+	if captured.file == nil {
 		b.failJob(job, "source_unavailable", "The conversation source became unavailable.", true)
-		return
+		return jobCapture{}, false
 	}
-	info, err := file.Stat()
+	info, err := captured.file.Stat()
 	if err != nil || !info.Mode().IsRegular() || !os.SameFile(job.source.info, info) || capturedStamp.compare(info) == sourceChanged {
 		b.failJobSourceChanged(job)
-		return
+		return jobCapture{}, false
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(job.source.path); resolveErr != nil || filepath.Clean(resolved) != filepath.Clean(job.source.path) || containedRegularFile(job.source.path, job.source.location.Root) != job.source.path {
 		b.failJobSourceChanged(job)
-		return
+		return jobCapture{}, false
 	}
-	if chainContextID != "" {
-		if err := b.validateClaudeChainJobEvidence(file, job.source.end, chainIdentity, chainEvidence); err != nil {
+	if captured.chainContextID != "" {
+		if err := b.validateClaudeChainJobEvidence(captured.file, job.source.end, captured.chainIdentity, captured.chainEvidence); err != nil {
 			b.failJobEvidence(job, err)
-			return
+			return jobCapture{}, false
 		}
 		// Keep the evidence fence immediately adjacent to the indexing pass. A
 		// valid range may be rewritten after the admission read and before the
@@ -766,6 +803,10 @@ func (b *Browser) runJob(job *browseJob) {
 		// rewritten bytes could be published as the old cursor's snapshot.
 		b.observe(browserObservation{kind: "chain_preparation"})
 	}
+	return captured, true
+}
+
+func (b *Browser) scanJobRecords(job *browseJob, file *os.File) (jobScan, bool) {
 	scanDigest := sha256.New()
 	records, err := NewJSONLRecordReader(b.ctx, file, 0, job.source.end, b.options.MaxRecordBytes, func(progress JSONLRecordProgress) {
 		job.mu.Lock()
@@ -775,7 +816,7 @@ func (b *Browser) runJob(job *browseJob) {
 	})
 	if err != nil {
 		b.failJob(job, "index_failed", "History preparation could not read the source.", true)
-		return
+		return jobScan{}, false
 	}
 	records.SetDigestWriter(scanDigest)
 	records.SetReadObserver(func(bytes int64) { _ = b.observeBackgroundRead(bytes) })
@@ -785,10 +826,7 @@ func (b *Browser) runJob(job *browseJob) {
 		}
 		return nil
 	})
-	diagnostics := BrowseDiagnostics{}
-	var plan *OMOTodoState
-	todoSeen, todoValid := false, false
-	recordCount := 0
+	var scan jobScan
 	const maxBatchRecords = 64
 	const maxBatchBytes = 4 * 1024 * 1024
 	for {
@@ -798,7 +836,7 @@ func (b *Browser) runJob(job *browseJob) {
 		for len(batch) < maxBatchRecords && batchBytes < maxBatchBytes {
 			if !b.jobHasInterest(job) {
 				b.failJobNoInterest(job)
-				return
+				return jobScan{}, false
 			}
 			record, nextErr := records.Next()
 			if errors.Is(nextErr, io.EOF) {
@@ -817,7 +855,7 @@ func (b *Browser) runJob(job *browseJob) {
 					message = jobNoInterestMessage
 				}
 				b.failJob(job, code, message, retryable)
-				return
+				return jobScan{}, false
 			}
 			batch = append(batch, record)
 			batchBytes += len(record.Raw)
@@ -831,39 +869,42 @@ func (b *Browser) runJob(job *browseJob) {
 			results, err = job.index.applyRecords(job.scope.Provider, job.source.revision, batch)
 			return err
 		}); code != "" {
-			return
+			return jobScan{}, false
 		}
 		for _, result := range results {
-			diagnostics.OversizedRecords += result.Diagnostics.OversizedRecords
-			diagnostics.CorruptRecords += result.Diagnostics.CorruptRecords
-			diagnostics.OmittedTools += result.Diagnostics.OmittedTools
-			diagnostics.OmittedPayloads += result.Diagnostics.OmittedPayloads
-			diagnostics.PlanCorrupt = diagnostics.PlanCorrupt || result.Diagnostics.PlanCorrupt
+			scan.diagnostics.OversizedRecords += result.Diagnostics.OversizedRecords
+			scan.diagnostics.CorruptRecords += result.Diagnostics.CorruptRecords
+			scan.diagnostics.OmittedTools += result.Diagnostics.OmittedTools
+			scan.diagnostics.OmittedPayloads += result.Diagnostics.OmittedPayloads
+			scan.diagnostics.PlanCorrupt = scan.diagnostics.PlanCorrupt || result.Diagnostics.PlanCorrupt
 			if result.Plan != nil {
-				plan = result.Plan
-				todoValid = true
+				scan.plan = result.Plan
+				scan.todoValid = true
 			}
-			todoSeen = todoSeen || result.TodoSeen
-			recordCount++
+			scan.todoSeen = scan.todoSeen || result.TodoSeen
 		}
 		if eof {
 			break
 		}
 	}
+	scan.firstDigest = hex.EncodeToString(scanDigest.Sum(nil))
+	return scan, true
+}
+
+func (b *Browser) verifyJobSource(job *browseJob, captured jobCapture, firstDigest string) (string, bool) {
 	job.mu.Lock()
 	job.phase = "verifying"
 	job.mu.Unlock()
-	firstDigest := hex.EncodeToString(scanDigest.Sum(nil))
 	job.mu.RLock()
 	chainDigest := job.chainContextID != ""
 	expectedRangeDigest := job.rangeDigest
 	job.mu.RUnlock()
 	if chainDigest && expectedRangeDigest != "" && firstDigest != expectedRangeDigest {
 		b.failJobSourceChanged(job)
-		return
+		return "", false
 	}
 	b.observe(browserObservation{kind: "source_read", bytes: job.source.end})
-	secondDigest, digestErr := fileRangeDigestObserved(b.ctx, file, 0, job.source.end, func() error {
+	secondDigest, digestErr := fileRangeDigestObserved(b.ctx, captured.file, 0, job.source.end, func() error {
 		if !b.jobHasInterest(job) {
 			return errJSONLCheckpoint
 		}
@@ -871,16 +912,16 @@ func (b *Browser) runJob(job *browseJob) {
 	}, b.observeBackgroundRead)
 	if errors.Is(digestErr, errJSONLCheckpoint) {
 		b.failJobNoInterest(job)
-		return
+		return "", false
 	}
 	if digestErr != nil || firstDigest != secondDigest {
 		b.failJobSourceChanged(job)
-		return
+		return "", false
 	}
 	if chainDigest {
-		if err := b.validateClaudeChainJobEvidence(file, job.source.end, chainIdentity, chainEvidence); err != nil {
+		if err := b.validateClaudeChainJobEvidence(captured.file, job.source.end, captured.chainIdentity, captured.chainEvidence); err != nil {
 			b.failJobEvidence(job, err)
-			return
+			return "", false
 		}
 	}
 	if chainDigest && expectedRangeDigest == "" {
@@ -890,28 +931,32 @@ func (b *Browser) runJob(job *browseJob) {
 	}
 	if err := validateSnapshotSource(job.source); err != nil {
 		b.failJobSourceChanged(job)
-		return
+		return "", false
 	}
+	return secondDigest, true
+}
+
+func (b *Browser) finalizeJobIndex(job *browseJob, scan *jobScan, secondDigest string) (int, bool) {
 	if agentkind.Of(job.scope.Provider) == agentkind.OMO {
-		if todoSeen && !todoValid {
-			diagnostics.CorruptRecords++
-			diagnostics.PlanCorrupt = true
+		if scan.todoSeen && !scan.todoValid {
+			scan.diagnostics.CorruptRecords++
+			scan.diagnostics.PlanCorrupt = true
 		}
-		if plan != nil {
-			copyPlan := *plan
+		if scan.plan != nil {
+			copyPlan := *scan.plan
 			copyPlan.SessionID = job.scope.SessionID
 			copyPlan.Available = true
-			plan = &copyPlan
+			scan.plan = &copyPlan
 		}
 	}
 	if !b.jobHasInterest(job) {
 		b.failJobNoInterest(job)
-		return
+		return 0, false
 	}
 	metadata, metadataErr := job.index.metadata()
 	if metadataErr != nil {
 		b.failJobIndexCorrupt(job)
-		return
+		return 0, false
 	}
 	count, countErr := job.index.countWithCheckpoint(func() error {
 		if !b.jobHasInterest(job) {
@@ -921,25 +966,25 @@ func (b *Browser) runJob(job *browseJob) {
 	})
 	if errors.Is(countErr, errJSONLCheckpoint) {
 		b.failJobNoInterest(job)
-		return
+		return 0, false
 	}
 	if countErr != nil {
 		b.failJobIndexCorrupt(job)
-		return
+		return 0, false
 	}
 	metadata.State = "ready"
 	metadata.SourceDigest = secondDigest
 	metadata.VisibleEntries = count
-	metadata.OversizedRecords = diagnostics.OversizedRecords
-	metadata.CorruptRecords = diagnostics.CorruptRecords
-	metadata.OmittedTools = diagnostics.OmittedTools
-	metadata.OmittedPayloads = diagnostics.OmittedPayloads
-	metadata.PlanCorrupt = diagnostics.PlanCorrupt
-	metadata.Plan = plan
+	metadata.OversizedRecords = scan.diagnostics.OversizedRecords
+	metadata.CorruptRecords = scan.diagnostics.CorruptRecords
+	metadata.OmittedTools = scan.diagnostics.OmittedTools
+	metadata.OmittedPayloads = scan.diagnostics.OmittedPayloads
+	metadata.PlanCorrupt = scan.diagnostics.PlanCorrupt
+	metadata.Plan = scan.plan
 	metadata.UpdatedAt = time.Now().UTC()
 	if !b.jobHasInterest(job) {
 		b.failJobNoInterest(job)
-		return
+		return 0, false
 	}
 	if code := b.writeWithCapacity(job, "finalize", "The prepared conversation index could not be finalized.", func() error {
 		if err := job.index.setMetadata(metadata); err != nil {
@@ -947,16 +992,20 @@ func (b *Browser) runJob(job *browseJob) {
 		}
 		return job.index.sync()
 	}); code != "" {
-		return
+		return 0, false
 	}
+	return count, true
+}
+
+func (b *Browser) publishJob(job *browseJob, file *os.File, scan jobScan, count int, secondDigest string) {
 	verifiedInfo, _ := file.Stat()
 	job.mu.Lock()
-	chainContextID = job.chainContextID
+	chainContextID := job.chainContextID
 	chainSegment := job.chainSegment
 	job.state = BrowseReady
 	job.phase = "ready"
-	job.diagnostics = diagnostics
-	job.plan = cloneTodo(plan)
+	job.diagnostics = scan.diagnostics
+	job.plan = cloneTodo(scan.plan)
 	job.total = count
 	job.sourceDigest = secondDigest
 	if verifiedInfo != nil {
