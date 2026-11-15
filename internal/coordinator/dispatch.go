@@ -117,7 +117,7 @@ func NewDispatcher(client backend.Backend, state *State, journal *activity.Journ
 	}
 	dispatcher.scheduler.SetGenerationCurrent(state.PaneSessionCurrent)
 	if journal != nil {
-		dispatcher.activities.worker = activity.NewWorker(journal)
+		dispatcher.activities.journal = journal
 	}
 	return dispatcher
 }
@@ -158,11 +158,7 @@ func (d *Dispatcher) CancelInflight() {
 
 func (d *Dispatcher) Close(ctx context.Context) error {
 	d.closeWatchers()
-	err := d.scheduler.Close(ctx)
-	if workerErr := d.activities.close(ctx); err == nil {
-		err = workerErr
-	}
-	return err
+	return d.scheduler.Close(ctx)
 }
 
 func (d *Dispatcher) startWatcher(work func(context.Context)) bool {
@@ -909,7 +905,7 @@ func (d *Dispatcher) HandleClearActivities(
 		}
 		return result
 	}
-	if d.activities.worker == nil {
+	if d.activities.journal == nil {
 		return finish(d.fail(requestID, "clear_activities", "", "Activity storage is unavailable"))
 	}
 	return d.activities.clear(func(err error) *CommandResult {

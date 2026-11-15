@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
+func TestReadPaneReadsEachFrameOnItsOwnConnection(t *testing.T) {
 	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -19,17 +19,12 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 	}
 	defer listener.Close()
 
-	serverResult := make(chan error, 1)
 	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			serverResult <- acceptErr
-			return
-		}
-		defer conn.Close()
-		decoder := json.NewDecoder(conn)
-		encoder := json.NewEncoder(conn)
-		for index := 1; index <= 2; index++ {
+		for index := 1; ; index++ {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
 			var request struct {
 				ID     string `json:"id"`
 				Method string `json:"method"`
@@ -40,32 +35,22 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 					Format string `json:"format"`
 				} `json:"params"`
 			}
-			if decodeErr := decoder.Decode(&request); decodeErr != nil {
-				serverResult <- decodeErr
-				return
-			}
-			if request.Method != "pane.read" || request.Params.PaneID != "w1:p1" ||
-				request.Params.Source != "recent_unwrapped" || request.Params.Lines != 80 ||
-				request.Params.Format != "ansi" {
-				serverResult <- fmt.Errorf("unexpected request: %+v", request)
-				return
-			}
-			response := map[string]any{
-				"id": request.ID,
-				"result": map[string]any{
-					"type": "pane_read",
-					"read": map[string]any{
-						"text":      fmt.Sprintf("frame %d", index),
-						"truncated": index == 1,
+			if json.NewDecoder(conn).Decode(&request) == nil && request.Method == "pane.read" &&
+				request.Params.PaneID == "w1:p1" && request.Params.Source == "recent_unwrapped" &&
+				request.Params.Lines == 80 && request.Params.Format == "ansi" {
+				_ = json.NewEncoder(conn).Encode(map[string]any{
+					"id": request.ID,
+					"result": map[string]any{
+						"type": "pane_read",
+						"read": map[string]any{
+							"text":      fmt.Sprintf("frame %d", index),
+							"truncated": index == 1,
+						},
 					},
-				},
+				})
 			}
-			if encodeErr := encoder.Encode(response); encodeErr != nil {
-				serverResult <- encodeErr
-				return
-			}
+			_ = conn.Close()
 		}
-		serverResult <- nil
 	}()
 	client := NewClient("/binary/must-not-run", socketPath)
 	defer client.Close()
@@ -81,9 +66,6 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 		if got, want := content.Truncated, index == 1; got != want {
 			t.Fatalf("read %d truncated = %v, want %v", index, got, want)
 		}
-	}
-	if serverErr := <-serverResult; serverErr != nil {
-		t.Fatal(serverErr)
 	}
 }
 
@@ -144,9 +126,9 @@ func TestUnaryRequestCancellationClosesBlockedPeer(t *testing.T) {
 	}
 }
 
-// Herdr 0.8.0 closes the API socket after every response. A connection cached
-// by an earlier request must not surface as a failed tab move.
-func TestTabMoveRetriesWhenServerClosesEachConnection(t *testing.T) {
+// Herdr closes the API socket after every response, so each move needs its own
+// connection.
+func TestTabMoveOpensConnectionPerRequest(t *testing.T) {
 	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {

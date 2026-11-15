@@ -112,7 +112,6 @@
       'pane.read': 'Terminal reads',
       'tab.move': 'Tab reorder',
       'client_shell.endpoint': 'Client endpoint',
-      direct_terminal: 'Direct terminal',
     };
     return Object.entries(features || {})
       .filter(([, feature]) => {

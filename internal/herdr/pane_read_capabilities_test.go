@@ -91,7 +91,7 @@ func TestPaneReadCapabilityProbeClassifiesEvidence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			path, listener, done := capabilitySocket(t, []map[string]any{test.response})
 			defer listener.Close()
-			state, reason := probePaneRead(context.Background(), newSocketAPIClient(path))
+			state, reason := probePaneRead(newSocketAPIClient(path))
 			if state != test.state || reason != test.reason {
 				t.Fatalf("probe = %s/%s, want %s/%s", state, reason, test.state, test.reason)
 			}
@@ -136,7 +136,7 @@ func TestPaneReadCapabilityProbeDoesNotTargetLivePane(t *testing.T) {
 			"id": request.ID, "error": map[string]any{"code": "pane_not_found", "message": "pane  not found"},
 		})
 	}()
-	state, reason := probePaneRead(context.Background(), newSocketAPIClient(listener.Addr().String()))
+	state, reason := probePaneRead(newSocketAPIClient(listener.Addr().String()))
 	if state != FeatureSupported || reason != "recognized_validation_refusal" {
 		t.Fatalf("probe = %s/%s", state, reason)
 	}
@@ -146,7 +146,7 @@ func TestPaneReadCapabilityProbeDoesNotTargetLivePane(t *testing.T) {
 }
 
 func TestPaneReadCapabilityProbeReportsUnavailableServer(t *testing.T) {
-	state, reason := probePaneRead(context.Background(), newSocketAPIClient(filepath.Join(t.TempDir(), "missing.sock")))
+	state, reason := probePaneRead(newSocketAPIClient(filepath.Join(t.TempDir(), "missing.sock")))
 	if state != FeatureUnknown || reason != "server_unavailable" {
 		t.Fatalf("probe = %s/%s, want unknown/server_unavailable", state, reason)
 	}
@@ -158,7 +158,7 @@ func TestReadPaneCLIFallbackDoesNotHideUnsupportedSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	refusal := map[string]any{"error": map[string]any{"code": "unknown_method", "message": "unsupported"}}
-	path, listener, done := capabilitySocket(t, []map[string]any{refusal, refusal})
+	path, listener, done := capabilitySocket(t, []map[string]any{refusal})
 	defer listener.Close()
 	client := NewClient(bin, path)
 	defer client.Close()
@@ -193,4 +193,13 @@ func TestVisiblePaneProbeRecordsCapabilityEvidence(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func probePaneRead(api *socketAPIClient) (FeatureState, string) {
+	for _, probe := range capabilityProbes {
+		if probe.feature == FeaturePaneRead {
+			return probe.run(context.Background(), api)
+		}
+	}
+	panic("no pane.read probe")
 }

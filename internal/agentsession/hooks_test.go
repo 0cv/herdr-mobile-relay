@@ -211,11 +211,11 @@ func TestAgyHooksConfig(t *testing.T) {
 func TestHooksEmptyAndShared(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	for _, original := range []string{`{}`, `{"hooks":{"Stop":[]}}`, `{"hooks":{},"a":1}`, `{"hooks":{"SessionStart":[]}}`, `{"hooks":{"SessionStart":null}}`} {
-		installed, _, err := editHooks([]byte(original), "codex", "/relay", true)
+		installed, _, err := editHooks([]byte(original), hookAgentNamed("codex"), "/relay", true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		removed, found, err := editHooks(installed, "codex", "", false)
+		removed, found, err := editHooks(installed, hookAgentNamed("codex"), "", false)
 		if err != nil || !found {
 			t.Fatal(err)
 		}
@@ -224,12 +224,12 @@ func TestHooksEmptyAndShared(t *testing.T) {
 		}
 	}
 	original := `{"hooks":{"SessionStart":[{"matcher":"x","hooks":[{"type":"command","command":"'/old' agent-session codex"},{"type":"command","command":"echo keep"}]}]}}`
-	removed, found, err := editHooks([]byte(original), "codex", "", false)
+	removed, found, err := editHooks([]byte(original), hookAgentNamed("codex"), "", false)
 	if err != nil || !found || !bytes.Contains(removed, []byte("echo keep")) || !bytes.Contains(removed, []byte(`"matcher": "x"`)) {
 		t.Fatalf("%s %v", removed, err)
 	}
 	for _, bad := range []string{`null`, `{} {}`, `{"hooks":null}`, `{"hooks":{"SessionStart":{}}}`, `{"a":1,"a":2}`} {
-		if _, _, err := editHooks([]byte(bad), "codex", "/relay", true); err == nil {
+		if _, _, err := editHooks([]byte(bad), hookAgentNamed("codex"), "/relay", true); err == nil {
 			t.Fatalf("accepted %s", bad)
 		}
 	}
@@ -319,4 +319,13 @@ func TestHooksStatusNotInstalled(t *testing.T) {
 	if out.String() != "claude: not installed\ncodex: not installed\ncursor: config absent\nqoder: config absent\nagy: config absent\nopencode: config absent\nomp: config absent\n" {
 		t.Fatal(out.String())
 	}
+}
+
+func hookAgentNamed(name string) hookAgent {
+	for _, agent := range hookAgents {
+		if agent.name == name {
+			return agent
+		}
+	}
+	panic("unknown hook agent " + name)
 }

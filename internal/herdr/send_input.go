@@ -118,23 +118,11 @@ func (c *Client) SendInput(ctx context.Context, paneID string, input PaneInput) 
 		params["keys"] = normalized.Keys
 	}
 
-	api := c.api
-	api.mu.Lock()
-	defer api.mu.Unlock()
-	_ = api.closeLocked()
-	if err := api.connect(ctx); err != nil {
-		return errors.Join(ErrNotStarted, err)
+	err = c.api.requestResult(ctx, "pane.send_input", params, "ok", nil)
+	var cliErr *CLIError
+	// Herdr types the text before it validates the keys, so even a refusal may have applied.
+	if errors.As(err, &cliErr) {
+		return errors.Join(ErrDispatchedUnknown, err)
 	}
-	response, wrote, err := api.requestConnected(ctx, "pane.send_input", params)
-	_ = api.closeLocked()
-	if err != nil {
-		if wrote {
-			return errors.Join(ErrDispatchedUnknown, err)
-		}
-		return errors.Join(ErrNotStarted, err)
-	}
-	if response.Result.Type != "ok" {
-		return errors.Join(ErrDispatchedUnknown, fmt.Errorf("Herdr socket API returned %q for pane.send_input", response.Result.Type))
-	}
-	return nil
+	return err
 }

@@ -55,32 +55,18 @@ export default {
 
 func manageOpenCodePlugin(home, binary, operation string, output io.Writer) error {
 	dir := filepath.Join(home, ".config", "opencode")
-	info, err := os.Stat(dir)
-	if os.IsNotExist(err) {
-		fmt.Fprintln(output, "opencode: config absent")
-		return nil
-	}
+	exists, err := configDirExists(dir)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s: not a directory", dir)
+	if !exists {
+		fmt.Fprintln(output, "opencode: config absent")
+		return nil
 	}
 	path := filepath.Join(dir, "cli.json")
-	data, err := os.ReadFile(path)
-	absent := os.IsNotExist(err)
-	if err != nil && !absent {
+	data, mode, _, err := readJSONOrEmpty(path)
+	if err != nil {
 		return err
-	}
-	mode := os.FileMode(0600)
-	if absent {
-		data = []byte("{}")
-	} else {
-		info, err = os.Stat(path)
-		if err != nil {
-			return err
-		}
-		mode = info.Mode().Perm()
 	}
 	root, err := parseObject(data)
 	if err != nil {
@@ -125,13 +111,12 @@ func manageOpenCodePlugin(home, binary, operation string, output io.Writer) erro
 	}
 	if operation == "install" || operation == "uninstall" && found {
 		root.set("plugins", raw(kept))
-		var out bytes.Buffer
-		if err := json.Indent(&out, raw(root), "", "  "); err != nil {
+		out, err := indentJSON(root)
+		if err != nil {
 			return err
 		}
-		out.WriteByte('\n')
-		if !bytes.Equal(data, out.Bytes()) {
-			if _, err := atomicfile.Replace(dir, path, ".agent-hooks-*", out.Bytes(), mode); err != nil {
+		if !bytes.Equal(data, out) {
+			if _, err := atomicfile.Replace(dir, path, ".agent-hooks-*", out, mode); err != nil {
 				return err
 			}
 		}

@@ -69,51 +69,30 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 }
 
 type SessionSnapshot struct {
-	Version          string          `json:"version"`
-	Protocol         int             `json:"protocol"`
-	Workspaces       []Workspace     `json:"workspaces"`
-	Tabs             []Tab           `json:"tabs"`
-	Panes            []SnapshotPane  `json:"panes"`
-	Agents           []SnapshotAgent `json:"agents"`
-	FocusedWorkspace string          `json:"focused_workspace_id"`
-	FocusedTab       string          `json:"focused_tab_id"`
-	FocusedPane      string          `json:"focused_pane_id"`
+	Version          string         `json:"version"`
+	Protocol         int            `json:"protocol"`
+	Workspaces       []Workspace    `json:"workspaces"`
+	Tabs             []Tab          `json:"tabs"`
+	Panes            []SnapshotPane `json:"panes"`
+	Agents           []Pane         `json:"agents"`
+	FocusedWorkspace string         `json:"focused_workspace_id"`
+	FocusedTab       string         `json:"focused_tab_id"`
+	FocusedPane      string         `json:"focused_pane_id"`
 }
 
 type SnapshotPane struct {
-	ID            string `json:"pane_id"`
-	TerminalID    string `json:"terminal_id"`
-	WorkspaceID   string `json:"workspace_id"`
-	TabID         string `json:"tab_id"`
-	Focused       bool   `json:"focused"`
-	Cwd           string `json:"cwd"`
-	ForegroundCwd string `json:"foreground_cwd"`
-	Label         string `json:"label"`
-	Agent         string `json:"agent"`
-	Status        string `json:"agent_status"`
-	Revision      int    `json:"revision"`
-	Scroll        struct {
-		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
-	} `json:"scroll"`
-}
-
-type SnapshotAgent struct {
-	PaneID         string `json:"pane_id"`
-	TerminalID     string `json:"terminal_id"`
-	WorkspaceID    string `json:"workspace_id"`
-	TabID          string `json:"tab_id"`
-	Focused        bool   `json:"focused"`
-	Name           string `json:"name"`
-	Agent          string `json:"agent"`
-	Status         string `json:"agent_status"`
-	Cwd            string `json:"cwd"`
-	ForegroundCwd  string `json:"foreground_cwd"`
-	Revision       int    `json:"revision"`
-	StateChangeSeq int64  `json:"state_change_seq"`
-	AgentSession   struct {
-		Value string `json:"value"`
-		Kind  string `json:"kind"`
-	} `json:"agent_session"`
+	ID            string     `json:"pane_id"`
+	TerminalID    string     `json:"terminal_id"`
+	WorkspaceID   string     `json:"workspace_id"`
+	TabID         string     `json:"tab_id"`
+	Focused       bool       `json:"focused"`
+	Cwd           string     `json:"cwd"`
+	ForegroundCwd string     `json:"foreground_cwd"`
+	Label         string     `json:"label"`
+	Agent         string     `json:"agent"`
+	Status        string     `json:"agent_status"`
+	Revision      int        `json:"revision"`
+	Scroll        PaneScroll `json:"scroll"`
 }
 
 type TopologySnapshot struct {
@@ -700,14 +679,12 @@ func (c *SessionCache) Apply(event Event) (bool, error) {
 		}
 		changed := false
 		if data.Released || data.Agent == nil {
-			if pane.Agent != "" || pane.Name != "" || pane.Session != "" || pane.SessionRaw.Value != "" || pane.SessionRaw.Kind != "" {
+			if pane.Agent != "" || pane.Name != "" || pane.Session != (AgentSession{}) {
 				changed = true
 			}
 			pane.Agent = ""
 			pane.Name = ""
-			pane.Session = ""
-			pane.SessionRaw.Value = ""
-			pane.SessionRaw.Kind = ""
+			pane.Session = AgentSession{}
 		} else if pane.Agent != *data.Agent {
 			pane.Agent = *data.Agent
 			changed = true
@@ -868,8 +845,7 @@ func (c *SessionCache) setPane(snapshot SnapshotPane) bool {
 	if exists {
 		pane.Agent = previous.Agent
 		pane.Name = cmp.Or(pane.Name, previous.Name)
-		pane.Session = cmp.Or(pane.Session, previous.Session)
-		pane.SessionRaw = previous.SessionRaw
+		pane.Session = previous.Session
 		if pane.StateChangeSeq == 0 {
 			pane.StateChangeSeq = previous.StateChangeSeq
 		}
@@ -892,9 +868,9 @@ func paneTopologyChanged(previous, current Pane) bool {
 		previous.Agent != current.Agent
 }
 
-func (c *SessionCache) applyAgent(agent SnapshotAgent) {
-	pane := c.panes[agent.PaneID]
-	pane.ID = cmp.Or(agent.PaneID, pane.ID)
+func (c *SessionCache) applyAgent(agent Pane) {
+	pane := c.panes[agent.ID]
+	pane.ID = cmp.Or(agent.ID, pane.ID)
 	pane.TerminalID = cmp.Or(agent.TerminalID, pane.TerminalID)
 	pane.WorkspaceID = cmp.Or(agent.WorkspaceID, pane.WorkspaceID)
 	pane.TabID = cmp.Or(agent.TabID, pane.TabID)
@@ -906,9 +882,7 @@ func (c *SessionCache) applyAgent(agent SnapshotAgent) {
 	pane.Status = agent.Status
 	pane.Revision = agent.Revision
 	pane.StateChangeSeq = agent.StateChangeSeq
-	pane.Session = agent.AgentSession.Value
-	pane.SessionRaw.Value = agent.AgentSession.Value
-	pane.SessionRaw.Kind = agent.AgentSession.Kind
+	pane.Session = agent.Session
 	c.panes[pane.ID] = pane
 }
 
@@ -917,18 +891,16 @@ func (c *SessionCache) applyAgent(agent SnapshotAgent) {
 // the authoritative sources for active agent identity.
 func paneToInventoryPane(snapshot SnapshotPane) Pane {
 	return Pane{
-		ID:          snapshot.ID,
-		TerminalID:  snapshot.TerminalID,
-		TabID:       snapshot.TabID,
-		WorkspaceID: snapshot.WorkspaceID,
-		Name:        snapshot.Label,
-		Status:      snapshot.Status,
-		Focused:     snapshot.Focused,
-		Cwd:         snapshot.Cwd,
-		Revision:    snapshot.Revision,
-		Scroll: struct {
-			MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
-		}{MaxOffsetFromBottom: snapshot.Scroll.MaxOffsetFromBottom},
+		ID:            snapshot.ID,
+		TerminalID:    snapshot.TerminalID,
+		TabID:         snapshot.TabID,
+		WorkspaceID:   snapshot.WorkspaceID,
+		Name:          snapshot.Label,
+		Status:        snapshot.Status,
+		Focused:       snapshot.Focused,
+		Cwd:           snapshot.Cwd,
+		Revision:      snapshot.Revision,
+		Scroll:        snapshot.Scroll,
 		ForegroundCwd: snapshot.ForegroundCwd,
 	}
 }

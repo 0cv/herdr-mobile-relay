@@ -39,7 +39,7 @@ func TestAuthoritativeOptionalKindInventory(t *testing.T) {
 			client := herdr.NewClient("unused", socket)
 			t.Cleanup(func() { _ = client.Close() })
 			inventory, err := client.GetInventory(ctx)
-			if err != nil || len(inventory.Panes) != 1 || inventory.Panes[0].Agent != "" || inventory.Panes[0].Session != "" {
+			if err != nil || len(inventory.Panes) != 1 || inventory.Panes[0].Agent != "" || inventory.Panes[0].Session.Value != "" {
 				t.Fatalf("optional fields rejected by GetInventory: %+v %v", inventory, err)
 			}
 			state := testState()

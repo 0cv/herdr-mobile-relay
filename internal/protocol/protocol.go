@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
 const (
@@ -424,39 +426,21 @@ func DecodeFailureResponse(raw map[string]any) map[string]any {
 	return ErrorResponse(requestID, NewApiError(ErrorInvalidRequest, nil))
 }
 
-type HerdrFeatureStatus struct {
-	State      string `json:"state"`
-	Reason     string `json:"reason"`
-	Generation uint64 `json:"generation"`
-}
-
-type HerdrStatus struct {
-	InstalledClientVersion     string                        `json:"installed_client_version,omitempty"`
-	ServerVersion              string                        `json:"server_version,omitempty"`
-	ServerProtocol             int                           `json:"server_protocol,omitempty"`
-	ServerProtocolKnown        bool                          `json:"server_protocol_known"`
-	EndpointProtocolGeneration *int                          `json:"endpoint_protocol_generation,omitempty"`
-	SurfaceInterest            *bool                         `json:"surface_interest,omitempty"`
-	HealthCheck                *bool                         `json:"health_check,omitempty"`
-	Generation                 uint64                        `json:"generation"`
-	Features                   map[string]HerdrFeatureStatus `json:"features"`
-}
-
 type PushConfig struct {
 	Type           string `json:"type"`
 	VAPIDPublicKey string `json:"vapid_public_key"`
 	Host           string `json:"host"`
 	// Home lets the phone print a checkout as "~/code/app" instead of the
 	// computer's absolute path, which rarely fits a phone row.
-	Home           string      `json:"home"`
-	Protocol       int         `json:"protocol"`
-	Version        string      `json:"version"`
-	ReleaseVersion string      `json:"release_version"`
-	Revision       string      `json:"revision"`
-	Update         any         `json:"update"`
-	AppDeploy      any         `json:"app_deploy"`
-	Capabilities   []string    `json:"capabilities"`
-	HerdrStatus    HerdrStatus `json:"herdr_status"`
+	Home           string             `json:"home"`
+	Protocol       int                `json:"protocol"`
+	Version        string             `json:"version"`
+	ReleaseVersion string             `json:"release_version"`
+	Revision       string             `json:"revision"`
+	Update         any                `json:"update"`
+	AppDeploy      any                `json:"app_deploy"`
+	Capabilities   []string           `json:"capabilities"`
+	HerdrStatus    herdr.ServerStatus `json:"herdr_status"`
 	// SpeechLanguages lists the languages this host has a voice for, so the
 	// phone offers only what the relay can actually read aloud.
 	SpeechLanguages []string `json:"speech_languages,omitempty"`

@@ -119,14 +119,6 @@ func identityUnavailable(step string, err error) error {
 	return fmt.Errorf("%w: %s: %v", ErrIdentityUnavailable, step, err)
 }
 
-type Lease struct {
-	Columns int
-	// Rows is zero when the client leases only the width: the pane keeps
-	// its own height, which is never written with a different value.
-	Rows      int
-	ExpiresAt time.Time
-}
-
 // terminalIdentity is captured at acquisition and re-validated before every
 // write. shellPID is zero only when Herdr reported no shell and the TTY was
 // found through the foreground process group leader instead.
@@ -163,7 +155,7 @@ type paneState struct {
 	baseline  size
 	applied   size
 	resizedAt time.Time
-	leases    map[string]Lease
+	leases    Leases
 	// generation fences cleanup: superseding a pending cleanup increments it,
 	// so a cleanup attempt planned earlier can never write over, or delete,
 	// the newer lease.
@@ -269,14 +261,8 @@ func (m *Manager) Acquire(
 	if !m.Available() {
 		return 0, 0, ErrUnavailable
 	}
-	if clientID == "" || paneID == "" {
-		return 0, 0, ErrInvalidLease
-	}
-	if columns < MinColumns || columns > MaxColumns {
-		return 0, 0, ErrInvalidColumns
-	}
-	if rows != 0 && (rows < MinRows || rows > MaxRows) {
-		return 0, 0, ErrInvalidRows
+	if err := ValidateLease(clientID, paneID, columns, rows); err != nil {
+		return 0, 0, err
 	}
 	if ctx.Err() != nil {
 		return 0, 0, ErrLeaseOwnerGone
@@ -425,10 +411,7 @@ func (m *Manager) Release(ctx context.Context, clientID, paneID string, immediat
 		return nil
 	}
 	if !immediate {
-		if lapse := now.Add(m.grace); lease.ExpiresAt.After(lapse) {
-			lease.ExpiresAt = lapse
-			state.leases[clientID] = lease
-		}
+		lease = state.leases.Shorten(clientID, now.Add(m.grace))
 		if lease.ExpiresAt.After(now) {
 			m.mu.Unlock()
 			return nil
@@ -621,8 +604,7 @@ func (m *Manager) shutdownPane(ctx context.Context, paneID string, state *paneSt
 	m.dropLocked(paneID, state)
 	m.mu.Unlock()
 	if errors.Is(err, ErrTerminalGone) {
-		m.logger.Info("pane size lease dropped: the pane's terminal was closed or replaced",
-			"pane_id", paneID, "reason", err.Error())
+		m.logLeaseDropped(paneID, err)
 		return nil
 	}
 	return err
@@ -641,23 +623,11 @@ func (m *Manager) ReadGeometry(clientID, paneID string) (int, int, bool) {
 	if state == nil {
 		return 0, 0, false
 	}
-	now := m.now()
-	own, owned := state.leases[clientID]
-	if !owned || !own.ExpiresAt.After(now) {
+	active := state.leases.ActiveAt(m.now())
+	if _, owned := active[clientID]; !owned {
 		return 0, 0, false
 	}
-	columns, rows := 0, 0
-	for _, lease := range state.leases {
-		if !lease.ExpiresAt.After(now) {
-			continue
-		}
-		if columns == 0 || lease.Columns < columns {
-			columns = lease.Columns
-		}
-		if lease.Rows > 0 && (rows == 0 || lease.Rows < rows) {
-			rows = lease.Rows
-		}
-	}
+	columns, rows := active.Narrowest()
 	if rows == 0 {
 		rows = state.baseline.rows
 	}
@@ -692,7 +662,7 @@ func (m *Manager) lockPane(ctx context.Context, paneID string) (*paneState, bool
 		}
 		state := m.panes[paneID]
 		if state == nil {
-			state = &paneState{lock: make(chan struct{}, 1), leases: make(map[string]Lease)}
+			state = &paneState{lock: make(chan struct{}, 1), leases: make(Leases)}
 			state.lock <- struct{}{} // a fresh channel never blocks
 			m.panes[paneID] = state
 			m.mu.Unlock()
@@ -984,8 +954,7 @@ func (m *Manager) attemptCleanup(ctx context.Context, paneID string, state *pane
 		m.dropLocked(paneID, state)
 	case errors.Is(err, ErrTerminalGone):
 		m.dropLocked(paneID, state)
-		m.logger.Info("pane size lease dropped: the pane's terminal was closed or replaced",
-			"pane_id", paneID, "reason", err.Error())
+		m.logLeaseDropped(paneID, err)
 	default:
 		cleanup.lastErr = err
 		next := m.now().Add(cleanupBackoff(cleanup.attempts))
@@ -1043,14 +1012,18 @@ func (m *Manager) exhaustLocked(paneID string, state *paneState, cleanup *cleanu
 	m.logger.Warn("pane size was not restored after Resize Session; resize the pane locally to recover", attrs...)
 }
 
+func (m *Manager) logLeaseDropped(paneID string, err error) {
+	m.logger.Info("pane size lease dropped: the pane's terminal was closed or replaced",
+		"pane_id", paneID, "reason", err.Error())
+}
+
 func (m *Manager) dropGone(paneID string, state *paneState, err error) {
 	m.mu.Lock()
 	dropped := m.panes[paneID] == state
 	m.dropLocked(paneID, state)
 	m.mu.Unlock()
 	if dropped {
-		m.logger.Info("pane size lease dropped: the pane's terminal was closed or replaced",
-			"pane_id", paneID, "reason", err.Error())
+		m.logLeaseDropped(paneID, err)
 	}
 }
 
@@ -1062,18 +1035,7 @@ func (m *Manager) dropLocked(paneID string, state *paneState) {
 }
 
 func (m *Manager) removeExpiredLocked(state *paneState, now time.Time) bool {
-	removed := false
-	var lastExpiry time.Time
-	for clientID, lease := range state.leases {
-		if lease.ExpiresAt.After(now) {
-			continue
-		}
-		delete(state.leases, clientID)
-		removed = true
-		if lease.ExpiresAt.After(lastExpiry) {
-			lastExpiry = lease.ExpiresAt
-		}
-	}
+	lastExpiry, removed := state.leases.RemoveExpired(now)
 	if removed && len(state.leases) == 0 {
 		// A delayed sweep must not give an expired lease a fresh cleanup
 		// budget. Start at the last lease's expiry, not the observation time.
@@ -1101,15 +1063,8 @@ func (s *paneState) observeLocked(current Winsize) {
 // row lease must be undone, and otherwise whatever the terminal has now.
 func (s *paneState) leaseTargetLocked(current Winsize) size {
 	want := size{rows: int(current.Rows)}
-	rows := 0
-	for _, lease := range s.leases {
-		if want.columns == 0 || lease.Columns < want.columns {
-			want.columns = lease.Columns
-		}
-		if lease.Rows > 0 && (rows == 0 || lease.Rows < rows) {
-			rows = lease.Rows
-		}
-	}
+	var rows int
+	want.columns, rows = s.leases.Narrowest()
 	switch {
 	case rows > 0:
 		want.rows = rows

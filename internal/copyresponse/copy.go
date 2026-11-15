@@ -88,25 +88,13 @@ func Run(
 	if !composerNeedsRestore && !profile.ComposerReady(initialState) {
 		return Result{}, ErrComposerBusy
 	}
-	var secondaryBefore []byte
-	var secondaryBeforeInfo os.FileInfo
-	secondaryExisted := false
-	if profile.SecondaryPath != "" {
-		if info, statErr := os.Stat(profile.SecondaryPath); statErr == nil {
-			if data, readErr := os.ReadFile(profile.SecondaryPath); readErr == nil {
-				secondaryBefore = data
-				secondaryBeforeInfo = info
-				secondaryExisted = true
-			}
-		}
+	copied, err := newCopiedResponse(readClipboard, profile.SecondaryPath)
+	if err != nil {
+		return Result{}, err
 	}
 
 	originalClipboard, _ := readClipboard(ctx)
-	sentinel, err := newSentinel()
-	if err != nil {
-		return Result{}, fmt.Errorf("create clipboard sentinel: %w", err)
-	}
-	if err := writeClipboard(ctx, []byte(sentinel)); err != nil {
+	if err := writeClipboard(ctx, []byte(copied.sentinel)); err != nil {
 		return Result{}, fmt.Errorf("write clipboard sentinel: %w", err)
 	}
 	defer func() {
@@ -168,7 +156,7 @@ func Run(
 	}
 	submitted = true
 
-	confirmation, err := waitForFreshConfirmation(ctx, pane, paneID, profile, initialState, readClipboard, sentinel, secondaryBefore, secondaryBeforeInfo, secondaryExisted)
+	confirmation, err := waitForFreshConfirmation(ctx, pane, paneID, profile, initialState, copied)
 	if err != nil {
 		return abort(err)
 	}
@@ -189,20 +177,11 @@ func Run(
 		}
 	}
 
-	copied, readErr := readClipboard(ctx)
-	if readErr == nil && string(copied) != sentinel &&
-		matchesCounts(copied, confirmedChars, confirmedLines) {
-		return Result{Text: string(copied), Source: "clipboard", Chars: utf8.RuneCount(copied), Lines: lineCount(copied)}, nil
+	clipboard, readErr := readClipboard(ctx)
+	if readErr == nil && copied.isFreshClipboard(clipboard, confirmedChars, confirmedLines) {
+		return Result{Text: string(clipboard), Source: "clipboard", Chars: utf8.RuneCount(clipboard), Lines: lineCount(clipboard)}, nil
 	}
-	if secondary, ok := freshSecondaryResponse(
-		profile.SecondaryPath,
-		secondaryBefore,
-		secondaryBeforeInfo,
-		secondaryExisted,
-		sentinel,
-		confirmedChars,
-		confirmedLines,
-	); ok {
+	if secondary, ok := copied.freshSecondaryResponse(confirmedChars, confirmedLines); ok {
 		return Result{Text: string(secondary), Source: "secondary_file", Chars: utf8.RuneCount(secondary), Lines: lineCount(secondary)}, nil
 	}
 	if readErr != nil {
@@ -217,11 +196,7 @@ func waitForFreshConfirmation(
 	paneID string,
 	profile slashcmd.CopyProfile,
 	baseline string,
-	readClipboard ClipboardReader,
-	sentinel string,
-	secondaryBefore []byte,
-	secondaryBeforeInfo os.FileInfo,
-	secondaryExisted bool,
+	copied copiedResponse,
 ) ([]byte, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(copyTimeoutMS)*time.Millisecond)
 	defer cancel()
@@ -232,31 +207,34 @@ func waitForFreshConfirmation(
 			return false
 		}
 		nextClipboardCheck = now.Add(clipboardPollPeriod)
-		return copiedResponseReady(waitCtx, profile, state, readClipboard, sentinel, secondaryBefore, secondaryBeforeInfo, secondaryExisted)
+		return copied.ready(waitCtx, profile, state)
 	}
 	enters := 0
 	lastAction := ""
 	previousState := profile.CleanSnapshot(baseline)
 	confirmationAfterAction := false
+	timeoutErr := func() error {
+		if waitCtx.Err() == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return ErrNoCopy
+	}
 	waitNext := func() error {
 		timer := time.NewTimer(confirmationPollPeriod)
 		defer timer.Stop()
 		select {
 		case <-waitCtx.Done():
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return ErrNoCopy
+			return timeoutErr()
 		case <-timer.C:
 			return nil
 		}
 	}
 	for {
-		if waitCtx.Err() != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, ErrNoCopy
+		if err := timeoutErr(); err != nil {
+			return nil, err
 		}
 		snapshot, err := readPane(waitCtx, pane, paneID)
 		if err != nil {
@@ -294,14 +272,10 @@ func waitForFreshConfirmation(
 				}
 			}
 		}
-		if action != "" {
-			if action == lastAction {
-				previousState = state
-				if err := waitNext(); err != nil {
-					return nil, err
-				}
-				continue
-			}
+		switch {
+		case action == "":
+			lastAction = ""
+		case action != lastAction:
 			if enters >= maxEnterPresses {
 				return nil, ErrNoCopy
 			}
@@ -311,13 +285,7 @@ func waitForFreshConfirmation(
 			enters++
 			confirmationAfterAction = true
 			lastAction = action
-			previousState = state
-			if err := waitNext(); err != nil {
-				return nil, err
-			}
-			continue
 		}
-		lastAction = ""
 		previousState = state
 		if err := waitNext(); err != nil {
 			return nil, err
@@ -325,59 +293,70 @@ func waitForFreshConfirmation(
 	}
 }
 
-func copiedResponseReady(
-	ctx context.Context,
-	profile slashcmd.CopyProfile,
-	state string,
-	readClipboard ClipboardReader,
-	sentinel string,
-	secondaryBefore []byte,
-	secondaryBeforeInfo os.FileInfo,
-	secondaryExisted bool,
-) bool {
+type copiedResponse struct {
+	readClipboard       ClipboardReader
+	sentinel            string
+	secondaryPath       string
+	secondaryBefore     []byte
+	secondaryBeforeInfo os.FileInfo
+	secondaryExisted    bool
+}
+
+func newCopiedResponse(readClipboard ClipboardReader, secondaryPath string) (copiedResponse, error) {
+	sentinel, err := newSentinel()
+	if err != nil {
+		return copiedResponse{}, fmt.Errorf("create clipboard sentinel: %w", err)
+	}
+	copied := copiedResponse{readClipboard: readClipboard, sentinel: sentinel, secondaryPath: secondaryPath}
+	if secondaryPath == "" {
+		return copied, nil
+	}
+	info, statErr := os.Stat(secondaryPath)
+	if statErr != nil {
+		return copied, nil
+	}
+	data, readErr := os.ReadFile(secondaryPath)
+	if readErr != nil {
+		return copied, nil
+	}
+	copied.secondaryBefore = data
+	copied.secondaryBeforeInfo = info
+	copied.secondaryExisted = true
+	return copied, nil
+}
+
+func (c copiedResponse) isFreshClipboard(data []byte, chars, lines int) bool {
+	return string(data) != c.sentinel && matchesCounts(data, chars, lines)
+}
+
+func (c copiedResponse) ready(ctx context.Context, profile slashcmd.CopyProfile, state string) bool {
 	chars, lines, ok := profile.ConfirmationCounts(state)
 	if !ok {
 		return false
 	}
-	copied, err := readClipboard(ctx)
-	if err == nil && string(copied) != sentinel && matchesCounts(copied, chars, lines) {
+	clipboard, err := c.readClipboard(ctx)
+	if err == nil && c.isFreshClipboard(clipboard, chars, lines) {
 		return true
 	}
-	_, ok = freshSecondaryResponse(
-		profile.SecondaryPath,
-		secondaryBefore,
-		secondaryBeforeInfo,
-		secondaryExisted,
-		sentinel,
-		chars,
-		lines,
-	)
+	_, ok = c.freshSecondaryResponse(chars, lines)
 	return ok
 }
 
-func freshSecondaryResponse(
-	path string,
-	before []byte,
-	beforeInfo os.FileInfo,
-	existed bool,
-	sentinel string,
-	chars int,
-	lines int,
-) ([]byte, bool) {
-	if path == "" {
+func (c copiedResponse) freshSecondaryResponse(chars, lines int) ([]byte, bool) {
+	if c.secondaryPath == "" {
 		return nil, false
 	}
-	secondary, err := os.ReadFile(path)
-	secondaryInfo, statErr := os.Stat(path)
+	secondary, err := os.ReadFile(c.secondaryPath)
+	secondaryInfo, statErr := os.Stat(c.secondaryPath)
 	if err != nil || statErr != nil ||
-		string(secondary) == sentinel || !matchesCounts(secondary, chars, lines) {
+		string(secondary) == c.sentinel || !matchesCounts(secondary, chars, lines) {
 		return nil, false
 	}
-	if !existed || !bytes.Equal(secondary, before) {
+	if !c.secondaryExisted || !bytes.Equal(secondary, c.secondaryBefore) {
 		return secondary, true
 	}
-	if beforeInfo == nil ||
-		(os.SameFile(beforeInfo, secondaryInfo) && beforeInfo.ModTime().Equal(secondaryInfo.ModTime())) {
+	if c.secondaryBeforeInfo == nil ||
+		(os.SameFile(c.secondaryBeforeInfo, secondaryInfo) && c.secondaryBeforeInfo.ModTime().Equal(secondaryInfo.ModTime())) {
 		return nil, false
 	}
 	return secondary, true
