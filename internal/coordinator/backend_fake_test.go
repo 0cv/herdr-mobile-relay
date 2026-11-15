@@ -31,6 +31,7 @@ type fakeBackend struct {
 	tabs       []herdr.Tab
 	contents   map[string]string
 	agent      herdr.AgentInfo
+	created    herdr.CreateResult
 	status     herdr.ServerStatus
 }
 
@@ -147,8 +148,34 @@ func (b *fakeBackend) TabList(ctx context.Context) ([]herdr.Tab, error) {
 	return slices.Clone(b.tabs), nil
 }
 
+func (b *fakeBackend) WorkspaceCreate(ctx context.Context, cwd, label string) (*herdr.CreateResult, error) {
+	if err := b.invoke(ctx, "WorkspaceCreate", cwd, label); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	created := b.created
+	return &created, nil
+}
+
+func (b *fakeBackend) WorkspaceRename(ctx context.Context, workspaceID, label string) error {
+	return b.invoke(ctx, "WorkspaceRename", workspaceID, label)
+}
+
+func (b *fakeBackend) WorkspaceClose(ctx context.Context, workspaceID string, closeGroup bool) error {
+	return b.invoke(ctx, "WorkspaceClose", workspaceID, closeGroup)
+}
+
 func (b *fakeBackend) ReadPane(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {
-	if err := b.invoke(ctx, "ReadPane", paneID, lines, format); err != nil {
+	return b.read(ctx, "ReadPane", paneID, lines, format)
+}
+
+func (b *fakeBackend) ReadPaneRecent(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {
+	return b.read(ctx, "ReadPaneRecent", paneID, lines, format)
+}
+
+func (b *fakeBackend) read(ctx context.Context, method, paneID string, lines int, format string) (herdr.PaneRead, error) {
+	if err := b.invoke(ctx, method, paneID, lines, format); err != nil {
 		return herdr.PaneRead{}, err
 	}
 	b.mu.Lock()

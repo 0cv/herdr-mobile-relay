@@ -204,37 +204,72 @@ func TestClearWithoutWiringDoesNotMutate(t *testing.T) {
 
 func runClearSerialization(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
-	f, _ := newClearFixture(t, launchFixtureOptions{start: "printf entered > '" + entered + "'; while [ ! -f '" + release + "' ]; do /bin/sleep 0.01; done"})
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(dir, "home")
+	cwd, config := filepath.Join(home, "project"), filepath.Join(dir, "config")
+	for _, path := range []string{cwd, filepath.Join(config, "herdr")} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("PATH", dir)
+	writeScript(t, dir, "claude", "#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(config, "herdr", "agent-profiles.ini"), []byte("[profiles]\nclaude = Test Claude\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resolver := profiles.NewResolver(config, nil)
+	if err := resolver.SetOwnershipPath(filepath.Join(dir, "ownership.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := newSerializationRecorder()
+	client := newFakeBackend()
+	target := herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new", Cwd: cwd}
+	client.created = herdr.CreateResult{PaneID: target.ID, TabID: target.TabID, WorkspaceID: target.WorkspaceID}
+	client.setHook("WorkspaceCreate", func(context.Context, fakeCall) error {
+		client.update(func(b *fakeBackend) { b.panes = append(b.panes, target) })
+		return nil
+	})
+	client.setHook("StartAgent", recorder.hook("agent_start", true))
+	state := NewState(testLogger())
+	old := profiles.PaneIdentity{PaneID: "pane-old", TerminalID: "terminal-old", TabID: "tab-old", WorkspaceID: "workspace-old"}
+	state.CommitInventory([]*AgentState{{PaneID: old.PaneID, RawPaneID: old.PaneID, TerminalID: old.TerminalID, TabID: old.TabID, WorkspaceID: old.WorkspaceID, Agent: "claude", Status: "idle", Cwd: cwd}}, state.RevisionCounter())
+	dispatcher := newTestDispatcher(t, client, state)
+	dispatcher.SetProfiles(resolver)
+	if err := resolver.RememberVerified(old, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	t.Cleanup(recorder.unblock)
+
 	first := make(chan *CommandResult, 1)
-	go func() { first <- f.dispatcher.Handle(f.ctx, clearMessage()) }()
-	for {
-		if _, err := os.Stat(entered); err == nil {
-			break
-		}
-		select {
-		case <-f.ctx.Done():
-			t.Fatal("start gate not reached")
-		case <-time.After(time.Millisecond):
-		}
+	go func() { first <- dispatcher.Handle(ctx, clearMessage()) }()
+	select {
+	case <-recorder.entered:
+	case <-ctx.Done():
+		t.Fatal("start gate not reached")
 	}
 	prompt, duplicate := make(chan *CommandResult, 1), make(chan *CommandResult, 1)
 	admitted := make(chan struct{})
 	go func() {
-		prompt <- f.dispatcher.HandleAdmitted(f.ctx, map[string]any{"type": "submit_prompt", "request_id": "queued", "pane_id": "pane-old", "text": "one"}, func() { close(admitted) })
+		prompt <- dispatcher.HandleAdmitted(ctx, map[string]any{"type": "submit_prompt", "request_id": "queued", "pane_id": "pane-old", "text": "one"}, func() { close(admitted) })
 	}()
 	select {
 	case <-admitted:
-	case <-f.ctx.Done():
+	case <-ctx.Done():
 		t.Fatal("prompt not admitted")
 	}
 	dupAdmitted := make(chan struct{})
-	go func() { duplicate <- f.dispatcher.HandleAdmitted(f.ctx, clearMessage(), func() { close(dupAdmitted) }) }()
+	go func() { duplicate <- dispatcher.HandleAdmitted(ctx, clearMessage(), func() { close(dupAdmitted) }) }()
 	select {
 	case <-dupAdmitted:
-	case <-f.ctx.Done():
+	case <-ctx.Done():
 		t.Fatal("duplicate not admitted")
 	}
 	select {
@@ -247,16 +282,14 @@ func runClearSerialization(t *testing.T) {
 		t.Fatalf("duplicate escaped gate: %+v", r)
 	default:
 	}
-	if err := os.WriteFile(release, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
+	recorder.unblock()
 	for _, ch := range []chan *CommandResult{first, duplicate} {
 		select {
 		case r := <-ch:
 			if !r.OK {
 				t.Fatalf("clear result %+v", r)
 			}
-		case <-f.ctx.Done():
+		case <-ctx.Done():
 			t.Fatal("clear timed out")
 		}
 	}
@@ -265,11 +298,11 @@ func runClearSerialization(t *testing.T) {
 		if r.OK {
 			t.Fatalf("stale prompt succeeded: %+v", r)
 		}
-	case <-f.ctx.Done():
+	case <-ctx.Done():
 		t.Fatal("prompt timed out")
 	}
-	calls := clearCalls(t, f)
-	if strings.Contains(calls, "agent prompt") || strings.Count(calls, "agent start") != 1 || strings.Count(calls, "pane close pane-old") != 1 {
-		t.Fatalf("serialized calls: %s", calls)
+	closed := client.callsTo("StopPane")
+	if client.count("Prompt") != 0 || client.count("StartAgent") != 1 || len(closed) != 1 || closed[0].Args[0] != "pane-old" {
+		t.Fatalf("serialized calls: %+v", client.recorded())
 	}
 }
