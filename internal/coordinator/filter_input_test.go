@@ -1,12 +1,10 @@
 package coordinator
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"net"
+	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -83,89 +81,51 @@ func TestFilterDelivery(t *testing.T) {
 		{"long", "", strings.Repeat("g", 33), "", "failed", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			socket := filepath.Join(testSocketDir(t), "api.sock")
-			listener, err := net.Listen("unix", socket)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer listener.Close()
+			client := newFakeBackend()
 			var mu sync.Mutex
 			value := tc.initial
 			writes := 0
 			var times []time.Time
-			done := make(chan struct{})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			state := NewState(testLogger())
 			state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "cursor", Status: "working"}}, state.RevisionCounter())
-			go func() {
-				defer close(done)
-				for {
-					conn, err := listener.Accept()
-					if err != nil {
-						return
-					}
-					func() {
-						defer conn.Close()
-						decoder := json.NewDecoder(bufio.NewReader(conn))
-						for {
-							var request struct {
-								ID     string `json:"id"`
-								Method string `json:"method"`
-								Params struct {
-									Keys []string `json:"keys"`
-								} `json:"params"`
-							}
-							if decoder.Decode(&request) != nil {
-								return
-							}
-							mu.Lock()
-							result := map[string]any{"type": "ok"}
-							switch request.Method {
-							case "pane.read":
-								screen := filterScreen(value)
-								if tc.mode == "close" && writes > 0 {
-									screen += "\n›"
-								}
-								result = map[string]any{"type": "pane_read", "read": map[string]any{"text": screen}}
-							case "pane.send_keys":
-								writes++
-								if tc.mode == "replace" {
-									state.BumpGeneration("pane-1")
-								}
-								if tc.mode == "cancel" {
-									cancel()
-								}
-								times = append(times, time.Now())
-								if len(request.Params.Keys) == 1 && tc.mode != "ignore" {
-									key := request.Params.Keys[0]
-									if key == "Space" {
-										key = " "
-									}
-									if len(key) == 1 {
-										value += key
-									}
-								}
-							}
-							lost := tc.mode == "lost" && request.Method == "pane.send_keys"
-							mu.Unlock()
-							if lost {
-								return
-							}
-							if json.NewEncoder(conn).Encode(map[string]any{"id": request.ID, "result": result}) != nil {
-								return
-							}
-						}
-					}()
+			client.setHook("ReadPaneVisible", func(context.Context, fakeCall) error {
+				mu.Lock()
+				defer mu.Unlock()
+				screen := filterScreen(value)
+				if tc.mode == "close" && writes > 0 {
+					screen += "\n›"
 				}
-			}()
-			client := herdr.NewClient("unused", socket)
-			d := NewDispatcher(client, state, nil, testLogger())
+				client.update(func(b *fakeBackend) { b.contents["pane-1"] = screen })
+				return nil
+			})
+			client.setHook("SendLiteralKey", func(_ context.Context, call fakeCall) error {
+				mu.Lock()
+				defer mu.Unlock()
+				writes++
+				if tc.mode == "replace" {
+					state.BumpGeneration("pane-1")
+				}
+				if tc.mode == "cancel" {
+					cancel()
+				}
+				times = append(times, time.Now())
+				if tc.mode != "ignore" {
+					value += call.Args[1].(string)
+				}
+				if tc.mode == "lost" {
+					return &herdr.OutcomeError{Started: true, Err: io.EOF}
+				}
+				return nil
+			})
+			d := newTestDispatcher(t, client, state)
 			result := d.Handle(ctx, map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": tc.text})
 			if result.Phase != tc.phase {
 				t.Errorf("result = %+v, want phase %s", result, tc.phase)
 			}
 			mu.Lock()
+			defer mu.Unlock()
 			if value != tc.want {
 				t.Errorf("value = %q, want %q", value, tc.want)
 			}
@@ -177,11 +137,6 @@ func TestFilterDelivery(t *testing.T) {
 					t.Error("writes not paced")
 				}
 			}
-			mu.Unlock()
-			_ = d.Close(context.Background())
-			_ = client.Close()
-			_ = listener.Close()
-			<-done
 		})
 	}
 }

@@ -77,7 +77,7 @@ func TestTerminalTextLiteralDispatchAndIdempotency(t *testing.T) {
 			t.Fatalf("result: %+v", result)
 		}
 	}
-	want := []filterSocketWrite{{"pane-1", "pane.send_input", text}}
+	want := []filterWrite{{"pane-1", "SendInput", text}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("writes = %#v", got)
 	}

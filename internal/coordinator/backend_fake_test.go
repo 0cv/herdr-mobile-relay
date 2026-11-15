@@ -30,6 +30,7 @@ type fakeBackend struct {
 	workspaces []herdr.Workspace
 	tabs       []herdr.Tab
 	contents   map[string]string
+	readErr    error
 	agent      herdr.AgentInfo
 	created    herdr.CreateResult
 	status     herdr.ServerStatus
@@ -174,12 +175,19 @@ func (b *fakeBackend) ReadPaneRecent(ctx context.Context, paneID string, lines i
 	return b.read(ctx, "ReadPaneRecent", paneID, lines, format)
 }
 
+func (b *fakeBackend) ReadPaneVisible(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {
+	return b.read(ctx, "ReadPaneVisible", paneID, lines, format)
+}
+
 func (b *fakeBackend) read(ctx context.Context, method, paneID string, lines int, format string) (herdr.PaneRead, error) {
 	if err := b.invoke(ctx, method, paneID, lines, format); err != nil {
 		return herdr.PaneRead{}, err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.readErr != nil {
+		return herdr.PaneRead{}, b.readErr
+	}
 	return herdr.PaneRead{Content: []byte(b.contents[paneID])}, nil
 }
 
@@ -189,6 +197,18 @@ func (b *fakeBackend) Prompt(ctx context.Context, paneID, text string) error {
 
 func (b *fakeBackend) SendKeys(ctx context.Context, paneID string, keys []string) error {
 	return b.invoke(ctx, "SendKeys", paneID, slices.Clone(keys))
+}
+
+func (b *fakeBackend) SendSecret(ctx context.Context, paneID, text string) error {
+	return b.invoke(ctx, "SendSecret", paneID, text)
+}
+
+func (b *fakeBackend) SendInput(ctx context.Context, paneID string, input herdr.PaneInput) error {
+	return b.invoke(ctx, "SendInput", paneID, input)
+}
+
+func (b *fakeBackend) SendLiteralKey(ctx context.Context, paneID, character string) error {
+	return b.invoke(ctx, "SendLiteralKey", paneID, character)
 }
 
 func (b *fakeBackend) SendText(ctx context.Context, paneID, text string) error {
