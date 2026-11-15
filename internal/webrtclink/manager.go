@@ -21,6 +21,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/0cv/herdr-mobile-relay/internal/framing"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -35,10 +36,6 @@ const (
 	// maxRemoteCandidates bounds the trickled candidates accepted per session;
 	// further candidates are dropped, not errors.
 	maxRemoteCandidates = 64
-
-	// stallSweepInterval is how often partially received frames are checked
-	// against framing.StallTimeout.
-	stallSweepInterval = 5 * time.Second
 
 	// stunDiscoveryTimeout bounds one address-discovery round trip against the
 	// gateway's STUN listener.
@@ -444,7 +441,7 @@ func (m *Manager) goServe(s *session, conn *transport.ChunkConn) bool {
 // sweep abandons sessions whose inbound frame assembly stalled.
 func (m *Manager) sweep() {
 	defer m.wg.Done()
-	ticker := time.NewTicker(stallSweepInterval)
+	ticker := time.NewTicker(framing.StallSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {

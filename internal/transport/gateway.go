@@ -30,10 +30,6 @@ const (
 	gatewayWriteQueue         = 64
 	gatewayDefaultMaxClients  = 8
 
-	// gatewayStallSweep is how often a logical connection whose inbound frame
-	// assembly stopped making progress is looked for.
-	gatewayStallSweep = 5 * time.Second
-
 	gatewayBackoffBase   = 1 * time.Second
 	gatewayBackoffMax    = 60 * time.Second
 	gatewayBackoffJitter = 0.2

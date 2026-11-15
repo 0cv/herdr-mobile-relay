@@ -93,7 +93,7 @@ func (s *gatewaySession) writeLoop() {
 // relay by going quiet mid-sequence. It ends with the session.
 func (s *gatewaySession) sweepLoop() {
 	defer s.serveWG.Done()
-	ticker := time.NewTicker(gatewayStallSweep)
+	ticker := time.NewTicker(framing.StallSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
