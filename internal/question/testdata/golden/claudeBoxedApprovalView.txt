@@ -1,0 +1,45 @@
+=== claudeBoxedApprovalView agent=claude
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:$ npm test ❯ 1. Yes 2. Yes, and remember this choice 3. No Command:npm test Options:[Yes Yes, and remember this choice No] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+╭────────────────────────────────────────╮
+Do you want to proceed?
+Bash command
+$ npm test
+❯ 1. Yes
+2. Yes, and remember this choice
+3. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "541f592169e0bbd27f859a43c9f8ae06514e01af3a363c33471b1309e70b3de5"
+=== claudeBoxedApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:$ npm test ❯ 1. Yes 2. Yes, and remember this choice 3. No Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== claudeBoxedApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:$ npm test 1. Yes 2. Yes, and remember this choice 3. No Command:npm test Options:[Yes Yes, and remember this choice No] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+╭────────────────────────────────────────╮
+Do you want to proceed?
+Bash command
+$ npm test
+❯ 1. Yes
+2. Yes, and remember this choice
+3. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "f981bcdbe48a330d7f4f308401883e075e1fcfc375d56f834c95ff4a6a15ef8e"
+=== claudeBoxedApprovalView agent=claude crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:$ npm test ❯ 1. Yes 2. Yes, and remember this choice 3. No Command:npm test Options:[Yes Yes, and remember this choice No] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+╭────────────────────────────────────────╮
+Do you want to proceed?
+Bash command
+$ npm test
+❯ 1. Yes
+2. Yes, and remember this choice
+3. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "541f592169e0bbd27f859a43c9f8ae06514e01af3a363c33471b1309e70b3de5"

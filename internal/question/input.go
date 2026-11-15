@@ -363,16 +363,7 @@ func navigationKeys(interaction *Interaction, target Focus) []string {
 		return 0
 	}
 	distance := position(target) - position(interaction.Focus)
-	key := "Down"
-	if distance < 0 {
-		key = "Up"
-		distance = -distance
-	}
-	keys := make([]string, distance)
-	for index := range keys {
-		keys[index] = key
-	}
-	return keys
+	return repeatKey(distance)
 }
 
 func qoderNavigationKeys(interaction *Interaction, target Focus) []string {
@@ -392,16 +383,7 @@ func qoderNavigationKeys(interaction *Interaction, target Focus) []string {
 		return 0
 	}
 	distance := position(target) - position(interaction.Focus)
-	key := "Down"
-	if distance < 0 {
-		key = "Up"
-		distance = -distance
-	}
-	keys := make([]string, distance)
-	for index := range keys {
-		keys[index] = key
-	}
-	return keys
+	return repeatKey(distance)
 }
 
 func openCodeNavigationKeys(interaction *Interaction, target Focus) []string {
@@ -412,6 +394,10 @@ func openCodeNavigationKeys(interaction *Interaction, target Focus) []string {
 		return focus.Index
 	}
 	distance := position(target) - position(interaction.Focus)
+	return repeatKey(distance)
+}
+
+func repeatKey(distance int) []string {
 	key := "Down"
 	if distance < 0 {
 		key = "Up"

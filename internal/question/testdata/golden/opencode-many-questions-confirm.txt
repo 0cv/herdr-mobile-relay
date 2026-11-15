@@ -1,0 +1,36 @@
+=== opencode-many-questions-confirm agent=opencode
+LayoutHint: true
+Parse: {ID:7f117688eb0fbdc6cf77 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. App type: Social platform
+2. Frontend: Vue 3
+3. Backend: Python + FastAPI Selected:false Summary:[{Question:App type Answer:Social platform} {Question:Frontend Answer:Vue 3} {Question:Backend Answer:Python + FastAPI}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Parse.json: {"id":"7f117688eb0fbdc6cf77","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. App type: Social platform\n2. Frontend: Vue 3\n3. Backend: Python + FastAPI","selected":false,"summary":[{"q":"App type","a":"Social platform"},{"q":"Frontend","a":"Vue 3"},{"q":"Backend","a":"Python + FastAPI"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+Classify: {Kind:question Prompt:Review your answers and choose what to do Command:Review your answers and choose what to do Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: {ID:7f117688eb0fbdc6cf77 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. App type: Social platform
+2. Frontend: Vue 3
+3. Backend: Python + FastAPI Selected:false Summary:[{Question:App type Answer:Social platform} {Question:Frontend Answer:Vue 3} {Question:Backend Answer:Python + FastAPI}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Classify.Interaction.json: {"id":"7f117688eb0fbdc6cf77","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. App type: Social platform\n2. Frontend: Vue 3\n3. Backend: Python + FastAPI","selected":false,"summary":[{"q":"App type","a":"Social platform"},{"q":"Frontend","a":"Vue 3"},{"q":"Backend","a":"Python + FastAPI"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+ApprovalFingerprint: ""
+=== opencode-many-questions-confirm agent=hermes
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:┃ multi options I can select + Thought: 6.9s → Asked 3 questions ▣ Build · Qwen3.6-27B-UD-Q6_K_XL ┃ App type Frontend Backend Confirm ┃ Review ┃ App type: Social platform ┃ Frontend: Vue 3 ┃ Backend: Python + FastAPI ┃ ~/workspace/tmp ┃ ⇆ tab enter submit esc dismiss ┃ • OpenCode 1.18.5 Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== opencode-many-questions-confirm agent=agy
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:┃ multi options I can select + Thought: 6.9s → Asked 3 questions ▣ Build · Qwen3.6-27B-UD-Q6_K_XL ┃ App type Frontend Backend Confirm ┃ Review ┃ App type: Social platform ┃ Frontend: Vue 3 ┃ Backend: Python + FastAPI ┃ ~/workspace/tmp ┃ ⇆ tab enter submit esc dismiss ┃ • OpenCode 1.18.5 Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== opencode-many-questions-confirm agent=opencode crlf
+LayoutHint: true
+Parse: {ID:7f117688eb0fbdc6cf77 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. App type: Social platform
+2. Frontend: Vue 3
+3. Backend: Python + FastAPI Selected:false Summary:[{Question:App type Answer:Social platform} {Question:Frontend Answer:Vue 3} {Question:Backend Answer:Python + FastAPI}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Parse.json: {"id":"7f117688eb0fbdc6cf77","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. App type: Social platform\n2. Frontend: Vue 3\n3. Backend: Python + FastAPI","selected":false,"summary":[{"q":"App type","a":"Social platform"},{"q":"Frontend","a":"Vue 3"},{"q":"Backend","a":"Python + FastAPI"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+Classify: {Kind:question Prompt:Review your answers and choose what to do Command:Review your answers and choose what to do Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: {ID:7f117688eb0fbdc6cf77 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. App type: Social platform
+2. Frontend: Vue 3
+3. Backend: Python + FastAPI Selected:false Summary:[{Question:App type Answer:Social platform} {Question:Frontend Answer:Vue 3} {Question:Backend Answer:Python + FastAPI}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Classify.Interaction.json: {"id":"7f117688eb0fbdc6cf77","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. App type: Social platform\n2. Frontend: Vue 3\n3. Backend: Python + FastAPI","selected":false,"summary":[{"q":"App type","a":"Social platform"},{"q":"Frontend","a":"Vue 3"},{"q":"Backend","a":"Python + FastAPI"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+ApprovalFingerprint: ""

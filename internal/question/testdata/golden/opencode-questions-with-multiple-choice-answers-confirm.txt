@@ -1,0 +1,40 @@
+=== opencode-questions-with-multiple-choice-answers-confirm agent=opencode
+LayoutHint: true
+Parse: {ID:8ff4843473e488203d42 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery
+2. Budget: €800-1200
+3. Timing: Next weekend
+4. Company: Small group (3-5) Selected:false Summary:[{Question:Trip vibe Answer:Nature and outdoors, Food and wine, Relaxation and scenery} {Question:Budget Answer:€800-1200} {Question:Timing Answer:Next weekend} {Question:Company Answer:Small group (3-5)}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:5 QuestionTotal:5 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Parse.json: {"id":"8ff4843473e488203d42","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery\n2. Budget: €800-1200\n3. Timing: Next weekend\n4. Company: Small group (3-5)","selected":false,"summary":[{"q":"Trip vibe","a":"Nature and outdoors, Food and wine, Relaxation and scenery"},{"q":"Budget","a":"€800-1200"},{"q":"Timing","a":"Next weekend"},{"q":"Company","a":"Small group (3-5)"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":5,"question_total":5}
+Classify: {Kind:question Prompt:Review your answers and choose what to do Command:Review your answers and choose what to do Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: {ID:8ff4843473e488203d42 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery
+2. Budget: €800-1200
+3. Timing: Next weekend
+4. Company: Small group (3-5) Selected:false Summary:[{Question:Trip vibe Answer:Nature and outdoors, Food and wine, Relaxation and scenery} {Question:Budget Answer:€800-1200} {Question:Timing Answer:Next weekend} {Question:Company Answer:Small group (3-5)}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:5 QuestionTotal:5 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Classify.Interaction.json: {"id":"8ff4843473e488203d42","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery\n2. Budget: €800-1200\n3. Timing: Next weekend\n4. Company: Small group (3-5)","selected":false,"summary":[{"q":"Trip vibe","a":"Nature and outdoors, Food and wine, Relaxation and scenery"},{"q":"Budget","a":"€800-1200"},{"q":"Timing","a":"Next weekend"},{"q":"Company","a":"Small group (3-5)"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":5,"question_total":5}
+ApprovalFingerprint: ""
+=== opencode-questions-with-multiple-choice-answers-confirm agent=hermes
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:+ Thought: 13.4s → Asked 4 questions ▣ Plan · Qwen3.6-27B-UD-Q6_K_XL ┃ Trip vibe Budget Timing Company Confirm ┃ Review ┃ Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery ┃ Budget: €800-1200 ┃ Timing: Next weekend ┃ Company: Small group (3-5) ┃ ~/workspace/tmp ┃ ⇆ tab enter submit esc dismiss ┃ • OpenCode 1.18.5 Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== opencode-questions-with-multiple-choice-answers-confirm agent=agy
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:+ Thought: 13.4s → Asked 4 questions ▣ Plan · Qwen3.6-27B-UD-Q6_K_XL ┃ Trip vibe Budget Timing Company Confirm ┃ Review ┃ Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery ┃ Budget: €800-1200 ┃ Timing: Next weekend ┃ Company: Small group (3-5) ┃ ~/workspace/tmp ┃ ⇆ tab enter submit esc dismiss ┃ • OpenCode 1.18.5 Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== opencode-questions-with-multiple-choice-answers-confirm agent=opencode crlf
+LayoutHint: true
+Parse: {ID:8ff4843473e488203d42 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery
+2. Budget: €800-1200
+3. Timing: Next weekend
+4. Company: Small group (3-5) Selected:false Summary:[{Question:Trip vibe Answer:Nature and outdoors, Food and wine, Relaxation and scenery} {Question:Budget Answer:€800-1200} {Question:Timing Answer:Next weekend} {Question:Company Answer:Small group (3-5)}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:5 QuestionTotal:5 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Parse.json: {"id":"8ff4843473e488203d42","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery\n2. Budget: €800-1200\n3. Timing: Next weekend\n4. Company: Small group (3-5)","selected":false,"summary":[{"q":"Trip vibe","a":"Nature and outdoors, Food and wine, Relaxation and scenery"},{"q":"Budget","a":"€800-1200"},{"q":"Timing","a":"Next weekend"},{"q":"Company","a":"Small group (3-5)"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":5,"question_total":5}
+Classify: {Kind:question Prompt:Review your answers and choose what to do Command:Review your answers and choose what to do Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: {ID:8ff4843473e488203d42 Kind:single_select Question:Review your answers and choose what to do Options:[{Index:0 Label:Submit answers Description:1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery
+2. Budget: €800-1200
+3. Timing: Next weekend
+4. Company: Small group (3-5) Selected:false Summary:[{Question:Trip vibe Answer:Nature and outdoors, Food and wine, Relaxation and scenery} {Question:Budget Answer:€800-1200} {Question:Timing Answer:Next weekend} {Question:Company Answer:Small group (3-5)}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Continue CanChat:false CanGoBack:true QuestionIndex:5 QuestionTotal:5 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:opencode NotesActive:false}
+Classify.Interaction.json: {"id":"8ff4843473e488203d42","kind":"single_select","question":"Review your answers and choose what to do","options":[{"index":0,"label":"Submit answers","description":"1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery\n2. Budget: €800-1200\n3. Timing: Next weekend\n4. Company: Small group (3-5)","selected":false,"summary":[{"q":"Trip vibe","a":"Nature and outdoors, Food and wine, Relaxation and scenery"},{"q":"Budget","a":"€800-1200"},{"q":"Timing","a":"Next weekend"},{"q":"Company","a":"Small group (3-5)"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Continue","can_chat":false,"can_go_back":true,"question_index":5,"question_total":5}
+ApprovalFingerprint: ""

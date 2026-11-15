@@ -1,0 +1,24 @@
+=== claudeAskQuestionView agent=claude
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:Who's going, and when? ╭─ Ask ─────────────────────────────────────╮ region budget party_timing Submit What's the budget per night for the cabin? ○ Budget ($80–150/night) Simple, rustic cabin. ❯ ○ Mid-range ($150–300/night) (Recommended) Comfortable cabin with modern amenities. ○ Splurge ($300+/night) Premium cabin, hot tub, lake-view deck. ○ Other (type your own) Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== claudeAskQuestionView agent=hermes
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:Who's going, and when? ╭─ Ask ─────────────────────────────────────╮ region budget party_timing Submit What's the budget per night for the cabin? ○ Budget ($80–150/night) Simple, rustic cabin. ❯ ○ Mid-range ($150–300/night) (Recommended) Comfortable cabin with modern amenities. ○ Splurge ($300+/night) Premium cabin, hot tub, lake-view deck. ○ Other (type your own) Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== claudeAskQuestionView agent=agy
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:Who's going, and when? ╭─ Ask ─────────────────────────────────────╮ region budget party_timing Submit What's the budget per night for the cabin? ○ Budget ($80–150/night) Simple, rustic cabin. ❯ ○ Mid-range ($150–300/night) (Recommended) Comfortable cabin with modern amenities. ○ Splurge ($300+/night) Premium cabin, hot tub, lake-view deck. ○ Other (type your own) Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== claudeAskQuestionView agent=claude crlf
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:Who's going, and when? ╭─ Ask ─────────────────────────────────────╮ region budget party_timing Submit What's the budget per night for the cabin? ○ Budget ($80–150/night) Simple, rustic cabin. ❯ ○ Mid-range ($150–300/night) (Recommended) Comfortable cabin with modern amenities. ○ Splurge ($300+/night) Premium cabin, hot tub, lake-view deck. ○ Other (type your own) Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

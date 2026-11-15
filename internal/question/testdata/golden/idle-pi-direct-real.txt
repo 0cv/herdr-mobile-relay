@@ -1,0 +1,46 @@
+=== idle-pi-direct-real agent=pi
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+[Extensions]
+herdr-agent-state.ts, pi-codex-limit
+Update Available
+New version 0.83.0 is available. Run pi update
+Changelog: https://pi.dev/changelog
+Error: No agent messages to copy yet.
+Reply with exactly: Pi copy probe — naïve café.
+Pi copy probe — naïve café.
+Copied last agent message to clipboard
+~/demo-project (feature/copy-response)
+↑1.1k ↓12 $0.006 (sub) 0.4%/272k (auto)                                                                                             gpt-5.6-sol • xhigh Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-pi-direct-real agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Pi can explain its own features and look up its docs. Ask it how to use or extend Pi. [Extensions] herdr-agent-state.ts, pi-codex-limit Update Available New version 0.83.0 is available. Run pi update Changelog: https://pi.dev/changelog Error: No agent messages to copy yet. Reply with exactly: Pi copy probe — naïve café. Pi copy probe — naïve café. Copied last agent message to clipboard ~/demo-project (feature/copy-response) ↑1.1k ↓12 $0.006 (sub) 0.4%/272k (auto) gpt-5.6-sol • xhigh Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-pi-direct-real agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Pi can explain its own features and look up its docs. Ask it how to use or extend Pi. [Extensions] herdr-agent-state.ts, pi-codex-limit Update Available New version 0.83.0 is available. Run pi update Changelog: https://pi.dev/changelog Error: No agent messages to copy yet. Reply with exactly: Pi copy probe — naïve café. Pi copy probe — naïve café. Copied last agent message to clipboard ~/demo-project (feature/copy-response) ↑1.1k ↓12 $0.006 (sub) 0.4%/272k (auto) gpt-5.6-sol • xhigh Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-pi-direct-real agent=pi crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+[Extensions]
+herdr-agent-state.ts, pi-codex-limit
+Update Available
+New version 0.83.0 is available. Run pi update
+Changelog: https://pi.dev/changelog
+Error: No agent messages to copy yet.
+Reply with exactly: Pi copy probe — naïve café.
+Pi copy probe — naïve café.
+Copied last agent message to clipboard
+~/demo-project (feature/copy-response)
+↑1.1k ↓12 $0.006 (sub) 0.4%/272k (auto)                                                                                             gpt-5.6-sol • xhigh Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
