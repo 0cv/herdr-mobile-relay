@@ -28,14 +28,6 @@ func newOMPFixture(t *testing.T) ompFixture {
 	return fixture
 }
 
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	mkdirAll(t, filepath.Dir(path))
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
 // writeSkill creates <dir>/<name>/SKILL.md with frontmatter.
 func writeSkill(t *testing.T, dir, name, description string) {
 	t.Helper()

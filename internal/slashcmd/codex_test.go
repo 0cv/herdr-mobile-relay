@@ -18,7 +18,7 @@ func TestCodexNoFilesystemDiscovery(t *testing.T) {
 	home := t.TempDir()
 	cmdDir := home + "/.codex/commands"
 	mkdirAll(t, cmdDir)
-	writeTestFile(t, cmdDir+"/extra.md", "Should not appear")
+	writeFile(t, cmdDir+"/extra.md", "Should not appear")
 
 	catalog := catalogFor("codex", "/tmp", home)
 	if hasCommand(catalog, "/extra") {

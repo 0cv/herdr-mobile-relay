@@ -124,7 +124,7 @@ func TestUnknownProfileFallsToGeneric(t *testing.T) {
 	root := t.TempDir()
 	skillDir := root + "/skills"
 	mkdirAll(t, skillDir+"/deploy")
-	writeTestFile(t, skillDir+"/deploy/SKILL.md", "---\nname: deploy\ndescription: Deploy\n---\n")
+	writeFile(t, skillDir+"/deploy/SKILL.md", "---\nname: deploy\ndescription: Deploy\n---\n")
 
 	catalog := CatalogFor("custom", "custom-agent", DiscoverContext{
 		Cwd:           root,

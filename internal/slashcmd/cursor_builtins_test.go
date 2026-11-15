@@ -97,7 +97,7 @@ func TestCursorOmitsPromptQualityBuiltin(t *testing.T) {
 	for _, suppressed := range []bool{false, true} {
 		home, cwd := t.TempDir(), t.TempDir()
 		catalog := CatalogFor("cursor", "cursor", DiscoverContext{Cwd: cwd, Home: home, SuppressNative: suppressed})
-		if containsCommand(catalog, "/open-in-prompt-quality") {
+		if hasCommand(catalog, "/open-in-prompt-quality") {
 			t.Errorf("development-only builtin published with suppression=%v", suppressed)
 		}
 	}

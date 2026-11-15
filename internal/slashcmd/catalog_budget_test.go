@@ -38,7 +38,7 @@ func newBudgetProviderFixture(t *testing.T, profile string) budgetProviderFixtur
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			writeTestFile(t, path, `{"defaultProjectTrust":"always"}`)
+			writeFile(t, path, `{"defaultProjectTrust":"always"}`)
 		}
 	case "kimi":
 		f.prefix = "/skill:"

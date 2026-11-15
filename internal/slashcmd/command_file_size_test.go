@@ -12,7 +12,7 @@ func paddedFile(t *testing.T, path, content string, size int) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, path, content+strings.Repeat("x", size-len(content)))
+	writeFile(t, path, content+strings.Repeat("x", size-len(content)))
 }
 
 func findCatalogCommand(catalog Catalog, name string) (Command, bool) {

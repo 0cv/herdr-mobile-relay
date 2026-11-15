@@ -24,7 +24,7 @@ func TestClaudeLargePersonalCatalogIncludesLateSkills(t *testing.T) {
 	}
 	for index := 0; index < 30; index++ {
 		name := fmt.Sprintf("custom-command-%03d", index)
-		writeTestFile(t, filepath.Join(commandDir, name+".md"), "Custom command")
+		writeFile(t, filepath.Join(commandDir, name+".md"), "Custom command")
 		expected["/"+name] = "personal"
 	}
 	for index := 0; index < 341; index++ {
@@ -218,8 +218,8 @@ func TestClaudeLaterScopeRestoresSuppressedCommand(t *testing.T) {
 	if err := os.MkdirAll(personalSkill, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(projectSkill, "SKILL.md"), "---\nname: deploy\nuser-invocable: false\n---\n")
-	writeTestFile(t, filepath.Join(personalSkill, "SKILL.md"), "---\nname: deploy\ndescription: Personal deploy\n---\n")
+	writeFile(t, filepath.Join(projectSkill, "SKILL.md"), "---\nname: deploy\nuser-invocable: false\n---\n")
+	writeFile(t, filepath.Join(personalSkill, "SKILL.md"), "---\nname: deploy\ndescription: Personal deploy\n---\n")
 
 	catalog := catalogFor("claude", cwd, home)
 	if !hasCommand(catalog, "/deploy") {
@@ -239,27 +239,11 @@ func TestClaudeLaterSettingsReenableEarlierOff(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cwd, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(home, ".claude", "settings.json"), `{"skillOverrides":{"review":"off"}}`)
-	writeTestFile(t, filepath.Join(cwd, ".claude", "settings.json"), `{"skillOverrides":{"review":"on"}}`)
+	writeFile(t, filepath.Join(home, ".claude", "settings.json"), `{"skillOverrides":{"review":"off"}}`)
+	writeFile(t, filepath.Join(cwd, ".claude", "settings.json"), `{"skillOverrides":{"review":"on"}}`)
 
 	catalog := catalogFor("claude", cwd, home)
 	if !hasCommand(catalog, "/review") {
 		t.Fatal("later project setting did not re-enable /review")
-	}
-}
-
-func hasCommand(catalog Catalog, name string) bool {
-	for _, cmd := range catalog.Commands {
-		if cmd.Command == name {
-			return true
-		}
-	}
-	return false
-}
-
-func writeTestFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
 	}
 }

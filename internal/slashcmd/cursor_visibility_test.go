@@ -17,7 +17,7 @@ func TestCursorOmitsConditionalBuiltins(t *testing.T) {
 			t.Setenv("CURSOR_AGENT_PERSIST_SESSION", "relay-session")
 			catalog := CatalogFor("cursor", "cursor", DiscoverContext{Cwd: t.TempDir(), Home: t.TempDir(), SuppressNative: suppressed})
 			for _, name := range cursorConditionalBuiltinNames {
-				if containsCommand(catalog, "/"+name) {
+				if hasCommand(catalog, "/"+name) {
 					t.Errorf("conditional builtin /%s was published", name)
 				}
 			}

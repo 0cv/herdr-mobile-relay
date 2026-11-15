@@ -27,7 +27,7 @@ func TestCursorProjectRootsDoNotIncludeAncestors(t *testing.T) {
 
 			catalog := cursorCatalog(t, cwd, home)
 			for _, name := range []string{"/parent-command", "/parent-skill"} {
-				if containsCommand(catalog, name) {
+				if hasCommand(catalog, name) {
 					t.Errorf("ancestor command %s was published", name)
 				}
 			}
@@ -68,10 +68,10 @@ func TestCursorPersonalSkillFileSymlinkBoundary(t *testing.T) {
 				cursorSkill(t, root, "sibling", "ignored", "Sibling skill")
 
 				catalog := cursorCatalog(t, t.TempDir(), home)
-				if got := containsCommand(catalog, "/linked"); got != insideRoot {
+				if got := hasCommand(catalog, "/linked"); got != insideRoot {
 					t.Errorf("linked file published = %v, want %v", got, insideRoot)
 				}
-				if !containsCommand(catalog, "/sibling") {
+				if !hasCommand(catalog, "/sibling") {
 					t.Error("sibling skill missing")
 				}
 			})
@@ -96,14 +96,14 @@ func TestCursorPersonalLinkedSkillDoesNotDescend(t *testing.T) {
 			}
 
 			catalog := cursorCatalog(t, t.TempDir(), home)
-			if !containsCommand(catalog, "/linked") {
+			if !hasCommand(catalog, "/linked") {
 				t.Error("linked directory's own skill missing")
 			}
-			if !containsCommand(catalog, "/nested") {
+			if !hasCommand(catalog, "/nested") {
 				t.Errorf("linked descendants changed the sibling ID; catalog=%v", commandNames(catalog))
 			}
 			for _, name := range []string{"/linked-nested", "/tools-nested"} {
-				if containsCommand(catalog, name) {
+				if hasCommand(catalog, name) {
 					t.Errorf("linked descendant introduced %s", name)
 				}
 			}
@@ -123,11 +123,11 @@ func TestCursorPersonalOutsideFileLinkDoesNotChangeSkillID(t *testing.T) {
 	}
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if !containsCommand(catalog, "/review") {
+	if !hasCommand(catalog, "/review") {
 		t.Errorf("outside file link changed the valid skill ID; catalog=%v", commandNames(catalog))
 	}
 	for _, name := range []string{"/other-review", "/tools-review"} {
-		if containsCommand(catalog, name) {
+		if hasCommand(catalog, name) {
 			t.Errorf("outside file link introduced %s", name)
 		}
 	}
@@ -215,7 +215,7 @@ func TestCursorRootSkillChangesNestedDuplicateID(t *testing.T) {
 	cursorSkill(t, filepath.Join(root, "other"), "skills", "ignored", "Nested skill")
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if !containsCommand(catalog, "/other-skills") {
+	if !hasCommand(catalog, "/other-skills") {
 		t.Errorf("root skill missing from duplicate detection; catalog=%v", commandNames(catalog))
 	}
 	if commandSource(catalog, "/skills") != "builtin" {

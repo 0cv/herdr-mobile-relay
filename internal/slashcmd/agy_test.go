@@ -22,7 +22,7 @@ func TestAgyCatalogListsBuiltinsAndUserSkills(t *testing.T) {
 			t.Fatalf("%s status = %q", agent, catalog.Status)
 		}
 		for _, want := range []string{"/model", "/compact", "/resume", "/paneagent"} {
-			if !containsCommand(catalog, want) {
+			if !hasCommand(catalog, want) {
 				t.Errorf("%s catalog is missing %s", agent, want)
 			}
 		}

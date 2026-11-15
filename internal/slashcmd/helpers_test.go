@@ -1,6 +1,12 @@
 package slashcmd
 
-import "github.com/0cv/herdr-mobile-relay/internal/agentkind"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
+)
 
 func catalogFor(agent, cwd, home string) Catalog {
 	return CatalogFor(agentkind.Of(agent), agent, DiscoverContext{Cwd: cwd, Home: home})
@@ -40,4 +46,17 @@ func walkCommandDir(root, source string) []Command {
 	truncated := false
 	reader.walkDirBudget(root, "", source, &commands, &suppressed, &budget, &truncated)
 	return commands
+}
+
+func hasCommand(catalog Catalog, name string) bool {
+	_, found := commandByName(catalog, name)
+	return found
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	mkdirAll(t, filepath.Dir(path))
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }

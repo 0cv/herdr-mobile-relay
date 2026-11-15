@@ -114,7 +114,7 @@ func TestReadSkillMetadataOversized(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
 	big := strings.Repeat("x", maxCommandFileSize+1)
-	writeTestFile(t, path, big)
+	writeFile(t, path, big)
 
 	_, ok := readSkillMetadata(path)
 	if ok {
@@ -127,7 +127,7 @@ func TestReadSkillMetadataLargeBody(t *testing.T) {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			path := t.TempDir() + "/SKILL.md"
 			frontmatter := "---\nname: large\ndescription: Large skill\n---\n"
-			writeTestFile(t, path, frontmatter+strings.Repeat("x", size-len(frontmatter)))
+			writeFile(t, path, frontmatter+strings.Repeat("x", size-len(frontmatter)))
 
 			fm, ok := readSkillMetadata(path)
 			if !ok {
@@ -319,7 +319,7 @@ func TestFrontmatterPlainScalarStartingWithPipe(t *testing.T) {
 func TestReadSkillMetadataBlockScalarFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
-	writeTestFile(t, path, "---\nname: deploy\ndescription: |\n  Ship the app\n  to production.\n---\nbody\n")
+	writeFile(t, path, "---\nname: deploy\ndescription: |\n  Ship the app\n  to production.\n---\nbody\n")
 
 	fm, ok := readSkillMetadata(path)
 	if !ok {
@@ -334,7 +334,7 @@ func TestReadSkillMetadataOversizedBlockScalar(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
 	body := strings.Repeat("  filler line\n", maxCommandFileSize/8)
-	writeTestFile(t, path, "---\nname: huge\ndescription: |\n"+body+"---\n")
+	writeFile(t, path, "---\nname: huge\ndescription: |\n"+body+"---\n")
 
 	if _, ok := readSkillMetadata(path); ok {
 		t.Error("oversized block scalar should still be rejected by maxCommandFileSize")
