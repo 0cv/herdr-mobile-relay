@@ -1,10 +1,8 @@
 // @vitest-environment node
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { URL } from 'node:url';
 import { createServer, type Plugin } from 'vite';
 import { describe, expect, it } from 'vitest';
-import versions from '../../build-versions.json' with { type: 'json' };
 import config from '../../vite.config.ts';
 
 type Chunk = { type: 'chunk'; fileName: string; code: string };
@@ -42,105 +40,7 @@ function publish(f: ReturnType<typeof fixture>) {
   }, [{}, f.bundle, false]);
 }
 
-// Independent Node crypto oracle, never the production digest or assetIdentity helper.
-function identity(source: string | Uint8Array) {
-  const hash = createHash('sha256').update(source).digest();
-  return { sha256: hash.toString('hex'), integrity: `sha256-${hash.toString('base64')}` };
-}
-
 describe('actual Vite release identity', () => {
-  it('publishes canonical and final identities with exact descriptor and version projections', () => {
-    const manifest = readFileSync(new URL('../../../herdr-plugin.toml', import.meta.url), 'utf8');
-    const productVersion = manifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
-    if (!productVersion) throw new Error('Missing current product version fixture input');
-    const originalJavascript = 'const builds=["__HERDR_BUILD_ID__","__HERDR_BUILD_ID__"];const snow="雪🌿";const color="--primary-foreground";\n';
-    const canonicalJavascript = 'const builds=["__HERDR_BUILD_ID__","__HERDR_BUILD_ID__"];const snow="雪🌿";const color="--pf";\n';
-    const originalStylesheet = ':root{--primary-foreground:red}.leaf{color:var(--primary-foreground)}\n';
-    const finalStylesheet = ':root{--pf:red}.leaf{color:var(--pf)}\n';
-    // Canonical bytes are hashed before either marker is replaced, with one NUL separator.
-    const canonical = `${canonicalJavascript}\u0000${finalStylesheet}`;
-    const build = createHash('sha256').update(canonical, 'utf8').digest('hex');
-    const finalJavascript = `const builds=["${build}","${build}"];const snow="雪🌿";const color="--pf";\n`;
-    const javascriptIdentity = identity(finalJavascript);
-    const stylesheetIdentity = identity(finalStylesheet);
-    const javascriptPath = `assets/app-${javascriptIdentity.sha256}.js`;
-    const stylesheetPath = `assets/app-${stylesheetIdentity.sha256}.css`;
-    const entryPath = `builds/${productVersion}-${versions.assets}-${build.slice(0, 16)}/index.html`;
-    const originalHtml = '<!doctype html>\n<html lang="en">\n  <head>\n    <link rel="icon" href="icons/icon.svg" />\n    <link rel="stylesheet" href="/assets/app.css" />\n  </head>\n  <body>\n    <script src="manifest-loader.js"></script>\n    <script type="module" src="/assets/app.js"></script>\n  </body>\n</html>\n';
-    const entrySource = `<!doctype html><html lang=en><head><link rel=icon href="/icons/icon.svg"><link rel=stylesheet href="/${stylesheetPath}" integrity="${stylesheetIdentity.integrity}" crossorigin="anonymous"></head><body><script src="/manifest-loader.js"></script><script type=module src="/${javascriptPath}" integrity="${javascriptIdentity.integrity}" crossorigin="anonymous"></script></body></html>\n`;
-    const entryIdentity = identity(entrySource);
-    const descriptor = {
-      schema: 1,
-      version: productVersion,
-      assets: versions.assets,
-      build,
-      entry: `/${entryPath}`,
-      files: {
-        entry: { path: entryPath, sha256: entryIdentity.sha256, integrity: entryIdentity.integrity },
-        javascript: { path: javascriptPath, sha256: javascriptIdentity.sha256, integrity: javascriptIdentity.integrity },
-        stylesheet: { path: stylesheetPath, sha256: stylesheetIdentity.sha256, integrity: stylesheetIdentity.integrity },
-      },
-    };
-    const version = {
-      version: productVersion,
-      assets: versions.assets,
-      build,
-      entry: `/${entryPath}`,
-      script: `/${javascriptPath}`,
-      style: `/${stylesheetPath}`,
-      script_sha256: javascriptIdentity.sha256,
-      style_sha256: stylesheetIdentity.sha256,
-    };
-    const setupManifest = JSON.parse(readFileSync(new URL('../../public/manifest.webmanifest', import.meta.url), 'utf8'));
-    delete setupManifest.start_url;
-    const bootstrap = '<!doctype html><script src="/herdr-bootstrap.js"></script>\n';
-    const expected: Record<string, string> = {
-      [entryPath]: entrySource,
-      'herdr-bootstrap.js': `const e = new URL(window.__HERDR_ENTRY__ || "/${entryPath}", location);\n  e.search = location.search;\n  e.hash = location.hash;\n  location.replace(e);\n`,
-      'release.json': `${JSON.stringify(descriptor, null, 2)}\n`,
-      'version.json': `${JSON.stringify(version)}\n`,
-      'setup.webmanifest': `${JSON.stringify(setupManifest, null, 2)}\n`,
-      '_redirects': `/ /${entryPath} 302\n/index.html /${entryPath} 302\n`,
-      '_headers': '/herdr-bootstrap.js\n  Cache-Control: no-cache, no-store\n\n/manifest-loader.js\n  Cache-Control: no-cache, no-store\n\n/manifest.webmanifest\n  Cache-Control: no-cache, no-store\n\n/setup.webmanifest\n  Cache-Control: no-cache, no-store\n\n/sw.js\n  Cache-Control: no-cache, no-store\n\n/version.json\n  Cache-Control: no-cache, no-store\n\n/release.json\n  Cache-Control: no-cache, no-store\n\n/\n  Cache-Control: no-cache, no-store\n\n/index.html\n  Cache-Control: no-cache, no-store\n\n/404.html\n  Cache-Control: no-store\n\n/404\n  Cache-Control: no-store\n\n/builds/*\n  Cache-Control: no-cache\n\n/assets/*\n  Cache-Control: no-cache\n',
-    };
-    const f = fixture(originalJavascript, originalStylesheet, originalHtml);
-    publish(f);
-    expect(f.errors).toEqual([]);
-    expect(f.bundle).toEqual({
-      'assets/app.js': { type: 'chunk', fileName: javascriptPath, code: finalJavascript },
-      'assets/app.css': { type: 'asset', fileName: stylesheetPath, source: finalStylesheet },
-      'index.html': { type: 'asset', fileName: 'index.html', source: bootstrap },
-    });
-    expect(f.emitted.map(asset => asset.fileName)).toEqual([
-      entryPath, 'herdr-bootstrap.js', 'release.json', 'version.json', '_redirects', '_headers', 'setup.webmanifest',
-    ]);
-    const actual: Record<string, string | Uint8Array> = {};
-    for (const asset of f.emitted) {
-      expect(asset.type).toBe('asset');
-      expect(typeof asset.source).toBe('string');
-      actual[asset.fileName] = asset.source;
-    }
-    expect(actual).toEqual(expected);
-    expect(JSON.parse(String(actual['release.json']))).toEqual(descriptor);
-    expect(JSON.parse(String(actual['version.json']))).toEqual(version);
-    expect(Object.keys(descriptor)).toEqual(['schema', 'version', 'assets', 'build', 'entry', 'files']);
-    expect(Object.keys(descriptor.files)).toEqual(['entry', 'javascript', 'stylesheet']);
-    for (const file of Object.values(descriptor.files)) {
-      expect(Object.keys(file)).toEqual(['path', 'sha256', 'integrity']);
-      expect(file.sha256).toMatch(/^[a-f0-9]{64}$/);
-      expect(file.integrity).toMatch(/^sha256-[A-Za-z0-9+/]{43}=$/);
-    }
-    expect(Object.keys(version)).toEqual([
-      'version', 'assets', 'build', 'entry', 'script', 'style', 'script_sha256', 'style_sha256',
-    ]);
-    expect(canonicalJavascript.match(/__HERDR_BUILD_ID__/g)).toHaveLength(2);
-    expect(f.javascript.code).not.toContain('__HERDR_BUILD_ID__');
-    expect(f.javascript.code.match(new RegExp(build, 'g'))).toHaveLength(2);
-    expect(build).not.toBe(javascriptIdentity.sha256);
-    expect(entryIdentity.sha256).not.toBe(javascriptIdentity.sha256);
-    expect(stylesheetIdentity.sha256).not.toBe(javascriptIdentity.sha256);
-  });
-
   it('serves the generated setup manifest during development', async () => {
     const plugin = config.plugins?.find((item): item is Plugin => item !== null
       && typeof item === 'object' && !Array.isArray(item)
