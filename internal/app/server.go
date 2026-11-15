@@ -804,64 +804,69 @@ func (s *Server) Run(ctx context.Context) error {
 		case "get_conversation_updates":
 			s.handleConversationUpdates(client, inbound)
 		case "unwatch_conversation":
+			reply := s.reply(client, inbound.RequestID, action, inbound.PaneID)
 			if inbound.SubscriptionID == "" {
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation subscription is required", inbound.PaneID, nil)
+				reply.fail("Conversation subscription is required")
 				break
 			}
 			s.stopConversationFeed(client.ID(), inbound.SubscriptionID)
-			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, nil)
+			reply.complete(nil)
 		case "device_list":
+			reply := s.reply(client, inbound.RequestID, action, "")
 			identity, authenticated := client.Identity()
 			if s.deviceAuth == nil || !authenticated {
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				reply.fail("Device management is unavailable")
 				break
 			}
-			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", "", map[string]any{
+			reply.complete(map[string]any{
 				"devices":           activeDeviceCredentials(s.deviceAuth, identity.CredentialID),
 				"current_device_id": identity.DeviceID,
 				"role":              identity.Role,
 			})
 		case "create_device_invitation":
+			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 			identity, authenticated := client.Identity()
 			if s.deviceAuth == nil || !authenticated {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				reply.fail("Device management is unavailable")
 				break
 			}
 			invitation, invitationErr := s.deviceAuth.CreateInvitation(inbound.Name, deviceauth.Role(inbound.Role), identity.Locale)
 			if invitationErr != nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", invitationErr.Error(), "", nil)
+				reply.fail(invitationErr.Error())
 				break
 			}
-			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"invitation": invitation})
+			reply.complete(map[string]any{"invitation": invitation})
 		case "rename_device":
+			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 			if s.deviceAuth == nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				reply.fail("Device management is unavailable")
 				break
 			}
 			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
 			if !found {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device credential was not found", "", nil)
+				reply.fail("Device credential was not found")
 				break
 			}
 			credential, renameErr := s.deviceAuth.RenameCredential(credentialID, inbound.Name)
 			if renameErr != nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", renameErr.Error(), "", nil)
+				reply.fail(renameErr.Error())
 				break
 			}
-			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"device": credential})
+			reply.complete(map[string]any{"device": credential})
 		case "revoke_device":
+			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 			if s.deviceAuth == nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				reply.fail("Device management is unavailable")
 				break
 			}
 			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
 			if !found {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device credential was not found", "", nil)
+				reply.fail("Device credential was not found")
 				break
 			}
 			credential, revokeErr := s.deviceAuth.RevokeCredential(credentialID)
 			if revokeErr != nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", revokeErr.Error(), "", nil)
+				reply.fail(revokeErr.Error())
 				break
 			}
 			s.forgetPushTest(credential.DeviceID)
@@ -873,19 +878,20 @@ func (s *Server) Run(ctx context.Context) error {
 				s.hub.DisconnectCredential(credential.CredentialID, credential.Version)
 			})
 			if pushCleanupErr != nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device revoked, but notification cleanup could not be persisted", "", map[string]any{"device": credential})
+				reply.failWithData("Device revoked, but notification cleanup could not be persisted", map[string]any{"device": credential})
 				break
 			}
-			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"device": credential})
+			reply.complete(map[string]any{"device": credential})
 		case "reset_devices":
+			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 			identity, authenticated := client.Identity()
 			if s.deviceAuth == nil || !authenticated {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				reply.fail("Device management is unavailable")
 				break
 			}
 			credentials := activeDeviceCredentials(s.deviceAuth, "")
 			if resetErr := s.deviceAuth.ResetWithBootstrap([]byte(s.cfg.Token), s.hostname, identity.Locale); resetErr != nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", resetErr.Error(), "", nil)
+				reply.fail(resetErr.Error())
 				break
 			}
 			for _, credential := range credentials {
@@ -903,10 +909,10 @@ func (s *Server) Run(ctx context.Context) error {
 				s.disconnectCredentials(credentials)
 			})
 			if resetPushErr != nil {
-				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Devices reset, but notification cleanup could not be persisted", "", nil)
+				reply.fail("Devices reset, but notification cleanup could not be persisted")
 				break
 			}
-			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", nil)
+			reply.complete(nil)
 		case "get_activity":
 			limit := messageInt(msg["limit"], 500)
 			if limit < 1 || limit > 500 {
@@ -993,20 +999,19 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			s.hub.Send(client, coordinator.CommandResultMessage(result))
 		case "list_directories":
-			requestID, _ := msg["request_id"].(string)
 			path, _ := msg["path"].(string)
 			listing := fsutil.ListDirectories(path, s.home)
-			s.sendCommandResult(client, requestID, "list_directories", true, "completed", "", "", listing)
+			s.reply(client, inbound.RequestID, "list_directories", "").complete(listing)
 		case "list_slash_commands":
-			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
+			reply := s.reply(client, inbound.RequestID, "list_slash_commands", paneID)
 			if paneID == "" {
-				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent is required", paneID, nil)
+				reply.fail("Agent is required")
 				break
 			}
 			activeAgent, ok := s.state.Agent(paneID)
 			if !ok {
-				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent pane not found", paneID, nil)
+				reply.fail("Agent pane not found")
 				break
 			}
 			agent, cwd := activeAgent.Agent, activeAgent.Cwd
@@ -1030,26 +1035,17 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			currentAgent, currentExists := s.state.Agent(paneID)
 			if !currentExists || !sameSlashTarget(activeAgent, currentAgent) {
-				s.sendCommandResult(
-					client,
-					requestID,
-					"list_slash_commands",
-					false,
-					"failed",
-					"The agent pane was replaced while commands were being listed",
-					paneID,
-					nil,
-				)
+				reply.fail("The agent pane was replaced while commands were being listed")
 				break
 			}
-			catalog = fitSlashCommandCatalog(slashcmd.Revise(catalog), requestID, "list_slash_commands", paneID)
-			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
+			catalog = fitSlashCommandCatalog(slashcmd.Revise(catalog), inbound.RequestID, "list_slash_commands", paneID)
+			reply.complete(catalog)
 		case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
-			requestID := inbound.RequestID
 			paneID := inbound.PaneID
+			reply := s.reply(client, inbound.RequestID, inbound.Type, paneID)
 			agent, exists := s.state.Agent(paneID)
 			if paneID == "" || !exists {
-				s.sendCommandResult(client, requestID, inbound.Type, false, "failed", "Agent pane not found", paneID, nil)
+				reply.fail("Agent pane not found")
 				break
 			}
 			generation := s.state.Generation(paneID)
@@ -1068,7 +1064,7 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			currentAgent, currentExists := s.state.Agent(paneID)
 			if !currentExists || s.state.Generation(paneID) != generation || strings.TrimSpace(currentAgent.Cwd) != cwd {
-				s.sendCommandResult(client, requestID, inbound.Type, false, "failed", "Agent workspace changed during inspection", paneID, nil)
+				reply.fail("Agent workspace changed during inspection")
 				break
 			}
 			if inspectErr != nil {
@@ -1077,40 +1073,36 @@ func (s *Server) Run(ctx context.Context) error {
 				if errors.As(inspectErr, &public) {
 					message = public.Message
 				}
-				s.sendCommandResult(client, requestID, inbound.Type, false, "failed", message, paneID, nil)
+				reply.fail(message)
 				break
 			}
-			s.sendCommandResult(client, requestID, inbound.Type, true, "completed", "", paneID, data)
+			reply.complete(data)
 		case "copy_agent_response":
-			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
-			s.copyAgentResponse(client, requestID, paneID)
+			s.copyAgentResponse(client, inbound.RequestID, paneID)
 		case "cancel_speech":
 			speechRequestID, _ := msg["speech_request_id"].(string)
 			s.cancelSpeech(client.ID(), speechRequestID)
 		case "speak_text":
-			requestID, _ := msg["request_id"].(string)
 			speechRequestID, _ := msg["speech_request_id"].(string)
 			text, _ := msg["text"].(string)
 			language, _ := msg["language"].(string)
-			s.speakText(client, requestID, speechRequestID, text, language)
+			s.speakText(client, inbound.RequestID, speechRequestID, text, language)
 		case "speech_voices_list":
-			requestID, _ := msg["request_id"].(string)
-			s.sendCommandResult(client, requestID, action, true, "completed", "", "", s.speechVoicePayload(nil))
+			s.reply(client, inbound.RequestID, action, "").complete(s.speechVoicePayload(nil))
 		case "speech_voice_install", "speech_voice_remove":
-			requestID, _ := msg["request_id"].(string)
 			language, _ := msg["language"].(string)
-			s.changeSpeechVoice(client, requestID, action, language)
+			s.changeSpeechVoice(client, inbound.RequestID, action, language)
 		case "qr_code":
-			requestID, _ := msg["request_id"].(string)
+			reply := s.reply(client, inbound.RequestID, action, "")
 			value, _ := msg["text"].(string)
 			size, packed, qrErr := setuphelper.PackedQR(value)
 			if qrErr != nil {
 				s.logger.Warn("qr encoding failed", "error", qrErr)
-				s.sendCommandResult(client, requestID, action, false, "failed", "This computer could not encode that QR code", "", nil)
+				reply.fail("This computer could not encode that QR code")
 				break
 			}
-			s.sendCommandResult(client, requestID, action, true, "completed", "", "", map[string]any{
+			reply.complete(map[string]any{
 				"size":    size,
 				"modules": base64.StdEncoding.EncodeToString(packed),
 			})
@@ -1119,16 +1111,17 @@ func (s *Server) Run(ctx context.Context) error {
 			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
 			s.hub.Send(client, map[string]any{"type": "push_policy", "policy": pushPolicyResponse(policy)})
 		case "push_policy_set":
+			reply := s.reply(client, inbound.RequestID, "push_policy_set", "")
 			identity, _ := client.Identity()
 			current := s.pushM.Policy(identity.DeviceID, identity.Locale)
 			policy, policyErr := boundPushPolicy(inbound.Policy, identity.DeviceID, identity.Locale, current)
 			if policyErr != nil || s.pushM.SetPolicy(policy) != nil {
-				s.sendCommandResult(client, inbound.RequestID, "push_policy_set", false, "failed", "Notification policy was rejected", "", nil)
+				reply.fail("Notification policy was rejected")
 				s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_policy"})
 				break
 			}
 			data := map[string]any{"policy": pushPolicyResponse(policy)}
-			s.sendCommandResult(client, inbound.RequestID, "push_policy_set", true, "completed", "", "", data)
+			reply.complete(data)
 			s.hub.Send(client, map[string]any{
 				"type": "push_policy_result", "ok": true, "policy": pushPolicyResponse(policy),
 			})
@@ -1165,10 +1158,10 @@ func (s *Server) Run(ctx context.Context) error {
 			identity, _ := client.Identity()
 			claims, verifyErr := s.pushM.VerifyEventReference(inbound.EventRef, time.Now().UTC())
 			if verifyErr != nil || claims.Key.DeviceID != identity.DeviceID || !s.pushTargetCurrent(claims.Key.Target()) {
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Notification target is no longer available", "", nil)
+				s.reply(client, inbound.RequestID, action, "").fail("Notification target is no longer available")
 				break
 			}
-			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", claims.Key.PaneID, map[string]any{
+			s.reply(client, inbound.RequestID, action, claims.Key.PaneID).complete(map[string]any{
 				"target": claims.Key.Target(), "event_id": claims.Key.EventID, "category": claims.Key.Category,
 			})
 		case "push_test_device":
@@ -1449,8 +1442,9 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) handleUpdate(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound) {
+	reply := s.reply(client, inbound.RequestID, inbound.Type, "")
 	if s.cfg.Backend == "hc" {
-		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", "Updates are managed by the TUI relay, not the hc backend", "", nil)
+		reply.fail("Updates are managed by the TUI relay, not the hc backend")
 		return
 	}
 	switch inbound.Type {
@@ -1462,13 +1456,13 @@ func (s *Server) handleUpdate(ctx context.Context, client *transport.ClientConn,
 		}})
 		updateState := s.updateM.Check(ctx)
 		s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-		s.sendCommandResult(client, inbound.RequestID, "check_update", true, "completed", "", "", map[string]any{"update": updateState})
+		reply.complete(map[string]any{"update": updateState})
 	case "install_update":
 		deployAppFirst := s.appDeployM.Required()
 		expectedAppOrigin := ""
 		if deployAppFirst {
 			if originErr := s.appDeployM.ValidateOrigin(inbound.ExpectedOrigin); originErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", originErr.Error(), "", map[string]any{"update": s.updateM.State()})
+				reply.failWithData(originErr.Error(), map[string]any{"update": s.updateM.State()})
 				break
 			}
 			expectedAppOrigin = inbound.ExpectedOrigin
@@ -1481,19 +1475,19 @@ func (s *Server) handleUpdate(ctx context.Context, client *transport.ClientConn,
 			expectedAppOrigin,
 		)
 		if scheduleErr != nil {
-			s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", scheduleErr.Error(), "", map[string]any{"update": updateState})
+			reply.failWithData(scheduleErr.Error(), map[string]any{"update": updateState})
 			break
 		}
 		s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-		s.sendCommandResult(client, inbound.RequestID, "install_update", true, "scheduled", "", "", map[string]any{"job": job, "update": updateState})
+		reply.schedule(map[string]any{"job": job, "update": updateState})
 	case "deploy_app_update":
 		job, deployState, scheduleErr := s.appDeployM.Schedule(ctx, inbound.ExpectedVersion, inbound.ExpectedRevision, inbound.ExpectedOrigin)
 		if scheduleErr != nil {
-			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", false, "failed", scheduleErr.Error(), "", map[string]any{"app_deploy": deployState})
+			reply.failWithData(scheduleErr.Error(), map[string]any{"app_deploy": deployState})
 			break
 		}
 		s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
-		s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
+		reply.schedule(map[string]any{"job": job, "app_deploy": deployState})
 	}
 }
 
@@ -1506,25 +1500,26 @@ func (s *Server) handleUpdate(ctx context.Context, client *transport.ClientConn,
 // else fails before any Herdr, process or TTY access. Release stays an
 // idempotent cleanup; immediate skips the navigation grace.
 func (s *Server) handlePaneSizeCommand(client *transport.ClientConn, inbound protocol.Inbound) {
+	reply := s.reply(client, inbound.RequestID, inbound.Type, inbound.PaneID)
 	if inbound.Type == "release_pane_size" {
 		if err := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID, inbound.Immediate); err != nil {
-			s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+			reply.fail(panesize.PublicMessage(err))
 			return
 		}
-		s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, nil)
+		reply.complete(nil)
 		return
 	}
 	if !inbound.OptIn || !s.paneSizeM.Available() {
-		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.ErrUnavailable.Error(), inbound.PaneID, nil)
+		reply.fail(panesize.ErrUnavailable.Error())
 		return
 	}
 	columns, rows, err := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
 	if err != nil {
 		s.logger.Debug("pane size lease failed", "pane_id", inbound.PaneID, "error", err)
-		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+		reply.fail(panesize.PublicMessage(err))
 		return
 	}
-	s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, map[string]any{"columns": columns, "rows": rows})
+	reply.complete(map[string]any{"columns": columns, "rows": rows})
 }
 
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
@@ -1719,40 +1714,196 @@ func (s *Server) handleTransition(
 	paneID, agent, project, status string,
 	revision, transitionAt int64,
 ) {
+	switch status {
+	case "working":
+		s.transitionWorking(parent, paneID, agent, project, revision, transitionAt)
+	case "blocked":
+		s.transitionBlocked(parent, paneID, agent, project, revision, transitionAt)
+	default:
+		s.transitionFinished(parent, paneID, agent, project, status, revision, transitionAt)
+	}
+}
+
+func (s *Server) transitionWorking(
+	parent context.Context,
+	paneID, agent, project string,
+	revision, transitionAt int64,
+) {
+	var session string
+	if agentState, ok := s.state.Agent(paneID); ok && s.state.TransitionCurrent(paneID, "working", revision) {
+		session = agentState.Session
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	if s.pushM != nil {
+		if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
+			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
+		}
+	}
+	summary := agent + " started working"
+	if agent == "" {
+		summary = "Agent started working"
+	}
+	if s.dispatcher != nil {
+		s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+			Kind:           "working",
+			Status:         "working",
+			Summary:        summary,
+			PaneID:         paneID,
+			ExpectedStatus: "working",
+			Revision:       revision,
+			Details:        map[string]any{"transition": "working", "transition_at": transitionAt},
+			Agent:          agent,
+			Project:        project,
+			Host:           s.hostname,
+			Session:        session,
+		})
+	}
+}
+
+func (s *Server) transitionBlocked(
+	parent context.Context,
+	paneID, agent, project string,
+	revision, transitionAt int64,
+) {
+	agentState, agentExists := s.state.Agent(paneID)
+	if !agentExists {
+		return
+	}
+	session := agentState.Session
+	blockedEventID := agentState.BlockedEventID
+	blockedContentRevision := s.state.ContentRevision(paneID)
+	paneGeneration, active := s.state.PaneSession(paneID)
+	if !active || blockedEventID == "" {
+		return
+	}
+	transitionCurrent := func() bool {
+		return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
+	}
+	if !transitionCurrent() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	if s.transitionEnrich != nil {
+		s.transitionEnrich(ctx, agentState)
+	} else {
+		s.enrichBlockedTransition(ctx, agentState)
+	}
+	if !transitionCurrent() {
+		return
+	}
+	persisted, ok := s.state.CommitAttentionClassification(
+		paneID,
+		blockedEventID,
+		paneGeneration,
+		blockedContentRevision,
+		classificationFromAgent(agentState),
+	)
+	if !ok || !transitionCurrent() {
+		return
+	}
+	agentState = persisted
+	classifiedAttentionRevision := s.state.AttentionRevision(paneID)
+	classifiedCurrent := func() bool {
+		return s.state.AttentionTransitionCurrent(
+			paneID,
+			blockedEventID,
+			paneGeneration,
+			string(agentState.AttentionKind),
+			classifiedAttentionRevision,
+		)
+	}
+	if !classifiedCurrent() {
+		return
+	}
+	if agentState.AttentionKind == question.AttentionChat {
+		s.broadcastBlockedAttention(agentState)
+		s.handleChatCompletion(ctx, agentState)
+		return
+	}
+
+	eventID := agentState.BlockedEventID
+	command := agentState.Command
+	activityKind := "blocked"
+	if command == "" {
+		switch agentState.AttentionKind {
+		case question.AttentionQuestion:
+			command = "Agent needs an answer"
+		case question.AttentionUnknown:
+			command = "Agent needs inspection"
+		default:
+			command = "Agent needs approval"
+		}
+	}
+	if agentState.AttentionKind == question.AttentionQuestion {
+		activityKind = "question"
+	}
+	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
+		Kind:           activityKind,
+		Status:         "attention",
+		Summary:        command,
+		PaneID:         paneID,
+		ExpectedStatus: "blocked",
+		Revision:       agentState.StateRevision,
+		Details: map[string]any{
+			"event_id":       eventID,
+			"attention_kind": agentState.AttentionKind,
+			"transition_at":  transitionAt,
+		},
+		Agent:   agent,
+		Project: project,
+		Host:    s.hostname,
+		Session: session,
+		Extract: agentState.Prompt,
+		BlockedIdentity: &coordinator.BlockedTransitionIdentity{
+			EventID:           blockedEventID,
+			Generation:        paneGeneration,
+			AttentionKind:     string(agentState.AttentionKind),
+			AttentionRevision: classifiedAttentionRevision,
+		},
+	}) {
+		return
+	}
+	if !classifiedCurrent() {
+		return
+	}
+	category := push.CategoryAttention
+	preview := push.PreviewHidden
+	if agentState.AttentionKind == question.AttentionQuestion {
+		category = push.CategoryQuestion
+		preview = push.PreviewQuestion
+	}
+	if s.pushM != nil {
+		s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
+	}
+	if !classifiedCurrent() {
+		return
+	}
+	s.broadcastBlockedAttention(agentState)
+}
+
+func (s *Server) transitionFinished(
+	parent context.Context,
+	paneID, agent, project, status string,
+	revision, transitionAt int64,
+) {
 	agentState, agentExists := s.state.Agent(paneID)
 	var session string
 	var sessionID string
 	conversationAgent := agent
 	var conversationCwd string
 	conversationProject := conversation.ProjectContext{}
-	var blockedEventID string
-	var paneGeneration int64
-	var blockedContentRevision int64
 	if agentExists {
-		if status != "working" || s.state.TransitionCurrent(paneID, status, revision) {
-			session = agentState.Session
-		}
+		session = agentState.Session
 		sessionID = agentState.SessionID
 		conversationAgent = agentState.Agent
 		conversationCwd = agentState.Cwd
 		conversationProject = projectContextForAgent(agentState)
-		blockedEventID = agentState.BlockedEventID
-		blockedContentRevision = s.state.ContentRevision(paneID)
-	}
-	if status == "blocked" {
-		generation, active := s.state.PaneSession(paneID)
-		if !active || blockedEventID == "" {
-			return
-		}
-		paneGeneration = generation
 	}
 	transitionCurrent := func() bool {
-		if status == "blocked" {
-			return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
-		}
-		if status == "working" {
-			return true
-		}
 		return s.state.CompletionCurrent(paneID, revision)
 	}
 	if !transitionCurrent() {
@@ -1761,175 +1912,75 @@ func (s *Server) handleTransition(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	if status == "working" {
-		if s.pushM != nil {
-			if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
-				s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
-			}
-		}
-		summary := agent + " started working"
-		if agent == "" {
-			summary = "Agent started working"
-		}
-		if s.dispatcher != nil {
-			s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
-				Kind:           "working",
-				Status:         "working",
-				Summary:        summary,
-				PaneID:         paneID,
-				ExpectedStatus: status,
-				Revision:       revision,
-				Details:        map[string]any{"transition": "working", "transition_at": transitionAt},
-				Agent:          agent,
-				Project:        project,
-				Host:           s.hostname,
-				Session:        session,
-			})
-		}
-		return
-	}
-
-	if status == "blocked" {
-		if !agentExists {
-			return
-		}
-		if s.transitionEnrich != nil {
-			s.transitionEnrich(ctx, agentState)
-		} else {
-			s.enrichBlockedTransition(ctx, agentState)
-		}
-		if !transitionCurrent() {
-			return
-		}
-		persisted, ok := s.state.CommitAttentionClassification(
-			paneID,
-			blockedEventID,
-			paneGeneration,
-			blockedContentRevision,
-			classificationFromAgent(agentState),
-		)
-		if !ok || !transitionCurrent() {
-			return
-		}
-		agentState = persisted
-		classifiedAttentionRevision := s.state.AttentionRevision(paneID)
-		classifiedCurrent := func() bool {
-			return s.state.AttentionTransitionCurrent(
-				paneID,
-				blockedEventID,
-				paneGeneration,
-				string(agentState.AttentionKind),
-				classifiedAttentionRevision,
-			)
-		}
-		if !classifiedCurrent() {
-			return
-		}
-		if agentState.AttentionKind == question.AttentionChat {
-			s.broadcastBlockedAttention(agentState)
-			s.handleChatCompletion(ctx, agentState)
-			return
-		}
-
-		eventID := agentState.BlockedEventID
-		command := agentState.Command
-		activityKind := "blocked"
-		if command == "" {
-			switch agentState.AttentionKind {
-			case question.AttentionQuestion:
-				command = "Agent needs an answer"
-			case question.AttentionUnknown:
-				command = "Agent needs inspection"
-			default:
-				command = "Agent needs approval"
-			}
-		}
-		if agentState.AttentionKind == question.AttentionQuestion {
-			activityKind = "question"
-		}
-		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
-			Kind:           activityKind,
-			Status:         "attention",
-			Summary:        command,
-			PaneID:         paneID,
-			ExpectedStatus: status,
-			Revision:       agentState.StateRevision,
-			Details: map[string]any{
-				"event_id":       eventID,
-				"attention_kind": agentState.AttentionKind,
-				"transition_at":  transitionAt,
-			},
-			Agent:   agent,
-			Project: project,
-			Host:    s.hostname,
-			Session: session,
-			Extract: agentState.Prompt,
-			BlockedIdentity: &coordinator.BlockedTransitionIdentity{
-				EventID:           blockedEventID,
-				Generation:        paneGeneration,
-				AttentionKind:     string(agentState.AttentionKind),
-				AttentionRevision: classifiedAttentionRevision,
-			},
-		}) {
-			return
-		}
-		if !classifiedCurrent() {
-			return
-		}
-		category := push.CategoryAttention
-		preview := push.PreviewHidden
-		if agentState.AttentionKind == question.AttentionQuestion {
-			category = push.CategoryQuestion
-			preview = push.PreviewQuestion
-		}
-		if s.pushM != nil {
-			s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
-		}
-		if !classifiedCurrent() {
-			return
-		}
-		s.broadcastBlockedAttention(agentState)
-		return
-	}
 	if !s.state.RegisterFinishedNotificationForTransition(paneID, revision) {
 		return
 	}
-	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
 	extract := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID, conversationProject)
 	currentAgent, currentExists := s.state.Agent(paneID)
 	if !transitionCurrent() || agentExists != currentExists ||
 		(agentExists && !sameConversationTuple(agentState, currentAgent)) {
 		return
 	}
-	summary := agent + " completed"
-	if agent == "" {
+	s.publishFinished(ctx, finishedNotice{
+		paneID:         paneID,
+		agent:          agent,
+		project:        project,
+		session:        session,
+		expectedStatus: status,
+		revision:       revision,
+		details:        map[string]any{"transition_at": transitionAt},
+		extract:        extract,
+		pushAgent:      currentAgent,
+	}, transitionCurrent)
+}
+
+type finishedNotice struct {
+	paneID         string
+	agent          string
+	project        string
+	session        string
+	expectedStatus string
+	revision       int64
+	details        map[string]any
+	extract        string
+	pushAgent      *coordinator.AgentState
+}
+
+func (s *Server) publishFinished(ctx context.Context, notice finishedNotice, current func() bool) {
+	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), notice.paneID)
+	notice.details["event_id"] = eventID
+	summary := notice.agent + " completed"
+	if notice.agent == "" {
 		summary = "Agent completed"
 	}
 	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
 		Kind:           "finished",
 		Status:         "completed",
 		Summary:        summary,
-		PaneID:         paneID,
-		ExpectedStatus: status,
-		Revision:       revision,
-		Details:        map[string]any{"event_id": eventID, "transition_at": transitionAt},
-		Agent:          agent,
-		Project:        project,
+		PaneID:         notice.paneID,
+		ExpectedStatus: notice.expectedStatus,
+		Revision:       notice.revision,
+		Details:        notice.details,
+		Agent:          notice.agent,
+		Project:        notice.project,
 		Host:           s.hostname,
-		Session:        session,
-		Extract:        extract,
+		Session:        notice.session,
+		Extract:        notice.extract,
 	}) {
 		return
 	}
-	if !transitionCurrent() {
+	if !current() {
 		return
 	}
-	if s.pushM != nil {
-		if currentAgent != nil {
-			s.publishAgentPush(ctx, currentAgent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
-		} else if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
-			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
-		}
+	if s.pushM == nil {
+		return
+	}
+	if notice.pushAgent != nil {
+		s.publishAgentPush(ctx, notice.pushAgent, eventID, notice.revision, push.CategoryFinished, push.PreviewBrief)
+		return
+	}
+	if err := s.pushM.ResolvePaneID(ctx, notice.paneID, ""); err != nil {
+		s.logger.Warn("push notification retraction failed", "pane_id", notice.paneID, "error", err)
 	}
 }
 
@@ -2098,36 +2149,17 @@ func (s *Server) handleChatCompletion(
 		!s.state.RegisterFinishedNotificationForTransition(agent.PaneID, revision) {
 		return
 	}
-	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), agent.PaneID)
-	summary := agent.Agent + " completed"
-	if agent.Agent == "" {
-		summary = "Agent completed"
-	}
-	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(coordinator.TransitionActivity{
-		Kind:           "finished",
-		Status:         "completed",
-		Summary:        summary,
-		PaneID:         agent.PaneID,
-		ExpectedStatus: "blocked",
-		Revision:       revision,
-		Details: map[string]any{
-			"event_id":       eventID,
-			"attention_kind": agent.AttentionKind,
-		},
-		Agent:   agent.Agent,
-		Project: agent.Project,
-		Host:    s.hostname,
-		Session: agent.Session,
-		Extract: agent.Prompt,
-	}) {
-		return
-	}
-	if !current() {
-		return
-	}
-	if s.pushM != nil {
-		s.publishAgentPush(ctx, agent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
-	}
+	s.publishFinished(ctx, finishedNotice{
+		paneID:         agent.PaneID,
+		agent:          agent.Agent,
+		project:        agent.Project,
+		session:        agent.Session,
+		expectedStatus: "blocked",
+		revision:       revision,
+		details:        map[string]any{"attention_kind": agent.AttentionKind},
+		extract:        agent.Prompt,
+		pushAgent:      agent,
+	}, current)
 }
 
 func (s *Server) captureHistoryLoop(ctx context.Context) {
@@ -2222,20 +2254,21 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 
 func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound protocol.Inbound) {
 	action := "get_conversation_history"
+	reply := s.reply(client, inbound.RequestID, action, inbound.PaneID)
 	agent, exists := s.state.Agent(inbound.PaneID)
 	if !exists {
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent is unavailable", inbound.PaneID, nil)
+		reply.fail("Agent is unavailable")
 		return
 	}
 	generation := s.state.Generation(inbound.PaneID)
 	browser := s.conversationB
 	if browser == nil || browser.Reader() != s.conversationM {
 		s.logger.Warn("conversation browser is unavailable", "pane_id", inbound.PaneID)
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+		reply.fail("Conversation history could not be read")
 		return
 	}
 	if !s.kimiSelectionCurrent(client.Context(), agent) {
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Kimi session changed", inbound.PaneID, nil)
+		reply.fail("Kimi session changed")
 		return
 	}
 	var page conversation.BrowsePage
@@ -2249,7 +2282,7 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 	}
 	if historyErr != nil {
 		s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID)
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+		reply.fail("Conversation history could not be read")
 		return
 	}
 	if s.conversationHistoryReadObserver != nil {
@@ -2259,10 +2292,10 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 	if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
 		!sameConversationTuple(agent, current) || !s.kimiSelectionCurrent(client.Context(), agent) ||
 		s.authorizeDeviceAction(client, protocol.ActionMetadata{Operation: action, Class: protocol.ActionReadOnly}, "") != nil {
-		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
+		reply.fail("Agent changed while conversation history was loading")
 		return
 	}
-	s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
+	reply.complete(page)
 }
 
 func (s *Server) latestConversationResponse(agent, sessionID string, project conversation.ProjectContext) string {
@@ -2454,32 +2487,33 @@ func (s *Server) pruneUploads(ctx context.Context) {
 }
 
 func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, paneID string) {
+	reply := s.reply(client, requestID, "copy_agent_response", paneID)
 	if paneID == "" {
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent is required", paneID, nil)
+		reply.fail("Agent is required")
 		return
 	}
 	agent, ok := s.state.Agent(paneID)
 	if !ok {
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent pane not found", paneID, nil)
+		reply.fail("Agent pane not found")
 		return
 	}
 	if agent.Status == "working" {
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent is still working; wait for the current turn to finish", paneID, nil)
+		reply.fail("Agent is still working; wait for the current turn to finish")
 		return
 	}
 	if message := copyBlockedMessage(agent); message != "" {
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", message, paneID, nil)
+		reply.fail(message)
 		return
 	}
 	if s.clipboardRead == nil || s.clipboardWrite == nil {
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Host clipboard is unavailable", paneID, nil)
+		reply.fail("Host clipboard is unavailable")
 		return
 	}
 	generation := s.state.Generation(paneID)
 	profileID := s.profiles.ResolvePane(paneID, agent.Agent)
 	profile, ok := slashcmd.CopyProfileFor(profileID, agent.Agent)
 	if !ok {
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent does not support response copying", paneID, nil)
+		reply.fail("Agent does not support response copying")
 		return
 	}
 	s.copyMu.Lock()
@@ -2502,14 +2536,14 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 	)
 	if err != nil {
 		s.logger.Warn("agent response copy failed", "pane_id", paneID, "error", err)
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", copyResponseError(err), paneID, nil)
+		reply.fail(copyResponseError(err))
 		return
 	}
 	if s.state.Generation(paneID) != generation {
-		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "The agent pane was replaced while the response was being copied", paneID, nil)
+		reply.fail("The agent pane was replaced while the response was being copied")
 		return
 	}
-	s.sendCommandResult(client, requestID, "copy_agent_response", true, "completed", "", paneID, map[string]any{
+	reply.complete(map[string]any{
 		"text":   result.Text,
 		"source": result.Source,
 		"chars":  result.Chars,
@@ -2521,13 +2555,14 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 // engine and returns the WAV inline. The phone plays it as ordinary media,
 // which keeps working with the screen off where the browser speech API dies.
 func (s *Server) speakText(client *transport.ClientConn, requestID, speechRequestID, text, language string) {
+	reply := s.reply(client, requestID, "speak_text", "")
 	speakable := s.speakableLanguages()
 	if len(speakable) == 0 {
-		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "No speech engine is installed on this computer", "", nil)
+		reply.fail("No speech engine is installed on this computer")
 		return
 	}
 	if !slices.Contains(speakable, language) {
-		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "This computer has no voice for that language", "", nil)
+		reply.fail("This computer has no voice for that language")
 		return
 	}
 	ctx, cancel := context.WithTimeout(client.Context(), 15*time.Second)
@@ -2560,10 +2595,10 @@ func (s *Server) speakText(client *transport.ClientConn, requestID, speechReques
 	wav, err := s.speechSynth(ctx, text, language)
 	if err != nil {
 		s.logger.Warn("speech synthesis failed", "error", err, "language", language)
-		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "Speech synthesis failed on this computer", "", nil)
+		reply.fail("Speech synthesis failed on this computer")
 		return
 	}
-	s.sendCommandResult(client, requestID, "speak_text", true, "completed", "", "", map[string]any{
+	reply.complete(map[string]any{
 		"format": "wav",
 		"audio":  base64.StdEncoding.EncodeToString(wav),
 	})
@@ -2613,12 +2648,13 @@ func (s *Server) rememberSpeechLanguages(languages []string) []string {
 // changeSpeechVoice downloads or deletes one cached voice, then tells every
 // connected phone what this computer can speak now.
 func (s *Server) changeSpeechVoice(client *transport.ClientConn, requestID, action, language string) {
+	reply := s.reply(client, requestID, action, "")
 	if !slices.Contains(speech.Offered, language) {
-		s.sendCommandResult(client, requestID, action, false, "failed", "That language is not one this app reads aloud", "", nil)
+		reply.fail("That language is not one this app reads aloud")
 		return
 	}
 	if action != "speech_voice_remove" && !s.speechStatus().ManagementSupported {
-		s.sendCommandResult(client, requestID, action, false, "failed", "Voice downloads are not supported on this computer", "", s.speechVoicePayload(nil))
+		reply.failWithData("Voice downloads are not supported on this computer", s.speechVoicePayload(nil))
 		return
 	}
 	label := speech.LanguageLabel(language)
@@ -2637,11 +2673,11 @@ func (s *Server) changeSpeechVoice(client *transport.ClientConn, requestID, acti
 		if action == "speech_voice_remove" {
 			message = fmt.Sprintf("Removing the %s voice failed on this computer", label)
 		}
-		s.sendCommandResult(client, requestID, action, false, "failed", message, "", status)
+		reply.failWithData(message, status)
 		return
 	}
 	s.hub.Broadcast(s.speechVoicePayload(map[string]any{"type": "speech_voices"}))
-	s.sendCommandResult(client, requestID, action, true, "completed", "", "", status)
+	reply.complete(status)
 }
 
 // speechVoicePayload reads the cache and republishes what this computer can
@@ -2993,24 +3029,55 @@ func unchangedPaneResponse(message, response map[string]any) map[string]any {
 	}
 }
 
-func (s *Server) sendCommandResult(
-	client *transport.ClientConn,
-	requestID, action string,
-	ok bool,
-	phase, publicError string,
-	paneID string,
-	data any,
-) {
+type commandReply struct {
+	server    *Server
+	client    *transport.ClientConn
+	requestID string
+	action    string
+	paneID    string
+	audited   map[string]any
+}
+
+func (s *Server) reply(client *transport.ClientConn, requestID, action, paneID string) commandReply {
+	return commandReply{server: s, client: client, requestID: requestID, action: action, paneID: paneID}
+}
+
+func (s *Server) auditedReply(client *transport.ClientConn, request map[string]any, requestID, action, paneID string) commandReply {
+	reply := s.reply(client, requestID, action, paneID)
+	reply.audited = request
+	return reply
+}
+
+func (r commandReply) fail(message string) {
+	r.send(false, "failed", message, nil)
+}
+
+func (r commandReply) failWithData(message string, data any) {
+	r.send(false, "failed", message, data)
+}
+
+func (r commandReply) complete(data any) {
+	r.send(true, "completed", "", data)
+}
+
+func (r commandReply) schedule(data any) {
+	r.send(true, "scheduled", "", data)
+}
+
+func (r commandReply) send(ok bool, phase, publicError string, data any) {
 	result := &coordinator.CommandResult{
-		RequestID: requestID,
-		Action:    action,
+		RequestID: r.requestID,
+		Action:    r.action,
 		OK:        ok,
 		Phase:     phase,
 		Error:     publicError,
-		PaneID:    paneID,
+		PaneID:    r.paneID,
 		Data:      data,
 	}
-	s.hub.Send(client, coordinator.CommandResultMessage(result))
+	if r.audited != nil {
+		r.server.recordWriteAudit(r.client, r.audited, result)
+	}
+	r.server.hub.Send(r.client, coordinator.CommandResultMessage(result))
 }
 
 func fitSlashCommandCatalog(catalog slashcmd.Catalog, requestID, action, paneID string) slashcmd.Catalog {
@@ -3056,28 +3123,6 @@ func slashCommandResultFits(catalog slashcmd.Catalog, requestID, action, paneID 
 	})
 	encoded, err := json.Marshal(message)
 	return err == nil && len(encoded) <= transport.MaxOutboundMessageBytes
-}
-
-func (s *Server) sendAuditedCommandResult(
-	client *transport.ClientConn,
-	message map[string]any,
-	requestID, action string,
-	ok bool,
-	phase, publicError string,
-	paneID string,
-	data any,
-) {
-	result := &coordinator.CommandResult{
-		RequestID: requestID,
-		Action:    action,
-		OK:        ok,
-		Phase:     phase,
-		Error:     publicError,
-		PaneID:    paneID,
-		Data:      data,
-	}
-	s.recordWriteAudit(client, message, result)
-	s.hub.Send(client, coordinator.CommandResultMessage(result))
 }
 
 func (s *Server) watchJobStates(ctx context.Context) {

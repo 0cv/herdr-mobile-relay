@@ -423,19 +423,19 @@ func (s *Server) handleWebRTCSignal(
 	msg map[string]any,
 ) {
 	h := s.hybrid
+	reply := s.reply(client, requestID, action, "")
 	if !h.directEnabled() {
-		s.sendCommandResult(client, requestID, action, false, "failed", errSignalUnavailable.Error(), "", nil)
+		reply.fail(errSignalUnavailable.Error())
 		return
 	}
 	// A DataChannel client is already direct; renegotiating from there would
 	// stack a second peer connection on top of the first.
 	if client.Transport() == transport.TransportWebRTC {
-		s.sendCommandResult(client, requestID, action, false, "failed",
-			"already connected over a direct channel", "", nil)
+		reply.fail("already connected over a direct channel")
 		return
 	}
 	if requestID == "" {
-		s.sendCommandResult(client, requestID, action, false, "failed", "request_id is required", "", nil)
+		reply.fail("request_id is required")
 		return
 	}
 	key := webrtclink.SessionKey{ClientID: client.ID(), RequestID: requestID}
@@ -443,19 +443,18 @@ func (s *Server) handleWebRTCSignal(
 	switch action {
 	case "webrtc_offer":
 		if !h.allowSignal(client.ID(), time.Now()) {
-			s.sendCommandResult(client, requestID, action, false, "failed",
-				"too many direct-connection attempts; retry shortly", "", nil)
+			reply.fail("too many direct-connection attempts; retry shortly")
 			return
 		}
 		offer := stringField(msg, "sdp")
 		if offer == "" {
-			s.sendCommandResult(client, requestID, action, false, "failed", "sdp is required", "", nil)
+			reply.fail("sdp is required")
 			return
 		}
 		answer, err := h.webrtc.HandleOffer(ctx, key, offer)
 		if err != nil {
 			s.logger.Debug("webrtc offer rejected", "client_id", client.ID(), "error", err)
-			s.sendCommandResult(client, requestID, action, false, "failed", err.Error(), "", nil)
+			reply.fail(err.Error())
 			return
 		}
 		s.hub.Send(client, map[string]any{
