@@ -278,7 +278,7 @@ it('clears the error when the lease is synchronised again', async () => {
   expect(lease.error).not.toBe('');
 
   lease.sync({
-    enabled: true, active: true, readOnly: false, questionMode: false, connected: true, paneId: target.pane_id,
+    enabled: true, active: true, readOnly: false, questionMode: false, connected: true,
   });
   expect(lease.error).toBe('');
 });
@@ -365,7 +365,7 @@ it('releases without reporting when stopped', async () => {
 
 it('releases for question mode and read-only, and only discards when off or disconnected', async () => {
   const { lease, releases } = build();
-  const inputs = { enabled: true, active: true, readOnly: false, questionMode: false, connected: true, paneId: target.pane_id };
+  const inputs = { enabled: true, active: true, readOnly: false, questionMode: false, connected: true };
   lease.request(false);
   await settle();
 
@@ -393,7 +393,7 @@ it('releases for question mode and read-only, and only discards when off or disc
 it('requests a lease after a tick once synchronised with a usable session', async () => {
   const { lease, leases } = build();
   lease.sync({
-    enabled: true, active: true, readOnly: false, questionMode: false, connected: true, paneId: target.pane_id,
+    enabled: true, active: true, readOnly: false, questionMode: false, connected: true,
   });
   expect(leases).not.toHaveBeenCalled();
   await settle();

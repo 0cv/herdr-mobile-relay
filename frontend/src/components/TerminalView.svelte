@@ -401,7 +401,6 @@
       readOnly,
       questionMode,
       connected: $connections.get(agent.relay_id)?.status === 'connected',
-      paneId: agent.pane_id,
     });
   });
 

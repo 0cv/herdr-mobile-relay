@@ -27,7 +27,6 @@ export interface PaneSizeLeaseInputs {
   readOnly: boolean;
   questionMode: boolean;
   connected: boolean;
-  paneId: string;
 }
 
 export class PaneSizeLease {
@@ -110,7 +109,6 @@ export class PaneSizeLease {
       this.error = '';
       return;
     }
-    if (this.target && this.target.pane_id !== inputs.paneId) this.release(this.mounted);
     this.error = '';
     void tick().then(() => this.request(false));
   }
@@ -159,8 +157,7 @@ export class PaneSizeLease {
     // owns focus the lease keeps its resting height and may only grow; the
     // resize listeners re-measure the moment the keyboard closes.
     if (this.host.typing() && rows && this.rows && rows < this.rows) rows = this.rows;
-    const sameTarget = this.target?.pane_id === target.pane_id;
-    if (!force && sameTarget && columns === this.columns && rows === this.rows) return;
+    if (!force && columns === this.columns && rows === this.rows) return;
     if (this.queued && this.queued.columns === columns && this.queued.rows === rows) {
       this.queued = { columns, rows, force: this.queued.force || force };
     } else this.queued = { columns, rows, force };
@@ -209,21 +206,15 @@ export class PaneSizeLease {
         const target = this.host.agent();
         if (!this.supported(target)) continue;
         if (!request.force
-          && this.target?.pane_id === target.pane_id
           && request.columns === this.columns
           && request.rows === this.rows) continue;
-        if (this.target && this.target.pane_id !== target.pane_id) {
-          this.release(this.mounted);
-        }
         const generation = this.generation;
         this.target = target;
         try {
           if (request.columns !== this.columns
             || request.rows !== this.rows) this.beginSettling();
           const applied = await this.host.lease(target, request.columns, request.rows);
-          if (generation !== this.generation
-            || this.target?.pane_id !== target.pane_id
-            || !this.supported(target)) continue;
+          if (generation !== this.generation || !this.supported(target)) continue;
           const changed = applied.columns !== this.columns
             || applied.rows !== this.rows;
           this.columns = applied.columns;
@@ -235,9 +226,7 @@ export class PaneSizeLease {
             this.host.applied(target);
           }
         } catch (error) {
-          if (generation === this.generation
-            && this.target?.pane_id === target.pane_id
-            && this.supported(target)) {
+          if (generation === this.generation && this.supported(target)) {
             this.queued = null;
             this.columns = 0;
             this.rows = 0;
