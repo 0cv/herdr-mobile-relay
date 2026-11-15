@@ -73,12 +73,7 @@ var agySkillRoots = []string{filepath.Join(".gemini", "skills")}
 
 func (p *agyProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	commands := make([]Command, len(agyBuiltins))
-	copy(commands, agyBuiltins)
-	seen := make(map[string]bool, len(commands))
-	for _, command := range commands {
-		seen[command.Command] = true
-	}
+	list := newCommandList(agyBuiltins, false)
 
 	var dirs []string
 	for _, root := range agySkillRoots {
@@ -92,20 +87,15 @@ func (p *agyProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 	dirs = append(dirs, ctx.SkillDirs...)
 	if len(dirs) == 0 {
-		return commands, reader.truncated
+		return list.commands(), reader.truncated
 	}
 	format := ctx.CommandFormat
 	if format == "" {
 		format = "/{name}"
 	}
 	custom, truncated := reader.discoverGenericSkills(dirs, format)
-	for _, command := range custom {
-		if !seen[command.Command] {
-			seen[command.Command] = true
-			commands = append(commands, command)
-		}
-	}
-	return commands, truncated
+	list.addIfAbsent(custom)
+	return list.commands(), truncated
 }
 
 func init() {

@@ -109,10 +109,7 @@ var ompBuiltins = []Command{
 func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
 	if ctx.CommandFormat != "" {
-		// The relay's INI configured this profile explicitly, which outranks
-		// discovery.
-		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(ompBuiltins, custom), truncated || reader.truncated
+		return reader.configuredCatalog(ompBuiltins, ctx)
 	}
 
 	settings := reader.loadOMPSkillSettings(ctx)

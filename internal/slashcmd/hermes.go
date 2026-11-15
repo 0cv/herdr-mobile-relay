@@ -80,12 +80,7 @@ func parseHermesSkillMetadata(metadata map[string]string, dirName, source string
 func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
 
-	commands := make([]Command, 0, len(hermesBuiltins))
-	commands = append(commands, hermesBuiltins...)
-	seen := make(map[string]bool, len(hermesBuiltins))
-	for _, cmd := range hermesBuiltins {
-		seen[cmd.Command] = true
-	}
+	list := newCommandList(hermesBuiltins, false)
 
 	truncated := false
 	budget := maxCustomFiles
@@ -99,12 +94,7 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		}
 		projectSkills := filepath.Join(projectRoot, ".hermes", "skills")
 		cmds, trunc := reader.scanHermesSkillDirBudget(projectSkills, "project", projectRoot, &budget)
-		for _, cmd := range cmds {
-			if !seen[cmd.Command] {
-				seen[cmd.Command] = true
-				commands = append(commands, cmd)
-			}
-		}
+		list.addIfAbsent(cmds)
 		truncated = truncated || trunc
 	}
 
@@ -113,12 +103,7 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if home := reader.hermesHome(ctx); home != "" {
 		personalSkills := filepath.Join(home, "skills")
 		cmds, trunc := reader.scanHermesSkillDirBudget(personalSkills, "personal", "", &budget)
-		for _, cmd := range cmds {
-			if !seen[cmd.Command] {
-				seen[cmd.Command] = true
-				commands = append(commands, cmd)
-			}
-		}
+		list.addIfAbsent(cmds)
 		truncated = truncated || trunc
 	}
 
@@ -129,16 +114,11 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			format = "/{name}"
 		}
 		custom, trunc := reader.discoverGenericSkills(ctx.SkillDirs, format)
-		for _, cmd := range custom {
-			if !seen[cmd.Command] {
-				seen[cmd.Command] = true
-				commands = append(commands, cmd)
-			}
-		}
+		list.addIfAbsent(custom)
 		truncated = truncated || trunc
 	}
 
-	return commands, truncated || reader.truncated
+	return list.commands(), truncated || reader.truncated
 }
 
 func (reader *catalogReader) hermesHome(ctx DiscoverContext) string {

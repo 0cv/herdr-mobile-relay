@@ -71,10 +71,7 @@ func (p *kimiProvider) Builtins() []Command { return kimiBuiltins }
 func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
 	if ctx.CommandFormat != "" {
-		// The relay's INI configured this profile explicitly, which outranks
-		// discovery.
-		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(kimiBuiltins, custom), truncated || reader.truncated
+		return reader.configuredCatalog(kimiBuiltins, ctx)
 	}
 
 	configDir := filepath.Join(ctx.Home, ".kimi-code")
@@ -91,19 +88,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	truncated := false
 	budget := maxCustomFiles
-	active := make(map[string]Command, len(kimiBuiltins))
-	order := make([]string, 0, len(kimiBuiltins))
-	apply := func(commands []Command) {
-		for _, command := range commands {
-			key := strings.ToLower(command.Command)
-			if _, exists := active[key]; exists {
-				continue
-			}
-			order = append(order, key)
-			active[key] = command
-		}
-	}
-	apply(kimiBuiltins)
+	list := newCommandList(kimiBuiltins, true)
 	seenFiles := make(map[string]bool)
 	seenDirs := make(map[string]bool)
 
@@ -115,7 +100,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				continue
 			}
 			cmds, trunc := reader.scanPiSkillTree(dir, scope, nil, true, true, &budget, seenFiles, seenDirs)
-			apply(cmds)
+			list.addIfAbsent(cmds)
 			truncated = truncated || trunc
 		}
 	}
@@ -156,16 +141,10 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scan("personal", dir)
 	}
 
-	commands := make([]Command, 0, len(order))
-	for _, name := range order {
-		if command, exists := active[name]; exists {
-			commands = append(commands, command)
-		}
-	}
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated || reader.truncated
+	return list.commands(), truncated || reader.truncated
 }
 
 func init() { registerProvider(&kimiProvider{}) }

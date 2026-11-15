@@ -105,6 +105,16 @@ func CatalogFor(profileID, reportedAgent string, ctx DiscoverContext) Catalog {
 	return finalizeCatalog(commands, truncated)
 }
 
+// configuredCatalog serves a profile whose INI file named the command format:
+// the builtins, then skills from the configured directories, builtins winning
+// name collisions. Native discovery is skipped.
+func (reader *catalogReader) configuredCatalog(builtins []Command, ctx DiscoverContext) ([]Command, bool) {
+	custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+	list := newCommandList(builtins, false)
+	list.addIfAbsent(custom)
+	return list.commands(), truncated || reader.truncated
+}
+
 func providerFor(profileID, agent string) Provider {
 	if provider := resolveProvider(profileID); provider != nil {
 		return provider
