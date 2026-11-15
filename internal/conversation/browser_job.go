@@ -194,17 +194,12 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	if code := b.ensureCapacity(request, nil, "admission", true); code != "" {
 		return nil, capacityFailurePage(code)
 	}
-	metadata := snapshotMetadata{
-		Schema: 1, State: "building", SnapshotID: snapshotID, SourceRevision: source.revision,
-		EndOffset: source.end, Boundary: boundary, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	index, err := openSnapshotIndex(b.cacheRoot, snapshotID, metadata)
+	index, code, err := b.openSnapshotWithCapacity(request, "admission", snapshotID, source, boundary)
 	if err != nil {
 		page := failPage("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true)
 		return nil, &page
 	}
-	if code := b.ensureCapacity(request, index, "admission", false); code != "" {
-		_ = index.remove()
+	if code != "" {
 		return nil, capacityFailurePage(code)
 	}
 	b.mu.Lock()
@@ -249,6 +244,22 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	return job, nil
 }
 
+func (b *Browser) openSnapshotWithCapacity(owner *browseJob, stage, snapshotID string, source fileSource, boundary int64) (*snapshotIndex, string, error) {
+	metadata := snapshotMetadata{
+		Schema: 1, State: "building", SnapshotID: snapshotID, SourceRevision: source.revision,
+		EndOffset: source.end, Boundary: boundary, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	index, err := openSnapshotIndex(b.cacheRoot, snapshotID, metadata)
+	if err != nil {
+		return nil, "", err
+	}
+	if code := b.ensureCapacity(owner, index, stage, false); code != "" {
+		_ = index.remove()
+		return nil, code, nil
+	}
+	return index, "", nil
+}
+
 func randomIdentifier() (string, error) {
 	var bytes [16]byte
 	if _, err := cryptorand.Read(bytes[:]); err != nil {
@@ -279,15 +290,8 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 		return b.preparingPage(job, cursor), nil
 	}
 	if state == BrowseFailed {
-		if err != nil && err.Retryable && (request.Retry || !autoRetried) {
-			if !request.Retry {
-				job.mu.Lock()
-				job.autoRetried = true
-				job.mu.Unlock()
-			}
-			if b.retryJob(ctx, job, nil) {
-				return b.preparingPage(job, cursor), nil
-			}
+		if b.retryFailedJob(ctx, job, err, autoRetried, request.Retry, nil) {
+			return b.preparingPage(job, cursor), nil
 		}
 		if err == nil {
 			err = browseErrorFor("index_failed", "History preparation failed.", true)
@@ -302,6 +306,18 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 		}, nil
 	}
 	return b.readSnapshotPage(ctx, request.Scope, request.Limit, job)
+}
+
+func (b *Browser) retryFailedJob(ctx context.Context, job *browseJob, failure *BrowseError, autoRetried, explicitRetry bool, foregroundBudget *claudeChainForegroundBudget) bool {
+	if failure == nil || !failure.Retryable || (!explicitRetry && autoRetried) {
+		return false
+	}
+	if !explicitRetry {
+		job.mu.Lock()
+		job.autoRetried = true
+		job.mu.Unlock()
+	}
+	return b.retryJob(ctx, job, foregroundBudget)
 }
 
 func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget *claudeChainForegroundBudget) bool {
@@ -384,16 +400,8 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget
 	if err != nil {
 		return false
 	}
-	metadata := snapshotMetadata{
-		Schema: 1, State: "building", SnapshotID: snapshotID, SourceRevision: source.revision,
-		EndOffset: source.end, Boundary: boundary, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	index, err := openSnapshotIndex(b.cacheRoot, snapshotID, metadata)
-	if err != nil {
-		return false
-	}
-	if code := b.ensureCapacity(job, index, "retry", false); code != "" {
-		_ = index.remove()
+	index, code, err := b.openSnapshotWithCapacity(job, "retry", snapshotID, source, boundary)
+	if err != nil || code != "" {
 		return false
 	}
 	b.mu.Lock()

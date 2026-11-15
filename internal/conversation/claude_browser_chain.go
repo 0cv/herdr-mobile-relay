@@ -1836,15 +1836,8 @@ func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequ
 		job.mu.RLock()
 		autoRetried := job.autoRetried
 		job.mu.RUnlock()
-		if failure.Retryable && (request.Retry || !autoRetried) {
-			if !request.Retry {
-				job.mu.Lock()
-				job.autoRetried = true
-				job.mu.Unlock()
-			}
-			if b.retryJob(ctx, job, budget.validation) {
-				return b.claudeChainPreparingPageForJob(request.Scope, chain, segmentIndex, boundary, byteBoundary, job)
-			}
+		if b.retryFailedJob(ctx, job, failure, autoRetried, request.Retry, budget.validation) {
+			return b.claudeChainPreparingPageForJob(request.Scope, chain, segmentIndex, boundary, byteBoundary, job)
 		}
 		view := b.claudeChainView(chain)
 		cursor, _ := b.claudeChainCursor(request.Scope, chain, segmentIndex, boundary, byteBoundary)
