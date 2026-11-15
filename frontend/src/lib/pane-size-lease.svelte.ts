@@ -57,6 +57,10 @@ export class PaneSizeLease {
 
   constructor(private readonly host: PaneSizeLeaseHost) {}
 
+  get layoutColumns(): number {
+    return this.columns || this.renderedColumns;
+  }
+
   start() {
     this.mounted = true;
     this.renewalTimer = setInterval(() => {

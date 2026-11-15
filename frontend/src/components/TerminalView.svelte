@@ -189,7 +189,7 @@
   const resizeLayoutActive = $derived(terminalResizeLayoutEngaged(
     resizeSessionActive,
     measuredCellWidth,
-    lease.columns || lease.renderedColumns,
+    lease.layoutColumns,
   ));
   // Three regimes, not two. A relay that cannot lease at all serves a pane at
   // its own width, and the fixed layout keeps that pane's columns aligned and
@@ -260,7 +260,7 @@
     // fall back to the container width and shred rows mid-word: the fixed
     // layout applies instead until a real cap exists.
     if (measuredCellWidth <= 0) return undefined;
-    const capColumns = lease.columns || lease.renderedColumns;
+    const capColumns = lease.layoutColumns;
     const styles = [`--terminal-cell-width: ${measuredCellWidth.toFixed(4)}px`];
     if (resizeLayoutActive) {
       styles.push(`--terminal-width: ${(capColumns * measuredCellWidth).toFixed(4)}px`);
@@ -722,7 +722,7 @@
     const layoutSignature = [
       resizeLayoutActive ? 'resize' : 'fixed',
       lastPreserveLineEnds ? 'line-ends' : 'wrapped',
-      lease.columns || lease.renderedColumns,
+      lease.layoutColumns,
       $interfaceSize,
       width,
     ].join(':');
@@ -737,8 +737,7 @@
     const parsedLineHeight = Number.parseFloat(style?.lineHeight || '');
     const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : 18;
     const wrappingColumns = measuredPaneColumns()
-      || lease.columns
-      || lease.renderedColumns
+      || lease.layoutColumns
       || 80;
     const sizes = renderedRows.map((row) => {
       const measured = virtualHeightCache.get(row.html);
@@ -772,7 +771,7 @@
       virtualContentColumns = terminalScreenColumns(
         renderedRows,
         resizeLayoutActive,
-        lease.columns || lease.renderedColumns,
+        lease.layoutColumns,
       );
     }
     renderVirtualWindow(nextTop, true);
