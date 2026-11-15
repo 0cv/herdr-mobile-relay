@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../support/probe-child-process';
 import { repositoryPath } from '../support/paths';
 import { observationsFixture, environmentFixture, measurementIdentity } from './android-product-environment';
 import { assessAndroidEnvironment } from '../android-environment';

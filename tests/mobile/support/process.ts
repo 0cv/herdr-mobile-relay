@@ -1,4 +1,4 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from './probe-child-process';
 import { redactText } from './diagnostics';
 import { PhaseBudget, PhaseBudgetError } from './budget';
 

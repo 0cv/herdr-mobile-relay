@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './probe-child-process';
 import { lstat, mkdir, readFile, readdir, rm, stat, writeFile, cp } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync, type ChildProcess } from 'node:child_process';
+import { timed } from '../support/case-probe';
+import { execFileSync, type ChildProcess } from '../support/probe-child-process';
 import { closeSync, createWriteStream, openSync, readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
@@ -8,7 +9,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnOwnedProcess } from '../support/owned-process';
-import { setTimeout as wait } from 'node:timers/promises';
+import { setTimeout as wait } from '../support/probe-timers-promises';
 import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, type IOSPlatformIO, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
 import { AppiumClient, WebDriverError, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock } from '../support/ios-launch-receipt';
@@ -5170,8 +5171,8 @@ export async function runIOSRegressions(selectedIds?: readonly string[], honorEn
     if (filter && !filter.test(name)) continue;
     executedTests++;
     try {
-      const outcome = name.startsWith('Plan13 hierarchy full install ')
-        ? await runIsolatedHierarchyCase(name) : await body();
+      const outcome = await timed('ios-inner', `iOS ${name}`, () => name.startsWith('Plan13 hierarchy full install ')
+        ? runIsolatedHierarchyCase(name) : body());
       process.stdout.write(outcome ? `ok - iOS ${name} # SKIP ${outcome}\n` : `ok - iOS ${name}\n`);
     } catch (error) {
       failures += 1;

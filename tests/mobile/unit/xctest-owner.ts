@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from '../support/probe-child-process';
 import { createHash, randomBytes } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { cp, mkdtemp, mkdir, readFile, writeFile, rm, realpath, symlink } from 'node:fs/promises';

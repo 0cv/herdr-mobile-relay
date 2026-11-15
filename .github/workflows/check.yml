@@ -276,6 +276,11 @@ jobs:
           path: ${{ runner.temp }}/unit-ci-${{ matrix.group_id }}/
           if-no-files-found: error
           retention-days: 1
+      - name: Print per-case timings
+        if: always()
+        run: |
+          echo "CASE_TIMING_RUNNER $(uname -sm) image=${ImageOS:-} runner=${RUNNER_NAME:-} group=${{ matrix.group_id }}"
+          sed 's/^/CASE_TIMING\t/' /tmp/case-timing.tsv || true
 
   mobile-unit-aggregate:
     name: Complete mobile unit shard gate

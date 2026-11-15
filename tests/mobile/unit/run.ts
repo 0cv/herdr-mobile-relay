@@ -1,6 +1,7 @@
+import { timed } from '../support/case-probe';
 import { strict as assert } from 'node:assert';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from '../support/probe-child-process';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2688,7 +2689,7 @@ async function runUnitTests(): Promise<void> {
     if (filteredNames && !filteredNames.has(name)) continue;
     executedTests++;
     try {
-      const outcome = await body();
+      const outcome = await timed('outer', name, body);
       process.stdout.write(outcome ? `ok - ${name} # SKIP ${outcome}\n` : `ok - ${name}\n`);
     } catch (error) {
       failures += 1;

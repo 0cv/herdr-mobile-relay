@@ -4,7 +4,7 @@ import { readFile, realpath, writeFile, rename, symlink, unlink, mkdtemp, rm } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../support/probe-child-process';
 import { createHash } from 'node:crypto';
 import { AppiumClient } from '../support/webdriver';
 import { IOSPlatform } from '../platforms/ios';

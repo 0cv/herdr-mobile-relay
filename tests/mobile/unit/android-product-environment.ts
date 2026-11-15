@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from '../support/probe-child-process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile, rm, truncate, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

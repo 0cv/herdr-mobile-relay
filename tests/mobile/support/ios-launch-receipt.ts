@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from './probe-child-process';
 import type { EventEmitter } from 'node:events';
 import type { WebDriverCommandEvidence, WebDriverSnapshot } from './webdriver';
 

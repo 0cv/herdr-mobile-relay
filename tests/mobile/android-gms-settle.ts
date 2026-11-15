@@ -1,4 +1,4 @@
-import { setTimeout as delay } from 'node:timers/promises';
+import { setTimeout as delay } from './support/probe-timers-promises';
 import { parseAndroidGmsComponentState } from './android-environment';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 import { command } from './support/process';

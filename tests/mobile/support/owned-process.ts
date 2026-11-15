@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from './probe-child-process';
 import { closeSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
