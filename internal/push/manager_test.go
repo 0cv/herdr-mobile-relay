@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func testLogger() *slog.Logger {
@@ -1156,5 +1158,95 @@ func TestPushEventKeyBoundsOwnedIdentifiersOnly(t *testing.T) {
 				t.Fatalf("opaque target identifier was rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestFailedPersistLeavesPolicyAndQueueUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := newPolicyEngine(filepath.Join(dir, "policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	key := typedTestKey("device-1")
+	snoozed := DefaultDevicePolicy("device-1", "en")
+	snoozed.Snoozed = true
+	if err := engine.Set(snoozed); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.MarkAccepted(key, now); err != nil {
+		t.Fatal(err)
+	}
+	target := protocol.TargetRef{ServerSessionID: "session", PaneID: "pane", TerminalID: "terminal"}
+	engine.SetViewedPane("device-1", &target)
+	engine.path = filepath.Join(dir, "missing", "policy.json")
+
+	if err := engine.Set(DefaultDevicePolicy("device-1", "en")); err == nil {
+		t.Fatal("Set() succeeded with a broken path")
+	}
+	if err := engine.Set(DefaultDevicePolicy("device-2", "en")); err == nil {
+		t.Fatal("Set() succeeded with a broken path")
+	}
+	if err := engine.MarkAccepted(key, now.Add(time.Hour)); err == nil {
+		t.Fatal("MarkAccepted() succeeded with a broken path")
+	}
+	if err := engine.RemoveDevice("device-1"); err == nil {
+		t.Fatal("RemoveDevice() succeeded with a broken path")
+	}
+	if !engine.Get("device-1", "en").Snoozed {
+		t.Fatal("failed writes changed the stored policy")
+	}
+	if got := engine.state.LastAccepted[policySlot(key)]; !got.Equal(now) {
+		t.Fatalf("last accepted = %s, want %s", got, now)
+	}
+	if _, ok := engine.state.Policies["device-2"]; ok {
+		t.Fatal("failed Set() stored a new policy")
+	}
+	if got := engine.viewedPanes["device-1"]; got != target {
+		t.Fatalf("viewed pane = %#v, want %#v", got, target)
+	}
+
+	queue, err := newDurableQueue(filepath.Join(dir, "queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := PushEvent{Key: key, Payload: []byte(`{"type":"question"}`), CreatedAt: now, ExpiresAt: now.Add(time.Minute)}
+	subscription := typedTestSubscription("device-1", "https://fcm.googleapis.com/one")
+	if _, err := queue.enqueue(event, subscription, now); err != nil {
+		t.Fatal(err)
+	}
+	queue.state.Delivered["delivered"] = deliveredRecord{Key: key, Subscription: subscription}
+	queue.path = filepath.Join(dir, "missing", "queue.json")
+
+	other := typedTestKey("device-1")
+	other.EventID = "other-event"
+	otherEvent := event
+	otherEvent.Key = other
+	if _, err := queue.enqueue(otherEvent, subscription, now); err == nil {
+		t.Fatal("enqueue() succeeded with a broken path")
+	}
+	if err := queue.cancelKey(key); err == nil {
+		t.Fatal("cancelKey() succeeded with a broken path")
+	}
+	if err := queue.removeSubscriptions("device-1", []string{subscription.Endpoint}); err == nil {
+		t.Fatal("removeSubscriptions() succeeded with a broken path")
+	}
+	replacement := typedTestSubscription("device-1", "https://fcm.googleapis.com/two")
+	if err := queue.replaceSubscriptionsWhileProcessing("device-1", []string{subscription.Endpoint}, replacement); err == nil {
+		t.Fatal("replaceSubscriptionsWhileProcessing() succeeded with a broken path")
+	}
+	if err := queue.forgetDelivered(key); err == nil {
+		t.Fatal("forgetDelivered() succeeded with a broken path")
+	}
+	if err := queue.removeDevice("device-1"); err == nil {
+		t.Fatal("removeDevice() succeeded with a broken path")
+	}
+	if len(queue.state.Entries) != 1 || len(queue.state.Delivered) != 1 {
+		t.Fatalf("failed writes changed the queue: %#v", queue.state)
+	}
+	for _, entry := range queue.state.Entries {
+		if entry.Subscription.Endpoint != subscription.Endpoint || entry.Event.Key != key {
+			t.Fatalf("queued entry changed: %#v", entry)
+		}
 	}
 }

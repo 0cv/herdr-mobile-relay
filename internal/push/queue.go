@@ -66,6 +66,13 @@ type queueFile struct {
 	Delivered map[string]deliveredRecord `json:"delivered"`
 }
 
+func (f queueFile) clone() queueFile {
+	return queueFile{
+		Entries:   maps.Clone(f.Entries),
+		Delivered: maps.Clone(f.Delivered),
+	}
+}
+
 type durableQueue struct {
 	mu      sync.Mutex
 	process sync.Mutex
@@ -106,14 +113,9 @@ func (q *durableQueue) enqueue(event PushEvent, subscription Subscription, dueAt
 	entry := queueEntry{ID: id, Event: event, Subscription: subscription, DueAt: dueAt}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	previous, existed := q.state.Entries[id]
-	q.state.Entries[id] = entry
-	if err := q.persistLocked(); err != nil {
-		if existed {
-			q.state.Entries[id] = previous
-		} else {
-			delete(q.state.Entries, id)
-		}
+	next := q.state.clone()
+	next.Entries[id] = entry
+	if err := q.commitLocked(next); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -124,23 +126,16 @@ func (q *durableQueue) cancelKey(key PushEventKey) error {
 	defer q.process.Unlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	removed := make(map[string]queueEntry)
-	for id, entry := range q.state.Entries {
+	next := q.state.clone()
+	for id, entry := range next.Entries {
 		if entry.Event.Key == key {
-			removed[id] = entry
-			delete(q.state.Entries, id)
+			delete(next.Entries, id)
 		}
 	}
-	if len(removed) == 0 {
+	if len(next.Entries) == len(q.state.Entries) {
 		return nil
 	}
-	if err := q.persistLocked(); err != nil {
-		for id, entry := range removed {
-			q.state.Entries[id] = entry
-		}
-		return err
-	}
-	return nil
+	return q.commitLocked(next)
 }
 
 func (q *durableQueue) removeSubscriptions(deviceID string, endpoints []string) error {
@@ -153,24 +148,18 @@ func (q *durableQueue) removeSubscriptions(deviceID string, endpoints []string) 
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	previousEntries := maps.Clone(q.state.Entries)
-	previousDelivered := maps.Clone(q.state.Delivered)
-	for id, entry := range q.state.Entries {
+	next := q.state.clone()
+	for id, entry := range next.Entries {
 		if entry.Subscription.DeviceID == deviceID && remove[entry.Subscription.Endpoint] {
-			delete(q.state.Entries, id)
+			delete(next.Entries, id)
 		}
 	}
-	for id, record := range q.state.Delivered {
+	for id, record := range next.Delivered {
 		if record.Subscription.DeviceID == deviceID && remove[record.Subscription.Endpoint] {
-			delete(q.state.Delivered, id)
+			delete(next.Delivered, id)
 		}
 	}
-	if err := q.persistLocked(); err != nil {
-		q.state.Entries = previousEntries
-		q.state.Delivered = previousDelivered
-		return err
-	}
-	return nil
+	return q.commitLocked(next)
 }
 
 func (q *durableQueue) replaceSubscriptionsWhileProcessing(deviceID string, endpoints []string, replacement Subscription) error {
@@ -185,36 +174,30 @@ func (q *durableQueue) replaceSubscriptionsWhileProcessing(deviceID string, endp
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	previousEntries := maps.Clone(q.state.Entries)
-	previousDelivered := maps.Clone(q.state.Delivered)
+	next := q.state.clone()
 	for id, entry := range q.state.Entries {
 		if entry.Subscription.DeviceID != deviceID || !replace[entry.Subscription.Endpoint] {
 			continue
 		}
-		delete(q.state.Entries, id)
+		delete(next.Entries, id)
 		entry.Subscription = replacement
 		entry.ID = deliveryID(entry.Event.Key, replacement.Endpoint)
-		if _, exists := q.state.Entries[entry.ID]; !exists {
-			q.state.Entries[entry.ID] = entry
+		if _, exists := next.Entries[entry.ID]; !exists {
+			next.Entries[entry.ID] = entry
 		}
 	}
-	for id, record := range q.state.Delivered {
+	for id, record := range next.Delivered {
 		if record.Subscription.DeviceID != deviceID || !replace[record.Subscription.Endpoint] {
 			continue
 		}
 		if record.Subscription.Endpoint == replacement.Endpoint {
 			record.Subscription = replacement
-			q.state.Delivered[id] = record
+			next.Delivered[id] = record
 			continue
 		}
-		delete(q.state.Delivered, id)
+		delete(next.Delivered, id)
 	}
-	if err := q.persistLocked(); err != nil {
-		q.state.Entries = previousEntries
-		q.state.Delivered = previousDelivered
-		return err
-	}
-	return nil
+	return q.commitLocked(next)
 }
 
 func (q *durableQueue) removeDevice(deviceID string) error {
@@ -222,30 +205,18 @@ func (q *durableQueue) removeDevice(deviceID string) error {
 	defer q.process.Unlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	removedEntries := make(map[string]queueEntry)
-	removedDelivered := make(map[string]deliveredRecord)
-	for id, entry := range q.state.Entries {
+	next := q.state.clone()
+	for id, entry := range next.Entries {
 		if entry.Subscription.DeviceID == deviceID {
-			removedEntries[id] = entry
-			delete(q.state.Entries, id)
+			delete(next.Entries, id)
 		}
 	}
-	for id, record := range q.state.Delivered {
+	for id, record := range next.Delivered {
 		if record.Subscription.DeviceID == deviceID {
-			removedDelivered[id] = record
-			delete(q.state.Delivered, id)
+			delete(next.Delivered, id)
 		}
 	}
-	if err := q.persistLocked(); err != nil {
-		for id, entry := range removedEntries {
-			q.state.Entries[id] = entry
-		}
-		for id, record := range removedDelivered {
-			q.state.Delivered[id] = record
-		}
-		return err
-	}
-	return nil
+	return q.commitLocked(next)
 }
 
 func (q *durableQueue) activeKeys() []PushEventKey {
@@ -283,12 +254,13 @@ func (q *durableQueue) deliveredFor(key PushEventKey) []deliveredRecord {
 func (q *durableQueue) forgetDelivered(key PushEventKey) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for id, record := range q.state.Delivered {
+	next := q.state.clone()
+	for id, record := range next.Delivered {
 		if record.Key == key {
-			delete(q.state.Delivered, id)
+			delete(next.Delivered, id)
 		}
 	}
-	return q.persistLocked()
+	return q.commitLocked(next)
 }
 
 func (q *durableQueue) hasEntriesFor(key PushEventKey) bool {
@@ -429,7 +401,7 @@ func (q *durableQueue) processDueWithRecovery(
 			return nil
 		}
 		q.mu.Lock()
-		err := q.persistLocked()
+		err := q.writeState(q.state)
 		q.mu.Unlock()
 		if err == nil {
 			dirty = false
@@ -608,11 +580,19 @@ func deliveryID(key PushEventKey, endpoint string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (q *durableQueue) persistLocked() error {
-	if len(q.state.Entries)+len(q.state.Delivered) > maxQueueEntries {
+func (q *durableQueue) commitLocked(next queueFile) error {
+	if err := q.writeState(next); err != nil {
+		return err
+	}
+	q.state = next
+	return nil
+}
+
+func (q *durableQueue) writeState(state queueFile) error {
+	if len(state.Entries)+len(state.Delivered) > maxQueueEntries {
 		return errors.New("push_queue_limit")
 	}
-	data, err := json.MarshalIndent(q.state, "", "  ")
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode push queue: %w", err)
 	}
