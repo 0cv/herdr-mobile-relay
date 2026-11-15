@@ -874,33 +874,34 @@ func (s *Server) Run(ctx context.Context) error {
 	return runErr
 }
 
+func (s *Server) rejectMessage(client *transport.ClientConn, admitted func(), response map[string]any) {
+	admitted()
+	s.hub.Send(client, response)
+}
+
 func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn, msg map[string]any, admitted func()) {
 	defer admitted()
 	inbound, err := protocol.DecodeMap(msg)
 	if err != nil {
-		admitted()
-		s.hub.Send(client, protocol.DecodeFailureResponse(msg))
+		s.rejectMessage(client, admitted, protocol.DecodeFailureResponse(msg))
 		return
 	}
 	scope, knownAction := protocol.ScopeFor(inbound)
 	if !knownAction {
-		admitted()
-		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+		s.rejectMessage(client, admitted, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
 			protocol.ErrorUnknownAction,
 			map[string]any{"operation": inbound.Type},
 		)))
 		return
 	}
 	if !protocol.Compatible(inbound) {
-		admitted()
-		s.hub.Send(client, protocol.IncompatibleResponse(inbound))
+		s.rejectMessage(client, admitted, protocol.IncompatibleResponse(inbound))
 		return
 	}
 	requestedSessionID := scope.ServerSessionID
 	if scope.Target != nil {
 		if requestedSessionID != "" && scope.Target.ServerSessionID != "" && requestedSessionID != scope.Target.ServerSessionID {
-			admitted()
-			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+			s.rejectMessage(client, admitted, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
 				protocol.ErrorInvalidRequest,
 				map[string]any{"field": "server_session_id"},
 			)))
@@ -911,22 +912,19 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 		}
 	}
 	if requestedSessionID != "" && requestedSessionID != protocol.PrimaryServerSessionID {
-		admitted()
-		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+		s.rejectMessage(client, admitted, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
 			protocol.ErrorInvalidRequest,
 			map[string]any{"field": "server_session_id"},
 		)))
 		return
 	}
 	if authorizationErr := s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID); authorizationErr != nil {
-		admitted()
-		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
+		s.rejectMessage(client, admitted, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
 		return
 	}
 	identity, authenticated := client.Identity()
 	if targetErr := validateExactPaneTarget(s.state, inbound, authenticated); targetErr != nil {
-		admitted()
-		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *targetErr))
+		s.rejectMessage(client, admitted, protocol.ErrorResponse(inbound.RequestID, *targetErr))
 		return
 	}
 	action := scope.Action.Operation
