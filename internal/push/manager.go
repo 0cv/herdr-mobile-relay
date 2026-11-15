@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
@@ -881,36 +882,7 @@ func (m *Manager) signal() {
 }
 
 func atomicWrite(filename string, data []byte, mode os.FileMode) error {
-	directory := filepath.Dir(filename)
-	temp, err := os.CreateTemp(directory, "."+filepath.Base(filename)+".")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(mode); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempName, filename); err != nil {
-		return err
-	}
-	parent, err := os.Open(directory)
-	if err == nil {
-		err = parent.Sync()
-		_ = parent.Close()
-	}
+	_, err := atomicfile.Replace(filepath.Dir(filename), filename, "."+filepath.Base(filename)+".", data, mode)
 	return err
 }
 

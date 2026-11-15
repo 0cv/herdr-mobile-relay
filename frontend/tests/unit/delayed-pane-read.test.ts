@@ -5,6 +5,7 @@ import { CommandError, relayStore } from '$lib/store';
 import { createHybridTransport } from '$lib/transports/path-manager';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, CommandResult, QuestionDraft, QuestionInteraction, RelayConfig } from '$lib/types';
+import { MockWebSocket } from '../support/relay';
 
 type Wire = Record<string, any>;
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
@@ -26,27 +27,11 @@ interface Peer {
 
 // The legacy tests still traverse the real WebSocket/encrypted-transport
 // implementation's explicitly supported tokenless loopback plaintext path.
-class MockWebSocket implements Peer {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSED = 3;
-  static instances: MockWebSocket[] = [];
-  readyState = MockWebSocket.CONNECTING;
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onclose: ((event?: { code: number }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
-  get protocol() { return typeof this.protocols === 'string' ? this.protocols : ''; }
+class StrictWebSocket extends MockWebSocket implements Peer {
   send(payload: string) {
     if (this.readyState !== MockWebSocket.OPEN) throw new Error('Synthetic socket is not open');
-    this.sent.push(payload);
+    super.send(payload);
   }
-  close() { this.readyState = MockWebSocket.CLOSED; }
-  open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
-  messages(): Wire[] { return this.sent.map(payload => JSON.parse(payload)); }
-  message(payload: Wire) { this.onmessage?.({ data: JSON.stringify(payload) }); }
 }
 
 const interaction: QuestionInteraction = {
@@ -269,7 +254,7 @@ beforeEach(() => {
   sessionStorage.clear();
   MockWebSocket.instances = [];
   transportHijack.current = null;
-  vi.stubGlobal('WebSocket', MockWebSocket);
+  vi.stubGlobal('WebSocket', StrictWebSocket);
   vi.useFakeTimers();
   setTerminalHistoryLines(10_000);
 });

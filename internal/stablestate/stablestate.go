@@ -187,10 +187,6 @@ func ReadState(filename string) (map[string]any, error) {
 }
 
 func Write(filename string, state map[string]any) error {
-	return write(filename, state, atomicfile.Replace)
-}
-
-func write(filename string, state map[string]any, replace func(string, string, string, []byte, os.FileMode) (atomicfile.Outcome, error)) error {
 	if state["owner"] != Owner {
 		return errors.New("refusing to write unowned stable state")
 	}
@@ -206,7 +202,7 @@ func write(filename string, state map[string]any, replace func(string, string, s
 		return err
 	}
 	data = append(data, '\n')
-	_, err = replace(directory, filename, "."+filepath.Base(filename)+".", data, 0o600)
+	_, err = atomicfile.Replace(directory, filename, "."+filepath.Base(filename)+".", data, 0o600)
 	return err
 }
 

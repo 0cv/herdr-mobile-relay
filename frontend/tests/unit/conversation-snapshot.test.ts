@@ -8,6 +8,7 @@ import { conversationIdentity } from '$lib/conversation-history';
 import { securityState, type SecurityState } from '$lib/security';
 import { relayStore } from '$lib/store';
 import type { Agent, ConversationBatch, ConversationPage } from '$lib/types';
+import { deferred } from '../support/relay';
 
 const agent: Agent = {
   relay_id: 'snapshot-test', relay_label: 'Fixture', raw_pane_id: 'pane', pane_id: 'snapshot-test::pane',
@@ -15,12 +16,6 @@ const agent: Agent = {
   agent: 'pi', cwd: '/fixture', project: 'Snapshot fixture', status: 'working',
 };
 const entry = (id: string, text: string) => ({ id, role: 'assistant' as const, timestamp: '', text });
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
-}
 
 function savePreview() {
   expect(putConversationPreview({

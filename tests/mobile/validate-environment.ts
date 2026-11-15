@@ -1,6 +1,7 @@
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { evidenceOptions, option } from './validate-evidence';
+import { required } from './support/cli';
+import { evidenceOptions } from './validate-evidence';
 import { loadEvidenceRows, validateMobileEvidence, type EvidenceValidationOptions } from './support/evidence';
 import { environmentStatus, productStatus, type EnvironmentStatus, type ProductStatus } from './support/mobile-result';
 import { publicMobileSummary } from './support/android-product';
@@ -36,11 +37,11 @@ export async function collectEnvironmentReport(options: EvidenceValidationOption
 }
 
 async function singleRowOptions(): Promise<EvidenceValidationOptions> {
-  const bundle = JSON.parse(await readFile(option('--bundle-set'), 'utf8'));
+  const bundle = JSON.parse(await readFile(required('--bundle-set'), 'utf8'));
   return {
-    contract: 'product', runId: option('--run-id'), attempt: option('--attempt'), directory: dirname(option('--result')),
-    matrix: [{ platform: option('--platform'), baseline: option('--baseline') }],
-    candidateCommit: bundle.candidate.provenance.sourceCommit, sourceRunHeadSha: option('--source-run-head-sha'),
+    contract: 'product', runId: required('--run-id'), attempt: required('--attempt'), directory: dirname(required('--result')),
+    matrix: [{ platform: required('--platform'), baseline: required('--baseline') }],
+    candidateCommit: bundle.candidate.provenance.sourceCommit, sourceRunHeadSha: required('--source-run-head-sha'),
     candidateWebHash: bundle.candidate.identity.webHash, candidateIdentity: bundle.candidate.identity,
     baselineIdentities: bundle.baselines.map((row: { name: string; identity: unknown }) => ({ name: row.name, identity: row.identity })),
   };
@@ -67,7 +68,7 @@ export async function environmentReport(): Promise<void> {
   const options = process.argv.includes('--result') ? await singleRowOptions() : evidenceOptions();
   const report = await collectEnvironmentReport(options);
   const bytes = serializeEnvironmentReport(report);
-  if (process.argv.includes('--output')) await writeFile(option('--output'), bytes, { mode: 0o600 });
+  if (process.argv.includes('--output')) await writeFile(required('--output'), bytes, { mode: 0o600 });
   process.stdout.write(bytes);
   const title = `Environment qualification: ${report.environment}`;
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${title}\n\n\`\`\`json\n${bytes}\`\`\`\n`);

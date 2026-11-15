@@ -32,8 +32,4 @@ func TestUpdaterRetainsPrivateFileWithoutRawTokens(t *testing.T) {
 	if !maps.Equal(job.Environment, map[string]string{"HERDR_GITHUB_TOKEN_FILE": "/private/updater-file"}) {
 		t.Fatal("incorrect updater launchd environment")
 	}
-	args := strings.Join(systemdRunArgs(job), "\n")
-	if !strings.Contains(args, "HERDR_GITHUB_TOKEN_FILE=/private/updater-file") || strings.Contains(args, "synthetic-raw-token") {
-		t.Fatal("incorrect updater systemd-run environment")
-	}
 }

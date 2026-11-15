@@ -77,7 +77,6 @@ printf '%s\n' '<html></html>' > "$RELEASE_DIR/web/index.html"
 printf '%s\n' license > "$RELEASE_DIR/LICENSE"
 printf '%s\n' readme > "$RELEASE_DIR/README.md"
 for WRAPPER in \
-    common.sh \
     herdr-mobile-relay-service.sh \
     plugin-on-event.sh \
     setup-link.sh \
@@ -87,7 +86,7 @@ for WRAPPER in \
     printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER"
 done
 
-cp "$REPO_DIR/relay/pi-commands.sh" "$RELEASE_DIR/relay/pi-commands.sh"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/pi-commands.sh" "$RELEASE_DIR/relay/"
 cp -R "$REPO_DIR/relay/pi-command-bridge" "$RELEASE_DIR/relay/pi-command-bridge"
 
 "$RELEASE_DIR/herdr-mobile-relay" release-manifest \

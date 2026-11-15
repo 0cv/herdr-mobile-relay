@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 )
 
 const (
@@ -258,27 +259,6 @@ func ReadFile(workspace, path string) (File, error) {
 	return File{Path: path, MediaType: mediaType, Kind: kind, Text: string(data), Size: info.Size()}, nil
 }
 
-type boundedBuffer struct {
-	buffer bytes.Buffer
-	limit  int
-	over   bool
-}
-
-func (b *boundedBuffer) Write(value []byte) (int, error) {
-	original := len(value)
-	remaining := b.limit - b.buffer.Len()
-	if remaining <= 0 {
-		b.over = true
-		return original, nil
-	}
-	if len(value) > remaining {
-		value = value[:remaining]
-		b.over = true
-	}
-	_, err := b.buffer.Write(value)
-	return original, err
-}
-
 func gitEnvironment() []string {
 	environment := make([]string, 0, len(os.Environ())+8)
 	for _, value := range childenv.WithoutReleaseCredentials(os.Environ()) {
@@ -322,16 +302,15 @@ func runGit(parent context.Context, root string, limit int, args ...string) (str
 	commandArgs = append(commandArgs, args...)
 	command := exec.CommandContext(ctx, "git", commandArgs...)
 	command.Env = gitEnvironment()
-	var output, stderr boundedBuffer
-	output.limit = limit
-	stderr.limit = 64 * 1024
+	output := processgroup.LimitedBuffer{Limit: limit}
+	stderr := processgroup.LimitedBuffer{Limit: 64 * 1024}
 	command.Stdout = &output
 	command.Stderr = &stderr
 	err := command.Run()
 	if ctx.Err() != nil {
 		return "", -1, publicError("Git inspection timed out")
 	}
-	if output.over || stderr.over {
+	if output.Truncated || stderr.Truncated {
 		return "", -1, publicError("Git output exceeded the preview limit")
 	}
 	code := 0
@@ -342,7 +321,7 @@ func runGit(parent context.Context, root string, limit int, args ...string) (str
 		}
 		code = exitError.ExitCode()
 	}
-	return output.buffer.String(), code, nil
+	return output.String(), code, nil
 }
 
 func GitStatusFor(ctx context.Context, workspace string) (GitStatus, error) {

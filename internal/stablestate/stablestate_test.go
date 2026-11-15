@@ -1,6 +1,7 @@
 package stablestate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,4 +161,81 @@ func runTunnelCommand(t *testing.T, input, command, argument string) (string, er
 		t.Fatal(err)
 	}
 	return string(output), runErr
+}
+
+func TestWriteIsIndentedAndTightensDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(filename, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(filename, map[string]any{"stage": "new", "owner": Owner}); err != nil {
+		t.Fatal(err)
+	}
+	const want = `{
+  "owner": "herdr-mobile-relay-stable-setup-v1",
+  "stage": "new"
+}
+`
+	data, err := os.ReadFile(filename)
+	if err != nil || string(data) != want {
+		t.Fatalf("state = %q, error %v; want %q", data, err, want)
+	}
+	for path, mode := range map[string]os.FileMode{dir: 0o700, filename: 0o600} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != mode {
+			t.Fatalf("%s mode = %v, error %v; want %o", path, info, err, mode)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("directory entries = %v, error %v; want only the state file", entries, err)
+	}
+}
+
+func TestWriteCreatesMissingDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new")
+	if err := Write(filepath.Join(dir, "state.json"), Default("/tmp/relay.env")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("directory mode = %v, error %v; want 700", info, err)
+	}
+}
+
+func TestWriteRejectsUnownedStateBeforeTouchingFilesystem(t *testing.T) {
+	for name, state := range map[string]map[string]any{
+		"nil":          nil,
+		"missing":      {"stage": "new"},
+		"wrong-type":   {"owner": 1},
+		"wrong-string": {"owner": "other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "absent")
+			if err := Write(filepath.Join(dir, "state.json"), state); err == nil {
+				t.Fatal("unowned state was written")
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected state created the directory: %v", err)
+			}
+		})
+	}
+}
+
+func TestWriteMarshalFailureKeepsExistingState(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(filename, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(filename, map[string]any{"owner": Owner, "bad": make(chan int)}); err == nil {
+		t.Fatal("unmarshalable state was written")
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil || string(data) != "old" {
+		t.Fatalf("state = %q, error %v; want old", data, err)
+	}
 }

@@ -16,6 +16,9 @@ project follows [Semantic Versioning](https://semver.org/).
   string instead of an array, or an empty string before discovery succeeds.
 - Relay rows in Settings now use the same wording as the update screen while an
   update is scheduled, verifying or installing.
+- A hand-edited `relay.env` value that refers to another variable with `$` is
+  now rejected by the update and event-hook paths, with an error naming the
+  key. Literal plain, single-quoted and double-quoted values work as before.
 
 ### Fixed
 

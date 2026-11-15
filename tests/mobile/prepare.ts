@@ -2,6 +2,7 @@ import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { prepareOutput, repositoryPath } from './support/paths';
 import { downloadWithRetry } from './support/download';
+import { option, required } from './support/cli';
 import {
   assertDistinctUpgrade,
   fileSha256,
@@ -15,17 +16,6 @@ import {
 interface BaselineManifest {
   schema: number;
   baselines: BundleExpectation[];
-}
-
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function requiredOption(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
 }
 
 function values(name: string): string[] {
@@ -58,12 +48,12 @@ async function main(): Promise<void> {
   const manifestPath = repositoryPath(option('--manifest') || 'tests/mobile/baselines.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as BaselineManifest;
   if (manifest.schema !== 1 || !Array.isArray(manifest.baselines) || !manifest.baselines.length) throw new Error('baseline manifest schema is invalid');
-  const candidateSource = repositoryPath(requiredOption('--candidate'));
-  const candidateVersion = requiredOption('--candidate-version');
-  const candidateAssets = Number(requiredOption('--candidate-assets'));
+  const candidateSource = repositoryPath(required('--candidate'));
+  const candidateVersion = required('--candidate-version');
+  const candidateAssets = Number(required('--candidate-assets'));
   if (!Number.isInteger(candidateAssets) || candidateAssets < 0) throw new Error('candidate assets must be a non-negative integer');
-  const candidateRevision = requiredOption('--candidate-revision');
-  const candidateHash = requiredOption('--candidate-sha256');
+  const candidateRevision = required('--candidate-revision');
+  const candidateHash = required('--candidate-sha256');
   if (!SHA256.test(candidateHash)) throw new Error('candidate archive checksum must be a SHA-256 hash');
   const output = repositoryPath(option('--output') || 'run-artifacts');
   const sourceOverrides = new Map<string, string>();

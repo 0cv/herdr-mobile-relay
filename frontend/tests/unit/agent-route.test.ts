@@ -3,13 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
 import { currentView, followInitialAgentSession, navigate, replaceView, stateFromLocation, viewUrl } from '$lib/router';
 import type { Agent } from '$lib/types';
+import { makeAgent } from '../support/relay';
 
 function agent(overrides: Partial<Agent> = {}): Agent {
-  return {
-    relay_id: 'relay', relay_label: 'Relay', pane_id: 'relay::pane-1', raw_pane_id: 'pane-1',
-    server_session_id: 'primary', terminal_id: 'terminal-1', generation: 1, agent_session_id: '',
-    agent: 'pi', status: 'idle', ...overrides,
-  };
+  return makeAgent({ relay_id: 'relay', relay_label: 'Relay', agent_session_id: '', agent: 'pi', status: 'idle', ...overrides });
 }
 
 let stopFollowing = () => {};

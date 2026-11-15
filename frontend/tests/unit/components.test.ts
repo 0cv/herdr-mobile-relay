@@ -17,28 +17,9 @@ import { reloadRisk } from '$lib/reload-guard';
 import { targetRefForAgent } from '$lib/resource-id';
 import { hiddenServers, setHomeLayout, setServerHidden } from '$lib/preferences';
 import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
+import { MockWebSocket } from '../support/relay';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
-
-class SlashCommandWebSocket {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSING = 2;
-  static CLOSED = 3;
-  static instances: SlashCommandWebSocket[] = [];
-  readyState = SlashCommandWebSocket.CONNECTING;
-  protocol = '';
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onclose: ((event?: { code: number }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  constructor(readonly url: string) { SlashCommandWebSocket.instances.push(this); }
-  send(payload: string) { this.sent.push(payload); }
-  close() { this.readyState = SlashCommandWebSocket.CLOSED; }
-  open() { this.readyState = SlashCommandWebSocket.OPEN; this.onopen?.(); }
-  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
-}
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
@@ -222,11 +203,11 @@ describe('accessible Svelte interactions', () => {
 
   it('filters the full real-store catalog and revalidates each palette opening', async () => {
     const user = userEvent.setup();
-    vi.stubGlobal('WebSocket', SlashCommandWebSocket);
+    vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
-    const socket = SlashCommandWebSocket.instances.at(-1)!;
+    const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',

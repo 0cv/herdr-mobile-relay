@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 )
 
 const (
@@ -259,60 +261,24 @@ func (j *Journal) compactLocked() error {
 }
 
 func (j *Journal) compactEntriesLocked(entries []Entry) error {
-	temp, err := os.CreateTemp(j.dir, ".activity.jsonl.*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
+	var data []byte
 	for _, entry := range entries {
-		data, err := encodeEntry(entry)
+		line, err := encodeEntry(entry)
 		if err != nil {
-			_ = temp.Close()
 			return err
 		}
-		written, err := temp.Write(data)
-		if err != nil {
-			_ = temp.Close()
-			return err
-		}
-		if written != len(data) {
-			_ = temp.Close()
-			return io.ErrShortWrite
-		}
+		data = append(data, line...)
 	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, j.path); err != nil {
-		return err
-	}
-	if err := syncDirectory(j.dir); err != nil {
+	outcome, err := atomicfile.Replace(j.dir, j.path, ".activity.jsonl.*.tmp", data, 0o600)
+	if err != nil && !(outcome == atomicfile.Renamed && unsupportedDirectorySync(err)) {
 		return err
 	}
 	j.entries = append([]Entry(nil), entries...)
 	return nil
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	err = directory.Sync()
-	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS) {
-		return nil
-	}
-	return err
+func unsupportedDirectorySync(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS)
 }
 
 func (j *Journal) Recent(limit int) []Entry {

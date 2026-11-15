@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/launchd"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 )
 
 const (
@@ -73,15 +74,6 @@ func TestUpdateWorkerJobForwardsAppDeploymentConfiguration(t *testing.T) {
 	if !maps.Equal(job.Environment, wantEnvironment) {
 		t.Fatalf("environment = %#v, want %#v", job.Environment, wantEnvironment)
 	}
-
-	linuxArgs := []string{"--user", "--collect", "--unit=" + job.Label}
-	for _, assignment := range assignments {
-		linuxArgs = append(linuxArgs, "--setenv="+assignment)
-	}
-	linuxArgs = append(linuxArgs, "/opt/relay", "update-worker", "/tmp/job.json")
-	if args := systemdRunArgs(job); !slices.Equal(args, linuxArgs) {
-		t.Fatalf("systemd-run args = %#v, want %#v", args, linuxArgs)
-	}
 }
 
 func TestManagerCheckPreservesActiveUpdateState(t *testing.T) {
@@ -134,7 +126,7 @@ func TestManagerCheckRecoversStaleWorkerState(t *testing.T) {
 		State:          "installing",
 		TargetVersion:  "1.2.4",
 		TargetRevision: nextTestRevision,
-		StartedAt:      time.Now().Add(-updateStartupGrace - time.Second).UTC().Format(time.RFC3339),
+		StartedAt:      time.Now().Add(-workerjob.StartupGrace - time.Second).UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +403,7 @@ func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
 	if state.State != "scheduled" || jobID != filepath.Base(launchedPath) {
 		t.Fatalf("schedule result = %q, %#v", jobID, state)
 	}
-	job, err := loadJob(launchedPath)
+	job, err := workerjob.Load[Job](launchedPath, "update")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +473,7 @@ func TestManagerRecoversOrphanedPluginUpdateState(t *testing.T) {
 			root := t.TempDir()
 			releaseRoot := filepath.Join(root, "installed")
 			runtimeDir := filepath.Join(root, "runtime")
-			started := time.Now().Add(-updateStartupGrace - time.Second).UTC().Format(time.RFC3339)
+			started := time.Now().Add(-workerjob.StartupGrace - time.Second).UTC().Format(time.RFC3339)
 			if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
 				State:          stateName,
 				TargetVersion:  "1.2.4",
@@ -516,7 +508,7 @@ func TestManagerPreservesUpdateStateOwnedByWorker(t *testing.T) {
 	if err := os.MkdirAll(releaseRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := acquireLock(filepath.Join(releaseRoot, "update.lock"))
+	lock, err := workerjob.Lock(filepath.Join(releaseRoot, "update.lock"), ErrConcurrent)
 	if err != nil {
 		t.Fatal(err)
 	}

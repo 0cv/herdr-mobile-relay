@@ -20,13 +20,14 @@
   },
   "compiler": "6.0.3",
   "inputs": {
-    "gate.ts": "a8b7000a3215e9dfaac48f84e53452e5da342f33fa9ae73f12da977fa3b639a6",
+    "gate.ts": "913962237282e94ad41854a9e052f1ca2237786a637e44b146e1d55ae98f1054",
     "ci.sh": "b5ddc2b17efd837b1a9b90c758f563560ad6c224b2fb269565bde71553720492",
     "producer-transform.json": "3be68060347bf26413ce569ee022309d212f58dec0d531495480dbdc65d088d1",
     "package.json": "411655cf66e7af8ea5727a8ae54afa4b23a63335622287fc6ef68a8296a8ffb2",
     "test.ts": "7689663c4f485f909f54b33393fa1581123f0e6291bc9d367e9ab4a14c11e315",
     "evidence.ts": "7f6af712afee7d4d5f6c9789c7b3fd0305c26d77fbeef00619a7b702b7e254a5",
-    "../unit/ios-producer.ts": "d1aac3940d9361e86f1e4a013f82553154cd1a9f412cc9e88bd4a601e704eb78"
+    "../unit/ios-producer.ts": "d1aac3940d9361e86f1e4a013f82553154cd1a9f412cc9e88bd4a601e704eb78",
+    "../support/appium-patch.ts": "b31c6665baa5914c604d1f01ebec30eaae7cdd461f83fbf20e5c1d61b0d5aae2"
   },
   "packages": {
     "appium": {

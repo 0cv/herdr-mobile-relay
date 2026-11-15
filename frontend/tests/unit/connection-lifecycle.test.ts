@@ -2,18 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createEncryptedTransport } from '$lib/transports/encrypted';
 import type { FrameChannelHandlers, TransportKind, TransportStatus, TransportStatusDetail } from '$lib/transports/types';
 import type { E2EEClientHandshake, E2EEClientHandshakeChallenge } from '$lib/e2ee';
+import { deferred } from '../support/relay';
 
 const handshakeFactory = vi.hoisted(() => vi.fn());
 vi.mock('$lib/e2ee', async (importOriginal) => ({
   ...await importOriginal<typeof import('$lib/e2ee')>(),
   createE2EEClientHandshake: handshakeFactory,
 }));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
-}
 
 function fixture(authenticated = vi.fn(), kind: TransportKind = 'websocket') {
   let channelHandlers!: FrameChannelHandlers;

@@ -15,11 +15,8 @@ import { collectIOSLaunchReceipt, IOSLaunchObservation, iosReceiptWriteStatus, o
 import { requireOwnedDevice } from '../support/device';
 import {
   accessibility,
-  ariaLabel,
-  ariaLabelPrefix,
   AppiumClient,
   isCommandAdmissionError,
-  buttonText,
   css,
   delay,
   driverRequestAllowanceMs,
@@ -33,6 +30,7 @@ import {
   type WebDriverRequestPolicy,
   WebDriverError,
 } from '../support/webdriver';
+import { isExpectedOrigin, preferenceValueScript, promptDraftScript, setPreference, clickDialogText, clickWebText, type WebContext } from './web-context';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
 
 const IOS_INSTALLED_BUNDLE_ID = 'com.apple.webapp';
@@ -723,7 +721,7 @@ export class IOSPlatform implements MobilePlatform {
       }
       if (candidate.url !== undefined) {
         if (candidate.url.length > IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT) stringInspectionTruncated = true;
-        else if (this.isExpectedOrigin(candidate.url)) expectedOriginContextCount += 1;
+        else if (isExpectedOrigin(candidate.url, this.origin)) expectedOriginContextCount += 1;
       }
     }
     let result: SafariDiscoveryResult;
@@ -821,7 +819,7 @@ export class IOSPlatform implements MobilePlatform {
         const metadata = await this.driver.contextMetadata(IOS_SAFARI_DISCOVERY_COMMAND_MS);
         this.safariLastDiscovery = this.safariDiscoveryEvidence(metadata, phase, timeoutMs);
         const context = metadata.find((candidate) => isIOSSafariBrowserBundle(candidate.bundleId)
-          || (candidate.url !== undefined && this.isExpectedOrigin(candidate.url)));
+          || (candidate.url !== undefined && isExpectedOrigin(candidate.url, this.origin)));
         if (!context) {
           lastError = 'Safari did not publish a web context';
           firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'discovery', this.safariLastDiscovery.cause);
@@ -835,7 +833,7 @@ export class IOSPlatform implements MobilePlatform {
           await this.driver.switchContext(context.id, IOS_SAFARI_ATTACH_COMMAND_MS);
           if (phase.remainingMs < 2_000) break;
           const currentUrl = await this.driver.currentUrl(1_000);
-          if (this.isExpectedOrigin(currentUrl)) {
+          if (isExpectedOrigin(currentUrl, this.origin)) {
             this.safariLastObservation = this.safariObservationEvidence('expected-origin', 'Safari page reported the fixture origin', phase, timeoutMs);
             this.lastUrl = currentUrl;
             if (phase.remainingMs < 1_000) break;
@@ -1207,7 +1205,7 @@ export class IOSPlatform implements MobilePlatform {
             await this.driver.switchContext(this.selectedInstalledContext, Math.max(1, phase.remainingMs));
             const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
             this.lastUrl = url;
-            if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `cached document origin ${url} is not ${this.origin}`);
+            if (!isExpectedOrigin(url, this.origin)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `cached document origin ${url} is not ${this.origin}`);
             await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
             return;
           } catch (error) {
@@ -1286,7 +1284,7 @@ export class IOSPlatform implements MobilePlatform {
               if (this.installedBindingState !== 'bound') this.installedBindingState = 'inspecting';
               const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
               this.lastUrl = url;
-              if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
+              if (!isExpectedOrigin(url, this.origin)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
               await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
               this.selectedInstalledContext = context.id;
               this.installedBindingState = 'bound';
@@ -1552,116 +1550,30 @@ export class IOSPlatform implements MobilePlatform {
     await this.attachToInstalledView();
     if (this.keyboardShownByPage) await this.waitForPageKeyboardHidden();
     if (this.keyboardDraft) {
-      const value = await this.driver.execute<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''");
+      const value = await this.driver.execute<string>(promptDraftScript);
       if (value !== this.keyboardDraft) throw new Error('IOS_KEYBOARD: draft was not preserved after dismissal');
     }
   }
 
-  async clickWebText(text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const locators = [buttonText(text), ariaLabel(text), ariaLabelPrefix(text), textLocator(text)];
-        for (const locator of locators) {
-          const locatorTimeout = deadline - Date.now();
-          if (locatorTimeout < minimumDriverRequestMs) break;
-          try {
-            const element = await this.driver.findAnyOnce([locator], locatorTimeout);
-            const controlTimeout = deadline - Date.now();
-            if (controlTimeout < minimumDriverRequestMs) break;
-            if (await this.webControlReady(element, deadline)) {
-              const clickTimeout = deadline - Date.now();
-              if (clickTimeout < minimumDriverRequestMs) break;
-              await this.driver.click(element, clickTimeout);
-              return;
-            }
-            lastError = `${text} is disabled, hidden, or empty`;
-          } catch (error) {
-            if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-            if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-            lastError = error instanceof Error ? error.message : String(error);
-          }
-        }
-      } catch (error) {
-        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-        if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError || 'control was not usable before the deadline'}`);
+  private get webContext(): WebContext {
+    return { driver: this.driver, budget: this.budget, attachToInstalledView: (timeoutMs) => this.attachToInstalledView(timeoutMs) };
   }
 
-  private async webControlReady(element: string, deadline: number): Promise<boolean> {
-    const disabledTimeout = deadline - Date.now();
-    if (disabledTimeout < minimumDriverRequestMs) return false;
-    const disabled = await this.driver.attribute(element, 'disabled', disabledTimeout);
-    if (disabled !== null && disabled !== 'false') return false;
-    const ariaDisabledTimeout = deadline - Date.now();
-    if (ariaDisabledTimeout < minimumDriverRequestMs) return false;
-    const ariaDisabled = await this.driver.attribute(element, 'aria-disabled', ariaDisabledTimeout);
-    if (ariaDisabled === 'true') return false;
-    const hiddenTimeout = deadline - Date.now();
-    if (hiddenTimeout < minimumDriverRequestMs) return false;
-    const hidden = await this.driver.attribute(element, 'hidden', hiddenTimeout);
-    if (hidden !== null && hidden !== 'false') return false;
-    const ariaHiddenTimeout = deadline - Date.now();
-    if (ariaHiddenTimeout < minimumDriverRequestMs) return false;
-    const ariaHidden = await this.driver.attribute(element, 'aria-hidden', ariaHiddenTimeout);
-    if (ariaHidden === 'true') return false;
-    const rectTimeout = deadline - Date.now();
-    if (rectTimeout < minimumDriverRequestMs) return false;
-    const rect = await this.driver.elementRect(element, rectTimeout);
-    return rect.width > 0 && rect.height > 0;
+  async clickWebText(text: string): Promise<void> {
+    await clickWebText(this.webContext, text);
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), findTimeout);
-        for (const button of buttons) {
-          const textTimeout = deadline - Date.now();
-          if (textTimeout < minimumDriverRequestMs) break;
-          if ((await this.driver.text(button, textTimeout)).trim() === text) {
-            const clickTimeout = deadline - Date.now();
-            if (clickTimeout < minimumDriverRequestMs) break;
-            await this.driver.click(button, clickTimeout);
-            return;
-          }
-        }
-        lastError = `${text} is not visible in ${dialogId}`;
-      } catch (error) {
-        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
+    await clickDialogText(this.webContext, dialogId, text);
   }
 
   async setPreference(preference: string): Promise<void> {
-    await this.clickWebText('Settings');
-    await this.clickWebText(preference === 'state' ? 'By State' : 'Mixed');
+    await setPreference((text) => this.clickWebText(text), preference);
   }
 
   async preferenceValue(): Promise<string> {
     await this.attachToInstalledView();
-    return this.driver.execute<string>("return localStorage.getItem('herdr_home_workspace_layout') || ''");
+    return this.driver.execute<string>(preferenceValueScript);
   }
 
   captureSanitizedEvidence(name: string): Promise<void> {
@@ -2474,14 +2386,6 @@ export class IOSPlatform implements MobilePlatform {
         throw new Error('IOS_CONTEXT_NOT_READY: installed page has not entered standalone display mode');
       }
       this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'selected page is not standalone');
-    }
-  }
-
-  private isExpectedOrigin(value: string): boolean {
-    try {
-      return new URL(value).origin === new URL(this.origin).origin;
-    } catch {
-      return false;
     }
   }
 

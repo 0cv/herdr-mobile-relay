@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
@@ -37,11 +38,46 @@ func launchctl(ctx context.Context, args ...string) ([]byte, error) {
 	return childenv.CommandContext(ctx, "launchctl", args...).CombinedOutput()
 }
 
-// Bootstrap starts job once. Without KeepAlive, launchd leaves the job loaded
-// but idle after it exits, until SweepWorkers removes it.
-func Bootstrap(ctx context.Context, dir string, job Job) error {
-	return bootstrap(ctx, launchctl, dir, os.Getuid(), job)
+// NewJob builds a job that runs program under a unique label starting with
+// prefix. It forwards the non-blank values of environmentKeys that lookupEnv finds.
+func NewJob(prefix string, program, environmentKeys []string, lookupEnv func(string) (string, bool)) Job {
+	environment := make(map[string]string, len(environmentKeys))
+	for _, key := range environmentKeys {
+		value, present := lookupEnv(key)
+		if present && strings.TrimSpace(value) != "" {
+			environment[key] = value
+		}
+	}
+	return Job{
+		Label:       fmt.Sprintf("%s%d", prefix, time.Now().UnixNano()),
+		Program:     program,
+		Environment: environment,
+	}
 }
+
+// Start runs job once in the background: as a launchd job on macOS, otherwise
+// as a transient systemd user unit. dir holds the launchd job file.
+func Start(ctx context.Context, dir string, job Job) error {
+	if runtime.GOOS == "darwin" {
+		return bootstrap(ctx, launchctl, dir, os.Getuid(), job)
+	}
+	output, err := childenv.CommandContext(ctx, "systemd-run", systemdRunArgs(job)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemd-run: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func systemdRunArgs(job Job) []string {
+	args := []string{"--user", "--collect", "--unit=" + job.Label}
+	for _, key := range slices.Sorted(maps.Keys(job.Environment)) {
+		args = append(args, "--setenv="+key+"="+job.Environment[key])
+	}
+	return append(args, job.Program...)
+}
+
+// bootstrap starts job once. Without KeepAlive, launchd leaves the job loaded
+// but idle after it exits, until SweepWorkers removes it.
 
 func bootstrap(ctx context.Context, run runner, dir string, uid int, job Job) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {

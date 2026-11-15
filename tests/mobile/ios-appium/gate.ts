@@ -1,26 +1,22 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import { artifactReader, configureHome, hash, substitute, transpile, writeIntegrity, type Substitution } from '../support/appium-patch.ts';
 
-type Transform = Record<string, Array<[string, string]>>;
+type Transform = Record<string, Substitution[]>;
 type Package = { name: string; version: string; root: string; entry: string; files: Record<string, string> };
 type Manifest = {
   schema: 1; contract: string; compiler: string; inputs: Record<string, string>;
   packages: Record<string, Package>; files: Record<string, { before: string; after: string }>;
 };
-const artifact = (name: string) => new URL(name, import.meta.url);
-const load = async <T>(name: string): Promise<T> => JSON.parse(await readFile(artifact(name), 'utf8')) as T;
-export const hash = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex');
+const { artifact, load } = artifactReader(import.meta.url);
 const contract = 'herdr-installed-contexts-v1';
 
 export async function configure(home: string): Promise<void> {
-  await mkdir(home, { recursive: true });
-  assert.deepEqual(await readdir(home), [], 'Fresh iOS Appium home required');
-  await writeFile(join(home, 'package.json'), await readFile(artifact('package.json')));
+  await configureHome(home, [['package.json', artifact('package.json')]], 'Fresh iOS Appium home required');
 }
 
 /** The only compiler operation: exact reviewed substitutions and JS emission, no dependency rebuild. */
@@ -30,22 +26,13 @@ export async function producerOutput(home: string, packages: Record<string, Pack
     const slash = key.indexOf('/');
     const id = key.slice(0, slash), file = key.slice(slash + 1);
     assert.ok(packages[id] && !file.includes('..') && !file.startsWith('/'));
-    let text = await readFile(join(home, packages[id].root, file), 'utf8');
-    for (const [before, after] of edits) {
-      assert.equal(text.split(before).length, 2, `Nonunique iOS producer substitution: ${key}`);
-      text = text.replace(before, after);
-    }
+    const text = substitute(await readFile(join(home, packages[id].root, file), 'utf8'), edits, key);
     output.set(key, text);
     if (file.startsWith('lib/') && file.endsWith('.ts')) {
-      const result = ts.transpileModule(text, { fileName: file, compilerOptions: {
-        target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, sourceMap: true, inlineSources: true,
-      } });
-      assert.ok(result.sourceMapText);
       const runtime = file.replace(/^lib\//u, 'build/lib/').replace(/\.ts$/u, '.js');
-      const map = JSON.parse(result.sourceMapText);
-      map.sources = [relative(dirname(runtime), file)];
-      output.set(`${id}/${runtime}`, result.outputText);
-      output.set(`${id}/${runtime}.map`, JSON.stringify(map));
+      const { code, map } = transpile(text, file, runtime);
+      output.set(`${id}/${runtime}`, code);
+      output.set(`${id}/${runtime}.map`, map);
     }
   }
   return output;
@@ -131,7 +118,7 @@ export async function patch(home: string): Promise<void> {
     const slash = key.indexOf('/');
     await writeFile(join(home, manifest.packages[key.slice(0, slash)].root, key.slice(slash + 1)), bytes);
   }
-  await writeFile(join(home, 'installed-context-integrity.json'), JSON.stringify(await installation(home, true), null, 2) + '\n');
+  await writeIntegrity(home, 'installed-context-integrity.json', await installation(home, true));
 }
 
 export async function verify(home: string): Promise<void> {

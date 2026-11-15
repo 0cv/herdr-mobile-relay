@@ -1,7 +1,10 @@
 import type { RetainedInspectionResult, NativeObservation } from '../android-appium/retained-inspection.cjs';
 import type { CoreDocumentObservation, SelectedDocumentObservation } from '../android-appium/target-inspection.cjs';
 import { isAndroidPersistentWebAppActivity } from './oracle';
+import toolchains from '../toolchains.json';
 import { namespaceForCapability, sameKernelCapability, validKernelCapability, type KernelCapability, type NativeNamespace } from '../android-appium/kernel-namespace.cjs';
+
+const chromeVersion = toolchains.android.browserVersion.split(' ')[0];
 
 export const nativeNamespace = 'reader-and-browser-active-in-procfs-mount-pid-namespace' as const;
 export interface RetainedNativeIdentity { pid: string; startTime: string; bootId: string; namespace: NativeNamespace; kernelCapability: KernelCapability }
@@ -77,7 +80,7 @@ export function decodeRetainedInspection(value: unknown, owner: RetainedNativeId
     const forward = object(s.forward);
     require(endpoint.host === '127.0.0.1' && integer(endpoint.port) && endpoint.port <= 65535 && typeof endpoint.browserPath === 'string'
       && /^\/devtools\/browser(?:\/[A-Za-z0-9-]+)?$/u.test(endpoint.browserPath)
-      && s.browserVersion === 'Chrome/131.0.6778.200' && forward.browserVersion === s.browserVersion
+      && s.browserVersion === `Chrome/${chromeVersion}` && forward.browserVersion === s.browserVersion
       && forward.serial === bounds.serial && forward.port === endpoint.port && forward.socket === 'chrome_devtools_remote'
       && typeof forward.inode === 'string' && /^[1-9]\d*$/u.test(forward.inode));
     require(selected.origin === new URL(bounds.scope).origin);

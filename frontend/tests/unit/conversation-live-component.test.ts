@@ -7,6 +7,7 @@ import { conversationIdentity } from '$lib/conversation-history';
 import { targetRefForAgent } from '$lib/resource-id';
 import { CommandError, relayStore } from '$lib/store';
 import type { Agent, ConversationBatch, ConversationPage } from '$lib/types';
+import { deferred } from '../support/relay';
 
 const agent: Agent = { relay_id: 'live-fixture', relay_label: 'Fixture', raw_pane_id: 'pane', pane_id: 'live-fixture::pane', server_session_id: 'primary', terminal_id: 'terminal', generation: 1, agent_session_id: 'session', agent: 'pi', cwd: '/fixture', status: 'working' };
 const capabilities = { source: 'pi_events' as const, active_branch: true };
@@ -15,13 +16,6 @@ const unavailableLabel = 'Live events unavailable — recorded history only.';
 const entry = (id: string, text = id) => ({ id, role: 'assistant' as const, timestamp: '', text });
 const livePage: ConversationPage = { available: true, reason: '', entries: [entry('pi:answer')], hasMore: false, total: 1, state: 'ready', sourceRevision: 'source:1', subscriptionId: 'sub-1', sequence: 0, capabilities, provisional: [entry('live:old', 'Old provisional text')] };
 const unavailablePage: ConversationPage = { available: false, reason: 'Fixture history unavailable', entries: [], hasMore: false, total: 0, state: 'ready' };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: Error) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 
 beforeEach(() => {
   clearConversationPreviews();

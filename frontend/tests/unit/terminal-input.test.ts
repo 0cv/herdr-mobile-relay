@@ -51,6 +51,43 @@ async function open(current = agent) {
   return rendered;
 }
 
+type Attention = 'idle' | 'question' | 'approval';
+const attentions: Attention[] = ['idle', 'question', 'approval'];
+const uncertainAlert = 'Delivery is uncertain. Tap Keyboard to check the terminal before sending.';
+
+function agentWithAttention(attention: Attention, interactionId: string): Agent {
+  const interaction: QuestionInteraction = { id: interactionId, kind: 'single_select', question: 'Choose a destination', options: [{ index: 0, label: 'North', selected: true }], can_go_back: true, can_chat: true };
+  return { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
+}
+
+function holdDelivery() {
+  const held = {} as { finish: (result: CommandResult) => void };
+  vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { held.finish = resolve; }));
+  return held;
+}
+
+const interruptions = {
+  disconnect: {
+    start: () => relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never)),
+    end: () => relayStore.connections.set(new Map([[agent.relay_id, connection]] as never)),
+  },
+  lock: {
+    start: () => securityState.set({ locked: true } as never),
+    end: () => securityState.set({ locked: false } as never),
+  },
+};
+
+async function expectAttentionControlsDisabled(attention: Attention) {
+  if (attention === 'question') for (const label of ['Submit', '← Previous', 'Chat about this']) expect(await screen.findByRole('button', { name: label })).toBeDisabled();
+  else if (attention === 'approval') expect(button('Allow once')).toBeDisabled();
+}
+
+async function expectAttentionControlsEnabled(attention: Attention) {
+  if (attention === 'idle') expect(button('Send prompt')).toBeEnabled();
+  else if (attention === 'question') expect(await screen.findByRole('button', { name: 'Submit' })).toBeEnabled();
+  else expect(button('Allow once')).toBeEnabled();
+}
+
 it.each(['\n','\r','\t','\u001b','\u0000','\u007f','\u0085','\u2028','\u2029','\ud800'])('rejects terminal controls %j', text => expect(terminalTextError('text'+text)).toBeTruthy());
 it('refreshes read-only context using the normal history budget without inventory-driven loops', async () => {
   vi.useFakeTimers();
@@ -200,29 +237,24 @@ describe('Terminal', () => {
 
   it.each((['disconnect', 'lock'] as const).flatMap(transition =>
     (['dispatched_unknown', 'accepted'] as const).flatMap(phase =>
-      (['idle', 'question', 'approval'] as const).map(attention => ({ transition, phase, attention })))))('retains $phase guards for $attention across $transition until fresh inspection', async ({ transition, phase, attention }) => {
-    const interaction: QuestionInteraction = { id: `recovery-${transition}-${phase}-${attention}`, kind: 'single_select', question: 'Choose a destination', options: [{ index: 0, label: 'North', selected: true }], can_go_back: true, can_chat: true };
-    const current: Agent = { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
+      attentions.map(attention => ({ transition, phase, attention })))))('retains $phase guards for $attention across $transition until fresh inspection', async ({ transition, phase, attention }) => {
+    const current = agentWithAttention(attention, `recovery-${transition}-${phase}-${attention}`);
     const rendered = await open(current);
     const stale = frame(current);
     await rendered.rerender({ frame: stale });
     vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase });
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'unconfirmed transient' } });
     await fireEvent.click(button('Send text'));
-    if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never));
-    else securityState.set({ locked: true } as never);
+    interruptions[transition].start();
     await waitFor(() => expect(button('Keyboard')).toBeVisible());
-    if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, connection]] as never));
-    else securityState.set({ locked: false } as never);
+    interruptions[transition].end();
     await rendered.rerender({ frame: stale });
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal recovery draft' } });
-    expect(alertWithText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.')).toBeVisible();
+    expect(alertWithText(uncertainAlert)).toBeVisible();
     expect(button('Enter')).toBeDisabled();
     expect(button('Send prompt')).toBeDisabled();
-    if (attention === 'question') {
-      expect(await screen.findByRole('radio', { name: 'North' })).toBeEnabled();
-      for (const label of ['Submit', '← Previous', 'Chat about this']) expect(button(label)).toBeDisabled();
-    } else if (attention === 'approval') expect(button('Allow once')).toBeDisabled();
+    if (attention === 'question') expect(await screen.findByRole('radio', { name: 'North' })).toBeEnabled();
+    await expectAttentionControlsDisabled(attention);
     await fireEvent.click(button('Keyboard'));
     await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
     expect(screen.getByLabelText('Terminal text')).toHaveFocus();
@@ -235,9 +267,7 @@ describe('Terminal', () => {
     expect(button('Enter')).toBeEnabled();
     await fireEvent.click(button('Close'));
     expect(button('Enter')).toBeEnabled();
-    if (attention === 'idle') expect(button('Send prompt')).toBeEnabled();
-    else if (attention === 'question') expect(await screen.findByRole('button', { name: 'Submit' })).toBeEnabled();
-    else expect(button('Allow once')).toBeEnabled();
+    await expectAttentionControlsEnabled(attention);
     expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(localStorage)).not.toContain('unconfirmed transient');
   });
@@ -317,37 +347,42 @@ describe('Terminal', () => {
     for (const text of ['uncertain before lock', 'new transient after unlock', 'draft before recovery observation']) expect(JSON.stringify(localStorage)).not.toContain(text);
   });
 
-  it.each((['disconnect', 'lock'] as const).flatMap(transition =>
-    (['completed', 'dispatched_unknown'] as const).map(phase => ({ transition, phase }))))('keeps pending dispatch guarded across $transition before a late $phase result', async ({ transition, phase }) => {
+  async function interruptPendingDispatch(transition: keyof typeof interruptions) {
     const current = { ...agent, status: 'idle' };
     const rendered = await open(current);
-    let finish!: (result: CommandResult) => void;
-    vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const held = holdDelivery();
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'pending transient' } });
     await fireEvent.click(button('Send text'));
-    if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, { ...connection, status: 'disconnected' }]] as never));
-    else securityState.set({ locked: true } as never);
+    interruptions[transition].start();
     await waitFor(() => expect(button('Keyboard')).toBeVisible());
-    if (transition === 'disconnect') relayStore.connections.set(new Map([[agent.relay_id, connection]] as never));
-    else securityState.set({ locked: false } as never);
+    interruptions[transition].end();
     await rendered.rerender({ frame: frame(current) });
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal draft while pending' } });
     expect(button('Enter')).toBeDisabled();
     expect(button('Send prompt')).toBeDisabled();
-    finish({ ...receipt, phase });
-    if (phase === 'completed') await waitFor(() => expect(button('Send prompt')).toBeEnabled());
-    else {
-      await waitFor(() => expect(alertWithText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.')).toBeVisible());
-      expect(button('Send prompt')).toBeDisabled();
-      await fireEvent.click(button('Keyboard'));
-      await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
-      expect(screen.getByLabelText('Terminal text')).toHaveFocus();
-      expect(button('Enter')).toBeDisabled();
-      expect(button('I checked the terminal')).toBeDisabled();
-      await rendered.rerender({ frame: frame(current) });
-      await fireEvent.click(button('I checked the terminal'));
-      expect(button('Enter')).toBeEnabled();
-    }
+    return { rendered, current, held };
+  }
+
+  it.each(['disconnect', 'lock'] as const)('keeps pending dispatch guarded across %s before a late completed result', async transition => {
+    const { held } = await interruptPendingDispatch(transition);
+    held.finish({ ...receipt, phase: 'completed' });
+    await waitFor(() => expect(button('Send prompt')).toBeEnabled());
+    expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['disconnect', 'lock'] as const)('keeps pending dispatch guarded across %s before a late dispatched_unknown result', async transition => {
+    const { rendered, current, held } = await interruptPendingDispatch(transition);
+    held.finish({ ...receipt, phase: 'dispatched_unknown' });
+    await waitFor(() => expect(alertWithText(uncertainAlert)).toBeVisible());
+    expect(button('Send prompt')).toBeDisabled();
+    await fireEvent.click(button('Keyboard'));
+    await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
+    expect(screen.getByLabelText('Terminal text')).toHaveFocus();
+    expect(button('Enter')).toBeDisabled();
+    expect(button('I checked the terminal')).toBeDisabled();
+    await rendered.rerender({ frame: frame(current) });
+    await fireEvent.click(button('I checked the terminal'));
+    expect(button('Enter')).toBeEnabled();
     expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
   });
 
@@ -398,15 +433,9 @@ describe('Terminal', () => {
     expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
   });
 
-  it.each((['cwd', 'agent'] as const).flatMap(field =>
-    (['pending-completed', 'pending-unknown', 'uncertain'] as const).flatMap(state =>
-      (['idle', 'question', 'approval'] as const).map(attention => ({ field, state, attention })))))('retains $state guards for $attention across same-target $field changes', async ({ field, state, attention }) => {
-    const interaction: QuestionInteraction = { id: 'metadata-change', kind: 'single_select', question: 'Choose a destination', options: [{ index: 0, label: 'North', selected: true }], can_go_back: true, can_chat: true };
-    const current: Agent = { ...agent, status: attention === 'idle' ? 'idle' : 'blocked', attention_capable: attention !== 'idle', attention_kind: attention === 'idle' ? 'unknown' : attention, interaction: attention === 'question' ? interaction : undefined, options: ['Allow once', 'Deny'] };
+  async function sendThenChangeMetadata(field: 'cwd' | 'agent', attention: Attention) {
+    const current = agentWithAttention(attention, 'metadata-change');
     const rendered = await open(current);
-    let finish!: (result: CommandResult) => void;
-    if (state === 'uncertain') vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'dispatched_unknown' });
-    else vi.mocked(relayStore.sendToAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'metadata-change transient' } });
     await fireEvent.click(button('Send text'));
     const changed = { ...current, [field]: field === 'agent' ? 'claude' : '/changed-directory' };
@@ -416,22 +445,47 @@ describe('Terminal', () => {
     await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal metadata draft' } });
     expect(button('Enter')).toBeDisabled();
     expect(button('Send prompt')).toBeDisabled();
-    if (attention === 'question') for (const label of ['Submit', '← Previous', 'Chat about this']) expect(await screen.findByRole('button', { name: label })).toBeDisabled();
-    else if (attention === 'approval') expect(button('Allow once')).toBeDisabled();
-    if (state !== 'uncertain') finish({ ...receipt, phase: state === 'pending-completed' ? 'completed' : 'dispatched_unknown' });
-    if (state === 'pending-completed') await waitFor(() => expect(button('Enter')).toBeEnabled());
-    else {
-      await waitFor(() => expect(alertWithText('Delivery is uncertain. Tap Keyboard to check the terminal before sending.')).toBeVisible());
-      expect(button('Enter')).toBeDisabled();
-      await fireEvent.click(button('Keyboard'));
-      await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
-      expect(button('I checked the terminal')).toBeDisabled();
-      await rendered.rerender({ frame: frame(changed) });
-      expect(button('I checked the terminal')).toBeEnabled();
-      expect(button('Enter')).toBeDisabled();
-      await fireEvent.click(button('I checked the terminal'));
-      expect(button('Enter')).toBeEnabled();
-    }
+    await expectAttentionControlsDisabled(attention);
+    return { changed, rendered };
+  }
+
+  async function inspectAfterMetadataChange(rendered: Awaited<ReturnType<typeof open>>, changed: Agent) {
+    await waitFor(() => expect(alertWithText(uncertainAlert)).toBeVisible());
+    expect(button('Enter')).toBeDisabled();
+    await fireEvent.click(button('Keyboard'));
+    await waitFor(() => expect(screen.getByLabelText('Terminal text')).toBeVisible());
+    expect(button('I checked the terminal')).toBeDisabled();
+    await rendered.rerender({ frame: frame(changed) });
+    expect(button('I checked the terminal')).toBeEnabled();
+    expect(button('Enter')).toBeDisabled();
+    await fireEvent.click(button('I checked the terminal'));
+    expect(button('Enter')).toBeEnabled();
+  }
+
+  const metadataCases = (['cwd', 'agent'] as const).flatMap(field => attentions.map(attention => ({ field, attention })));
+
+  it.each(metadataCases)('retains pending-completed guards for $attention across same-target $field changes', async ({ field, attention }) => {
+    const held = holdDelivery();
+    await sendThenChangeMetadata(field, attention);
+    held.finish({ ...receipt, phase: 'completed' });
+    await waitFor(() => expect(button('Enter')).toBeEnabled());
+    expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(localStorage)).not.toContain('metadata-change transient');
+  });
+
+  it.each(metadataCases)('retains pending-unknown guards for $attention across same-target $field changes', async ({ field, attention }) => {
+    const held = holdDelivery();
+    const { changed, rendered } = await sendThenChangeMetadata(field, attention);
+    held.finish({ ...receipt, phase: 'dispatched_unknown' });
+    await inspectAfterMetadataChange(rendered, changed);
+    expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(localStorage)).not.toContain('metadata-change transient');
+  });
+
+  it.each(metadataCases)('retains uncertain guards for $attention across same-target $field changes', async ({ field, attention }) => {
+    vi.mocked(relayStore.sendToAgent).mockResolvedValue({ ...receipt, phase: 'dispatched_unknown' });
+    const { changed, rendered } = await sendThenChangeMetadata(field, attention);
+    await inspectAfterMetadataChange(rendered, changed);
     expect(relayStore.sendToAgent).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(localStorage)).not.toContain('metadata-change transient');
   });

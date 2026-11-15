@@ -166,13 +166,12 @@ frontend-check:
 	bun build frontend/public/sw.js --outfile=/dev/null
 	bun build frontend/public/notification-icons.js --outfile=/dev/null
 	bash -n frontend/scripts/run-browser-tests.sh
-	bash -n frontend/scripts/run-attention-tests.sh
 
 frontend-browser:
-	frontend/scripts/run-browser-tests.sh dist
+	frontend/scripts/run-browser-tests.sh playwright.config.ts
 
 frontend-browser-release:
-	frontend/scripts/run-browser-tests.sh ../web
+	HERDR_WEB_ROOT=../web frontend/scripts/run-browser-tests.sh playwright.config.ts
 
 frontend-browser-attention-release:
 	HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention

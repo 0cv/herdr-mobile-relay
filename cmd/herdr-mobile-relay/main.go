@@ -13,12 +13,14 @@ import (
 	"strings"
 	"syscall"
 
+	herdrmobilerelay "github.com/0cv/herdr-mobile-relay"
 	"github.com/0cv/herdr-mobile-relay/internal/agentsession"
 	"github.com/0cv/herdr-mobile-relay/internal/app"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/eventhook"
 	"github.com/0cv/herdr-mobile-relay/internal/launchd"
+	"github.com/0cv/herdr-mobile-relay/internal/piintegration"
 	"github.com/0cv/herdr-mobile-relay/internal/readiness"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
@@ -183,6 +185,12 @@ func run(args []string) (int, error) {
 	case "speech-voices":
 		err := speech.Run(context.Background(), args, os.Stdout, os.Stderr)
 		if errors.Is(err, speech.ErrUsage) {
+			return 2, err
+		}
+		return status(err)
+	case "pi-commands":
+		err := piintegration.Run(herdrmobilerelay.PiCommandBridge(), args, os.Stdout)
+		if errors.Is(err, piintegration.ErrUsage) {
 			return 2, err
 		}
 		return status(err)

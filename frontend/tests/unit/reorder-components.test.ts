@@ -44,72 +44,107 @@ afterEach(() => {
   relayStore.relayConfigs.set([]);
 });
 
+async function geometryFixture(kind: 'tabs' | 'workspaces', sourceIndex: number) {
+  vi.useFakeTimers();
+  vi.stubGlobal('scrollY', 300);
+  vi.spyOn(window, 'scrollBy').mockImplementation(() => {});
+  const tabMove = vi.spyOn(relayStore, 'reorderTab').mockReturnValue(new Promise<CommandResult>(() => {}));
+  const workspaceMove = vi.spyOn(relayStore, 'reorderWorkspaceBlock').mockReturnValue(new Promise<CommandResult>(() => {}));
+  relayStore.relayConfigs.set([{ id: 'test', label: 'Test', url: 'ws://test', token: '' }]);
+  relayStore.connections.set(new Map([['test', connection as never]]));
+  relayStore.workspaces.set(workspaces);
+  const { container } = kind === 'tabs'
+    ? render(AgentList, { agents, relays: [], connections: new Map([['test', connection]]), responding: new Set<string>(), onopen: vi.fn() })
+    : render(WorkspaceManager);
+  await tick();
+  const slots = [...container.querySelectorAll<HTMLElement>(kind === 'tabs' ? '.workspace-tab' : '.workspace-management-slot')];
+  expect(slots).toHaveLength(3);
+  // Document tops 400, 450, 540; unequal heights, first gap 10, second gap 20.
+  slots.forEach((slot, i) => vi.spyOn(slot, 'getBoundingClientRect').mockReturnValue({ top: [100, 150, 240][i], height: [40, 70, 30][i] } as DOMRect));
+  const handle = kind === 'tabs' ? slots[sourceIndex].querySelector<HTMLElement>('.agent-open')! : slots[sourceIndex];
+  const transform = (i: number) => slots[i].style.transform;
+  const unmarkSlot = (i: number) => { delete slots[i].dataset[kind === 'tabs' ? 'tabId' : 'workspaceKey']; };
+  const startDrag = async () => {
+    await pointer(handle, 'pointerdown', 120);
+    await vi.advanceTimersByTimeAsync(550);
+    await tick();
+  };
+  // Change scroll after measurement: client 135 now means document 555,
+  // exactly the last midpoint. Strict > must leave it in the middle slot.
+  const scrollAfterMeasurement = () => vi.stubGlobal('scrollY', 420);
+  const dragTo = (clientY: number) => pointer(handle, 'pointermove', clientY);
+  const drop = (clientY: number) => pointer(handle, 'pointerup', clientY);
+  const expectMoved = (index: number, beforeWorkspaceId: string) => {
+    if (kind === 'tabs') expect(tabMove).toHaveBeenCalledExactlyOnceWith(agents[sourceIndex], index);
+    else expect(workspaceMove).toHaveBeenCalledExactlyOnceWith('test', [workspaces[sourceIndex].workspace_id], beforeWorkspaceId, index);
+  };
+  const expectNotMoved = () => expect(kind === 'tabs' ? tabMove : workspaceMove).not.toHaveBeenCalled();
+  return { transform, unmarkSlot, startDrag, scrollAfterMeasurement, dragTo, drop, expectMoved, expectNotMoved };
+}
+
 for (const kind of ['tabs', 'workspaces'] as const) {
   describe(`${kind} actual drag geometry (synthetic dispatch)`, () => {
-    for (const scenario of ['forward', 'backward', 'noop', 'missing-source', 'missing-other'] as const) {
-      it(scenario, async () => {
-        vi.useFakeTimers();
-        vi.stubGlobal('scrollY', 300);
-        vi.spyOn(window, 'scrollBy').mockImplementation(() => {});
-        const tabMove = vi.spyOn(relayStore, 'reorderTab').mockReturnValue(new Promise<CommandResult>(() => {}));
-        const workspaceMove = vi.spyOn(relayStore, 'reorderWorkspaceBlock').mockReturnValue(new Promise<CommandResult>(() => {}));
-        relayStore.relayConfigs.set([{ id: 'test', label: 'Test', url: 'ws://test', token: '' }]);
-        relayStore.connections.set(new Map([['test', connection as never]]));
-        relayStore.workspaces.set(workspaces);
-        const { container } = kind === 'tabs'
-          ? render(AgentList, { agents, relays: [], connections: new Map([['test', connection]]), responding: new Set<string>(), onopen: vi.fn() })
-          : render(WorkspaceManager);
-        await tick();
-        const slots = [...container.querySelectorAll<HTMLElement>(kind === 'tabs' ? '.workspace-tab' : '.workspace-management-slot')];
-        expect(slots).toHaveLength(3);
-        // Document tops 400, 450, 540; unequal heights, first gap 10, second gap 20.
-        slots.forEach((slot, i) => vi.spyOn(slot, 'getBoundingClientRect').mockReturnValue({ top: [100, 150, 240][i], height: [40, 70, 30][i] } as DOMRect));
-        const source = scenario === 'backward' ? 2 : 0;
-        const handle = kind === 'tabs' ? slots[source].querySelector<HTMLElement>('.agent-open')! : slots[source];
-        if (scenario === 'missing-source' || scenario === 'missing-other') {
-          delete slots[scenario === 'missing-source' ? source : 1].dataset[kind === 'tabs' ? 'tabId' : 'workspaceKey'];
-        }
-        await pointer(handle, 'pointerdown', 120);
-        await vi.advanceTimersByTimeAsync(550);
-        await tick();
-        const transform = (i: number) => slots[i].style.transform;
-        if (scenario === 'missing-source' && kind === 'workspaces') {
-          expect(transform(source)).toBe('');
-        } else {
-          expect(transform(source)).toBe('translateY(0px)');
-        }
-        // Change scroll after measurement: client 135 now means document 555,
-        // exactly the last midpoint. Strict > must leave it in the middle slot.
-        vi.stubGlobal('scrollY', 420);
-        if (scenario === 'forward') {
-          await pointer(handle, 'pointermove', 135);
-          expect(transform(1)).toBe('translateY(-50px)');
-          expect(transform(2)).toBe('');
-        }
-        const target = scenario === 'backward' ? -1 : scenario === 'noop' ? 0 : 136;
-        await pointer(handle, 'pointermove', target);
-        if (scenario === 'forward') {
-          expect(transform(0)).toBe('translateY(136px)');
-          expect(transform(1)).toBe('translateY(-50px)');
-          expect(transform(2)).toBe('translateY(-50px)');
-        } else if (scenario === 'backward') {
-          expect(transform(0)).toBe('translateY(40px)');
-          expect(transform(1)).toBe('translateY(40px)');
-        } else if (scenario === 'missing-other') {
-          expect(transform(1)).toBe('');
-          expect(transform(2)).toBe('translateY(-50px)');
-        }
-        await pointer(handle, 'pointerup', target);
-        const move = kind === 'tabs' ? tabMove : workspaceMove;
-        if (scenario === 'noop' || scenario === 'missing-source') {
-          expect(move).not.toHaveBeenCalled();
-        } else if (kind === 'tabs') {
-          expect(tabMove).toHaveBeenCalledExactlyOnceWith(agents[source], scenario === 'backward' ? 0 : 3);
-        } else {
-          expect(workspaceMove).toHaveBeenCalledExactlyOnceWith('test', [workspaces[source].workspace_id], scenario === 'backward' ? 'w1' : '', scenario === 'backward' ? 0 : 3);
-        }
-      });
-    }
+    it('forward', async () => {
+      const drag = await geometryFixture(kind, 0);
+      await drag.startDrag();
+      expect(drag.transform(0)).toBe('translateY(0px)');
+      drag.scrollAfterMeasurement();
+      await drag.dragTo(135);
+      expect(drag.transform(1)).toBe('translateY(-50px)');
+      expect(drag.transform(2)).toBe('');
+      await drag.dragTo(136);
+      expect(drag.transform(0)).toBe('translateY(136px)');
+      expect(drag.transform(1)).toBe('translateY(-50px)');
+      expect(drag.transform(2)).toBe('translateY(-50px)');
+      await drag.drop(136);
+      drag.expectMoved(3, '');
+    });
+
+    it('backward', async () => {
+      const drag = await geometryFixture(kind, 2);
+      await drag.startDrag();
+      expect(drag.transform(2)).toBe('translateY(0px)');
+      drag.scrollAfterMeasurement();
+      await drag.dragTo(-1);
+      expect(drag.transform(0)).toBe('translateY(40px)');
+      expect(drag.transform(1)).toBe('translateY(40px)');
+      await drag.drop(-1);
+      drag.expectMoved(0, 'w1');
+    });
+
+    it('noop', async () => {
+      const drag = await geometryFixture(kind, 0);
+      await drag.startDrag();
+      expect(drag.transform(0)).toBe('translateY(0px)');
+      drag.scrollAfterMeasurement();
+      await drag.dragTo(0);
+      await drag.drop(0);
+      drag.expectNotMoved();
+    });
+
+    it('missing-source', async () => {
+      const drag = await geometryFixture(kind, 0);
+      drag.unmarkSlot(0);
+      await drag.startDrag();
+      expect(drag.transform(0)).toBe(kind === 'workspaces' ? '' : 'translateY(0px)');
+      drag.scrollAfterMeasurement();
+      await drag.dragTo(136);
+      await drag.drop(136);
+      drag.expectNotMoved();
+    });
+
+    it('missing-other', async () => {
+      const drag = await geometryFixture(kind, 0);
+      drag.unmarkSlot(1);
+      await drag.startDrag();
+      expect(drag.transform(0)).toBe('translateY(0px)');
+      drag.scrollAfterMeasurement();
+      await drag.dragTo(136);
+      expect(drag.transform(1)).toBe('');
+      expect(drag.transform(2)).toBe('translateY(-50px)');
+      await drag.drop(136);
+      drag.expectMoved(3, '');
+    });
   });
 }
 

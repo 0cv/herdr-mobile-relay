@@ -15,13 +15,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 )
 
 const (
-	updateStartupGrace  = 30 * time.Second
 	updateWorkerTimeout = 15 * time.Minute
 	updateRepository    = "0cv/herdr-mobile-relay"
 )
@@ -76,7 +77,7 @@ func Run(ctx context.Context, jobPath string) error {
 }
 
 func (w Worker) Run(ctx context.Context, jobPath string) error {
-	job, err := loadJob(jobPath)
+	job, err := workerjob.Load[Job](jobPath, "update")
 	if err != nil {
 		return err
 	}
@@ -100,7 +101,7 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	if err := os.MkdirAll(job.ReleaseRoot, 0o700); err != nil {
 		return failStartup(err)
 	}
-	lock, err := acquireLock(filepath.Join(job.ReleaseRoot, "update.lock"))
+	lock, err := workerjob.Lock(filepath.Join(job.ReleaseRoot, "update.lock"), ErrConcurrent)
 	if err != nil {
 		if errors.Is(err, ErrConcurrent) {
 			return err
@@ -250,18 +251,6 @@ func validateJob(job Job) error {
 	return nil
 }
 
-func loadJob(filename string) (Job, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return Job{}, fmt.Errorf("read update job: %w", err)
-	}
-	var job Job
-	if err := json.Unmarshal(data, &job); err != nil {
-		return Job{}, fmt.Errorf("parse update job: %w", err)
-	}
-	return job, nil
-}
-
 func PruneOldReleases(releaseRoot string, keep ...string) error {
 	if !filepath.IsAbs(releaseRoot) || filepath.Clean(releaseRoot) == string(filepath.Separator) {
 		return errors.New("release root must be a non-root absolute path")
@@ -383,60 +372,8 @@ func verifyHealth(ctx context.Context, healthURL string, manifest relayrelease.M
 	}
 }
 
-func acquireLock(filename string) (*os.File, error) {
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		file.Close()
-		return nil, ErrConcurrent
-	}
-	_ = file.Truncate(0)
-	_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
-	_ = file.Sync()
-	return file, nil
-}
-
 func writeState(filename string, state State) error {
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	directory := filepath.Dir(filename)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	temp, err := os.CreateTemp(directory, ".update-state.")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempName, filename); err != nil {
-		return err
-	}
-	dir, err := os.Open(directory)
-	if err == nil {
-		err = dir.Sync()
-		_ = dir.Close()
-	}
+	_, err := atomicfile.WriteJSON(filename, state, 0o600)
 	return err
 }
 

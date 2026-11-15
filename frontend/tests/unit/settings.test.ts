@@ -18,6 +18,7 @@ import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, clearUpdateProgress } from '$lib/updates';
 import { guardReload } from '$lib/reload-guard';
 import { defaultAgentView, paneAgentViewOverrides, readTerminalResizeSession, setTerminalResizeSession } from '$lib/preferences';
+import { MockWebSocket, connectRelay } from '../support/relay';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -33,31 +34,6 @@ vi.mock('$lib/transports', async (importOriginal) => {
   };
 });
 
-class MockWebSocket {
-  static OPEN = 1;
-  static instances: MockWebSocket[] = [];
-  readyState = 0;
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  sent: string[] = [];
-
-  constructor(readonly url: string) {
-    MockWebSocket.instances.push(this);
-  }
-
-  send(payload: string) { this.sent.push(payload); }
-  close() { this.readyState = 3; }
-  open() {
-    this.readyState = MockWebSocket.OPEN;
-    this.onopen?.();
-  }
-  server(message: unknown) {
-    this.onmessage?.({ data: JSON.stringify(message) });
-  }
-}
-
 describe('settings relay status', () => {
   it('exposes Pi Integration per connected relay with reader access kept read-only', async () => {
     const credential = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role: 'reader', deviceId: 'device' } as never);
@@ -66,8 +42,7 @@ describe('settings relay status', () => {
     try {
       render(SettingsView);
       const socket = MockWebSocket.instances[0];
-      socket.open();
-      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      connectRelay({ capabilities: ['pi_integration'] }, socket);
       const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
       await waitFor(() => expect(toggle).toBeChecked());
       expect(toggle).toBeDisabled();
@@ -82,12 +57,11 @@ describe('settings relay status', () => {
     try {
       render(SettingsView);
       const socket = MockWebSocket.instances[0];
-      socket.open();
-      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      connectRelay({ capabilities: ['pi_integration'] }, socket);
       const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
       await waitFor(() => expect(toggle).toBeChecked());
-      socket.server({ type: 'agents', agents: [] });
-      socket.server({ type: 'inventory_status', state: 'ready' });
+      socket.message({ type: 'agents', agents: [] });
+      socket.message({ type: 'inventory_status', state: 'ready' });
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(toggle).toBeChecked();
       expect(screen.getByText('/synthetic/agent: up to date')).toBeInTheDocument();
@@ -181,7 +155,7 @@ describe('settings relay status', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
     expect(screen.getByText('Push: syncing…')).toBeInTheDocument();
 
-    socket.server({ type: 'push_subscribed', ok: true });
+    socket.message({ type: 'push_subscribed', ok: true });
     await waitFor(() => expect(screen.getByText('Push: synced')).toBeInTheDocument());
   });
 
@@ -189,7 +163,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       capabilities: ['workspace_management'],
@@ -221,7 +195,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       capabilities: [],
@@ -243,7 +217,7 @@ describe('settings relay status', () => {
 
     // A real read failure must appear without remounting Settings, and a later
     // successful observation must remove it rather than leave a stale warning.
-    socket.server({
+    socket.message({
       type: 'herdr_status',
       status: {
         server_version: '0.9.0',
@@ -255,7 +229,7 @@ describe('settings relay status', () => {
       },
     });
     expect(await screen.findByText('Terminal reads: Could not check')).toBeInTheDocument();
-    socket.server({
+    socket.message({
       type: 'herdr_status',
       status: {
         server_version: '0.9.0',
@@ -280,7 +254,7 @@ describe('settings relay status', () => {
       render(SettingsView);
       const socket = MockWebSocket.instances[0];
       socket.open();
-      socket.server({
+      socket.message({
         type: 'push_config',
         protocol: 3,
         capabilities: [],
@@ -372,7 +346,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       release_version: '0.15.0',
@@ -389,12 +363,12 @@ describe('settings relay status', () => {
     });
 
     expect(await screen.findByText('Gateway: 0.15.0 · Latest: 0.16.0')).toBeInTheDocument();
-    socket.server({
+    socket.message({
       type: 'update_status',
       update: { state: 'current', upstream_version: '0.14.0' },
     });
     expect(await screen.findByText('Gateway: 0.15.0 · Latest: 0.16.0')).toBeInTheDocument();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       release_version: '0.17.0',
@@ -416,7 +390,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       release_version: '0.6.0',
@@ -559,7 +533,7 @@ describe('settings relay status', () => {
     expect(height).toBeDisabled();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config', protocol: 3, host: 'fedora', agent_profiles: [],
       capabilities: ['pane_size_opt_in', 'pane_size_opt_in_rows'],
     });
@@ -589,7 +563,7 @@ describe('settings relay status', () => {
     const socket = MockWebSocket.instances[0];
     socket.open();
     await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
-    socket.server({ type: 'push_config', protocol: 3, version: 'abc1234', vapid_public_key: 'test-key' });
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc1234', vapid_public_key: 'test-key' });
 
     // One Notifications section owns the switch; categories, delays, and
     // delivery tests do nothing without a subscription, so they stay hidden.
@@ -609,7 +583,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       release_version: '0.7.0',
@@ -639,7 +613,7 @@ describe('settings relay status', () => {
       expected_version: '0.8.0',
       expected_revision: 'f'.repeat(40),
     });
-    socket.server({
+    socket.message({
       type: 'command_result',
       request_id: command.request_id,
       ok: true,
@@ -695,7 +669,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       release_version: '9.0.0',
@@ -724,7 +698,7 @@ describe('settings relay status', () => {
       expected_revision: 'f'.repeat(40),
       expected_origin: location.origin,
     });
-    socket.server({
+    socket.message({
       type: 'command_result',
       request_id: command.request_id,
       ok: true,
@@ -744,7 +718,7 @@ describe('settings relay status', () => {
     const publishing = /Publishing v9\.0\.0 from Fedora and waiting for this app origin to update\. This can take up to two minutes\./;
     expect(await screen.findByText(publishing)).toBeInTheDocument();
 
-    socket.server({
+    socket.message({
       type: 'app_deploy_status',
       app_deploy: {
         configured: true,
@@ -773,7 +747,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    socket.server({
+    socket.message({
       type: 'push_config',
       protocol: 3,
       release_version: '8.0.0',

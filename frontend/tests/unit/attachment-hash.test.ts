@@ -3,18 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AttachmentBatchController } from '$lib/attachments';
 import { IncrementalSha256 } from '$lib/incremental-sha256';
 import type { AttachmentUploadCallbacks, UploadChunkRequest, UploadFinishRequest } from '$lib/attachments';
+import { deferred } from '../support/relay';
 
 const target = {
   server_session_id: 'server', pane_id: 'pane', terminal_id: 'terminal', agent_session_id: 'session', generation: 7,
 };
 const wholeDigest = 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9';
 const expiresAt = '2099-01-01T00:00:00.000Z';
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
-}
 
 function fixture() {
   const chunks: UploadChunkRequest[] = [];

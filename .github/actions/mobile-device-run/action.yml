@@ -29,7 +29,7 @@ runs:
         printf 'MOBILE_FIXTURE_BINARY=%s\n' "$RUNNER_TEMP/herdr-mobile-fixture" >> "$GITHUB_ENV"
         printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
         printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
-        printf 'IOS_PLATFORM_VERSION=27.0\n' >> "$GITHUB_ENV"
+        printf 'IOS_PLATFORM_VERSION=%s\n' "$(jq -r '.ios.runtime | ltrimstr("iOS ")' tests/mobile/toolchains.json)" >> "$GITHUB_ENV"
         if [ "$WORKFLOW_PLATFORM" = ios ]; then printf 'MOBILE_TIMING_SCALE=3\n' >> "$GITHUB_ENV"; fi
         printf 'IOS_XCTEST_STATE_DIR=%s\n' "$RUNNER_TEMP/herdr-xctest-owner" >> "$GITHUB_ENV"
         printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
@@ -37,22 +37,11 @@ runs:
         printf 'IOS_WDA_PREBUILT_PATH=%s/Build/Products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
         printf 'IOS_WDA_AGENT_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
       shell: bash
-    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+    - uses: ./.github/actions/setup-toolchain
       with:
-        bun-version: 1.4.4
-    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-      with:
-        node-version: 26.13.0
-    - name: Assert shell Node runtime
-      run: |
-        set -euo pipefail
-        test "$(node --version)" = v26.13.0
-        test "$(command -v node)" = "$(node -p 'process.execPath')"
-      shell: bash
-    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-      with:
-        go-version: '1.27.3'
-        cache: true
+        node: 'true'
+        bun: 'true'
+        go: 'true'
     - name: Install mobile harness dependencies
       run: bun install --frozen-lockfile --cwd tests/mobile
       shell: bash
@@ -197,8 +186,11 @@ runs:
         chrome_version="$(grep -m1 'versionName=' <<<"$chrome_dump")"
         trichrome_version="$(grep -m1 'com.google.android.trichromelibrary version:' <<<"$chrome_dump")"
         printf '%s\n%s\n' "$chrome_version" "$trichrome_version" >"$RUNNER_TEMP/android-chrome-version.txt"
-        grep -F 'versionName=131.0.6778.200' <<<"$chrome_version"
-        grep -F 'com.google.android.trichromelibrary version:677820038' <<<"$trichrome_version"
+        chrome_expected="$(jq -r '.android.browserVersion' tests/mobile/toolchains.json)"
+        trichrome_expected="$(jq -r '.android.trichromeLibraryVersion' tests/mobile/toolchains.json)"
+        trichrome_code="${trichrome_expected##*(}"
+        grep -F "versionName=${chrome_expected%% *}" <<<"$chrome_version"
+        grep -F "com.google.android.trichromelibrary version:${trichrome_code%)}" <<<"$trichrome_version"
       shell: bash
     - name: Prepare owned Android environment policy
       if: inputs.platform == 'android'
@@ -214,10 +206,10 @@ runs:
       if: inputs.platform == 'ios'
       run: |
         set -euo pipefail
-        xcode_application=/Applications/Xcode_27.app
+        xcode_application="$(jq -r '.ios.xcode' tests/mobile/toolchains.json)"
         developer_directory="$xcode_application/Contents/Developer"
-        expected_xcode_version=27.0
-        expected_xcode_build=27A266a
+        expected_xcode_version="$(jq -r '.ios.xcodeVersion' tests/mobile/toolchains.json)"
+        expected_xcode_build="$(jq -r '.ios.xcodeBuild' tests/mobile/toolchains.json)"
         hosted_target="$RUNNER_TEMP/ios-hosted-target.txt"
         {
           printf 'expected_xcode_application=%s\n' "$xcode_application"
@@ -295,7 +287,7 @@ runs:
           -scheme WebDriverAgentRunner \
           -derivedDataPath "$IOS_WDA_DERIVED_DATA_PATH" \
           -destination "id=$IOS_SIMULATOR_UDID" \
-          IPHONEOS_DEPLOYMENT_TARGET=27.0 \
+          IPHONEOS_DEPLOYMENT_TARGET="$IOS_PLATFORM_VERSION" \
           GCC_TREAT_WARNINGS_AS_ERRORS=0 \
           COMPILER_INDEX_STORE_ENABLE=NO \
           APPIUM_XCODEBUILD_WDA_MARKER=1 \

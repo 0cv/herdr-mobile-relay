@@ -24,14 +24,10 @@ import { isAndroidTerminationPackage } from '../android-events';
 import {
   accessibility,
   androidTextLocator,
-  ariaLabel,
-  ariaLabelPrefix,
   AppiumClient,
-  buttonText,
   css,
   delay,
   isCommandAdmissionError,
-  isFatalDriverError as isFatalAppiumError,
   isRetryableElementLookupError,
   minimumDriverRequestMs,
   textLocator,
@@ -39,11 +35,8 @@ import {
   type SessionOptions,
   WebDriverError,
 } from '../support/webdriver';
+import { isExpectedOrigin, isFatalDriverError, preferenceValueScript, promptDraftScript, setPreference, clickDialogText, clickWebText, type WebContext } from './web-context';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
-
-function isFatalDriverError(error: unknown): boolean {
-  return isFatalAppiumError(error) || isQualificationFatal(error);
-}
 
 function isAdbTransportLoss(error: unknown): boolean {
   return error instanceof WebDriverError && error.code === 'APPIUM_COMMAND' && error.status === 500
@@ -1215,124 +1208,42 @@ export class AndroidPlatform implements MobilePlatform {
     await this.waitForKeyboard(false);
     await this.attachToInstalledView();
     if (this.keyboardDraft) {
-      const value = await this.readInstalledDocument<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''", 'keyboard');
+      const value = await this.readInstalledDocument<string>(promptDraftScript, 'keyboard');
       if (value !== this.keyboardDraft) throw new Error('ANDROID_KEYBOARD: draft was not preserved after dismissal');
     }
   }
 
-  async clickWebText(text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const locators = [buttonText(text), ariaLabel(text), ariaLabelPrefix(text), textLocator(text)];
-        for (const locator of locators) {
-          const locatorTimeout = deadline - Date.now();
-          if (locatorTimeout < minimumDriverRequestMs) break;
-          try {
-            const element = await this.driver.findAnyOnce([locator], locatorTimeout);
-            const controlTimeout = deadline - Date.now();
-            if (controlTimeout < minimumDriverRequestMs) break;
-            if (await this.webControlReady(element, deadline)) {
-              const clickTimeout = deadline - Date.now();
-              if (clickTimeout < minimumDriverRequestMs) break;
-              if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient click and retained postcheck allowance');
-              const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
-              await this.driver.click(element, 2_000);
-              await this.attachToInstalledView(deadline - Date.now());
-              this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
-              return;
-            }
-            lastError = `${text} is disabled, hidden, or empty`;
-          } catch (error) {
-            if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-            if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-            lastError = error instanceof Error ? error.message : String(error);
-          }
-        }
-      } catch (error) {
-        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-        if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError || 'control was not usable before the deadline'}`);
+  private get webContext(): WebContext {
+    return { driver: this.driver, budget: this.budget, attachToInstalledView: (timeoutMs) => this.attachToInstalledView(timeoutMs) };
   }
 
-  private async webControlReady(element: string, deadline: number): Promise<boolean> {
-    const disabledTimeout = deadline - Date.now();
-    if (disabledTimeout < minimumDriverRequestMs) return false;
-    const disabled = await this.driver.attribute(element, 'disabled', disabledTimeout);
-    if (disabled !== null && disabled !== 'false') return false;
-    const ariaDisabledTimeout = deadline - Date.now();
-    if (ariaDisabledTimeout < minimumDriverRequestMs) return false;
-    const ariaDisabled = await this.driver.attribute(element, 'aria-disabled', ariaDisabledTimeout);
-    if (ariaDisabled === 'true') return false;
-    const hiddenTimeout = deadline - Date.now();
-    if (hiddenTimeout < minimumDriverRequestMs) return false;
-    const hidden = await this.driver.attribute(element, 'hidden', hiddenTimeout);
-    if (hidden !== null && hidden !== 'false') return false;
-    const ariaHiddenTimeout = deadline - Date.now();
-    if (ariaHiddenTimeout < minimumDriverRequestMs) return false;
-    const ariaHidden = await this.driver.attribute(element, 'aria-hidden', ariaHiddenTimeout);
-    if (ariaHidden === 'true') return false;
-    const rectTimeout = deadline - Date.now();
-    if (rectTimeout < minimumDriverRequestMs) return false;
-    const rect = await this.driver.elementRect(element, rectTimeout);
-    return rect.width > 0 && rect.height > 0;
+  async clickWebText(text: string): Promise<void> {
+    await clickWebText(this.webContext, text, async (element, deadline, clickTimeout) => {
+      if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient click and retained postcheck allowance');
+      const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
+      await this.driver.click(element, 2_000);
+      await this.attachToInstalledView(deadline - Date.now());
+      this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
+    });
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), findTimeout);
-        for (const button of buttons) {
-          const textTimeout = deadline - Date.now();
-          if (textTimeout < minimumDriverRequestMs) break;
-          if ((await this.driver.text(button, textTimeout)).trim() === text) {
-            const clickTimeout = deadline - Date.now();
-            if (clickTimeout < minimumDriverRequestMs) break;
-            if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient dialog click and retained postcheck allowance');
-            if (dialogId === 'update-herdr-dialog' && text === 'Load Update') this.productRecorder.transition('update-activation', this.retainedOwner!);
-            const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
-            await this.driver.click(button, 2_000);
-            await this.attachToInstalledView(deadline - Date.now());
-            this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
-            return;
-          }
-        }
-        lastError = `${text} is not visible in ${dialogId}`;
-      } catch (error) {
-        if (isFatalDriverError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
+    await clickDialogText(this.webContext, dialogId, text, async (button, deadline, clickTimeout) => {
+      if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient dialog click and retained postcheck allowance');
+      if (dialogId === 'update-herdr-dialog' && text === 'Load Update') this.productRecorder.transition('update-activation', this.retainedOwner!);
+      const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
+      await this.driver.click(button, 2_000);
+      await this.attachToInstalledView(deadline - Date.now());
+      this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
+    });
   }
 
   async setPreference(preference: string): Promise<void> {
-    await this.clickWebText('Settings');
-    await this.clickWebText(preference === 'state' ? 'By State' : 'Mixed');
+    await setPreference((text) => this.clickWebText(text), preference);
   }
 
   async preferenceValue(): Promise<string> {
-    return this.readInstalledDocument<string>("return localStorage.getItem('herdr_home_workspace_layout') || ''", 'preference');
+    return this.readInstalledDocument<string>(preferenceValueScript, 'preference');
   }
 
   async captureSanitizedEvidence(name: string): Promise<void> {
@@ -1967,7 +1878,7 @@ export class AndroidPlatform implements MobilePlatform {
           lastError = responseDetail;
         } else {
           const metadata = JSON.parse(observed.body) as Record<string, unknown>;
-          if (observed.httpStatus === 200 && this.isExpectedOrigin(observed.url)
+          if (observed.httpStatus === 200 && isExpectedOrigin(observed.url, this.origin)
             && typeof metadata.version === 'string'
             && Number.isInteger(Number(metadata.assets))
             && Number(metadata.assets) > 0) return;
@@ -2051,14 +1962,6 @@ export class AndroidPlatform implements MobilePlatform {
       }
     }
     throw new Error(`ANDROID_TARGET: signed installed target was not foreground (${last || 'none'})`, { cause: launchError });
-  }
-
-  private isExpectedOrigin(value: string): boolean {
-    try {
-      return new URL(value).origin === new URL(this.origin).origin;
-    } catch {
-      return false;
-    }
   }
 
   private guardRetainedCommands(): void {
