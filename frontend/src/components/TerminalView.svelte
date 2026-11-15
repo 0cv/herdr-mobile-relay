@@ -787,6 +787,27 @@
     }
   }
 
+  function commitVirtualScroll(
+    nextTop: number,
+    stick: boolean,
+    { force = false, after }: { force?: boolean; after?: () => void } = {},
+  ) {
+    virtualStickToBottom = stick;
+    virtualScrollResetPending = true;
+    renderVirtualWindow(nextTop, force);
+    void tick().then(() => {
+      if (terminalLayoutSuspended) return;
+      if (!terminalElement) {
+        virtualScrollResetPending = false;
+        return;
+      }
+      terminalElement.scrollTop = stick ? terminalElement.scrollHeight : nextTop;
+      rememberVirtualScrollGeometry(terminalElement);
+      after?.();
+      virtualScrollResetPending = false;
+    });
+  }
+
   function measureVirtualRows(entries: ResizeObserverEntry[]) {
     if (!terminalElement || !entries.length || terminalLayoutSuspended) return;
     if (virtualScrollResetPending) return;
@@ -816,19 +837,10 @@
     }
     if (!changed) return;
     const nextTop = wasAtBottom ? virtualIndex.total : previousTop + anchorDelta;
-    virtualStickToBottom = wasAtBottom;
-    virtualScrollResetPending = true;
-    renderVirtualWindow(nextTop);
-    void tick().then(() => {
-      if (terminalLayoutSuspended) return;
-      if (!terminalElement) {
-        virtualScrollResetPending = false;
-        return;
-      }
-      terminalElement.scrollTop = wasAtBottom ? terminalElement.scrollHeight : nextTop;
-      rememberVirtualScrollGeometry(terminalElement);
-      if (wasAtBottom) virtualStickToBottom = true;
-      virtualScrollResetPending = false;
+    commitVirtualScroll(nextTop, wasAtBottom, {
+      after: () => {
+        if (wasAtBottom) virtualStickToBottom = true;
+      },
     });
   }
 
@@ -865,19 +877,7 @@
 
   function jumpToBottom() {
     if (terminalLayoutSuspended) return;
-    virtualStickToBottom = true;
-    virtualScrollResetPending = true;
-    renderVirtualWindow(Number.POSITIVE_INFINITY, true);
-    void tick().then(() => {
-      if (terminalLayoutSuspended) return;
-      if (!terminalElement) {
-        virtualScrollResetPending = false;
-        return;
-      }
-      terminalElement.scrollTop = terminalElement.scrollHeight;
-      rememberVirtualScrollGeometry(terminalElement);
-      virtualScrollResetPending = false;
-    });
+    commitVirtualScroll(Number.POSITIVE_INFINITY, true, { force: true });
   }
 
   function handleScroll() {
