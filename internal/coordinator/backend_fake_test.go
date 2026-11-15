@@ -29,13 +29,16 @@ type fakeBackend struct {
 	panes      []herdr.Pane
 	workspaces []herdr.Workspace
 	tabs       []herdr.Tab
+	contents   map[string]string
+	agent      herdr.AgentInfo
 	status     herdr.ServerStatus
 }
 
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
-		hooks:  map[string]fakeHook{},
-		status: herdr.NewClient("", "").CapabilityStatus(),
+		hooks:    map[string]fakeHook{},
+		contents: map[string]string{},
+		status:   herdr.NewClient("", "").CapabilityStatus(),
 	}
 }
 
@@ -144,6 +147,15 @@ func (b *fakeBackend) TabList(ctx context.Context) ([]herdr.Tab, error) {
 	return slices.Clone(b.tabs), nil
 }
 
+func (b *fakeBackend) ReadPane(ctx context.Context, paneID string, lines int, format string) (herdr.PaneRead, error) {
+	if err := b.invoke(ctx, "ReadPane", paneID, lines, format); err != nil {
+		return herdr.PaneRead{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return herdr.PaneRead{Content: []byte(b.contents[paneID])}, nil
+}
+
 func (b *fakeBackend) Prompt(ctx context.Context, paneID, text string) error {
 	return b.invoke(ctx, "Prompt", paneID, text)
 }
@@ -164,11 +176,39 @@ func (b *fakeBackend) PaneRun(ctx context.Context, paneID string, argv []string)
 	return b.invoke(ctx, "PaneRun", paneID, slices.Clone(argv))
 }
 
+func (b *fakeBackend) TabRename(ctx context.Context, tabID, label string) error {
+	return b.invoke(ctx, "TabRename", tabID, label)
+}
+
+func (b *fakeBackend) TabMove(ctx context.Context, tabID string, insertIndex int) error {
+	return b.invoke(ctx, "TabMove", tabID, insertIndex)
+}
+
+func (b *fakeBackend) AgentGet(ctx context.Context, paneID string) (*herdr.AgentInfo, error) {
+	if err := b.invoke(ctx, "AgentGet", paneID); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	info := b.agent
+	return &info, nil
+}
+
+func (b *fakeBackend) RenameAgent(ctx context.Context, paneID, name string) error {
+	return b.invoke(ctx, "RenameAgent", paneID, name)
+}
+
 func (b *fakeBackend) StopPane(ctx context.Context, paneID string) error {
 	return b.invoke(ctx, "StopPane", paneID)
 }
 
 func (b *fakeBackend) CapabilityStatus() herdr.ServerStatus {
+	b.mu.Lock()
+	hook := b.hooks["CapabilityStatus"]
+	b.mu.Unlock()
+	if hook != nil {
+		_ = hook(context.Background(), fakeCall{Method: "CapabilityStatus"})
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.status

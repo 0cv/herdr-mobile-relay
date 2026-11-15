@@ -5,24 +5,25 @@ package coordinator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net"
-	"os"
-	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
-func recordingHerdr(t *testing.T, dir, record, stdout string) string {
-	return writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"printf '"+stdout+"\\n'\n")
+func keyCalls(client *fakeBackend, key string) int {
+	count := 0
+	for _, call := range client.callsTo("SendKeys") {
+		if slices.Contains(call.Args[1].([]string), key) {
+			count++
+		}
+	}
+	return count
 }
 
 // §9.6 / §16.9: the relay-level pre-pane ledger shares one launch between
@@ -118,12 +119,10 @@ func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {
 }
 
 func TestAgentStopRetryDoesNotCloseOrBumpTwice(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "stops.log")
-	bin := recordingHerdr(t, dir, record, `{"ok":true}`)
+	client := newFakeBackend()
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, state.RevisionCounter())
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	d := newTestDispatcher(t, client, state)
 	message := map[string]any{
 		"type": "agent_stop", "request_id": "stop-1", "pane_id": "pane-1",
 	}
@@ -132,9 +131,8 @@ func TestAgentStopRetryDoesNotCloseOrBumpTwice(t *testing.T) {
 	if !first.OK || !second.OK {
 		t.Fatalf("stop results = %+v, %+v", first, second)
 	}
-	data, _ := os.ReadFile(record)
-	if closes := strings.Count(string(data), "pane close"); closes != 1 {
-		t.Fatalf("pane close invocations = %d, want 1\n%s", closes, data)
+	if closes := client.callsTo("StopPane"); len(closes) != 1 {
+		t.Fatalf("StopPane calls = %d, want 1: %+v", len(closes), client.recorded())
 	}
 	if generation := state.Generation("pane-1"); generation != 1 {
 		t.Fatalf("state generation = %d, want 1", generation)
@@ -142,18 +140,12 @@ func TestAgentStopRetryDoesNotCloseOrBumpTwice(t *testing.T) {
 }
 
 func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "renames.log")
+	client := newFakeBackend()
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{
 		PaneID: "pane-1", TabID: "tab-1", Status: "working",
 	}}, state.RevisionCounter())
-	d := NewDispatcher(
-		herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")),
-		state,
-		nil,
-		testLogger(),
-	)
+	d := newTestDispatcher(t, client, state)
 
 	result := d.Handle(context.Background(), map[string]any{
 		"type": "agent_rename", "request_id": "rename-1", "pane_id": "pane-1", "name": "123",
@@ -161,73 +153,24 @@ func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
 	if !result.OK {
 		t.Fatalf("numeric rename failed: %+v", result)
 	}
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "tab rename tab-1 123") {
-		t.Fatalf("rename commands = %q, missing tab rename", data)
-	}
-	if strings.Contains(string(data), "agent rename") {
-		t.Fatalf("tab label was sent through agent rename: %q", data)
+	want := []fakeCall{{Method: "TabRename", Args: []any{"tab-1", "123"}}}
+	if got := client.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls = %+v, want only %+v", got, want)
 	}
 }
 
 func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
-	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	serverResult := make(chan error, 1)
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			serverResult <- acceptErr
-			return
-		}
-		defer conn.Close()
-		var request struct {
-			ID     string `json:"id"`
-			Method string `json:"method"`
-			Params struct {
-				TabID       string `json:"tab_id"`
-				InsertIndex int    `json:"insert_index"`
-			} `json:"params"`
-		}
-		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
-			serverResult <- decodeErr
-			return
-		}
-		if request.Method != "tab.move" || request.Params.TabID != "tab-1" || request.Params.InsertIndex != 2 {
-			serverResult <- fmt.Errorf("unexpected tab move request: %+v", request)
-			return
-		}
-		serverResult <- json.NewEncoder(conn).Encode(map[string]any{
-			"id": request.ID,
-			"result": map[string]any{
-				"type": "tab_list",
-				"tabs": []any{},
-			},
-		})
-	}()
-
+	client := newFakeBackend()
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{
 		PaneID: "pane-1", TabID: "tab-1", Status: "working",
 	}}, state.RevisionCounter())
-	client := herdr.NewClient("/binary/must-not-run", socketPath)
-	defer client.Close()
-	dispatcher := NewDispatcher(client, state, nil, testLogger())
+	dispatcher := newTestDispatcher(t, client, state)
 	result := dispatcher.Handle(context.Background(), map[string]any{
 		"type": "tab_reorder", "request_id": "move-1", "pane_id": "pane-1", "insert_index": 2,
 	})
 	if !result.OK {
 		t.Fatalf("tab reorder failed: %+v", result)
-	}
-	if serverErr := <-serverResult; serverErr != nil {
-		t.Fatal(serverErr)
 	}
 	invalid := dispatcher.Handle(context.Background(), map[string]any{
 		"type": "tab_reorder", "request_id": "move-invalid", "pane_id": "pane-1", "insert_index": 1.5,
@@ -235,22 +178,19 @@ func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
 	if invalid.OK || invalid.Error != "Tab position is invalid" {
 		t.Fatalf("fractional tab position accepted: %+v", invalid)
 	}
+	want := []fakeCall{{Method: "TabMove", Args: []any{"tab-1", 2}}}
+	if got := client.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls = %+v, want %+v", got, want)
+	}
 }
 
 func TestApprovalRetryAfterStatusChangeReturnsStoredPhase(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "approvals.log")
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf '"+approvalPane+"\\n'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
+	client := newFakeBackend()
+	client.contents["pane-1"] = approvalPane
 	state := NewState(testLogger())
 	commitApproval(state, "pane-1")
 	eventID := blockedEventID(t, &Dispatcher{state: state}, "pane-1")
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	d := newTestDispatcher(t, client, state)
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 	updates := make(chan map[string]any, 1)
 	d.SetBroadcast(func(message any) {
@@ -280,31 +220,23 @@ func TestApprovalRetryAfterStatusChangeReturnsStoredPhase(t *testing.T) {
 	if !replay.OK || replay.Phase != "confirmed" {
 		t.Fatalf("approval replay = %+v, want stored confirmed phase", replay)
 	}
-	data, _ := os.ReadFile(record)
-	if sends := strings.Count(string(data), "send-keys"); sends != 1 {
-		t.Fatalf("approval sends = %d, want 1\n%s", sends, data)
+	if sends := client.callsTo("SendKeys"); len(sends) != 1 {
+		t.Fatalf("approval sends = %d, want 1: %+v", len(sends), client.recorded())
 	}
 }
 
 // §9.6: repeating answer_question with the same interaction_id must send the
 // answer keys only once.
 func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "keys.log")
 	questionView := "Which deployment target?\n❯ 1. Development\n2. Staging\n3. Type something.\n4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel"
 	interaction := question.Parse(questionView, "claude")
 	if interaction == nil {
 		t.Fatal("test question did not parse")
 	}
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf '%s\\n' '"+questionView+"'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
+	client := newFakeBackend()
+	client.contents["pane-1"] = questionView
 
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "claude", Status: "blocked"}}, d.state.RevisionCounter())
 
 	answer := func() *CommandResult {
@@ -331,11 +263,9 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 		t.Fatalf("same request with different answer = %+v, want conflict", conflict)
 	}
 
-	data, _ := os.ReadFile(record)
 	// Each answer confirms with a single Enter; a deduped answer sends it once.
-	enters := strings.Count(string(data), "Enter")
-	if enters != 1 {
-		t.Fatalf("duplicate question answer confirmed %d times, want 1\nrecord:\n%s", enters, data)
+	if enters := keyCalls(client, "Enter"); enters != 1 {
+		t.Fatalf("duplicate question answer confirmed %d times, want 1: %+v", enters, client.recorded())
 	}
 }
 
@@ -366,36 +296,25 @@ func TestQuestionWatcherWaitsThroughTransientUnparseableFrames(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			countFile := filepath.Join(dir, "reads")
-			if err := os.WriteFile(countFile, []byte("0\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-				"if [ \"$1 $2 $3\" = \"pane read pane-1\" ]; then\n"+
-				"  count=$(cat \""+countFile+"\")\n"+
-				"  count=$((count + 1))\n"+
-				"  printf '%s\\n' \"$count\" > \""+countFile+"\"\n"+
-				"  if [ \"$count\" -eq 1 ]; then\n"+
-				"    printf '%s\\n' '"+test.initialView+"'\n"+
-				"  elif [ \"$count\" -eq 2 ]; then\n"+
-				"    printf '%s\\n' 'redrawing question'\n"+
-				"  else\n"+
-				"    printf '%s\\n' '"+test.nextView+"'\n"+
-				"  fi\n"+
-				"else\n"+
-				"  printf '{\"ok\":true}\\n'\n"+
-				"fi\n")
+			client := newFakeBackend()
+			reads := 0
+			client.setHook("ReadPane", func(context.Context, fakeCall) error {
+				reads++
+				view := test.nextView
+				switch reads {
+				case 1:
+					view = test.initialView
+				case 2:
+					view = "redrawing question"
+				}
+				client.update(func(b *fakeBackend) { b.contents["pane-1"] = view })
+				return nil
+			})
 			state := NewState(testLogger())
 			state.CommitInventory([]*AgentState{{
 				PaneID: "pane-1", Agent: "codex", Status: "blocked",
 			}}, state.RevisionCounter())
-			d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
-			t.Cleanup(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				_ = d.Close(ctx)
-			})
+			d := newTestDispatcher(t, client, state)
 			updates := make(chan map[string]any, 8)
 			d.SetBroadcast(func(message any) {
 				if update, ok := message.(map[string]any); ok {
@@ -486,46 +405,24 @@ func TestAcknowledgeOnlyBroadcastsDisplayedStatusChanges(t *testing.T) {
 }
 
 func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "keys.log")
-	stateFile := filepath.Join(dir, "pane.txt")
-	firstFile := filepath.Join(dir, "first.txt")
-	secondFile := filepath.Join(dir, "second.txt")
 	firstView := "Question 1/2 (1 unanswered)\nChoose the first value\n\n❯ 1. Alpha\n  2. Beta\n  3. None of the above\n\ntab to add notes | enter to submit answer | ←/→ to navigate questions"
 	secondView := "Question 2/2 (1 unanswered)\nChoose the second value\n\n❯ 1. Gamma\n  2. Delta\n  3. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions"
-	if err := os.WriteFile(firstFile, []byte(firstView), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(secondFile, []byte(secondView), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(stateFile, []byte(secondView), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2 $3\" = \"pane read pane-1\" ]; then\n"+
-		"  cat \""+stateFile+"\"\n"+
-		"elif printf '%s' \"$*\" | grep -q 'Left'; then\n"+
-		"  cp \""+firstFile+"\" \""+stateFile+"\"\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"elif printf '%s' \"$*\" | grep -q 'Enter'; then\n"+
-		"  cp \""+secondFile+"\" \""+stateFile+"\"\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
+	client := newFakeBackend()
+	client.contents["pane-1"] = secondView
+	client.setHook("SendKeys", func(_ context.Context, call fakeCall) error {
+		keys := call.Args[1].([]string)
+		switch {
+		case slices.Contains(keys, "Left"):
+			client.update(func(b *fakeBackend) { b.contents["pane-1"] = firstView })
+		case slices.Contains(keys, "Enter"):
+			client.update(func(b *fakeBackend) { b.contents["pane-1"] = secondView })
+		}
+		return nil
+	})
 
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "codex", Status: "blocked"}}, state.RevisionCounter())
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := d.Close(ctx); err != nil {
-			t.Errorf("close dispatcher: %v", err)
-		}
-	})
+	d := newTestDispatcher(t, client, state)
 	updates := make(chan map[string]any, 8)
 	d.SetBroadcast(func(message any) {
 		if update, ok := message.(map[string]any); ok {
@@ -609,39 +506,25 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 	}
 	awaitUpdate("answer-2", "advanced")
 
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
+	if lefts := keyCalls(client, "Left"); lefts != 2 {
+		t.Fatalf("Left dispatches = %d, want 2: %+v", lefts, client.recorded())
 	}
-	if lefts := strings.Count(string(data), "Left"); lefts != 2 {
-		t.Fatalf("Left dispatches = %d, want 2\n%s", lefts, data)
-	}
-	if enters := strings.Count(string(data), "Enter"); enters != 2 {
-		t.Fatalf("answer dispatches = %d, want 2\n%s", enters, data)
+	if enters := keyCalls(client, "Enter"); enters != 2 {
+		t.Fatalf("answer dispatches = %d, want 2: %+v", enters, client.recorded())
 	}
 }
 
 func TestUnchangedQuestionNavigationReturnsReplayableError(t *testing.T) {
-	dir := t.TempDir()
 	questionView := "Question 2/2 (1 unanswered)\nChoose the second value\n\n❯ 1. Gamma\n  2. Delta\n  3. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions"
 	interaction := question.Parse(questionView, "codex")
 	if interaction == nil {
 		t.Fatal("question fixture did not parse")
 	}
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"if [ \"$1 $2 $3\" = \"pane read pane-1\" ]; then\n"+
-		"  printf '%s\\n' '"+questionView+"'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
+	client := newFakeBackend()
+	client.contents["pane-1"] = questionView
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "codex", Status: "blocked"}}, state.RevisionCounter())
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = d.Close(ctx)
-	})
+	d := newTestDispatcher(t, client, state)
 	updates := make(chan map[string]any, 1)
 	d.SetBroadcast(func(message any) {
 		if update, ok := message.(map[string]any); ok {

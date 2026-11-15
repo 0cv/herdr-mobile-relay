@@ -2,47 +2,11 @@ package coordinator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/0cv/herdr-mobile-relay/internal/backend"
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
-
-type blockedStopBackend struct {
-	backend.Backend
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (b *blockedStopBackend) StopPane(ctx context.Context, _ string) error {
-	close(b.entered)
-	select {
-	case <-b.release:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-type blockedCapabilityBackend struct {
-	backend.Backend
-	entered chan struct{}
-	release chan struct{}
-	blocked atomic.Bool
-}
-
-func (b *blockedCapabilityBackend) CapabilityStatus() herdr.ServerStatus {
-	if b.blocked.CompareAndSwap(false, true) {
-		close(b.entered)
-		<-b.release
-	}
-	return b.Backend.CapabilityStatus()
-}
 
 func generationResult(t *testing.T, ctx context.Context, results <-chan *CommandResult) *CommandResult {
 	t.Helper()
@@ -58,20 +22,18 @@ func generationResult(t *testing.T, ctx context.Context, results <-chan *Command
 	}
 }
 
-func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, message map[string]any) *CommandResult {
+func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, client *fakeBackend, message map[string]any) *CommandResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
-	client := &blockedStopBackend{Backend: d.herdr, entered: make(chan struct{}), release: make(chan struct{})}
-	d.herdr = client
-	t.Cleanup(func() {
-		cleanupCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		if err := d.Close(cleanupCtx); err != nil {
-			t.Error(err)
-		}
-		if err := client.Close(); err != nil {
-			t.Error(err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	client.setHook("StopPane", func(ctx context.Context, _ fakeCall) error {
+		close(entered)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	})
 	stopped := make(chan *CommandResult, 1)
@@ -81,7 +43,7 @@ func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, message map[string]an
 		})
 	}()
 	select {
-	case <-client.entered:
+	case <-entered:
 	case <-ctx.Done():
 		t.Fatal("stop did not reach backend: ", ctx.Err())
 	}
@@ -110,7 +72,7 @@ func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, message map[string]an
 	default:
 	}
 
-	close(client.release)
+	close(release)
 	if result := generationResult(t, ctx, stopped); !result.OK {
 		t.Fatalf("stop failed: %+v", result)
 	}
@@ -120,20 +82,20 @@ func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, message map[string]an
 // §9.5: a mutation that captured generation N must abort — without sending any
 // input — if a Clear/Stop advances the generation while it was queued.
 func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	client := newFakeBackend()
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 
 	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, d.state.RevisionCounter())
-	res := mutationQueuedBehindStop(t, d, map[string]any{
+	res := mutationQueuedBehindStop(t, d, client, map[string]any{
 		"type": "submit_prompt", "request_id": "p", "pane_id": "pane-1", "text": "hi",
 	})
 	if res.OK || res.Error != "pane session was replaced" {
 		t.Fatalf("prompt dispatched after generation advanced: ok=%v phase=%q err=%q "+
 			"(§9.5: input must not land on a replaced session)", res.OK, res.Phase, res.Error)
 	}
-	if data, _ := os.ReadFile(record); len(data) != 0 {
-		t.Fatalf("prompt sent input to herdr despite a stale generation:\n%s", data)
+	want := []fakeCall{{Method: "StopPane", Args: []any{"pane-1"}}}
+	if got := client.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("prompt sent input to herdr despite a stale generation: calls = %+v", got)
 	}
 }
 
@@ -141,14 +103,14 @@ func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
 // so a fresh attempt (against the new session) can dispatch — the abort is a
 // definite non-dispatch, not an uncertain one.
 func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, approvalPane), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	client := newFakeBackend()
+	client.contents["pane-1"] = approvalPane
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
-	first := mutationQueuedBehindStop(t, d, map[string]any{
+	first := mutationQueuedBehindStop(t, d, client, map[string]any{
 		"type": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
 		"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
 	})
@@ -164,8 +126,8 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 	if !second.OK {
 		t.Fatalf("retry after stale-generation abort was blocked: phase=%q err=%q (ledger not released)", second.Phase, second.Error)
 	}
-	if data, _ := os.ReadFile(record); strings.Count(string(data), "send-keys") != 1 {
-		t.Fatalf("want exactly one approval dispatch after release, got:\n%s", data)
+	if sends := client.callsTo("SendKeys"); len(sends) != 1 {
+		t.Fatalf("want exactly one approval dispatch after release, got: %+v", client.recorded())
 	}
 }
 
@@ -313,13 +275,22 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 		t.Fatalf("absent prompt result = %+v, want replaced-session failure", got)
 	}
 
-	client := &blockedCapabilityBackend{Backend: d.herdr, entered: make(chan struct{}), release: make(chan struct{})}
+	client := newFakeBackend()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var blocked atomic.Bool
+	client.setHook("CapabilityStatus", func(context.Context, fakeCall) error {
+		if blocked.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+		return nil
+	})
 	d.herdr = client
 	defer func() {
 		select {
-		case <-client.release:
+		case <-release:
 		default:
-			close(client.release)
+			close(release)
 		}
 	}()
 	results := make(chan *CommandResult, 1)
@@ -327,7 +298,7 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 		results <- d.Handle(f.ctx, clearMessage())
 	}()
 	select {
-	case <-client.entered:
+	case <-entered:
 	case <-f.ctx.Done():
 		t.Fatal("clear did not reach backend: ", f.ctx.Err())
 	}
@@ -335,13 +306,13 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 		PaneID: old.PaneID, RawPaneID: old.PaneID, TerminalID: "terminal-replacement",
 		TabID: old.TabID, WorkspaceID: old.WorkspaceID, Agent: "claude", Status: "working", Cwd: f.cwd,
 	}}, d.state.RevisionCounter())
-	close(client.release)
+	close(release)
 
 	if got := generationResult(t, f.ctx, results); got.OK || got.Error != ErrPaneReplaced.Error() {
 		t.Fatalf("absence-window clear result = %+v, want replaced-session failure", got)
 	}
-	if calls := clearCalls(t, f); calls != "" {
-		t.Fatalf("absence-window command reached replacement pane:\n%s", calls)
+	if calls := clearCalls(t, f); calls != "" || len(client.recorded()) != 0 {
+		t.Fatalf("absence-window command reached replacement pane:\n%s\n%+v", calls, client.recorded())
 	}
 	if generation := d.state.Generation(old.PaneID); generation != 2 {
 		t.Fatalf("replacement generation = %d, want distinct epoch 2", generation)
@@ -349,17 +320,8 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 }
 
 func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(
-		herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")),
-		NewState(testLogger()),
-		nil,
-		testLogger(),
-	)
-	t.Cleanup(func() {
-		_ = d.Close(context.Background())
-	})
+	client := newFakeBackend()
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 
 	messages := []map[string]any{
 		{"type": "send_keys", "request_id": "keys", "pane_id": "missing", "keys": []any{"Enter"}},
@@ -376,8 +338,8 @@ func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
 			t.Errorf("%s unexpectedly succeeded for absent pane", message["type"])
 		}
 	}
-	if data, _ := os.ReadFile(record); len(data) != 0 {
-		t.Fatalf("absent-pane mutation invoked Herdr:\n%s", data)
+	if calls := client.recorded(); len(calls) != 0 {
+		t.Fatalf("absent-pane mutation invoked Herdr: %+v", calls)
 	}
 }
 
