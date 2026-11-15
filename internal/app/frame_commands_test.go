@@ -404,6 +404,13 @@ func TestFrameCoordinatorFieldsMatchWithoutRegardToLetterCase(t *testing.T) {
 			t.Fatalf("send keys = %v, want one call for the second option", got)
 		}
 	})
+	t.Run("Lines and Format on read_pane", func(t *testing.T) {
+		e := newPaneFrameEnv(t)
+		e.exchange(t, map[string]any{"type": "read_pane", "Lines": 120, "Format": "ansi"})
+		if got := e.backend.called("Read"); !slices.Equal(got, []string{"ReadPaneRecent pane-1 lines=120 format=ansi"}) {
+			t.Fatalf("reads = %v, want 120 ansi lines", got)
+		}
+	})
 	t.Run("Text on send_input", func(t *testing.T) {
 		e := newFrameEnv(t)
 		expectCommandResult(t, e.exchange(t, map[string]any{"type": "send_input", "Text": "hello"}), "send_input", true, "completed", "")

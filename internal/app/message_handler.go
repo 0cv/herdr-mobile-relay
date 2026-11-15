@@ -95,13 +95,13 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	case "lease_pane_size", "release_pane_size":
 		s.handlePaneSizeCommand(client, inbound)
 	case "read_pane":
-		s.handleReadPane(ctx, client, inbound, msg)
+		s.handleReadPane(ctx, client, inbound)
 	case "watch_pane":
-		s.startPaneWatch(client, msg)
+		s.startPaneWatch(client, inbound)
 	case "unwatch_pane":
 		s.stopPaneWatch(client.ID(), inbound.PaneID)
 	case "pane_applied":
-		s.handlePaneApplied(client, msg)
+		s.handlePaneApplied(client, inbound)
 	case "get_conversation_history":
 		s.handleConversationHistory(client, inbound)
 	case "get_conversation_updates":

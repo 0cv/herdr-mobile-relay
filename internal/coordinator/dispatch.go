@@ -915,36 +915,20 @@ func (d *Dispatcher) HandleClearActivities(
 	})
 }
 
-func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
-	if paneID := stringValue(message, "pane_id"); paneID != "" {
-		d.handleAcknowledge(stringValue(message, "request_id"), paneID)
+func (d *Dispatcher) HandleReadPane(ctx context.Context, request PaneReadRequest) map[string]any {
+	if request.PaneID != "" {
+		d.handleAcknowledge(request.RequestID, request.PaneID)
 	}
-	return d.panes.read(ctx, message)
+	return d.panes.read(ctx, request)
 }
 
-func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {
-	return d.panes.probe(ctx, message)
+func (d *Dispatcher) HandleProbePane(ctx context.Context, request PaneReadRequest) map[string]any {
+	return d.panes.probe(ctx, request)
 }
 
 func (d *Dispatcher) wake() {
 	if d.wakePoll != nil {
 		d.wakePoll()
-	}
-}
-
-func stringValue(message map[string]any, key string) string {
-	value, _ := message[key].(string)
-	return value
-}
-
-func intValue(value any, fallback int) int {
-	switch number := value.(type) {
-	case int:
-		return number
-	case float64:
-		return int(number)
-	default:
-		return fallback
 	}
 }
 
