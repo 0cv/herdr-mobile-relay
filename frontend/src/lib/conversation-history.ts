@@ -518,6 +518,10 @@ export class ConversationHistoryController {
     } catch (failure) {
       if (demandEpoch !== this.stateValue.epoch || isAbortFailure(failure)) return;
       const error = conversationError(failure, 'Conversation history could not be loaded.');
+      if (error.code === workDeadlineError().code) {
+        this.pauseWithError(error.message, error.retryable, error.code);
+        return;
+      }
       this.stateValue.error = error;
       this.stateValue.requestPhase = 'idle';
       this.stateValue.pausedReason = error.retryable ? '' : error.message;
@@ -917,9 +921,6 @@ export class ConversationHistoryController {
     request: ConversationHistoryRequest,
   ): Promise<ConversationPage> {
     const remaining = remainingWorkMs(startedAt);
-    if (remaining <= 0) {
-      throw { error: workDeadlineError() };
-    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     const timeout = new Promise<ConversationPage>((_, reject) => {

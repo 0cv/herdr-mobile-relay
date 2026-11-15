@@ -1236,6 +1236,9 @@ describe('history runaway guards', () => {
     function expectDeadlineKeptWindow(controller: ConversationHistoryController) {
       expect(controller.state.error?.code).toBe('work_deadline');
       expect(controller.state.error?.retryable).toBe(true);
+      expect(controller.state.pausedReason).toBe(controller.state.error?.message);
+      expect(controller.state.pausedReason).toContain('two minutes');
+      expect(controller.state.contextSearching).toBe(false);
       expect(ids(controller)).toEqual(windowIds);
       expect(controller.state.nextCursor).toBe('older');
     }
@@ -1247,6 +1250,8 @@ describe('history runaway guards', () => {
       });
       const controller = await loadWindowWithFakeTimers(request);
       try {
+        controller.refresh();
+        controller.demandOlder();
         controller.refresh();
         await settle();
         expectDeadlineKeptWindow(controller);
@@ -1265,10 +1270,12 @@ describe('history runaway guards', () => {
       const controller = await loadWindowWithFakeTimers(request);
       try {
         controller.demandOlder();
+        controller.refresh();
         await settle();
         expect(request).toHaveBeenCalledTimes(2);
         await vi.advanceTimersByTimeAsync(HISTORY_ACTIVE_DEADLINE_MS);
         expectDeadlineKeptWindow(controller);
+        expect(request).toHaveBeenCalledTimes(2);
         controller.retry();
         await settle();
         expect(request).toHaveBeenCalledTimes(3);
