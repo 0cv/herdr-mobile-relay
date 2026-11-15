@@ -811,3 +811,239 @@ describe('conversation history entry ownership', () => {
     }
   });
 });
+
+describe('history rejection paths', () => {
+  type State = import('$lib/conversation-history').ConversationHistoryControllerState;
+  type Preview = import('$lib/conversation-cache').ConversationPreview;
+  type ConversationRequest = import('$lib/conversation-history').ConversationHistoryControllerOptions['request'];
+
+  const established = () => [entry('u2', 'user'), entry('a2', 'assistant')];
+  const establishedIds = ['u2', 'a2'];
+  const ids = (state: State) => state.entries.map(({ id }) => id);
+
+  function bulkEntries(prefix: string, count: number): ConversationEntry[] {
+    return Array.from({ length: count }, (_, index) => entry(`${prefix}${index}`, 'assistant', 'x'));
+  }
+
+  function warmPreview(entries: ConversationEntry[]): () => Preview {
+    return () => ({
+      identity: conversationIdentity(agent())!,
+      relayId: 'relay-1',
+      savedAt: 1,
+      sourceRevision: 'warm',
+      historical: false,
+      entries,
+    });
+  }
+
+  async function loadWindow(request: ConversationRequest) {
+    const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(ids(controller.state)).toEqual(establishedIds);
+    return controller;
+  }
+
+  async function demandOlderRejected(request: ConversationRequest) {
+    const controller = await loadWindow(request);
+    controller.demandOlder();
+    await vi.waitFor(() => expect(controller.state.error).not.toBeNull());
+    return controller;
+  }
+
+  function expectWindowKept(state: State, code: string, retryable: boolean) {
+    expect(state.error?.code).toBe(code);
+    expect(state.error?.retryable).toBe(retryable);
+    expect(ids(state)).toEqual(establishedIds);
+    expect(state.nextCursor).toBe('older');
+    expect(state.hasMore).toBe(true);
+    expect(state.beginningReached).toBe(false);
+  }
+
+  const firstPage = () => page({ entries: established(), hasMore: true, nextCursor: 'older', sourceRevision: 'r1' });
+
+  it('rejects an older page whose source revision changed', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(firstPage())
+      .mockResolvedValueOnce(page({ entries: [entry('u1', 'user')], sourceRevision: 'r2' }));
+    const controller = await demandOlderRejected(request);
+    try {
+      expectWindowKept(controller.state, 'source_changed', false);
+      expect(controller.state.error?.message).toBe('The conversation source changed while history was being browsed.');
+      expect(controller.state.sourceRevision).toBe('r1');
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('restores the established window when a bridge continuation changes source', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(firstPage())
+      .mockResolvedValueOnce(page({ entries: [entry('new', 'assistant')], hasMore: true, nextCursor: 'bridge', sourceRevision: 'r1' }))
+      .mockResolvedValueOnce(page({ entries: [entry('u2', 'user')], sourceRevision: 'r2' }));
+    const controller = await loadWindow(request);
+    try {
+      controller.refresh();
+      await vi.waitFor(() => expect(controller.state.error).not.toBeNull());
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(request.mock.calls[2][1]).toMatchObject({ cursor: 'bridge' });
+      expectWindowKept(controller.state, 'source_changed', false);
+      expect(controller.state.error?.message).toBe('The conversation source changed while history was being browsed.');
+      expect(controller.state.latestGapOutstanding).toBe(false);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('rejects a snapshot page without a snapshot id', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(firstPage())
+      .mockResolvedValueOnce(page({ entries: [entry('u1', 'user')], mode: 'snapshot', sourceRevision: 'r1' }));
+    const controller = await demandOlderRejected(request);
+    try {
+      expectWindowKept(controller.state, 'invalid_page', false);
+      expect(controller.state.error?.message).toBe('Conversation history returned an incomplete snapshot identity.');
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('rejects a page that has more history but no cursor and does not retry it', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(firstPage())
+      .mockResolvedValueOnce(page({ entries: [entry('u1', 'user')], hasMore: true, sourceRevision: 'r1' }));
+    const controller = await demandOlderRejected(request);
+    try {
+      expectWindowKept(controller.state, 'invalid_page', false);
+      expect(controller.state.error?.message).toBe('Conversation history returned an incomplete continuation.');
+      controller.retry();
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('reports a failed page without an error object using the page reason and does not retry it', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(firstPage())
+      .mockResolvedValueOnce(page({ state: 'failed', reason: 'The transcript could not be read.', sourceRevision: 'r1' }));
+    const controller = await demandOlderRejected(request);
+    try {
+      expectWindowKept(controller.state, 'history_failed', false);
+      expect(controller.state.error?.message).toBe('The transcript could not be read.');
+      controller.retry();
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('stops an older page that takes the retained entries over the entry limit', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(firstPage())
+      .mockResolvedValueOnce(page({ entries: bulkEntries('older-', 20_000), sourceRevision: 'r1' }));
+    const controller = await demandOlderRejected(request);
+    try {
+      expectWindowKept(controller.state, 'memory_limit', false);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('refuses live entries that take the retained entries over the entry limit', async () => {
+    const request = vi.fn().mockResolvedValueOnce(page({ entries: established(), hasMore: true, nextCursor: 'older', sourceRevision: 'r1' }));
+    const controller = await loadWindow(request);
+    try {
+      expect(controller.applyLiveEntries('r1', bulkEntries('live-', 20_000), 1)).toBe(false);
+      expectWindowKept(controller.state, 'memory_limit', false);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('keeps a warm preview when the fresh page alone is over the entry limit', async () => {
+    const cached = [entry('cached-user', 'user'), entry('cached-answer', 'assistant')];
+    const request = vi.fn().mockResolvedValue(page({ entries: bulkEntries('fresh-', 20_001), sourceRevision: 'r1' }));
+    const controller = new ConversationHistoryController(agent(), { request, getPreview: warmPreview(cached) });
+    try {
+      controller.start();
+      await vi.waitFor(() => expect(controller.state.error?.code).toBe('memory_limit'));
+      expect(controller.state.error?.retryable).toBe(false);
+      expect(ids(controller.state)).toEqual(['cached-user', 'cached-answer']);
+      expect(controller.state.preview).toBe(true);
+      expect(controller.state.authoritative).toBe(false);
+      expect(controller.state.nextCursor).toBe('');
+      expect(controller.state.hasMore).toBe(false);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('counts only the fresh page against the entry limit while a warm preview is visible', async () => {
+    const cached = [entry('cached-user', 'user'), entry('cached-answer', 'assistant')];
+    const request = vi.fn().mockResolvedValue(page({ entries: bulkEntries('fresh-', 20_000), sourceRevision: 'r1' }));
+    const controller = new ConversationHistoryController(agent(), { request, getPreview: warmPreview(cached) });
+    try {
+      controller.start();
+      await vi.waitFor(() => expect(controller.state.authoritative).toBe(true));
+      expect(controller.state.error).toBeNull();
+      expect(controller.state.preview).toBe(false);
+      expect(controller.state.entries).toHaveLength(20_000);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('keeps a warm preview and offers retry when the fresh page is empty and truncated', async () => {
+    const cached = [entry('cached-user', 'user'), entry('cached-answer', 'assistant')];
+    const truncated = page({
+      sourceRevision: 'r1',
+      diagnostics: { oversized_records: 0, corrupt_records: 0, source_truncated: true },
+    });
+    const request = vi.fn()
+      .mockResolvedValueOnce(truncated)
+      .mockResolvedValueOnce(page({ entries: [entry('fresh-user', 'user')], sourceRevision: 'r1' }));
+    const controller = new ConversationHistoryController(agent(), { request, getPreview: warmPreview(cached) });
+    try {
+      controller.start();
+      await vi.waitFor(() => expect(controller.state.error?.code).toBe('incomplete_history'));
+      expect(controller.state.error?.retryable).toBe(true);
+      expect(controller.state.preview).toBe(true);
+      expect(controller.state.authoritative).toBe(false);
+      expect(ids(controller.state)).toEqual(['cached-user', 'cached-answer']);
+      controller.retry();
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+      expect(request.mock.calls[1][1].cursor).toBeUndefined();
+      expect(request.mock.calls[1][1]).toMatchObject({ retry: true });
+      await vi.waitFor(() => expect(controller.state.authoritative).toBe(true));
+      expect(ids(controller.state)).toEqual(['fresh-user']);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('replaces a warm preview with a cursorless unavailable page', async () => {
+    const cached = [entry('cached-user', 'user'), entry('cached-answer', 'assistant')];
+    const unavailable = page({ available: false, reasonCode: 'source_missing', reason: 'The transcript is gone.' });
+    const onInitialPage = vi.fn();
+    const controller = new ConversationHistoryController(agent(), {
+      request: vi.fn().mockResolvedValue(unavailable),
+      getPreview: warmPreview(cached),
+      onInitialPage,
+    });
+    try {
+      controller.start();
+      expect(ids(controller.state)).toEqual(['cached-user', 'cached-answer']);
+      await vi.waitFor(() => expect(controller.state.available).toBe(false));
+      expect(controller.state.entries).toEqual([]);
+      expect(controller.state.authoritative).toBe(true);
+      expect(controller.state.preview).toBe(false);
+      expect(controller.state.nextCursor).toBe('');
+      expect(controller.state.hasMore).toBe(false);
+      expect(controller.state.error).toBeNull();
+      expect(onInitialPage).toHaveBeenCalledTimes(1);
+    } finally {
+      controller.cancel();
+    }
+  });
+});
