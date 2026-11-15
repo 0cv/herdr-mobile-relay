@@ -28,7 +28,7 @@ func TestCursorSkillIDsAtFileBudget(t *testing.T) {
 				if !catalog.Truncated {
 					t.Error("exhausted file budget did not mark catalog truncated")
 				}
-				if containsCommand(catalog, "/review") {
+				if hasCommand(catalog, "/review") {
 					t.Error("published /review, but Cursor registers only /a-review and /z-review")
 				}
 				wantCount := len(cursorBuiltins) + commandCount
@@ -39,7 +39,7 @@ func TestCursorSkillIDsAtFileBudget(t *testing.T) {
 					t.Errorf("catalog has %d commands, want %d", len(catalog.Commands), wantCount)
 				}
 				for _, name := range []string{"/a-review", "/z-review"} {
-					if got, want := containsCommand(catalog, name), remaining == 2; got != want {
+					if got, want := hasCommand(catalog, name), remaining == 2; got != want {
 						t.Errorf("%s present = %v, want %v", name, got, want)
 					}
 				}

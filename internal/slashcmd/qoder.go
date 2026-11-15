@@ -8,6 +8,8 @@ type qoderProvider struct{}
 
 func (p *qoderProvider) ID() string { return "qoder" }
 
+func (p *qoderProvider) Builtins() []Command { return qoderBuiltins }
+
 type qoderProjectScope struct {
 	commands   []Command
 	skills     []Command
@@ -28,11 +30,6 @@ var qoderBuiltins = []Command{
 
 func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(qoderBuiltins))
-		copy(builtins, qoderBuiltins)
-		return builtins, reader.truncated
-	}
 	truncated := false
 	budget := maxCustomFiles
 

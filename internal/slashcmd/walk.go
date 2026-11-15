@@ -129,16 +129,28 @@ func parseSkillMetadata(metadata map[string]string, dirName, namespace, source s
 	if !userInvocable(metadata) {
 		return nil, fullName
 	}
-	description := metadata["description"]
-	if description == "" {
-		description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+	command := skillCommand(fullName, skillDescription(metadata, name), source, metadata)
+	return &command, ""
+}
+
+func skillDescription(metadata map[string]string, name string) string {
+	if description := metadata["description"]; description != "" {
+		return description
 	}
-	return &Command{
-		Command:      fullName,
+	return strings.ToUpper(name[:1]) + name[1:] + " skill"
+}
+
+func skillCommand(command, description, source string, metadata map[string]string) Command {
+	return Command{
+		Command:      command,
 		Description:  textutil.Compact(description, 240),
 		Source:       source,
 		ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
-	}, ""
+	}
+}
+
+func formattedCommand(format, name string) string {
+	return "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/")
 }
 
 func findGitRoot(dir string) string {
@@ -328,12 +340,7 @@ func (reader *catalogReader) scanSkillDirFormatOptions(dir, source, format strin
 		if description == "" {
 			continue
 		}
-		commands = append(commands, Command{
-			Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
-			Description:  textutil.Compact(description, 240),
-			Source:       source,
-			ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
-		})
+		commands = append(commands, skillCommand(formattedCommand(format, name), description, source, metadata))
 	}
 	return commands, truncated
 }
@@ -403,12 +410,8 @@ func (reader *catalogReader) skillCommandFromFile(path, fallbackName, source, fo
 	if description == "" {
 		return nil
 	}
-	return &Command{
-		Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
-		Description:  textutil.Compact(description, 240),
-		Source:       source,
-		ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
-	}
+	command := skillCommand(formattedCommand(format, name), description, source, metadata)
+	return &command
 }
 
 func descriptionFrom(fm map[string]string, data []byte) string {

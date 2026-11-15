@@ -63,7 +63,7 @@ func TestCatalogForExactDispatch(t *testing.T) {
 		{"open code", "/models"},
 	}
 	for _, tt := range tests {
-		catalog := CatalogFor(tt.agent, cwd, "/nonexistent")
+		catalog := catalogFor(tt.agent, cwd, "/nonexistent")
 		if !hasCommand(catalog, tt.wantBuiltin) {
 			t.Errorf("CatalogFor(%q) missing %q", tt.agent, tt.wantBuiltin)
 		}
@@ -102,19 +102,19 @@ func TestCatalogForProfileFallbackCoversEveryAgentName(t *testing.T) {
 		{"open-code", "/models"},
 	}
 	for _, tt := range tests {
-		catalog := CatalogForProfile("", tt.agent, "/tmp", "/nonexistent", nil, "", "")
+		catalog := CatalogFor("", tt.agent, DiscoverContext{Cwd: "/tmp", Home: "/nonexistent"})
 		if len(catalog.Commands) == 0 {
-			t.Errorf("CatalogForProfile(\"\", %q) returned an empty catalog", tt.agent)
+			t.Errorf("CatalogFor(\"\", %q) returned an empty catalog", tt.agent)
 			continue
 		}
 		if !hasCommand(catalog, tt.wantBuiltin) {
-			t.Errorf("CatalogForProfile(\"\", %q) missing %q", tt.agent, tt.wantBuiltin)
+			t.Errorf("CatalogFor(\"\", %q) missing %q", tt.agent, tt.wantBuiltin)
 		}
 	}
 }
 
 func TestCatalogForNoSubstringMatch(t *testing.T) {
-	catalog := CatalogFor("not-claude-at-all", "/tmp", "/nonexistent")
+	catalog := catalogFor("not-claude-at-all", "/tmp", "/nonexistent")
 	if len(catalog.Commands) != 0 {
 		t.Errorf("substring match should not trigger provider: %+v", catalog.Commands)
 	}
@@ -124,16 +124,21 @@ func TestUnknownProfileFallsToGeneric(t *testing.T) {
 	root := t.TempDir()
 	skillDir := root + "/skills"
 	mkdirAll(t, skillDir+"/deploy")
-	writeTestFile(t, skillDir+"/deploy/SKILL.md", "---\nname: deploy\ndescription: Deploy\n---\n")
+	writeFile(t, skillDir+"/deploy/SKILL.md", "---\nname: deploy\ndescription: Deploy\n---\n")
 
-	catalog := CatalogForProfile("custom", "custom-agent", root, root, []string{skillDir}, "skill:{name}", "")
+	catalog := CatalogFor("custom", "custom-agent", DiscoverContext{
+		Cwd:           root,
+		Home:          root,
+		SkillDirs:     []string{skillDir},
+		CommandFormat: "skill:{name}",
+	})
 	if !hasCommand(catalog, "/skill:deploy") {
 		t.Error("unknown profile with config should use generic provider")
 	}
 }
 
 func TestUnknownProfileNoConfig(t *testing.T) {
-	catalog := CatalogForProfile("custom", "custom-agent", "/tmp", "/tmp", nil, "", "")
+	catalog := CatalogFor("custom", "custom-agent", DiscoverContext{Cwd: "/tmp", Home: "/tmp"})
 	if len(catalog.Commands) != 0 {
 		t.Errorf("unknown profile without config should be empty: %+v", catalog.Commands)
 	}

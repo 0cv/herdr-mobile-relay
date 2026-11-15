@@ -10,6 +10,7 @@ import (
 
 type Provider interface {
 	ID() string
+	Builtins() []Command
 	Discover(ctx DiscoverContext) ([]Command, bool)
 }
 

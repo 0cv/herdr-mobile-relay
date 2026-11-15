@@ -24,7 +24,7 @@ func cursorSkill(t *testing.T, dir, folder, frontmatterName, description string)
 func cursorCatalog(t *testing.T, cwd, home string) Catalog {
 	t.Helper()
 	isolateAgentEnv(t)
-	return CatalogFor("cursor", cwd, home)
+	return catalogFor("cursor", cwd, home)
 }
 
 // Cursor derives a skill's command id from its directory name, not from the
@@ -37,10 +37,10 @@ func TestCursorSkillCommandUsesFolderNameNotFrontmatter(t *testing.T) {
 	cursorSkill(t, skillDir, "pdf-forms", "pdf form toolkit", "Fill PDF forms")
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if containsCommand(catalog, "/pdf form toolkit") {
+	if hasCommand(catalog, "/pdf form toolkit") {
 		t.Error("frontmatter name leaked into the palette; cursor resolves folder names")
 	}
-	if !containsCommand(catalog, "/pdf-forms") {
+	if !hasCommand(catalog, "/pdf-forms") {
 		t.Errorf("folder-named skill missing; catalog=%v", commandNames(catalog))
 	}
 }
@@ -51,7 +51,7 @@ func TestCursorReadsAgentsSharedRoot(t *testing.T) {
 	cursorSkill(t, filepath.Join(home, ".agents", "skills"), "caveman", "caveman", "Shared skill")
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if !containsCommand(catalog, "/caveman") {
+	if !hasCommand(catalog, "/caveman") {
 		t.Errorf("shared .agents root not scanned; catalog=%v", commandNames(catalog))
 	}
 }
@@ -70,7 +70,7 @@ func TestCursorIgnoresReservedInternalRoots(t *testing.T) {
 	}
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if containsCommand(catalog, "/internal-tool") {
+	if hasCommand(catalog, "/internal-tool") {
 		t.Errorf("reserved internal root leaked into the palette; catalog=%v", commandNames(catalog))
 	}
 }
@@ -91,10 +91,10 @@ func TestCursorSkillNameCollisionAcrossRootsReplaces(t *testing.T) {
 		"---\nname: review\ndescription: Project review\nargument-hint: <project>\n---\n")
 
 	catalog := cursorCatalog(t, repo, home)
-	if !containsCommand(catalog, "/review") {
+	if !hasCommand(catalog, "/review") {
 		t.Errorf("collision dropped the skill entirely; catalog=%v", commandNames(catalog))
 	}
-	if containsCommand(catalog, "/review-2") {
+	if hasCommand(catalog, "/review-2") {
 		t.Errorf("cross-root duplicates must not be suffixed; catalog=%v", commandNames(catalog))
 	}
 	for _, command := range catalog.Commands {
@@ -119,11 +119,11 @@ func TestCursorDuplicateFolderNamesWithinRootUseRelativeIDs(t *testing.T) {
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
 	for _, name := range []string{"/tools-review", "/other-review"} {
-		if !containsCommand(catalog, name) {
+		if !hasCommand(catalog, name) {
 			t.Errorf("%s missing; catalog=%v", name, commandNames(catalog))
 		}
 	}
-	if containsCommand(catalog, "/review") {
+	if hasCommand(catalog, "/review") {
 		t.Errorf("duplicated folder name should not keep a bare id; catalog=%v", commandNames(catalog))
 	}
 }
@@ -137,7 +137,7 @@ func TestCursorDiscoversNestedSkill(t *testing.T) {
 	cursorSkill(t, filepath.Join(root, "tools"), "deep-tool", "deep-tool", "Nested skill")
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if !containsCommand(catalog, "/deep-tool") {
+	if !hasCommand(catalog, "/deep-tool") {
 		t.Errorf("nested skill omitted; catalog=%v", commandNames(catalog))
 	}
 }
@@ -168,7 +168,7 @@ func TestCursorUserCommandBeatsWorkspaceCommand(t *testing.T) {
 	if got := commandSource(catalog, "/deploy"); got != "personal" {
 		t.Errorf("/deploy source = %q, want personal to win the collision", got)
 	}
-	if containsCommand(catalog, "/project-deploy") {
+	if hasCommand(catalog, "/project-deploy") {
 		t.Error("command files are not prefixed by scope")
 	}
 }
@@ -186,7 +186,7 @@ func TestCursorReadsCommandFiles(t *testing.T) {
 
 	catalog := cursorCatalog(t, repo, home)
 	for _, name := range []string{"/ship", "/audit", "/personal", "/claudeuser"} {
-		if !containsCommand(catalog, name) {
+		if !hasCommand(catalog, name) {
 			t.Errorf("%s missing; catalog=%v", name, commandNames(catalog))
 		}
 	}
@@ -202,13 +202,13 @@ func TestCursorUserFileCannotTakeBuiltinName(t *testing.T) {
 	writeFile(t, filepath.Join(home, ".cursor", "commands", "clear.md"), "# My clear\n")
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if !containsCommand(catalog, "/clear") {
+	if !hasCommand(catalog, "/clear") {
 		t.Errorf("/clear missing; catalog=%v", commandNames(catalog))
 	}
 	if got := commandSource(catalog, "/clear"); got != "builtin" {
 		t.Errorf("/clear source = %q, want the builtin to keep its reserved name", got)
 	}
-	if containsCommand(catalog, "/clear-2") {
+	if hasCommand(catalog, "/clear-2") {
 		t.Errorf("a suffixed alias is not resolvable in Cursor and must not be published; catalog=%v", commandNames(catalog))
 	}
 }
@@ -222,7 +222,7 @@ func TestCursorBuiltinSurvivesSkillCollision(t *testing.T) {
 	if got := commandSource(catalog, "/help"); got != "builtin" {
 		t.Errorf("/help source = %q, want the builtin to keep the name", got)
 	}
-	if containsCommand(catalog, "/help-2") {
+	if hasCommand(catalog, "/help-2") {
 		t.Errorf("skill alias must not be invented; catalog=%v", commandNames(catalog))
 	}
 }
@@ -238,7 +238,7 @@ func TestCursorOmitsDebugAndDeveloperOnlyCommands(t *testing.T) {
 		"/debug-test", "/throw", "/pq", "/static-indicator",
 		"/dev:classify-conversation", "/dev:score-commit", "/dev:score-recent-commits",
 	} {
-		if containsCommand(catalog, name) {
+		if hasCommand(catalog, name) {
 			t.Errorf("%s is not unconditionally available and must not be published", name)
 		}
 	}
@@ -267,7 +267,7 @@ func TestCursorFollowsSymlinkedSkillDir(t *testing.T) {
 	}
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if !containsCommand(catalog, "/1password-op-cli") {
+	if !hasCommand(catalog, "/1password-op-cli") {
 		t.Errorf("symlinked skill dir dropped; catalog=%v", commandNames(catalog))
 	}
 }
@@ -282,10 +282,10 @@ func TestCursorRespectsUserInvocableFalse(t *testing.T) {
 	cursorSkill(t, skillDir, "visible", "visible", "Visible")
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if containsCommand(catalog, "/hidden") {
+	if hasCommand(catalog, "/hidden") {
 		t.Error("user-invocable: false skill was published")
 	}
-	if !containsCommand(catalog, "/visible") {
+	if !hasCommand(catalog, "/visible") {
 		t.Error("sibling skill lost when a non-invocable skill was present")
 	}
 }
@@ -296,11 +296,13 @@ func TestCursorHonorsConfiguredSkillDirs(t *testing.T) {
 	extra := filepath.Join(home, "extra-skills")
 	cursorSkill(t, extra, "custom-command", "custom-command", "Extra")
 
-	catalog := CatalogForProfile(
-		"cursor", "cursor", t.TempDir(), home,
-		[]string{extra}, "/{name}", "",
-	)
-	if !containsCommand(catalog, "/custom-command") {
+	catalog := CatalogFor("cursor", "cursor", DiscoverContext{
+		Cwd:           t.TempDir(),
+		Home:          home,
+		SkillDirs:     []string{extra},
+		CommandFormat: "/{name}",
+	})
+	if !hasCommand(catalog, "/custom-command") {
 		t.Errorf("configured skill dir ignored; catalog=%v", commandNames(catalog))
 	}
 }
@@ -324,11 +326,11 @@ func TestCursorSkipsNonRegularCommandFile(t *testing.T) {
 	go func() { done <- cursorCatalog(t, t.TempDir(), home) }()
 	select {
 	case catalog := <-done:
-		if !containsCommand(catalog, "/real") {
+		if !hasCommand(catalog, "/real") {
 			t.Errorf("real command missing; catalog=%v", commandNames(catalog))
 		}
 		for _, command := range []string{"/pipe", "/linked-pipe"} {
-			if containsCommand(catalog, command) {
+			if hasCommand(catalog, command) {
 				t.Errorf("a fifo must not become a command: %s", command)
 			}
 		}
@@ -342,15 +344,17 @@ func TestCursorSuppressNativeYieldsBuiltinsOnly(t *testing.T) {
 	home := t.TempDir()
 	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "someskill", "someskill", "Skill")
 
-	catalog := CatalogForProfileWithSuppression(
-		"cursor", "cursor", t.TempDir(), home,
-		nil, "/{name}", "", true,
-	)
+	catalog := CatalogFor("cursor", "cursor", DiscoverContext{
+		Cwd:            t.TempDir(),
+		Home:           home,
+		CommandFormat:  "/{name}",
+		SuppressNative: true,
+	})
 	if len(catalog.Commands) != len(cursorBuiltins) {
 		t.Errorf("suppressed catalog has %d commands, want %d builtins",
 			len(catalog.Commands), len(cursorBuiltins))
 	}
-	if containsCommand(catalog, "/someskill") {
+	if hasCommand(catalog, "/someskill") {
 		t.Error("suppressed catalog must not scan skills")
 	}
 }
@@ -377,7 +381,7 @@ func TestCursorNestedProjectSkillMetadata(t *testing.T) {
 				{"/tools-review", "Nested review", "project", "<nested>"},
 				{"/unique", "Unique nested skill", "project", "<unique>"},
 			} {
-				if !containsCommand(catalog, want.Command) {
+				if !hasCommand(catalog, want.Command) {
 					t.Errorf("missing %s", want.Command)
 				}
 				for _, got := range catalog.Commands {
@@ -423,7 +427,7 @@ func TestCursorNestedProjectSkillSymlinkBoundary(t *testing.T) {
 					t.Skipf("symlinks unavailable: %v", err)
 				}
 				catalog := cursorCatalog(t, repo, t.TempDir())
-				if got, want := containsCommand(catalog, "/linked"), location == "skill-root"; got != want {
+				if got, want := hasCommand(catalog, "/linked"), location == "skill-root"; got != want {
 					t.Errorf("/linked present = %v, want %v", got, want)
 				}
 				for _, command := range catalog.Commands {
@@ -446,7 +450,7 @@ func TestCursorSkipsDependencyAndBuildDirectories(t *testing.T) {
 			cursorSkill(t, root, ignored, ignored, "Ignored skill")
 
 			catalog := cursorCatalog(t, t.TempDir(), home)
-			if !containsCommand(catalog, "/review") {
+			if !hasCommand(catalog, "/review") {
 				t.Errorf("ignored directory changed skill ID; catalog=%v", commandNames(catalog))
 			}
 			for _, command := range catalog.Commands {
@@ -479,10 +483,10 @@ func TestCursorDeduplicatesSkillRealpathsAcrossRoots(t *testing.T) {
 			}
 
 			catalog := cursorCatalog(t, t.TempDir(), home)
-			if !containsCommand(catalog, "/original") {
+			if !hasCommand(catalog, "/original") {
 				t.Error("original skill missing")
 			}
-			if got := containsCommand(catalog, "/alias"); got != duplicateName {
+			if got := hasCommand(catalog, "/alias"); got != duplicateName {
 				t.Errorf("/alias present = %v, want %v", got, duplicateName)
 			}
 			for _, command := range catalog.Commands {
@@ -513,10 +517,10 @@ func TestCursorFollowsRegularCommandSymlink(t *testing.T) {
 			}
 
 			catalog := cursorCatalog(t, t.TempDir(), home)
-			if !containsCommand(catalog, "/linked-review") {
+			if !hasCommand(catalog, "/linked-review") {
 				t.Error("symlinked command missing")
 			}
-			if containsCommand(catalog, "/broken") {
+			if hasCommand(catalog, "/broken") {
 				t.Error("broken symlink became a command")
 			}
 		})
@@ -570,10 +574,10 @@ func TestCursorSkillSurfaces(t *testing.T) {
 					"---\nname: ignored\ndescription: Surface test\n"+tc.metadata+"---\nBody\n")
 				cursorSkill(t, root, "sibling", "sibling", "Sibling skill")
 				catalog := cursorCatalog(t, repo, home)
-				if got := containsCommand(catalog, "/surface-test"); got != tc.visible {
+				if got := hasCommand(catalog, "/surface-test"); got != tc.visible {
 					t.Errorf("skill present = %v, want %v", got, tc.visible)
 				}
-				if !containsCommand(catalog, "/sibling") {
+				if !hasCommand(catalog, "/sibling") {
 					t.Error("surface filtering removed sibling")
 				}
 			})
@@ -609,7 +613,7 @@ func TestCursorProjectOutsideLinkDoesNotChangeSkillID(t *testing.T) {
 			}
 
 			catalog := cursorCatalog(t, repo, t.TempDir())
-			if !containsCommand(catalog, "/review") {
+			if !hasCommand(catalog, "/review") {
 				t.Error("outside link changed the valid skill ID")
 			}
 			for _, command := range catalog.Commands {
@@ -629,19 +633,6 @@ func commandNamesIn(commands []Command) []string {
 		names = append(names, command.Command)
 	}
 	return names
-}
-
-func containsCommand(catalog Catalog, name string) bool {
-	return commandInList(catalog.Commands, name)
-}
-
-func commandInList(commands []Command, name string) bool {
-	for _, command := range commands {
-		if command.Command == name {
-			return true
-		}
-	}
-	return false
 }
 
 func commandSource(catalog Catalog, name string) string {

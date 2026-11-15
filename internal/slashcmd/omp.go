@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
@@ -21,6 +22,8 @@ const maxSettingsSize = 256 * 1024
 type ompProvider struct{}
 
 func (p *ompProvider) ID() string { return "omp" }
+
+func (p *ompProvider) Builtins() []Command { return ompBuiltins }
 
 // ompBuiltins mirrors the primary TUI commands in OMP 17.1.7.
 var ompBuiltins = []Command{
@@ -105,52 +108,20 @@ var ompBuiltins = []Command{
 // important skills, never the highest-priority ones.
 func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(ompBuiltins))
-		copy(builtins, ompBuiltins)
-		return builtins, reader.truncated
-	}
 	if ctx.CommandFormat != "" {
-		// The relay's INI configured this profile explicitly, which outranks
-		// discovery.
-		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(ompBuiltins, custom), truncated || reader.truncated
+		return reader.configuredCatalog(ompBuiltins, ctx)
 	}
 
 	settings := reader.loadOMPSkillSettings(ctx)
 	if !settings.enabled || !settings.enableSkillCommands {
-		builtins := make([]Command, len(ompBuiltins))
-		copy(builtins, ompBuiltins)
-		return builtins, reader.truncated
+		return slices.Clone(ompBuiltins), reader.truncated
 	}
 
 	truncated := false
 	budget := maxCustomFiles
-	active := make(map[string]Command, len(ompBuiltins))
-	order := make([]string, 0, len(ompBuiltins))
-	apply := func(commands []Command) {
-		for _, command := range commands {
-			if _, exists := active[command.Command]; exists {
-				continue
-			}
-			order = append(order, command.Command)
-			active[command.Command] = command
-		}
-	}
-	apply(ompBuiltins)
+	list := newCommandList(ompBuiltins, false)
 
-	// The ban lists apply to skills only; omp's filters run over discovered
-	// skills, never over its own builtin commands.
-	applyOverride := func(commands []Command) {
-		for _, command := range commands {
-			if _, exists := active[command.Command]; !exists {
-				order = append(order, command.Command)
-			}
-			active[command.Command] = command
-		}
-	}
-
-	scanUsing := func(scope, boundary string, applyCommands func([]Command), dirs ...string) {
+	scanUsing := func(scope, boundary string, add func([]Command), dirs ...string) {
 		for _, dir := range dirs {
 			if dir == "" || !filepath.IsAbs(dir) {
 				continue
@@ -160,21 +131,23 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				respectEnabled: true,
 			}
 			cmds, trunc := reader.scanSkillDirFormatOptions(dir, scope, ompCommandFormat, &budget, options)
+			// The ban lists apply to skills only; omp's filters run over discovered
+			// skills, never over its own builtin commands.
 			allowed := cmds[:0]
 			for _, command := range cmds {
 				if settings.allows(ompSkillName(command.Command)) {
 					allowed = append(allowed, command)
 				}
 			}
-			applyCommands(allowed)
+			add(allowed)
 			truncated = truncated || trunc
 		}
 	}
 	scan := func(scope string, dirs ...string) {
-		scanUsing(scope, "", apply, dirs...)
+		scanUsing(scope, "", list.addIfAbsent, dirs...)
 	}
 	scanOverride := func(scope, boundary string, dirs ...string) {
-		scanUsing(scope, boundary, applyOverride, dirs...)
+		scanUsing(scope, boundary, list.set, dirs...)
 	}
 	// scanProject scans <ancestor>/<stem>/skills in descending precedence:
 	// innermost ancestor first and, within one ancestor, stems in the order omp
@@ -206,7 +179,7 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// Extension packages register below native skills and above compatibility
 	for _, extension := range reader.ompExtensionSkillDirs(ctx, settings) {
 		if extension.directSkillDir {
-			reader.scanExtensionSkillPath(extension, &budget, apply, &truncated, settings)
+			reader.scanExtensionSkillPath(extension, &budget, list, &truncated, settings)
 			continue
 		}
 		scan(extension.source, filepath.Join(extension.path, "skills"))
@@ -278,18 +251,12 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	agentDir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
 	scan("personal", filepath.Join(agentDir, "managed-skills"))
 
-	commands := make([]Command, 0, len(order))
-	for _, name := range order {
-		if command, exists := active[name]; exists {
-			commands = append(commands, command)
-		}
-	}
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated || reader.truncated
+	return list.commands(), truncated || reader.truncated
 }
-func (reader *catalogReader) scanExtensionSkillPath(extension ompExtensionDir, budget *int, apply func([]Command), truncated *bool, settings ompSkillSettings) {
+func (reader *catalogReader) scanExtensionSkillPath(extension ompExtensionDir, budget *int, list *commandList, truncated *bool, settings ompSkillSettings) {
 	options := skillScanOptions{respectEnabled: true}
 	commands, trunc := reader.scanSkillPathFormatOptions(extension.path, extension.source, ompCommandFormat, budget, options)
 	allowed := commands[:0]
@@ -298,7 +265,7 @@ func (reader *catalogReader) scanExtensionSkillPath(extension ompExtensionDir, b
 			allowed = append(allowed, command)
 		}
 	}
-	apply(allowed)
+	list.addIfAbsent(allowed)
 	*truncated = *truncated || trunc
 }
 

@@ -17,12 +17,12 @@ func TestAgyCatalogListsBuiltinsAndUserSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, agent := range []string{"agy", "antigravity", "Antigravity-CLI"} {
-		catalog := CatalogFor(agent, t.TempDir(), home)
+		catalog := catalogFor(agent, t.TempDir(), home)
 		if catalog.Status != "available" {
 			t.Fatalf("%s status = %q", agent, catalog.Status)
 		}
 		for _, want := range []string{"/model", "/compact", "/resume", "/paneagent"} {
-			if !containsCommand(catalog, want) {
+			if !hasCommand(catalog, want) {
 				t.Errorf("%s catalog is missing %s", agent, want)
 			}
 		}
@@ -44,7 +44,7 @@ func TestAgyUserSkillCannotShadowBuiltin(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: model\ndescription: shadow\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := commandSource(CatalogFor("agy", t.TempDir(), home), "/model"); got != "builtin" {
+	if got := commandSource(catalogFor("agy", t.TempDir(), home), "/model"); got != "builtin" {
 		t.Fatalf("/model source = %q, want builtin", got)
 	}
 }
