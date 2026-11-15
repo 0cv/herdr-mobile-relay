@@ -27,11 +27,7 @@ func TestBrowserUsesNativeHermesCursorPaging(t *testing.T) {
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "hermes", CWD: cwd, SessionID: sessionID}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {

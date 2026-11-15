@@ -1,7 +1,6 @@
 package blackbox
 
 import (
-	"context"
 	"encoding/json"
 	"runtime"
 	"testing"
@@ -17,14 +16,7 @@ import (
 // cleanly here because the fake Herdr has no pane.get or pane.process_info.
 func TestPaneSizeCommandsThroughServer(t *testing.T) {
 	env := setupEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.CloseNow()
+	ctx, conn := dial(t, env, 30*time.Second)
 
 	supported := runtime.GOOS == "darwin" || runtime.GOOS == "linux"
 	for {

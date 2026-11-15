@@ -175,7 +175,8 @@ Docker for hosts that explicitly want containerized WebKit. Directly invoking
 script instead.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
-response barriers, and process-control traces for black-box tests.
+a Herdr socket API (`fake-herdr socket-server`), response barriers, and
+process-control traces for black-box tests.
 
 Installed-PWA device CI is documented in `docs/mobile-device-ci.md`. Its host-only
 check does not replace the real Android Home Screen or iOS Home Screen runs;

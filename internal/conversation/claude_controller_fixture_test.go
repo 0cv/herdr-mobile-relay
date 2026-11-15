@@ -20,11 +20,7 @@ func TestClaudeFirstContinuationControllerFixture(t *testing.T) {
 		return map[string]any{"type": role, "uuid": id, "message": map[string]any{"content": text}}
 	}
 	writeRows(t, path(a), row("a-u1", "user", "A older question"), row("a-a1", "assistant", "A older answer"), row("a-u2", "user", "A latest question"), row("a-a2", "assistant", "A latest answer"))
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: a}
 	read := func(cursor string) BrowsePage {
 		t.Helper()

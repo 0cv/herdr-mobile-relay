@@ -137,11 +137,7 @@ func TestGrokBrowserRewindChangesRevision(t *testing.T) {
 	path := grokUpdatesPath(home, grokCWD, testSessionID)
 	f := grokTurns(3)
 	f.write(t, path)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
 
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
@@ -194,11 +190,7 @@ func TestGrokOversizedRecordIsReportedSeparately(t *testing.T) {
 	if page.SourceCorrupt {
 		t.Fatal("an oversized record is not corruption")
 	}
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
 	browsed, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 80})
 	if err != nil || browsed.Diagnostics.OversizedRecords != 1 || browsed.Diagnostics.CorruptRecords != 0 {

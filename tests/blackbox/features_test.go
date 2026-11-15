@@ -50,14 +50,7 @@ func awaitAgentTarget(t *testing.T, conn *websocket.Conn, ctx context.Context) m
 func TestOnConnectHandshake(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	// First message should be push_config
 	msg := readNextJSON(t, conn, ctx)
@@ -84,14 +77,8 @@ func TestOnConnectHandshake(t *testing.T) {
 }
 
 func TestTerminalReadCapabilityIsCheckedWithoutOpenPanes(t *testing.T) {
-	env := setupEnvWithScenario(t, `{"panes":[],"tabs":[],"workspaces":[]}`)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	env := startRelay(t, relayOptions{scenario: `{"panes":[],"tabs":[],"workspaces":[]}`})
+	ctx, conn := dial(t, env, 60*time.Second)
 
 	// Do not send a pane read: startup and the event bootstrap recheck must
 	// resolve the status themselves, even for an empty Herdr session.
@@ -127,13 +114,7 @@ func TestTerminalReadCapabilityIsCheckedWithoutOpenPanes(t *testing.T) {
 func TestInstallUpdateBootstrapDoesNotRequireProtocolV2(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	payload, err := json.Marshal(map[string]any{
 		"type":       "install_update",
@@ -162,13 +143,7 @@ func TestInstallUpdateBootstrapDoesNotRequireProtocolV2(t *testing.T) {
 
 func TestUnknownServerSessionCannotFallThroughToPrimary(t *testing.T) {
 	env := setupEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	payload, err := json.Marshal(map[string]any{
 		"type":              "submit_prompt",
@@ -202,13 +177,7 @@ func TestUnknownServerSessionCannotFallThroughToPrimary(t *testing.T) {
 
 func TestUploadAttachmentBatch(t *testing.T) {
 	env := setupEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	png := []byte{
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -306,13 +275,7 @@ func TestUploadAttachmentBatch(t *testing.T) {
 
 func TestUploadAttachmentRejectsBadMime(t *testing.T) {
 	env := setupEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	target := awaitAgentTarget(t, conn, ctx)
 	request := map[string]any{
@@ -339,14 +302,7 @@ func TestUploadAttachmentRejectsBadMime(t *testing.T) {
 func TestListDirectories(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	req := map[string]any{
 		"type":       "list_directories",
@@ -387,16 +343,9 @@ func TestListSlashCommands(t *testing.T) {
 
 func testListSlashCommands(t *testing.T, agent string) {
 	scenario := fmt.Sprintf(`{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":%q,"name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`, agent)
-	env := setupEnvWithScenario(t, scenario)
+	env := startRelay(t, relayOptions{scenario: scenario})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	// Wait for the initial agents snapshot so the inventory is committed.
 	for {
@@ -457,14 +406,7 @@ func testListSlashCommands(t *testing.T, agent string) {
 func TestUDPEventTriggersBroadcast(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	// Drain handshake messages
 	for i := 0; i < 3; i++ {
@@ -536,15 +478,9 @@ func TestApprovalRequiresCurrentInventoryEventAndDispatchesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := setupEnvWithScenario(t, string(scenario))
+	env := startRelay(t, relayOptions{scenario: string(scenario)})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	var eventID string
 	var approvalFingerprint string
@@ -629,15 +565,9 @@ func TestCapturedQoderAttentionFlowsThroughRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := setupEnvWithScenario(t, string(scenario))
+	env := startRelay(t, relayOptions{scenario: string(scenario)})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 15*time.Second)
 
 	var approvalEventID string
 	var approvalFingerprint string

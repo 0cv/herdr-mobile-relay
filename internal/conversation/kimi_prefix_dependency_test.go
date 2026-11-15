@@ -38,11 +38,7 @@ func TestKimiRecentWindowRequiresPrefixValidation(t *testing.T) {
 			t.Setenv("KIMI_CODE_HOME", "")
 			cwd, id := "/fixture/prefix-proof", "session_prefix"
 			kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Prefix proof", 1, test.wire)
-			browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 			var acquired int64
 			setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
 				n := observation.bytes
@@ -72,11 +68,7 @@ func TestKimiColdLimitDoesNotTrustUnverifiedTail(t *testing.T) {
 	wire := append([]byte("{\"type\":\"metadata\",\"protocol_version\":\"1.5\"}\n"), bytes.Repeat([]byte("\n"), maxConversationBytes)...)
 	wire = append(wire, []byte("{\"type\":\"context.append_message\",\"message\":{\"role\":\"assistant\",\"content\":\"Readable but unverified tail\"}}\n")...)
 	kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Bounded replay", 1, wire)
-	browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 	var acquired int64
 	setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
 		n := observation.bytes

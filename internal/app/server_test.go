@@ -622,10 +622,7 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 		_ = server.conversationB.Close()
 	}
 	reader := conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
+	browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 	server.conversationM = reader
 	server.conversationB = browser
 	server.state.CommitInventory([]*coordinator.AgentState{{
@@ -726,10 +723,7 @@ func TestConversationHistoryRejectsForegroundChangeDuringRead(t *testing.T) {
 		_ = server.conversationB.Close()
 	}
 	reader := conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
+	browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 	server.conversationM = reader
 	server.conversationB = browser
 	server.state.CommitInventory([]*coordinator.AgentState{{

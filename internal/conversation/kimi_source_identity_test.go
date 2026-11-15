@@ -19,11 +19,7 @@ func TestKimiInferredDuplicateRootArchiveCursor(t *testing.T) {
 	path := kimiFixture(t, first, kimiWorkspaceKey(cwd), id, cwd, "First", 1, wire)
 	kimiFixture(t, second, kimiWorkspaceKey(cwd), id, cwd, "Second", 2, []byte(strings.ReplaceAll(string(wire), "ROOT_A", "ROOT_B")))
 	reader := NewReader(home)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	project := ProjectContext{CWD: cwd}
 	selected, location, code := reader.SelectKimiSession(project, "")
 	scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: selected, InferredSession: true, SelectionSource: KimiSourceIdentity(location)}

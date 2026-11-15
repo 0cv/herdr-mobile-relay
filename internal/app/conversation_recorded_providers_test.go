@@ -49,11 +49,7 @@ func TestRecordedConversationProviderAliases(t *testing.T) {
 			server := testServerWithCacheDir(t.TempDir())
 			server.conversationB.Close()
 			reader := conversation.NewReader(home)
-			browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 			defer server.herdrC.Close()
 			server.conversationM, server.conversationB = reader, browser
 			server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "fixture-pane", Agent: provider, Cwd: "/fixture", SessionID: session, AgentSessionID: session, TerminalID: "fixture-terminal", ServerSessionID: "primary", Status: "working"}}, server.state.RevisionCounter())

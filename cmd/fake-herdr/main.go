@@ -107,6 +107,12 @@ func main() {
 		}
 		return
 	}
+	if len(args) == 1 && args[0] == "socket-server" {
+		if err := runSocketServer(); err != nil {
+			fatal("%v", err)
+		}
+		return
+	}
 	if len(args) < 2 {
 		fatal("expected <group> <command> [args]")
 	}

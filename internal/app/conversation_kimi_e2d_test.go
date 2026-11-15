@@ -175,11 +175,7 @@ func kimiE2dDuplicateSource(t *testing.T) (*Server, *coordinator.AgentState, str
 	t.Setenv("KIMI_CODE_HOME", "")
 	server.conversationB.Close()
 	server.conversationM = conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(server.conversationM, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { browser.Close() })
+	browser := newTestBrowser(t, server.conversationM, conversation.DefaultBrowserOptions())
 	server.conversationB = browser
 	agent := &coordinator.AgentState{PaneID: "pane", TerminalID: "terminal", ServerSessionID: "primary", Agent: "kimi", Cwd: "/fixture", Status: "working"}
 	server.enrichKimiSessions(t.Context(), []*coordinator.AgentState{agent})

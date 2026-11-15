@@ -25,8 +25,11 @@ func testSocketDir(t *testing.T) string {
 func TestBlackboxSocketDirWithLongTestName(t *testing.T) {
 	t.Run(strings.Repeat("long-test-name-", 8), func(t *testing.T) {
 		socket := filepath.Join(testSocketDir(t), "herdr.sock")
-		listener := startInventorySocket(t, socket, "{}")
-		t.Cleanup(func() { _ = listener.Close() })
+		scenario := filepath.Join(t.TempDir(), "scenario.json")
+		if err := os.WriteFile(scenario, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		startFakeSocket(t, socket, scenario)
 		canonical, err := filepath.EvalSymlinks(socket)
 		if err != nil {
 			t.Fatal(err)

@@ -61,10 +61,7 @@ func capacityScheduleBrowser(t *testing.T) (*Browser, string) {
 	options.ActiveWorkers = 2
 	options.InterestLease = time.Minute
 	options.SnapshotTTL = time.Hour
-	b, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := newTestBrowser(t, reader, options)
 	t.Cleanup(func() {
 		if err := b.Close(); err != nil {
 			t.Error(err)

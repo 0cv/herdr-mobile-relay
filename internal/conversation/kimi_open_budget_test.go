@@ -25,11 +25,7 @@ func TestKimiOpeningProjectionWorkBudget(t *testing.T) {
 		fmt.Fprintf(&wire, "{\"type\":\"context.append_message\",\"message\":{\"role\":\"assistant\",\"content\":\"%08d:%s\"}}\n", i, strings.Repeat("x", 160))
 	}
 	path := kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Budget", 1, wire.Bytes())
-	browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane", ProcessIdentity: "1:argv"}
 	var acquired int64
 	projections := 0

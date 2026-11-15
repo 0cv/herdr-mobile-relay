@@ -289,11 +289,7 @@ func TestKimiBrowserAppendRewriteAndCursorFences(t *testing.T) {
 	wire := kimiSample(t, "rewrites/before.jsonl")
 	path := kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Browser", 1, wire)
 	reader := NewReader(home)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane", ProcessIdentity: "100:argv"}
 	read := func(cursor string) BrowsePage {
 		t.Helper()

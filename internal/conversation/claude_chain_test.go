@@ -36,11 +36,7 @@ func TestClaudeChainPreparesAClippedParent(t *testing.T) {
 	options.RecentBytes = 128
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 2
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(latest.Entries) != 1 || latest.Entries[0].Text != "child answer" || latest.NextCursor == "" {
@@ -86,16 +82,10 @@ func TestClaudeChainLatestAndOlderSegments(t *testing.T) {
 		t.Fatalf("older = %#v, err=%v", older, err)
 	}
 
-	browser, err := NewBrowser(reader, t.TempDir(), func() BrowserOptions {
-		o := DefaultBrowserOptions()
-		o.DefaultPageSize = 1
-		o.MaxPageSize = 4
-		return o
-	}())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	options := DefaultBrowserOptions()
+	options.DefaultPageSize = 1
+	options.MaxPageSize = 4
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: a}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(latest.Entries) != 1 || latest.Entries[0].Text != "b2" || latest.NextCursor == "" {
@@ -114,15 +104,11 @@ func TestClaudeChainLatestAndOlderSegments(t *testing.T) {
 		t.Fatalf("browser chain retained an EOF cursor %q", cursor)
 	}
 
-	options := DefaultBrowserOptions()
+	options = DefaultBrowserOptions()
 	options.RecentBytes = 100
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 4
-	preparedBrowser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer preparedBrowser.Close()
+	preparedBrowser := newTestBrowser(t, reader, options)
 	prepared, err := preparedBrowser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(prepared.Entries) != 1 || prepared.Entries[0].Text != "b2" || prepared.NextCursor == "" {
 		t.Fatalf("prepared latest = %#v, err=%v", prepared, err)
@@ -157,11 +143,7 @@ func TestClaudeChainEmptyContinuationKeepsParentVisible(t *testing.T) {
 	if err != nil || len(legacy.Entries) != 1 || legacy.Entries[0].Text != "parent answer" {
 		t.Fatalf("empty child legacy page = %#v, err=%v", legacy, err)
 	}
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}, Limit: 10})
 	if err != nil || len(page.Entries) != 1 || page.Entries[0].Text != "parent answer" {
 		t.Fatalf("empty child browser page = %#v, err=%v", page, err)
@@ -178,11 +160,7 @@ func TestClaudeChainFirstContinuationPreservesSingleFileRevision(t *testing.T) {
 		map[string]any{"type": "user", "uuid": "a1", "message": map[string]any{"content": "parent question"}},
 		map[string]any{"type": "assistant", "uuid": "a2", "message": map[string]any{"content": "parent answer"}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	initial, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10})
 	if err != nil || initial.ReasonCode != "" || initial.SourceRevision == "" || len(initial.Entries) != 2 {
@@ -230,11 +208,7 @@ func TestClaudeChainDefaultWindowPreparesTheCurrentClippedSegment(t *testing.T) 
 		})
 	}
 	writeRows(t, filepath.Join(root, child+".jsonl"), rows...)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope})
 	if err != nil || len(page.Entries) == 0 || page.Entries[0].Text == "parent" || page.NextCursor == "" {
@@ -451,11 +425,7 @@ func TestClaudeChainTraversesTwoClippedSegmentsWithSavedCursorExactOrder(t *test
 	options.RecentBytes = 1024
 	options.DefaultPageSize = 2
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
 	if err != nil || latest.ReasonCode != "" || len(latest.Entries) != 2 || latest.NextCursor == "" {
@@ -587,11 +557,7 @@ func TestClaudeChainRecentTailDoesNotSkipPrefixWhenPreparationFinishesConcurrent
 	options.RecentBytes = 256
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 2
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	initial, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(initial.Entries) != 1 || initial.Entries[0].Text == "parent" || initial.NextCursor == "" {
@@ -716,11 +682,7 @@ func TestClaudeChainLatestBudgetUsesCapturedEndForAPreviouslyReadSegment(t *test
 	options.RecentBytes = 512
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 2
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(first.Entries) != 0 || first.NextCursor == "" {
@@ -795,11 +757,7 @@ func TestClaudeChainMediumRecentCursorDoesNotPollForever(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 2
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.ReasonCode != "" || len(latest.Entries) != 1 || !strings.HasPrefix(latest.Entries[0].Text, "medium-09") || latest.NextCursor == "" {
@@ -856,11 +814,7 @@ func TestClaudeChainPreparedBoundaryPreservesBudgetAndPhysicalReadAccounting(t *
 	options.RecentBytes = 512
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 2
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	var discoveryReads int64
 	var validationReads int64
@@ -975,11 +929,7 @@ func TestClaudeChainPreparedPagingDoesNotRehashTheCapturedTranscript(t *testing.
 	options.RecentBytes = 64 * 1024
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 2
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(latest.Entries) != 1 || latest.Entries[0].Text == "parent" || latest.NextCursor == "" {
@@ -1045,11 +995,7 @@ func TestClaudeChainRecentReadsShareAggregateBudget(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 256
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	var observed int64
 	setBrowserObserver(browser, "source_read", func(observation browserObservation) {
 		bytes := observation.bytes
@@ -1078,11 +1024,7 @@ func TestClaudeChainAppendRefreshesLatestWithoutRetargetingCursor(t *testing.T) 
 		map[string]any{"type": "assistant", "uuid": "b1", "message": map[string]any{"content": "first"}},
 		map[string]any{"type": "assistant", "uuid": "b2", "message": map[string]any{"content": "second"}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	initial, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(initial.Entries) != 1 || initial.Entries[0].Text != "second" || initial.NextCursor == "" {
@@ -1153,11 +1095,7 @@ func TestClaudeChainAppendToNewContinuationKeepsOldCursorOnSavedSegment(t *testi
 		map[string]any{"type": "assistant", "uuid": "b1", "message": map[string]any{"content": "child before C"}},
 		map[string]any{"type": "assistant", "uuid": "b2", "message": map[string]any{"content": "child latest before C"}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	beforeC, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(beforeC.Entries) != 1 || beforeC.Entries[0].Text != "child latest before C" || beforeC.NextCursor == "" {
@@ -1209,11 +1147,7 @@ func TestClaudeChainSavedPreparationUsesCapturedEndAfterAppend(t *testing.T) {
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	initial, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || initial.ReasonCode != "" || len(initial.Entries) != 1 || initial.NextCursor == "" {
@@ -1298,11 +1232,7 @@ func TestClaudeChainLineageRejectsReplacementAndPreservesAppend(t *testing.T) {
 		map[string]any{"type": "assistant", "uuid": "b1", "message": map[string]any{"content": "first"}},
 		map[string]any{"type": "assistant", "uuid": "b2", "message": map[string]any{"content": "second"}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(first.Entries) != 1 || first.Entries[0].Text != "second" {
@@ -1368,11 +1298,7 @@ func TestClaudeChainRetainsSelectedRangeEvidenceAcrossAppend(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(first.Entries) != 1 || first.Entries[0].Text == "parent" {
@@ -1460,11 +1386,7 @@ func TestClaudeChainCancellationPreservesClaudeLineage(t *testing.T) {
 		map[string]any{"type": "assistant", "uuid": "b1", "message": map[string]any{"content": "first"}},
 		map[string]any{"type": "assistant", "uuid": "b2", "message": map[string]any{"content": "second"}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	initial, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || initial.ReasonCode != "" || len(initial.Entries) != 1 || initial.NextCursor == "" {
@@ -1566,11 +1488,7 @@ func TestClaudeChainEvidenceCompactionBoundsRetentionAndRejectsRewrite(t *testin
 		segment.ObservedRanges = append(segment.ObservedRanges, claudeRangeEvidence{Start: start, End: end, Digest: digest})
 	}
 	source.close()
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	var compactionReads atomic.Int64
 	setBrowserObserver(browser, "validation_read", func(observation browserObservation) {
 		bytes := observation.bytes
@@ -1688,11 +1606,7 @@ func TestClaudeChainEvidenceCompactionRejectsRewriteAndAppendBetweenPhases(t *te
 		segment.ObservedRanges = append(segment.ObservedRanges, claudeRangeEvidence{Start: start, End: start + 3, Digest: digest})
 	}
 	source.close()
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	mutationResult := make(chan error, 1)
 	var mutationOnce atomic.Bool
 	setBrowserObserver(browser, "chain_compaction", func(observation browserObservation) {
@@ -1755,11 +1669,7 @@ func TestClaudeChainLargeAppendValidationIsDeferredAndDeduplicated(t *testing.T)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	initial, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || initial.ReasonCode != "" || len(initial.Entries) != 1 {
@@ -1912,11 +1822,7 @@ func TestClaudeChainSharesForegroundValidationBudgetAcrossAppendedSegments(t *te
 	options.RecentBytes = 64 * 1024
 	options.DefaultPageSize = 2
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
 	if err != nil || latest.ReasonCode != "" || len(latest.Entries) != 2 || latest.NextCursor == "" {
@@ -2005,11 +1911,7 @@ func TestClaudeChainAuthenticatesSelectedRangeBeforeFirstPreparation(t *testing.
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.ReasonCode != "" || len(latest.Entries) != 1 || latest.NextCursor == "" {
@@ -2124,11 +2026,7 @@ func TestClaudeChainPreparationRefusesRewriteAcrossEvidenceAndScanGap(t *testing
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.ReasonCode != "" || latest.NextCursor == "" {
@@ -2249,11 +2147,7 @@ func TestClaudeChainRetainsShiftedEvidenceAcrossTwoAppends(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latestWithValidation := func() BrowsePage {
 		t.Helper()
@@ -2370,11 +2264,7 @@ func TestClaudeChainPreparedCursorValidatesRewriteAfterAppend(t *testing.T) {
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 512
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 512})
 	if err != nil || len(latest.Entries) == 0 || latest.NextCursor == "" {
@@ -2535,11 +2425,7 @@ func TestClaudeChainPreparationPublishesEvidenceBeforeWorkerCapture(t *testing.T
 	options.RecentBytes = 256 * 1024
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.ReasonCode != "" || latest.NextCursor == "" {
@@ -2621,11 +2507,7 @@ func TestClaudeChainPreparationDeduplicatesConcurrentHandles(t *testing.T) {
 	)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	chain, err := resolveClaudeChain(context.Background(), reader.Locate(scope.Provider, scope.CWD, scope.SessionID), anchor)
 	if err != nil {
@@ -2684,11 +2566,7 @@ func TestClaudeChainPreparationAdmissionFailureRetainsRetryIdentity(t *testing.T
 	)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.NextCursor == "" {
@@ -2730,11 +2608,7 @@ func TestClaudeChainConcurrentReadsShareChainMetadataSafely(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.NextCursor == "" {
@@ -2768,11 +2642,7 @@ func TestClaudeChainContextAdmissionIsAtomic(t *testing.T) {
 	reader, _ := testReader(t)
 	options := DefaultBrowserOptions()
 	options.CursorTTL = time.Hour
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	const attempts = maxClaudeChainContexts + 32
 	start := make(chan struct{})
 	release := make(chan struct{})

@@ -33,10 +33,7 @@ func kimiIdentityServer(t *testing.T) (*Server, *coordinator.AgentState, string)
 	server.conversationB.Close()
 	server.herdrC.Close()
 	server.conversationM = conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(server.conversationM, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
+	browser := newTestBrowser(t, server.conversationM, conversation.DefaultBrowserOptions())
 	server.conversationB = browser
 	server.kimiProcessBirth = func(int) (string, error) { return "synthetic-start-1", nil }
 	socketDir, err := os.MkdirTemp("", "kimi-")

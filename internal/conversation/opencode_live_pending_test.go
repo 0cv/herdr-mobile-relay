@@ -44,11 +44,7 @@ INSERT INTO session_v2 VALUES('ses_pending','/fixture','Pending',1,'opencode');`
 	reader := NewReader(t.TempDir())
 	executor := &liveBudgetExecutor{t: t, base: sqliteexec.New(), plans: make(map[string]bool)}
 	reader.openCode.executor = executor
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = browser.Close() })
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	watch := browser.NewDatabaseWatch(BrowseScope{Provider: "OpenCode", SessionID: "ses_pending"})
 	return db, browser, watch, executor
 }

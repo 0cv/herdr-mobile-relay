@@ -32,11 +32,7 @@ func TestKimiInferredIdentityDuplicateRoot(t *testing.T) {
 	t.Setenv("KIMI_CODE_HOME", "")
 	server.conversationB.Close()
 	server.conversationM = conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(server.conversationM, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, server.conversationM, conversation.DefaultBrowserOptions())
 	server.conversationB = browser
 	resolve := func() *coordinator.AgentState {
 		t.Helper()

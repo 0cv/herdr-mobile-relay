@@ -145,11 +145,7 @@ func TestTitleAndTranscriptFollowForegroundProjectContext(t *testing.T) {
 	resolver := session.NewResolverWithReader(home, reader)
 	project := conversation.ProjectContext{CWD: cwd, ForegroundCWD: foreground}
 	title := resolver.SessionNameWithProject("claudecode", project, invariantSession)
-	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 	page, err := browser.ReadPage(context.Background(), conversation.BrowseRequest{
 		Scope: conversation.BrowseScope{
 			Provider: "claudecode", CWD: cwd, ForegroundCWD: foreground, SessionID: invariantSession,
