@@ -2,6 +2,8 @@ package pibridge
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -48,6 +50,19 @@ func openBridgeConnection(ctx context.Context, directory string, pid int) (*brid
 		return nil, err
 	}
 	return bridge, nil
+}
+
+func (conn *bridgeConnection) replaced() bool {
+	after, err := owned(conn.path, true)
+	return err != nil || !os.SameFile(conn.before, after)
+}
+
+func newChallenge() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(nonce[:]), nil
 }
 
 func (conn *bridgeConnection) Close() error {

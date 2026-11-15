@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -79,13 +80,7 @@ type credentialRecord struct {
 }
 
 type invitationRecord struct {
-	InvitationID        string    `json:"invitation_id"`
-	Version             uint64    `json:"version"`
-	Secret              string    `json:"secret"`
-	ExpiresAt           time.Time `json:"expires_at"`
-	Name                string    `json:"name"`
-	Role                Role      `json:"role"`
-	Locale              string    `json:"locale"`
+	Invitation
 	FailedAttempts      int       `json:"failed_attempts"`
 	NextAttemptAt       time.Time `json:"next_attempt_at,omitempty"`
 	PendingCredentialID string    `json:"pending_credential_id,omitempty"`
@@ -95,6 +90,15 @@ type diskState struct {
 	SchemaVersion int                `json:"schema_version"`
 	Invitation    *invitationRecord  `json:"invitation,omitempty"`
 	Credentials   []credentialRecord `json:"credentials"`
+}
+
+func (state diskState) clone() diskState {
+	state.Credentials = slices.Clone(state.Credentials)
+	if state.Invitation != nil {
+		invitation := *state.Invitation
+		state.Invitation = &invitation
+	}
+	return state
 }
 
 type Option func(*Store)
@@ -139,7 +143,7 @@ func Open(dir string, options ...Option) (*Store, error) {
 	if err := store.load(); err != nil {
 		return nil, err
 	}
-	if err := store.persistLocked(); err != nil {
+	if err := store.commitLocked(store.state); err != nil {
 		return nil, fmt.Errorf("initialize device store: %w", err)
 	}
 	return store, nil
@@ -161,7 +165,7 @@ func (s *Store) CreateInvitation(name string, role Role, locale string) (Invitat
 		return Invitation{}, err
 	}
 	now := s.now().UTC()
-	record := &invitationRecord{
+	record := &invitationRecord{Invitation: Invitation{
 		InvitationID: id,
 		Version:      1,
 		Secret:       secret,
@@ -169,56 +173,22 @@ func (s *Store) CreateInvitation(name string, role Role, locale string) (Invitat
 		Name:         name,
 		Role:         role,
 		Locale:       locale,
-	}
-	previous := s.state.Invitation
-	s.state.Invitation = record
-	if err := s.persistLocked(); err != nil {
-		s.state.Invitation = previous
+	}}
+	if err := s.replaceInvitationLocked(record); err != nil {
 		return Invitation{}, fmt.Errorf("persist invitation: %w", err)
 	}
-	return invitationFromRecord(record), nil
+	return record.Invitation, nil
 }
 
-func (s *Store) EnsureBootstrapInvitation(secret []byte, name, locale string) error {
+func newBootstrapInvitation(secret []byte, name, locale string, now time.Time) (*invitationRecord, error) {
 	name, locale, err := validateMetadata(name, RoleController, locale)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(secret) != secretBytes {
-		return errors.New("bootstrap device secret must be 32 bytes")
+		return nil, errors.New("bootstrap device secret must be 32 bytes")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.state.Credentials) > 0 && !s.rearmBootstrap {
-		return nil
-	}
-	now := s.now().UTC()
-	if record := s.state.Invitation; record != nil && now.Before(record.ExpiresAt) &&
-		(!s.rearmBootstrap || record.FailedAttempts < maxInviteAttempts) {
-		return nil
-	}
-	return s.armBootstrapLocked(secret, name, locale, now)
-}
-
-// ArmBootstrapInvitation mints a bootstrap invitation while keeping every
-// enrolled device. The operator asks for it by printing the setup link again,
-// so each print pairs exactly one more phone.
-func (s *Store) ArmBootstrapInvitation(secret []byte, name, locale string) error {
-	name, locale, err := validateMetadata(name, RoleController, locale)
-	if err != nil {
-		return err
-	}
-	if len(secret) != secretBytes {
-		return errors.New("bootstrap device secret must be 32 bytes")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.armBootstrapLocked(secret, name, locale, s.now().UTC())
-}
-
-func (s *Store) armBootstrapLocked(secret []byte, name, locale string, now time.Time) error {
-	previous := s.state.Invitation
-	s.state.Invitation = &invitationRecord{
+	return &invitationRecord{Invitation: Invitation{
 		InvitationID: bootstrapInvitationID,
 		Version:      1,
 		Secret:       base64.RawURLEncoding.EncodeToString(secret),
@@ -226,12 +196,50 @@ func (s *Store) armBootstrapLocked(secret []byte, name, locale string, now time.
 		Name:         name,
 		Role:         RoleController,
 		Locale:       locale,
+	}}, nil
+}
+
+func (s *Store) EnsureBootstrapInvitation(secret []byte, name, locale string) error {
+	now := s.now().UTC()
+	bootstrap, err := newBootstrapInvitation(secret, name, locale, now)
+	if err != nil {
+		return err
 	}
-	if err := s.persistLocked(); err != nil {
-		s.state.Invitation = previous
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.state.Credentials) > 0 && !s.rearmBootstrap {
+		return nil
+	}
+	if record := s.state.Invitation; record != nil && now.Before(record.ExpiresAt) &&
+		(!s.rearmBootstrap || record.FailedAttempts < maxInviteAttempts) {
+		return nil
+	}
+	if err := s.replaceInvitationLocked(bootstrap); err != nil {
 		return fmt.Errorf("persist bootstrap invitation: %w", err)
 	}
 	return nil
+}
+
+// ArmBootstrapInvitation mints a bootstrap invitation while keeping every
+// enrolled device. The operator asks for it by printing the setup link again,
+// so each print pairs exactly one more phone.
+func (s *Store) ArmBootstrapInvitation(secret []byte, name, locale string) error {
+	bootstrap, err := newBootstrapInvitation(secret, name, locale, s.now().UTC())
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.replaceInvitationLocked(bootstrap); err != nil {
+		return fmt.Errorf("persist bootstrap invitation: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) replaceInvitationLocked(record *invitationRecord) error {
+	next := s.state.clone()
+	next.Invitation = record
+	return s.commitLocked(next)
 }
 
 func (s *Store) ListCredentials(currentCredentialID string) []Credential {
@@ -269,10 +277,9 @@ func (s *Store) RenameCredential(credentialID, name string) (Credential, error) 
 	if index < 0 {
 		return Credential{}, ErrNotFound
 	}
-	previous := s.state.Credentials[index]
-	s.state.Credentials[index].Name = name
-	if err := s.persistLocked(); err != nil {
-		s.state.Credentials[index] = previous
+	next := s.state.clone()
+	next.Credentials[index].Name = name
+	if err := s.commitLocked(next); err != nil {
 		return Credential{}, fmt.Errorf("persist credential rename: %w", err)
 	}
 	return s.state.Credentials[index].Credential, nil
@@ -285,55 +292,40 @@ func (s *Store) RevokeCredential(credentialID string) (Credential, error) {
 	if index < 0 {
 		return Credential{}, ErrNotFound
 	}
-	record := &s.state.Credentials[index]
-	if !record.Revoked && record.Role == RoleController && s.activeControllerCountLocked() == 1 {
+	current := s.state.Credentials[index]
+	if !current.Revoked && current.Role == RoleController && s.activeControllerCountLocked() == 1 {
 		return Credential{}, ErrLastController
 	}
-	previous := *record
-	previousInvitation := s.state.Invitation
+	next := s.state.clone()
+	record := &next.Credentials[index]
 	if !record.Revoked {
 		record.Revoked = true
 		record.Version++
 		record.Secret = ""
 	}
-	if invitation := s.state.Invitation; invitation != nil &&
+	if invitation := next.Invitation; invitation != nil &&
 		invitation.PendingCredentialID == credentialID {
-		s.state.Invitation = nil
+		next.Invitation = nil
 	}
-	if err := s.persistLocked(); err != nil {
-		s.state.Credentials[index] = previous
-		s.state.Invitation = previousInvitation
+	if err := s.commitLocked(next); err != nil {
 		return Credential{}, fmt.Errorf("persist credential revocation: %w", err)
 	}
-	return record.Credential, nil
+	return s.state.Credentials[index].Credential, nil
 }
 
 func (s *Store) ResetWithBootstrap(secret []byte, name, locale string) error {
-	name, locale, err := validateMetadata(name, RoleController, locale)
+	bootstrap, err := newBootstrapInvitation(secret, name, locale, s.now().UTC())
 	if err != nil {
 		return err
 	}
-	if len(secret) != secretBytes {
-		return errors.New("bootstrap device secret must be 32 bytes")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	previous := s.state
-	now := s.now().UTC()
-	s.state = diskState{
+	next := diskState{
 		SchemaVersion: storeSchemaVersion,
-		Invitation: &invitationRecord{
-			InvitationID: bootstrapInvitationID,
-			Version:      1,
-			Secret:       base64.RawURLEncoding.EncodeToString(secret),
-			ExpiresAt:    now.Add(invitationLifetime),
-			Name:         name,
-			Role:         RoleController,
-			Locale:       locale,
-		},
+		Invitation:    bootstrap,
+		Credentials:   make([]credentialRecord, 0),
 	}
-	if err := s.persistLocked(); err != nil {
-		s.state = previous
+	if err := s.commitLocked(next); err != nil {
 		return fmt.Errorf("persist device reset: %w", err)
 	}
 	return nil
@@ -408,8 +400,16 @@ func (s *Store) load() error {
 	return nil
 }
 
-func (s *Store) persistLocked() error {
-	data, err := json.Marshal(s.state)
+func (s *Store) commitLocked(next diskState) error {
+	if err := s.writeState(next); err != nil {
+		return err
+	}
+	s.state = next
+	return nil
+}
+
+func (s *Store) writeState(state diskState) error {
+	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
@@ -525,16 +525,4 @@ func validText(value string, maxBytes int) bool {
 func validSecret(encoded string) bool {
 	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
 	return err == nil && len(decoded) == secretBytes
-}
-
-func invitationFromRecord(record *invitationRecord) Invitation {
-	return Invitation{
-		InvitationID: record.InvitationID,
-		Version:      record.Version,
-		Secret:       record.Secret,
-		ExpiresAt:    record.ExpiresAt,
-		Name:         record.Name,
-		Role:         record.Role,
-		Locale:       record.Locale,
-	}
 }

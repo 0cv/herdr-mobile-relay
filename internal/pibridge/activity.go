@@ -3,13 +3,10 @@ package pibridge
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -80,11 +77,10 @@ func activityRead(ctx context.Context, identity Identity, operation, cursor stri
 	if err := checkPeer(conn.Conn.(*net.UnixConn), identity.PID); err != nil {
 		return err
 	}
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
+	challenge, err := newChallenge()
+	if err != nil {
 		return err
 	}
-	challenge := hex.EncodeToString(nonce[:])
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return err
 	}
@@ -106,8 +102,7 @@ func activityRead(ctx context.Context, identity Identity, operation, cursor stri
 		if err := decodeBridge(scanner.Bytes(), &frame); err != nil {
 			return err
 		}
-		after, err := owned(conn.path, true)
-		if err != nil || !os.SameFile(conn.before, after) || frame.Identity != identity || frame.Challenge != challenge || len(frame.Incarnation) != 36 || (incarnation != "" && incarnation != frame.Incarnation) {
+		if conn.replaced() || frame.Identity != identity || frame.Challenge != challenge || len(frame.Incarnation) != 36 || (incarnation != "" && incarnation != frame.Incarnation) {
 			return errors.New("activity source replaced")
 		}
 		incarnation = frame.Incarnation

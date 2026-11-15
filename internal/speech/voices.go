@@ -1,8 +1,6 @@
 package speech
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +17,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/fetch"
 )
 
 // ErrUsage marks a command line the caller got wrong, which the relay reports
@@ -64,7 +63,11 @@ var runtimeAssets = map[string]struct{ name, digest string }{
 
 var installMu sync.Mutex
 
-const runtimeStartTimeout = 5 * time.Second
+const (
+	runtimeStartTimeout    = 5 * time.Second
+	maxRuntimeArchiveBytes = 128 * 1024 * 1024
+	maxVoiceBytes          = 256 * 1024 * 1024
+)
 
 type runtimeProbe struct {
 	size    int64
@@ -252,10 +255,10 @@ func Install(ctx context.Context, language string) error {
 	}
 	model := filepath.Join(voiceDir(), entry.name+".onnx")
 	base := voiceBaseURL() + "/" + entry.path + "/" + entry.name
-	if err := download(ctx, base+".onnx", model, entry.modelSHA); err != nil {
+	if err := download(ctx, base+".onnx", model, entry.modelSHA, maxVoiceBytes); err != nil {
 		return err
 	}
-	return download(ctx, base+".onnx.json", model+".json", entry.configSHA)
+	return download(ctx, base+".onnx.json", model+".json", entry.configSHA, maxVoiceBytes)
 }
 
 // Remove deletes a cached voice. The language keeps working wherever a system
@@ -291,10 +294,10 @@ func installRuntime(ctx context.Context) error {
 	}
 	defer os.RemoveAll(work)
 	archive := filepath.Join(work, asset.name)
-	if err := download(ctx, runtimeBaseURL()+"/"+asset.name, archive, asset.digest); err != nil {
+	if err := download(ctx, runtimeBaseURL()+"/"+asset.name, archive, asset.digest, maxRuntimeArchiveBytes); err != nil {
 		return err
 	}
-	if err := extractTarGz(archive, work); err != nil {
+	if err := fetch.ExtractTarGz(archive, work, true); err != nil {
 		return err
 	}
 	if err := startRuntime(ctx, filepath.Join(work, "piper", "piper")); err != nil {
@@ -316,96 +319,6 @@ func installRuntime(ctx context.Context) error {
 	return nil
 }
 
-func archivePath(name string) (string, error) {
-	name = filepath.Clean(filepath.FromSlash(name))
-	if name == "." || name == ".." || filepath.IsAbs(name) ||
-		strings.HasPrefix(name, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("unsafe path %q", name)
-	}
-	return name, nil
-}
-
-func safeLinkTarget(target string) bool {
-	target = filepath.FromSlash(target)
-	if target == "" || filepath.IsAbs(target) || filepath.VolumeName(target) != "" {
-		return false
-	}
-	for _, component := range strings.Split(filepath.ToSlash(target), "/") {
-		if component == ".." {
-			return false
-		}
-	}
-	return true
-}
-
-// extractTarGz unpacks the engine archive beneath destination.
-func extractTarGz(archive, destination string) error {
-	file, err := os.Open(archive)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", filepath.Base(archive), err)
-	}
-	defer file.Close()
-	stream, err := gzip.NewReader(file)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", filepath.Base(archive), err)
-	}
-	defer stream.Close()
-	root, err := os.OpenRoot(destination)
-	if err != nil {
-		return fmt.Errorf("open extraction root: %w", err)
-	}
-	defer root.Close()
-
-	reader := tar.NewReader(stream)
-	for {
-		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read %s: %w", filepath.Base(archive), err)
-		}
-		name, err := archivePath(header.Name)
-		if err != nil {
-			return fmt.Errorf("%s contains %w: %s", filepath.Base(archive), err, header.Name)
-		}
-		mode := os.FileMode(header.Mode).Perm()
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := root.MkdirAll(name, mode); err != nil {
-				return fmt.Errorf("create %s: %w", name, err)
-			}
-		case tar.TypeReg:
-			if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-				return fmt.Errorf("create parent for %s: %w", name, err)
-			}
-			out, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-			if err != nil {
-				return fmt.Errorf("create %s: %w", name, err)
-			}
-			if _, err := io.Copy(out, reader); err != nil {
-				_ = out.Close()
-				return fmt.Errorf("write %s: %w", name, err)
-			}
-			if err := out.Close(); err != nil {
-				return fmt.Errorf("close %s: %w", name, err)
-			}
-		case tar.TypeSymlink:
-			if !safeLinkTarget(header.Linkname) {
-				return fmt.Errorf("%s contains an unsafe link target %q for %s", filepath.Base(archive), header.Linkname, name)
-			}
-			if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-				return fmt.Errorf("create parent for %s: %w", name, err)
-			}
-			if err := root.Symlink(filepath.FromSlash(header.Linkname), name); err != nil {
-				return fmt.Errorf("create link %s: %w", name, err)
-			}
-		default:
-			return fmt.Errorf("%s contains unsupported entry %s: %q", filepath.Base(archive), name, header.Typeflag)
-		}
-	}
-}
-
 // fileDigest returns the file's SHA-256, or an empty string when it cannot be
 // read: a truncated cached file then simply looks like a missing one.
 func fileDigest(path string) string {
@@ -423,44 +336,28 @@ func fileDigest(path string) string {
 
 // download writes the verified bytes into place, so a cached file is never a
 // partial or tampered one, and an already valid file is left alone.
-func download(ctx context.Context, url, destination, digest string) error {
+func download(ctx context.Context, url, destination, digest string, maximum int64) error {
 	if fileDigest(destination) == digest {
 		return nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	name := filepath.Base(destination)
+	out, err := os.CreateTemp(filepath.Dir(destination), "."+name+".part-")
 	if err != nil {
-		return fmt.Errorf("request %s: %w", filepath.Base(destination), err)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", filepath.Base(destination), err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: %s", filepath.Base(destination), response.Status)
-	}
-	out, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".part-")
-	if err != nil {
-		return fmt.Errorf("write %s: %w", filepath.Base(destination), err)
+		return fmt.Errorf("write %s: %w", name, err)
 	}
 	partial := out.Name()
-	sum := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(out, sum), response.Body); err != nil {
-		out.Close()
+	actual, err := fetch.DownloadFile(ctx, http.DefaultClient, url, out, maximum)
+	if err != nil {
 		os.Remove(partial)
-		return fmt.Errorf("download %s: %w", filepath.Base(destination), err)
+		return fmt.Errorf("download %s: %w", name, err)
 	}
-	if err := out.Close(); err != nil {
+	if actual != digest {
 		os.Remove(partial)
-		return fmt.Errorf("write %s: %w", filepath.Base(destination), err)
-	}
-	if actual := hex.EncodeToString(sum.Sum(nil)); actual != digest {
-		os.Remove(partial)
-		return fmt.Errorf("%s does not match its published checksum", filepath.Base(destination))
+		return fmt.Errorf("%s does not match its published checksum", name)
 	}
 	if err := os.Rename(partial, destination); err != nil {
 		os.Remove(partial)
-		return fmt.Errorf("install %s: %w", filepath.Base(destination), err)
+		return fmt.Errorf("install %s: %w", name, err)
 	}
 	return nil
 }
