@@ -1,7 +1,9 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { assertDistinctUpgrade, type BundleSet } from './support/artifacts';
+import { assertDistinctUpgrade, readBundleSet, type BundleSet } from './support/artifacts';
+import { option, required } from './support/cli';
+import { fixtureControl, fixtureState, waitForFault, waitForFixtureInfo, type FixtureInfo, type FixtureRequest, type FixtureState } from './support/fixture-client';
 import { DiagnosticRecorder, redactText, writeSanitizedJson } from './support/diagnostics';
 import { PhaseBudget } from './support/budget';
 import { command, startCommand, stopProcess } from './support/process';
@@ -38,46 +40,6 @@ import { IOSPlatform } from './platforms/ios';
 import type { MobilePlatform, PlatformOptions, UpdateCompletionEvidence } from './platforms/types';
 import { repositoryPath, repositoryRoot } from './support/paths';
 
-interface FixtureInfo {
-  app_url: string;
-  relay_urls: string[];
-  setup_urls: string[];
-  control_url: string;
-  control_secret: string;
-  ca_certificate: string;
-  old_release: string;
-  candidate_release: string;
-}
-
-interface FixtureRelayState {
-  name: string;
-  invitation_auth_count: number;
-  credential_auth_count: number;
-  credential_pseudonyms: string[];
-  connections: number;
-  install_update_count: number;
-  deploy_app_update_count: number;
-}
-
-interface FixtureRequest {
-  method: string;
-  path: string;
-  fault?: string;
-  fault_id?: string;
-  fault_generation?: string;
-  release: string;
-}
-
-interface FixtureState {
-  active_release: string;
-  app_url: string;
-  requests: FixtureRequest[];
-  faults?: Array<{ id: string; generation: string; method: string; path: string; kind: string; remaining: number }>;
-  invalidated?: boolean;
-  invalidation_reason?: string;
-  relays: FixtureRelayState[];
-}
-
 interface RunResult {
   schema: 2;
   product: { status: 'PASS' | 'FAIL' | 'INDETERMINATE'; categories: string[] };
@@ -113,33 +75,6 @@ interface RunResult {
   budget?: ReturnType<PhaseBudget['snapshot']>;
 }
 
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function required(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
-}
-
-async function readJsonFile<T>(filename: string): Promise<T> {
-  return JSON.parse(await readFile(filename, 'utf8')) as T;
-}
-
-async function waitForInfo(filename: string, timeoutMs: number, budget?: PhaseBudget): Promise<FixtureInfo> {
-  const deadline = Date.now() + Math.min(timeoutMs, budget?.remainingMs ?? timeoutMs);
-  while (Date.now() < deadline) {
-    try {
-      return await readJsonFile<FixtureInfo>(filename);
-    } catch {
-      await delay(250, budget);
-    }
-  }
-  throw new Error('FIXTURE_STARTUP: fixture did not publish its private info before the deadline');
-}
-
 function fixtureEnvironment(root: string): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH || '',
@@ -163,25 +98,6 @@ function startFixture(bundleSet: BundleSet, privateDir: string, infoFile: string
     if (output.join('').length < 1_000_000) output.push(chunk);
   }, { cwd: repositoryRoot, env: fixtureEnvironment(fixtureRoot) });
   return { process: child, output };
-}
-
-async function control(info: FixtureInfo, path: string, method = 'GET', body?: unknown): Promise<any> {
-  const response = await fetch(`${info.control_url}${path}`, {
-    method,
-    headers: {
-      'X-Herdr-Fixture-Secret': info.control_secret,
-      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`FIXTURE_CONTROL: HTTP ${response.status}: ${text.slice(0, 300)}`);
-  return text ? JSON.parse(text) : null;
-}
-
-async function fixtureState(info: FixtureInfo): Promise<FixtureState> {
-  return control(info, '/state') as Promise<FixtureState>;
 }
 
 async function waitForCredential(info: FixtureInfo, relayName: string, budget?: PhaseBudget): Promise<FixtureState> {
@@ -217,27 +133,6 @@ function authEvidence(state: FixtureState): RelayAuthEvidence {
   };
 }
 
-async function waitForFault(
-  info: FixtureInfo,
-  path: string,
-  kind: string,
-  faultId: string,
-  faultGeneration: string,
-  budget?: PhaseBudget,
-): Promise<void> {
-  const deadline = Date.now() + Math.min(30_000, budget?.remainingMs ?? 30_000);
-  while (Date.now() < deadline) {
-    const state = await fixtureState(info);
-    if (state.invalidated) throw new Error(`FIXTURE_FAULT_EXPIRED: ${state.invalidation_reason || 'fault lifetime expired'}`);
-    if (state.requests.some((request) => request.path === path
-      && request.fault === kind
-      && request.fault_id === faultId
-      && request.fault_generation === faultGeneration)) return;
-    await delay(250, budget);
-  }
-  throw new Error(`FIXTURE_FAULT: ${kind} for ${path} was not consumed`);
-}
-
 function assertFaultActive(state: FixtureState, path: string, kind: string, faultId: string, faultGeneration: string): void {
   if (state.invalidated) throw new Error(`FIXTURE_FAULT_EXPIRED: ${state.invalidation_reason || 'fault lifetime expired'}`);
   const request = state.requests.find((candidate) => candidate.path === path
@@ -245,7 +140,7 @@ function assertFaultActive(state: FixtureState, path: string, kind: string, faul
     && candidate.fault_id === faultId
     && candidate.fault_generation === faultGeneration);
   if (!request) throw new Error(`FIXTURE_FAULT_GENERATION: consumed ${kind} fault ${faultId} was not recorded with its generation`);
-  const fault = state.faults?.find((candidate) => candidate.id === faultId
+  const fault = state.faults.find((candidate) => candidate.id === faultId
     && candidate.generation === faultGeneration
     && candidate.path === path
     && candidate.kind === kind);
@@ -255,7 +150,7 @@ function assertFaultActive(state: FixtureState, path: string, kind: string, faul
 async function reconnectAllRelays(info: FixtureInfo, before: RelayAuthEvidence, budget?: PhaseBudget): Promise<RelayAuthEvidence> {
   const relayNames = Object.keys(before.relays).sort();
   for (const relayName of relayNames) {
-    await control(info, `/relay/drop?name=${encodeURIComponent(relayName)}`, 'POST');
+    await fixtureControl(info, `/relay/drop?name=${encodeURIComponent(relayName)}`, 'POST');
   }
   let state = await fixtureState(info);
   for (const relayName of relayNames) {
@@ -471,12 +366,12 @@ async function runUpgradeScenario(
   if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
     throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
   }
-  await control(info, '/fault', 'POST', {
+  await fixtureControl(info, '/fault', 'POST', {
     id: faultId, generation: faultGeneration, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
   });
   const faultIdentity = { id: faultId, generation: faultGeneration, kind: faultKind, path: faultPath };
   faultsExercised.push(`${faultKind}:${faultPath}`);
-  await control(info, '/activate', 'POST', { release: 'candidate' });
+  await fixtureControl(info, '/activate', 'POST', { release: 'candidate' });
   await platform.clickWebText('Settings');
   await platform.clickWebText('Check for Updates');
   await platform.clickWebText('Load Update');
@@ -497,7 +392,7 @@ async function runUpgradeScenario(
     qualification,
     budget,
   );
-  await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
+  await fixtureControl(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
   const clearedState = await fixtureState(info);
   qualification.observe({ fault: clearedState });
   if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {
@@ -635,14 +530,7 @@ function freezeEvidence(platform: MobilePlatform): Record<string, unknown> {
 }
 
 async function main(): Promise<void> {
-  const bundleSetFile = repositoryPath(required('--bundle-set'));
-  const bundleSetDirectory = resolve(bundleSetFile, '..');
-  const bundleSetValue = await readJsonFile<BundleSet>(bundleSetFile);
-  const resolvedBundleSet: BundleSet = {
-    ...bundleSetValue,
-    candidate: { ...bundleSetValue.candidate, root: resolve(bundleSetDirectory, bundleSetValue.candidate.root) },
-    baselines: bundleSetValue.baselines.map((bundle) => ({ ...bundle, root: resolve(bundleSetDirectory, bundle.root) })),
-  };
+  const resolvedBundleSet = await readBundleSet(repositoryPath(required('--bundle-set')));
   const selectedBaseline = option('--baseline');
   const baseline = selectedBaseline
     ? resolvedBundleSet.baselines.find((bundle) => bundle.name === selectedBaseline)
@@ -687,7 +575,7 @@ async function main(): Promise<void> {
   let stage: string = 'fixture';
   try {
     validateMeasurementIdentity(identity);
-    fixtureInfo = await waitForInfo(infoFile, 180_000, budget);
+    fixtureInfo = await waitForFixtureInfo(infoFile, 180_000, budget);
     if (process.env.MOBILE_PLATFORM === 'android') await reversePorts(fixtureInfo, process.env.ANDROID_SERIAL || '', reverse);
     const platformOptions: PlatformOptions = {
       origin: fixtureInfo.app_url,
@@ -761,7 +649,7 @@ async function main(): Promise<void> {
       if (platform && result) result.evidence = freezeEvidence(platform);
     });
     await attempt('session-teardown', async () => platform?.stopOwnedResources());
-    if (fixtureInfo) await attempt('fixture-shutdown', () => control(fixtureInfo!, '/shutdown', 'POST'));
+    if (fixtureInfo) await attempt('fixture-shutdown', () => fixtureControl(fixtureInfo!, '/shutdown', 'POST'));
     await attempt('fixture-stop', () => stopProcess(fixtureProcess.process));
     await removeReverses(process.env.ANDROID_SERIAL || '', reverse, attempt);
     await attempt('fixture-log', () => writeFile(resolve(outputDir, 'fixture.log'), redactText(fixtureProcess.output.join('')).slice(0, 100 * 1024 * 1024), { mode: 0o600 }));

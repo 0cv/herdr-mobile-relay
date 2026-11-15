@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {relocateDeclarationMap} from '../android-appium/declaration-map.ts';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const source = path.join(repo, 'tests/mobile/android-appium');
@@ -25,10 +24,12 @@ for (const [directory, name] of [[repo, 'source'], [home, 'install'], [output, '
 const ownershipMarker = path.join(fixture, '.owned');
 assert.ok(fs.lstatSync(ownershipMarker).isFile(), 'Regular non-symlink fixture marker required');
 assert.equal(fs.readFileSync(ownershipMarker, 'utf8'), 'herdr-owned-inspection-fixture\n');
-const gate = path.join(output, 'gate-fixture');
+const gateFixture = path.join(output, 'gate-fixture');
+const gate = path.join(gateFixture, 'android-appium');
 fs.mkdirSync(output, {recursive: true});
 fs.cpSync(source, gate, {recursive: true});
-if (!fs.existsSync(path.join(gate, 'node_modules'))) fs.symlinkSync(path.join(repo, 'tests/mobile/node_modules'), path.join(gate, 'node_modules'));
+fs.cpSync(path.join(repo, 'tests/mobile/support/appium-patch.ts'), path.join(gateFixture, 'support/appium-patch.ts'), {recursive: true});
+for (const directory of [gate, gateFixture]) if (!fs.existsSync(path.join(directory, 'node_modules'))) fs.symlinkSync(path.join(repo, 'tests/mobile/node_modules'), path.join(directory, 'node_modules'));
 const manifest = JSON.parse(fs.readFileSync(path.join(gate, 'producer-manifest.json')));
 const runtime = JSON.parse(fs.readFileSync(path.join(gate, 'runtime-manifest.json')));
 const root = path.join(home, runtime.android.root);
@@ -144,27 +145,12 @@ for (const resolverDirectory of ['node_modules', 'lib/node_modules']) for (const
   } finally { fs.rmSync(directory, {recursive: true}); fs.rmSync(executed, {force: true}); }
 }
 const producerSnapshot = Object.fromEntries(Object.keys(manifest.files).map(file => [file, fs.readFileSync(producerPath(file))]));
-const driverSource = 'lib/driver.ts';
-const beforeDriver = fs.readFileSync(pristinePath(driverSource), 'utf8');
-const afterDriver = producerSnapshot[driverSource].toString();
-const declaration = producerSnapshot['build/lib/driver.d.ts'].toString();
-const declarationMap = fs.readFileSync(pristinePath('build/lib/driver.d.ts.map'), 'utf8');
-const edits = JSON.parse(fs.readFileSync(path.join(gate, 'producer-transform.json'))).driver;
-assert.equal(relocateDeclarationMap(driverSource, beforeDriver, afterDriver, declaration, declarationMap, edits), producerSnapshot['build/lib/driver.d.ts.map'].toString());
-for (const [from, to] of [
-  ['  ): Promise<any> {', '  ): Promise<string> {'],
-  ['  systemPort: number | undefined;', '  systemPort: string | undefined;'],
-  ["    return {};", "    return {changed: true};"],
-  ['      const defaultOpts = {', '      const changedDefaultOpts = {'],
-]) assert.throws(() => relocateDeclarationMap(driverSource, beforeDriver, afterDriver.replace(from, to), declaration, declarationMap, [...edits, [from, to]]), /Only the createSession catch may change/);
-const wrongMap = JSON.parse(declarationMap);
-wrongMap.sources = ['../../wrong.ts'];
-assert.throws(() => relocateDeclarationMap(driverSource, beforeDriver, afterDriver, declaration, JSON.stringify(wrongMap), edits));
+const afterDriver = producerSnapshot['lib/driver.ts'].toString();
 const runtimeMap = JSON.parse(producerSnapshot['build/lib/driver.js.map']);
 assert.deepEqual(runtimeMap.sources, ['../../lib/driver.ts']);
 assert.deepEqual(runtimeMap.sourcesContent, [afterDriver]);
-assert.deepEqual(producerSnapshot['build/lib/driver.d.ts'], fs.readFileSync(pristinePath('build/lib/driver.d.ts')));
-results.push({label: 'UiAutomator2 catch-only, class/member signatures and exact declaration/runtime maps', checks: 9});
+for (const file of ['build/lib/driver.d.ts', 'build/lib/driver.d.ts.map']) assert.deepEqual(fs.readFileSync(path.join(home, runtime.uiautomator2.root, file)), fs.readFileSync(path.join(pristineUia, file)));
+results.push({label: 'UiAutomator2 runtime map and untouched declarations', checks: 4});
 const authoredSnapshot = Object.fromEntries(Object.keys(manifest.authored).map(file => [file, fs.readFileSync(path.join(root, file))]));
 try {
   for (const file of Object.keys(producerSnapshot)) fs.copyFileSync(pristinePath(file), producerPath(file));
@@ -185,8 +171,8 @@ try {
     const value = JSON.parse(bytes); value.files['build/lib/commands/context/exports.js'].after = '0'.repeat(64); return JSON.stringify(value);
   }, () => run('patch', false, 'incorrect generated posthash before writes'));
   mutation(path.join(gate, 'producer-manifest.json'), bytes => {
-    const value = JSON.parse(bytes); delete value.files['build/lib/commands/context/helpers.d.ts.map']; return JSON.stringify(value);
-  }, () => run('patch', false, 'missing prospective declaration map'));
+    const value = JSON.parse(bytes); delete value.files['build/lib/commands/context/helpers.js.map']; return JSON.stringify(value);
+  }, () => run('patch', false, 'missing prospective runtime map'));
   mutation(path.join(gate, 'producer-manifest.json'), bytes => {
     const value = JSON.parse(bytes); delete value.authored['build/lib/commands/context/retained-inspection.d.cts']; return JSON.stringify(value);
   }, () => run('patch', false, 'missing prospective authored type'));

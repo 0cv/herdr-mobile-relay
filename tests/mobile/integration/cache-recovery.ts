@@ -1,33 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { chromium, type Browser, type Page } from '../../../frontend/node_modules/playwright';
-import { fileSha256, type BundleSet } from '../support/artifacts';
+import { fileSha256, readBundleSet } from '../support/artifacts';
+import { option, required } from '../support/cli';
+import { fixtureControl, waitForFault, waitForFixtureInfo, type FixtureInfo } from '../support/fixture-client';
 import { command, startCommand, stopProcess } from '../support/process';
 import { repositoryPath, repositoryRoot } from '../support/paths';
-
-interface FixtureInfo {
-  app_url: string;
-  setup_urls: string[];
-  control_url: string;
-  control_secret: string;
-}
-
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function required(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
-}
-
-async function readJson<T>(filename: string): Promise<T> {
-  return JSON.parse(await readFile(filename, 'utf8')) as T;
-}
 
 async function lazyAsset(root: string, script: string): Promise<string> {
   const source = await readFile(join(root, script.replace(/^\//u, '')), 'utf8');
@@ -58,56 +38,8 @@ async function observeBrowserAsset(page: Page, assetPath: string, loadModule = f
   }, { assetPath, loadModule });
 }
 
-async function waitForInfo(filename: string): Promise<FixtureInfo> {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    try {
-      return await readJson<FixtureInfo>(filename);
-    } catch {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-    }
-  }
-  throw new Error('CACHE_RECOVERY: fixture info was not published');
-}
-
-async function control(info: FixtureInfo, path: string, method = 'GET', body?: unknown): Promise<any> {
-  const response = await fetch(`${info.control_url}${path}`, {
-    method,
-    headers: {
-      'X-Herdr-Fixture-Secret': info.control_secret,
-      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`CACHE_RECOVERY: fixture control ${response.status}: ${text.slice(0, 300)}`);
-  return text ? JSON.parse(text) : null;
-}
-
-async function waitForFault(info: FixtureInfo, path: string, faultId: string, faultGeneration: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const state = await control(info, '/state');
-    if (state.invalidated) throw new Error(`CACHE_RECOVERY: fixture fault expired: ${state.invalidation_reason || 'unknown reason'}`);
-    if (state.requests.some((request: { path: string; fault?: string; fault_id?: string; fault_generation?: string }) => request.path === path
-      && request.fault === 'missing'
-      && request.fault_id === faultId
-      && request.fault_generation === faultGeneration)) return;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-  }
-  throw new Error(`CACHE_RECOVERY: missing stylesheet fault was not consumed for ${path}`);
-}
-
 async function main(): Promise<void> {
-  const bundleSetFile = repositoryPath(required('--bundle-set'));
-  const bundleSetDirectory = resolve(bundleSetFile, '..');
-  const source = await readJson<BundleSet>(bundleSetFile);
-  const bundleSet: BundleSet = {
-    ...source,
-    candidate: { ...source.candidate, root: resolve(bundleSetDirectory, source.candidate.root) },
-    baselines: source.baselines.map((bundle) => ({ ...bundle, root: resolve(bundleSetDirectory, bundle.root) })),
-  };
+  const bundleSet = await readBundleSet(repositoryPath(required('--bundle-set')));
   const baseline = bundleSet.baselines[0];
   if (!baseline) throw new Error('CACHE_RECOVERY: bundle set has no baseline');
   if (baseline.identity.style === bundleSet.candidate.identity.style
@@ -142,7 +74,7 @@ async function main(): Promise<void> {
   let info: FixtureInfo | undefined;
   let browser: Browser | undefined;
   try {
-    info = await waitForInfo(infoFile);
+    info = await waitForFixtureInfo(infoFile, 60_000);
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await context.newPage();
@@ -159,7 +91,7 @@ async function main(): Promise<void> {
     assert.equal(warmedBaseline.status, 200);
     assert.equal(warmedBaseline.cacheControl, 'public, max-age=31536000, immutable');
     assert.equal(warmedBaseline.sha256, baselineLazyHash);
-    const warmedState = await control(info, '/state');
+    const warmedState = await fixtureControl(info, '/state');
     const warmedBaselineRequests = warmedState.requests.filter((request: { release: string; path: string }) => request.release === 'old' && request.path === baselineLazyPath).length;
     if (warmedBaselineRequests < 1) throw new Error(`CACHE_RECOVERY: baseline lazy asset was not requested: ${baselineLazyPath}`);
     await page.goto(info.setup_urls[0], { waitUntil: 'domcontentloaded' });
@@ -187,20 +119,20 @@ async function main(): Promise<void> {
     });
     const faultId = 'cache-recovery-candidate-style';
     const faultGeneration = `${faultId}-1`;
-    await control(info, '/fault', 'POST', {
+    await fixtureControl(info, '/fault', 'POST', {
       id: faultId, generation: faultGeneration, method: 'GET', path: bundleSet.candidate.identity.style, kind: 'missing', remaining: -1,
     });
-    await control(info, '/activate', 'POST', { release: 'candidate' });
+    await fixtureControl(info, '/activate', 'POST', { release: 'candidate' });
     await page.goto(`${info.app_url}/index.html?herdr_reload=cache-recovery`, { waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: 'Herdr could not load' }).waitFor();
-    await waitForFault(info, bundleSet.candidate.identity.style, faultId, faultGeneration);
+    await waitForFault(info, bundleSet.candidate.identity.style, 'missing', faultId, faultGeneration);
     await page.waitForFunction(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || '{}').phoneState === 'failed');
     const failedPlan = await page.evaluate(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || '{}')) as { phoneAcknowledged?: boolean; phoneState?: string };
     if (failedPlan.phoneAcknowledged === true || failedPlan.phoneState !== 'failed') {
       throw new Error(`CACHE_RECOVERY: failed plan was not incomplete: ${JSON.stringify(failedPlan)}`);
     }
-    await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
-    const clearedState = await control(info, '/state');
+    await fixtureControl(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
+    const clearedState = await fixtureControl(info, '/state');
     if (clearedState.invalidated || clearedState.faults?.some((fault: { id: string; generation: string }) => fault.id === faultId && fault.generation === faultGeneration)) {
       throw new Error('CACHE_RECOVERY: fault was not explicitly cleared');
     }
@@ -214,14 +146,14 @@ async function main(): Promise<void> {
     }, undefined, { timeout: 30_000 });
     const loadedCandidate = await observeBrowserAsset(page, candidateLazyPath, true);
     if (!loadedCandidate.ok) {
-      const state = await control(info, '/state');
+      const state = await fixtureControl(info, '/state');
       throw new Error(`CACHE_RECOVERY: candidate lazy asset response ${JSON.stringify({ loadedCandidate, activeRelease: state.active_release, requests: state.requests.slice(-8) })}`);
     }
     assert.equal(loadedCandidate.ok, true, JSON.stringify(loadedCandidate));
     assert.equal(loadedCandidate.status, 200, JSON.stringify(loadedCandidate));
     assert.equal(loadedCandidate.cacheControl, 'public, max-age=31536000, immutable');
     assert.equal(loadedCandidate.sha256, candidateLazyHash);
-    const upgradedState = await control(info, '/state');
+    const upgradedState = await fixtureControl(info, '/state');
     const upgradedBaselineRequests = upgradedState.requests.filter((request: { release: string; path: string }) => request.release === 'old' && request.path === baselineLazyPath).length;
     const candidateRequests = upgradedState.requests.filter((request: { release: string; path: string }) => request.release === 'candidate' && request.path === candidateLazyPath).length;
     if (upgradedBaselineRequests !== warmedBaselineRequests) {
@@ -239,7 +171,7 @@ async function main(): Promise<void> {
       || targetRuntime.build !== bundleSet.candidate.identity.build) {
       throw new Error(`CACHE_RECOVERY: target runtime identity mismatch: ${JSON.stringify(targetRuntime)}`);
     }
-    const state = await control(info, '/state');
+    const state = await fixtureControl(info, '/state');
     const fault = state.requests.find((request: { path: string; fault?: string; fault_id?: string; fault_generation?: string }) => request.path === bundleSet.candidate.identity.style
       && request.fault === 'missing'
       && request.fault_id === faultId
@@ -257,7 +189,7 @@ async function main(): Promise<void> {
     await context.close();
   } finally {
     await browser?.close();
-    if (info) await control(info, '/shutdown', 'POST').catch(() => undefined);
+    if (info) await fixtureControl(info, '/shutdown', 'POST').catch(() => undefined);
     await stopProcess(fixture);
     await rm(privateDir, { recursive: true, force: true });
   }
