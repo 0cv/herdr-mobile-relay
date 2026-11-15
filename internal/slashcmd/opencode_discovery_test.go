@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -65,8 +66,8 @@ func TestOpenCodeCommandPrecedenceAndSuppression(t *testing.T) {
 	if !found {
 		t.Fatal("missing nearest project command")
 	}
-	commands, truncated := (&openCodeProvider{}).Discover(DiscoverContext{Home: home, Cwd: cwd, SuppressNative: true})
-	if truncated || len(commands) != len(openCodeBuiltins) {
+	suppressed := CatalogForProfileWithSuppression("opencode", "opencode", cwd, home, nil, "", "", true)
+	if suppressed.Truncated || !reflect.DeepEqual(suppressed.Commands, openCodeBuiltins) {
 		t.Fatal("native suppression did not retain only builtins")
 	}
 }

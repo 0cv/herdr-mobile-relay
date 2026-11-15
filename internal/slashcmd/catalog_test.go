@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -215,32 +216,35 @@ func TestUnknownProfileHasNoClaudeFallback(t *testing.T) {
 
 func TestExplicitSuppressionSkipsNativeDiscovery(t *testing.T) {
 	isolateAgentEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	skill := "---\nname: native-only\ndescription: Must stay suppressed\n---\n"
 	cases := []struct {
-		profile   string
-		builtins  int
-		skillRoot string
+		profile    string
+		builtins   []Command
+		nativeFile string
 	}{
-		{"claude", len(claudeBuiltins), filepath.Join(".claude", "skills")},
-		{"qoder", len(qoderBuiltins), filepath.Join(".qoder", "skills")},
-		{"pi", len(piBuiltins), filepath.Join(".pi", "agent", "skills")},
-		{"omp", len(ompBuiltins), filepath.Join(".omp", "agent", "skills")},
-		{"kimi", len(kimiBuiltins), filepath.Join(".kimi", "skills")},
-		{"hermes", len(hermesBuiltins), filepath.Join(".hermes", "skills")},
+		{"claude", claudeBuiltins, filepath.Join(".claude", "skills", "native-only", "SKILL.md")},
+		{"qoder", qoderBuiltins, filepath.Join(".qoder", "skills", "native-only", "SKILL.md")},
+		{"pi", piBuiltins, filepath.Join(".pi", "agent", "skills", "native-only", "SKILL.md")},
+		{"omp", ompBuiltins, filepath.Join(".omp", "agent", "skills", "native-only", "SKILL.md")},
+		{"kimi", kimiBuiltins, filepath.Join(".kimi-code", "skills", "native-only", "SKILL.md")},
+		{"hermes", hermesBuiltins, filepath.Join(".hermes", "skills", "native-only", "SKILL.md")},
+		{"agy", agyBuiltins, filepath.Join(".gemini", "skills", "native-only", "SKILL.md")},
+		{"opencode", openCodeBuiltins, filepath.Join(".config", "opencode", "commands", "native-only.md")},
+		{"cursor", cursorBuiltins, filepath.Join(".cursor", "skills", "native-only", "SKILL.md")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {
 			home := t.TempDir()
-			writeSkill(t, filepath.Join(home, tc.skillRoot), "native-only", "Must stay suppressed")
+			writeFile(t, filepath.Join(home, tc.nativeFile), skill)
 			catalog := CatalogForProfileWithSuppression(
 				tc.profile, tc.profile, t.TempDir(), home, nil, "", "", true,
 			)
-			if len(catalog.Commands) != tc.builtins {
-				t.Fatalf("commands = %d, want %d builtins", len(catalog.Commands), tc.builtins)
+			if !reflect.DeepEqual(catalog.Commands, tc.builtins) {
+				t.Fatalf("commands = %d, want the %d builtins in order", len(catalog.Commands), len(tc.builtins))
 			}
-			for _, command := range catalog.Commands {
-				if command.Source != "builtin" {
-					t.Fatalf("native command discovered despite suppression: %+v", command)
-				}
+			if catalog.Truncated {
+				t.Fatal("suppressed catalog reported truncation")
 			}
 		})
 	}
