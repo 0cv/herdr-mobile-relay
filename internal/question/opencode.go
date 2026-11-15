@@ -2,7 +2,6 @@ package question
 
 import (
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/textutil"
@@ -35,64 +34,16 @@ func parseOpenCode(text string) *Interaction {
 		return interaction
 	}
 
-	type row struct {
-		line     int
-		focus    bool
-		label    string
-		selected bool
+	rows := lastRun(scanRows(lines, 0, footerIndex, rowScan{
+		checkboxes:   true,
+		restartAtOne: true,
+		endRunOnGap:  true,
+	}))
+	compactRows(rows, true)
+	for index := range rows {
+		rows[index].focus = openCodeFocusPattern.MatchString(rawLines[rows[index].line])
 	}
-	var runs [][]row
-	var currentRun []row
-	expected := 1
-	flush := func() {
-		if len(currentRun) > 0 {
-			runs = append(runs, currentRun)
-		}
-		currentRun = nil
-		expected = 1
-	}
-	for index := 0; index < footerIndex; index++ {
-		match := checkboxPattern.FindStringSubmatch(lines[index])
-		checkbox := match != nil
-		if match == nil {
-			match = menuPattern.FindStringSubmatch(lines[index])
-		}
-		if match == nil {
-			continue
-		}
-		number, _ := strconv.Atoi(match[2])
-		if number == 1 {
-			flush()
-		}
-		if number != expected {
-			flush()
-			continue
-		}
-		labelIndex := 3
-		selected := false
-		if checkbox {
-			labelIndex = 4
-			selected = strings.TrimSpace(match[3]) != ""
-		}
-		label := textutil.Compact(match[labelIndex], 500)
-		if selectedPattern.MatchString(label) {
-			selected = true
-			label = strings.TrimSpace(selectedPattern.ReplaceAllString(label, ""))
-		}
-		currentRun = append(currentRun, row{
-			line:     index,
-			focus:    openCodeFocusPattern.MatchString(rawLines[index]),
-			label:    label,
-			selected: selected,
-		})
-		expected++
-	}
-	flush()
-	if len(runs) == 0 {
-		return nil
-	}
-	rows := runs[len(runs)-1]
-	if len(rows) < 2 || !otherPattern.MatchString(rows[len(rows)-1].label) {
+	if len(rows) < 2 || !otherPattern.MatchString(rows[len(rows)-1].text) {
 		return nil
 	}
 
@@ -110,23 +61,7 @@ func parseOpenCode(text string) *Interaction {
 		return nil
 	}
 
-	all := make([]Option, 0, len(rows))
-	focus := Focus{Kind: "option"}
-	for index, item := range rows {
-		end := footerIndex
-		if index+1 < len(rows) {
-			end = rows[index+1].line
-		}
-		all = append(all, Option{
-			Index:       index,
-			Label:       item.label,
-			Description: description(lines, item.line, end),
-			Selected:    item.selected,
-		})
-		if item.focus {
-			focus = Focus{Kind: "option", Index: index}
-		}
-	}
+	all, focus := optionsFromRows(lines, rows, footerIndex)
 	options, otherItem := splitOther(all)
 	otherText := otherItem.Description
 	if strings.EqualFold(otherText, otherItem.Label) {
@@ -140,7 +75,7 @@ func parseOpenCode(text string) *Interaction {
 	}
 
 	kind := "single_select"
-	if checkboxPattern.MatchString(lines[rows[0].line]) {
+	if rows[0].checkbox {
 		kind = "multi_select"
 	}
 	if current < 1 || total < current {

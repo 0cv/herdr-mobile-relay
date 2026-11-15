@@ -82,3 +82,14 @@ func TestParseNumberedRows(t *testing.T) {
 		}
 	}
 }
+
+func TestParseClaudeLabelCutAfterSpaceIsTrimmed(t *testing.T) {
+	rows := []string{"1. " + strings.Repeat("a", 499) + " tail", "2. Beta", "3. Gamma"}
+	got := Parse(numberedRowsPane("claude", rows), "claude")
+	if got == nil || len(got.Options) == 0 {
+		t.Fatalf("no interaction parsed: %#v", got)
+	}
+	if label := got.Options[0].Label; label != strings.Repeat("a", 499) {
+		t.Fatalf("label = %q", label[len(label)-5:])
+	}
+}

@@ -2,7 +2,6 @@ package question
 
 import (
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/textutil"
@@ -38,61 +37,33 @@ func parseQoder(text string) *Interaction {
 		return parseQoderReview(lines, headerIndex, footerIndex, total)
 	}
 
-	type row struct {
-		line     int
-		focus    bool
-		label    string
-		selected bool
-	}
-	var checkboxRows, menuRows []row
-	expected := 1
-	for index := headerIndex + 1; index < footerIndex; index++ {
-		if match := checkboxPattern.FindStringSubmatch(lines[index]); match != nil {
-			number, _ := strconv.Atoi(match[2])
-			if number != expected {
-				continue
-			}
-			checkboxRows = append(checkboxRows, row{
-				line:     index,
-				focus:    match[1] != "",
-				label:    textutil.Compact(match[4], 500),
-				selected: strings.TrimSpace(match[3]) != "",
-			})
-			expected++
-			continue
+	scanned := lastRun(scanRows(lines, headerIndex+1, footerIndex, rowScan{checkboxes: true}))
+	compactRows(scanned, false)
+	var checkboxRows, menuRows []optionRow
+	for _, item := range scanned {
+		if item.checkbox {
+			checkboxRows = append(checkboxRows, item)
+		} else {
+			menuRows = append(menuRows, item)
 		}
-		match := menuPattern.FindStringSubmatch(lines[index])
-		if match == nil {
-			continue
-		}
-		number, _ := strconv.Atoi(match[2])
-		if number != expected {
-			continue
-		}
-		menuRows = append(menuRows, row{
-			line:  index,
-			focus: match[1] != "",
-			label: textutil.Compact(match[3], 500),
-		})
-		expected++
 	}
 
 	kind := "single_select"
 	rows := menuRows
-	submitRow := row{}
+	submitRow := optionRow{}
 	if len(checkboxRows) >= 2 {
 		kind = "multi_select"
 		rows = checkboxRows
 		for _, item := range menuRows {
-			label := strings.TrimSpace(strings.TrimSuffix(item.label, "→"))
+			label := strings.TrimSpace(strings.TrimSuffix(item.text, "→"))
 			if strings.EqualFold(label, "next") || strings.EqualFold(label, "submit") {
 				submitRow = item
 			}
 		}
 	}
-	var otherRow row
+	var otherRow optionRow
 	for _, item := range menuRows {
-		if otherPattern.MatchString(item.label) {
+		if otherPattern.MatchString(item.text) {
 			otherRow = item
 		}
 	}
@@ -100,7 +71,7 @@ func parseQoder(text string) *Interaction {
 		return nil
 	}
 	if kind == "single_select" {
-		if !otherPattern.MatchString(rows[len(rows)-1].label) {
+		if !otherPattern.MatchString(rows[len(rows)-1].text) {
 			return nil
 		}
 		rows = rows[:len(rows)-1]
@@ -127,25 +98,11 @@ func parseQoder(text string) *Interaction {
 		return nil
 	}
 
-	options := make([]Option, 0, len(rows))
-	focus := Focus{Kind: "option"}
-	for index, item := range rows {
-		end := otherRow.line
-		if index+1 < len(rows) {
-			end = rows[index+1].line
-		} else if submitRow.line > 0 {
-			end = submitRow.line
-		}
-		options = append(options, Option{
-			Index:       index,
-			Label:       item.label,
-			Description: description(lines, item.line, end),
-			Selected:    item.selected,
-		})
-		if item.focus {
-			focus = Focus{Kind: "option", Index: index}
-		}
+	end := otherRow.line
+	if submitRow.line > 0 {
+		end = submitRow.line
 	}
+	options, focus := optionsFromRows(lines, rows, end)
 	if submitRow.focus {
 		focus = Focus{Kind: "submit"}
 	}
@@ -169,9 +126,9 @@ func parseQoder(text string) *Interaction {
 		Question: questionText,
 		Options:  options,
 		Other: Other{
-			Selected:    otherRow.selected || notesActive,
+			Selected:    otherRow.checked || notesActive,
 			Text:        notes,
-			Label:       otherRow.label,
+			Label:       otherRow.text,
 			Placeholder: "Type an answer",
 		},
 		SubmitLabel:    nextOrSubmit(current, total),

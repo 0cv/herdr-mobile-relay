@@ -19,25 +19,20 @@ var (
 
 func parseClaude(text string) *Interaction {
 	lines := cleanLines(text)
-	type row struct {
-		line     int
-		focus    bool
-		label    string
-		selected bool
-	}
-	var checkboxRows []row
+	var checkboxRows []optionRow
 	for index, line := range lines {
 		match := checkboxPattern.FindStringSubmatch(line)
 		if match == nil {
 			continue
 		}
-		checkboxRows = append(checkboxRows, row{
-			line:     index,
-			focus:    match[1] != "",
-			label:    textutil.Compact(match[4], 500),
-			selected: strings.TrimSpace(match[3]) != "",
+		checkboxRows = append(checkboxRows, optionRow{
+			line:    index,
+			focus:   match[1] != "",
+			checked: strings.TrimSpace(match[3]) != "",
+			text:    match[4],
 		})
 	}
+	compactClaudeRows(checkboxRows)
 	submitIndex, submitFocus, submitLabel := -1, false, ""
 	chatIndex, chatFocus := -1, false
 	for index, line := range lines {
@@ -53,23 +48,7 @@ func parseClaude(text string) *Interaction {
 		if chatIndex >= 0 && chatIndex < end {
 			end = chatIndex
 		}
-		all := make([]Option, 0, len(checkboxRows))
-		focus := Focus{Kind: "option"}
-		for index, item := range checkboxRows {
-			rowEnd := end
-			if index+1 < len(checkboxRows) {
-				rowEnd = checkboxRows[index+1].line
-			}
-			all = append(all, Option{
-				Index:       index,
-				Label:       strings.TrimSpace(selectedPattern.ReplaceAllString(item.label, "")),
-				Description: description(lines, item.line, rowEnd),
-				Selected:    item.selected || selectedPattern.MatchString(item.label),
-			})
-			if item.focus {
-				focus = Focus{Kind: "option", Index: index}
-			}
-		}
+		all, focus := optionsFromRows(lines, checkboxRows, end)
 		if submitFocus {
 			focus = Focus{Kind: "submit"}
 		}
@@ -102,50 +81,12 @@ func parseClaude(text string) *Interaction {
 	if chatIndex < 0 {
 		return parseClaudeReview(text, lines)
 	}
-	var rows []row
-	expected := 1
-	for index, line := range lines[:chatIndex] {
-		match := menuPattern.FindStringSubmatch(line)
-		if match == nil {
-			continue
-		}
-		number, _ := strconv.Atoi(match[2])
-		if number == 1 {
-			rows = nil
-			expected = 1
-		}
-		if number != expected {
-			continue
-		}
-		label := textutil.Compact(match[3], 500)
-		rows = append(rows, row{
-			line:     index,
-			focus:    match[1] != "",
-			label:    strings.TrimSpace(selectedPattern.ReplaceAllString(label, "")),
-			selected: selectedPattern.MatchString(label),
-		})
-		expected++
-	}
+	rows := lastRun(scanRows(lines, 0, chatIndex, rowScan{restartAtOne: true}))
 	if len(rows) < 3 {
 		return nil
 	}
-	all := make([]Option, 0, len(rows))
-	focus := Focus{Kind: "option"}
-	for index, item := range rows {
-		rowEnd := chatIndex
-		if index+1 < len(rows) {
-			rowEnd = rows[index+1].line
-		}
-		all = append(all, Option{
-			Index:       index,
-			Label:       item.label,
-			Description: description(lines, item.line, rowEnd),
-			Selected:    item.selected,
-		})
-		if item.focus {
-			focus = Focus{Kind: "option", Index: index}
-		}
-	}
+	compactClaudeRows(rows)
+	all, focus := optionsFromRows(lines, rows, chatIndex)
 	if chatFocus {
 		focus = Focus{Kind: "chat"}
 	}
@@ -324,4 +265,11 @@ func countMarks(value string) int {
 		}
 	}
 	return count
+}
+
+func compactClaudeRows(rows []optionRow) {
+	compactRows(rows, true)
+	for index := range rows {
+		rows[index].text = strings.TrimSpace(rows[index].text)
+	}
 }

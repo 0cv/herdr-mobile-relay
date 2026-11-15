@@ -13,13 +13,6 @@ var (
 	codexSubmitPattern = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
 )
 
-type codexRow struct {
-	line   int
-	focus  bool
-	prefix int
-	body   string
-}
-
 func parseCodex(text string) *Interaction {
 	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	lines := make([]string, len(rawLines))
@@ -45,21 +38,7 @@ func parseCodex(text string) *Interaction {
 	if footerIndex < 0 {
 		return nil
 	}
-	var rows []codexRow
-	expected := 1
-	for index := headerIndex + 1; index < footerIndex; index++ {
-		match := menuPattern.FindStringSubmatch(lines[index])
-		if match == nil {
-			continue
-		}
-		number, _ := strconv.Atoi(match[2])
-		if number != expected {
-			continue
-		}
-		prefix := strings.Index(lines[index], match[3])
-		rows = append(rows, codexRow{line: index, focus: match[1] != "", prefix: prefix, body: match[3]})
-		expected++
-	}
+	rows := lastRun(scanRows(lines, headerIndex+1, footerIndex, rowScan{}))
 	if len(rows) < 3 {
 		return nil
 	}
@@ -162,16 +141,16 @@ func codexFooter(line string) bool {
 			strings.Contains(lower, "tab or esc to clear notes"))
 }
 
-func codexDescriptionColumn(lines []string, rows []codexRow) int {
+func codexDescriptionColumn(lines []string, rows []optionRow) int {
 	counts := make(map[int]int)
 	for _, item := range rows {
-		bodyStart := strings.Index(lines[item.line], item.body)
+		bodyStart := strings.Index(lines[item.line], item.text)
 		if bodyStart < 0 {
 			continue
 		}
-		if gap := columnGapPattern.FindStringIndex(item.body); gap != nil {
+		if gap := columnGapPattern.FindStringIndex(item.text); gap != nil {
 			prefixColumn := len([]rune(lines[item.line][:bodyStart]))
-			descriptionColumn := prefixColumn + len([]rune(item.body[:gap[1]]))
+			descriptionColumn := prefixColumn + len([]rune(item.text[:gap[1]]))
 			counts[descriptionColumn]++
 		}
 	}
@@ -184,7 +163,7 @@ func codexDescriptionColumn(lines []string, rows []codexRow) int {
 	return best
 }
 
-func codexParts(lines []string, item codexRow, end, descriptionColumn int) (string, string) {
+func codexParts(lines []string, item optionRow, end, descriptionColumn int) (string, string) {
 	var labels, descriptions []string
 	for index := item.line; index < end; index++ {
 		line := lines[index]
@@ -192,9 +171,9 @@ func codexParts(lines []string, item codexRow, end, descriptionColumn int) (stri
 			continue
 		}
 		if index == item.line {
-			left, right := item.body, ""
-			if gap := columnGapPattern.FindStringIndex(item.body); gap != nil {
-				left, right = item.body[:gap[0]], item.body[gap[1]:]
+			left, right := item.text, ""
+			if gap := columnGapPattern.FindStringIndex(item.text); gap != nil {
+				left, right = item.text[:gap[0]], item.text[gap[1]:]
 			}
 			if value := strings.TrimSpace(left); value != "" {
 				labels = append(labels, value)
