@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestOMOTodoProjectionKeepsHeadIdentityWhenTranscriptTailIsClipped(t *testing.T) {
+func TestBrowserOMOPlanFromTailKeepsHeadIdentityOfLargeFile(t *testing.T) {
 	home := t.TempDir()
 	cwd := "/work/project"
 	sessionID := "session-large"
@@ -38,20 +38,22 @@ func TestOMOTodoProjectionKeepsHeadIdentityWhenTranscriptTailIsClipped(t *testin
 		t.Fatal(err)
 	}
 
-	page, err := NewReader(home).readOMO(cwd, sessionID, "", 50)
-	if err != nil {
-		t.Fatal(err)
+	browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
+	scope := BrowseScope{Provider: "omo", CWD: cwd, SessionID: sessionID}
+	page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 50})
+	if err != nil || !page.Available || page.OMOPlan == nil {
+		t.Fatalf("large OMO page = %#v, err = %v", page, err)
 	}
 	state := *page.OMOPlan
-	if !state.Available || !state.Truncated || len(state.Phases) != 1 || len(state.Phases[0].Tasks) != 1 {
+	if !state.Available || len(state.Phases) != 1 || len(state.Phases[0].Tasks) != 1 {
 		t.Fatalf("projected OMO state = %#v", state)
 	}
-	if state.Phases[0].Tasks[0].Content != "Ship it" {
-		t.Fatalf("projected task = %#v", state.Phases[0].Tasks[0])
+	if state.Phases[0].Tasks[0].Content != "Ship it" || !page.Diagnostics.SourceTruncated {
+		t.Fatalf("projected task = %#v, diagnostics = %#v", state.Phases[0].Tasks[0], page.Diagnostics)
 	}
 }
 
-func TestOMOWithoutTodoIsAvailableAndOversizedRowsAreSkipped(t *testing.T) {
+func TestOMOReadFollowsGrowthAndSkipsOversizedRows(t *testing.T) {
 	home := t.TempDir()
 	cwd := "/work/project"
 	sessionID := "session-no-todo"
@@ -69,43 +71,29 @@ func TestOMOWithoutTodoIsAvailableAndOversizedRowsAreSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := NewReader(home)
-	page, err := reader.readOMO(cwd, sessionID, "", 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page.OMOPlan == nil || !page.OMOPlan.Available || page.OMOPlan.ReasonCode != "" {
-		t.Fatalf("normal no-todo plan = %#v", page.OMOPlan)
-	}
-	reader.mu.Lock()
-	cacheEntries := len(reader.omoCache)
-	reader.mu.Unlock()
-	if cacheEntries != 1 {
-		t.Fatalf("OMO transcript cache entries = %d", cacheEntries)
+	page, err := reader.ReadWithProject("omo", ProjectContext{CWD: cwd}, sessionID, "", 50)
+	if err != nil || !page.Available || len(page.Entries) != 0 {
+		t.Fatalf("OMO page without entries = %#v, err = %v", page, err)
 	}
 
-	valid := `{"type":"custom","customType":"senpi.todo-state","timestamp":"2026-09-02T12:01:00Z","data":{"schema":"v2","phases":[{"name":"Build","tasks":[{"content":"Ship","status":"pending"}]}]}}`
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = fmt.Fprintln(file, valid); err != nil {
+	if _, err = fmt.Fprintln(file, strings.Repeat("x", maxOMOTodoBytes+1)); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if _, err = fmt.Fprintln(file, `{"type":"message","message":{"role":"user","content":"after growth"}}`); err != nil {
 		file.Close()
 		t.Fatal(err)
 	}
 	if err = file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	page, err = reader.readOMO(cwd, sessionID, "", 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := *page.OMOPlan
-	if !state.Available || len(state.Phases) != 1 || state.Phases[0].Tasks[0].Content != "Ship" {
-		t.Fatalf("state after cache invalidation = %#v", state)
-	}
-	state, found, invalidOnly := latestValidOMOTodo(strings.Repeat("x", maxOMOTodoBytes+1)+"\n"+valid, sessionID)
-	if !found || invalidOnly || len(state.Phases) != 1 || state.Phases[0].Tasks[0].Content != "Ship" {
-		t.Fatalf("state after oversized row = %#v, found %v, invalid only %v", state, found, invalidOnly)
+	page, err = reader.ReadWithProject("omo", ProjectContext{CWD: cwd}, sessionID, "", 50)
+	if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "after growth" {
+		t.Fatalf("OMO page after the file grew = %#v, err = %v", page, err)
 	}
 }
 
@@ -129,17 +117,11 @@ func TestOMOInvalidOnlyTodoStatePreservesHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := NewReader(home)
-	page, err := reader.readOMO(cwd, sessionID, "", 50)
+	page, err := reader.ReadWithProject("omo", ProjectContext{CWD: cwd}, sessionID, "", 50)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.ReasonCode != "" || !page.SourceCorrupt || len(page.Entries) != 1 || page.Entries[0].Text != "keep this" {
+	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "keep this" {
 		t.Fatalf("invalid-only OMO page = %#v", page)
-	}
-	reader.mu.Lock()
-	cacheEntries := len(reader.omoCache)
-	reader.mu.Unlock()
-	if cacheEntries != 1 {
-		t.Fatalf("readable invalid OMO source was not cached: %d entries", cacheEntries)
 	}
 }

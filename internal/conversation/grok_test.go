@@ -141,13 +141,29 @@ func (f *grokFixture) write(t *testing.T, path string) {
 	writeRows(t, path, f.rows...)
 }
 
-func readGrok(t *testing.T, reader *Reader, before string, limit int) Page {
+func readGrok(t *testing.T, reader *Reader, limit int) Page {
 	t.Helper()
-	page, err := reader.ReadFor("grok", grokCWD, testSessionID, before, limit)
+	page, err := reader.ReadFor("grok", grokCWD, testSessionID, "", limit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return page
+}
+
+func readGrokBrowser(t *testing.T, reader *Reader, limit int) BrowsePage {
+	t.Helper()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
+	page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: limit})
+	if err != nil || !page.Available {
+		t.Fatalf("browser page = %#v, err = %v", page, err)
+	}
+	return page
+}
+
+func grokBrowserCorrupt(t *testing.T, reader *Reader) bool {
+	t.Helper()
+	return readGrokBrowser(t, reader, 80).Diagnostics.CorruptRecords > 0
 }
 
 func assertEntry(t *testing.T, entry Entry, role, text string, tools int) {
@@ -261,12 +277,14 @@ func TestGrokCLIIntegration(t *testing.T) {
 		if json.Unmarshal(output, &response) != nil || !safeSessionID(response.SessionID) {
 			t.Fatal("live exchange did not report a valid new session ID")
 		}
-		location := reader.Locate("grok", work, response.SessionID)
+		location := reader.LocateWithProject("grok", ProjectContext{CWD: work}, response.SessionID)
 		if location.Path == "" || containedRegularFile(location.Path, state) == "" {
 			t.Fatal("production lookup did not locate the isolated live updates.jsonl")
 		}
 		page, err := reader.ReadFor("grok", work, response.SessionID, "", 80)
-		if err != nil || !page.Available || page.SourceCorrupt {
+		scope := BrowseScope{Provider: "grok", CWD: work, SessionID: response.SessionID}
+		browsed, browseErr := newTestBrowser(t, reader, DefaultBrowserOptions()).ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 80})
+		if err != nil || !page.Available || browseErr != nil || browsed.Diagnostics.CorruptRecords > 0 {
 			t.Fatal("production reader did not parse the isolated live history")
 		}
 		return page, location.Path, response.SessionID
@@ -387,9 +405,10 @@ func TestGrokReadsNormalSession(t *testing.T) {
 	reader, home := testReader(t)
 	normalGrokSession().write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
-	page := readGrok(t, reader, "", 80)
-	if !page.Available || page.Total != 3 || page.HasMore || page.SourceCorrupt {
-		t.Fatalf("page = %#v, want 3 available entries", page)
+	page := readGrok(t, reader, 80)
+	browsed := readGrokBrowser(t, reader, 80)
+	if !page.Available || len(page.Entries) != 3 || browsed.Total == nil || *browsed.Total != 3 || browsed.HasMore || browsed.Diagnostics.CorruptRecords != 0 {
+		t.Fatalf("page = %#v, browsed = %#v, want 3 available entries", page, browsed)
 	}
 	assertEntry(t, page.Entries[0], "user", "list the files", 0)
 	assertEntry(t, page.Entries[1], "assistant", "I'll check.", 1)
@@ -408,7 +427,7 @@ func TestGrokReadsNormalSession(t *testing.T) {
 		}
 		seen[entry.ID] = true
 	}
-	again := readGrok(t, reader, "", 80)
+	again := readGrok(t, reader, 80)
 	for index := range page.Entries {
 		if again.Entries[index].ID != page.Entries[index].ID {
 			t.Fatal("entry IDs must be stable across reads")
@@ -429,7 +448,7 @@ func TestGrokKeepsHistoryBeforeCompaction(t *testing.T) {
 	f.agent("second answer")
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
-	page := readGrok(t, reader, "", 80)
+	page := readGrok(t, reader, 80)
 	if len(page.Entries) != 4 {
 		t.Fatalf("entries = %#v, want the turns on both sides of the compaction", page.Entries)
 	}
@@ -454,7 +473,7 @@ func TestGrokMessageSentWhileWorking(t *testing.T) {
 	f.agent("Tests pass; running vet next.")
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
-	page := readGrok(t, reader, "", 80)
+	page := readGrok(t, reader, 80)
 	if len(page.Entries) != 4 {
 		t.Fatalf("entries = %#v, want 4", page.Entries)
 	}
@@ -480,7 +499,7 @@ func TestGrokParallelToolResultsOutOfOrderAndFailure(t *testing.T) {
 	f.toolResult("call-unknown", "completed", "orphan")
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
-	page := readGrok(t, reader, "", 80)
+	page := readGrok(t, reader, 80)
 	if len(page.Entries) != 2 {
 		t.Fatalf("entries = %#v, want user and one tool entry", page.Entries)
 	}
@@ -536,7 +555,7 @@ func TestGrokUserQueryMarkup(t *testing.T) {
 				if want == "" {
 					want = tc.text
 				}
-				assertGrokTexts(t, readGrok(t, reader, "", 80).Entries, "user:"+want)
+				assertGrokTexts(t, readGrok(t, reader, 80).Entries, "user:"+want)
 			})
 		}
 		t.Run(fmt.Sprintf("tagged=%t/chunk joins", tagged), func(t *testing.T) {
@@ -550,7 +569,7 @@ func TestGrokUserQueryMarkup(t *testing.T) {
 			}
 			reader, home := testReader(t)
 			f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-			assertGrokTexts(t, readGrok(t, reader, "", 80).Entries, "user:Explain <user_query>hello</user_query>\nand preserve this suffix")
+			assertGrokTexts(t, readGrok(t, reader, 80).Entries, "user:Explain <user_query>hello</user_query>\nand preserve this suffix")
 		})
 	}
 }
@@ -569,7 +588,7 @@ func TestGrokUserChunks(t *testing.T) {
 	f.user(2, "untagged follow-up without a wrapper")
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
-	page := readGrok(t, reader, "", 80)
+	page := readGrok(t, reader, 80)
 	if len(page.Entries) != 5 {
 		t.Fatalf("entries = %#v, want 5", page.Entries)
 	}
@@ -592,8 +611,8 @@ func TestGrokCorruptAndPartialRecords(t *testing.T) {
 	_, _ = file.WriteString(`{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"partial`)
 	_ = file.Close()
 
-	page := readGrok(t, reader, "", 80)
-	if len(page.Entries) != 3 || !page.SourceCorrupt {
+	page := readGrok(t, reader, 80)
+	if len(page.Entries) != 3 || !grokBrowserCorrupt(t, reader) {
 		t.Fatalf("page = %#v, want valid entries kept and corruption reported", page)
 	}
 }
@@ -604,7 +623,7 @@ func TestGrokParseHonoursCancellation(t *testing.T) {
 	normalGrokSession().write(t, path)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := parseGrokUpdates(ctx, reader.Locate("grok", grokCWD, testSessionID)); !errors.Is(err, context.Canceled) {
+	if _, err := parseGrokUpdates(ctx, reader.LocateWithProject("grok", ProjectContext{CWD: grokCWD}, testSessionID)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
@@ -616,25 +635,6 @@ func grokTurns(count int) *grokFixture {
 		f.agent(fmt.Sprintf("answer %d", turn))
 	}
 	return f
-}
-
-func TestGrokReaderPaginatesWithBefore(t *testing.T) {
-	reader, home := testReader(t)
-	grokTurns(3).write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-
-	latest := readGrok(t, reader, "", 2)
-	if len(latest.Entries) != 2 || !latest.HasMore || latest.Total != 6 || latest.Entries[0].Text != "question 2" {
-		t.Fatalf("latest = %#v", latest)
-	}
-	older := readGrok(t, reader, latest.Entries[0].ID, 4)
-	if len(older.Entries) != 4 || older.HasMore || older.Entries[0].Text != "question 0" || older.Entries[3].Text != "answer 1" {
-		t.Fatalf("older = %#v", older)
-	}
-	for _, before := range []string{"999999", "not-a-cursor"} {
-		if page := readGrok(t, reader, before, 2); page.Available || page.ReasonCode != "invalid_cursor" {
-			t.Fatalf("before %q page = %#v, want invalid_cursor", before, page)
-		}
-	}
 }
 
 func TestGrokBrowserPaginatesAndRejectsReplacedSource(t *testing.T) {
@@ -669,6 +669,24 @@ func TestGrokBrowserPaginatesAndRejectsReplacedSource(t *testing.T) {
 	}
 }
 
+func TestGrokBrowserRejectsInvalidCursor(t *testing.T) {
+	reader, home := testReader(t)
+	grokTurns(3).write(t, grokUpdatesPath(home, grokCWD, testSessionID))
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
+	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
+	if err != nil || latest.SourceRevision == "" {
+		t.Fatalf("latest = %#v, err = %v", latest, err)
+	}
+	for _, before := range []string{"999999", "not-a-cursor"} {
+		cursor := signedNativeCursor(t, browser, scope, latest.SourceRevision, before)
+		page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: cursor, Limit: 2})
+		if err != nil || page.State != BrowseFailed || page.ReasonCode != "invalid_cursor" {
+			t.Fatalf("before %q page = %#v, err = %v, want invalid_cursor", before, page, err)
+		}
+	}
+}
+
 func TestGrokProjectDirNameMatchesURLEncoding(t *testing.T) {
 	cases := map[string]string{
 		"/Users/dev":                   "%2FUsers%2Fdev",
@@ -690,7 +708,7 @@ func TestGrokLocateUsesEncodedAndRealProjectDirectory(t *testing.T) {
 	path := grokUpdatesPath(home, cwd, testSessionID)
 	grokTurns(1).write(t, path)
 	want, _ := filepath.EvalSymlinks(path)
-	if location := reader.Locate("grok", cwd, testSessionID); location.Path != want {
+	if location := reader.LocateWithProject("grok", ProjectContext{CWD: cwd}, testSessionID); location.Path != want {
 		t.Fatalf("Locate(%q) = %q, want %q", cwd, location.Path, want)
 	}
 
@@ -711,7 +729,7 @@ func TestGrokLocateUsesEncodedAndRealProjectDirectory(t *testing.T) {
 	linkedPath := grokUpdatesPath(home, resolved, linkedSession)
 	grokTurns(1).write(t, linkedPath)
 	wantLinked, _ := filepath.EvalSymlinks(linkedPath)
-	if location := reader.Locate("grok", link, linkedSession); location.Path != wantLinked {
+	if location := reader.LocateWithProject("grok", ProjectContext{CWD: link}, linkedSession); location.Path != wantLinked {
 		t.Fatalf("Locate(symlink) = %q, want %q", location.Path, wantLinked)
 	}
 }
@@ -721,7 +739,7 @@ func TestGrokLocateFallsBackToSessionScan(t *testing.T) {
 	path := grokUpdatesPath(home, "/somewhere/else", testSessionID)
 	grokTurns(1).write(t, path)
 
-	location := reader.Locate("grok", "", testSessionID)
+	location := reader.LocateWithProject("grok", ProjectContext{CWD: ""}, testSessionID)
 	want, _ := filepath.EvalSymlinks(path)
 	if location.Path != want {
 		t.Fatalf("Locate without cwd = %q, want %q", location.Path, want)
@@ -731,7 +749,7 @@ func TestGrokLocateFallsBackToSessionScan(t *testing.T) {
 func TestGrokLocateRejectsOtherProject(t *testing.T) {
 	reader, home := testReader(t)
 	grokTurns(1).write(t, grokUpdatesPath(home, "/other/project", testSessionID))
-	if location := reader.Locate("grok", grokCWD, testSessionID); location.Path != "" {
+	if location := reader.LocateWithProject("grok", ProjectContext{CWD: grokCWD}, testSessionID); location.Path != "" {
 		t.Fatalf("cross-project location = %#v", location)
 	}
 }
@@ -740,7 +758,7 @@ func TestGrokLocateIgnoresChatHistoryOnly(t *testing.T) {
 	reader, home := testReader(t)
 	legacy := filepath.Join(filepath.Dir(grokUpdatesPath(home, grokCWD, testSessionID)), "chat_history.jsonl")
 	writeRows(t, legacy, map[string]any{"type": "user", "content": "synthetic"})
-	if location := reader.Locate("grok", grokCWD, testSessionID); location.Path != "" {
+	if location := reader.LocateWithProject("grok", ProjectContext{CWD: grokCWD}, testSessionID); location.Path != "" {
 		t.Fatalf("Locate = %q, want no location without updates.jsonl", location.Path)
 	}
 }
@@ -750,7 +768,7 @@ func TestGrokLocateRejectsUnsafeSessionIDs(t *testing.T) {
 	grokTurns(1).write(t, grokUpdatesPath(home, grokCWD, testSessionID))
 
 	for _, sessionID := range []string{"", "..", "../" + testSessionID, "a/b"} {
-		if location := reader.Locate("grok", grokCWD, sessionID); location.Path != "" {
+		if location := reader.LocateWithProject("grok", ProjectContext{CWD: grokCWD}, sessionID); location.Path != "" {
 			t.Fatalf("Locate(%q) = %q, want no location", sessionID, location.Path)
 		}
 	}
@@ -771,7 +789,7 @@ func TestGrokSessionTitleFromSummary(t *testing.T) {
 		if err := os.WriteFile(summary, []byte(test.body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		title := reader.Locate("grok", grokCWD, testSessionID).Title
+		title := reader.LocateWithProject("grok", ProjectContext{CWD: grokCWD}, testSessionID).Title
 		if title != test.want {
 			t.Fatalf("summary %s: title = %q, want %q", test.body, title, test.want)
 		}

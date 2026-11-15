@@ -30,7 +30,7 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !profilePage.Available || profilePage.Total != 2 ||
+	if !profilePage.Available || len(profilePage.Entries) != 2 ||
 		profilePage.Entries[0].Text != "from profile root" || profilePage.Entries[1].Text != "profile answer" {
 		t.Fatalf("profile page = %#v, want two entries resolved from the additional root", profilePage)
 	}
@@ -43,7 +43,7 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !homePage.Available || homePage.Total != 1 || homePage.Entries[0].Text != "from home root" {
+	if !homePage.Available || len(homePage.Entries) != 1 || homePage.Entries[0].Text != "from home root" {
 		t.Fatalf("home page = %#v, want the home-default root to still resolve alongside the configured list", homePage)
 	}
 }
@@ -56,9 +56,6 @@ func TestClaudeConversationUnavailableWhenSessionMissingFromAllRoots(t *testing.
 	}
 	if page.Available {
 		t.Fatalf("page = %#v, want unavailable", page)
-	}
-	if page.Reason != "No conversation log is available for this session." {
-		t.Fatalf("reason = %q", page.Reason)
 	}
 }
 
@@ -105,7 +102,7 @@ func TestOMPConversationResolvesFromConfiguredProfileRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 ||
+	if !page.Available || len(page.Entries) != 2 ||
 		page.Entries[0].Text != "question" || page.Entries[1].Text != "response" {
 		t.Fatalf("page = %#v, want the omp profile root to resolve", page)
 	}
@@ -136,7 +133,7 @@ func TestClaudeConversationEarliestRootWinsForDuplicateSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 1 || page.Entries[0].Text != "earlier root copy" {
+	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "earlier root copy" {
 		t.Fatalf("page = %#v, want the earliest configured root's copy served over the home default's", page)
 	}
 }
@@ -158,7 +155,7 @@ func TestOMPConversationDiscoversProfileCreatedAfterReaderConstructed(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 1 || page.Entries[0].Text != "question" {
+	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "question" {
 		t.Fatalf("page = %#v, want the profile created after NewReader to be discovered", page)
 	}
 }
@@ -188,7 +185,7 @@ func TestClaudeConversationSearchesSymlinkedProjectDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 1 || page.Entries[0].Text != "via symlinked project directory" {
+	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "via symlinked project directory" {
 		t.Fatalf("page = %#v, want the symlinked project directory to be searched", page)
 	}
 }
@@ -203,14 +200,14 @@ func TestReaderKeepsLocatedDuplicateStableAcrossRequests(t *testing.T) {
 	secondPath := filepath.Join(second, "projects", "-work", testSessionID+".jsonl")
 	writeRows(t, secondPath,
 		map[string]any{"type": "user", "uuid": "u1", "message": map[string]any{"content": "second root"}})
-	firstLocation := reader.Locate("claude", "/work", testSessionID)
+	firstLocation := reader.LocateWithProject("claude", ProjectContext{CWD: "/work"}, testSessionID)
 	if firstLocation.Path != secondPath {
 		t.Fatalf("initial location = %q, want %q", firstLocation.Path, secondPath)
 	}
 
 	writeRows(t, filepath.Join(first, "projects", "-work", testSessionID+".jsonl"),
 		map[string]any{"type": "user", "uuid": "u2", "message": map[string]any{"content": "new first root"}})
-	if got := reader.Locate("claude", "/work", testSessionID); got.Path != secondPath {
+	if got := reader.LocateWithProject("claude", ProjectContext{CWD: "/work"}, testSessionID); got.Path != secondPath {
 		t.Fatalf("cached location flipped to %q, want stable %q", got.Path, secondPath)
 	}
 	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)

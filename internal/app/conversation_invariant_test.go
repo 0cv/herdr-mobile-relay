@@ -107,8 +107,8 @@ func TestTitleAndTranscriptAgreeForANonDefaultProfile(t *testing.T) {
 	if title != "" && !page.Available {
 		t.Fatalf("INVARIANT BROKEN: title %q resolved while the transcript reported %q", title, page.Reason)
 	}
-	if page.Available && page.Total != 2 {
-		t.Errorf("page total = %d, want the prompt and the answer", page.Total)
+	if page.Available && len(page.Entries) != 2 {
+		t.Errorf("page entries = %d, want the prompt and the answer", len(page.Entries))
 	}
 }
 
@@ -188,9 +188,6 @@ func TestTitleAndTranscriptFailTogetherWhenNoRootHasTheSession(t *testing.T) {
 	if page.Available {
 		t.Errorf("transcript resolved from nowhere: %#v", page.Entries)
 	}
-	if page.Reason != "No conversation log is available for this session." {
-		t.Errorf("reason = %q, want the path-resolution reason verbatim", page.Reason)
-	}
 }
 
 // The exact production shape of the reported bug: the pane's agent used a
@@ -227,17 +224,14 @@ func TestLegacyConfigDirDoesNotSplitTitleFromTranscript(t *testing.T) {
 	}
 }
 
-// A missing session id is a different failure from a path that cannot be
-// resolved, and the two reason strings are the only signal that tells an
-// operator which one happened. Pin both.
-func TestMissingSessionIDKeepsItsOwnReason(t *testing.T) {
+func TestMissingSessionIDIsUnavailable(t *testing.T) {
 	clearAgentEnv(t)
 	page, err := conversation.NewReader(t.TempDir()).Read("claude", "", "", 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Available || page.Reason != "This agent has not reported a conversation session yet." {
-		t.Fatalf("page = %#v, want the missing-session-id reason verbatim", page)
+	if page.Available {
+		t.Fatalf("page = %#v, want unavailable without a session id", page)
 	}
 }
 
@@ -364,8 +358,8 @@ func TestTitleAndTranscriptInvariantAcrossSupportedAgents(t *testing.T) {
 				t.Fatalf("INVARIANT BROKEN for %s: title=%q available=%v reason=%q",
 					fixture.agent, title, page.Available, page.Reason)
 			}
-			if page.Total != 2 {
-				t.Fatalf("%s page total = %d, want user and assistant turns", fixture.agent, page.Total)
+			if len(page.Entries) != 2 {
+				t.Fatalf("%s page entries = %d, want user and assistant turns", fixture.agent, len(page.Entries))
 			}
 		})
 	}

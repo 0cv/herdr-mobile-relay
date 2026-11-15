@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestProjectSessionWithPunctuationWithoutCWDFile(t *testing.T) {
 			path := filepath.Join(roots[0], "-Users-first-last-Development-my-project-", testSessionID+".jsonl")
 			writeRows(t, path, map[string]any{"type": "user", "message": map[string]any{"content": "hello"}})
 			cwd := "/Users/first.last/Development/my_project!"
-			if got := reader.Locate(agent, cwd, testSessionID); got.Path != path {
+			if got := reader.LocateWithProject(agent, ProjectContext{CWD: cwd}, testSessionID); got.Path != path {
 				t.Fatalf("location = %#v, want %s", got, path)
 			}
 			page, err := reader.ReadFor(agent, cwd, testSessionID, "", 80)
@@ -85,7 +86,7 @@ func TestClaudeConversationFiltersInjectedAndSidechainRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 || len(page.Entries) != 2 {
+	if !page.Available || len(page.Entries) != 2 {
 		t.Fatalf("page = %#v, want two visible turns", page)
 	}
 	if page.Entries[0].Role != "user" || page.Entries[0].Text != "hello" ||
@@ -108,7 +109,7 @@ func TestCodexConversationUsesResponseItemsWithoutDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 2 || page.Entries[0].Text != "build it" || page.Entries[1].Text != "done" {
+	if len(page.Entries) != 2 || page.Entries[0].Text != "build it" || page.Entries[1].Text != "done" {
 		t.Fatalf("entries = %#v", page.Entries)
 	}
 }
@@ -125,7 +126,7 @@ func TestPiConversationConfinesReportedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 2 {
+	if len(page.Entries) != 2 {
 		t.Fatalf("entries = %#v", page.Entries)
 	}
 
@@ -152,7 +153,7 @@ func TestPiConversationConfinesReportedPath(t *testing.T) {
 	}
 }
 
-func TestConversationPagesOlderTurnsWithStableCursors(t *testing.T) {
+func TestBrowserPagesOlderTurnsWithStableCursors(t *testing.T) {
 	reader, home := testReader(t)
 	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")
 	writeRows(t, path,
@@ -160,19 +161,36 @@ func TestConversationPagesOlderTurnsWithStableCursors(t *testing.T) {
 		map[string]any{"type": "assistant", "message": map[string]any{"content": "two"}},
 		map[string]any{"type": "user", "message": map[string]any{"content": "three"}},
 	)
-	latest, err := reader.Read("claude", testSessionID, "", 1)
-	if err != nil {
-		t.Fatal(err)
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
+	latest, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 1})
+	if err != nil || len(latest.Entries) != 1 || latest.Entries[0].Text != "three" || !latest.HasMore || latest.NextCursor == "" {
+		t.Fatalf("latest page = %#v, err = %v", latest, err)
 	}
-	if len(latest.Entries) != 1 || latest.Entries[0].Text != "three" || !latest.HasMore {
-		t.Fatalf("latest page = %#v", latest)
+	older, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 2})
+	if err != nil || len(older.Entries) != 2 || older.Entries[0].Text != "one" || older.Entries[1].Text != "two" || older.HasMore {
+		t.Fatalf("older page = %#v, err = %v", older, err)
 	}
-	older, err := reader.Read("claude", testSessionID, latest.Entries[0].ID, 2)
-	if err != nil {
-		t.Fatal(err)
+	again, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 2})
+	if err != nil || !reflect.DeepEqual(older.Entries, again.Entries) {
+		t.Fatalf("replayed cursor page = %#v, err = %v", again, err)
 	}
-	if len(older.Entries) != 2 || older.Entries[0].Text != "one" || older.Entries[1].Text != "two" || older.HasMore {
-		t.Fatalf("older page = %#v", older)
+}
+
+func TestBrowserRejectsMissingAndInvalidSessions(t *testing.T) {
+	reader, home := testReader(t)
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	missing, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}, Limit: 80})
+	if err != nil || missing.Available || missing.ReasonCode != "invalid_session" || missing.Reason != "No conversation log is available for this session." {
+		t.Fatalf("missing Claude session page = %#v, err = %v", missing, err)
+	}
+	unreported, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: BrowseScope{Provider: "claude", CWD: "/work"}, Limit: 80})
+	if err != nil || unreported.Available || unreported.Reason != "This agent has not reported a conversation session yet." {
+		t.Fatalf("session without an ID page = %#v, err = %v", unreported, err)
+	}
+	invalid, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: BrowseScope{Provider: "cursor", CWD: home, SessionID: "not-a-uuid"}, Limit: 80})
+	if err != nil || invalid.Available || invalid.ReasonCode != "invalid_session" {
+		t.Fatalf("non-UUID Cursor session page = %#v, err = %v", invalid, err)
 	}
 }
 
@@ -199,7 +217,7 @@ func TestClaudeConversationAssociatesToolResultsWithCallingTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || len(page.Entries[0].Tools) != 1 {
+	if len(page.Entries) != 1 || len(page.Entries[0].Tools) != 1 {
 		t.Fatalf("entries = %#v", page.Entries)
 	}
 	tool := page.Entries[0].Tools[0]
@@ -224,7 +242,7 @@ func TestClaudeConversationKeepsArrayShapedUserPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 1 || len(page.Entries) != 1 {
+	if !page.Available || len(page.Entries) != 1 {
 		t.Fatalf("page = %#v, want one visible turn", page)
 	}
 	if page.Entries[0].Role != "user" || page.Entries[0].Text != "hi" {
@@ -255,7 +273,7 @@ func TestClaudeConversationDropsToolResultOnlyUserRowButKeepsToolOutput(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || len(page.Entries) != 1 || page.Entries[0].Role != "assistant" {
+	if len(page.Entries) != 1 || page.Entries[0].Role != "assistant" {
 		t.Fatalf("entries = %#v, want only the calling assistant turn", page.Entries)
 	}
 	if len(page.Entries[0].Tools) != 1 || page.Entries[0].Tools[0].Output != "file contents" {
@@ -279,7 +297,7 @@ func TestClaudeConversationFiltersArrayShapedEnvelopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 0 || len(page.Entries) != 0 {
+	if len(page.Entries) != 0 {
 		t.Fatalf("entries = %#v, want the injected envelope filtered", page.Entries)
 	}
 }
@@ -307,7 +325,7 @@ func TestClaudeConversationKeepsOnlyTextFromMixedUserBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 2 || len(page.Entries) != 2 {
+	if len(page.Entries) != 2 {
 		t.Fatalf("entries = %#v, want the assistant call and the user prompt", page.Entries)
 	}
 	entry := page.Entries[1]
@@ -333,7 +351,7 @@ func TestClaudeConversationDropsEmptyArrayUserRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 0 || len(page.Entries) != 0 {
+	if len(page.Entries) != 0 {
 		t.Fatalf("entries = %#v, want no turn for an empty content array", page.Entries)
 	}
 }
@@ -359,7 +377,7 @@ func TestClaudeConversationRendersArrayShapedSlashCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 2 || len(page.Entries) != 2 {
+	if len(page.Entries) != 2 {
 		t.Fatalf("entries = %#v, want both command rows", page.Entries)
 	}
 	if page.Entries[0].Text != "/clear x" || page.Entries[1].Text != "/clear x" {
@@ -390,7 +408,7 @@ func TestClaudeConversationDropsEnvelopeBlocksAfterTheFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 2 {
+	if len(page.Entries) != 2 {
 		t.Fatalf("entries = %#v, want the prompt and the answer", page.Entries)
 	}
 	if got := page.Entries[0].Text; got != "please refactor the parser" {
@@ -421,7 +439,7 @@ func TestClaudeConversationKeepsPromptWhenEnvelopeComesFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || page.Entries[0].Text != "the actual question" {
+	if len(page.Entries) != 1 || page.Entries[0].Text != "the actual question" {
 		t.Fatalf("entries = %#v, want only the real prompt text", page.Entries)
 	}
 }

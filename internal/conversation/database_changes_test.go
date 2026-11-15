@@ -52,7 +52,7 @@ func TestOMORecordedPlanChangeToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err := reader.ChangeToken(t.Context(), scope)
-	page, readErr := reader.ReadFor(scope.Provider, cwd, session, "", 10)
+	page, readErr := newTestBrowser(t, reader, DefaultBrowserOptions()).ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 10})
 	if err != nil || readErr != nil || before == after || page.OMOPlan == nil || len(page.OMOPlan.Phases) != 1 {
 		t.Fatalf("OMO plan did not update: %+v %v %v", page, err, readErr)
 	}

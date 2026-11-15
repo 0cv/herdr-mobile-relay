@@ -44,7 +44,7 @@ func TestCursorConversationReadsAgentTranscripts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 || len(page.Entries) != 2 {
+	if !page.Available || len(page.Entries) != 2 {
 		t.Fatalf("page = %#v", page)
 	}
 	if page.Entries[0].Role != "user" || page.Entries[0].Text != "ship it" || page.Entries[0].Timestamp != "2026-09-22T14:35:00Z" {
@@ -83,7 +83,7 @@ func TestCursorConversationLocatesByWorkspaceTrusted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 || page.Entries[0].Text != "via trust" {
+	if !page.Available || len(page.Entries) != 2 || page.Entries[0].Text != "via trust" {
 		t.Fatalf("page = %#v", page)
 	}
 }
@@ -101,7 +101,7 @@ func TestCursorConversationLocatesByUUIDScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 || page.Entries[0].Text != "hello" {
+	if !page.Available || len(page.Entries) != 2 || page.Entries[0].Text != "hello" {
 		t.Fatalf("page = %#v", page)
 	}
 }
@@ -140,7 +140,7 @@ func TestCursorConversationHidesHarnessUserText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 || page.Entries[0].Text != "real" {
+	if !page.Available || len(page.Entries) != 2 || page.Entries[0].Text != "real" {
 		t.Fatalf("page = %#v", page)
 	}
 }
@@ -151,7 +151,7 @@ func TestCursorConversationRejectsNonUUIDSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Available || page.ReasonCode != "invalid_session" {
+	if page.Available {
 		t.Fatalf("page = %#v", page)
 	}
 }
@@ -255,7 +255,7 @@ func TestCursorTimestampNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 5 {
+	if !page.Available || len(page.Entries) != 5 {
 		t.Fatalf("page = %#v", page)
 	}
 
@@ -310,7 +310,7 @@ func TestCursorTimestampOnlyFromUserRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 {
+	if !page.Available || len(page.Entries) != 2 {
 		t.Fatalf("page = %#v", page)
 	}
 
@@ -362,7 +362,7 @@ func TestCursorTimestampRejectsUnrecognizedLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 4 {
+	if !page.Available || len(page.Entries) != 4 {
 		t.Fatalf("page = %#v", page)
 	}
 

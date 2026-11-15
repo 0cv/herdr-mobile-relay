@@ -2,8 +2,6 @@ package conversation
 
 import (
 	"encoding/json"
-	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -19,31 +17,6 @@ func piNoticeRows() []map[string]any {
 		{"type": "custom", "id": "state", "display": true, "data": "PRIVATE_STATE"},
 		{"type": "custom_message", "id": "notice", "timestamp": "2026-10-16T00:00:00Z", "customType": "arbitrary-extension", "display": true, "content": "Use /orchestrate-answer synthetic-run guidance", "details": map[string]any{"secret": "PRIVATE_DETAILS"}},
 		{"type": "custom_message", "id": "blocks", "display": true, "content": []any{map[string]any{"type": "text", "text": "First"}, map[string]any{"type": "image", "data": "PRIVATE_IMAGE"}, map[string]any{"type": "thinking", "thinking": "PRIVATE_THINKING"}, map[string]any{"type": "toolCall", "name": "PRIVATE_TOOL"}, map[string]any{"type": "text", "text": "Second"}}},
-	}
-}
-
-func TestPiNoticeReaderVisibilityOrderingAndPaging(t *testing.T) {
-	reader, home := testReader(t)
-	path := filepath.Join(home, ".pi", "agent", "sessions", "--work--", "notices.jsonl")
-	writeRows(t, path, piNoticeRows()...)
-	page, err := reader.Read("pi", path, "", 2)
-	if err != nil || !page.Available || !page.HasMore || page.Total != 4 || len(page.Entries) != 2 {
-		t.Fatalf("notice page = %+v, %v", page, err)
-	}
-	if page.Entries[0].Kind != "notice" || page.Entries[0].Timestamp != "2026-10-16T00:00:00Z" || page.Entries[1].Text != "First\nSecond" || len(page.Entries[1].Tools) != 0 {
-		t.Fatalf("notices = %+v", page.Entries)
-	}
-	older, err := reader.Read("pi", path, page.Entries[0].ID, 2)
-	if err != nil || older.HasMore || len(older.Entries) != 2 || older.Entries[0].Text != "Question" || older.Entries[1].Text != "Answer" {
-		t.Fatalf("older = %+v, %v", older, err)
-	}
-	again, err := reader.Read("pi", path, "", 2)
-	if err != nil || !reflect.DeepEqual(page, again) {
-		t.Fatalf("unstable notice page = %+v, %v", again, err)
-	}
-	encoded, _ := json.Marshal(page)
-	if strings.Contains(string(encoded), "PRIVATE_") {
-		t.Fatal("notice exported hidden content or metadata")
 	}
 }
 

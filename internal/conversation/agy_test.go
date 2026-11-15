@@ -116,7 +116,7 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 		}
 	}
 	page, err := reader.ReadFor("agy", t.TempDir(), session, "", 80)
-	if err != nil || !page.Available || page.SourceCorrupt {
+	if err != nil || !page.Available {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
 	if len(page.Entries) != 4 {
@@ -138,29 +138,33 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 	}
 }
 
-func TestAgyReaderPagesBackwardByStep(t *testing.T) {
-	reader, _, session := agyFixture(t)
-	latest, err := reader.ReadFor("agy", "", session, "", 2)
-	if err != nil || len(latest.Entries) != 2 || !latest.HasMore || latest.Entries[1].Text != "Done." {
-		t.Fatalf("latest = %#v, err = %v", latest, err)
-	}
-	older, err := reader.ReadFor("agy", "", session, latest.Entries[0].ID, 10)
-	if err != nil || older.HasMore || len(older.Entries) != 2 || older.Entries[0].Text != "check the gateway" {
-		t.Fatalf("older = %#v, err = %v", older, err)
-	}
-	bad, err := reader.ReadFor("agy", "", session, "nope", 10)
-	if err != nil || bad.Available || bad.ReasonCode != "invalid_cursor" {
-		t.Fatalf("bad cursor = %#v, err = %v", bad, err)
-	}
-}
-
 func TestAgyReaderRejectsUnsafeSessions(t *testing.T) {
 	reader, _, _ := agyFixture(t)
 	for _, session := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
 		page, err := reader.ReadFor("agy", "", session, "", 10)
-		if err != nil || page.Available || page.ReasonCode != "invalid_session" {
+		if err != nil || page.Available || len(page.Entries) != 0 {
 			t.Fatalf("session %q page = %#v, err = %v", session, page, err)
 		}
+	}
+}
+
+func TestAgyBrowserRejectsUnsafeSessionsAndInvalidCursor(t *testing.T) {
+	reader, _, session := agyFixture(t)
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	for _, unsafe := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
+		page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "agy", SessionID: unsafe}, Limit: 10})
+		if err != nil || page.Available || page.ReasonCode != "invalid_session" {
+			t.Fatalf("session %q page = %#v, err = %v", unsafe, page, err)
+		}
+	}
+	scope := BrowseScope{Provider: "agy", SessionID: session}
+	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
+	if err != nil || latest.SourceRevision == "" {
+		t.Fatalf("latest = %#v, err = %v", latest, err)
+	}
+	bad, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: signedNativeCursor(t, browser, scope, latest.SourceRevision, "nope"), Limit: 10})
+	if err != nil || bad.State != BrowseFailed || bad.ReasonCode != "invalid_cursor" {
+		t.Fatalf("bad cursor = %#v, err = %v", bad, err)
 	}
 }
 
@@ -169,7 +173,7 @@ func TestAgyBrowserNativeCursorAndChangeToken(t *testing.T) {
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "agy", SessionID: session}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
-	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 2 || !latest.HasMore || latest.NextCursor == "" {
+	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 2 || !latest.HasMore || latest.NextCursor == "" || latest.Diagnostics.CorruptRecords != 0 {
 		t.Fatalf("latest = %#v, err = %v", latest, err)
 	}
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10, Cursor: latest.NextCursor})
