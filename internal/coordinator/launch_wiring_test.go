@@ -30,10 +30,11 @@ func TestAgentStartWithoutWiringDoesNotMutate(t *testing.T) {
 					t.Fatalf("result = %+v, want %q", result, input.want)
 				}
 			}
-			for _, path := range []string{f.calls, f.ownership} {
-				if _, err := os.Stat(path); !os.IsNotExist(err) {
-					t.Fatalf("unexpected mutation at %s: %v", path, err)
-				}
+			if calls := f.client.recorded(); len(calls) != 0 {
+				t.Fatalf("unexpected Herdr calls: %+v", calls)
+			}
+			if _, err := os.Stat(f.ownership); !os.IsNotExist(err) {
+				t.Fatalf("unexpected mutation at %s: %v", f.ownership, err)
 			}
 			if d.state.TopologyGeneration() != before {
 				t.Fatal("unwired launch published topology")

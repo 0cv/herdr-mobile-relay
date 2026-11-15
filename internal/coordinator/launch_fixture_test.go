@@ -2,27 +2,24 @@ package coordinator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
 // launchFixture uses the server's dispatcher/resolver wiring, not a fake lifecycle.
 type launchFixture struct {
-	dispatcher                    *Dispatcher
-	ctx                           context.Context
-	cwd, calls, config, ownership string
-	target                        profiles.PaneIdentity
+	dispatcher             *Dispatcher
+	client                 *fakeBackend
+	ctx                    context.Context
+	cwd, config, ownership string
+	target                 profiles.PaneIdentity
 }
 
+// Each hook runs when the launch reaches that Herdr call; a returned error fails the call.
 type launchFixtureOptions struct {
-	start, prompt, enter string
-	close                string
+	start, prompt, enter, close fakeHook
 }
 
 func newLaunchFixture(t *testing.T) *launchFixture {
@@ -32,89 +29,35 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 
 func newLaunchFixtureWithOptions(t *testing.T, options launchFixtureOptions) *launchFixture {
 	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	home := filepath.Join(dir, "home")
+	env := newLaunchEnv(t, "claude", "qodercli")
 	f := &launchFixture{
-		cwd: filepath.Join(home, "project"), calls: filepath.Join(dir, "calls"),
-		config: filepath.Join(dir, "config"), ownership: filepath.Join(dir, "ownership.json"),
+		client: newLaunchFake(), cwd: env.cwd, config: env.config, ownership: env.ownership,
 		target: profiles.PaneIdentity{PaneID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"},
 	}
-	for _, path := range []string{f.cwd, filepath.Join(f.config, "herdr")} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			t.Fatal(err)
+	f.client.target.Cwd = f.cwd
+	f.client.setHook("StartAgent", func(ctx context.Context, call fakeCall) error {
+		if err := requirePendingOwnership(f.ownership); err != nil {
+			return err
+		}
+		if options.start == nil {
+			return nil
+		}
+		return options.start(ctx, call)
+	})
+	for method, hook := range map[string]fakeHook{"Prompt": options.prompt, "SendKeys": options.enter, "StopPane": options.close} {
+		if hook != nil {
+			f.client.setHook(method, hook)
 		}
 	}
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", f.config)
-	t.Setenv("PATH", dir)
-	writeScript(t, dir, "claude", "#!/bin/sh\nexit 0\n")
-	writeScript(t, dir, "qodercli", "#!/bin/sh\nexit 0\n")
-	if err := os.WriteFile(filepath.Join(f.config, "herdr", "agent-profiles.ini"), []byte("[profiles]\nclaude = Test Claude\nqodercli = Test Qoder\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	created := filepath.Join(dir, "created")
-	bin := writeScript(t, dir, "herdr", `#!/bin/sh
-printf '%s\n' "$*" >> '`+f.calls+`'
-case "$1 $2" in
- 'workspace create')
-  printf created > '`+created+`'
-  printf '%s\n' '{"result":{"root_pane":{"pane_id":"pane-new","tab_id":"tab-new","workspace_id":"workspace-new"}}}' ;;
- 'tab rename') printf '%s\n' '{"result":{}}' ;;
- 'agent start')
-  pending=false
-  while IFS= read -r line || [ -n "$line" ]; do
-   case "$line" in *'"pending":true'*) pending=true ;; esac
-  done < '`+f.ownership+`'
-  [ "$pending" = true ] || exit 2
-  `+options.start+`
-  printf '%s\n' '{"result":{"pane_id":"pane-new"}}' ;;
- 'agent prompt') `+options.prompt+`
-  printf '%s\n' '{"result":{}}' ;;
- 'pane close') `+options.close+`
-  printf '%s\n' '{"result":{}}' ;;
- 'pane send-text') printf '%s\n' '{"result":{}}' ;;
- 'pane send-keys') `+options.enter+`
-  printf '%s\n' '{"result":{}}' ;;
- *) exit 2 ;;
-esac
-`)
-	socket := startPollerTestSocket(t, func(method string) (any, string) {
-		if method != "pane.list" {
-			return pollerSuccessResult(method), ""
-		}
-		panes := []herdr.Pane{}
-		if _, err := os.Stat(created); err == nil {
-			panes = append(panes, herdr.Pane{ID: f.target.PaneID, TerminalID: f.target.TerminalID, TabID: f.target.TabID, WorkspaceID: f.target.WorkspaceID, Cwd: f.cwd})
-		} else if !os.IsNotExist(err) {
-			return nil, "internal_error"
-		}
-		return map[string]any{"type": "pane_list", "panes": panes}, ""
-	})
-	client := herdr.NewClient(bin, socket)
-	t.Cleanup(func() {
-		if err := client.Close(); err != nil {
-			t.Error(err)
-		}
-	})
 	resolver := profiles.NewResolver(f.config, nil)
 	if err := resolver.SetOwnershipPath(f.ownership); err != nil {
 		t.Fatal(err)
 	}
-	f.dispatcher = NewDispatcher(client, NewState(testLogger()), nil, testLogger())
+	f.dispatcher = newTestDispatcher(t, f.client, NewState(testLogger()))
 	f.dispatcher.SetProfiles(resolver)
 	if f.dispatcher.lifecycle == nil || f.dispatcher.lifecycle.profiles != resolver || f.dispatcher.lifecycle.state != f.dispatcher.state {
 		t.Fatal("production lifecycle wiring missing")
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := f.dispatcher.Close(ctx); err != nil {
-			t.Error(err)
-		}
-	})
 	var cancel context.CancelFunc
 	f.ctx, cancel = context.WithTimeout(t.Context(), 15*time.Second)
 	t.Cleanup(cancel)
@@ -140,21 +83,33 @@ func (f *launchFixture) assertLaunch(t *testing.T, result *CommandResult) {
 	}
 }
 
+func (f *launchFixture) countCalls(method string, args ...any) int {
+	count := 0
+	for _, call := range f.client.callsTo(method) {
+		if hasArgPrefix(call, args) {
+			count++
+		}
+	}
+	return count
+}
+
 func (f *launchFixture) assertCalls(t *testing.T, prompts int) {
 	t.Helper()
-	data, err := os.ReadFile(f.calls)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for command, want := range map[string]int{"workspace create ": 1, "tab create ": 0, "tab rename tab-new proj": 1, "agent start ": 1, "agent start proj --kind claude --pane pane-new --timeout ": 1, "agent prompt ": prompts, "agent prompt pane-new hello": prompts} {
-		got := 0
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, command) {
-				got++
-			}
-		}
-		if got != want {
-			t.Fatalf("%q calls = %d, want %d\n%s", command, got, want, data)
+	for _, want := range []struct {
+		method string
+		args   []any
+		count  int
+	}{
+		{"WorkspaceCreate", nil, 1},
+		{"TabCreate", nil, 0},
+		{"TabRename", []any{"tab-new", "proj"}, 1},
+		{"StartAgent", nil, 1},
+		{"StartAgent", []any{"proj", "claude", "pane-new"}, 1},
+		{"Prompt", nil, prompts},
+		{"Prompt", []any{"pane-new", "hello"}, prompts},
+	} {
+		if got := f.countCalls(want.method, want.args...); got != want.count {
+			t.Fatalf("%s%v calls = %d, want %d\n%+v", want.method, want.args, got, want.count, f.client.recorded())
 		}
 	}
 }

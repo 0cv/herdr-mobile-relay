@@ -3,73 +3,29 @@ package coordinator
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
-type recordingBackend struct {
-	backend.Backend
-	pane          herdr.Pane
-	inventories   int
-	prompts       atomic.Int32
-	launchEffects atomic.Int32
-	keys          atomic.Int32
-	texts         atomic.Int32
-}
-
-func (b *recordingBackend) GetInventory(context.Context) (*herdr.Inventory, error) {
-	b.inventories++
-	return &herdr.Inventory{Panes: []herdr.Pane{b.pane}}, nil
-}
-
-func (b *recordingBackend) PaneList(context.Context) ([]herdr.Pane, error) {
-	return []herdr.Pane{b.pane}, nil
-}
-
-func (b *recordingBackend) WorkspaceList(context.Context) ([]herdr.Workspace, error) {
-	return nil, nil
-}
-
-func (b *recordingBackend) TabList(context.Context) ([]herdr.Tab, error) {
-	return nil, nil
-}
-
-func (b *recordingBackend) Prompt(context.Context, string, string) error {
-	b.prompts.Add(1)
-	return nil
-}
-
-func (b *recordingBackend) SendKeys(context.Context, string, []string) error {
-	b.keys.Add(1)
-	return nil
-}
-
-func (b *recordingBackend) SendText(context.Context, string, string) error {
-	b.texts.Add(1)
-	return nil
-}
-
 func TestBackendPromptSubmitsWithoutManualInput(t *testing.T) {
-	client := &recordingBackend{}
-	dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
-	defer dispatcher.Close(context.Background())
+	client := newFakeBackend()
+	client.status = herdr.ServerStatus{}
+	dispatcher := newTestDispatcher(t, client, NewState(testLogger()))
 	if err := dispatcher.deliverPrompt(context.Background(), WorkerToken{PaneID: "pane-1", AllowAbsent: true}, "answer", true); err != nil {
 		t.Fatal(err)
 	}
-	if client.prompts.Load() != 1 || client.texts.Load() != 0 || client.keys.Load() != 0 {
-		t.Fatalf("calls: prompt=%d text=%d keys=%d", client.prompts.Load(), client.texts.Load(), client.keys.Load())
+	if client.count("Prompt") != 1 || client.count("SendText") != 0 || client.count("SendKeys") != 0 {
+		t.Fatalf("calls: %+v", client.recorded())
 	}
 }
 
 func TestBackendRefusesQuestionTextBeforeSendingInput(t *testing.T) {
-	client := &recordingBackend{}
-	dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
-	defer dispatcher.Close(context.Background())
+	client := newFakeBackend()
+	client.status = herdr.ServerStatus{}
+	dispatcher := newTestDispatcher(t, client, NewState(testLogger()))
 	err := dispatcher.executeQuestion(context.Background(), WorkerToken{
 		PaneID: "pane-1", AllowAbsent: true,
 	}, "pane-1", questionPayload{
@@ -84,44 +40,25 @@ func TestBackendRefusesQuestionTextBeforeSendingInput(t *testing.T) {
 	if errors.Is(err, herdr.ErrPartiallyApplied) || errors.Is(err, herdr.ErrDispatchedUnknown) {
 		t.Fatalf("refusal classified as applied: %v", err)
 	}
-	if client.keys.Load() != 0 || client.texts.Load() != 0 {
-		t.Fatalf("backend received %d key calls and %d text calls", client.keys.Load(), client.texts.Load())
+	if client.count("SendKeys") != 0 || client.count("SendText") != 0 {
+		t.Fatalf("backend received %d key calls and %d text calls", client.count("SendKeys"), client.count("SendText"))
 	}
-}
-
-func (b *recordingBackend) CapabilityStatus() herdr.ServerStatus {
-	return herdr.ServerStatus{}
-}
-
-func (b *recordingBackend) StartAgent(context.Context, string, string, string, int, ...string) (string, error) {
-	b.launchEffects.Add(1)
-	return "", nil
-}
-
-func (b *recordingBackend) PaneRun(context.Context, string, []string) error {
-	b.launchEffects.Add(1)
-	return nil
-}
-
-func (b *recordingBackend) StopPane(context.Context, string) error {
-	b.launchEffects.Add(1)
-	return nil
 }
 
 func TestBackendRefusesUnsupportedAgentLaunch(t *testing.T) {
 	for _, action := range []string{"agent_start", "agent_clear"} {
 		t.Run(action, func(t *testing.T) {
-			client := &recordingBackend{}
-			dispatcher := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
-			defer dispatcher.Close(context.Background())
+			client := newFakeBackend()
+			client.status = herdr.ServerStatus{}
+			dispatcher := newTestDispatcher(t, client, NewState(testLogger()))
 			result := dispatcher.Handle(context.Background(), map[string]any{
 				"type": action, "pane_id": "pane-1",
 			})
 			if result.OK || result.Error != "This backend does not support launching agents" {
 				t.Fatalf("result = %+v", result)
 			}
-			if client.launchEffects.Load() != 0 {
-				t.Fatal("unsupported launch caused backend effects")
+			if len(client.recorded()) != 0 {
+				t.Fatalf("unsupported launch caused backend calls: %+v", client.recorded())
 			}
 		})
 	}
@@ -130,11 +67,10 @@ func TestBackendRefusesUnsupportedAgentLaunch(t *testing.T) {
 func TestPromptNotStartedKeepsAction(t *testing.T) {
 	for _, reason := range []string{"expired", "closed"} {
 		t.Run(reason, func(t *testing.T) {
-			client := &recordingBackend{}
+			client := newFakeBackend()
 			state := NewState(testLogger())
 			state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "codex"}}, state.RevisionCounter())
-			dispatcher := NewDispatcher(client, state, nil, testLogger())
-			defer dispatcher.Close(context.Background())
+			dispatcher := newTestDispatcher(t, client, state)
 			message := map[string]any{
 				"type": "submit_prompt", "request_id": "prompt", "pane_id": "pane-1", "text": "hello",
 			}
@@ -147,7 +83,7 @@ func TestPromptNotStartedKeepsAction(t *testing.T) {
 			if result.OK || result.Phase != "not_started" || result.Action != "submit_prompt" {
 				t.Fatalf("prompt result = %+v, want not-started submit_prompt", result)
 			}
-			if client.prompts.Load() != 0 {
+			if client.count("Prompt") != 0 {
 				t.Fatal("prompt reached the backend")
 			}
 		})
@@ -157,10 +93,10 @@ func TestPromptNotStartedKeepsAction(t *testing.T) {
 func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client := &recordingBackend{pane: herdr.Pane{ID: "pane-1", TerminalID: "terminal-1", Agent: "codex"}}
+	client := newFakeBackend()
+	client.panes = []herdr.Pane{{ID: "pane-1", TerminalID: "terminal-1", Agent: "codex"}}
 	state := NewState(testLogger())
-	dispatcher := NewDispatcher(client, state, nil, testLogger())
-	defer dispatcher.Close(ctx)
+	dispatcher := newTestDispatcher(t, client, state)
 	poller := NewPoller(client, state, time.Second, testLogger())
 	poller.SetOnInventoryChange(func() error {
 		dispatcher.PruneSlots(map[string]bool{"pane-1": true})
@@ -202,7 +138,7 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	client.pane.TerminalID = "terminal-2"
+	client.update(func(b *fakeBackend) { b.panes[0].TerminalID = "terminal-2" })
 	poller.poll(ctx)
 	if got := state.Generation("pane-1"); got != generation+1 {
 		t.Fatalf("generation = %d, want %d", got, generation+1)
@@ -215,7 +151,7 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	if client.inventories != 2 || client.prompts.Load() != 0 {
-		t.Fatalf("inventories = %d, prompts = %d", client.inventories, client.prompts.Load())
+	if client.count("GetInventory") != 2 || client.count("Prompt") != 0 {
+		t.Fatalf("inventories = %d, prompts = %d", client.count("GetInventory"), client.count("Prompt"))
 	}
 }

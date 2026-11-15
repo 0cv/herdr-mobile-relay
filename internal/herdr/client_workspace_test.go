@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -177,6 +178,31 @@ func TestWorkspaceCloseEOFIsDispatchedUnknownWithoutRetry(t *testing.T) {
 	case method := <-requests:
 		t.Fatalf("WorkspaceClose() retried after EOF with %q", method)
 	default:
+	}
+}
+
+func TestWorkspaceCloseParameters(t *testing.T) {
+	tests := []struct {
+		name       string
+		closeGroup bool
+		want       map[string]any
+	}{
+		{name: "single workspace", want: map[string]any{"workspace_id": "w1"}},
+		{name: "whole group", closeGroup: true, want: map[string]any{"workspace_id": "w1", "close_group": true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			socketPath, requests := startRecordingTestSocket(t, map[string]any{"type": "ok"})
+			client := NewClient("/binary/must-not-run", socketPath)
+
+			if err := client.WorkspaceClose(context.Background(), "w1", test.closeGroup); err != nil {
+				t.Fatalf("WorkspaceClose() error = %v", err)
+			}
+			request := <-requests
+			if request.Method != "workspace.close" || !reflect.DeepEqual(request.Params, test.want) {
+				t.Fatalf("request = %+v, want workspace.close with params %v", request, test.want)
+			}
+		})
 	}
 }
 

@@ -2,8 +2,7 @@ package coordinator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,12 +10,7 @@ import (
 )
 
 func TestDirtyWorktreeRemovalOffersExplicitForceRetry(t *testing.T) {
-	dispatcher := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = dispatcher.Close(ctx)
-	})
+	dispatcher := newTestDispatcher(t, nil, NewState(testLogger()))
 
 	result := dispatcher.failTopologyErr("remove-1", "worktree_remove", "", &herdr.OutcomeError{
 		Started: true,
@@ -50,26 +44,20 @@ func TestWorkspaceStatePreservesCwdAcrossMetadataEvents(t *testing.T) {
 // as its ordering position (topologyMu) is secured — not after the Herdr
 // command completes, which can take the full command deadline.
 func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
-	dir := t.TempDir()
-	started := filepath.Join(dir, "rename-started")
-	release := filepath.Join(dir, "release-rename")
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"if [ \"$1 $2\" = \"workspace rename\" ]; then\n"+
-		"  touch \""+started+"\"\n"+
-		"  while [ ! -f \""+release+"\" ]; do sleep 0.01; done\n"+
-		"fi\n"+
-		"printf '{\"ok\":true}\\n'\n")
-
-	dispatcher := NewDispatcher(
-		herdr.NewClient(bin, filepath.Join(dir, "sock")),
-		NewState(testLogger()),
-		nil,
-		testLogger(),
-	)
-	t.Cleanup(func() {
-		_ = os.WriteFile(release, nil, 0o600)
-		_ = dispatcher.Close(context.Background())
+	client := newFakeBackend()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	client.setHook("WorkspaceRename", func(ctx context.Context, _ fakeCall) error {
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	})
+	dispatcher := newTestDispatcher(t, client, NewState(testLogger()))
+	t.Cleanup(unblock)
 	dispatcher.state.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "Project"}})
 	dispatcher.state.CommitInventory(
 		[]*AgentState{{PaneID: "pane-1", Agent: "codex", Status: "working"}},
@@ -111,9 +99,7 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 		t.Fatalf("unrelated command was blocked behind the workspace mutation: %+v", prompt)
 	}
 
-	if err := os.WriteFile(release, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	unblock()
 	select {
 	case result := <-renameDone:
 		if !result.OK {
@@ -129,31 +115,23 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 // topologyMu, which stalled the hub's global ordered ingress — prompts and
 // approvals from every client — for the running command's full deadline.
 func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
-	dir := t.TempDir()
-	started := filepath.Join(dir, "rename-started")
-	release := filepath.Join(dir, "release-rename")
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"if [ \"$1 $2\" = \"workspace rename\" ]; then\n"+
-		"  touch \""+started+"\"\n"+
-		"  while [ ! -f \""+release+"\" ]; do sleep 0.01; done\n"+
-		"fi\n"+
-		"printf '{\"ok\":true}\\n'\n")
-
-	socketPath := filepath.Join(testSocketDir(t), "sock")
-	startInventorySocket(t, socketPath, []any{
-		map[string]any{"workspace_id": "w1", "label": "Project"},
-		map[string]any{"workspace_id": "w2", "label": "Second"},
+	client := newFakeBackend()
+	client.workspaces = []herdr.Workspace{{ID: "w1", Label: "Project"}, {ID: "w2", Label: "Second"}}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	client.setHook("WorkspaceRename", func(ctx context.Context, _ fakeCall) error {
+		close(started)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	})
-	dispatcher := NewDispatcher(
-		herdr.NewClient(bin, socketPath),
-		NewState(testLogger()),
-		nil,
-		testLogger(),
-	)
-	t.Cleanup(func() {
-		_ = os.WriteFile(release, nil, 0o600)
-		_ = dispatcher.Close(context.Background())
-	})
+	dispatcher := newTestDispatcher(t, client, NewState(testLogger()))
+	t.Cleanup(unblock)
 	dispatcher.state.CommitWorkspaces([]herdr.Workspace{
 		{ID: "w1", Label: "Project"},
 		{ID: "w2", Label: "Second"},
@@ -165,15 +143,10 @@ func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 	go func() {
 		renameDone <- dispatcher.HandleWorkspaceRename(ctx, "rename-1", "w1", "Renamed")
 	}()
-	for {
-		if _, err := os.Stat(started); err == nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("rename never reached its Herdr command")
-		case <-time.After(5 * time.Millisecond):
-		}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("rename never reached its Herdr command")
 	}
 
 	admitted := make(chan struct{})
@@ -199,9 +172,7 @@ func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 	default:
 	}
 
-	if err := os.WriteFile(release, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	unblock()
 	for name, done := range map[string]chan *CommandResult{"rename": renameDone, "close": closeDone} {
 		select {
 		case result := <-done:

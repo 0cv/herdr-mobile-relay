@@ -1,8 +1,7 @@
 package coordinator
 
 // Regression tests for dispatch-path idempotency and dispatched-unknown
-// outcomes. They drive the real Dispatcher against a
-// Herdr binary implemented as a tiny inline script.
+// outcomes. They drive the real Dispatcher against the in-process Herdr fake.
 
 import (
 	"context"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,8 +20,7 @@ import (
 func TestDispatcherRequiresDirectActionType(t *testing.T) {
 	for _, admitted := range []bool{false, true} {
 		for _, typ := range []string{"", "command"} {
-			d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-			t.Cleanup(func() { _ = d.Close(context.Background()) })
+			d := newTestDispatcher(t, nil, NewState(testLogger()))
 			message := map[string]any{"type": typ, "action": "send_secret", "request_id": "unsupported", "pane_id": "pane", "text": "fixture"}
 			var result *CommandResult
 			signals := 0
@@ -40,15 +37,6 @@ func TestDispatcherRequiresDirectActionType(t *testing.T) {
 			}
 		}
 	}
-}
-
-func writeScript(t *testing.T, dir, name, body string) string {
-	t.Helper()
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	return p
 }
 
 func blockedEventID(t *testing.T, d *Dispatcher, paneID string) string {
@@ -89,18 +77,9 @@ func commitApproval(state *State, paneID string) {
 // T7 — §9.6 / §16.7: two clients approving the same (pane, event_id, index)
 // must dispatch the approval keystroke exactly once.
 func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	// Records every invocation's argv, then returns success.
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf '"+approvalPane+"\\n'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
-
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	client := newFakeBackend()
+	client.contents["pane-1"] = approvalPane
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
@@ -124,32 +103,23 @@ func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
 	go func() { defer wg.Done(); approve("client-b") }()
 	wg.Wait()
 
-	data, _ := os.ReadFile(record)
-	sends := strings.Count(string(data), "send-keys")
-	if sends != 1 {
-		t.Fatalf("duplicate approval dispatched %d send-keys invocations, want 1\nrecord:\n%s", sends, data)
+	if sends := client.callsTo("SendKeys"); len(sends) != 1 {
+		t.Fatalf("duplicate approval dispatched %d SendKeys calls, want 1\ncalls: %+v", len(sends), client.recorded())
 	}
 }
 
 func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
 	chatPane := `• Resolution plan
   1. Add parser fixtures.
   2. Verify the backend.
 ─ Worked for 4s ─
 ›`
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf '"+chatPane+"\\n'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
+	client := newFakeBackend()
+	client.contents["pane-1"] = chatPane
 	state := NewState(testLogger())
 
 	commitApproval(state, "pane-1")
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	d := newTestDispatcher(t, client, state)
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
@@ -161,29 +131,21 @@ func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
 	if result.OK || result.Error != "Approval choices are no longer available" {
 		t.Fatalf("approval result = %+v", result)
 	}
-	data, _ := os.ReadFile(record)
-	if strings.Contains(string(data), "send-keys") {
-		t.Fatalf("approval keys were sent after chat revalidation:\n%s", data)
+	if sends := client.callsTo("SendKeys"); len(sends) != 0 {
+		t.Fatalf("approval keys were sent after chat revalidation: %+v", sends)
 	}
 }
 func TestApprovalRevalidationRejectsSameLengthChangedChoices(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
 	changedPane := `Would you like to run this command?
 $ make deploy
 ❯ 1. Run
   2. Cancel
 Enter to select · Esc to cancel`
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf '"+changedPane+"\\n'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
+	client := newFakeBackend()
+	client.contents["pane-1"] = changedPane
 	state := NewState(testLogger())
 	commitApproval(state, "pane-1")
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	d := newTestDispatcher(t, client, state)
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 	result := d.Handle(context.Background(), map[string]any{
 		"type": "respond", "request_id": "changed", "pane_id": "pane-1",
@@ -193,8 +155,8 @@ Enter to select · Esc to cancel`
 	if result.OK || result.Error != "Approval choices are no longer available" {
 		t.Fatalf("changed approval result = %+v", result)
 	}
-	if data, _ := os.ReadFile(record); strings.Contains(string(data), "send-keys") {
-		t.Fatalf("approval keys were sent after same-length choices changed:\n%s", data)
+	if sends := client.callsTo("SendKeys"); len(sends) != 0 {
+		t.Fatalf("approval keys were sent after same-length choices changed: %+v", sends)
 	}
 }
 
@@ -215,20 +177,8 @@ func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
 		t.Fatalf("classification = %+v", classification)
 	}
 
-	dir := t.TempDir()
-	panePath := filepath.Join(dir, "pane.ansi")
-	if err := os.WriteFile(panePath, fixture, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	record := filepath.Join(dir, "invocations.log")
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  cat \""+panePath+"\"\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
-
+	client := newFakeBackend()
+	client.contents["pane-1"] = string(fixture)
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{
 		PaneID: "pane-1", Agent: "qodercli", Status: "blocked",
@@ -236,12 +186,7 @@ func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
 		Options:             append([]string(nil), classification.Options...),
 		ApprovalFingerprint: question.ApprovalFingerprint(classification),
 	}}, state.RevisionCounter())
-	d := NewDispatcher(
-		herdr.NewClient(bin, filepath.Join(dir, "sock")),
-		state,
-		nil,
-		testLogger(),
-	)
+	d := newTestDispatcher(t, client, state)
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 	result := d.Handle(context.Background(), map[string]any{
 		"type":                 "respond",
@@ -256,18 +201,9 @@ func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
 	if !result.OK || result.Phase != "accepted" {
 		t.Fatalf("approval result = %+v", result)
 	}
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(
-		string(data),
-		"pane send-keys pane-1 Up Up Enter",
-	) {
-		t.Fatalf("focus-aware approval keys were not dispatched:\n%s", data)
-	}
-	if strings.Contains(string(data), "Escape") {
-		t.Fatalf("approval dispatch assumed Escape selected the last row:\n%s", data)
+	want := []fakeCall{{Method: "SendKeys", Args: []any{"pane-1", []string{"Up", "Up", "Enter"}}}}
+	if got := client.callsTo("SendKeys"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("approval keys = %+v, want %+v", got, want)
 	}
 }
 
@@ -295,18 +231,16 @@ func TestApprovalKeysNavigateToEveryRowWithEnter(t *testing.T) {
 // timed out must be reported as dispatched_unknown, never a plain failure —
 // otherwise the phone may safely-retry an approval/prompt that already ran.
 func TestPostDispatchTimeoutIsDispatchedUnknown(t *testing.T) {
-	dir := t.TempDir()
-	// Ignores its arguments and hangs, so the subprocess is definitely started
-	// and then killed by the deadline (post-dispatch timeout).
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\nsleep 30\n")
-
+	client := newFakeBackend()
+	client.setHook("Prompt", func(ctx context.Context, _ fakeCall) error {
+		<-ctx.Done()
+		return &herdr.OutcomeError{Started: true, Err: ctx.Err()}
+	})
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, state.RevisionCounter())
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	d := newTestDispatcher(t, client, state)
 
-	// A short parent deadline wins over the handler's internal command deadline,
-	// so the herdr child is started and then cancelled quickly.
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
 	res := d.Handle(ctx, map[string]any{

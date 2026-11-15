@@ -3,12 +3,12 @@ package coordinator
 import (
 	"context"
 	"os"
-	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/backend"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
@@ -32,16 +32,10 @@ func clearMessage() map[string]any {
 	return map[string]any{"type": "agent_clear", "request_id": "clear", "pane_id": "pane-old"}
 }
 
-func clearCalls(t *testing.T, f *launchFixture) string {
-	t.Helper()
-	data, err := os.ReadFile(f.calls)
-	if os.IsNotExist(err) {
-		return ""
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
+func callIndex(calls []fakeCall, method string, args ...any) int {
+	return slices.IndexFunc(calls, func(call fakeCall) bool {
+		return call.Method == method && hasArgPrefix(call, args)
+	})
 }
 
 func TestClearConfiguredOutcomes(t *testing.T) {
@@ -49,10 +43,10 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			options := launchFixtureOptions{}
 			if mode == "close-failure" {
-				options.close = "exit 2"
+				options.close = failCall("exit status 2")
 			}
 			if mode == "uncertain-start" {
-				options.start = "exit 2"
+				options.start = failCall("exit status 2")
 			}
 			f, old := newClearFixture(t, options)
 			switch mode {
@@ -77,11 +71,11 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				}
 			}
 			result := f.dispatcher.Handle(f.ctx, clearMessage())
-			calls := clearCalls(t, f)
+			calls := f.client.recorded()
 			switch mode {
 			case "no-profile", "invalid-cwd":
-				if result.OK || calls != "" {
-					t.Fatalf("refusal = %+v; calls %s", result, calls)
+				if result.OK || len(calls) != 0 {
+					t.Fatalf("refusal = %+v; calls %+v", result, calls)
 				}
 				if mode == "no-profile" && !strings.Contains(result.Error, "No launch profile matches") {
 					t.Fatalf("refusal message = %q", result.Error)
@@ -91,8 +85,8 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 					t.Fatalf("ownership changed: %v", err)
 				}
 			case "uncertain-start":
-				if result.OK || result.Phase != "dispatched_unknown" || strings.Contains(calls, "pane close") || !strings.Contains(calls, "agent start") {
-					t.Fatalf("uncertain = %+v; calls %s", result, calls)
+				if result.OK || result.Phase != "dispatched_unknown" || f.client.count("StopPane") != 0 || f.client.count("StartAgent") == 0 {
+					t.Fatalf("uncertain = %+v; calls %+v", result, calls)
 				}
 				if !f.dispatcher.profiles.OwnsTarget(old, "claude") {
 					t.Fatal("old ownership lost")
@@ -105,15 +99,15 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				if !ok || data["pane_id"] != f.target.PaneID || data["cwd"] != f.cwd {
 					t.Fatalf("replacement = %+v", result)
 				}
-				start, stop := strings.Index(calls, "agent start"), strings.Index(calls, "pane close pane-old")
-				if start < 0 || stop < start || strings.Count(calls, "workspace create") != 1 || strings.Count(calls, "pane close") != 1 {
-					t.Fatalf("order/count: %s", calls)
+				start, stop := callIndex(calls, "StartAgent"), callIndex(calls, "StopPane", "pane-old")
+				if start < 0 || stop < start || f.client.count("WorkspaceCreate") != 1 || f.client.count("StopPane") != 1 {
+					t.Fatalf("order/count: %+v", calls)
 				}
 				if !f.dispatcher.profiles.OwnsTarget(f.target, "claude") {
 					t.Fatal("replacement ownership missing")
 				}
-				if !strings.Contains(calls, "--kind claude") || strings.Contains(calls, "qodercli") {
-					t.Fatalf("replacement profile: %s", calls)
+				if callIndex(calls, "StartAgent", result.Data.(map[string]any)["name"], "claude") < 0 || f.client.count("StartAgent") != 1 {
+					t.Fatalf("replacement profile: %+v", calls)
 				}
 				if mode == "close-failure" {
 					if result.Phase != "completed_with_warning" || data["warning"] == nil || !f.dispatcher.profiles.OwnsTarget(old, "claude") {
@@ -126,26 +120,12 @@ func TestClearConfiguredOutcomes(t *testing.T) {
 				if !retry.OK || !retry.replayed {
 					t.Fatalf("retry = %+v", retry)
 				}
-				if clearCalls(t, f) != calls {
+				if !reflect.DeepEqual(f.client.recorded(), calls) {
 					t.Fatal("retry duplicated mutation")
 				}
 			}
 		})
 	}
-}
-
-type clearInventoryBackend struct {
-	backend.Backend
-	pane    herdr.Pane
-	checked bool
-}
-
-func (b *clearInventoryBackend) GetInventory(ctx context.Context) (*herdr.Inventory, error) {
-	if b.checked {
-		return b.Backend.GetInventory(ctx)
-	}
-	b.checked = true
-	return &herdr.Inventory{Panes: []herdr.Pane{b.pane}}, nil
 }
 
 func TestRepeatedClearDoesNotReuseTarget(t *testing.T) {
@@ -159,13 +139,12 @@ func TestRepeatedClearDoesNotReuseTarget(t *testing.T) {
 	if err := f.dispatcher.profiles.RememberVerified(old, "claude"); err != nil {
 		t.Fatal(err)
 	}
-	b := &clearInventoryBackend{Backend: f.dispatcher.herdr, pane: pane}
-	f.dispatcher.herdr, f.dispatcher.lifecycle.herdr = b, b
+	f.client.update(func(b *fakeBackend) { b.inventoryOverrides = [][]herdr.Pane{{pane}} })
 	clearedAgain := f.dispatcher.Handle(f.ctx, map[string]any{"type": "agent_clear", "request_id": "clear-again", "pane_id": old.PaneID})
 	if !clearedAgain.OK {
 		t.Fatalf("clear again: %+v", clearedAgain)
 	}
-	if clearedAgain.Data.(map[string]any)["pane_id"] == old.PaneID || strings.Count(clearCalls(t, f), "agent start") != 2 {
+	if clearedAgain.Data.(map[string]any)["pane_id"] == old.PaneID || f.client.count("StartAgent") != 2 {
 		t.Fatalf("clear reused its target: %+v", clearedAgain)
 	}
 }
@@ -195,7 +174,7 @@ func TestClearWithoutWiringDoesNotMutate(t *testing.T) {
 				}
 			}
 			after, err := os.ReadFile(f.ownership)
-			if err != nil || string(before) != string(after) || clearCalls(t, f) != "" || d.state.TopologyGeneration() != topology {
+			if err != nil || string(before) != string(after) || len(f.client.recorded()) != 0 || d.state.TopologyGeneration() != topology {
 				t.Fatalf("unwired mutation: %v", err)
 			}
 		})
@@ -204,37 +183,51 @@ func TestClearWithoutWiringDoesNotMutate(t *testing.T) {
 
 func runClearSerialization(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
-	f, _ := newClearFixture(t, launchFixtureOptions{start: "printf entered > '" + entered + "'; while [ ! -f '" + release + "' ]; do /bin/sleep 0.01; done"})
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
+	env := newLaunchEnv(t, "claude")
+	cwd := env.cwd
+	resolver := profiles.NewResolver(env.config, nil)
+	if err := resolver.SetOwnershipPath(env.ownership); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := newSerializationRecorder()
+	client := newLaunchFake()
+	client.target.Cwd = cwd
+	client.setHook("StartAgent", recorder.hook("agent_start", true))
+	state := NewState(testLogger())
+	old := profiles.PaneIdentity{PaneID: "pane-old", TerminalID: "terminal-old", TabID: "tab-old", WorkspaceID: "workspace-old"}
+	state.CommitInventory([]*AgentState{{PaneID: old.PaneID, RawPaneID: old.PaneID, TerminalID: old.TerminalID, TabID: old.TabID, WorkspaceID: old.WorkspaceID, Agent: "claude", Status: "idle", Cwd: cwd}}, state.RevisionCounter())
+	dispatcher := newTestDispatcher(t, client, state)
+	dispatcher.SetProfiles(resolver)
+	if err := resolver.RememberVerified(old, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	t.Cleanup(recorder.unblock)
+
 	first := make(chan *CommandResult, 1)
-	go func() { first <- f.dispatcher.Handle(f.ctx, clearMessage()) }()
-	for {
-		if _, err := os.Stat(entered); err == nil {
-			break
-		}
-		select {
-		case <-f.ctx.Done():
-			t.Fatal("start gate not reached")
-		case <-time.After(time.Millisecond):
-		}
+	go func() { first <- dispatcher.Handle(ctx, clearMessage()) }()
+	select {
+	case <-recorder.entered:
+	case <-ctx.Done():
+		t.Fatal("start gate not reached")
 	}
 	prompt, duplicate := make(chan *CommandResult, 1), make(chan *CommandResult, 1)
 	admitted := make(chan struct{})
 	go func() {
-		prompt <- f.dispatcher.HandleAdmitted(f.ctx, map[string]any{"type": "submit_prompt", "request_id": "queued", "pane_id": "pane-old", "text": "one"}, func() { close(admitted) })
+		prompt <- dispatcher.HandleAdmitted(ctx, map[string]any{"type": "submit_prompt", "request_id": "queued", "pane_id": "pane-old", "text": "one"}, func() { close(admitted) })
 	}()
 	select {
 	case <-admitted:
-	case <-f.ctx.Done():
+	case <-ctx.Done():
 		t.Fatal("prompt not admitted")
 	}
 	dupAdmitted := make(chan struct{})
-	go func() { duplicate <- f.dispatcher.HandleAdmitted(f.ctx, clearMessage(), func() { close(dupAdmitted) }) }()
+	go func() { duplicate <- dispatcher.HandleAdmitted(ctx, clearMessage(), func() { close(dupAdmitted) }) }()
 	select {
 	case <-dupAdmitted:
-	case <-f.ctx.Done():
+	case <-ctx.Done():
 		t.Fatal("duplicate not admitted")
 	}
 	select {
@@ -247,16 +240,14 @@ func runClearSerialization(t *testing.T) {
 		t.Fatalf("duplicate escaped gate: %+v", r)
 	default:
 	}
-	if err := os.WriteFile(release, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
+	recorder.unblock()
 	for _, ch := range []chan *CommandResult{first, duplicate} {
 		select {
 		case r := <-ch:
 			if !r.OK {
 				t.Fatalf("clear result %+v", r)
 			}
-		case <-f.ctx.Done():
+		case <-ctx.Done():
 			t.Fatal("clear timed out")
 		}
 	}
@@ -265,11 +256,11 @@ func runClearSerialization(t *testing.T) {
 		if r.OK {
 			t.Fatalf("stale prompt succeeded: %+v", r)
 		}
-	case <-f.ctx.Done():
+	case <-ctx.Done():
 		t.Fatal("prompt timed out")
 	}
-	calls := clearCalls(t, f)
-	if strings.Contains(calls, "agent prompt") || strings.Count(calls, "agent start") != 1 || strings.Count(calls, "pane close pane-old") != 1 {
-		t.Fatalf("serialized calls: %s", calls)
+	closed := client.callsTo("StopPane")
+	if client.count("Prompt") != 0 || client.count("StartAgent") != 1 || len(closed) != 1 || closed[0].Args[0] != "pane-old" {
+		t.Fatalf("serialized calls: %+v", client.recorded())
 	}
 }

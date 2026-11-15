@@ -2,59 +2,47 @@ package coordinator
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
 
 func TestAgentStartRetryReplaysInitialPromptWarning(t *testing.T) {
-	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: "exit 1"})
-	d, record := f.dispatcher, f.calls
+	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: failCall("exit status 1")})
+	d := f.dispatcher
 	message := map[string]any{"type": "agent_start", "request_id": "warning", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 	first, second := d.Handle(f.ctx, message), d.Handle(f.ctx, message)
 	f.assertCalls(t, 1)
 	if !second.replayed || first.Phase != "completed_with_warning" || second.Phase != first.Phase {
 		t.Fatalf("results = %+v, %+v", first, second)
 	}
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(data), "agent start") != 1 || strings.Count(string(data), "agent prompt") != 1 {
-		t.Fatalf("calls = %s", data)
+	if f.client.count("StartAgent") != 1 || f.client.count("Prompt") != 1 {
+		t.Fatalf("calls = %+v", f.client.recorded())
 	}
 }
 
 func TestLateLaunchReceivesFreshPromptBudget(t *testing.T) {
 	f := newLaunchFixture(t)
-	d, record := f.dispatcher, f.calls
+	d := f.dispatcher
 	result := d.handleAgentStart(f.ctx, d.newCommandRequest(time.Now().Add(-13*time.Second), "late", "", map[string]any{"profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}, nil))
 	f.assertLaunch(t, result)
 	f.assertCalls(t, 1)
 	if result.Phase != "completed" {
 		t.Fatalf("result = %+v", result)
 	}
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(data), "agent prompt") != 1 {
-		t.Fatalf("calls = %s", data)
+	if f.client.count("Prompt") != 1 {
+		t.Fatalf("calls = %+v", f.client.recorded())
 	}
 }
 
 func TestInitialQoderPromptUsesTextAndEnter(t *testing.T) {
 	for _, failEnter := range []bool{false, true} {
 		t.Run(map[bool]string{false: "success", true: "partial"}[failEnter], func(t *testing.T) {
-			enter := ""
+			var enter fakeHook
 			if failEnter {
-				enter = "exit 1"
+				enter = failCall("exit status 1")
 			}
 			f := newLaunchFixtureWithOptions(t, launchFixtureOptions{enter: enter})
-			d, record := f.dispatcher, f.calls
+			d := f.dispatcher
 			message := map[string]any{"type": "agent_start", "request_id": "qoder", "profile_id": "qodercli", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 			result := d.Handle(f.ctx, message)
 			want := "completed"
@@ -68,37 +56,28 @@ func TestInitialQoderPromptUsesTextAndEnter(t *testing.T) {
 			if !replay.replayed || replay.Phase != want {
 				t.Fatalf("replay = %+v", replay)
 			}
-			data, err := os.ReadFile(record)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Count(string(data), "workspace create") != 1 || strings.Count(string(data), "agent start") != 1 || strings.Count(string(data), "pane send-text") != 1 || strings.Count(string(data), "pane send-keys") != 1 || strings.Contains(string(data), "agent prompt") {
-				t.Fatalf("calls = %s", data)
+			client := f.client
+			if client.count("WorkspaceCreate") != 1 || client.count("StartAgent") != 1 || client.count("SendText") != 1 || client.count("SendKeys") != 1 || client.count("Prompt") != 0 {
+				t.Fatalf("calls = %+v", client.recorded())
 			}
 		})
 	}
 }
 
 func TestInitialPromptBlocksDuplicateCompletion(t *testing.T) {
-	dir := t.TempDir()
-	entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
-	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: fmt.Sprintf(": > %q; while [ ! -f %q ]; do /bin/sleep 0.01; done; exit 1", entered, release)})
+	gate := newReleaseGate()
+	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{prompt: gate.hook(failCall("exit status 1"))})
 	d := f.dispatcher
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
+	t.Cleanup(gate.open)
 	message := map[string]any{"type": "agent_start", "request_id": "blocked", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 	first, duplicate := make(chan *CommandResult, 1), make(chan *CommandResult, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	go func() { first <- d.Handle(ctx, message) }()
-	for {
-		if _, err := os.Stat(entered); err == nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("prompt did not start")
-		case <-time.After(time.Millisecond):
-		}
+	select {
+	case <-gate.entered:
+	case <-ctx.Done():
+		t.Fatal("prompt did not start")
 	}
 	go func() { duplicate <- d.Handle(ctx, message) }()
 	select {
@@ -106,9 +85,7 @@ func TestInitialPromptBlocksDuplicateCompletion(t *testing.T) {
 		t.Fatalf("premature result = %+v", result)
 	case <-time.After(50 * time.Millisecond):
 	}
-	if err := os.WriteFile(release, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
+	gate.open()
 	for _, ch := range []chan *CommandResult{first, duplicate} {
 		select {
 		case result := <-ch:
