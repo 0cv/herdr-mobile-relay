@@ -673,577 +673,10 @@ func (s *Server) Run(ctx context.Context) error {
 	})
 	s.hub.SetOnConnect(s.sendConnectionSnapshot)
 
-	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
-		s.stopConversationFeed(client.ID(), "")
-		s.stopPaneWatch(client.ID(), "")
-		if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
-			s.pushM.SetViewedPane(identity.DeviceID, nil)
-		}
-		if s.hybrid != nil {
-			s.hybrid.forgetClient(client.ID())
-		}
-		// A departing phone gives its panes back at once, without the
-		// navigation grace. Restores that cannot finish now continue in the
-		// manager's bounded cleanup.
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.paneSizeM.ReleaseClient(releaseCtx, client.ID())
-	})
+	s.hub.SetOnDisconnect(s.handleDisconnect)
 
 	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
-		defer admitted()
-		inbound, err := protocol.DecodeMap(msg)
-		if err != nil {
-			admitted()
-			s.hub.Send(client, protocol.DecodeFailureResponse(msg))
-			return
-		}
-		scope, knownAction := protocol.ScopeFor(inbound)
-		if !knownAction {
-			admitted()
-			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
-				protocol.ErrorUnknownAction,
-				map[string]any{"operation": inbound.Type},
-			)))
-			return
-		}
-		if !protocol.Compatible(inbound) {
-			admitted()
-			s.hub.Send(client, protocol.IncompatibleResponse(inbound))
-			return
-		}
-		requestedSessionID := scope.ServerSessionID
-		if scope.Target != nil {
-			if requestedSessionID != "" && scope.Target.ServerSessionID != "" && requestedSessionID != scope.Target.ServerSessionID {
-				admitted()
-				s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
-					protocol.ErrorInvalidRequest,
-					map[string]any{"field": "server_session_id"},
-				)))
-				return
-			}
-			if requestedSessionID == "" {
-				requestedSessionID = scope.Target.ServerSessionID
-			}
-		}
-		if requestedSessionID != "" && requestedSessionID != protocol.PrimaryServerSessionID {
-			admitted()
-			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
-				protocol.ErrorInvalidRequest,
-				map[string]any{"field": "server_session_id"},
-			)))
-			return
-		}
-		if authorizationErr := s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID); authorizationErr != nil {
-			admitted()
-			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
-			return
-		}
-		_, authenticated := client.Identity()
-		if targetErr := validateExactPaneTarget(s.state, inbound, authenticated); targetErr != nil {
-			admitted()
-			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *targetErr))
-			return
-		}
-		action := scope.Action.Operation
-		coordinated := scope.Action.Coordinated
-		auditedWrite := scope.Action.Audited
-		if auditedWrite {
-			s.recordWriteAudit(client, msg, nil)
-		}
-		if !coordinated {
-			admitted()
-		}
-
-		commandCtx := herdr.WithDispatchCheck(client.Context(), func() error {
-			if err := client.Context().Err(); err != nil {
-				return err
-			}
-			if s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID) != nil {
-				return errors.New("device is no longer authorized")
-			}
-			if validateExactPaneTarget(s.state, inbound, authenticated) != nil {
-				return coordinator.ErrPaneReplaced
-			}
-			return nil
-		})
-		switch action {
-		case "get_pi_integration", "set_pi_integration":
-			s.handlePiIntegration(commandCtx, client, inbound, msg)
-		case "get_pi_prompt_capability", "send_pi_prompt_unconfirmed":
-			result := s.handlePiPrompt(commandCtx, client, inbound, msg, admitted)
-			if auditedWrite {
-				s.recordWriteAudit(client, msg, result)
-			}
-			s.hub.Send(client, coordinator.CommandResultMessage(result))
-		case "check_update", "install_update", "deploy_app_update":
-			s.handleUpdate(ctx, client, inbound)
-		case "lease_pane_size", "release_pane_size":
-			s.handlePaneSizeCommand(client, inbound)
-		case "read_pane":
-			s.applyPaneReadLease(client.ID(), msg)
-			s.stopPaneWatch(client.ID(), inbound.PaneID)
-			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
-			resp["request_id"] = inbound.RequestID
-			if inbound.Target != nil {
-				resp["target"] = *inbound.Target
-			}
-			if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
-				s.hub.Send(client, unchanged)
-				break
-			}
-			s.hub.Send(client, resp)
-		case "watch_pane":
-			s.startPaneWatch(client, msg)
-		case "unwatch_pane":
-			s.stopPaneWatch(client.ID(), inbound.PaneID)
-		case "pane_applied":
-			s.handlePaneApplied(client, msg)
-		case "get_conversation_history":
-			s.handleConversationHistory(client, inbound)
-		case "get_conversation_updates":
-			s.handleConversationUpdates(client, inbound)
-		case "unwatch_conversation":
-			reply := s.reply(client, inbound.RequestID, action, inbound.PaneID)
-			if inbound.SubscriptionID == "" {
-				reply.fail("Conversation subscription is required")
-				break
-			}
-			s.stopConversationFeed(client.ID(), inbound.SubscriptionID)
-			reply.complete(nil)
-		case "device_list":
-			reply := s.reply(client, inbound.RequestID, action, "")
-			identity, authenticated := client.Identity()
-			if s.deviceAuth == nil || !authenticated {
-				reply.fail("Device management is unavailable")
-				break
-			}
-			reply.complete(map[string]any{
-				"devices":           activeDeviceCredentials(s.deviceAuth, identity.CredentialID),
-				"current_device_id": identity.DeviceID,
-				"role":              identity.Role,
-			})
-		case "create_device_invitation":
-			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
-			identity, authenticated := client.Identity()
-			if s.deviceAuth == nil || !authenticated {
-				reply.fail("Device management is unavailable")
-				break
-			}
-			invitation, invitationErr := s.deviceAuth.CreateInvitation(inbound.Name, deviceauth.Role(inbound.Role), identity.Locale)
-			if invitationErr != nil {
-				reply.fail(invitationErr.Error())
-				break
-			}
-			reply.complete(map[string]any{"invitation": invitation})
-		case "rename_device":
-			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
-			if s.deviceAuth == nil {
-				reply.fail("Device management is unavailable")
-				break
-			}
-			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
-			if !found {
-				reply.fail("Device credential was not found")
-				break
-			}
-			credential, renameErr := s.deviceAuth.RenameCredential(credentialID, inbound.Name)
-			if renameErr != nil {
-				reply.fail(renameErr.Error())
-				break
-			}
-			reply.complete(map[string]any{"device": credential})
-		case "revoke_device":
-			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
-			if s.deviceAuth == nil {
-				reply.fail("Device management is unavailable")
-				break
-			}
-			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
-			if !found {
-				reply.fail("Device credential was not found")
-				break
-			}
-			credential, revokeErr := s.deviceAuth.RevokeCredential(credentialID)
-			if revokeErr != nil {
-				reply.fail(revokeErr.Error())
-				break
-			}
-			s.forgetPushTest(credential.DeviceID)
-			var pushCleanupErr error
-			if s.pushM != nil {
-				pushCleanupErr = s.pushM.RemoveDevice(credential.DeviceID)
-			}
-			time.AfterFunc(250*time.Millisecond, func() {
-				s.hub.DisconnectCredential(credential.CredentialID, credential.Version)
-			})
-			if pushCleanupErr != nil {
-				reply.failWithData("Device revoked, but notification cleanup could not be persisted", map[string]any{"device": credential})
-				break
-			}
-			reply.complete(map[string]any{"device": credential})
-		case "reset_devices":
-			reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
-			identity, authenticated := client.Identity()
-			if s.deviceAuth == nil || !authenticated {
-				reply.fail("Device management is unavailable")
-				break
-			}
-			credentials := activeDeviceCredentials(s.deviceAuth, "")
-			if resetErr := s.deviceAuth.ResetWithBootstrap([]byte(s.cfg.Token), s.hostname, identity.Locale); resetErr != nil {
-				reply.fail(resetErr.Error())
-				break
-			}
-			for _, credential := range credentials {
-				s.forgetPushTest(credential.DeviceID)
-			}
-			var resetPushErr error
-			if s.pushM != nil {
-				for _, credential := range credentials {
-					if pushErr := s.pushM.RemoveDevice(credential.DeviceID); pushErr != nil && resetPushErr == nil {
-						resetPushErr = pushErr
-					}
-				}
-			}
-			time.AfterFunc(250*time.Millisecond, func() {
-				s.disconnectCredentials(credentials)
-			})
-			if resetPushErr != nil {
-				reply.fail("Devices reset, but notification cleanup could not be persisted")
-				break
-			}
-			reply.complete(nil)
-		case "get_activity":
-			limit := messageInt(msg["limit"], 500)
-			if limit < 1 || limit > 500 {
-				limit = 500
-			}
-			s.hub.Send(client, map[string]any{
-				"type":       "activity_history",
-				"activities": s.recentActivities(limit),
-			})
-		case "clear_activities":
-			requestID, _ := msg["request_id"].(string)
-			s.dispatcher.HandleClearActivities(requestID, func(result *coordinator.CommandResult) {
-				s.hub.Send(client, coordinator.CommandResultMessage(result))
-			})
-		case "upload_begin":
-			s.handleUploadBegin(client, inbound.RequestID, msg)
-		case "upload_chunk":
-			s.handleUploadChunk(client, inbound.RequestID, msg)
-		case "upload_finish":
-			s.handleUploadFinish(client, inbound.RequestID, msg)
-		case "upload_cancel":
-			s.handleUploadCancel(client, inbound.RequestID, msg)
-		case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
-			"worktree_list", "worktree_create", "worktree_open", "worktree_remove":
-			// The dispatcher signals admitted() as soon as it holds the
-			// topology ordering lock; the Herdr command itself must not
-			// block the hub's global ordered ingress.
-			result := s.dispatcher.HandleTopologyAdmitted(commandCtx, admitted, func(handlerCtx context.Context) *coordinator.CommandResult {
-				switch action {
-				case "workspace_create":
-					return s.dispatcher.HandleWorkspaceCreate(handlerCtx, inbound.RequestID, inbound.Cwd, inbound.Label)
-				case "workspace_rename":
-					return s.dispatcher.HandleWorkspaceRename(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.Label)
-				case "workspace_reorder":
-					if len(inbound.WorkspaceIDs) > 0 {
-						return s.dispatcher.HandleWorkspaceReorderBlock(
-							handlerCtx,
-							inbound.RequestID,
-							inbound.WorkspaceIDs,
-							inbound.BeforeWorkspaceID,
-						)
-					}
-					return s.dispatcher.HandleWorkspaceReorder(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
-				case "workspace_close":
-					return s.dispatcher.HandleWorkspaceClose(
-						handlerCtx,
-						inbound.RequestID,
-						inbound.WorkspaceID,
-						inbound.CloseGroup,
-						inbound.ExpectedWorkspaceIDs,
-					)
-				case "worktree_list":
-					return s.dispatcher.HandleWorktreeList(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
-				case "worktree_create":
-					return s.dispatcher.HandleWorktreeCreate(
-						handlerCtx,
-						inbound.RequestID,
-						inbound.WorkspaceID,
-						inbound.Branch,
-						inbound.Base,
-						inbound.Path,
-						inbound.Label,
-					)
-				case "worktree_open":
-					return s.dispatcher.HandleWorktreeOpen(
-						handlerCtx,
-						inbound.RequestID,
-						inbound.WorkspaceID,
-						inbound.Path,
-						inbound.Branch,
-						inbound.Label,
-					)
-				default:
-					return s.dispatcher.HandleWorktreeRemove(
-						handlerCtx,
-						inbound.RequestID,
-						inbound.WorkspaceID,
-						inbound.Force,
-					)
-				}
-			})
-			if auditedWrite {
-				s.recordWriteAudit(client, msg, result)
-			}
-			s.hub.Send(client, coordinator.CommandResultMessage(result))
-		case "list_directories":
-			path, _ := msg["path"].(string)
-			listing := fsutil.ListDirectories(path, s.home)
-			s.reply(client, inbound.RequestID, "list_directories", "").complete(listing)
-		case "list_slash_commands":
-			paneID, _ := msg["pane_id"].(string)
-			reply := s.reply(client, inbound.RequestID, "list_slash_commands", paneID)
-			if paneID == "" {
-				reply.fail("Agent is required")
-				break
-			}
-			activeAgent, ok := s.state.Agent(paneID)
-			if !ok {
-				reply.fail("Agent pane not found")
-				break
-			}
-			agent, cwd := activeAgent.Agent, activeAgent.Cwd
-			project := projectContextForAgent(activeAgent)
-			profileID := s.profiles.ResolvePane(paneID, agent)
-			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
-			location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
-			agentDir := locatedAgentDir(s.home, agent, location)
-			catalog := slashcmd.CatalogForProfileWithSuppression(
-				profileID, agent, cwd, s.home, skillDirs, commandFormat, agentDir, suppressNative,
-			)
-			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
-				catalog.Status = "partial"
-				if runtime, err := runtimePiCatalog(client.Context(), s.herdrC, s.cfg.SocketPath, paneID, activeAgent.SessionID); err == nil {
-					if runtime.Status == "available" || runtime.Status == "partial" {
-						catalog = runtime
-					} else {
-						catalog.Status = runtime.Status
-					}
-				}
-			}
-			currentAgent, currentExists := s.state.Agent(paneID)
-			if !currentExists || !sameSlashTarget(activeAgent, currentAgent) {
-				reply.fail("The agent pane was replaced while commands were being listed")
-				break
-			}
-			catalog = fitSlashCommandCatalog(slashcmd.Revise(catalog), inbound.RequestID, "list_slash_commands", paneID)
-			reply.complete(catalog)
-		case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
-			paneID := inbound.PaneID
-			reply := s.reply(client, inbound.RequestID, inbound.Type, paneID)
-			agent, exists := s.state.Agent(paneID)
-			if paneID == "" || !exists {
-				reply.fail("Agent pane not found")
-				break
-			}
-			generation := s.state.Generation(paneID)
-			cwd := strings.TrimSpace(agent.Cwd)
-			var data any
-			var inspectErr error
-			switch inbound.Type {
-			case "workspace_tree":
-				data, inspectErr = workspace.TreeFor(cwd)
-			case "workspace_file":
-				data, inspectErr = workspace.ReadFile(cwd, inbound.Path)
-			case "workspace_git_status":
-				data, inspectErr = workspace.GitStatusFor(client.Context(), cwd)
-			case "workspace_git_diff":
-				data, inspectErr = workspace.GitDiffFor(client.Context(), cwd, inbound.Path)
-			}
-			currentAgent, currentExists := s.state.Agent(paneID)
-			if !currentExists || s.state.Generation(paneID) != generation || strings.TrimSpace(currentAgent.Cwd) != cwd {
-				reply.fail("Agent workspace changed during inspection")
-				break
-			}
-			if inspectErr != nil {
-				var public *workspace.Error
-				message := "Workspace inspection failed"
-				if errors.As(inspectErr, &public) {
-					message = public.Message
-				}
-				reply.fail(message)
-				break
-			}
-			reply.complete(data)
-		case "copy_agent_response":
-			paneID, _ := msg["pane_id"].(string)
-			s.copyAgentResponse(client, inbound.RequestID, paneID)
-		case "cancel_speech":
-			speechRequestID, _ := msg["speech_request_id"].(string)
-			s.cancelSpeech(client.ID(), speechRequestID)
-		case "speak_text":
-			speechRequestID, _ := msg["speech_request_id"].(string)
-			text, _ := msg["text"].(string)
-			language, _ := msg["language"].(string)
-			s.speakText(client, inbound.RequestID, speechRequestID, text, language)
-		case "speech_voices_list":
-			s.reply(client, inbound.RequestID, action, "").complete(s.speechVoicePayload(nil))
-		case "speech_voice_install", "speech_voice_remove":
-			language, _ := msg["language"].(string)
-			s.changeSpeechVoice(client, inbound.RequestID, action, language)
-		case "qr_code":
-			reply := s.reply(client, inbound.RequestID, action, "")
-			value, _ := msg["text"].(string)
-			size, packed, qrErr := setuphelper.PackedQR(value)
-			if qrErr != nil {
-				s.logger.Warn("qr encoding failed", "error", qrErr)
-				reply.fail("This computer could not encode that QR code")
-				break
-			}
-			reply.complete(map[string]any{
-				"size":    size,
-				"modules": base64.StdEncoding.EncodeToString(packed),
-			})
-		case "push_policy_get":
-			identity, _ := client.Identity()
-			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
-			s.hub.Send(client, map[string]any{"type": "push_policy", "policy": pushPolicyResponse(policy)})
-		case "push_policy_set":
-			reply := s.reply(client, inbound.RequestID, "push_policy_set", "")
-			identity, _ := client.Identity()
-			current := s.pushM.Policy(identity.DeviceID, identity.Locale)
-			policy, policyErr := boundPushPolicy(inbound.Policy, identity.DeviceID, identity.Locale, current)
-			if policyErr != nil || s.pushM.SetPolicy(policy) != nil {
-				reply.fail("Notification policy was rejected")
-				s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_policy"})
-				break
-			}
-			data := map[string]any{"policy": pushPolicyResponse(policy)}
-			reply.complete(data)
-			s.hub.Send(client, map[string]any{
-				"type": "push_policy_result", "ok": true, "policy": pushPolicyResponse(policy),
-			})
-		case "push_snooze":
-			identity, _ := client.Identity()
-			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
-			policy.Snoozed = inbound.Snoozed
-			policy.SnoozeUntil = time.Time{}
-			if inbound.SnoozeUntil != "" {
-				until, parseErr := time.Parse(time.RFC3339, inbound.SnoozeUntil)
-				if parseErr != nil {
-					s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_snooze"})
-					break
-				}
-				policy.SnoozeUntil = until
-			}
-			if policyErr := s.pushM.SetPolicy(policy); policyErr != nil {
-				s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_snooze"})
-				break
-			}
-			s.hub.Send(client, map[string]any{
-				"type": "push_policy_result", "ok": true, "policy": pushPolicyResponse(policy),
-			})
-		case "push_viewed_pane":
-			identity, _ := client.Identity()
-			var target *protocol.TargetRef
-			if inbound.Visible && inbound.Unlocked && inbound.Target != nil && s.pushTargetCurrent(*inbound.Target) {
-				copyTarget := *inbound.Target
-				target = &copyTarget
-			}
-			s.pushM.SetViewedPane(identity.DeviceID, target)
-			s.hub.Send(client, map[string]any{"type": "push_viewed_pane_result", "ok": true})
-		case "push_open_ref":
-			identity, _ := client.Identity()
-			claims, verifyErr := s.pushM.VerifyEventReference(inbound.EventRef, time.Now().UTC())
-			if verifyErr != nil || claims.Key.DeviceID != identity.DeviceID || !s.pushTargetCurrent(claims.Key.Target()) {
-				s.reply(client, inbound.RequestID, action, "").fail("Notification target is no longer available")
-				break
-			}
-			s.reply(client, inbound.RequestID, action, claims.Key.PaneID).complete(map[string]any{
-				"target": claims.Key.Target(), "event_id": claims.Key.EventID, "category": claims.Key.Category,
-			})
-		case "push_test_device":
-			identity, _ := client.Identity()
-			now := time.Now().UTC()
-			if !s.reservePushTest(identity.DeviceID, now) {
-				s.hub.Send(client, map[string]any{"type": "push_test_result", "stage": "rate_limited"})
-				break
-			}
-			eventID := "test"
-			key := push.PushEventKey{DeviceID: identity.DeviceID, EventID: eventID, Category: push.CategoryTest}
-			published, publishErr := s.pushM.Publish(ctx, push.PublishRequest{
-				Key: key, Preview: push.PreviewHidden, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
-			})
-			stage := "dropped"
-			if publishErr == nil && published.Queued > 0 {
-				// The manager's worker performs the network send. Keeping it out
-				// of this command path avoids holding the global queue processor
-				// while one client waits for a push service.
-				stage = "queued"
-			}
-			s.hub.Send(client, map[string]any{"type": "push_test_result", "stage": stage})
-		case "push_subscribe":
-			ok := false
-			if s.pushM != nil {
-				identity, _ := client.Identity()
-				var sub push.Subscription
-				if json.Unmarshal(inbound.Subscription, &sub) == nil {
-					sub.ClientID = inbound.ClientID
-					sub.DeviceID = identity.DeviceID
-					sub.Locale = identity.Locale
-					// The authenticated connection does not currently carry a
-					// trusted browser platform. Defaulting to no actions is safe;
-					// never infer an actionable platform from client JSON.
-					sub.Platform = push.PlatformOther
-					sub.UserAgent = ""
-					ok = s.pushM.Subscribe(sub, inbound.ReplaceEndpoints) == nil
-				}
-			}
-			s.hub.Send(client, map[string]any{"type": "push_subscribed", "ok": ok})
-		case "push_unsubscribe":
-			ok := false
-			if s.pushM != nil {
-				identity, _ := client.Identity()
-				ok = s.pushM.UnsubscribeDevice(identity.DeviceID, inbound.Endpoints, inbound.ClientID) == nil
-			}
-			s.hub.Send(client, map[string]any{"type": "push_unsubscribed", "ok": ok})
-		case "register_app_origin":
-			if err := s.storePhoneAppOrigin(inbound.Origin); err != nil {
-				s.recordSafeError("phone app origin was not stored", err)
-				s.logger.Warn("phone app origin was not stored", "error", err)
-			}
-		case "refresh_agents":
-			s.requestAgentRefresh(client)
-		case "webrtc_offer", "webrtc_ice", "webrtc_close":
-			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
-		default:
-			if err := s.expandPromptAttachmentReferences(action, msg, inbound.Target); err != nil {
-				result := &coordinator.CommandResult{
-					RequestID: inbound.RequestID,
-					Action:    action,
-					Phase:     "failed",
-					Error:     "One or more attachments are no longer available for this agent",
-					PaneID:    inbound.PaneID,
-				}
-				if auditedWrite {
-					s.recordWriteAudit(client, msg, result)
-				}
-				s.hub.Send(client, coordinator.CommandResultMessage(result))
-				break
-			}
-			var result *coordinator.CommandResult
-			if coordinated {
-				result = s.dispatcher.HandleAdmitted(commandCtx, msg, admitted)
-			} else {
-				result = s.dispatcher.Handle(commandCtx, msg)
-			}
-			if auditedWrite {
-				s.recordWriteAudit(client, msg, result)
-			}
-			s.hub.Send(client, coordinator.CommandResultMessage(result))
-		}
+		s.handleMessage(ctx, client, msg, admitted)
 	})
 
 	webHandler, err := web.NewHandler(s.cfg.WebRoot)
@@ -1439,6 +872,579 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = s.webH.Close()
 	}
 	return runErr
+}
+
+func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn, msg map[string]any, admitted func()) {
+	defer admitted()
+	inbound, err := protocol.DecodeMap(msg)
+	if err != nil {
+		admitted()
+		s.hub.Send(client, protocol.DecodeFailureResponse(msg))
+		return
+	}
+	scope, knownAction := protocol.ScopeFor(inbound)
+	if !knownAction {
+		admitted()
+		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+			protocol.ErrorUnknownAction,
+			map[string]any{"operation": inbound.Type},
+		)))
+		return
+	}
+	if !protocol.Compatible(inbound) {
+		admitted()
+		s.hub.Send(client, protocol.IncompatibleResponse(inbound))
+		return
+	}
+	requestedSessionID := scope.ServerSessionID
+	if scope.Target != nil {
+		if requestedSessionID != "" && scope.Target.ServerSessionID != "" && requestedSessionID != scope.Target.ServerSessionID {
+			admitted()
+			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+				protocol.ErrorInvalidRequest,
+				map[string]any{"field": "server_session_id"},
+			)))
+			return
+		}
+		if requestedSessionID == "" {
+			requestedSessionID = scope.Target.ServerSessionID
+		}
+	}
+	if requestedSessionID != "" && requestedSessionID != protocol.PrimaryServerSessionID {
+		admitted()
+		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+			protocol.ErrorInvalidRequest,
+			map[string]any{"field": "server_session_id"},
+		)))
+		return
+	}
+	if authorizationErr := s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID); authorizationErr != nil {
+		admitted()
+		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
+		return
+	}
+	_, authenticated := client.Identity()
+	if targetErr := validateExactPaneTarget(s.state, inbound, authenticated); targetErr != nil {
+		admitted()
+		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *targetErr))
+		return
+	}
+	action := scope.Action.Operation
+	coordinated := scope.Action.Coordinated
+	auditedWrite := scope.Action.Audited
+	if auditedWrite {
+		s.recordWriteAudit(client, msg, nil)
+	}
+	if !coordinated {
+		admitted()
+	}
+
+	commandCtx := herdr.WithDispatchCheck(client.Context(), func() error {
+		if err := client.Context().Err(); err != nil {
+			return err
+		}
+		if s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID) != nil {
+			return errors.New("device is no longer authorized")
+		}
+		if validateExactPaneTarget(s.state, inbound, authenticated) != nil {
+			return coordinator.ErrPaneReplaced
+		}
+		return nil
+	})
+	switch action {
+	case "get_pi_integration", "set_pi_integration":
+		s.handlePiIntegration(commandCtx, client, inbound, msg)
+	case "get_pi_prompt_capability", "send_pi_prompt_unconfirmed":
+		result := s.handlePiPrompt(commandCtx, client, inbound, msg, admitted)
+		if auditedWrite {
+			s.recordWriteAudit(client, msg, result)
+		}
+		s.hub.Send(client, coordinator.CommandResultMessage(result))
+	case "check_update", "install_update", "deploy_app_update":
+		s.handleUpdate(ctx, client, inbound)
+	case "lease_pane_size", "release_pane_size":
+		s.handlePaneSizeCommand(client, inbound)
+	case "read_pane":
+		s.applyPaneReadLease(client.ID(), msg)
+		s.stopPaneWatch(client.ID(), inbound.PaneID)
+		resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
+		resp["request_id"] = inbound.RequestID
+		if inbound.Target != nil {
+			resp["target"] = *inbound.Target
+		}
+		if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
+			s.hub.Send(client, unchanged)
+			break
+		}
+		s.hub.Send(client, resp)
+	case "watch_pane":
+		s.startPaneWatch(client, msg)
+	case "unwatch_pane":
+		s.stopPaneWatch(client.ID(), inbound.PaneID)
+	case "pane_applied":
+		s.handlePaneApplied(client, msg)
+	case "get_conversation_history":
+		s.handleConversationHistory(client, inbound)
+	case "get_conversation_updates":
+		s.handleConversationUpdates(client, inbound)
+	case "unwatch_conversation":
+		reply := s.reply(client, inbound.RequestID, action, inbound.PaneID)
+		if inbound.SubscriptionID == "" {
+			reply.fail("Conversation subscription is required")
+			break
+		}
+		s.stopConversationFeed(client.ID(), inbound.SubscriptionID)
+		reply.complete(nil)
+	case "device_list":
+		reply := s.reply(client, inbound.RequestID, action, "")
+		identity, authenticated := client.Identity()
+		if s.deviceAuth == nil || !authenticated {
+			reply.fail("Device management is unavailable")
+			break
+		}
+		reply.complete(map[string]any{
+			"devices":           activeDeviceCredentials(s.deviceAuth, identity.CredentialID),
+			"current_device_id": identity.DeviceID,
+			"role":              identity.Role,
+		})
+	case "create_device_invitation":
+		reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+		identity, authenticated := client.Identity()
+		if s.deviceAuth == nil || !authenticated {
+			reply.fail("Device management is unavailable")
+			break
+		}
+		invitation, invitationErr := s.deviceAuth.CreateInvitation(inbound.Name, deviceauth.Role(inbound.Role), identity.Locale)
+		if invitationErr != nil {
+			reply.fail(invitationErr.Error())
+			break
+		}
+		reply.complete(map[string]any{"invitation": invitation})
+	case "rename_device":
+		reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+		if s.deviceAuth == nil {
+			reply.fail("Device management is unavailable")
+			break
+		}
+		credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+		if !found {
+			reply.fail("Device credential was not found")
+			break
+		}
+		credential, renameErr := s.deviceAuth.RenameCredential(credentialID, inbound.Name)
+		if renameErr != nil {
+			reply.fail(renameErr.Error())
+			break
+		}
+		reply.complete(map[string]any{"device": credential})
+	case "revoke_device":
+		reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+		if s.deviceAuth == nil {
+			reply.fail("Device management is unavailable")
+			break
+		}
+		credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+		if !found {
+			reply.fail("Device credential was not found")
+			break
+		}
+		credential, revokeErr := s.deviceAuth.RevokeCredential(credentialID)
+		if revokeErr != nil {
+			reply.fail(revokeErr.Error())
+			break
+		}
+		s.forgetPushTest(credential.DeviceID)
+		var pushCleanupErr error
+		if s.pushM != nil {
+			pushCleanupErr = s.pushM.RemoveDevice(credential.DeviceID)
+		}
+		time.AfterFunc(250*time.Millisecond, func() {
+			s.hub.DisconnectCredential(credential.CredentialID, credential.Version)
+		})
+		if pushCleanupErr != nil {
+			reply.failWithData("Device revoked, but notification cleanup could not be persisted", map[string]any{"device": credential})
+			break
+		}
+		reply.complete(map[string]any{"device": credential})
+	case "reset_devices":
+		reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
+		identity, authenticated := client.Identity()
+		if s.deviceAuth == nil || !authenticated {
+			reply.fail("Device management is unavailable")
+			break
+		}
+		credentials := activeDeviceCredentials(s.deviceAuth, "")
+		if resetErr := s.deviceAuth.ResetWithBootstrap([]byte(s.cfg.Token), s.hostname, identity.Locale); resetErr != nil {
+			reply.fail(resetErr.Error())
+			break
+		}
+		for _, credential := range credentials {
+			s.forgetPushTest(credential.DeviceID)
+		}
+		var resetPushErr error
+		if s.pushM != nil {
+			for _, credential := range credentials {
+				if pushErr := s.pushM.RemoveDevice(credential.DeviceID); pushErr != nil && resetPushErr == nil {
+					resetPushErr = pushErr
+				}
+			}
+		}
+		time.AfterFunc(250*time.Millisecond, func() {
+			s.disconnectCredentials(credentials)
+		})
+		if resetPushErr != nil {
+			reply.fail("Devices reset, but notification cleanup could not be persisted")
+			break
+		}
+		reply.complete(nil)
+	case "get_activity":
+		limit := messageInt(msg["limit"], 500)
+		if limit < 1 || limit > 500 {
+			limit = 500
+		}
+		s.hub.Send(client, map[string]any{
+			"type":       "activity_history",
+			"activities": s.recentActivities(limit),
+		})
+	case "clear_activities":
+		requestID, _ := msg["request_id"].(string)
+		s.dispatcher.HandleClearActivities(requestID, func(result *coordinator.CommandResult) {
+			s.hub.Send(client, coordinator.CommandResultMessage(result))
+		})
+	case "upload_begin":
+		s.handleUploadBegin(client, inbound.RequestID, msg)
+	case "upload_chunk":
+		s.handleUploadChunk(client, inbound.RequestID, msg)
+	case "upload_finish":
+		s.handleUploadFinish(client, inbound.RequestID, msg)
+	case "upload_cancel":
+		s.handleUploadCancel(client, inbound.RequestID, msg)
+	case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
+		"worktree_list", "worktree_create", "worktree_open", "worktree_remove":
+		// The dispatcher signals admitted() as soon as it holds the
+		// topology ordering lock; the Herdr command itself must not
+		// block the hub's global ordered ingress.
+		result := s.dispatcher.HandleTopologyAdmitted(commandCtx, admitted, func(handlerCtx context.Context) *coordinator.CommandResult {
+			switch action {
+			case "workspace_create":
+				return s.dispatcher.HandleWorkspaceCreate(handlerCtx, inbound.RequestID, inbound.Cwd, inbound.Label)
+			case "workspace_rename":
+				return s.dispatcher.HandleWorkspaceRename(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.Label)
+			case "workspace_reorder":
+				if len(inbound.WorkspaceIDs) > 0 {
+					return s.dispatcher.HandleWorkspaceReorderBlock(
+						handlerCtx,
+						inbound.RequestID,
+						inbound.WorkspaceIDs,
+						inbound.BeforeWorkspaceID,
+					)
+				}
+				return s.dispatcher.HandleWorkspaceReorder(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
+			case "workspace_close":
+				return s.dispatcher.HandleWorkspaceClose(
+					handlerCtx,
+					inbound.RequestID,
+					inbound.WorkspaceID,
+					inbound.CloseGroup,
+					inbound.ExpectedWorkspaceIDs,
+				)
+			case "worktree_list":
+				return s.dispatcher.HandleWorktreeList(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
+			case "worktree_create":
+				return s.dispatcher.HandleWorktreeCreate(
+					handlerCtx,
+					inbound.RequestID,
+					inbound.WorkspaceID,
+					inbound.Branch,
+					inbound.Base,
+					inbound.Path,
+					inbound.Label,
+				)
+			case "worktree_open":
+				return s.dispatcher.HandleWorktreeOpen(
+					handlerCtx,
+					inbound.RequestID,
+					inbound.WorkspaceID,
+					inbound.Path,
+					inbound.Branch,
+					inbound.Label,
+				)
+			default:
+				return s.dispatcher.HandleWorktreeRemove(
+					handlerCtx,
+					inbound.RequestID,
+					inbound.WorkspaceID,
+					inbound.Force,
+				)
+			}
+		})
+		if auditedWrite {
+			s.recordWriteAudit(client, msg, result)
+		}
+		s.hub.Send(client, coordinator.CommandResultMessage(result))
+	case "list_directories":
+		path, _ := msg["path"].(string)
+		listing := fsutil.ListDirectories(path, s.home)
+		s.reply(client, inbound.RequestID, "list_directories", "").complete(listing)
+	case "list_slash_commands":
+		paneID, _ := msg["pane_id"].(string)
+		reply := s.reply(client, inbound.RequestID, "list_slash_commands", paneID)
+		if paneID == "" {
+			reply.fail("Agent is required")
+			break
+		}
+		activeAgent, ok := s.state.Agent(paneID)
+		if !ok {
+			reply.fail("Agent pane not found")
+			break
+		}
+		agent, cwd := activeAgent.Agent, activeAgent.Cwd
+		project := projectContextForAgent(activeAgent)
+		profileID := s.profiles.ResolvePane(paneID, agent)
+		skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
+		location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
+		agentDir := locatedAgentDir(s.home, agent, location)
+		catalog := slashcmd.CatalogForProfileWithSuppression(
+			profileID, agent, cwd, s.home, skillDirs, commandFormat, agentDir, suppressNative,
+		)
+		if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
+			catalog.Status = "partial"
+			if runtime, err := runtimePiCatalog(client.Context(), s.herdrC, s.cfg.SocketPath, paneID, activeAgent.SessionID); err == nil {
+				if runtime.Status == "available" || runtime.Status == "partial" {
+					catalog = runtime
+				} else {
+					catalog.Status = runtime.Status
+				}
+			}
+		}
+		currentAgent, currentExists := s.state.Agent(paneID)
+		if !currentExists || !sameSlashTarget(activeAgent, currentAgent) {
+			reply.fail("The agent pane was replaced while commands were being listed")
+			break
+		}
+		catalog = fitSlashCommandCatalog(slashcmd.Revise(catalog), inbound.RequestID, "list_slash_commands", paneID)
+		reply.complete(catalog)
+	case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
+		paneID := inbound.PaneID
+		reply := s.reply(client, inbound.RequestID, inbound.Type, paneID)
+		agent, exists := s.state.Agent(paneID)
+		if paneID == "" || !exists {
+			reply.fail("Agent pane not found")
+			break
+		}
+		generation := s.state.Generation(paneID)
+		cwd := strings.TrimSpace(agent.Cwd)
+		var data any
+		var inspectErr error
+		switch inbound.Type {
+		case "workspace_tree":
+			data, inspectErr = workspace.TreeFor(cwd)
+		case "workspace_file":
+			data, inspectErr = workspace.ReadFile(cwd, inbound.Path)
+		case "workspace_git_status":
+			data, inspectErr = workspace.GitStatusFor(client.Context(), cwd)
+		case "workspace_git_diff":
+			data, inspectErr = workspace.GitDiffFor(client.Context(), cwd, inbound.Path)
+		}
+		currentAgent, currentExists := s.state.Agent(paneID)
+		if !currentExists || s.state.Generation(paneID) != generation || strings.TrimSpace(currentAgent.Cwd) != cwd {
+			reply.fail("Agent workspace changed during inspection")
+			break
+		}
+		if inspectErr != nil {
+			var public *workspace.Error
+			message := "Workspace inspection failed"
+			if errors.As(inspectErr, &public) {
+				message = public.Message
+			}
+			reply.fail(message)
+			break
+		}
+		reply.complete(data)
+	case "copy_agent_response":
+		paneID, _ := msg["pane_id"].(string)
+		s.copyAgentResponse(client, inbound.RequestID, paneID)
+	case "cancel_speech":
+		speechRequestID, _ := msg["speech_request_id"].(string)
+		s.cancelSpeech(client.ID(), speechRequestID)
+	case "speak_text":
+		speechRequestID, _ := msg["speech_request_id"].(string)
+		text, _ := msg["text"].(string)
+		language, _ := msg["language"].(string)
+		s.speakText(client, inbound.RequestID, speechRequestID, text, language)
+	case "speech_voices_list":
+		s.reply(client, inbound.RequestID, action, "").complete(s.speechVoicePayload(nil))
+	case "speech_voice_install", "speech_voice_remove":
+		language, _ := msg["language"].(string)
+		s.changeSpeechVoice(client, inbound.RequestID, action, language)
+	case "qr_code":
+		reply := s.reply(client, inbound.RequestID, action, "")
+		value, _ := msg["text"].(string)
+		size, packed, qrErr := setuphelper.PackedQR(value)
+		if qrErr != nil {
+			s.logger.Warn("qr encoding failed", "error", qrErr)
+			reply.fail("This computer could not encode that QR code")
+			break
+		}
+		reply.complete(map[string]any{
+			"size":    size,
+			"modules": base64.StdEncoding.EncodeToString(packed),
+		})
+	case "push_policy_get":
+		identity, _ := client.Identity()
+		policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
+		s.hub.Send(client, map[string]any{"type": "push_policy", "policy": pushPolicyResponse(policy)})
+	case "push_policy_set":
+		reply := s.reply(client, inbound.RequestID, "push_policy_set", "")
+		identity, _ := client.Identity()
+		current := s.pushM.Policy(identity.DeviceID, identity.Locale)
+		policy, policyErr := boundPushPolicy(inbound.Policy, identity.DeviceID, identity.Locale, current)
+		if policyErr != nil || s.pushM.SetPolicy(policy) != nil {
+			reply.fail("Notification policy was rejected")
+			s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_policy"})
+			break
+		}
+		data := map[string]any{"policy": pushPolicyResponse(policy)}
+		reply.complete(data)
+		s.hub.Send(client, map[string]any{
+			"type": "push_policy_result", "ok": true, "policy": pushPolicyResponse(policy),
+		})
+	case "push_snooze":
+		identity, _ := client.Identity()
+		policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
+		policy.Snoozed = inbound.Snoozed
+		policy.SnoozeUntil = time.Time{}
+		if inbound.SnoozeUntil != "" {
+			until, parseErr := time.Parse(time.RFC3339, inbound.SnoozeUntil)
+			if parseErr != nil {
+				s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_snooze"})
+				break
+			}
+			policy.SnoozeUntil = until
+		}
+		if policyErr := s.pushM.SetPolicy(policy); policyErr != nil {
+			s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_snooze"})
+			break
+		}
+		s.hub.Send(client, map[string]any{
+			"type": "push_policy_result", "ok": true, "policy": pushPolicyResponse(policy),
+		})
+	case "push_viewed_pane":
+		identity, _ := client.Identity()
+		var target *protocol.TargetRef
+		if inbound.Visible && inbound.Unlocked && inbound.Target != nil && s.pushTargetCurrent(*inbound.Target) {
+			copyTarget := *inbound.Target
+			target = &copyTarget
+		}
+		s.pushM.SetViewedPane(identity.DeviceID, target)
+		s.hub.Send(client, map[string]any{"type": "push_viewed_pane_result", "ok": true})
+	case "push_open_ref":
+		identity, _ := client.Identity()
+		claims, verifyErr := s.pushM.VerifyEventReference(inbound.EventRef, time.Now().UTC())
+		if verifyErr != nil || claims.Key.DeviceID != identity.DeviceID || !s.pushTargetCurrent(claims.Key.Target()) {
+			s.reply(client, inbound.RequestID, action, "").fail("Notification target is no longer available")
+			break
+		}
+		s.reply(client, inbound.RequestID, action, claims.Key.PaneID).complete(map[string]any{
+			"target": claims.Key.Target(), "event_id": claims.Key.EventID, "category": claims.Key.Category,
+		})
+	case "push_test_device":
+		identity, _ := client.Identity()
+		now := time.Now().UTC()
+		if !s.reservePushTest(identity.DeviceID, now) {
+			s.hub.Send(client, map[string]any{"type": "push_test_result", "stage": "rate_limited"})
+			break
+		}
+		eventID := "test"
+		key := push.PushEventKey{DeviceID: identity.DeviceID, EventID: eventID, Category: push.CategoryTest}
+		published, publishErr := s.pushM.Publish(ctx, push.PublishRequest{
+			Key: key, Preview: push.PreviewHidden, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+		})
+		stage := "dropped"
+		if publishErr == nil && published.Queued > 0 {
+			// The manager's worker performs the network send. Keeping it out
+			// of this command path avoids holding the global queue processor
+			// while one client waits for a push service.
+			stage = "queued"
+		}
+		s.hub.Send(client, map[string]any{"type": "push_test_result", "stage": stage})
+	case "push_subscribe":
+		ok := false
+		if s.pushM != nil {
+			identity, _ := client.Identity()
+			var sub push.Subscription
+			if json.Unmarshal(inbound.Subscription, &sub) == nil {
+				sub.ClientID = inbound.ClientID
+				sub.DeviceID = identity.DeviceID
+				sub.Locale = identity.Locale
+				// The authenticated connection does not currently carry a
+				// trusted browser platform. Defaulting to no actions is safe;
+				// never infer an actionable platform from client JSON.
+				sub.Platform = push.PlatformOther
+				sub.UserAgent = ""
+				ok = s.pushM.Subscribe(sub, inbound.ReplaceEndpoints) == nil
+			}
+		}
+		s.hub.Send(client, map[string]any{"type": "push_subscribed", "ok": ok})
+	case "push_unsubscribe":
+		ok := false
+		if s.pushM != nil {
+			identity, _ := client.Identity()
+			ok = s.pushM.UnsubscribeDevice(identity.DeviceID, inbound.Endpoints, inbound.ClientID) == nil
+		}
+		s.hub.Send(client, map[string]any{"type": "push_unsubscribed", "ok": ok})
+	case "register_app_origin":
+		if err := s.storePhoneAppOrigin(inbound.Origin); err != nil {
+			s.recordSafeError("phone app origin was not stored", err)
+			s.logger.Warn("phone app origin was not stored", "error", err)
+		}
+	case "refresh_agents":
+		s.requestAgentRefresh(client)
+	case "webrtc_offer", "webrtc_ice", "webrtc_close":
+		s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
+	default:
+		if err := s.expandPromptAttachmentReferences(action, msg, inbound.Target); err != nil {
+			result := &coordinator.CommandResult{
+				RequestID: inbound.RequestID,
+				Action:    action,
+				Phase:     "failed",
+				Error:     "One or more attachments are no longer available for this agent",
+				PaneID:    inbound.PaneID,
+			}
+			if auditedWrite {
+				s.recordWriteAudit(client, msg, result)
+			}
+			s.hub.Send(client, coordinator.CommandResultMessage(result))
+			break
+		}
+		var result *coordinator.CommandResult
+		if coordinated {
+			result = s.dispatcher.HandleAdmitted(commandCtx, msg, admitted)
+		} else {
+			result = s.dispatcher.Handle(commandCtx, msg)
+		}
+		if auditedWrite {
+			s.recordWriteAudit(client, msg, result)
+		}
+		s.hub.Send(client, coordinator.CommandResultMessage(result))
+	}
+}
+
+func (s *Server) handleDisconnect(client *transport.ClientConn) {
+	s.stopConversationFeed(client.ID(), "")
+	s.stopPaneWatch(client.ID(), "")
+	if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
+		s.pushM.SetViewedPane(identity.DeviceID, nil)
+	}
+	if s.hybrid != nil {
+		s.hybrid.forgetClient(client.ID())
+	}
+	// A departing phone gives its panes back at once, without the
+	// navigation grace. Restores that cannot finish now continue in the
+	// manager's bounded cleanup.
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.paneSizeM.ReleaseClient(releaseCtx, client.ID())
 }
 
 func (s *Server) handleUpdate(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound) {
