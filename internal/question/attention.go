@@ -131,7 +131,8 @@ func Classify(text, agent string) Classification {
 				Interaction: interaction,
 			}
 		}
-		if options, focus, command := liveApprovalDetails(p, kind); len(options) > 0 {
+		if dialog, ok := detectApproval(p, kind); ok {
+			command := dialog.command
 			summaryLines := approvalSummaryLines(p, kind)
 			if command == "" {
 				command = approvalCommand(summaryLines)
@@ -140,9 +141,9 @@ func Classify(text, agent string) Classification {
 				Kind:           AttentionApproval,
 				Prompt:         textutil.Compact(strings.Join(summaryLines, "\n"), 500),
 				Command:        textutil.Compact(command, 240),
-				Options:        options,
-				ApprovalFocus:  focus,
-				approvalSource: approvalDialogSource(p, kind),
+				Options:        dialog.options,
+				ApprovalFocus:  dialog.focus,
+				approvalSource: dialog.source,
 			}
 		}
 	}
@@ -230,22 +231,38 @@ func hermesApprovalRows(rows []approvalMenuRow) ([]approvalMenuRow, int, bool) {
 	return rows, focus, true
 }
 
-func liveApprovalDetails(p *pane, kind string) ([]string, int, string) {
+type approvalDialog struct {
+	options []string
+	focus   int
+	command string
+	source  string
+}
+
+func detectApproval(p *pane, kind string) (approvalDialog, bool) {
 	if kind == agentkind.OpenCode {
-		return nil, 0, ""
+		return approvalDialog{}, false
 	}
 	lines := p.trimmed()
 	if kind == agentkind.OMP || kind == agentkind.Pi {
-		if options, focus, command := ompToolApprovalDetails(lines); len(options) > 0 {
-			return options, focus, command
+		options, focus, command := ompToolApprovalDetails(lines)
+		if len(options) == 0 {
+			options, focus = ompPlanApprovalDetails(lines)
+			command = ""
 		}
-		options, focus := ompPlanApprovalDetails(lines)
-		return options, focus, ""
+		if len(options) == 0 {
+			return approvalDialog{}, false
+		}
+		return approvalDialog{
+			options: options,
+			focus:   focus,
+			command: command,
+			source:  ompApprovalSource(lines),
+		}, true
 	}
 	menuLines := p.indented()
 	rows := latestApprovalMenu(menuLines)
 	if len(rows) < 2 {
-		return nil, 0, ""
+		return approvalDialog{}, false
 	}
 	menuEnd := rows[len(rows)-1].line
 	isHermes := kind == agentkind.Hermes
@@ -254,15 +271,15 @@ func liveApprovalDetails(p *pane, kind string) ([]string, int, string) {
 		var ok bool
 		rows, focus, ok = hermesApprovalRows(rows)
 		if !ok {
-			return nil, 0, ""
+			return approvalDialog{}, false
 		}
 	} else if !approvalLabels(rows) {
-		return nil, 0, ""
+		return approvalDialog{}, false
 	}
 
 	latestCompleted := latestCompletedTurnLine(lines)
 	if rows[0].line <= latestCompleted {
-		return nil, 0, ""
+		return approvalDialog{}, false
 	}
 
 	headerStart := latestCompleted + 1
@@ -271,10 +288,10 @@ func liveApprovalDetails(p *pane, kind string) ([]string, int, string) {
 	}
 	header := strings.Join(lines[headerStart:rows[0].line], "\n")
 	if !approvalHeader(kind, header) {
-		return nil, 0, ""
+		return approvalDialog{}, false
 	}
 	if newerOutputAfterMenu(menuLines, menuEnd, kind) {
-		return nil, 0, ""
+		return approvalDialog{}, false
 	}
 
 	options := make([]string, 0, len(rows))
@@ -284,52 +301,31 @@ func liveApprovalDetails(p *pane, kind string) ([]string, int, string) {
 			focus = len(options) - 1
 		}
 	}
-	return options, focus, ""
+	return approvalDialog{
+		options: options,
+		focus:   focus,
+		source:  strings.Join(menuLines[headerStart:rows[len(rows)-1].line+1], "\n"),
+	}, true
 }
 
-func approvalDialogSource(p *pane, kind string) string {
-	if kind == agentkind.OpenCode {
-		return ""
-	}
-	if kind == agentkind.OMP || kind == agentkind.Pi {
-		lines := p.trimmed()
-		if header := lastLineMatching(lines, ompToolApprovalPattern); header >= 0 {
-			for end := header + 1; end < len(lines); end++ {
-				if strings.HasPrefix(lines[end], "╰") {
-					return strings.Join(lines[header:end+1], "\n")
-				}
-			}
-		}
-		header := lastLineMatching(lines, ompPlanMenuPattern)
-		if header < 0 {
-			return ""
-		}
+func ompApprovalSource(lines []string) string {
+	if header := lastLineMatching(lines, ompToolApprovalPattern); header >= 0 {
 		for end := header + 1; end < len(lines); end++ {
-			if lines[end] == "" || ompBorderLine(lines[end]) {
-				return strings.Join(lines[header:end], "\n")
+			if strings.HasPrefix(lines[end], "╰") {
+				return strings.Join(lines[header:end+1], "\n")
 			}
 		}
+	}
+	header := lastLineMatching(lines, ompPlanMenuPattern)
+	if header < 0 {
 		return ""
 	}
-	menuLines := p.indented()
-	rows := latestApprovalMenu(menuLines)
-	if len(rows) < 2 {
-		return ""
-	}
-	end := rows[len(rows)-1].line
-	if kind == agentkind.Hermes {
-		var ok bool
-		rows, _, ok = hermesApprovalRows(rows)
-		if !ok {
-			return ""
+	for end := header + 1; end < len(lines); end++ {
+		if lines[end] == "" || ompBorderLine(lines[end]) {
+			return strings.Join(lines[header:end], "\n")
 		}
-		end = rows[len(rows)-1].line
 	}
-	headerStart := latestCompletedTurnLine(p.trimmed()) + 1
-	if candidate := rows[0].line - 16; candidate > headerStart {
-		headerStart = candidate
-	}
-	return strings.Join(menuLines[headerStart:end+1], "\n")
+	return ""
 }
 
 // The status block under a live dialog is at most this many non-empty lines.
