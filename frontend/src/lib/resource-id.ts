@@ -63,6 +63,12 @@ export function targetRefForAgent(agent: Partial<Agent>): FrontendTargetRef | nu
     agent_session_id: agent.agent_session_id,
   });
 }
+
+export function agentTargetPayload(agent: Agent): { target: FrontendTargetRef; server_session_id: string } | null {
+  const target = targetRefForAgent(agent);
+  return target ? { target, server_session_id: target.server_session_id } : null;
+}
+
 export function targetRefMatchesAgent(target: FrontendTargetRef, agent: Partial<Agent>): boolean {
   const normalized = normalizeFrontendTargetRef(target);
   const current = targetRefForAgent(agent);

@@ -1,7 +1,7 @@
 <script lang="ts">
 
   import Button from '$components/ui/Button.svelte';
-  import { relayStore } from '$lib/store';
+  import { loadWorkspaceTree, loadWorkspaceFile, loadWorkspaceGitStatus, loadWorkspaceGitDiff } from '$lib/workspace-inspection';
   import type { Agent, WorkspaceFile, WorkspaceGitDiff, WorkspaceGitStatus, WorkspaceTree } from '$lib/types';
 
   let {
@@ -193,8 +193,8 @@
     loading = true;
     try {
       const [treeResult, gitResult] = await Promise.allSettled([
-        relayStore.loadWorkspaceTree(target),
-        relayStore.loadWorkspaceGitStatus(target),
+        loadWorkspaceTree(target),
+        loadWorkspaceGitStatus(target),
       ]);
       if (current !== workspaceGeneration) return;
       if (treeResult.status === 'rejected') throw treeResult.reason;
@@ -226,8 +226,8 @@
     previewLoading = true;
     try {
       const next = await (kind === 'file'
-        ? relayStore.loadWorkspaceFile(agent, path)
-        : relayStore.loadWorkspaceGitDiff(agent, path));
+        ? loadWorkspaceFile(agent, path)
+        : loadWorkspaceGitDiff(agent, path));
       if (current === previewGeneration) preview = next;
     } catch (loadError) {
       if (current === previewGeneration) error = (loadError as Error).message;

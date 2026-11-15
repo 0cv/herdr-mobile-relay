@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { ConversationHistoryController } from '$lib/conversation-history';
-import { normalizeConversationPage } from '$lib/store';
+import { normalizeConversationPage } from '$lib/conversation-page';
 import type { Agent } from '$lib/types';
 import fixture from '../fixtures/claude-first-continuation.json';
 

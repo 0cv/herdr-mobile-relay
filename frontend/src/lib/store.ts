@@ -1,5 +1,4 @@
 import { get, writable } from 'svelte/store';
-import { bytesToHex } from '@noble/hashes/utils.js';
 import { base64Encode, base64UrlEncode } from './base64url';
 import { isRecord } from './record';
 import { releasePendingResources, resetPendingDeadline, registerPendingOperation } from './pending-operations';
@@ -32,7 +31,6 @@ import {
   shouldRetainSetupFragment,
 } from './config';
 import { gatewayRendezvous } from './gateway-credentials';
-import { SLASH_COMMAND_MAX_ENTRIES } from './slash-command-limits';
 import {
   BrowserDeviceCredentialStore,
   commitDeviceEnrollment,
@@ -60,25 +58,33 @@ import {
   staleAgentRevision,
   stabilizeBlockedSnapshot,
 } from './agents';
+import { PaneStreams } from './pane-streams';
 import { reportAppAnomaly } from './crash-banner';
+import { CommandError, dispatchedUnknownError } from './command-error';
+import { normalizeConversationBatch, normalizeConversationPage } from './conversation-page';
+import {
+  normalizeAgentInventory,
+  normalizeAgentTargetFields,
+  normalizeHerdrStatus,
+  normalizePushPolicy,
+  normalizeSlashCommandCatalog,
+  normalizeWorkspace,
+} from './wire-normalizers';
 import {
   parseActionReceipt,
   parseApiError,
   parseCommandErrorDetail,
-  parseWireSafeInteger,
+  commandRequestId,
   relayProtocolError,
   RELAY_PROTOCOL_VERSION,
 } from './protocol';
 import {
-  normalizeFrontendTargetRef,
+  agentTargetPayload,
   targetRefForAgent,
   targetRefMatchesAgent,
-  targetStoreKey,
 } from './resource-id';
 import { adoptRelaySpeech, isSpeechLanguage, type SpeechRequest } from './speech';
 import {
-  PUSH_CATEGORIES,
-  defaultDevicePushPolicy,
   type DevicePushPolicy,
   type PushTestState,
 } from './push-policy';
@@ -91,7 +97,6 @@ import type {
 import {
   clearPaneAgentViewOverridesForRelay,
   pruneHiddenServers,
-  terminalHistoryLines,
   terminalRefreshInterval,
   terminalResizeSession,
 } from './preferences';
@@ -106,30 +111,20 @@ import type {
   Activity,
   Agent,
   AgentProfile,
-  AgentInventoryStatus,
   CommandResult,
   ConversationHistoryRequest,
   ConversationPage,
-  FrontendTargetRef,
-  OmoTodoState,
   DirectoryListing,
   QuestionDraft,
   QuestionInteraction,
-  HerdrStatus,
   RelayConfig,
   RelayConnectionView,
   RelaySpeechVoice,
   RelayWorkspace,
-  SlashCommand,
   SlashCommandCatalog,
   TerminalFrame,
   TargetRef,
   ToastMessage,
-  WorkspaceFile,
-  WorkspaceGitDiff,
-  WorkspaceGitStatus,
-  WorkspaceTree,
-  WorktreeListing,
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
 const BOOTSTRAP_PAIRING_SESSION_PREFIX = 'herdr_browser_pairing:';
@@ -141,7 +136,6 @@ const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
 const UTF8_ENCODER = new TextEncoder();
-const PANE_READ_RETRY_MS = 35_000;
 // A connect attempt older than this is replaced when a revalidation event
 // (wake, focus, online, network change) arrives. A healthy dial finishes its
 // two handshakes in a couple of seconds; one that predates the event usually
@@ -161,10 +155,6 @@ const KEEPALIVE_INTERVAL_MS = 120_000;
 // radio wakeups: the keepalive stops and the connection is left to lapse.
 // Becoming visible resets the bound and resumes the keepalive.
 const HIDDEN_KEEPALIVE_MAX_MS = 60 * 60_000;
-// Gateway-relayed traffic is metered project bandwidth. Cap scrollback while
-// honoring the user's refresh rate; acknowledged deltas keep idle frames off
-// the wire and make the selected cadence affordable during normal output.
-const RELAYED_HISTORY_LINES = 1_000;
 const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   answer_question: true,
   navigate_question: true,
@@ -192,266 +182,6 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   acknowledge_pane: true,
   copy_agent_response: true,
 };
-
-function normalizeAgentInventory(
-  value: unknown,
-  fallbackState: AgentInventoryStatus['state'] = 'starting',
-): AgentInventoryStatus {
-  const inventory = value && typeof value === 'object' ? value as Record<string, unknown> : {};
-  const state = ['starting', 'ready', 'error'].includes(String(inventory.state))
-    ? String(inventory.state) as AgentInventoryStatus['state']
-    : fallbackState;
-  return {
-    state,
-    errorCode: String(inventory.error_code || '').slice(0, 80),
-    message: String(inventory.message || '').slice(0, 500),
-    lastAttemptAt: Number(inventory.last_attempt_at) || 0,
-    lastSuccessAt: Number(inventory.last_success_at) || 0,
-    stale: inventory.stale === true,
-  };
-}
-function normalizeHerdrStatus(value: unknown): HerdrStatus {
-  const status = isRecord(value)
-    ? value as Record<string, unknown>
-    : {};
-  const features: Record<string, HerdrStatus['features'][string]> = {};
-  const rawFeatures = isRecord(status.features)
-    ? status.features as Record<string, unknown>
-    : {};
-  for (const [name, rawFeature] of Object.entries(rawFeatures).slice(0, 64)) {
-    if (!isRecord(rawFeature)) continue;
-    const feature = rawFeature as Record<string, unknown>;
-    const state = String(feature.state || '');
-    if (!['supported', 'unsupported', 'unknown'].includes(state)) continue;
-    features[name.slice(0, 96)] = {
-      state: state as HerdrStatus['features'][string]['state'],
-      reason: String(feature.reason || '').slice(0, 160),
-    };
-  }
-  const endpoint = Number(status.endpoint_protocol_generation);
-  return {
-    installed_client_version: String(status.installed_client_version || '').slice(0, 64),
-    server_version: String(status.server_version || '').slice(0, 64),
-    server_protocol: parseWireSafeInteger(status.server_protocol) ?? 0,
-    server_protocol_known: status.server_protocol_known === true,
-    endpoint_protocol_generation: Number.isSafeInteger(endpoint) && endpoint > 0 ? endpoint : null,
-    generation: parseWireSafeInteger(status.generation) ?? 0,
-    features,
-  };
-}
-
-function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
-  if (!isRecord(value)) return undefined;
-  const state = value as Record<string, unknown>;
-  let remainingTasks = 1_000;
-  const phases = (Array.isArray(state.phases) ? state.phases : [])
-    .slice(0, 128)
-    .flatMap((candidate) => {
-      if (!isRecord(candidate)) return [];
-      const phase = candidate as Record<string, unknown>;
-      const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
-        .slice(0, remainingTasks)
-        .flatMap((item) => {
-          if (!isRecord(item)) return [];
-          const task = item as Record<string, unknown>;
-          const status = String(task.status || '');
-          const content = String(task.content || '').slice(0, 4_096);
-          if (!content || !['pending', 'in_progress', 'completed', 'abandoned'].includes(status)) return [];
-          return [{
-            id: String(task.id || '').slice(0, 160) || undefined,
-            content,
-            status: status as OmoTodoState['phases'][number]['tasks'][number]['status'],
-          }];
-        });
-      remainingTasks -= tasks.length;
-      return [{
-        name: String(phase.name || '').slice(0, 4_096) || 'Plan',
-        tasks,
-      }];
-    });
-  return {
-    available: state.available === true,
-    reason_code: String(state.reason_code || '').slice(0, 80) || undefined,
-    session_id: String(state.session_id || '').slice(0, 160) || undefined,
-    version: parseWireSafeInteger(state.version),
-    updated_at: String(state.updated_at || '').slice(0, 80) || undefined,
-    phases,
-    truncated: state.truncated === true,
-  };
-}
-
-
-const BROWSE_CURSOR_LIMIT = 2_048;
-
-function conversationCapabilities(value: unknown): import('./types').ConversationCapabilities | undefined {
-  if (value == null) return undefined;
-  const raw = browseRecord(value, true)!;
-  if (!['pi_events', 'recorded_history'].includes(raw.source)) invalidBrowse();
-  return { source: raw.source, active_branch: browseBoolean(raw.active_branch) };
-}
-
-export function normalizeConversationBatch(value: unknown): import('./types').ConversationBatch {
-  const raw = browseRecord(value, true)!;
-  if (!['batch', 'reset', 'heartbeat'].includes(raw.kind) || !Array.isArray(raw.remove) || raw.remove.length > 200 || JSON.stringify(raw).length > 2 * 1024 * 1024) invalidBrowse();
-  const page = normalizeConversationPage({ available: true, has_more: false, entries: raw.entries || [], state: 'ready', mode: 'recent', source_revision: raw.source_revision });
-  return { subscriptionId: browseString(raw.subscription_id, 128, true), kind: raw.kind, sourceRevision: page.sourceRevision || '', sequence: browseCount(raw.sequence), entries: page.entries, remove: raw.remove.map((id: unknown) => browseString(id, 256, true)), state: browseString(raw.state, 32), capabilities: conversationCapabilities(raw.capabilities) };
-}
-
-function invalidBrowse(): never {
-  throw new CommandError('Relay returned invalid conversation history');
-}
-
-function browseString(value: unknown, max: number, required = false): string {
-  if (value == null && !required) return '';
-  if (typeof value !== 'string' || value.length > max || (required && !value)) invalidBrowse();
-  return value;
-}
-
-function browseText(value: unknown, max: number): string {
-  return typeof value === 'string' ? value.slice(0, max) : '';
-}
-
-function browseIdentity(value: unknown, max: number): string {
-  return typeof value === 'string' && value.length <= max ? value : '';
-}
-
-function browseCount(value: unknown): number {
-  if (value == null) return 0;
-  const count = Number(value);
-  if (!Number.isSafeInteger(count) || count < 0) invalidBrowse();
-  return count;
-}
-
-function browseRecord(value: unknown, required = false): Record<string, any> | null {
-  const record = isRecord(value) ? value as Record<string, any> : null;
-  if (!record && required) invalidBrowse();
-  return record;
-}
-
-function browseBoolean(value: unknown, optional = false): boolean {
-  if (value == null && optional) return false;
-  if (typeof value !== 'boolean') invalidBrowse();
-  return value;
-}
-
-export function normalizeConversationPage(value: unknown): ConversationPage {
-  const data = browseRecord(value, true)!;
-  if (typeof data.available !== 'boolean' || typeof data.has_more !== 'boolean' || !Array.isArray(data.entries) || data.entries.length > 200) invalidBrowse();
-  const entries = data.entries.flatMap((candidate: unknown) => {
-    const entry = browseRecord(candidate);
-    if (!entry || (entry.role !== 'user' && entry.role !== 'assistant')) return [];
-    const text = browseText(entry.text, 1_048_576);
-    const tools = (Array.isArray(entry.tools) ? entry.tools : []).slice(0, 128).flatMap((candidateTool: unknown) => {
-      const tool = browseRecord(candidateTool);
-      if (!tool) return [];
-      return [{
-        id: browseIdentity(tool.id, 256), name: browseText(tool.name, 160) || 'Tool',
-        input: browseText(tool.input, 1_048_576), output: browseText(tool.output, 1_048_576),
-        ...(tool.state === 'running' || tool.state === 'completed' || tool.state === 'failed' ? { state: tool.state } : {}),
-        ...(typeof tool.parent_id === 'string' ? { parentId: browseIdentity(tool.parent_id, 256) } : {}),
-        error: tool.error === true, truncated: tool.truncated === true,
-      }];
-    });
-    const normalized = {
-      ...(entry.kind === 'compaction' || entry.kind === 'notice' ? { kind: entry.kind } : {}),
-      id: browseIdentity(entry.id, 256), timestamp: browseText(entry.timestamp, 128),
-      role: entry.role, text, tools, truncated: entry.truncated === true,
-    };
-    return normalized.id && (text || tools.length) ? [normalized] : [];
-  });
-  const cursor = browseString(data.next_cursor, BROWSE_CURSOR_LIMIT);
-  const state = browseString(data.state, 32, true);
-  const mode = browseString(data.mode, 32, true);
-  if (!['ready', 'preparing', 'failed'].includes(state) || !['recent', 'snapshot', 'native'].includes(mode)
-    || (data.has_more && !cursor) || (state === 'preparing' && !cursor)) invalidBrowse();
-  const progress = data.progress == null ? undefined : (() => {
-    const raw = browseRecord(data.progress, true)!;
-    const scanned = browseCount(raw.scanned_bytes);
-    const source = browseCount(raw.source_bytes);
-    if (scanned > source) invalidBrowse();
-    return { phase: browseString(raw.phase, 32, true), scanned_bytes: scanned, source_bytes: source };
-  })();
-  const rawDiagnostics = data.diagnostics == null ? {} : browseRecord(data.diagnostics, true)!;
-  const continuationIncomplete = browseBoolean(rawDiagnostics.continuation_incomplete, true);
-  const continuationReason = rawDiagnostics.continuation_reason == null
-    ? undefined
-    : browseString(rawDiagnostics.continuation_reason, 64);
-  const continuationReasons = new Set(['missing_source', 'invalid_link', 'ambiguous_link', 'cycle', 'resolution_limit', 'partial_link']);
-  if (continuationIncomplete && (!continuationReason || !continuationReasons.has(continuationReason))) invalidBrowse();
-  if (!continuationIncomplete && continuationReason) invalidBrowse();
-  const diagnostics = {
-    oversized_records: browseCount(rawDiagnostics.oversized_records), corrupt_records: browseCount(rawDiagnostics.corrupt_records),
-    omitted_tools: browseCount(rawDiagnostics.omitted_tools), omitted_payloads: browseCount(rawDiagnostics.omitted_payloads),
-    plan_corrupt: browseBoolean(rawDiagnostics.plan_corrupt, true),
-    source_truncated: browseBoolean(rawDiagnostics.source_truncated, true),
-    continuation_incomplete: continuationIncomplete,
-    continuation_reason: continuationReason,
-  };
-  const rawError = data.error == null ? null : browseRecord(data.error, true)!;
-  const error = rawError ? {
-    code: browseString(rawError.code, 64, true), message: browseString(rawError.message, 512, true),
-    retryable: browseBoolean(rawError.retryable),
-  } : undefined;
-  if (state === 'failed' && !error) invalidBrowse();
-  if (data.provisional != null && (!Array.isArray(data.provisional) || data.provisional.length > 16)) invalidBrowse();
-  return {
-    subscriptionId: browseString(data.subscription_id, 128),
-    provisional: data.provisional ? normalizeConversationPage({ available: true, has_more: false, entries: data.provisional, mode: 'recent', state: 'ready' }).entries : undefined,
-    capabilities: conversationCapabilities(data.capabilities), sequence: browseCount(data.sequence), liveState: browseString(data.live_state, 32),
-    available: data.available, reason: browseString(data.reason, 512), reasonCode: browseString(data.reason_code, 64) || undefined, entries,
-    nextCursor: cursor, hasMore: data.has_more, total: data.total == null ? null : browseCount(data.total),
-    state: state as ConversationPage['state'], mode: mode as ConversationPage['mode'],
-    sourceRevision: browseString(data.source_revision, 256), snapshotId: browseString(data.snapshot_id, 256), progress, diagnostics, error,
-    omoPlan: normalizeOmoTodoState(data.omo_plan),
-  };
-}
-
-function normalizeAgentTargetFields(agent: Partial<Agent>): Partial<Agent> {
-  const generation = Number(agent.generation);
-  return {
-    ...agent,
-    server_session_id: typeof agent.server_session_id === 'string' && agent.server_session_id.trim()
-      ? agent.server_session_id.trim()
-      : undefined,
-    terminal_id: typeof agent.terminal_id === 'string' && agent.terminal_id.trim()
-      ? agent.terminal_id.trim()
-      : undefined,
-    generation: Number.isSafeInteger(generation) && generation >= 0 ? generation : undefined,
-    agent_session_id: typeof agent.agent_session_id === 'string' ? agent.agent_session_id : undefined,
-  };
-}
-
-function normalizeWorkspace(
-  relayId: string,
-  relayLabel: string,
-  value: Record<string, unknown>,
-): RelayWorkspace | null {
-  const workspaceId = String(value.workspace_id || '');
-  if (!workspaceId) return null;
-  const worktreeValue = value.worktree && typeof value.worktree === 'object'
-    ? value.worktree as Record<string, unknown>
-    : null;
-  return {
-    relay_id: relayId,
-    relay_label: relayLabel,
-    workspace_id: workspaceId,
-    number: Number(value.number) || 0,
-    label: String(value.label || 'Workspace').slice(0, 256),
-    focused: value.focused === true,
-    pane_count: Number(value.pane_count) || 0,
-    tab_count: Number(value.tab_count) || 0,
-    active_tab_id: String(value.active_tab_id || ''),
-    agent_status: String(value.agent_status || ''),
-    cwd: String(value.cwd || ''),
-    worktree: worktreeValue ? {
-      repo_key: String(worktreeValue.repo_key || ''),
-      repo_name: String(worktreeValue.repo_name || ''),
-      repo_root: String(worktreeValue.repo_root || ''),
-      checkout_path: String(worktreeValue.checkout_path || ''),
-      is_linked_worktree: worktreeValue.is_linked_worktree === true,
-    } : null,
-  };
-}
 
 interface RelayConnection extends RelayConnectionView {
   transport: RelayTransport | null;
@@ -498,56 +228,12 @@ interface PendingSlashCommands {
   promise: Promise<SlashCommandCatalog>;
 }
 
-export class CommandError extends Error {
-  data?: Record<string, unknown>;
-  code?: string;
-  args?: Record<string, string | number | boolean>;
-}
-
-/**
- * A rejection for a frame that was already written to the transport. The
- * relay may have received and applied the command even though no result came
- * back, so callers must never treat a retry as safe (the retry-safety
- * doctrine's `dispatched_unknown` phase). Definitive pre-send failures —
- * capability checks, validation, a relay that never connected, a write the
- * transport refused — stay plain CommandErrors.
- */
-function dispatchedUnknownError(message: string): CommandError {
-  const error = new CommandError(message);
-  error.data = { dispatched_unknown: true };
-  return error;
-}
-
-function normalizePushPolicy(value: unknown): DevicePushPolicy | null {
-  if (!value || typeof value !== 'object') return null;
-  const record = value as Record<string, unknown>;
-  const deviceId = String(record.device_id || '').trim();
-  if (!deviceId) return null;
-  const policy = defaultDevicePushPolicy(deviceId, String(record.locale || 'en'));
-  const categories = record.categories && typeof record.categories === 'object'
-    ? record.categories as Record<string, unknown>
-    : {};
-  for (const category of PUSH_CATEGORIES) {
-    if (typeof categories[category] === 'boolean') policy.categories[category] = Boolean(categories[category]);
-  }
-  const settle = Number(record.settle_ms);
-  const cooldown = Number(record.cooldown_ms);
-  if (Number.isSafeInteger(settle) && settle >= 0) policy.settle_ms = settle;
-  if (Number.isSafeInteger(cooldown) && cooldown >= 0) policy.cooldown_ms = cooldown;
-  policy.snoozed = record.snoozed === true;
-  policy.update_once = record.update_once !== false;
-  const snoozeUntil = String(record.snooze_until || '');
-  if (snoozeUntil && Number.isFinite(Date.parse(snoozeUntil))) policy.snooze_until = snoozeUntil;
-  return policy;
-}
-
 class RelayStore {
   readonly relayConfigs = writable<RelayConfig[]>([]);
   readonly connections = writable<Map<string, RelayConnection>>(new Map());
   readonly agents = writable<Agent[]>([]);
   readonly workspaces = writable<RelayWorkspace[]>([]);
   readonly activities = writable<Activity[]>([]);
-  readonly terminalFrames = writable<Map<string, TerminalFrame>>(new Map());
   readonly responding = writable<Set<string>>(new Set());
   readonly toast = writable<ToastMessage | null>(null);
   readonly devices = writable<Map<string, DeviceSummary[]>>(new Map());
@@ -556,10 +242,16 @@ class RelayStore {
   readonly pushTests = writable<Map<string, PushTestState>>(new Map());
 
   private connectionsValue = new Map<string, RelayConnection>();
+  private readonly panes = new PaneStreams({
+    connection: (relayId) => this.connectionsValue.get(relayId),
+    agents: () => this.agentsValue,
+    sendRaw: (relayId, payload) => this.sendRaw(relayId, payload),
+    applyInteraction: (paneId, message) => this.mergePaneInteraction(paneId, message),
+  });
+  readonly terminalFrames = this.panes.frames;
   private agentsValue: Agent[] = [];
   private workspacesValue: RelayWorkspace[] = [];
   private activitiesValue: Activity[] = [];
-  private terminalFramesValue = new Map<string, TerminalFrame>();
   private respondingValue = new Set<string>();
   private devicesValue = new Map<string, DeviceSummary[]>();
   private pushPoliciesValue = new Map<string, DevicePushPolicy>();
@@ -567,17 +259,12 @@ class RelayStore {
   private blockedSnapshotMisses = new Map<string, number>();
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingUploads = new Map<string, PendingUpload>();
-  private pendingPaneReads = new Map<string, { requestId: string; requestedAt: number; startedAt: number }>();
-  private paneContentFingerprints = new Map<string, string>();
-  private secretObservations = new WeakMap<TerminalFrame, RelayConnection>();
   private secretReadAfter = new Map<string, number>();
-  private watchedPanes = new Map<string, Agent>();
   // Panes this phone may hold a size lease on, kept outside TerminalView so
   // turning Resize Session off can release panes whose view already closed
   // and are only in the relay's navigation grace.
   private ownedPaneLeases = new Map<string, Agent>();
   private paneLeaseEpoch = 0;
-  private paneWatchesStarted = new Set<string>();
   private slashCommandCache = new Map<string, SlashCommandCacheEntry>();
   private pendingSlashCommands = new Map<string, PendingSlashCommands>();
   private respondingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -596,7 +283,7 @@ class RelayStore {
     terminalRefreshInterval.subscribe((value) => {
       if (value === previousRefreshInterval) return;
       previousRefreshInterval = value;
-      this.restartPaneWatches();
+      this.panes.restartWatches();
     });
     terminalResizeSession.subscribe((enabled) => {
       if (!enabled) this.releaseAllPaneSizeLeases();
@@ -776,11 +463,8 @@ class RelayStore {
     this.responding.set(new Set());
     this.slashCommandCache.clear();
     this.pendingSlashCommands.clear();
-    this.pendingPaneReads.clear();
-    this.paneContentFingerprints.clear();
+    this.panes.reset();
     clearConversationPreviews();
-    this.watchedPanes.clear();
-    this.paneWatchesStarted.clear();
     this.ownedPaneLeases.clear();
   }
 
@@ -1013,13 +697,11 @@ class RelayStore {
         // the old one, and reads sent while the transport was down were lost
         // silently. Re-read every watched pane so an open terminal streams
         // again within one round trip, not at the next resync interval.
-        for (const watched of this.watchedPanes.values()) {
-          if (watched.relay_id === relay.id) this.readPane(watched);
-        }
+        this.panes.rereadWatched(relay.id);
       }
       // A path switch changes the relayed-fidelity budget, so panes have to be
       // rewatched at the interval the new path can afford.
-      if (previousPath && previousPath !== connection.path) this.restartPaneWatches();
+      if (previousPath && previousPath !== connection.path) this.panes.restartWatches();
       return;
     }
     if (status === 'connecting') {
@@ -1128,10 +810,7 @@ class RelayStore {
 
   disconnectRelay(id: string): void {
     this.clearSlashCommandCacheForRelay(id);
-    this.pendingPaneReads.clear();
-    for (const paneId of this.paneWatchesStarted) {
-      if (paneId.startsWith(`${id}::`)) this.paneWatchesStarted.delete(paneId);
-    }
+    this.panes.forgetRelay(id);
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
     connection.closed = true;
@@ -1378,10 +1057,10 @@ class RelayStore {
     ['agents', (relayId, message) => this.handleAgents(relayId, message)],
     ['blocked', (relayId, message) => this.handleBlocked(relayId, message)],
     ['agent_update', (relayId, message) => this.handleAgentUpdate(relayId, message)],
-    ['pane_unchanged', (relayId, message) => this.handlePaneUnchanged(relayId, message)],
-    ['pane_resync', (relayId, message) => this.handlePaneResync(relayId, message)],
-    ['pane_delta', (relayId, message) => this.handlePaneDelta(relayId, message)],
-    ['pane_content', (relayId, message) => this.handlePaneContent(relayId, message)],
+    ['pane_unchanged', (relayId, message) => this.panes.handleUnchanged(relayId, message)],
+    ['pane_resync', (relayId, message) => this.panes.handleResync(relayId, message)],
+    ['pane_delta', (relayId, message) => this.panes.handleDelta(relayId, message)],
+    ['pane_content', (relayId, message) => this.panes.handleContent(relayId, message)],
   ]);
 
   private handleMessage(relayId: string, message: Record<string, any>): void {
@@ -1651,143 +1330,6 @@ class RelayStore {
     this.publishAgents('agent update');
   }
 
-  private paneMessageContext(relayId: string, message: Record<string, any>) {
-    const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-    const agent = this.agentsValue.find((candidate) => candidate.pane_id === paneId)
-      || this.watchedPanes.get(paneId);
-    const hasTarget = Object.prototype.hasOwnProperty.call(message, 'target');
-    const target = !agent
-      ? null
-      : hasTarget
-        ? normalizeFrontendTargetRef({
-          ...(message.target as Record<string, unknown>),
-          relay_id: relayId,
-        })
-        : targetRefForAgent(agent);
-    const readKey = target && targetStoreKey(target);
-    const pendingRead = readKey ? this.pendingPaneReads.get(readKey) : undefined;
-    return {
-      paneId,
-      matches: !hasTarget || Boolean(target && agent && targetRefMatchesAgent(target, agent)),
-      staleRead: Boolean(message.request_id && message.request_id !== pendingRead?.requestId),
-      inputTarget: !message.error && hasTarget ? target : undefined,
-      completeRead: (): number | undefined => {
-        if (!readKey || !pendingRead || message.request_id !== pendingRead.requestId) return;
-        this.pendingPaneReads.delete(readKey);
-        return !message.error ? pendingRead.startedAt : undefined;
-      },
-    };
-  }
-
-  private handlePaneUnchanged(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches, staleRead, completeRead } = this.paneMessageContext(relayId, message);
-    if (staleRead || !matches) return;
-    completeRead();
-    if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
-      this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-    }
-    this.startPaneWatch(paneId);
-  }
-
-  private handlePaneResync(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches } = this.paneMessageContext(relayId, message);
-    if (!matches) return;
-    const watched = this.watchedPanes.get(paneId);
-    if (watched) this.readPane(watched, true);
-  }
-
-  private handlePaneDelta(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches, inputTarget } = this.paneMessageContext(relayId, message);
-    if (!matches) return;
-    const frame = this.terminalFramesValue.get(paneId);
-    const baseFingerprint = this.paneContentFingerprints.get(paneId);
-    const metadataOnly = baseFingerprint === message.base_fingerprint
-      && message.base_fingerprint === message.content_fingerprint
-      && Array.isArray(message.segments) && message.segments.length === 0;
-    const nextContent = frame && baseFingerprint === message.base_fingerprint
-      ? metadataOnly ? frame.content : applyPaneDelta(frame.content, message.segments)
-      : null;
-    const watched = this.watchedPanes.get(paneId);
-    if (nextContent === null || typeof message.content_fingerprint !== 'string') {
-      if (watched) this.readPane(watched, true);
-      return;
-    }
-    this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-    const deltaNoEcho = typeof message.no_echo === 'boolean' ? message.no_echo : frame?.noEcho;
-    this.terminalFramesValue.set(paneId, {
-      paneId,
-      content: nextContent,
-      receivedAt: performance.now(),
-      inputTarget,
-      target: typeof message.no_echo === 'boolean' ? inputTarget : undefined,
-      format: String(message.format || frame?.format || 'plain'),
-      truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
-      viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
-      viewportRows: typeof message.viewport_rows === 'number' ? message.viewport_rows : frame?.viewportRows,
-      noEcho: deltaNoEcho,
-      noEchoPrompt: deltaNoEcho
-        ? typeof message.no_echo_prompt === 'string' ? message.no_echo_prompt : frame?.noEchoPrompt
-        : undefined,
-      resizeSettling: message.resize_settling === true,
-    });
-    this.terminalFrames.set(new Map(this.terminalFramesValue));
-    this.mergePaneInteraction(paneId, message);
-    if (watched) this.acknowledgePaneFrame(watched, message.content_fingerprint);
-    return;
-  }
-
-  private handlePaneContent(relayId: string, message: Record<string, any>): void {
-    const { paneId, matches, staleRead, inputTarget, completeRead } = this.paneMessageContext(relayId, message);
-    if (staleRead || !matches) return;
-    const readStartedAt = completeRead();
-    const connection = this.connectionsValue.get(relayId);
-    if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
-      this.paneContentFingerprints.set(paneId, message.content_fingerprint);
-    }
-    const nextFrame: TerminalFrame = {
-      readStartedAt,
-      paneId,
-      content: typeof message.content === 'string' ? message.content : '(empty)',
-      receivedAt: performance.now(),
-      target: inputTarget,
-      inputTarget,
-      noEcho: typeof message.no_echo === 'boolean' ? message.no_echo : undefined,
-      format: String(message.format || 'plain'),
-    };
-    if (message.truncated === true) nextFrame.truncated = true;
-    if (message.viewport_only === true) nextFrame.viewportOnly = true;
-    if (typeof message.viewport_rows === 'number') nextFrame.viewportRows = message.viewport_rows;
-    if (message.no_echo === true) {
-      nextFrame.noEcho = true;
-      if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
-    }
-    if (message.resize_settling === true) nextFrame.resizeSettling = true;
-    if (connection && typeof nextFrame.noEcho === 'boolean' && Number.isFinite(readStartedAt)) this.secretObservations.set(nextFrame, connection);
-    this.terminalFramesValue.set(paneId, nextFrame);
-    this.terminalFrames.set(new Map(this.terminalFramesValue));
-    this.mergePaneInteraction(paneId, message);
-    const watched = this.watchedPanes.get(paneId);
-    const contentFingerprint = typeof message.content_fingerprint === 'string'
-      ? message.content_fingerprint
-      : '';
-    if (watched && message.ack_required && contentFingerprint) {
-      this.acknowledgePaneFrame(watched, contentFingerprint);
-    }
-    this.startPaneWatch(paneId);
-  }
-
-  private acknowledgePaneFrame(agent: Agent, contentFingerprint: string): void {
-    const identity = this.agentTargetPayload(agent);
-    if (!identity) return;
-    this.sendRaw(agent.relay_id, {
-      type: 'pane_applied',
-      pane_id: agent.raw_pane_id,
-      content_fingerprint: contentFingerprint,
-      ...identity,
-    });
-  }
-
-
   /**
    * Every agents publish flows through here because the home view keys its
    * cards by pane_id: one duplicate anywhere wedges Svelte's flush and every
@@ -1827,7 +1369,7 @@ class RelayStore {
     for (const paneId of this.blockedSnapshotMisses.keys()) {
       if (paneId.startsWith(`${relayId}::`)) this.blockedSnapshotMisses.delete(paneId);
     }
-    this.pendingPaneReads.clear();
+    this.panes.clearPendingReads();
     this.publishAgents('relay removal');
   }
 
@@ -2141,13 +1683,8 @@ class RelayStore {
   }
 
 
-  private agentTargetPayload(agent: Agent): { target: FrontendTargetRef; server_session_id: string } | null {
-    const target = targetRefForAgent(agent);
-    return target ? { target, server_session_id: target.server_session_id } : null;
-  }
-
   sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number, signal?: AbortSignal): Promise<CommandResult> {
-    const identity = this.agentTargetPayload(agent);
+    const identity = agentTargetPayload(agent);
     if (!identity) return Promise.reject(new CommandError('This agent no longer has an exact terminal identity'));
     return this.sendCommand(agent.relay_id, {
       ...payload,
@@ -2187,7 +1724,7 @@ class RelayStore {
       && connection?.status === 'connected' && capability.transport === connection.transport
       && connection.capabilities.includes('pi_prompt_unconfirmed') && this.deviceCredential(agent.relay_id)?.role === 'controller'
       && !this.hidden && document.visibilityState !== 'hidden' && frame && frame.noEcho === false
-      && frame === this.terminalFramesValue.get(agent.pane_id) && this.secretObservations.get(frame) === connection
+      && frame === this.panes.currentFrame(agent.pane_id) && this.panes.observedConnection(frame) === connection
       && frame.target && targetRefMatchesAgent(frame.target, agent) && age >= 0 && age < 3_000
       && Number.isFinite(frame.readStartedAt) && frame.readStartedAt! > capability.observedAt);
   }
@@ -2225,7 +1762,7 @@ class RelayStore {
       speech_request_id: speechRequestId,
     }, 20_000) as SpeechRequest;
     promise.cancel = () => {
-      const identity = this.agentTargetPayload(agent);
+      const identity = agentTargetPayload(agent);
       if (!identity) return;
       this.sendRaw(agent.relay_id, {
         type: 'cancel_speech',
@@ -2247,7 +1784,7 @@ class RelayStore {
     const connection = this.connectionsValue.get(agent.relay_id);
     const age = performance.now() - (frame?.receivedAt ?? NaN);
     return Boolean(frame && connection?.status === 'connected' && !this.hidden && document.visibilityState !== 'hidden'
-      && frame === this.terminalFramesValue.get(agent.pane_id) && this.secretObservations.get(frame) === connection
+      && frame === this.panes.currentFrame(agent.pane_id) && this.panes.observedConnection(frame) === connection
       && frame.noEcho === true && frame.target && targetRefMatchesAgent(frame.target, agent)
       && Number.isFinite(age) && age >= 0 && age < 3_000 && Number.isFinite(frame.readStartedAt)
       && frame.readStartedAt! > (this.secretReadAfter.get(agent.pane_id) ?? -Infinity));
@@ -2264,7 +1801,7 @@ class RelayStore {
     }
     const delivery = terminalInputDelivery(agent);
     if (!delivery.begin()) throw new CommandError('Check terminal input delivery before sending.');
-    this.secretObservations.delete(frame);
+    this.panes.forgetObservation(frame);
     let uncertain = true;
     try {
       const result = await this.sendToAgent(agent, { type: 'send_secret', text });
@@ -2290,134 +1827,6 @@ class RelayStore {
     return this.sendToAgent(agent, { type: 'tab_reorder', insert_index: insertIndex });
   }
 
-  private workspaceManagementAvailable(relayId: string, capability = 'workspace_management'): RelayConnection {
-    const connection = this.connectionsValue.get(relayId);
-    if (!connection?.capabilities.includes(capability)
-      && !(['workspace_rename', 'workspace_reorder'].includes(capability) && connection?.capabilities.includes('workspace_management'))) {
-      throw new CommandError(capability === 'worktree_management'
-        ? 'This relay does not support worktree management'
-        : 'This relay does not support workspace management');
-    }
-    return connection;
-  }
-
-  async createWorkspace(relayId: string, cwd: string, label: string): Promise<CommandResult> {
-    this.workspaceManagementAvailable(relayId);
-    const result = await this.sendCommand(relayId, { type: 'workspace_create', cwd, label }, 45_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async renameWorkspace(workspace: RelayWorkspace, label: string): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'workspace_rename');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'workspace_rename', workspace_id: workspace.workspace_id, label,
-    });
-    this.requestAgents();
-    return result;
-  }
-
-  async reorderWorkspaceBlock(
-    relayId: string,
-    workspaceIds: string[],
-    beforeWorkspaceId: string,
-    legacyInsertIndex: number,
-  ): Promise<CommandResult> {
-    const connection = this.workspaceManagementAvailable(relayId, 'workspace_reorder');
-    if (!workspaceIds.length || new Set(workspaceIds).size !== workspaceIds.length) {
-      throw new CommandError('Workspace selection is invalid');
-    }
-    const payload = connection.capabilities.includes('workspace_reorder_block')
-      ? {
-          type: 'workspace_reorder',
-          workspace_ids: workspaceIds,
-          before_workspace_id: beforeWorkspaceId,
-        }
-      : workspaceIds.length === 1 && Number.isInteger(legacyInsertIndex) && legacyInsertIndex >= 0
-        ? {
-            type: 'workspace_reorder',
-            workspace_id: workspaceIds[0],
-            insert_index: legacyInsertIndex,
-          }
-        : null;
-    if (!payload) {
-      throw new CommandError('Update Herdr to reorder a workspace with linked worktrees');
-    }
-    const result = await this.sendCommand(relayId, payload);
-    this.requestAgents();
-    return result;
-  }
-
-  async closeWorkspace(
-    workspace: RelayWorkspace,
-    options: { closeGroup?: boolean; expectedWorkspaceIds?: string[] } = {},
-  ): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id);
-    const payload: Record<string, unknown> = {
-      type: 'workspace_close',
-      workspace_id: workspace.workspace_id,
-    };
-    if (options.closeGroup === true) {
-      payload.close_group = true;
-      payload.expected_workspace_ids = options.expectedWorkspaceIds || [];
-    }
-    const result = await this.sendCommand(workspace.relay_id, payload, 30_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async listWorktrees(workspace: RelayWorkspace): Promise<WorktreeListing> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_list', workspace_id: workspace.workspace_id,
-    }, 30_000);
-    const listing = result.data as unknown as WorktreeListing;
-    if (!listing?.source || !Array.isArray(listing.worktrees)) {
-      throw new CommandError('Relay returned an invalid worktree listing');
-    }
-    return listing;
-  }
-
-  async createWorktree(
-    workspace: RelayWorkspace,
-    options: { branch: string; base?: string; label?: string },
-  ): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_create',
-      workspace_id: workspace.workspace_id,
-      branch: options.branch,
-      base: options.base || '',
-      label: options.label || '',
-    }, 75_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async openWorktree(
-    workspace: RelayWorkspace,
-    options: { path?: string; branch?: string; label?: string },
-  ): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_open',
-      workspace_id: workspace.workspace_id,
-      path: options.path || '',
-      branch: options.branch || '',
-      label: options.label || '',
-    }, 75_000);
-    this.requestAgents();
-    return result;
-  }
-
-  async removeWorktree(workspace: RelayWorkspace, force = false): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'worktree_remove', workspace_id: workspace.workspace_id, force,
-    }, 75_000);
-    this.requestAgents();
-    return result;
-  }
 
   async checkRelayUpdate(relayId: string): Promise<void> {
     const connection = this.connectionsValue.get(relayId);
@@ -2730,85 +2139,16 @@ class RelayStore {
     void this.sendToAgent(agent, { type: 'unwatch_conversation', subscription_id: subscriptionId }, 3000).catch(() => {});
   }
 
-  /**
-   * Terminal history the active path can afford. Gateway-relayed traffic is
-   * metered project bandwidth, so it caps scrollback; every path honors the
-   * user's selected refresh interval.
-   */
-  private paneBudget(relayId: string): { lines: number; intervalMs: number } {
-    const lines = get(terminalHistoryLines);
-    const intervalMs = get(terminalRefreshInterval);
-    if (this.connectionsValue.get(relayId)?.path !== 'gateway') return { lines, intervalMs };
-    return { lines: Math.min(lines, RELAYED_HISTORY_LINES), intervalMs };
-  }
-
   readPane(agent: Agent, force = false, lines?: number): void {
-    const identity = this.agentTargetPayload(agent);
-    if (!identity) return;
-    const readKey = targetStoreKey(identity.target);
-    if (!readKey) return;
-    const pending = this.pendingPaneReads.get(readKey);
-    if (!force && pending && Date.now() - pending.requestedAt < PANE_READ_RETRY_MS) return;
-    this.paneWatchesStarted.delete(agent.pane_id);
-    const requestId = commandRequestId();
-    const startedAt = performance.now();
-    const sent = this.sendRaw(agent.relay_id, {
-      type: 'read_pane',
-      request_id: requestId,
-      pane_id: agent.raw_pane_id,
-      lines: lines ?? this.paneBudget(agent.relay_id).lines,
-      format: 'ansi',
-      content_fingerprint: force || lines !== undefined ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
-      ...identity,
-    });
-    if (sent) this.pendingPaneReads.set(readKey, { requestId, startedAt, requestedAt: Date.now() });
+    this.panes.readPane(agent, force, lines);
   }
 
   watchPane(agent: Agent): void {
-    this.watchedPanes.set(agent.pane_id, agent);
-    this.startPaneWatch(agent.pane_id);
+    this.panes.watchPane(agent);
   }
 
   unwatchPane(agent: Agent): void {
-    this.watchedPanes.delete(agent.pane_id);
-    this.paneWatchesStarted.delete(agent.pane_id);
-    const connection = this.connectionsValue.get(agent.relay_id);
-    const identity = this.agentTargetPayload(agent);
-    if (!connection?.capabilities.includes('pane_realtime_delta') || !identity) return;
-    this.sendRaw(agent.relay_id, {
-      type: 'unwatch_pane',
-      pane_id: agent.raw_pane_id,
-      ...identity,
-    });
-  }
-
-  private restartPaneWatches(): void {
-    for (const paneId of [...this.paneWatchesStarted]) {
-      this.paneWatchesStarted.delete(paneId);
-      this.startPaneWatch(paneId);
-    }
-  }
-
-  private startPaneWatch(paneId: string): void {
-    const agent = this.watchedPanes.get(paneId);
-    if (!agent || this.paneWatchesStarted.has(paneId)) return;
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('pane_realtime_delta')) return;
-    const contentFingerprint = this.paneContentFingerprints.get(paneId);
-    const identity = this.agentTargetPayload(agent);
-    const readKey = identity && targetStoreKey(identity.target);
-    if (!contentFingerprint || !identity || !readKey || this.pendingPaneReads.has(readKey)) return;
-    const budget = this.paneBudget(agent.relay_id);
-    const sent = this.sendRaw(agent.relay_id, {
-      type: 'watch_pane',
-      pane_id: agent.raw_pane_id,
-      lines: budget.lines,
-      interval_ms: budget.intervalMs,
-      format: 'ansi',
-      content_fingerprint: contentFingerprint,
-      ...identity,
-    });
-    if (sent) this.paneWatchesStarted.add(paneId);
+    this.panes.unwatchPane(agent);
   }
 
   requestAgents(): void {
@@ -3118,55 +2458,6 @@ class RelayStore {
     return this.applySpeechVoices(relayId, connection, result.data);
   }
 
-  private workspaceInspectionAvailable(agent: Agent): void {
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('workspace_inspection')) {
-      throw new CommandError('This relay does not support workspace inspection.');
-    }
-    if (!String(agent.cwd || '').trim()) {
-      throw new CommandError('This agent does not report a workspace path.');
-    }
-  }
-
-  async loadWorkspaceTree(agent: Agent): Promise<WorkspaceTree> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_tree' }, 20_000);
-    const data = result.data as unknown as WorkspaceTree;
-    if (!data || typeof data.root !== 'string' || !Array.isArray(data.entries)) {
-      throw new CommandError('Relay returned an invalid workspace tree.');
-    }
-    return data;
-  }
-
-  async loadWorkspaceFile(agent: Agent, path: string): Promise<WorkspaceFile> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_file', path }, 20_000);
-    const data = result.data as unknown as WorkspaceFile;
-    if (!data || data.path !== path || !['text', 'image'].includes(data.kind)) {
-      throw new CommandError('Relay returned an invalid workspace preview.');
-    }
-    return data;
-  }
-
-  async loadWorkspaceGitStatus(agent: Agent): Promise<WorkspaceGitStatus> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_git_status' }, 20_000);
-    const data = result.data as unknown as WorkspaceGitStatus;
-    if (!data || typeof data.available !== 'boolean' || !Array.isArray(data.files)) {
-      throw new CommandError('Relay returned an invalid Git status.');
-    }
-    return data;
-  }
-
-  async loadWorkspaceGitDiff(agent: Agent, path: string): Promise<WorkspaceGitDiff> {
-    this.workspaceInspectionAvailable(agent);
-    const result = await this.sendToAgent(agent, { type: 'workspace_git_diff', path }, 20_000);
-    const data = result.data as unknown as WorkspaceGitDiff;
-    if (!data || data.path !== path || typeof data.diff !== 'string') {
-      throw new CommandError('Relay returned an invalid Git diff.');
-    }
-    return data;
-  }
 
   async loadSlashCommands(agent: Agent, refresh = false): Promise<SlashCommandCatalog> {
     const connection = this.connectionsValue.get(agent.relay_id);
@@ -3183,48 +2474,7 @@ class RelayStore {
     const promise = this.sendToAgent(agent, { type: 'list_slash_commands' }, 10_000)
       .then((result) => {
         const data = result.data && typeof result.data === 'object' ? result.data : {};
-        const rawCommands = data.commands;
-        const commandsList = Array.isArray(rawCommands) ? rawCommands : [];
-        const sources = new Set(['builtin', 'personal', 'project', 'temporary']);
-        const metadata = data.metadata && typeof data.metadata === 'object'
-          ? data.metadata as Record<string, Record<string, unknown>> : {};
-        const commandMetadata = (name: string): Pick<SlashCommand, 'kind' | 'provenance'> => {
-          const value = metadata[name];
-          if (!value || !['builtin', 'extension', 'prompt', 'skill'].includes(String(value.kind))) return {};
-          const kind = value.kind as SlashCommand['kind'];
-          const p = value.provenance as Record<string, unknown> | undefined;
-          if (!p || !['user', 'project', 'temporary'].includes(String(p.scope))
-            || !['package', 'top-level'].includes(String(p.origin))) return { kind };
-          return { kind, provenance: {
-            path: String(p.path || '').slice(0, 1024), source: String(p.source || '').slice(0, 256),
-            scope: p.scope as NonNullable<SlashCommand['provenance']>['scope'],
-            origin: p.origin as NonNullable<SlashCommand['provenance']>['origin'],
-            ...(p.base_dir ? { base_dir: String(p.base_dir).slice(0, 1024) } : {}),
-          } };
-        };
-        const validCommands = commandsList
-          .filter((entry: Record<string, unknown>) => typeof entry?.command === 'string'
-            && entry.command.length <= 121 && /^\/[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/.test(entry.command));
-        const commands = validCommands
-          .slice(0, SLASH_COMMAND_MAX_ENTRIES)
-          .map((entry: Record<string, unknown>): SlashCommand => ({
-            command: String(entry.command),
-            description: String(entry.description || entry.command).slice(0, 240),
-            ...(entry.argument_hint ? { argument_hint: String(entry.argument_hint).slice(0, 120) } : {}),
-            source: sources.has(String(entry.source))
-              ? entry.source as SlashCommand['source']
-              : 'temporary',
-            ...commandMetadata(String(entry.command)),
-          }))
-          .sort((left, right) => left.command.localeCompare(right.command, undefined, { sensitivity: 'base' }));
-        const catalog: SlashCommandCatalog = {
-          commands,
-          truncated: Boolean(data.truncated) || validCommands.length > SLASH_COMMAND_MAX_ENTRIES,
-          ...(['loading', 'available', 'unavailable', 'partial'].includes(String(data.status))
-            ? { status: data.status as SlashCommandCatalog['status'] } : {}),
-          ...(typeof data.revision === 'string' && /^[a-f0-9]{64}$/.test(data.revision)
-            ? { revision: data.revision } : {}),
-        };
+        const catalog = normalizeSlashCommandCatalog(data);
         if (this.pendingSlashCommands.get(agent.pane_id)?.promise === promise) {
           this.slashCommandCache.set(agent.pane_id, { identity, catalog });
         }
@@ -3388,44 +2638,8 @@ function relayConnectionIdentityChanged(before: RelayConfig, after: RelayConfig)
     || before.rendezvousKey !== after.rendezvousKey;
 }
 
-function applyPaneDelta(previous: string, value: unknown): string | null {
-  if (!Array.isArray(value)) return null;
-  const boundaries = [0];
-  for (let index = 0; index < previous.length; index += 1) {
-    if (previous.charCodeAt(index) === 10) boundaries.push(index + 1);
-  }
-  boundaries.push(previous.length);
-
-  const chunks: string[] = [];
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== 'object') return null;
-    const segment = candidate as Record<string, unknown>;
-    if (segment.copy_lines !== undefined) {
-      if (!Number.isInteger(segment.copy_lines) || Number(segment.copy_lines) <= 0) return null;
-      const copyLines = Number(segment.copy_lines);
-      const copyStart = segment.copy_start === undefined ? 0 : segment.copy_start;
-      if (!Number.isInteger(copyStart) || Number(copyStart) < 0) return null;
-      const copyEnd = Number(copyStart) + copyLines;
-      if (copyEnd > boundaries.length - 1) return null;
-      chunks.push(previous.slice(boundaries[Number(copyStart)], boundaries[copyEnd]));
-      continue;
-    }
-    if (typeof segment.text !== 'string') return null;
-    chunks.push(segment.text);
-  }
-  return chunks.join('');
-}
-
-
 function paneLeaseKey(agent: Agent): string {
   return `${agent.relay_id}\u0000${agent.pane_id}`;
-}
-
-function commandRequestId(): string {
-  if (crypto.randomUUID) return crypto.randomUUID();
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return bytesToHex(bytes);
 }
 
 function runningAsInstalledApp(): boolean {
