@@ -235,7 +235,11 @@ func TestInboundDecodesCompositeScope(t *testing.T) {
 }
 
 func TestActionCatalogMetadataIsClosed(t *testing.T) {
-	for operation, metadata := range actionCatalog {
+	for operation := range actionCatalog {
+		metadata, known := ClassifyAction(operation)
+		if !known {
+			t.Errorf("%q is not classified", operation)
+		}
 		if metadata.Operation != operation {
 			t.Errorf("%q metadata operation = %q", operation, metadata.Operation)
 		}
