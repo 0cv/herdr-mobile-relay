@@ -67,6 +67,14 @@ type paneRecord struct {
 	revision     int64
 	contentRev   int64
 	attentionRev int64
+	completion   completionState
+}
+
+type completionState struct {
+	unseenDone    bool
+	ackDone       bool
+	finishedNotif bool
+	completionRev int64
 }
 
 type TransitionCallback func(paneID, agent, project, status string, revision int64)
@@ -77,10 +85,6 @@ type State struct {
 	workspaces         []herdr.Workspace
 	topologyGen        int64
 	revCounter         int64
-	unseenDone         map[string]bool
-	ackDone            map[string]bool
-	finishedNotif      map[string]bool
-	completionRev      map[string]int64
 	generation         map[string]int64
 	sessionDiscoveries map[string]sessionDiscovery
 	triage             map[string]triageRecord
@@ -125,10 +129,6 @@ type InventorySnapshot struct {
 func NewState(logger *slog.Logger) *State {
 	return &State{
 		panes:              make(map[string]*paneRecord),
-		unseenDone:         make(map[string]bool),
-		ackDone:            make(map[string]bool),
-		finishedNotif:      make(map[string]bool),
-		completionRev:      make(map[string]int64),
 		generation:         make(map[string]int64),
 		sessionDiscoveries: make(map[string]sessionDiscovery),
 		pendingEvents:      make(map[string]pendingEvent),
@@ -348,7 +348,7 @@ func (s *State) CompletionCurrent(paneID string, revision int64) bool {
 	return rec != nil &&
 		(!attentionStatuses[rec.agent.Status] ||
 			rec.agent.Status == "blocked" && rec.agent.AttentionKind == question.AttentionChat) &&
-		s.completionRev[paneID] == revision
+		rec.completion.completionRev == revision
 }
 
 func (s *State) MarkTopologyChanged() {
@@ -500,10 +500,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.sessionDiscoveries, incoming.PaneID)
 			topologyChanged = true
 			s.generation[incoming.PaneID]++
-			delete(s.unseenDone, incoming.PaneID)
-			delete(s.ackDone, incoming.PaneID)
-			delete(s.finishedNotif, incoming.PaneID)
-			delete(s.completionRev, incoming.PaneID)
+			rec.completion = completionState{}
 			existing = nil
 			exists = false
 		}
@@ -588,10 +585,10 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.registerTransition(incoming.PaneID, prev, cp.Status, previousAttention)
 		if !exists && (doneStatuses[cp.Status] || cp.Status == "idle") {
 			if cp.LastActiveAt > cp.LastSeenAt {
-				s.unseenDone[incoming.PaneID] = true
-				delete(s.ackDone, incoming.PaneID)
+				rec.completion.unseenDone = true
+				rec.completion.ackDone = false
 			} else if doneStatuses[cp.Status] && (cp.LastActiveAt > 0 || cp.LastSeenAt > 0) {
-				s.ackDone[incoming.PaneID] = true
+				rec.completion.ackDone = true
 			}
 		}
 		triageDirty = s.syncTriageLocked(&cp) || triageDirty
@@ -610,10 +607,6 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.sessionDiscoveries, id)
 			s.generation[id]++
 			delete(s.panes, id)
-			delete(s.unseenDone, id)
-			delete(s.ackDone, id)
-			delete(s.finishedNotif, id)
-			delete(s.completionRev, id)
 			delete(s.customAnswers, id)
 		}
 	}
@@ -808,10 +801,7 @@ func (s *State) registerTransition(
 	rec := s.panes[paneID]
 	if attentionStatuses[status] {
 		if prev != status {
-			delete(s.unseenDone, paneID)
-			delete(s.ackDone, paneID)
-			delete(s.finishedNotif, paneID)
-			delete(s.completionRev, paneID)
+			rec.completion = completionState{}
 		}
 		if status == "blocked" && prev != "blocked" {
 			s.fireTransition(paneID, status)
@@ -824,9 +814,9 @@ func (s *State) registerTransition(
 
 	if doneStatuses[status] {
 		if attentionStatuses[prev] {
-			delete(s.ackDone, paneID)
-			s.unseenDone[paneID] = true
-			s.completionRev[paneID] = rec.revision
+			rec.completion.ackDone = false
+			rec.completion.unseenDone = true
+			rec.completion.completionRev = rec.revision
 			s.fireTransition(paneID, status)
 		}
 		return
@@ -838,9 +828,9 @@ func (s *State) registerTransition(
 		if prev == "blocked" && previousAttention == question.AttentionChat {
 			return
 		}
-		delete(s.ackDone, paneID)
-		s.unseenDone[paneID] = true
-		s.completionRev[paneID] = rec.revision
+		rec.completion.ackDone = false
+		rec.completion.unseenDone = true
+		rec.completion.completionRev = rec.revision
 		s.fireTransition(paneID, status)
 	}
 }
@@ -852,14 +842,14 @@ func (s *State) syncAttentionCompletionLocked(
 	rec := s.panes[paneID]
 	if current == question.AttentionChat {
 		if previous != question.AttentionChat {
-			delete(s.finishedNotif, paneID)
-			s.completionRev[paneID] = rec.revision
+			rec.completion.finishedNotif = false
+			rec.completion.completionRev = rec.revision
 		}
 		return
 	}
 	if previous == question.AttentionChat {
-		delete(s.finishedNotif, paneID)
-		delete(s.completionRev, paneID)
+		rec.completion.finishedNotif = false
+		rec.completion.completionRev = 0
 	}
 }
 
@@ -973,9 +963,9 @@ func (s *State) AcknowledgePane(paneID string) bool {
 	}
 	agent := rec.agent
 	agent.LastSeenAt = max(time.Now().UnixMilli(), agent.LastActiveAt)
-	if s.unseenDone[paneID] || doneStatuses[agent.Status] {
-		delete(s.unseenDone, paneID)
-		s.ackDone[paneID] = true
+	if rec.completion.unseenDone || doneStatuses[agent.Status] {
+		rec.completion.unseenDone = false
+		rec.completion.ackDone = true
 	}
 	if s.syncTriageLocked(agent) {
 		s.persistTriageLocked()
@@ -992,10 +982,10 @@ func (s *State) DisplayedStatus(paneID string) string {
 		return ""
 	}
 	a := rec.agent
-	if doneStatuses[a.Status] && s.ackDone[paneID] {
+	if doneStatuses[a.Status] && rec.completion.ackDone {
 		return "idle"
 	}
-	if a.Status == "idle" && s.unseenDone[paneID] {
+	if a.Status == "idle" && rec.completion.unseenDone {
 		return "done"
 	}
 	return a.Status
@@ -1013,10 +1003,10 @@ func (s *State) snapshotLocked() []*AgentState {
 		cp := rec.agent.Clone()
 		cp.StateRevision = rec.revision
 		cp.Generation = s.generation[cp.PaneID]
-		if doneStatuses[cp.Status] && s.ackDone[cp.PaneID] {
+		if doneStatuses[cp.Status] && rec.completion.ackDone {
 			cp.Status = "idle"
 		}
-		if cp.Status == "idle" && s.unseenDone[cp.PaneID] {
+		if cp.Status == "idle" && rec.completion.unseenDone {
 			cp.Status = "done"
 		}
 		result = append(result, cp)
@@ -1187,9 +1177,9 @@ func (s *State) RegisterFinishedNotificationForTransition(
 	if rec == nil ||
 		(attentionStatuses[rec.agent.Status] &&
 			!(rec.agent.Status == "blocked" && rec.agent.AttentionKind == question.AttentionChat)) ||
-		s.completionRev[paneID] != revision || s.finishedNotif[paneID] {
+		rec.completion.completionRev != revision || rec.completion.finishedNotif {
 		return false
 	}
-	s.finishedNotif[paneID] = true
+	rec.completion.finishedNotif = true
 	return true
 }
