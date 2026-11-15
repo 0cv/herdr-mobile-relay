@@ -109,8 +109,7 @@ func parseCodex(text string) *Interaction {
 	if len(all) == 0 || !otherPattern.MatchString(all[len(all)-1].Label) {
 		return nil
 	}
-	otherItem := all[len(all)-1]
-	options := all[:len(all)-1]
+	options, otherItem := splitOther(all)
 	notes := ""
 	for _, line := range lines[notesStart:footerIndex] {
 		trimmed := strings.TrimSpace(line)
@@ -131,10 +130,6 @@ func parseCodex(text string) *Interaction {
 			otherItem.Selected = true
 		}
 	}
-	submitLabel := "Submit"
-	if current < total {
-		submitLabel = "Next"
-	}
 	interaction := &Interaction{
 		Kind:     "single_select",
 		Question: questionText,
@@ -146,7 +141,7 @@ func parseCodex(text string) *Interaction {
 			Placeholder: "Optional notes",
 			AllowEmpty:  true,
 		},
-		SubmitLabel:    submitLabel,
+		SubmitLabel:    nextOrSubmit(current, total),
 		CanChat:        false,
 		CanGoBack:      current > 1,
 		QuestionIndex:  current,
@@ -156,8 +151,7 @@ func parseCodex(text string) *Interaction {
 		Agent:          "codex",
 		NotesActive:    notesActive,
 	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return finishInteraction(interaction)
 }
 
 func codexFooter(line string) bool {

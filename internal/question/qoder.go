@@ -174,7 +174,7 @@ func parseQoder(text string) *Interaction {
 			Label:       otherRow.label,
 			Placeholder: "Type an answer",
 		},
-		SubmitLabel:    "Next",
+		SubmitLabel:    nextOrSubmit(current, total),
 		CanGoBack:      current > 1,
 		QuestionIndex:  current,
 		QuestionTotal:  total,
@@ -183,11 +183,7 @@ func parseQoder(text string) *Interaction {
 		Agent:          "qoder",
 		NotesActive:    notesActive,
 	}
-	if current == total {
-		interaction.SubmitLabel = "Submit"
-	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return finishInteraction(interaction)
 }
 
 func parseQoderReview(lines []string, headerIndex, footerIndex, questionTotal int) *Interaction {
@@ -229,21 +225,7 @@ func parseQoderReview(lines []string, headerIndex, footerIndex, questionTotal in
 	options[0].Description = summaryLines(summary, 1000)
 	options[0].Summary = summary
 	step := questionTotal + 1
-	interaction := &Interaction{
-		Kind:           "single_select",
-		Question:       "Review your answers and choose what to do",
-		Options:        options,
-		Other:          Other{Hidden: true},
-		SubmitLabel:    "Continue",
-		CanGoBack:      true,
-		QuestionIndex:  step,
-		QuestionTotal:  step,
-		Focus:          focus,
-		AllOptionCount: len(options),
-		Agent:          "qoder",
-	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return reviewInteraction("qoder", options, focus, true, step, step)
 }
 
 func qoderHeader(line string) bool {

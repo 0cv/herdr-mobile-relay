@@ -173,16 +173,12 @@ func parseOMP(text string) *Interaction {
 	if total == 0 {
 		current, total = 1, 1
 	}
-	submitLabel := "Submit"
-	if current < total {
-		submitLabel = "Next"
-	}
 	interaction := &Interaction{
 		Kind:           kind,
 		Question:       question,
 		Options:        options,
 		Other:          other,
-		SubmitLabel:    submitLabel,
+		SubmitLabel:    nextOrSubmit(current, total),
 		CanGoBack:      current > 1,
 		QuestionIndex:  current,
 		QuestionTotal:  total,
@@ -190,8 +186,7 @@ func parseOMP(text string) *Interaction {
 		AllOptionCount: allOptions,
 		Agent:          "omp",
 	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return finishInteraction(interaction)
 }
 
 func parseOMPReview(lines []string, start, end int) *Interaction {
@@ -240,8 +235,7 @@ func parseOMPReview(lines []string, start, end int) *Interaction {
 		AllOptionCount: 1,
 		Agent:          "omp",
 	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return finishInteraction(interaction)
 }
 
 func ompQuestion(lines []string, start, firstOption int) string {

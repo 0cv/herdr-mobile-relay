@@ -127,8 +127,7 @@ func parseOpenCode(text string) *Interaction {
 			focus = Focus{Kind: "option", Index: index}
 		}
 	}
-	otherItem := all[len(all)-1]
-	options := all[:len(all)-1]
+	options, otherItem := splitOther(all)
 	otherText := otherItem.Description
 	if strings.EqualFold(otherText, otherItem.Label) {
 		otherText = ""
@@ -147,10 +146,6 @@ func parseOpenCode(text string) *Interaction {
 	if current < 1 || total < current {
 		current, total = 1, 1
 	}
-	submitLabel := "Next"
-	if current == total {
-		submitLabel = "Submit"
-	}
 	interaction := &Interaction{
 		Kind:     kind,
 		Question: questionText,
@@ -161,7 +156,7 @@ func parseOpenCode(text string) *Interaction {
 			Label:       otherItem.Label,
 			Placeholder: "Type your own answer",
 		},
-		SubmitLabel:    submitLabel,
+		SubmitLabel:    nextOrSubmit(current, total),
 		CanGoBack:      current > 1,
 		QuestionIndex:  current,
 		QuestionTotal:  total,
@@ -170,8 +165,7 @@ func parseOpenCode(text string) *Interaction {
 		Agent:          "opencode",
 		NotesActive:    notesActive,
 	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return finishInteraction(interaction)
 }
 
 func parseOpenCodeReview(
@@ -205,26 +199,13 @@ func parseOpenCodeReview(
 	}
 	current = total + 1
 	total = current
-	interaction := &Interaction{
-		Kind:     "single_select",
-		Question: "Review your answers and choose what to do",
-		Options: []Option{{
-			Index:       0,
-			Label:       "Submit answers",
-			Description: summaryLines(summary, 1000),
-			Summary:     summary,
-		}},
-		Other:          Other{Hidden: true},
-		SubmitLabel:    "Continue",
-		CanGoBack:      true,
-		QuestionIndex:  current,
-		QuestionTotal:  total,
-		Focus:          Focus{Kind: "option"},
-		AllOptionCount: 1,
-		Agent:          "opencode",
-	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	options := []Option{{
+		Index:       0,
+		Label:       "Submit answers",
+		Description: summaryLines(summary, 1000),
+		Summary:     summary,
+	}}
+	return reviewInteraction("opencode", options, Focus{Kind: "option"}, true, current, total)
 }
 
 func openCodeLayoutHint(text string) bool {

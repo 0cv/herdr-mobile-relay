@@ -76,12 +76,7 @@ func parseClaude(text string) *Interaction {
 		if chatFocus {
 			focus = Focus{Kind: "chat"}
 		}
-		otherItem := all[len(all)-1]
-		options := all[:len(all)-1]
-		otherText := ""
-		if !otherPattern.MatchString(otherItem.Label) {
-			otherText = otherItem.Label
-		}
+		options, otherItem := splitOther(all)
 		question := prompt(lines, checkboxRows[0].line)
 		current, total := claudePosition(text)
 		if submitLabel == "Submit" && current > 0 && current < total {
@@ -91,7 +86,7 @@ func parseClaude(text string) *Interaction {
 			Kind:           "multi_select",
 			Question:       question,
 			Options:        options,
-			Other:          Other{Selected: otherItem.Selected, Text: otherText},
+			Other:          claudeOther(otherItem),
 			SubmitLabel:    submitLabel,
 			CanChat:        chatIndex >= 0,
 			CanGoBack:      current > 1,
@@ -101,8 +96,7 @@ func parseClaude(text string) *Interaction {
 			AllOptionCount: len(all),
 			Agent:          "claude",
 		}
-		interaction.ID = interactionID(interaction)
-		return interaction
+		return finishInteraction(interaction)
 	}
 
 	if chatIndex < 0 {
@@ -155,23 +149,14 @@ func parseClaude(text string) *Interaction {
 	if chatFocus {
 		focus = Focus{Kind: "chat"}
 	}
-	otherItem := all[len(all)-1]
-	options := all[:len(all)-1]
-	otherText := ""
-	if !otherPattern.MatchString(otherItem.Label) {
-		otherText = otherItem.Label
-	}
+	options, otherItem := splitOther(all)
 	current, total := claudePosition(text)
-	submitLabel = "Submit"
-	if current > 0 && current < total {
-		submitLabel = "Next"
-	}
 	interaction := &Interaction{
 		Kind:           "single_select",
 		Question:       prompt(lines, rows[0].line),
 		Options:        options,
-		Other:          Other{Selected: otherItem.Selected, Text: otherText},
-		SubmitLabel:    submitLabel,
+		Other:          claudeOther(otherItem),
+		SubmitLabel:    nextOrSubmit(current, total),
 		CanChat:        true,
 		CanGoBack:      current > 1,
 		QuestionIndex:  current,
@@ -183,7 +168,7 @@ func parseClaude(text string) *Interaction {
 	// Leftover typed text only marks the custom answer as chosen while no
 	// option row carries the confirmed selection; otherwise a stale note from
 	// an earlier visit would override the real answer.
-	if otherText != "" && !interaction.Other.Selected {
+	if interaction.Other.Text != "" && !interaction.Other.Selected {
 		selectedElsewhere := false
 		for _, option := range options {
 			if option.Selected {
@@ -195,8 +180,14 @@ func parseClaude(text string) *Interaction {
 			interaction.Other.Selected = true
 		}
 	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return finishInteraction(interaction)
+}
+
+func claudeOther(item Option) Other {
+	if otherPattern.MatchString(item.Label) {
+		return Other{Selected: item.Selected}
+	}
+	return Other{Selected: item.Selected, Text: item.Label}
 }
 
 func parseClaudeReview(text string, lines []string) *Interaction {
@@ -269,21 +260,7 @@ func parseClaudeReview(text string, lines []string) *Interaction {
 		current = len(summary) + 1
 		total = current
 	}
-	interaction := &Interaction{
-		Kind:           "single_select",
-		Question:       "Review your answers and choose what to do",
-		Options:        options,
-		Other:          Other{Hidden: true},
-		SubmitLabel:    "Continue",
-		CanGoBack:      strings.Contains(text, "←"),
-		QuestionIndex:  current,
-		QuestionTotal:  total,
-		Focus:          focus,
-		AllOptionCount: len(options),
-		Agent:          "claude",
-	}
-	interaction.ID = interactionID(interaction)
-	return interaction
+	return reviewInteraction("claude", options, focus, strings.Contains(text, "←"), current, total)
 }
 
 func prompt(lines []string, firstOption int) string {

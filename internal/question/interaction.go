@@ -57,6 +57,44 @@ type Interaction struct {
 	NotesActive    bool   `json:"-"`
 }
 
+func finishInteraction(interaction *Interaction) *Interaction {
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
+func nextOrSubmit(current, total int) string {
+	if current < total {
+		return "Next"
+	}
+	return "Submit"
+}
+
+func reviewInteraction(
+	agent string,
+	options []Option,
+	focus Focus,
+	canGoBack bool,
+	current, total int,
+) *Interaction {
+	return finishInteraction(&Interaction{
+		Kind:           "single_select",
+		Question:       "Review your answers and choose what to do",
+		Options:        options,
+		Other:          Other{Hidden: true},
+		SubmitLabel:    "Continue",
+		CanGoBack:      canGoBack,
+		QuestionIndex:  current,
+		QuestionTotal:  total,
+		Focus:          focus,
+		AllOptionCount: len(options),
+		Agent:          agent,
+	})
+}
+
+func splitOther(all []Option) ([]Option, Option) {
+	return all[:len(all)-1], all[len(all)-1]
+}
+
 func interactionID(interaction *Interaction) string {
 	value := struct {
 		Kind        string   `json:"kind"`
