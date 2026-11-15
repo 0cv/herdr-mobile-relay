@@ -157,7 +157,12 @@ func TestCursorCommandWinsSkillCollision(t *testing.T) {
 					writeFile(t, filepath.Join(skillRoot, "review", "SKILL.md"),
 						"---\nname: review\ndescription: Skill review\nargument-hint: <skill>\n---\nBody\n")
 
-					catalog := CatalogForProfile("cursor", "cursor", repo, home, skillDirs, "/{name}", "")
+					catalog := CatalogFor("cursor", "cursor", DiscoverContext{
+						Cwd:           repo,
+						Home:          home,
+						SkillDirs:     skillDirs,
+						CommandFormat: "/{name}",
+					})
 					want := Command{"/review", "Command review", commandScope, "<command>"}
 					count := 0
 					for _, command := range catalog.Commands {

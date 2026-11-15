@@ -4,7 +4,7 @@ import "testing"
 
 func TestOMPBuiltinCatalog(t *testing.T) {
 	isolateAgentEnv(t)
-	catalog := CatalogForProfile("omp", "omp", t.TempDir(), "/nonexistent", nil, "", "")
+	catalog := catalogFor("omp", t.TempDir(), "/nonexistent")
 	if catalog.Truncated {
 		t.Fatal("builtins-only catalog is truncated")
 	}

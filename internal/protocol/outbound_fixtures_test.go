@@ -130,7 +130,7 @@ func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	actual := slashcmd.CatalogFor("claude", "/nonexistent", "/nonexistent")
+	actual := slashcmd.CatalogFor("claude", "claude", slashcmd.DiscoverContext{Cwd: "/nonexistent", Home: "/nonexistent"})
 	if fixture.Type != "command_result" || fixture.RequestID != "req-slash-1" ||
 		fixture.Action != "list_slash_commands" || !fixture.OK ||
 		fixture.Phase != "completed" || fixture.Error != "" || fixture.PaneID != "pane-1" ||

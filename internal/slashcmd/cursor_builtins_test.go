@@ -60,7 +60,12 @@ func TestCursorBuiltinAliasesCannotBecomeCustomCommands(t *testing.T) {
 							cursorSkill(t, skillRoot, name, name, "Custom skill")
 						}
 					}
-					catalog := CatalogForProfile("cursor", "cursor", cwd, home, skillDirs, "/{name}", "")
+					catalog := CatalogFor("cursor", "cursor", DiscoverContext{
+						Cwd:           cwd,
+						Home:          home,
+						SkillDirs:     skillDirs,
+						CommandFormat: "/{name}",
+					})
 					assertCursorCustomCommands(t, catalog)
 					for canonical := range aliases {
 						if commandSource(catalog, canonical) != "builtin" {
@@ -91,7 +96,7 @@ func TestCursorAdditionalUnconditionalBuiltins(t *testing.T) {
 func TestCursorOmitsPromptQualityBuiltin(t *testing.T) {
 	for _, suppressed := range []bool{false, true} {
 		home, cwd := t.TempDir(), t.TempDir()
-		catalog := CatalogForProfileWithSuppression("cursor", "cursor", cwd, home, nil, "", "", suppressed)
+		catalog := CatalogFor("cursor", "cursor", DiscoverContext{Cwd: cwd, Home: home, SuppressNative: suppressed})
 		if containsCommand(catalog, "/open-in-prompt-quality") {
 			t.Errorf("development-only builtin published with suppression=%v", suppressed)
 		}

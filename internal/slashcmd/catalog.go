@@ -64,10 +64,7 @@ func Revise(catalog Catalog) Catalog {
 }
 
 func IsPi(profile, agent string) bool {
-	provider := resolveProvider(profile)
-	if provider == nil {
-		provider = resolveProvider(agentkind.Of(agent))
-	}
+	provider := providerFor(profile, agent)
 	return provider != nil && provider.ID() == "pi"
 }
 
@@ -94,51 +91,21 @@ func MergePiRuntime(entries []RuntimeCommand, status string, truncated bool) Cat
 	return Revise(Catalog{Commands: commands, Metadata: metadata, Status: status, Truncated: truncated})
 }
 
-func CatalogFor(agent, cwd, home string) Catalog {
-	return CatalogForProfile(agentkind.Of(agent), agent, cwd, home, nil, "", "")
-}
-
-func CatalogForProfile(
-	profileID, reportedAgent, cwd, home string,
-	skillDirs []string,
-	commandFormat, agentDir string,
-) Catalog {
-	return CatalogForProfileWithSuppression(
-		profileID, reportedAgent, cwd, home,
-		skillDirs, commandFormat, agentDir, false,
-	)
-}
-
-func CatalogForProfileWithSuppression(
-	profileID, reportedAgent, cwd, home string,
-	skillDirs []string,
-	commandFormat, agentDir string,
-	suppressNative bool,
-) Catalog {
-	var commands []Command
-	var truncated bool
-
-	ctx := DiscoverContext{
-		AgentDir:       agentDir,
-		Cwd:            cwd,
-		Home:           home,
-		SkillDirs:      skillDirs,
-		CommandFormat:  commandFormat,
-		SuppressNative: suppressNative,
+func CatalogFor(profileID, reportedAgent string, ctx DiscoverContext) Catalog {
+	provider := providerFor(profileID, reportedAgent)
+	if provider == nil {
+		commands, truncated := newCatalogReader().discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+		return finalizeCatalog(commands, truncated)
 	}
-
-	p := resolveProvider(profileID)
-	if p == nil && reportedAgent != "" {
-		p = resolveProvider(agentkind.Of(reportedAgent))
-	}
-
-	if p != nil {
-		commands, truncated = p.Discover(ctx)
-	} else {
-		commands, truncated = discoverGenericSkills(skillDirs, commandFormat)
-	}
-
+	commands, truncated := provider.Discover(ctx)
 	return finalizeCatalog(commands, truncated)
+}
+
+func providerFor(profileID, agent string) Provider {
+	if provider := resolveProvider(profileID); provider != nil {
+		return provider
+	}
+	return resolveProvider(agentkind.Of(agent))
 }
 
 func finalizeCatalog(commands []Command, truncated bool) Catalog {

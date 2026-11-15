@@ -1,5 +1,15 @@
 package slashcmd
 
+import "github.com/0cv/herdr-mobile-relay/internal/agentkind"
+
+func catalogFor(agent, cwd, home string) Catalog {
+	return CatalogFor(agentkind.Of(agent), agent, DiscoverContext{Cwd: cwd, Home: home})
+}
+
+func discoverGenericSkills(dirs []string, format string) ([]Command, bool) {
+	return newCatalogReader().discoverGenericSkills(dirs, format)
+}
+
 func readSkillMetadata(path string) (map[string]string, bool) {
 	return newCatalogReader().readSkillMetadata(path)
 }

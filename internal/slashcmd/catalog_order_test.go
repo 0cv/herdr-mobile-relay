@@ -70,7 +70,7 @@ func TestClaudeCatalogOrder(t *testing.T) {
 	writeFile(t, filepath.Join(personal, "settings.json"),
 		`{"skillOverrides":{"plan":"off","stats":"off","gamma":"off"}}`)
 
-	catalog := CatalogForProfile("claude", "claude", cwd, home, nil, "", "")
+	catalog := catalogFor("claude", cwd, home)
 	assertOrdered(t, catalog, wantOrdered(claudeBuiltins,
 		map[string]string{"/help": "personal", "/review": "", "/plan": ""},
 		"/deploy|personal", "/alpha|project", "/zeta|project", "/beta|personal", "/review|personal",
@@ -102,7 +102,7 @@ func TestQoderCatalogOrder(t *testing.T) {
 	writeSkill(t, filepath.Join(personal, "skills"), "shared", "Personal shared")
 	writeSkill(t, filepath.Join(personal, "skills"), "status", "Personal status")
 
-	catalog := CatalogForProfile("qoder", "qoder", cwd, home, nil, "", "")
+	catalog := catalogFor("qoder", cwd, home)
 	assertOrdered(t, catalog, wantOrdered(qoderBuiltins,
 		map[string]string{"/help": "", "/cost": "", "/copy": "", "/status": ""},
 		"/deploy|personal", "/help|personal", "/shared|personal", "/status|personal",
@@ -188,7 +188,12 @@ func TestHermesCatalogOrder(t *testing.T) {
 		writeSkill(t, scope.dir, scope.only, "Only skill")
 	}
 
-	catalog := CatalogForProfile("hermes", "hermes", repo, home, []string{configured}, "/{name}", "")
+	catalog := CatalogFor("hermes", "hermes", DiscoverContext{
+		Cwd:           repo,
+		Home:          home,
+		SkillDirs:     []string{configured},
+		CommandFormat: "/{name}",
+	})
 	assertOrdered(t, catalog, wantOrdered(hermesBuiltins, nil,
 		"/deploy|project", "/project-only|project", "/personal-only|personal", "/configured-only|personal",
 	))
@@ -211,7 +216,7 @@ func TestCursorCatalogOrder(t *testing.T) {
 	writeSkill(t, filepath.Join(home, ".cursor", "skills"), "Mixed-Case", "Personal mixed")
 	writeSkill(t, filepath.Join(home, ".agents", "skills"), "mixed-case", "Agents mixed")
 
-	catalog := CatalogForProfile("cursor", "cursor", repo, home, nil, "", "")
+	catalog := catalogFor("cursor", repo, home)
 	assertOrdered(t, catalog, wantOrdered(cursorBuiltins, nil,
 		"/deploy|project", "/alpha|project", "/beta|personal", "/shared|personal", "/Mixed-Case|personal",
 	))
@@ -232,7 +237,7 @@ func TestOpenCodeCatalogOrder(t *testing.T) {
 	writeCommand(t, filepath.Join(cwd, ".opencode", "commands", "deploy.md"), "Inner deploy")
 	writeCommand(t, filepath.Join(cwd, ".opencode", "commands", "git", "review.md"), "Inner review")
 
-	catalog := CatalogForProfile("opencode", "opencode", cwd, home, nil, "", "")
+	catalog := catalogFor("opencode", cwd, home)
 	assertOrdered(t, catalog, wantOrdered(openCodeBuiltins, nil,
 		"/personal-only|personal", "/deploy|project", "/outer-only|project", "/git/review|project",
 	))
@@ -250,7 +255,7 @@ func TestAgyCatalogOrder(t *testing.T) {
 		writeSkill(t, scope.dir, scope.only, "Only skill")
 	}
 
-	catalog := CatalogForProfile("agy", "agy", t.TempDir(), home, []string{configured}, "", "")
+	catalog := CatalogFor("agy", "agy", DiscoverContext{Cwd: t.TempDir(), Home: home, SkillDirs: []string{configured}})
 	assertOrdered(t, catalog, wantOrdered(agyBuiltins, nil,
 		"/deploy|personal", "/personal-only|personal", "/configured-only|project",
 	))
@@ -276,12 +281,17 @@ func TestConfiguredFormatKeepsBuiltinsFirst(t *testing.T) {
 			writeSkill(t, personal, "alpha", "Personal alpha")
 			writeSkill(t, project, "beta", "Project beta")
 
-			catalog := CatalogForProfile(tc.profile, tc.profile, cwd, home, []string{personal, project}, "/{name}", "")
+			catalog := CatalogFor(tc.profile, tc.profile, DiscoverContext{
+				Cwd:           cwd,
+				Home:          home,
+				SkillDirs:     []string{personal, project},
+				CommandFormat: "/{name}",
+			})
 			assertOrdered(t, catalog, wantOrdered(tc.builtins, nil,
 				"/alpha|personal", "/zeta|personal", "/beta|project",
 			))
 
-			catalog = CatalogForProfile(tc.profile, tc.profile, cwd, home, nil, "/{name}", "")
+			catalog = CatalogFor(tc.profile, tc.profile, DiscoverContext{Cwd: cwd, Home: home, CommandFormat: "/{name}"})
 			assertOrdered(t, catalog, wantOrdered(tc.builtins, nil))
 		})
 	}

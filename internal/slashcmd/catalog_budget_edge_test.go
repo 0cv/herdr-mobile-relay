@@ -37,7 +37,7 @@ func TestCatalogBudgetEdge(t *testing.T) {
 				for index := range files {
 					tc.add(t, home, index)
 				}
-				catalog := CatalogForProfile(tc.profile, tc.profile, t.TempDir(), home, nil, "", "")
+				catalog := CatalogFor(tc.profile, tc.profile, DiscoverContext{Cwd: t.TempDir(), Home: home})
 				if catalog.Truncated != wantTruncated {
 					t.Errorf("truncated = %v, want %v", catalog.Truncated, wantTruncated)
 				}

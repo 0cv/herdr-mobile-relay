@@ -26,7 +26,7 @@ func TestSlashCommandLimitsMatchContract(t *testing.T) {
 }
 
 func TestClaudeBuiltins(t *testing.T) {
-	catalog := CatalogFor("claude-code", "/tmp", "/nonexistent-home")
+	catalog := catalogFor("claude-code", "/tmp", "/nonexistent-home")
 	if len(catalog.Commands) == 0 {
 		t.Fatal("no commands returned")
 	}
@@ -49,7 +49,7 @@ func TestClaudeBuiltins(t *testing.T) {
 }
 
 func TestCodexBuiltins(t *testing.T) {
-	catalog := CatalogFor("codex", "/tmp", "/nonexistent-home")
+	catalog := catalogFor("codex", "/tmp", "/nonexistent-home")
 	if len(catalog.Commands) == 0 {
 		t.Fatal("no commands returned")
 	}
@@ -72,7 +72,7 @@ func TestDiscoverPersonalCommands(t *testing.T) {
 	os.WriteFile(filepath.Join(cmdDir, "deploy.md"), []byte("Deploy the app to production\n\nMore details here."), 0o644)
 	os.WriteFile(filepath.Join(cmdDir, "not-a-command.txt"), []byte("ignored"), 0o644)
 
-	catalog := CatalogFor("claude", "/tmp", home)
+	catalog := catalogFor("claude", "/tmp", home)
 
 	found := false
 	for _, cmd := range catalog.Commands {
@@ -98,7 +98,7 @@ func TestDiscoverProjectCommands(t *testing.T) {
 	os.MkdirAll(cmdDir, 0o755)
 	os.WriteFile(filepath.Join(cmdDir, "test.md"), []byte("Run project tests"), 0o644)
 
-	catalog := CatalogFor("claude", cwd, home)
+	catalog := catalogFor("claude", cwd, home)
 
 	found := false
 	for _, cmd := range catalog.Commands {
@@ -120,7 +120,7 @@ func TestDiscoverSkills(t *testing.T) {
 	os.MkdirAll(skillDir, 0o755)
 	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: my-skill\n---\nA custom skill"), 0o644)
 
-	catalog := CatalogFor("claude", "/tmp", home)
+	catalog := catalogFor("claude", "/tmp", home)
 
 	found := false
 	for _, cmd := range catalog.Commands {
@@ -137,7 +137,7 @@ func TestDiscoverSkills(t *testing.T) {
 }
 
 func TestClaudeBuiltinCatalogIsComplete(t *testing.T) {
-	catalog := CatalogFor("claude", "/tmp", "/nonexistent")
+	catalog := catalogFor("claude", "/tmp", "/nonexistent")
 	if len(catalog.Commands) != 51 {
 		t.Fatalf("Claude builtins = %d, want 51", len(catalog.Commands))
 	}
@@ -190,7 +190,12 @@ func TestGenericConfiguredSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	catalog := CatalogForProfile("pi", "pi-coding-agent", root, root, []string{first, second}, "skill:{name}", "")
+	catalog := CatalogFor("pi", "pi-coding-agent", DiscoverContext{
+		Cwd:           root,
+		Home:          root,
+		SkillDirs:     []string{first, second},
+		CommandFormat: "skill:{name}",
+	})
 	if len(catalog.Commands) != len(piBuiltins)+1 {
 		t.Fatalf("command count = %d, want %d: %+v", len(catalog.Commands), len(piBuiltins)+1, catalog.Commands)
 	}
@@ -208,7 +213,7 @@ func TestGenericConfiguredSkills(t *testing.T) {
 }
 
 func TestUnknownProfileHasNoClaudeFallback(t *testing.T) {
-	catalog := CatalogForProfile("custom", "custom", t.TempDir(), t.TempDir(), nil, "", "")
+	catalog := CatalogFor("custom", "custom", DiscoverContext{Cwd: t.TempDir(), Home: t.TempDir()})
 	if len(catalog.Commands) != 0 {
 		t.Fatalf("unexpected commands: %+v", catalog.Commands)
 	}
@@ -237,9 +242,7 @@ func TestExplicitSuppressionSkipsNativeDiscovery(t *testing.T) {
 		t.Run(tc.profile, func(t *testing.T) {
 			home := t.TempDir()
 			writeFile(t, filepath.Join(home, tc.nativeFile), skill)
-			catalog := CatalogForProfileWithSuppression(
-				tc.profile, tc.profile, t.TempDir(), home, nil, "", "", true,
-			)
+			catalog := CatalogFor(tc.profile, tc.profile, DiscoverContext{Cwd: t.TempDir(), Home: home, SuppressNative: true})
 			if !reflect.DeepEqual(catalog.Commands, tc.builtins) {
 				t.Fatalf("commands = %d, want the %d builtins in order", len(catalog.Commands), len(tc.builtins))
 			}

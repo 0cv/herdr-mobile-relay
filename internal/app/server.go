@@ -1020,9 +1020,14 @@ func (s *Server) Run(ctx context.Context) error {
 			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
 			location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
 			agentDir := locatedAgentDir(s.home, agent, location)
-			catalog := slashcmd.CatalogForProfileWithSuppression(
-				profileID, agent, cwd, s.home, skillDirs, commandFormat, agentDir, suppressNative,
-			)
+			catalog := slashcmd.CatalogFor(profileID, agent, slashcmd.DiscoverContext{
+				AgentDir:       agentDir,
+				Cwd:            cwd,
+				Home:           s.home,
+				SkillDirs:      skillDirs,
+				CommandFormat:  commandFormat,
+				SuppressNative: suppressNative,
+			})
 			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
 				catalog.Status = "partial"
 				if runtime, err := runtimePiCatalog(client.Context(), s.herdrC, s.cfg.SocketPath, paneID, activeAgent.SessionID); err == nil {

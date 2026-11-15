@@ -26,7 +26,7 @@ func TestOpenCodeNativeMarkdownCommands(t *testing.T) {
 	writeOpenCodeCommand(t, filepath.Join(project, ".opencode", "commands", "git", "review.md"), "---\ndescription: Nested review\nhidden: true\nuser-invocable: false\n---\nNever execute this body.\n")
 	writeOpenCodeCommand(t, filepath.Join(project, ".opencode", "command", "legacy.md"), "Legacy spelling")
 	writeOpenCodeCommand(t, filepath.Join(project, ".opencode", "skills", "not-a-slash-command", "SKILL.md"), "---\nname: not-a-slash-command\ndescription: Native @ mention\n---\nSkill body")
-	catalog := CatalogFor("opencode", project, home)
+	catalog := catalogFor("opencode", project, home)
 	for _, name := range []string{"/personal", "/git/review", "/legacy"} {
 		if !hasCommand(catalog, name) {
 			t.Errorf("missing native command %s", name)
@@ -50,7 +50,7 @@ func TestOpenCodeCommandPrecedenceAndSuppression(t *testing.T) {
 	cwd := filepath.Join(project, "src")
 	writeOpenCodeCommand(t, filepath.Join(cwd, ".opencode", "command", "deploy.md"), "---\ndescription: Inner\n---\nBody")
 	writeOpenCodeCommand(t, filepath.Join(cwd, ".opencode", "commands", "help.md"), "---\ndescription: Must not override builtin\n---\nBody")
-	catalog := CatalogFor("opencode", cwd, home)
+	catalog := catalogFor("opencode", cwd, home)
 	found := false
 	for _, cmd := range catalog.Commands {
 		if cmd.Command == "/deploy" {
@@ -66,7 +66,7 @@ func TestOpenCodeCommandPrecedenceAndSuppression(t *testing.T) {
 	if !found {
 		t.Fatal("missing nearest project command")
 	}
-	suppressed := CatalogForProfileWithSuppression("opencode", "opencode", cwd, home, nil, "", "", true)
+	suppressed := CatalogFor("opencode", "opencode", DiscoverContext{Cwd: cwd, Home: home, SuppressNative: true})
 	if suppressed.Truncated || !reflect.DeepEqual(suppressed.Commands, openCodeBuiltins) {
 		t.Fatal("native suppression did not retain only builtins")
 	}
@@ -83,7 +83,7 @@ func TestOpenCodeCommandBoundsAndReadOnly(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "escape.md")); err != nil {
 		t.Fatal(err)
 	}
-	catalog := CatalogFor("opencode", project, home)
+	catalog := catalogFor("opencode", project, home)
 	if catalog.Truncated || !hasCommand(catalog, "/kept") || hasCommand(catalog, "/oversized") || hasCommand(catalog, "/escape") {
 		t.Fatalf("bounded file handling: %+v", catalog)
 	}
@@ -94,7 +94,7 @@ func TestOpenCodeCommandBoundsAndReadOnly(t *testing.T) {
 	for i := 0; i <= maxCustomFiles; i++ {
 		writeOpenCodeCommand(t, filepath.Join(root, fmt.Sprintf("budget%04d.md", i)), "Body")
 	}
-	catalog = CatalogFor("opencode", project, home)
+	catalog = catalogFor("opencode", project, home)
 	if !catalog.Truncated || len(catalog.Commands) != len(openCodeBuiltins)+maxCustomFiles {
 		t.Fatalf("file budget: entries=%d truncated=%v", len(catalog.Commands), catalog.Truncated)
 	}

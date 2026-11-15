@@ -60,7 +60,12 @@ func (f budgetProviderFixture) catalog() Catalog {
 	} else if f.profile == "hermes" {
 		dirs = f.roots[1:]
 	}
-	return CatalogForProfile(f.profile, "", f.cwd, f.home, dirs, f.format, "")
+	return CatalogFor(f.profile, "", DiscoverContext{
+		Cwd:           f.cwd,
+		Home:          f.home,
+		SkillDirs:     dirs,
+		CommandFormat: f.format,
+	})
 }
 
 func (f budgetProviderFixture) add(t *testing.T, root int, name, metadata string, size int) {

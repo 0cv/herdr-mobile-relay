@@ -24,7 +24,7 @@ func cursorSkill(t *testing.T, dir, folder, frontmatterName, description string)
 func cursorCatalog(t *testing.T, cwd, home string) Catalog {
 	t.Helper()
 	isolateAgentEnv(t)
-	return CatalogFor("cursor", cwd, home)
+	return catalogFor("cursor", cwd, home)
 }
 
 // Cursor derives a skill's command id from its directory name, not from the
@@ -296,10 +296,12 @@ func TestCursorHonorsConfiguredSkillDirs(t *testing.T) {
 	extra := filepath.Join(home, "extra-skills")
 	cursorSkill(t, extra, "custom-command", "custom-command", "Extra")
 
-	catalog := CatalogForProfile(
-		"cursor", "cursor", t.TempDir(), home,
-		[]string{extra}, "/{name}", "",
-	)
+	catalog := CatalogFor("cursor", "cursor", DiscoverContext{
+		Cwd:           t.TempDir(),
+		Home:          home,
+		SkillDirs:     []string{extra},
+		CommandFormat: "/{name}",
+	})
 	if !containsCommand(catalog, "/custom-command") {
 		t.Errorf("configured skill dir ignored; catalog=%v", commandNames(catalog))
 	}
@@ -342,10 +344,12 @@ func TestCursorSuppressNativeYieldsBuiltinsOnly(t *testing.T) {
 	home := t.TempDir()
 	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "someskill", "someskill", "Skill")
 
-	catalog := CatalogForProfileWithSuppression(
-		"cursor", "cursor", t.TempDir(), home,
-		nil, "/{name}", "", true,
-	)
+	catalog := CatalogFor("cursor", "cursor", DiscoverContext{
+		Cwd:            t.TempDir(),
+		Home:           home,
+		CommandFormat:  "/{name}",
+		SuppressNative: true,
+	})
 	if len(catalog.Commands) != len(cursorBuiltins) {
 		t.Errorf("suppressed catalog has %d commands, want %d builtins",
 			len(catalog.Commands), len(cursorBuiltins))

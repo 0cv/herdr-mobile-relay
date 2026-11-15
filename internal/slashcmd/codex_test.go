@@ -3,7 +3,7 @@ package slashcmd
 import "testing"
 
 func TestCodexBaseBuiltins(t *testing.T) {
-	catalog := CatalogFor("codex", "/tmp", "/nonexistent")
+	catalog := catalogFor("codex", "/tmp", "/nonexistent")
 	if len(catalog.Commands) == 0 {
 		t.Fatal("no commands returned")
 	}
@@ -20,14 +20,14 @@ func TestCodexNoFilesystemDiscovery(t *testing.T) {
 	mkdirAll(t, cmdDir)
 	writeTestFile(t, cmdDir+"/extra.md", "Should not appear")
 
-	catalog := CatalogFor("codex", "/tmp", home)
+	catalog := catalogFor("codex", "/tmp", home)
 	if hasCommand(catalog, "/extra") {
 		t.Error("codex should not do filesystem discovery")
 	}
 }
 
 func TestCodexModelHint(t *testing.T) {
-	catalog := CatalogFor("codex", "/tmp", "/nonexistent")
+	catalog := catalogFor("codex", "/tmp", "/nonexistent")
 	for _, cmd := range catalog.Commands {
 		if cmd.Command == "/goal" {
 			if cmd.ArgumentHint != "[objective|edit|pause|resume|clear]" {
