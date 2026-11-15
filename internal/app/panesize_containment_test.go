@@ -3,8 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"runtime"
 	"slices"
 	"strings"
@@ -158,13 +156,7 @@ func TestPaneSizeCommandsOnAllIngresses(t *testing.T) {
 			var send func([]byte) error
 			var receive func() ([]byte, error)
 			if path == transport.TransportWebSocket {
-				httpServer := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
-				defer httpServer.Close()
-				conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer conn.CloseNow()
+				conn := dialHub(t, s)
 				send = func(data []byte) error { return conn.Write(ctx, websocket.MessageText, data) }
 				receive = func() ([]byte, error) { _, data, err := conn.Read(ctx); return data, err }
 			} else {

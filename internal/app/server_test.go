@@ -630,17 +630,8 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
 	}}, server.state.RevisionCounter())
 	useProductionHandler(t, server)
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	defer func() {
-		server.hub.Shutdown(context.Background())
-		browser.Close()
-	}()
-	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
+	t.Cleanup(func() { browser.Close() })
+	conn := dialHub(t, server)
 	payload, err := json.Marshal(map[string]any{
 		"type": "get_conversation_history", "request_id": "history-1", "pane_id": "pane-1", "limit": 1,
 	})
@@ -730,17 +721,8 @@ func TestConversationHistoryRejectsForegroundChangeDuringRead(t *testing.T) {
 		<-releaseRead
 	}
 	useProductionHandler(t, server)
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	defer func() {
-		server.hub.Shutdown(context.Background())
-		browser.Close()
-	}()
-	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
+	t.Cleanup(func() { browser.Close() })
+	conn := dialHub(t, server)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	payload, err := json.Marshal(map[string]any{
@@ -915,15 +897,6 @@ func TestPublishCurrentInventoryOrdersRecoveryForConnectedRefreshAndReconnect(t 
 	publishInventoryForTest(t, server)
 	connected := make(chan *transport.ClientConn, 2)
 	server.hub.SetOnConnect(func(client *transport.ClientConn) { connected <- client })
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	dial := func() *websocket.Conn {
-		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return conn
-	}
 	readType := func(conn *websocket.Conn) string {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -936,7 +909,7 @@ func TestPublishCurrentInventoryOrdersRecoveryForConnectedRefreshAndReconnect(t 
 		typeName, _ := message["type"].(string)
 		return typeName
 	}
-	conn := dial()
+	conn := dialHub(t, server)
 	client := <-connected
 	server.state.MarkInventoryFailure(errors.New("topology churn"))
 	publishInventoryForTest(t, server)
@@ -970,7 +943,7 @@ func TestPublishCurrentInventoryOrdersRecoveryForConnectedRefreshAndReconnect(t 
 		server.sendConnectionSnapshot(client)
 		connected <- client
 	})
-	reconnected := dial()
+	reconnected := dialHub(t, server)
 	<-connected
 	for index, want := range []string{"push_config", "agents", "workspaces", "activity_history", "inventory_status"} {
 		if got := readType(reconnected); got != want {
@@ -1004,15 +977,6 @@ func TestProductionInventoryPublisherOrdersRefreshAndRegistrationBarriers(t *tes
 		server.sendConnectionSnapshot(client)
 		connected <- client
 	})
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	dial := func() *websocket.Conn {
-		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return conn
-	}
 	readMessage := func(conn *websocket.Conn) map[string]any {
 		t.Helper()
 		_, data, err := conn.Read(ctx)
@@ -1054,7 +1018,7 @@ func TestProductionInventoryPublisherOrdersRefreshAndRegistrationBarriers(t *tes
 		}
 		return state
 	}
-	conn := dial()
+	conn := dialHub(t, server)
 	client := <-connected
 	if got := readHandshake(conn); got != "ready" {
 		t.Fatalf("initial handshake state = %q", got)
@@ -1097,6 +1061,8 @@ func TestProductionInventoryPublisherOrdersRefreshAndRegistrationBarriers(t *tes
 		server.requestAgentRefresh(client)
 		close(refreshDone)
 	}()
+	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
+	defer httpServer.Close()
 	secondDial := make(chan *websocket.Conn, 1)
 	go func() {
 		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
@@ -1235,15 +1201,6 @@ func TestCommittedInventoryPublicationRepairsZeroListenerRefreshAndReconnect(t *
 		server.sendConnectionSnapshot(client)
 		connected <- client
 	})
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	dial := func() *websocket.Conn {
-		conn, _, dialErr := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-		if dialErr != nil {
-			t.Fatal(dialErr)
-		}
-		return conn
-	}
 	readMessage := func(conn *websocket.Conn) map[string]any {
 		_, data, readErr := conn.Read(ctx)
 		if readErr != nil {
@@ -1284,7 +1241,7 @@ func TestCommittedInventoryPublicationRepairsZeroListenerRefreshAndReconnect(t *
 			}
 		}
 	}
-	conn := dial()
+	conn := dialHub(t, server)
 	client := <-connected
 	pushConfig := readMessage(conn)
 	if pushConfig["type"] != "push_config" {
@@ -1348,7 +1305,7 @@ func TestCommittedInventoryPublicationRepairsZeroListenerRefreshAndReconnect(t *
 		}
 	}
 	conn.CloseNow()
-	reconnected := dial()
+	reconnected := dialHub(t, server)
 	<-connected
 	for index, expectedType := range []string{"push_config", "agents", "workspaces", "activity_history", "inventory_status"} {
 		message := readMessage(reconnected)
@@ -1540,15 +1497,6 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 		server.sendConnectionSnapshot(client)
 		connected <- client
 	})
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	dial := func() *websocket.Conn {
-		conn, _, dialErr := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-		if dialErr != nil {
-			t.Fatal(dialErr)
-		}
-		return conn
-	}
 	readMessage := func(conn *websocket.Conn) map[string]any {
 		_, data, readErr := conn.Read(ctx)
 		if readErr != nil {
@@ -1611,7 +1559,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 		t.Fatal("production poll did not publish its failure")
 	}
 	waitCommittedState("error")
-	conn := dial()
+	conn := dialHub(t, server)
 	client := <-connected
 	for index := 0; index < 5; index++ {
 		message := readMessage(conn)
@@ -1670,7 +1618,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	if got := reconnectWaits.Load(); got != 2 {
 		t.Fatalf("event reconnect waits = %d, want 2", got)
 	}
-	latest := dial()
+	latest := dialHub(t, server)
 	<-connected
 	for index := 0; index < 5; index++ {
 		message := readMessage(latest)
@@ -1859,12 +1807,7 @@ func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
 		server.sendConnectionSnapshot(client)
 		connected <- client
 	})
-	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-	defer httpServer.Close()
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := dialHub(t, server)
 	client := <-connected
 	for index := 0; index < 5; index++ {
 		_, data, readErr := conn.Read(ctx)
@@ -2204,19 +2147,7 @@ func TestCopyResponseError(t *testing.T) {
 func openCopyTestClient(t *testing.T, s *Server) *websocket.Conn {
 	t.Helper()
 	useProductionHandler(t, s)
-	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
-	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	if err != nil {
-		server.Close()
-		t.Fatalf("dial copy test client: %v", err)
-	}
-	t.Cleanup(func() {
-		conn.CloseNow()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.hub.Shutdown(shutdownCtx)
-		server.Close()
-	})
+	conn := dialHub(t, s)
 	return conn
 }
 
@@ -2261,19 +2192,7 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		return []byte("RIFFfakewav"), nil
 	}
 	useProductionHandler(t, s)
-	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
-	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	if err != nil {
-		server.Close()
-		t.Fatalf("dial speak test client: %v", err)
-	}
-	t.Cleanup(func() {
-		conn.CloseNow()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.hub.Shutdown(shutdownCtx)
-		server.Close()
-	})
+	conn := dialHub(t, s)
 	request := func(text, language string) map[string]any {
 		t.Helper()
 		payload, err := json.Marshal(map[string]any{
@@ -2343,19 +2262,7 @@ func TestCancelSpeechStopsRelaySynthesis(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	useProductionHandler(t, s)
-	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
-	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	if err != nil {
-		server.Close()
-		t.Fatalf("dial speech cancellation client: %v", err)
-	}
-	t.Cleanup(func() {
-		conn.CloseNow()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.hub.Shutdown(shutdownCtx)
-		server.Close()
-	})
+	conn := dialHub(t, s)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageText, []byte(fmt.Sprintf(
@@ -2421,19 +2328,7 @@ func TestSpeechVoiceManagementOverTheWire(t *testing.T) {
 		return nil
 	}
 	useProductionHandler(t, s)
-	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
-	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	if err != nil {
-		server.Close()
-		t.Fatalf("dial voice test client: %v", err)
-	}
-	t.Cleanup(func() {
-		conn.CloseNow()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.hub.Shutdown(shutdownCtx)
-		server.Close()
-	})
+	conn := dialHub(t, s)
 	exchange := func(request map[string]any) []map[string]any {
 		t.Helper()
 		payload, err := json.Marshal(request)
