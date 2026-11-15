@@ -8,10 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -159,16 +156,6 @@ func TestProductionInventoryOutcomesAtPublicationBarriers(t *testing.T) {
 					wait(func() bool { return server.committedInventoryStatus()["state"] == "error" })
 					connected := make(chan *transport.ClientConn, 4)
 					server.hub.SetOnConnect(func(client *transport.ClientConn) { server.sendConnectionSnapshot(client); connected <- client })
-					httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-					defer httpServer.Close()
-					dial := func() *websocket.Conn {
-						t.Helper()
-						conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-						if err != nil {
-							t.Fatal(err)
-						}
-						return conn
-					}
 					read := func(conn *websocket.Conn) map[string]any {
 						t.Helper()
 						_, data, err := conn.Read(ctx)
@@ -250,7 +237,7 @@ func TestProductionInventoryOutcomesAtPublicationBarriers(t *testing.T) {
 					var conn *websocket.Conn
 					var client *transport.ClientConn
 					if action != "registration" {
-						conn = dial()
+						conn = dialHub(t, server)
 						defer conn.CloseNow()
 						client = <-connected
 						handshake(conn, "error", 1)
@@ -283,7 +270,7 @@ func TestProductionInventoryOutcomesAtPublicationBarriers(t *testing.T) {
 					send := func() {
 						switch action {
 						case "registration":
-							conn = dial()
+							conn = dialHub(t, server)
 							go func() { client = <-connected; close(actionDone) }()
 						case "immediate":
 							go func() { defer close(actionDone); server.requestAgentRefresh(client) }()
@@ -361,7 +348,7 @@ func TestProductionInventoryOutcomesAtPublicationBarriers(t *testing.T) {
 					outcome.Store(-1)
 					server.poller.Wake()
 					wait(func() bool { return server.committedInventoryStatus()["state"] == "error" })
-					reconnect := dial()
+					reconnect := dialHub(t, server)
 					defer reconnect.CloseNow()
 					client = <-connected
 					handshake(reconnect, "error", 2)
@@ -374,7 +361,7 @@ func TestProductionInventoryOutcomesAtPublicationBarriers(t *testing.T) {
 					outcome.Store(2)
 					server.poller.Wake()
 					wait(func() bool { return server.committedInventoryStatus()["state"] == "ready" })
-					final := dial()
+					final := dialHub(t, server)
 					defer final.CloseNow()
 					<-connected
 					handshake(final, "ready", 2)

@@ -3,8 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"runtime"
 	"slices"
 	"strings"
@@ -151,47 +149,14 @@ func TestPaneSizeCommandsOnAllIngresses(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			s := testServer()
 			fakes := newPaneSizeFakes(s)
-			// Run installs the production handler; this mirrors its ordering up
-			// to dispatch so the request still crosses action classification,
-			// authorization, and target validation. A local connection is
-			// unauthenticated and therefore a controller.
-			s.hub.SetOnConnect(func(*transport.ClientConn) {})
-			s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
-				defer admitted()
-				inbound, err := protocol.DecodeMap(msg)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				scope, known := protocol.ScopeFor(inbound)
-				if !known || !protocol.Compatible(inbound) {
-					t.Errorf("%s is no longer a compatible known action", inbound.Type)
-					return
-				}
-				if authorizationErr := s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID); authorizationErr != nil {
-					t.Errorf("%s authorization: %#v", inbound.Type, authorizationErr)
-					return
-				}
-				_, authenticated := client.Identity()
-				if targetErr := validateExactPaneTarget(s.state, inbound, authenticated); targetErr != nil {
-					t.Errorf("%s target validation: %#v", inbound.Type, targetErr)
-					return
-				}
-				s.handlePaneSizeCommand(client, inbound)
-			})
+			useProductionHandler(t, s)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			defer s.hub.Shutdown(context.Background())
 			var send func([]byte) error
 			var receive func() ([]byte, error)
 			if path == transport.TransportWebSocket {
-				httpServer := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
-				defer httpServer.Close()
-				conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer conn.CloseNow()
+				conn := dialHub(t, s)
 				send = func(data []byte) error { return conn.Write(ctx, websocket.MessageText, data) }
 				receive = func() ([]byte, error) { _, data, err := conn.Read(ctx); return data, err }
 			} else {
