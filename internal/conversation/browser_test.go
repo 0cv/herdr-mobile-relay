@@ -611,3 +611,15 @@ func newTestBrowser(t *testing.T, reader *Reader, options BrowserOptions) *Brows
 	t.Cleanup(func() { _ = browser.Close() })
 	return browser
 }
+
+func signedNativeCursor(t *testing.T, browser *Browser, scope BrowseScope, revision, before string) string {
+	t.Helper()
+	cursor, err := encodeBrowseCursor(browser.key, browseCursor{
+		Mode: "native", Scope: browseScopeID(scope), Revision: revision, NativeBefore: before,
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cursor
+}

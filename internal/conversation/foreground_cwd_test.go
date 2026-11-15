@@ -61,8 +61,8 @@ func TestClaudeLocateWithProjectUsesForegroundDirectory(t *testing.T) {
 	if location.Path != path || location.Root != filepath.Join(home, ".claude", "projects") {
 		t.Fatalf("location = %#v, want foreground path %q in default root", location, path)
 	}
-	page, err := reader.ReadWithProject("claude", ProjectContext{CWD: "/work/pane", ForegroundCWD: foreground}, testSessionID, "", 80)
-	if err != nil || !page.Available || len(page.Entries) != 2 || page.Entries[1].Text != "foreground answer" {
+	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work/pane", ForegroundCWD: foreground}, testSessionID, 80)
+	if err != nil || len(page) != 2 || page[1].Text != "foreground answer" {
 		t.Fatalf("foreground page = %#v, err = %v", page, err)
 	}
 }
@@ -237,8 +237,8 @@ func TestProjectContextLeavesNonClaudeProvidersPaneOnly(t *testing.T) {
 	if got.Path != panePath {
 		t.Fatalf("qoder location = %q, want pane path %q", got.Path, panePath)
 	}
-	page, err := reader.ReadWithProject("qoder", projectContext, testSessionID, "", 10)
-	if err != nil || !page.Available || len(page.Entries) == 0 || page.Entries[len(page.Entries)-1].Text != "pane" {
+	page, err := reader.ReadLatest("qoder", projectContext, testSessionID, 10)
+	if err != nil || len(page) == 0 || page[len(page)-1].Text != "pane" {
 		t.Fatalf("qoder page = %#v, err = %v; want pane transcript", page, err)
 	}
 }

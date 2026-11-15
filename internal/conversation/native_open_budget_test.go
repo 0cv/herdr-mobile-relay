@@ -3,7 +3,6 @@ package conversation
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -187,33 +186,5 @@ func TestNativeColdOpeningWorkBudget(t *testing.T) {
 				t.Fatalf("count-free indexed v2 recent open used %d VM steps for 24 entries", steps)
 			}
 		})
-	}
-}
-
-func TestPageUnknownTotalJSON(t *testing.T) {
-	for _, total := range []int{UnknownTotal, 0, 7} {
-		raw, err := json.Marshal(Page{Available: true, Total: total, HasMore: true, Entries: []Entry{{ID: "turn", Role: "user", Text: "hello"}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		var page struct {
-			Total     *int    `json:"total"`
-			Available bool    `json:"available"`
-			HasMore   bool    `json:"has_more"`
-			Entries   []Entry `json:"entries"`
-		}
-		if err := json.Unmarshal(raw, &page); err != nil {
-			t.Fatal(err)
-		}
-		if !page.Available || !page.HasMore || len(page.Entries) != 1 {
-			t.Fatalf("lost page fields: %s", raw)
-		}
-		if total == UnknownTotal {
-			if page.Total != nil {
-				t.Fatalf("unknown total is not null: %s", raw)
-			}
-		} else if page.Total == nil || *page.Total != total {
-			t.Fatalf("lost exact total: %s", raw)
-		}
 	}
 }

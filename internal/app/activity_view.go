@@ -29,7 +29,7 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 	for _, agent := range s.state.Snapshot() {
 		agents[agent.PaneID] = agent
 	}
-	pages := make(map[string]conversation.Page)
+	pages := make(map[string][]conversation.Entry)
 	for index := range entries {
 		entry := entries[index]
 		if strings.ToLower(strings.TrimSpace(entry.Kind)) != "finished" {
@@ -53,23 +53,23 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		if conversation.IsKimi(agentName) && agents[entry.PaneID] == nil {
 			continue
 		}
-		var page conversation.Page
+		var conversationEntries []conversation.Entry
 		if current := agents[entry.PaneID]; current != nil && conversation.IsKimi(current.Agent) {
 			var err error
-			page, err = s.readAgentConversation(context.Background(), current, 200)
-			if err != nil || !page.Available {
+			conversationEntries, err = s.readAgentConversation(context.Background(), current, 200)
+			if err != nil {
 				continue
 			}
 		} else {
 			cacheKey := agentName + "\x00" + project.CWD + "\x00" + project.ForegroundCWD + "\x00" + sessionID
 			var loaded bool
-			page, loaded = pages[cacheKey]
+			conversationEntries, loaded = pages[cacheKey]
 			if !loaded {
-				page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
-				pages[cacheKey] = page
+				conversationEntries, _ = s.conversationM.ReadLatest(agentName, project, sessionID, 200)
+				pages[cacheKey] = conversationEntries
 			}
 		}
-		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {
+		if response := conversationResponseAt(conversationEntries, int64(entry.Timestamp)); response != "" {
 			entries[index].Extract = response
 		}
 	}

@@ -72,14 +72,9 @@ func TestClaudeChainLatestAndOlderSegments(t *testing.T) {
 		map[string]any{"type": "user", "uuid": "b1", "message": map[string]any{"content": "b1"}},
 		map[string]any{"type": "assistant", "uuid": "b2", "message": map[string]any{"content": "b2"}},
 	)
-	page, err := reader.ReadFor("claude", "/work", a, "", 1)
-	if err != nil || len(page.Entries) != 1 || page.Entries[0].Text != "b2" || page.ContinuationIncomplete {
-		t.Fatalf("latest = %#v, err=%v", page, err)
-	}
-	before := page.Entries[0].ID
-	older, err := reader.ReadFor("claude", "/work", a, before, 10)
-	if err != nil || len(older.Entries) != 3 || older.Entries[0].Text != "a1" || older.Entries[2].Text != "b1" {
-		t.Fatalf("older = %#v, err=%v", older, err)
+	entries, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, a, 1)
+	if err != nil || len(entries) != 1 || entries[0].Text != "b2" {
+		t.Fatalf("latest = %#v, err=%v", entries, err)
 	}
 
 	options := DefaultBrowserOptions()
@@ -88,7 +83,7 @@ func TestClaudeChainLatestAndOlderSegments(t *testing.T) {
 	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: a}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
-	if err != nil || len(latest.Entries) != 1 || latest.Entries[0].Text != "b2" || latest.NextCursor == "" {
+	if err != nil || len(latest.Entries) != 1 || latest.Entries[0].Text != "b2" || latest.NextCursor == "" || latest.Diagnostics.ContinuationIncomplete {
 		t.Fatalf("browser latest = %#v, err=%v", latest, err)
 	}
 	want := []string{"b1", "a2", "a1"}
@@ -139,9 +134,9 @@ func TestClaudeChainEmptyContinuationKeepsParentVisible(t *testing.T) {
 		map[string]any{"type": "continued-in", "sessionId": anchor, "continuedInSessionId": child},
 	)
 	writeRows(t, filepath.Join(root, child+".jsonl"))
-	legacy, err := reader.ReadFor("claude", "/work", anchor, "", 10)
-	if err != nil || len(legacy.Entries) != 1 || legacy.Entries[0].Text != "parent answer" {
-		t.Fatalf("empty child legacy page = %#v, err=%v", legacy, err)
+	latest, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, anchor, 10)
+	if err != nil || len(latest) != 1 || latest[0].Text != "parent answer" {
+		t.Fatalf("empty child latest entries = %#v, err=%v", latest, err)
 	}
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}, Limit: 10})
@@ -2509,7 +2504,7 @@ func TestClaudeChainPreparationDeduplicatesConcurrentHandles(t *testing.T) {
 	options.RecentBytes = 1
 	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: anchor}
-	chain, err := resolveClaudeChain(context.Background(), reader.Locate(scope.Provider, scope.CWD, scope.SessionID), anchor)
+	chain, err := resolveClaudeChain(context.Background(), reader.LocateWithProject(scope.Provider, ProjectContext{CWD: scope.CWD}, scope.SessionID), anchor)
 	if err != nil {
 		t.Fatal(err)
 	}

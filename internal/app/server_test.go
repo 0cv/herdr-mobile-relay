@@ -105,14 +105,14 @@ func TestResolveAgentSessionName(t *testing.T) {
 
 // A whitespace-only session value is what herdr reports for a pane with no
 // real session yet - not the same as an empty string, but every other
-// consumer (Reader.Read, latestConversationResponse, the activity backfill
+// consumer (Reader.ReadLatest, latestConversationResponse, the activity backfill
 // path) treats it as one via TrimSpace. Before the fix,
 // resolveAgentSessionName did not, so the untrimmed value survived the
 // `== ""` guard and reached the resolver's empty-id sole-transcript
 // heuristic, which - given a cwd whose project directory holds exactly one
 // transcript - invents a title for a session that was never reported. The
 // conversation view for the same (agent, cwd) reads its session id through
-// Reader.Read, which trims it back to empty and answers "not available", so
+// Reader.ReadLatest, which trims it back to empty and answers "not available", so
 // the pane would show a confident title next to an unavailable transcript.
 func TestResolveAgentSessionNameTrimsWhitespaceOnlySession(t *testing.T) {
 	home := t.TempDir()

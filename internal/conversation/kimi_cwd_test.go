@@ -14,9 +14,9 @@ func TestKimiForegroundCWDWhitespaceIsIdentity(t *testing.T) {
 	kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Whitespace", 1, kimiSample(t, "rewrites/before.jsonl"))
 	reader := NewReader(home)
 	project := ProjectContext{CWD: "/wrong", ForegroundCWD: cwd}
-	page, err := reader.ReadWithProject("kimi", project, id, "", 1)
-	if err != nil || !page.Available || len(page.Entries) != 1 {
-		t.Fatalf("reader changed lexical cwd: %+v %v", page, err)
+	entries, err := reader.ReadLatest("kimi", project, id, 1)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("reader changed lexical cwd: %+v %v", entries, err)
 	}
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	for _, scope := range []BrowseScope{{Provider: "kimi", CWD: "/wrong", ForegroundCWD: cwd, SessionID: id}, {Provider: "kimi", CWD: cwd, SessionID: id}} {

@@ -52,7 +52,7 @@ func TestOMORecordedPlanChangeToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err := reader.ChangeToken(t.Context(), scope)
-	page, readErr := reader.ReadFor(scope.Provider, cwd, session, "", 10)
+	page, readErr := newTestBrowser(t, reader, DefaultBrowserOptions()).ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 10})
 	if err != nil || readErr != nil || before == after || page.OMOPlan == nil || len(page.OMOPlan.Phases) != 1 {
 		t.Fatalf("OMO plan did not update: %+v %v %v", page, err, readErr)
 	}
@@ -155,11 +155,11 @@ func TestDatabaseReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
 	scope := BrowseScope{Provider: "opencode", SessionID: session}
 	read := func() []Entry {
 		t.Helper()
-		page, err := reader.ReadFor(scope.Provider, root, session, "", 10)
-		if err != nil || !page.Available {
+		page, err := reader.ReadLatest(scope.Provider, ProjectContext{CWD: root}, session, 10)
+		if err != nil {
 			t.Fatalf("read failed: %+v %v", page, err)
 		}
-		return page.Entries
+		return page
 	}
 	if entries := read(); len(entries) != 1 {
 		t.Fatalf("seed entries = %+v", entries)
@@ -232,11 +232,11 @@ func TestAgyReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
 	scope := BrowseScope{Provider: "agy", SessionID: agySessionID}
 	read := func() []Entry {
 		t.Helper()
-		page, err := reader.ReadFor(scope.Provider, root, scope.SessionID, "", 10)
-		if err != nil || !page.Available {
+		page, err := reader.ReadLatest(scope.Provider, ProjectContext{CWD: root}, scope.SessionID, 10)
+		if err != nil {
 			t.Fatalf("read failed: %+v %v", page, err)
 		}
-		return page.Entries
+		return page
 	}
 	if entries := read(); len(entries) != 1 || entries[0].Text != "seed" {
 		t.Fatalf("seed entries = %+v", entries)
