@@ -15,16 +15,10 @@ var (
 	openCodeColumnPattern = regexp.MustCompile(`\s{20,}`)
 )
 
-func parseOpenCode(text string) *Interaction {
-	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	lines := make([]string, len(rawLines))
-	footerIndex := -1
-	for index, raw := range rawLines {
-		lines[index] = cleanOpenCodeLine(raw)
-		if openCodeFooter(lines[index]) {
-			footerIndex = index
-		}
-	}
+func parseOpenCode(p *pane) *Interaction {
+	rawLines := p.raw
+	lines := p.openCode()
+	footerIndex := openCodeFooterIndex(p)
 	if footerIndex < 0 || !openCodeTailIsEmpty(lines, footerIndex) {
 		return nil
 	}
@@ -143,17 +137,19 @@ func parseOpenCodeReview(
 	return reviewInteraction("opencode", options, Focus{Kind: "option"}, true, current, total)
 }
 
-func openCodeLayoutHint(text string) bool {
-	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	lines := make([]string, len(rawLines))
+func openCodeLayoutHint(p *pane) bool {
+	footerIndex := openCodeFooterIndex(p)
+	return footerIndex >= 0 && openCodeTailIsEmpty(p.openCode(), footerIndex)
+}
+
+func openCodeFooterIndex(p *pane) int {
 	footerIndex := -1
-	for index, raw := range rawLines {
-		lines[index] = cleanOpenCodeLine(raw)
-		if openCodeFooter(lines[index]) {
+	for index, line := range p.openCode() {
+		if openCodeFooter(line) {
 			footerIndex = index
 		}
 	}
-	return footerIndex >= 0 && openCodeTailIsEmpty(lines, footerIndex)
+	return footerIndex
 }
 
 func openCodeTailIsEmpty(lines []string, footerIndex int) bool {
@@ -222,20 +218,4 @@ func openCodeActiveTab(raw string) string {
 		}
 	}
 	return textutil.Compact(strings.Join(parts, ""), 500)
-}
-
-func cleanOpenCodeLine(line string) string {
-	line = strings.TrimRight(
-		textutil.StripANSI(strings.ReplaceAll(line, "\r", "")),
-		" \t",
-	)
-	trimmed := strings.TrimLeft(line, " \t")
-	if !strings.HasPrefix(trimmed, "┃") {
-		return ""
-	}
-	trimmed = strings.TrimPrefix(trimmed, "┃")
-	if gap := openCodeColumnPattern.FindStringIndex(trimmed); gap != nil {
-		trimmed = trimmed[:gap[0]]
-	}
-	return strings.TrimSpace(trimmed)
 }

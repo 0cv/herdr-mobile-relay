@@ -33,36 +33,44 @@ func supportsKind(kind string) bool {
 }
 
 func Parse(text, agent string) *Interaction {
-	if !LayoutHint(text) {
+	return parse(newPane(text), agent)
+}
+
+func parse(p *pane, agent string) *Interaction {
+	if !layoutHint(p) {
 		return nil
 	}
 	kind := agentkind.Of(agent)
 	switch kind {
 	case agentkind.OMP, agentkind.Pi:
-		return parseOMP(text)
+		return parseOMP(p)
 	case agentkind.Codex:
-		return parseCodex(text)
+		return parseCodex(p)
 	case agentkind.Claude:
-		return parseClaude(text)
+		return parseClaude(p)
 	case agentkind.Qoder:
-		return parseQoder(text)
+		return parseQoder(p)
 	case agentkind.OpenCode:
-		return parseOpenCode(text)
+		return parseOpenCode(p)
 	}
-	if interaction := parseCodex(text); interaction != nil {
+	if interaction := parseCodex(p); interaction != nil {
 		return interaction
 	}
-	if interaction := parseClaude(text); interaction != nil {
+	if interaction := parseClaude(p); interaction != nil {
 		return interaction
 	}
-	return parseQoder(text)
+	return parseQoder(p)
 }
 
 func LayoutHint(text string) bool {
-	if openCodeLayoutHint(text) || ompLayoutHint(text) {
+	return layoutHint(newPane(text))
+}
+
+func layoutHint(p *pane) bool {
+	if openCodeLayoutHint(p) || ompLayoutHint(p) {
 		return true
 	}
-	lines := cleanLines(text)
+	lines := p.trimmed()
 	hasCheckbox, hasSubmit, hasChat := false, false, false
 	hasCodexHeader, hasCodexFooter, hasQoderHeader, hasQoderFooter := false, false, false, false
 	hasReview := false

@@ -113,16 +113,17 @@ func Classify(text, agent string) Classification {
 		text = textutil.StripANSI(text)
 		text = agyMenuFocusPattern.ReplaceAllString(text, "${1}❯ ${2}")
 	}
+	p := newPane(text)
 	structuredControls := supportsKind(kind)
-	inputReady := normalInputPrompt(text, kind)
+	inputReady := normalInputPrompt(p, kind)
 	if !structuredControls && !inputReady {
 		return Classification{
 			Kind:   AttentionUnknown,
-			Prompt: textutil.Compact(PaneSummary(text), 500),
+			Prompt: textutil.Compact(paneSummary(p), 500),
 		}
 	}
 	if structuredControls {
-		if interaction := Parse(text, agent); interaction != nil {
+		if interaction := parse(p, agent); interaction != nil {
 			return Classification{
 				Kind:        AttentionQuestion,
 				Prompt:      interaction.Question,
@@ -130,8 +131,8 @@ func Classify(text, agent string) Classification {
 				Interaction: interaction,
 			}
 		}
-		if options, focus, command := liveApprovalDetails(text, kind); len(options) > 0 {
-			summaryLines := approvalSummaryLines(text, kind)
+		if options, focus, command := liveApprovalDetails(p, kind); len(options) > 0 {
+			summaryLines := approvalSummaryLines(p, kind)
 			if command == "" {
 				command = approvalCommand(summaryLines)
 			}
@@ -141,14 +142,14 @@ func Classify(text, agent string) Classification {
 				Command:        textutil.Compact(command, 240),
 				Options:        options,
 				ApprovalFocus:  focus,
-				approvalSource: approvalDialogSource(text, kind),
+				approvalSource: approvalDialogSource(p, kind),
 			}
 		}
 	}
 	if inputReady {
 		response := LatestCompletedResponse(text)
 		if response == "" {
-			response = PaneSummary(text)
+			response = paneSummary(p)
 		}
 		return Classification{
 			Kind:   AttentionChat,
@@ -157,20 +158,20 @@ func Classify(text, agent string) Classification {
 	}
 	return Classification{
 		Kind:   AttentionUnknown,
-		Prompt: textutil.Compact(PaneSummary(text), 500),
+		Prompt: textutil.Compact(paneSummary(p), 500),
 	}
 }
 
-func approvalSummaryLines(text, kind string) []string {
+func approvalSummaryLines(p *pane, kind string) []string {
 	isHermes := kind == agentkind.Hermes
 	isAgy := kind == agentkind.Agy
 	if !isHermes && !isAgy {
-		return paneSummaryLines(text)
+		return paneSummaryLines(p)
 	}
 	// Remove volatile chrome before applying the summary tail limit. A repaint
 	// must not evict stable dialog content from the fingerprint inputs.
 	filtered := make([]string, 0)
-	for _, line := range cleanLines(text) {
+	for _, line := range p.trimmed() {
 		if line == "" || chromePattern.MatchString(line) ||
 			promptSkipPattern.MatchString(line) ||
 			isHermes && hermesApprovalChromeLine(line) ||
@@ -229,11 +230,11 @@ func hermesApprovalRows(rows []approvalMenuRow) ([]approvalMenuRow, int, bool) {
 	return rows, focus, true
 }
 
-func liveApprovalDetails(text, kind string) ([]string, int, string) {
+func liveApprovalDetails(p *pane, kind string) ([]string, int, string) {
 	if kind == agentkind.OpenCode {
 		return nil, 0, ""
 	}
-	lines := cleanLines(text)
+	lines := p.trimmed()
 	if kind == agentkind.OMP || kind == agentkind.Pi {
 		if options, focus, command := ompToolApprovalDetails(lines); len(options) > 0 {
 			return options, focus, command
@@ -241,11 +242,7 @@ func liveApprovalDetails(text, kind string) ([]string, int, string) {
 		options, focus := ompPlanApprovalDetails(lines)
 		return options, focus, ""
 	}
-	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	menuLines := make([]string, len(rawLines))
-	for index, line := range rawLines {
-		menuLines[index] = cleanCodexLine(line)
-	}
+	menuLines := p.indented()
 	rows := latestApprovalMenu(menuLines)
 	if len(rows) < 2 {
 		return nil, 0, ""
@@ -290,12 +287,12 @@ func liveApprovalDetails(text, kind string) ([]string, int, string) {
 	return options, focus, ""
 }
 
-func approvalDialogSource(text, kind string) string {
+func approvalDialogSource(p *pane, kind string) string {
 	if kind == agentkind.OpenCode {
 		return ""
 	}
 	if kind == agentkind.OMP || kind == agentkind.Pi {
-		lines := cleanLines(text)
+		lines := p.trimmed()
 		if header := lastLineMatching(lines, ompToolApprovalPattern); header >= 0 {
 			for end := header + 1; end < len(lines); end++ {
 				if strings.HasPrefix(lines[end], "╰") {
@@ -314,11 +311,7 @@ func approvalDialogSource(text, kind string) string {
 		}
 		return ""
 	}
-	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	menuLines := make([]string, len(rawLines))
-	for index, line := range rawLines {
-		menuLines[index] = cleanCodexLine(line)
-	}
+	menuLines := p.indented()
 	rows := latestApprovalMenu(menuLines)
 	if len(rows) < 2 {
 		return ""
@@ -332,7 +325,7 @@ func approvalDialogSource(text, kind string) string {
 		}
 		end = rows[len(rows)-1].line
 	}
-	headerStart := latestCompletedTurnLine(cleanLines(text)) + 1
+	headerStart := latestCompletedTurnLine(p.trimmed()) + 1
 	if candidate := rows[0].line - 16; candidate > headerStart {
 		headerStart = candidate
 	}
@@ -680,11 +673,11 @@ func qoderApprovalTailLine(line string) bool {
 		strings.Contains(lower, "without providing feedback")
 }
 
-func normalInputPrompt(text, kind string) bool {
+func normalInputPrompt(p *pane, kind string) bool {
 	if !supportsKind(kind) && kind != agentkind.Kimi {
 		return false
 	}
-	lines := cleanLines(text)
+	lines := p.trimmed()
 	if ompInputFramePrompt(lines, kind) ||
 		openCodeInputPrompt(lines, kind) ||
 		kimiInputFramePrompt(lines, kind) {

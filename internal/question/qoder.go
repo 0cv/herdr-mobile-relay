@@ -12,21 +12,19 @@ var (
 	qoderReviewPattern = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(submit answers|cancel ask)\s*$`)
 )
 
-func parseQoder(text string) *Interaction {
-	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	lines := make([]string, len(rawLines))
+func parseQoder(p *pane) *Interaction {
+	lines := p.trimmed()
 	headerIndex, footerIndex := -1, -1
 	current, total := 0, 0
-	for index, raw := range rawLines {
-		lines[index] = cleanLine(raw)
-		if qoderHeader(lines[index]) {
+	for index, line := range lines {
+		if qoderHeader(line) {
 			headerIndex = index
-			current, total = qoderPosition(raw)
+			current, total = qoderPosition(p, index)
 			if current == 0 && total == 0 {
 				current, total = 1, 1
 			}
 		}
-		if headerIndex >= 0 && qoderFooter(lines[index]) {
+		if headerIndex >= 0 && qoderFooter(line) {
 			footerIndex = index
 		}
 	}
@@ -211,8 +209,9 @@ func qoderFooter(line string) bool {
 		(strings.Contains(line, "←") || strings.Contains(lower, "tab/"))
 }
 
-func qoderPosition(raw string) (int, int) {
-	clean := cleanLine(raw)
+func qoderPosition(p *pane, index int) (int, int) {
+	raw := p.raw[index]
+	clean := p.trimmed()[index]
 	dot := strings.Index(clean, "·")
 	if dot < 0 {
 		return 0, 0

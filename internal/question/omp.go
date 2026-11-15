@@ -29,8 +29,8 @@ type ompOptionRow struct {
 	selected bool
 }
 
-func ompLayoutHint(text string) bool {
-	lines := cleanLines(text)
+func ompLayoutHint(p *pane) bool {
+	lines := p.trimmed()
 	start := lastLineMatching(lines, ompAskHeaderPattern)
 	if start < 0 {
 		return false
@@ -69,17 +69,18 @@ func ompLayoutHint(text string) bool {
 
 // ompCleanLines additionally strips the Ask frame's inner scrollbar column,
 // which survives edge cleanup when the frame content overflows.
-func ompCleanLines(text string) []string {
-	lines := cleanLines(text)
-	for index, line := range lines {
+func ompCleanLines(p *pane) []string {
+	trimmed := p.trimmed()
+	lines := make([]string, len(trimmed))
+	for index, line := range trimmed {
 		lines[index] = strings.TrimRight(line, " \t│█▉▊▋▌▍▎▏▁▂▃▄▅▆▇▀")
 	}
 	return lines
 }
 
-func parseOMP(text string) *Interaction {
-	lines := ompCleanLines(text)
-	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+func parseOMP(p *pane) *Interaction {
+	lines := ompCleanLines(p)
+	rawLines := p.raw
 	start := lastLineMatching(lines, ompAskHeaderPattern)
 	if start < 0 {
 		return nil

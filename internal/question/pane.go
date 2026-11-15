@@ -17,8 +17,54 @@ var (
 	responsePrefixPattern = regexp.MustCompile(`^\s*[•●]\s+`)
 )
 
+type pane struct {
+	text         string
+	raw          []string
+	trimmedLines []string
+	indentedRows []string
+	openCodeRows []string
+}
+
+func newPane(text string) *pane {
+	return &pane{text: text, raw: strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")}
+}
+
+// trimmed, indented and openCode are built on first use. Callers must not edit the returned lines.
+func (p *pane) trimmed() []string {
+	if p.trimmedLines == nil {
+		p.trimmedLines = mapLines(p.raw, cleanLine)
+	}
+	return p.trimmedLines
+}
+
+func (p *pane) indented() []string {
+	if p.indentedRows == nil {
+		p.indentedRows = mapLines(p.raw, cleanIndentedLine)
+	}
+	return p.indentedRows
+}
+
+func (p *pane) openCode() []string {
+	if p.openCodeRows == nil {
+		p.openCodeRows = mapLines(p.raw, cleanOpenCodeLine)
+	}
+	return p.openCodeRows
+}
+
+func mapLines(lines []string, clean func(string) string) []string {
+	result := make([]string, len(lines))
+	for index, line := range lines {
+		result[index] = clean(line)
+	}
+	return result
+}
+
 func PaneSummary(text string) string {
-	return strings.Join(paneSummaryLines(text), "\n")
+	return paneSummary(newPane(text))
+}
+
+func paneSummary(p *pane) string {
+	return strings.Join(paneSummaryLines(p), "\n")
 }
 
 func latestCompletedTurnLine(lines []string) int {
@@ -71,10 +117,9 @@ func LatestCompletedResponse(text string) string {
 	return strings.TrimSpace(strings.Join(response, "\n"))
 }
 
-func paneSummaryLines(text string) []string {
-	lines := cleanLines(text)
+func paneSummaryLines(p *pane) []string {
 	var summaryLines []string
-	for _, line := range lines {
+	for _, line := range p.trimmed() {
 		if line == "" || chromePattern.MatchString(line) || promptSkipPattern.MatchString(line) {
 			continue
 		}
@@ -84,15 +129,6 @@ func paneSummaryLines(text string) []string {
 		summaryLines = summaryLines[len(summaryLines)-12:]
 	}
 	return summaryLines
-}
-
-func cleanLines(text string) []string {
-	raw := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	result := make([]string, len(raw))
-	for index, line := range raw {
-		result[index] = cleanLine(line)
-	}
-	return result
 }
 
 func cleanLine(line string) string {
@@ -106,7 +142,7 @@ func cleanLine(line string) string {
 	}
 }
 
-func cleanCodexLine(line string) string {
+func cleanIndentedLine(line string) string {
 	line = strings.TrimRight(
 		textutil.StripANSI(strings.ReplaceAll(line, "\r", "")),
 		" \t",
@@ -118,4 +154,20 @@ func cleanCodexLine(line string) string {
 		}
 		line = next
 	}
+}
+
+func cleanOpenCodeLine(line string) string {
+	line = strings.TrimRight(
+		textutil.StripANSI(strings.ReplaceAll(line, "\r", "")),
+		" \t",
+	)
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, "┃") {
+		return ""
+	}
+	trimmed = strings.TrimPrefix(trimmed, "┃")
+	if gap := openCodeColumnPattern.FindStringIndex(trimmed); gap != nil {
+		trimmed = trimmed[:gap[0]]
+	}
+	return strings.TrimSpace(trimmed)
 }

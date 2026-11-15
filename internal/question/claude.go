@@ -17,8 +17,8 @@ var (
 	)
 )
 
-func parseClaude(text string) *Interaction {
-	lines := cleanLines(text)
+func parseClaude(p *pane) *Interaction {
+	lines := p.trimmed()
 	var checkboxRows []optionRow
 	for index, line := range lines {
 		match := checkboxPattern.FindStringSubmatch(line)
@@ -57,7 +57,7 @@ func parseClaude(text string) *Interaction {
 		}
 		options, otherItem := splitOther(all)
 		question := prompt(lines, checkboxRows[0].line)
-		current, total := claudePosition(text)
+		current, total := claudePosition(p)
 		if submitLabel == "Submit" && current > 0 && current < total {
 			submitLabel = "Next"
 		}
@@ -79,7 +79,7 @@ func parseClaude(text string) *Interaction {
 	}
 
 	if chatIndex < 0 {
-		return parseClaudeReview(text, lines)
+		return parseClaudeReview(p, lines)
 	}
 	rows := lastRun(scanRows(lines, 0, chatIndex, rowScan{restartAtOne: true}))
 	if len(rows) < 3 {
@@ -91,7 +91,7 @@ func parseClaude(text string) *Interaction {
 		focus = Focus{Kind: "chat"}
 	}
 	options, otherItem := splitOther(all)
-	current, total := claudePosition(text)
+	current, total := claudePosition(p)
 	interaction := &Interaction{
 		Kind:           "single_select",
 		Question:       prompt(lines, rows[0].line),
@@ -131,7 +131,7 @@ func claudeOther(item Option) Other {
 	return Other{Selected: item.Selected, Text: item.Label}
 }
 
-func parseClaudeReview(text string, lines []string) *Interaction {
+func parseClaudeReview(p *pane, lines []string) *Interaction {
 	reviewIndex := -1
 	for index := len(lines) - 1; index >= 0; index-- {
 		if strings.EqualFold(strings.TrimSpace(lines[index]), "Review your answers") {
@@ -196,12 +196,12 @@ func parseClaudeReview(text string, lines []string) *Interaction {
 	options[0].Description = summaryLines(summary, 1000)
 	options[0].Summary = summary
 
-	current, total := claudePosition(text)
+	current, total := claudePosition(p)
 	if current < 1 || total < current {
 		current = len(summary) + 1
 		total = current
 	}
-	return reviewInteraction("claude", options, focus, strings.Contains(text, "←"), current, total)
+	return reviewInteraction("claude", options, focus, strings.Contains(p.text, "←"), current, total)
 }
 
 func prompt(lines []string, firstOption int) string {
@@ -229,9 +229,10 @@ func prompt(lines []string, firstOption int) string {
 	return textutil.Compact(strings.Join(lines[start:end+1], " "), 1000)
 }
 
-func claudePosition(text string) (int, int) {
-	for _, raw := range strings.Split(text, "\n") {
-		clean := cleanLine(raw)
+func claudePosition(p *pane) (int, int) {
+	trimmed := p.trimmed()
+	for index, raw := range p.raw {
+		clean := trimmed[index]
 		if !strings.Contains(clean, "→") || !strings.Contains(strings.ToLower(clean), "submit") {
 			continue
 		}

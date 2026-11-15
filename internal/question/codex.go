@@ -13,13 +13,12 @@ var (
 	codexSubmitPattern = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
 )
 
-func parseCodex(text string) *Interaction {
-	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	lines := make([]string, len(rawLines))
+func parseCodex(p *pane) *Interaction {
+	rawLines := p.raw
+	lines := p.indented()
 	headerIndex, current, total := -1, 0, 0
-	for index, raw := range rawLines {
-		lines[index] = cleanCodexLine(raw)
-		if match := codexHeaderPattern.FindStringSubmatch(lines[index]); match != nil {
+	for index, line := range lines {
+		if match := codexHeaderPattern.FindStringSubmatch(line); match != nil {
 			headerIndex = index
 			current, _ = strconv.Atoi(match[1])
 			total, _ = strconv.Atoi(match[2])
@@ -100,7 +99,7 @@ func parseCodex(text string) *Interaction {
 	if notesActive {
 		focus = Focus{Kind: "option", Index: len(all) - 1}
 	}
-	if strings.Contains(text, "\x1b[") &&
+	if strings.Contains(p.text, "\x1b[") &&
 		!strings.Contains(strings.Join(rawLines[headerIndex+1:firstOption], "\n"), "\x1b[38;5;6m") &&
 		focus.Kind == "option" {
 		if focus.Index < len(options) {
