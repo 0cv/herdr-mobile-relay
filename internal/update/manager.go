@@ -99,8 +99,7 @@ func NewManager(releaseRoot, runtimeDir, herdrBin, version, revision, healthURL 
 		manager.tokenFile = filepath.Clean(tokenFile)
 	}
 	manager.launch = manager.launchWorker
-	manager.state = manager.loadState()
-	manager.recoverOrphan(true)
+	manager.reconcile(true)
 	manager.state = manager.loadState()
 	return manager
 }
@@ -108,18 +107,15 @@ func NewManager(releaseRoot, runtimeDir, herdrBin, version, revision, healthURL 
 func (m *Manager) State() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.recoverOrphan(false)
-	state := m.loadState()
-	if state.State != "" {
-		m.state = state
-	}
+	m.reconcile(false)
+	m.state = m.loadState()
 	return m.publicState(m.state)
 }
 
 func (m *Manager) Check(ctx context.Context) State {
 	_ = sweepWorkers(ctx)
 	m.mu.Lock()
-	m.recoverOrphan(false)
+	m.reconcile(false)
 	current := m.loadState()
 	if transientUpdateState(current.State) {
 		m.state = current
@@ -142,7 +138,7 @@ func (m *Manager) Check(ctx context.Context) State {
 	metadata, err := m.fetchRelease(ctx)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.recoverOrphan(false)
+	m.reconcile(false)
 	current = m.loadState()
 	if transientUpdateState(current.State) {
 		m.state = current
@@ -193,10 +189,8 @@ func (m *Manager) Schedule(
 ) (string, State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	current := m.loadState()
-	if current.State != "" {
-		m.state = current
-	}
+	m.reconcile(false)
+	m.state = m.loadState()
 	if m.state.State != "available" || !m.state.CanInstall {
 		reason := m.state.Reason
 		if reason == "" {
@@ -502,64 +496,50 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 }
 
 func (m *Manager) loadState() State {
+	checking := State{
+		State:           "checking",
+		CurrentVersion:  m.version,
+		CurrentRevision: m.revision,
+	}
 	data, err := os.ReadFile(m.statePath())
 	if err != nil {
-		return State{
-			State:           "checking",
-			CurrentVersion:  m.version,
-			CurrentRevision: m.revision,
-		}
+		return checking
 	}
 	var state State
 	if json.Unmarshal(data, &state) != nil || !validState(state.State) {
-		return State{
-			State:           "checking",
-			CurrentVersion:  m.version,
-			CurrentRevision: m.revision,
-		}
+		return checking
 	}
 	state.CurrentVersion = m.version
 	state.CurrentRevision = m.revision
-	if (transientUpdateState(state.State) ||
-		(state.State == "failed" && state.StartedAt != "")) &&
-		state.TargetVersion == m.version &&
-		strings.EqualFold(state.TargetRevision, m.revision) {
-		state.CanInstall = false
-		state.Error = ""
-		if state.FinishedAt == "" {
-			state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-		}
-		_ = writeState(m.statePath(), state)
+	if state.State != "available" && state.State != "blocked" {
 		return state
 	}
-	if state.State == "available" || state.State == "blocked" {
-		candidate := state.AvailableVersion
-		if candidate == "" {
-			candidate = state.TargetVersion
-		}
-		if !NewerVersion(candidate, m.version) {
-			upstreamVersion := state.UpstreamVersion
-			if upstreamVersion == "" {
-				upstreamVersion = candidate
-			}
-			upstreamRevision := state.UpstreamRevision
-			if upstreamRevision == "" {
-				upstreamRevision = state.TargetRevision
-			}
-			return State{
-				State:            "current",
-				CurrentVersion:   m.version,
-				CurrentRevision:  m.revision,
-				UpstreamVersion:  upstreamVersion,
-				UpstreamRevision: upstreamRevision,
-				CheckedAt:        state.CheckedAt,
-			}
-		}
+	candidate := state.AvailableVersion
+	if candidate == "" {
+		candidate = state.TargetVersion
 	}
-	return state
+	if NewerVersion(candidate, m.version) {
+		return state
+	}
+	upstreamVersion := state.UpstreamVersion
+	if upstreamVersion == "" {
+		upstreamVersion = candidate
+	}
+	upstreamRevision := state.UpstreamRevision
+	if upstreamRevision == "" {
+		upstreamRevision = state.TargetRevision
+	}
+	return State{
+		State:            "current",
+		CurrentVersion:   m.version,
+		CurrentRevision:  m.revision,
+		UpstreamVersion:  upstreamVersion,
+		UpstreamRevision: upstreamRevision,
+		CheckedAt:        state.CheckedAt,
+	}
 }
 
-func (m *Manager) recoverOrphan(includeScheduled bool) {
+func (m *Manager) reconcile(includeScheduled bool) {
 	statePath := m.statePath()
 	state, err := readState(statePath)
 	if err != nil {

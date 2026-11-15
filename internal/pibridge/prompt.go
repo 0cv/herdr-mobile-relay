@@ -2,12 +2,7 @@ package pibridge
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -58,51 +53,16 @@ func promptExchange(ctx context.Context, directory string, lease PromptLease, re
 			return result, false, errors.New("invalid bridge prompt")
 		}
 	}
-	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
-	default:
-		return result, false, errors.New("bridge busy")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
-	defer cancel()
-	conn, err := openBridgeConnection(ctx, directory, lease.PID)
-	if err != nil {
-		return result, false, err
-	}
-	defer conn.Close()
-	challengeBytes := make([]byte, 16)
-	if _, err := rand.Read(challengeBytes); err != nil {
-		return result, false, err
-	}
-	challenge := hex.EncodeToString(challengeBytes)
-	request := map[string]any{"instance": lease.Instance, "pane": lease.Pane, "session": lease.Session, "pid": lease.PID, "challenge": challenge, "operation": operation, "connection": lease.Connection, "target_key": lease.TargetKey}
-	if requestID != "" {
-		request["incarnation"], request["token"], request["request_id"], request["text"] = lease.Incarnation, lease.Token, requestID, text
-	}
-	if err := herdr.CheckDispatch(ctx); err != nil {
-		return result, false, err
-	}
-	if err := ctx.Err(); err != nil {
-		return result, false, err
-	}
-	attempted := requestID != ""
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
-		return result, attempted, err
-	}
-	data, err := io.ReadAll(io.LimitReader(conn, 16385))
+	challenge, encoded, err := roundTrip(ctx, directory, lease.PID, 16384, func(challenge string) (any, error) {
+		request := map[string]any{"instance": lease.Instance, "pane": lease.Pane, "session": lease.Session, "pid": lease.PID, "challenge": challenge, "operation": operation, "connection": lease.Connection, "target_key": lease.TargetKey}
+		if requestID != "" {
+			request["incarnation"], request["token"], request["request_id"], request["text"] = lease.Incarnation, lease.Token, requestID, text
+		}
+		return request, herdr.CheckDispatch(ctx)
+	}, &result)
+	attempted := requestID != "" && encoded
 	if err != nil {
 		return result, attempted, err
-	}
-	if len(data) > 16384 {
-		return result, attempted, errors.New("bridge response too large")
-	}
-	if err := decodeBridge(data, &result); err != nil {
-		return result, attempted, err
-	}
-	after, err := owned(conn.path, true)
-	if err != nil || !os.SameFile(conn.before, after) {
-		return result, attempted, errors.New("bridge replaced")
 	}
 	if result.Identity != lease.Identity || result.Challenge != challenge || len(result.Incarnation) != 36 {
 		return result, attempted, errors.New("bridge identity mismatch")

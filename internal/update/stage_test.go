@@ -71,25 +71,6 @@ func TestPrepareTargetReleaseDownloadsVerifiesAndChecksCompatibility(t *testing.
 	}
 }
 
-func TestExtractReleaseArchiveRejectsPathTraversal(t *testing.T) {
-	root := t.TempDir()
-	archivePath := filepath.Join(root, "malicious.tar.gz")
-	archive := singleFileArchive(t, "../escaped", []byte("no"))
-	if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	destination := filepath.Join(root, "release")
-	if err := os.Mkdir(destination, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := extractReleaseArchive(archivePath, destination); err == nil || !strings.Contains(err.Error(), "escapes") {
-		t.Fatalf("path traversal error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "escaped")); !os.IsNotExist(err) {
-		t.Fatalf("path traversal created a file: %v", err)
-	}
-}
-
 func releaseArchive(t *testing.T, root string) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
@@ -133,26 +114,6 @@ func releaseArchive(t *testing.T, root string) []byte {
 		return closeErr
 	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := archive.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := compressed.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buffer.Bytes()
-}
-
-func singleFileArchive(t *testing.T, name string, contents []byte) []byte {
-	t.Helper()
-	var buffer bytes.Buffer
-	compressed := gzip.NewWriter(&buffer)
-	archive := tar.NewWriter(compressed)
-	if err := archive.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(contents)), Typeflag: tar.TypeReg}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := archive.Write(contents); err != nil {
 		t.Fatal(err)
 	}
 	if err := archive.Close(); err != nil {

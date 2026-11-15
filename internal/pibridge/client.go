@@ -2,7 +2,6 @@ package pibridge
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -206,56 +205,64 @@ func identify(ctx context.Context, directory string, identity Identity) (string,
 
 func exchange(ctx context.Context, directory string, identity Identity, operation string) (Response, error) {
 	var result Response
-	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
-	default:
-		return result, errors.New("bridge busy")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
-	defer cancel()
-	conn, err := openBridgeConnection(ctx, directory, identity.PID)
+	challenge, _, err := roundTrip(ctx, directory, identity.PID, MaxBytes, func(challenge string) (any, error) {
+		return struct {
+			Identity
+			Challenge string `json:"challenge"`
+			Operation string `json:"operation"`
+		}{identity, challenge, operation}, nil
+	}, &result)
 	if err != nil {
 		return result, err
-	}
-	defer conn.Close()
-	challengeBytes := make([]byte, 16)
-	if _, err := rand.Read(challengeBytes); err != nil {
-		return result, err
-	}
-	challenge := hex.EncodeToString(challengeBytes)
-	request := struct {
-		Identity
-		Challenge string `json:"challenge"`
-		Operation string `json:"operation"`
-	}{identity, challenge, operation}
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
-		return result, err
-	}
-	data, err := io.ReadAll(io.LimitReader(conn, MaxBytes+1))
-	if err != nil {
-		return result, err
-	}
-	if len(data) > MaxBytes {
-		return result, errors.New("bridge response too large")
-	}
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-	if err := decodeBridge(data, &result); err != nil {
-		return result, err
-	}
-	after, err := owned(conn.path, true)
-	if err != nil || !os.SameFile(conn.before, after) {
-		return result, errors.New("bridge replaced")
 	}
 	if result.Instance != identity.Instance || result.Pane != identity.Pane || result.PID != identity.PID || result.Challenge != challenge {
 		return result, errors.New("bridge identity mismatch")
 	}
 	return result, nil
+}
+
+func roundTrip(ctx context.Context, directory string, pid, limit int, newRequest func(challenge string) (any, error), response any) (string, bool, error) {
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	default:
+		return "", false, errors.New("bridge busy")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+	defer cancel()
+	conn, err := openBridgeConnection(ctx, directory, pid)
+	if err != nil {
+		return "", false, err
+	}
+	defer conn.Close()
+	challenge, err := newChallenge()
+	if err != nil {
+		return "", false, err
+	}
+	request, err := newRequest(challenge)
+	if err != nil {
+		return challenge, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return challenge, false, err
+	}
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return challenge, true, err
+	}
+	data, err := io.ReadAll(io.LimitReader(conn, int64(limit)+1))
+	if err != nil {
+		return challenge, true, err
+	}
+	if len(data) > limit {
+		return challenge, true, errors.New("bridge response too large")
+	}
+	if err := decodeBridge(data, response); err != nil {
+		return challenge, true, err
+	}
+	if conn.replaced() {
+		return challenge, true, errors.New("bridge replaced")
+	}
+	return challenge, true, nil
 }
 
 func decodeBridge(data []byte, target any) error {
