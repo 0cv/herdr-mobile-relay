@@ -452,6 +452,8 @@ func targetMatchesAgent(target protocol.TargetRef, agent *coordinator.AgentState
 		target.AgentSessionID == agent.SessionID
 }
 
+const deviceManagementUnavailable = "Device management is unavailable"
+
 func deviceCredentialID(store *deviceauth.Store, deviceID string) (string, bool) {
 	if store == nil || strings.TrimSpace(deviceID) == "" {
 		return "", false
@@ -462,6 +464,14 @@ func deviceCredentialID(store *deviceauth.Store, deviceID string) (string, bool)
 		}
 	}
 	return "", false
+}
+
+func (s *Server) credentialIDOrFail(reply commandReply, deviceID string) (string, bool) {
+	credentialID, found := deviceCredentialID(s.deviceAuth, deviceID)
+	if !found {
+		reply.fail("Device credential was not found")
+	}
+	return credentialID, found
 }
 
 func activeDeviceCredentials(store *deviceauth.Store, currentCredentialID string) []deviceauth.Credential {
@@ -1073,7 +1083,7 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 func (s *Server) handleDeviceList(client *transport.ClientConn, inbound protocol.Inbound, action string, identity transport.AuthenticatedIdentity, authenticated bool) {
 	reply := s.reply(client, inbound.RequestID, action, "")
 	if s.deviceAuth == nil || !authenticated {
-		reply.fail("Device management is unavailable")
+		reply.fail(deviceManagementUnavailable)
 		return
 	}
 	reply.complete(map[string]any{
@@ -1086,7 +1096,7 @@ func (s *Server) handleDeviceList(client *transport.ClientConn, inbound protocol
 func (s *Server) handleCreateDeviceInvitation(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, identity transport.AuthenticatedIdentity, authenticated bool) {
 	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 	if s.deviceAuth == nil || !authenticated {
-		reply.fail("Device management is unavailable")
+		reply.fail(deviceManagementUnavailable)
 		return
 	}
 	invitation, invitationErr := s.deviceAuth.CreateInvitation(inbound.Name, deviceauth.Role(inbound.Role), identity.Locale)
@@ -1100,12 +1110,11 @@ func (s *Server) handleCreateDeviceInvitation(client *transport.ClientConn, inbo
 func (s *Server) handleRenameDevice(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string) {
 	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 	if s.deviceAuth == nil {
-		reply.fail("Device management is unavailable")
+		reply.fail(deviceManagementUnavailable)
 		return
 	}
-	credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+	credentialID, found := s.credentialIDOrFail(reply, inbound.DeviceID)
 	if !found {
-		reply.fail("Device credential was not found")
 		return
 	}
 	credential, renameErr := s.deviceAuth.RenameCredential(credentialID, inbound.Name)
@@ -1119,12 +1128,11 @@ func (s *Server) handleRenameDevice(client *transport.ClientConn, inbound protoc
 func (s *Server) handleRevokeDevice(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string) {
 	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 	if s.deviceAuth == nil {
-		reply.fail("Device management is unavailable")
+		reply.fail(deviceManagementUnavailable)
 		return
 	}
-	credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+	credentialID, found := s.credentialIDOrFail(reply, inbound.DeviceID)
 	if !found {
-		reply.fail("Device credential was not found")
 		return
 	}
 	credential, revokeErr := s.deviceAuth.RevokeCredential(credentialID)
@@ -1150,7 +1158,7 @@ func (s *Server) handleRevokeDevice(client *transport.ClientConn, inbound protoc
 func (s *Server) handleResetDevices(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, identity transport.AuthenticatedIdentity, authenticated bool) {
 	reply := s.auditedReply(client, msg, inbound.RequestID, action, "")
 	if s.deviceAuth == nil || !authenticated {
-		reply.fail("Device management is unavailable")
+		reply.fail(deviceManagementUnavailable)
 		return
 	}
 	credentials := activeDeviceCredentials(s.deviceAuth, "")
