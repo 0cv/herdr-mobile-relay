@@ -31,11 +31,7 @@ func TestClaudeForegroundHintIsDistinctFromWhitespacePaneCWD(t *testing.T) {
 	if location.Path != foregroundPath {
 		t.Fatalf("location = %q, want foreground path %q", location.Path, foregroundPath)
 	}
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	foregroundScope := BrowseScope{Provider: "claude", CWD: paneCWD, ForegroundCWD: foregroundCWD, SessionID: testSessionID}
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: foregroundScope, Limit: 1})
 	if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "foreground answer" || page.NextCursor == "" {
@@ -278,11 +274,7 @@ func TestClaudeBrowserUsesForegroundScopeAndRejectsOldCursor(t *testing.T) {
 
 func TestClaudeBrowserRecoversWhenForegroundHintChangesAfterMiss(t *testing.T) {
 	reader, home := testReader(t)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	missing := BrowseScope{Provider: "claude", CWD: "/work/pane", ForegroundCWD: "/work/missing", SessionID: testSessionID}
 	miss, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: missing, Limit: 1})
 	if err != nil || miss.Available || miss.ReasonCode != "invalid_session" {
@@ -305,11 +297,7 @@ func TestClaudeBrowserCursorIgnoresRedundantForegroundHints(t *testing.T) {
 		map[string]any{"type": "assistant", "uuid": "first", "message": map[string]any{"content": "first answer"}},
 		map[string]any{"type": "assistant", "uuid": "second", "message": map[string]any{"content": "second answer"}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	base := BrowseScope{Provider: "claude", CWD: "/work/pane", SessionID: testSessionID}
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: base, Limit: 1})
 	if err != nil || !first.Available || first.NextCursor == "" {

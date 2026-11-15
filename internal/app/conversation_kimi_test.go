@@ -111,11 +111,7 @@ func TestKimiRecordedFeedAppendUndoBranchAndIncompleteResets(t *testing.T) {
 	server.conversationB.Close()
 	defer server.herdrC.Close()
 	reader := conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 	server.conversationM, server.conversationB = reader, browser
 	server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "kimi-pane", TerminalID: "terminal", ServerSessionID: "primary", Agent: "kimi", Cwd: "/fixture", SessionID: id, AgentSessionID: id, Status: "working"}}, server.state.RevisionCounter())
 	agent, _ := server.state.Agent("kimi-pane")

@@ -174,11 +174,7 @@ func TestSnapshotAppendGrowthAvoidsCapturedRangeRehash(t *testing.T) {
 	options.RecentBytes = 1
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.NextCursor == "" {
@@ -227,11 +223,7 @@ func TestSnapshotReferenceDefersExpiryUntilReleased(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil {
@@ -296,10 +288,7 @@ func TestConcurrentSnapshotReadsCanOverlapShutdown(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	browser := newTestBrowser(t, reader, options)
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}, Limit: 1})
 	if err != nil {
 		_ = browser.Close()
@@ -369,11 +358,7 @@ func TestBrowserTraversesLargeJSONLSource(t *testing.T) {
 	options.RecentBytes = 1024
 	options.DefaultPageSize = 128
 	options.MaxPageSize = 128
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 128})
 	if err != nil || !latest.Available || latest.NextCursor == "" || !latest.HasMore {

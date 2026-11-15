@@ -192,11 +192,7 @@ func TestBrowserReadPageIncludesCursorTextTurns(t *testing.T) {
 			map[string]any{"type": "tool_use", "name": "Shell", "input": map[string]any{"command": "pwd"}},
 		}}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "cursor", CWD: cwd, SessionID: testSessionID}
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10})
 	if err != nil {

@@ -32,11 +32,7 @@ func claudeScheduleFixture(t *testing.T, segments int) (*Browser, BrowseScope, [
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 256 * 1024
 	options.MaxPageSize = 512
-	b, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = b.Close() })
+	b := newTestBrowser(t, reader, options)
 	return b, normalizeBrowseScope(BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}), paths
 }
 

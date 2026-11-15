@@ -72,11 +72,7 @@ func TestRecordedConversationFeedPublishesOnlyChangedEntries(t *testing.T) {
 		server.conversationB.Close()
 	}
 	reader := conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 	server.conversationM = reader
 	server.conversationB = browser
 	server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "fixture-pane", Agent: "claude", Cwd: "/fixture", SessionID: session, AgentSessionID: session, TerminalID: "fixture-terminal", ServerSessionID: "primary", Status: "working"}}, server.state.RevisionCounter())
@@ -159,11 +155,7 @@ func TestRecordedConversationFeedContinuationAndDiagnostics(t *testing.T) {
 			server := testServerWithCacheDir(t.TempDir())
 			server.conversationB.Close()
 			reader := conversation.NewReader(home)
-			browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 			if scenario == "nonready" {
 				browser.Close()
 			}
@@ -299,4 +291,14 @@ func waitFeedBatch(t *testing.T, feed *conversationFeed, after uint64) conversat
 	}
 	t.Fatal("changed source did not wake feed")
 	return conversationBatch{}
+}
+
+func newTestBrowser(t *testing.T, reader *conversation.Reader, options conversation.BrowserOptions) *conversation.Browser {
+	t.Helper()
+	browser, err := conversation.NewBrowser(reader, t.TempDir(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = browser.Close() })
+	return browser
 }

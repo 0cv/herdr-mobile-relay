@@ -21,11 +21,7 @@ func TestBrowserFailurePublishesAfterWorkerRelinquishesJob(t *testing.T) {
 	options.SnapshotQuota = initialSnapshotBytes(t)
 	options.AggregateQuota = 1024 * 1024
 	options.ActiveWorkers = 2
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	finishing := make(chan *browseJob, 2)
 	release := make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })

@@ -166,11 +166,7 @@ func TestAgyReaderRejectsUnsafeSessions(t *testing.T) {
 
 func TestAgyBrowserNativeCursorAndChangeToken(t *testing.T) {
 	reader, database, session := agyFixture(t)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "agy", SessionID: session}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
 	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 2 || !latest.HasMore || latest.NextCursor == "" {

@@ -432,11 +432,7 @@ func TestCapacityOMOTraversals(t *testing.T) {
 	writeRows(t, path, rows...)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	b, err := NewBrowser(NewReader(home), t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
+	b := newTestBrowser(t, NewReader(home), options)
 	scope := BrowseScope{Provider: "omo", CWD: cwd, SessionID: sessionID}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -492,11 +488,7 @@ func TestCapacityAppendTraversals(t *testing.T) {
 	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	var rows []map[string]any
 	for i := 0; i < 100; i++ {

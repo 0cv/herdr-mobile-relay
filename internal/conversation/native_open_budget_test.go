@@ -152,11 +152,7 @@ func measureNativeOpening(t *testing.T, provider string, count int) int64 {
 	if provider == "hermes" {
 		agent = "hermes"
 	}
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	request := BrowseRequest{Scope: BrowseScope{Provider: agent, SessionID: session, PaneID: "synthetic-pane"}, Limit: 24}
 	page, err := browser.ReadPage(t.Context(), request)
 	if err != nil || !page.Available || page.Error != nil || len(page.Entries) != 24 || !page.HasMore || page.NextCursor == "" {

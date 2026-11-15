@@ -42,11 +42,7 @@ func TestClaudeChainForegroundValidationMutationBeforeAdmission(t *testing.T) {
 				map[string]any{"type": "user", "uuid": "b1", "message": map[string]any{"content": "stable first"}},
 				map[string]any{"type": "assistant", "uuid": "b2", "message": map[string]any{"content": "observed-original"}},
 				map[string]any{"type": "assistant", "uuid": "b3", "message": map[string]any{"content": "stable footer"}})
-			b, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer b.Close()
+			b := newTestBrowser(t, reader, DefaultBrowserOptions())
 			scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 			initial, err := b.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10})
 			if err != nil || len(initial.Entries) != 3 || initial.ReasonCode != "" {

@@ -149,11 +149,7 @@ INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, sessionDi
 	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	for name, pane := range panes {
 		t.Run(name, func(t *testing.T) {
 			page, err := reader.ReadWithProject("opencode", ProjectContext{CWD: pane}, "ses_resumed", "", defaultPageSize)
@@ -194,11 +190,7 @@ INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, cwd)
 	execTestSQL(t, database, sql)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "opencode", CWD: cwd, SessionID: "ses_browser"}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {
@@ -484,11 +476,7 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 		openCodeV2Message("m3", "ses_browser2", "assistant", 3, 3, `{"content":[{"type":"text","text":"newer"}]}`)
 	createOpenCodeFixture(t, database, sql)
 	reader := openCodeFixtureReader(t, root)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	// The pane cwd differs from session_v2.directory (#61).
 	scope := BrowseScope{Provider: "opencode", CWD: cwd, SessionID: "ses_browser2"}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})

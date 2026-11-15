@@ -100,11 +100,7 @@ func liveDatabaseFixture(t *testing.T, format string, count int) (*sql.DB, *Brow
 	reader := NewReader(t.TempDir())
 	executor := &liveBudgetExecutor{t: t, base: sqliteexec.New(), plans: make(map[string]bool)}
 	reader.openCode.executor, reader.hermes.executor = executor, executor
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = browser.Close() })
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	watch := browser.NewDatabaseWatch(BrowseScope{Provider: provider, SessionID: session, CWD: root})
 	page, reset := watch.Refresh(t.Context())
 	if reset || page.State != BrowseReady || len(page.Entries) != min(count, maxPageSize) {

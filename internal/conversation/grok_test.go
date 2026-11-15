@@ -641,11 +641,7 @@ func TestGrokBrowserPaginatesAndRejectsReplacedSource(t *testing.T) {
 	reader, home := testReader(t)
 	path := grokUpdatesPath(home, grokCWD, testSessionID)
 	grokTurns(3).write(t, path)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
 
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})

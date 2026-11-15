@@ -69,11 +69,7 @@ func TestDatabaseLoadedHistoryEditDelivery(t *testing.T) {
 			server := testServerWithCacheDir(t.TempDir())
 			server.conversationB.Close()
 			reader := conversation.NewReader(t.TempDir())
-			browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 			defer server.herdrC.Close()
 			server.conversationM, server.conversationB = reader, browser
 			defer func() {

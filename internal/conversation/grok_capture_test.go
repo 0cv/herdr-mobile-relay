@@ -35,11 +35,7 @@ func TestGrokAppendDuringCapture(t *testing.T) {
 				reader, home := testReader(t)
 				path := grokUpdatesPath(home, grokCWD, testSessionID)
 				grokTurns(600).write(t, path)
-				browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer browser.Close()
+				browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 				scope := normalizeBrowseScope(BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID})
 				initial, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 2})
 				if err != nil || initial.NextCursor == "" {

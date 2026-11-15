@@ -18,11 +18,7 @@ func TestKimiForegroundCWDWhitespaceIsIdentity(t *testing.T) {
 	if err != nil || !page.Available || len(page.Entries) != 1 {
 		t.Fatalf("reader changed lexical cwd: %+v %v", page, err)
 	}
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	for _, scope := range []BrowseScope{{Provider: "kimi", CWD: "/wrong", ForegroundCWD: cwd, SessionID: id}, {Provider: "kimi", CWD: cwd, SessionID: id}} {
 		page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 1})
 		if err != nil || !page.Available || len(page.Entries) != 1 {
