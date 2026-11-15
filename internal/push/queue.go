@@ -302,8 +302,6 @@ type prunedRecovery struct {
 	results   []DeliveryResult
 }
 
-type recoverPrunedFunc func([]DeliveryResult) (bool, error)
-
 func (q *durableQueue) recoverPrunedWhileProcessing(recoveries []prunedRecovery, now time.Time) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -378,10 +376,6 @@ func (q *durableQueue) restorePrunedWhileProcessing(results []DeliveryResult, no
 	return dirty
 }
 
-type currentEventFunc func(PushEventKey) bool
-
-type queueSender func(context.Context, Subscription, []byte) error
-
 func newDeliveryResult(entry queueEntry, disposition DeliveryDisposition, attempts int) DeliveryResult {
 	return DeliveryResult{
 		Key: entry.Event.Key, Endpoint: entry.Subscription.Endpoint,
@@ -390,120 +384,10 @@ func newDeliveryResult(entry queueEntry, disposition DeliveryDisposition, attemp
 	}
 }
 
-func terminalSubscriptionKey(subscription Subscription) string {
-	return subscription.DeviceID + "\x00" + subscription.Endpoint
-}
-
-func (q *durableQueue) processDueWithRecovery(
-	ctx context.Context,
-	now time.Time,
-	current currentEventFunc,
-	send queueSender,
-	accepted func(PushEventKey, time.Time) error,
-	recoverPruned recoverPrunedFunc,
-) ([]DeliveryResult, error) {
-	q.process.Lock()
-	defer q.process.Unlock()
-	entries := q.dueEntries(now)
-	results := make([]DeliveryResult, 0, len(entries))
-	terminalSubscriptions := make(map[string]bool)
-	dirty := false
-	for _, entry := range entries {
-		if ctx.Err() != nil {
-			return q.finishPass(results, dirty, now, recoverPruned, ctx.Err())
-		}
-		result, err := q.deliverOne(ctx, now, entry, current, send, terminalSubscriptions)
-		if err != nil {
-			return q.finishPass(results, dirty, now, recoverPruned, err)
-		}
-		if result.Disposition == DeliveryPruned {
-			terminalSubscriptions[terminalSubscriptionKey(entry.Subscription)] = true
-		}
-		changed, err := q.applyResult(entry, result, now, accepted)
-		dirty = changed || dirty
-		if err != nil {
-			return q.finishPass(results, dirty, now, recoverPruned, err)
-		}
-		results = append(results, result)
-	}
-	return q.finishPass(results, dirty, now, recoverPruned, nil)
-}
-
-func (q *durableQueue) applyResult(entry queueEntry, result DeliveryResult, now time.Time, accepted func(PushEventKey, time.Time) error) (bool, error) {
-	if result.Disposition == DeliveryRetrying {
-		return q.rescheduleInMemory(entry.ID, entry, result.Attempts, result.NextAttempt), nil
-	}
-	changed := q.finishInMemory(entry.ID, entry, result.Disposition, now)
-	if result.Disposition != DeliveryAccepted || accepted == nil {
-		return changed, nil
-	}
-	return changed, accepted(entry.Event.Key, now)
-}
-
-func (q *durableQueue) finishPass(results []DeliveryResult, dirty bool, now time.Time, recoverPruned recoverPrunedFunc, cause error) ([]DeliveryResult, error) {
-	if recoverPruned != nil {
-		recovered, err := recoverPruned(results)
-		dirty = recovered || dirty
-		if err != nil {
-			dirty = q.restorePrunedWhileProcessing(results, now) || dirty
-			if persistErr := q.writeIfDirty(dirty); persistErr != nil {
-				return results, persistErr
-			}
-			return results, err
-		}
-	}
-	if err := q.writeIfDirty(dirty); err != nil {
-		return results, err
-	}
-	return results, cause
-}
-
-func (q *durableQueue) writeIfDirty(dirty bool) error {
-	if !dirty {
-		return nil
-	}
+func (q *durableQueue) write() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.writeState(q.state)
-}
-
-func (q *durableQueue) deliverOne(
-	ctx context.Context,
-	now time.Time,
-	entry queueEntry,
-	current currentEventFunc,
-	send queueSender,
-	terminalSubscriptions map[string]bool,
-) (result DeliveryResult, err error) {
-	if terminalSubscriptions[terminalSubscriptionKey(entry.Subscription)] {
-		return newDeliveryResult(entry, DeliveryPruned, entry.Attempts), nil
-	}
-	if !now.Before(entry.Event.ExpiresAt) {
-		return newDeliveryResult(entry, DeliveryExpired, entry.Attempts), nil
-	}
-	if current == nil || !current(entry.Event.Key) {
-		return newDeliveryResult(entry, DeliveryStale, entry.Attempts), nil
-	}
-	sendErr := send(ctx, entry.Subscription, entry.Event.Payload)
-	if sendErr != nil && ctx.Err() != nil {
-		return result, ctx.Err()
-	}
-	attempts := entry.Attempts + 1
-	if sendErr == nil {
-		return newDeliveryResult(entry, DeliveryAccepted, attempts), nil
-	}
-	if isTerminalError(sendErr) {
-		return newDeliveryResult(entry, DeliveryPruned, attempts), nil
-	}
-	if retryablePushError(sendErr) && attempts < maxDeliveryAttempts {
-		next := now.Add(retryDelay(attempts))
-		if next.Before(entry.Event.ExpiresAt) {
-			result = newDeliveryResult(entry, DeliveryRetrying, attempts)
-			result.NextAttempt = next
-			return result, nil
-		}
-	}
-	return newDeliveryResult(entry, DeliveryDropped, attempts), nil
 }
 
 func (q *durableQueue) dueEntries(now time.Time) []queueEntry {
