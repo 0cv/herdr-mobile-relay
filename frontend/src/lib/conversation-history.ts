@@ -42,6 +42,8 @@ type EntryLanes = {
   networkSnapshotId?: string;
 };
 
+type LaneContext = Pick<PageContext, 'isFreshHead' | 'previewWasVisible' | 'olderContinuationBefore' | 'planBefore'>;
+
 type PageContext = Readonly<{
   demand: Demand;
   requestedCursor: string;
@@ -621,7 +623,7 @@ export class ConversationHistoryController {
     const incoming = cloneEntries(page.entries);
     const incomingPlan = page.omoPlan ? clonePlan(page.omoPlan) : null;
     const carriesContent = page.available && !page.error && pageState === 'ready' && !(page.hasMore && !page.nextCursor);
-    const lanes = carriesContent ? this.nextLanes(page, demand, incoming, incomingPlan, context) : null;
+    const lanes = carriesContent ? nextLanes(this.currentLanes(), page, demand, incoming, incomingPlan, context) : null;
     if (lanes) {
       const retained = previewWasVisible && lanes.network.length ? [lanes.network] : [lanes.raw, lanes.network, lanes.bridge];
       if (retainedEntryCount(...retained) > HISTORY_MAX_RAW_ENTRIES || retainedEntryBytes(...retained) > this.maxContentBytes) {
@@ -829,20 +831,8 @@ export class ConversationHistoryController {
     return true;
   }
 
-  private nextLanes(
-    page: ConversationPage,
-    demand: Demand,
-    incoming: ConversationEntry[],
-    incomingPlan: OmoTodoState | null,
-    context: {
-      isFreshHead: boolean;
-      previewWasVisible: boolean;
-      olderContinuationBefore: OlderContinuation | null;
-      planBefore: OmoTodoState | null;
-    },
-  ): EntryLanes {
-    const { isFreshHead, previewWasVisible, olderContinuationBefore, planBefore } = context;
-    const lanes: EntryLanes = {
+  private currentLanes(): EntryLanes {
+    return {
       raw: this.rawEntries,
       network: this.networkEntries,
       bridge: this.bridgeEntries,
@@ -852,72 +842,6 @@ export class ConversationHistoryController {
       latestGapOutstanding: this.stateValue.latestGapOutstanding,
       replacedWindow: false,
     };
-    if (isFreshHead) {
-      if (previewWasVisible) {
-        // Never merge a fresh page into cache-owned content merely because a
-        // source revision or entry ID happens to match. The fresh lane is
-        // promoted only after it provides usable/authoritatively empty data.
-        lanes.network = incoming;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      } else if (demand === 'refresh' && this.rawEntries.length > 0 && !sharedEntryId(this.rawEntries, incoming)) {
-        lanes.bridgeRestore = olderContinuationBefore;
-        lanes.bridgePlan = incomingPlan || planBefore;
-        lanes.bridge = incoming;
-        lanes.network = incoming;
-        lanes.bridgeActive = Boolean(page.hasMore || page.nextCursor);
-        lanes.latestGapOutstanding = lanes.bridgeActive;
-        // A bridge uses the fresh head's cursor and snapshot cohort. The
-        // established older lane is restored after overlap is proven.
-        lanes.networkSnapshotId = page.mode === 'snapshot' ? page.snapshotId || '' : '';
-        if (!lanes.bridgeActive) {
-          lanes.raw = incoming;
-          lanes.bridge = [];
-          lanes.bridgeRestore = null;
-          lanes.latestGapOutstanding = false;
-          lanes.replacedWindow = true;
-        }
-      } else if (demand === 'refresh' && this.rawEntries.length > 0) {
-        lanes.raw = mergeFreshEntries(this.rawEntries, incoming);
-        lanes.network = lanes.raw;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      } else {
-        lanes.raw = incoming;
-        lanes.network = incoming;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      }
-    } else if (this.bridgeActive) {
-      lanes.bridge = mergeOlderEntries(this.bridgeEntries, incoming);
-      lanes.network = lanes.bridge;
-      if (sharedEntryId(this.rawEntries, lanes.bridge)) {
-        lanes.raw = mergeBridgedEntries(this.rawEntries, lanes.bridge);
-        lanes.network = lanes.raw;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      } else if (!page.hasMore && !page.nextCursor) {
-        // The new chain reached source start without overlap. It is safe to
-        // replace the old window, but never mix the two disconnected chains.
-        lanes.raw = lanes.bridge;
-        lanes.network = lanes.raw;
-        lanes.bridge = [];
-        lanes.bridgeRestore = null;
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-        lanes.replacedWindow = true;
-      }
-    } else {
-      lanes.network = previewWasVisible
-        ? mergeOlderEntries(this.networkEntries, incoming)
-        : mergeOlderEntries(this.rawEntries, incoming);
-      if (!previewWasVisible) lanes.raw = lanes.network;
-    }
-    return lanes;
   }
 
   private restoreBridgeAfterFailure(): boolean {
@@ -1170,6 +1094,130 @@ function mergeBridgedEntries(existing: ConversationEntry[], bridge: Conversation
 function sharedEntryId(first: ConversationEntry[], second: ConversationEntry[]): boolean {
   const ids = new Set(first.map((entry) => entry.id));
   return second.some((entry) => ids.has(entry.id));
+}
+
+function nextLanes(
+  current: EntryLanes,
+  page: ConversationPage,
+  demand: Demand,
+  incoming: ConversationEntry[],
+  incomingPlan: OmoTodoState | null,
+  context: LaneContext,
+): EntryLanes {
+  if (context.isFreshHead) {
+    if (context.previewWasVisible) return previewHeadLanes(current, incoming);
+    return freshHeadLanes(current, page, demand, incoming, incomingPlan, context);
+  }
+  if (current.bridgeActive) return bridgeContinuationLanes(current, page, incoming);
+  return olderPageLanes(current, incoming, context.previewWasVisible);
+}
+
+function previewHeadLanes(current: EntryLanes, incoming: ConversationEntry[]): EntryLanes {
+  // Never merge a fresh page into cache-owned content merely because a
+  // source revision or entry ID happens to match. The fresh lane is
+  // promoted only after it provides usable/authoritatively empty data.
+  return {
+    ...current,
+    network: incoming,
+    bridge: [],
+    bridgeActive: false,
+    latestGapOutstanding: false,
+  };
+}
+
+function freshHeadLanes(
+  current: EntryLanes,
+  page: ConversationPage,
+  demand: Demand,
+  incoming: ConversationEntry[],
+  incomingPlan: OmoTodoState | null,
+  context: LaneContext,
+): EntryLanes {
+  if (demand === 'refresh' && current.raw.length > 0 && !sharedEntryId(current.raw, incoming)) {
+    const bridgeActive = Boolean(page.hasMore || page.nextCursor);
+    // A bridge uses the fresh head's cursor and snapshot cohort. The
+    // established older lane is restored after overlap is proven.
+    const networkSnapshotId = page.mode === 'snapshot' ? page.snapshotId || '' : '';
+    if (!bridgeActive) {
+      return {
+        ...current,
+        raw: incoming,
+        network: incoming,
+        bridge: [],
+        bridgeActive,
+        bridgeRestore: null,
+        bridgePlan: incomingPlan || context.planBefore,
+        latestGapOutstanding: false,
+        replacedWindow: true,
+        networkSnapshotId,
+      };
+    }
+    return {
+      ...current,
+      network: incoming,
+      bridge: incoming,
+      bridgeActive,
+      bridgeRestore: context.olderContinuationBefore,
+      bridgePlan: incomingPlan || context.planBefore,
+      latestGapOutstanding: true,
+      networkSnapshotId,
+    };
+  }
+  if (demand === 'refresh' && current.raw.length > 0) {
+    const merged = mergeFreshEntries(current.raw, incoming);
+    return {
+      ...current,
+      raw: merged,
+      network: merged,
+      bridge: [],
+      bridgeActive: false,
+      latestGapOutstanding: false,
+    };
+  }
+  return {
+    ...current,
+    raw: incoming,
+    network: incoming,
+    bridge: [],
+    bridgeActive: false,
+    latestGapOutstanding: false,
+  };
+}
+
+function bridgeContinuationLanes(current: EntryLanes, page: ConversationPage, incoming: ConversationEntry[]): EntryLanes {
+  const bridge = mergeOlderEntries(current.bridge, incoming);
+  if (sharedEntryId(current.raw, bridge)) {
+    const raw = mergeBridgedEntries(current.raw, bridge);
+    return {
+      ...current,
+      raw,
+      network: raw,
+      bridge: [],
+      bridgeActive: false,
+      latestGapOutstanding: false,
+    };
+  }
+  if (!page.hasMore && !page.nextCursor) {
+    // The new chain reached source start without overlap. It is safe to
+    // replace the old window, but never mix the two disconnected chains.
+    return {
+      ...current,
+      raw: bridge,
+      network: bridge,
+      bridge: [],
+      bridgeRestore: null,
+      bridgeActive: false,
+      latestGapOutstanding: false,
+      replacedWindow: true,
+    };
+  }
+  return { ...current, network: bridge, bridge };
+}
+
+function olderPageLanes(current: EntryLanes, incoming: ConversationEntry[], previewWasVisible: boolean): EntryLanes {
+  if (previewWasVisible) return { ...current, network: mergeOlderEntries(current.network, incoming) };
+  const raw = mergeOlderEntries(current.raw, incoming);
+  return { ...current, raw, network: raw };
 }
 
 function mergeDiagnostics(
