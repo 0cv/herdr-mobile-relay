@@ -79,3 +79,39 @@ func startUnaryTestSocket(t *testing.T, expectedMethod string, result any) (stri
 	}()
 	return socketPath, done
 }
+
+type recordedSocketRequest struct {
+	Method string         `json:"method"`
+	Params map[string]any `json:"params"`
+}
+
+// startRecordingTestSocket answers every request with result and reports each
+// request it received, in order.
+func startRecordingTestSocket(t *testing.T, result any) (string, <-chan recordedSocketRequest) {
+	t.Helper()
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	requests := make(chan recordedSocketRequest, 16)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			var request struct {
+				ID string `json:"id"`
+				recordedSocketRequest
+			}
+			if json.NewDecoder(conn).Decode(&request) == nil {
+				requests <- request.recordedSocketRequest
+				_ = json.NewEncoder(conn).Encode(map[string]any{"id": request.ID, "result": result})
+			}
+			_ = conn.Close()
+		}
+	}()
+	return socketPath, requests
+}
