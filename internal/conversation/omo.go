@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
@@ -89,11 +90,10 @@ func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([
 	if ok && cached.size == source.info.Size() && cached.modTime == source.info.ModTime().UnixNano() && cached.identity == sourceIdentity {
 		return append([]Entry(nil), cached.entries...), ""
 	}
-	text, _, err := loadTailFile(source.file, maxConversationBytes)
+	entries, err := readJSONLTail(source.file, agentkind.OMO, source.revision, source.info.Size())
 	if err != nil {
 		return nil, "source_unavailable"
 	}
-	entries := parseTranscript("pi", text)
 	current, statErr := os.Stat(source.path)
 	if statErr == nil && os.SameFile(source.info, current) && current.Size() == source.info.Size() && current.ModTime() == source.info.ModTime() {
 		entry := omoCacheEntry{

@@ -1,7 +1,6 @@
 package conversation
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -175,11 +174,16 @@ func (r *Reader) ReadLatest(agent string, project ProjectContext, sessionID stri
 	if agentkind.Of(agent) == agentkind.Claude {
 		return r.readClaudeChain(sessionID, location, limit)
 	}
-	text, _, err := loadTail(location.Path, maxConversationBytes)
+	source, err := captureFileSource(location)
 	if err != nil {
 		return nil, fmt.Errorf("read conversation log: %w", err)
 	}
-	return latest(parseTranscript(agent, text), limit), nil
+	defer source.close()
+	entries, err := readJSONLTail(source.file, agent, source.revision, source.end)
+	if err != nil {
+		return nil, fmt.Errorf("read conversation log: %w", err)
+	}
+	return latest(entries, limit), nil
 }
 
 func clampPageLimit(limit int) int {
@@ -517,46 +521,31 @@ func containedRegularFile(path, root string) string {
 	return realPath
 }
 
-func loadTail(path string, limit int64) (string, bool, error) {
-	file, err := openConversationSource(path)
+func readJSONLEntries(file *os.File, agent, revision string, start, end int64) ([]Entry, error) {
+	records, err := NewJSONLRecordReader(context.Background(), file, start, end, maxConversationBytes, nil)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	defer file.Close()
-	return loadTailFile(file, limit)
+	projector := newMemoryProjector(agent, revision)
+	for {
+		record, err := records.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		projector.apply(record)
+	}
+	entries := make([]Entry, len(projector.entries))
+	for index, projected := range projector.entries {
+		entries[index] = projected.Entry
+	}
+	return entries, nil
 }
 
-func loadTailFile(file *os.File, limit int64) (string, bool, error) {
-	if file == nil {
-		return "", false, errors.New("conversation source is closed")
-	}
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		if err == nil {
-			err = errors.New("conversation source is not a regular file")
-		}
-		return "", false, err
-	}
-	clipped := info.Size() > limit
-	start := int64(0)
-	if clipped {
-		start = info.Size() - limit
-	}
-	if _, err := file.Seek(start, 0); err != nil {
-		return "", false, err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, limit))
-	if err != nil {
-		return "", false, err
-	}
-	if clipped {
-		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
-			data = data[newline+1:]
-		} else {
-			data = nil
-		}
-	}
-	return string(data), clipped, nil
+func readJSONLTail(file *os.File, agent, revision string, size int64) ([]Entry, error) {
+	return readJSONLEntries(file, agent, revision, max(0, size-maxConversationBytes), size)
 }
 
 type toolResult struct {
@@ -568,47 +557,6 @@ type toolResult struct {
 type toolLocation struct {
 	entry int
 	tool  int
-}
-
-func parseTranscript(agent, text string) []Entry {
-	normalized := agentkind.Of(agent)
-	entries := make([]Entry, 0)
-	seenIDs := make(map[string]int)
-	pendingTools := make(map[string]toolLocation)
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) != nil {
-			continue
-		}
-		calls, results := parseToolActivity(normalized, record)
-		for _, result := range results {
-			location, ok := pendingTools[toolAssociationKey(normalized, result.id)]
-			if !ok || location.entry >= len(entries) || location.tool >= len(entries[location.entry].Tools) {
-				continue
-			}
-			tool := &entries[location.entry].Tools[location.tool]
-			applyProjectedToolResult(tool, result)
-			delete(pendingTools, toolAssociationKey(normalized, result.id))
-		}
-
-		entry := prepareJSONLEntry(agent, record, calls)
-		if entry == nil {
-			continue
-		}
-		normalizeEntryTools(entry)
-		entry.ID = stableRowID(line, seenIDs)
-		entryIndex := len(entries)
-		entries = append(entries, *entry)
-		for toolIndex := range calls {
-			if id := toolAssociationID(calls[toolIndex]); id != "" {
-				pendingTools[toolAssociationKey(normalized, id)] = toolLocation{entry: entryIndex, tool: toolIndex}
-			}
-		}
-	}
-	return entries
 }
 
 func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []toolResult) {
@@ -994,17 +942,6 @@ func clampText(text string, limit int) (string, bool) {
 		clipped = clipped[:len(clipped)-1]
 	}
 	return strings.TrimSpace(clipped), true
-}
-
-func stableRowID(line string, seen map[string]int) string {
-	digest := sha256.Sum256([]byte(line))
-	base := hex.EncodeToString(digest[:12])
-	occurrence := seen[base]
-	seen[base] = occurrence + 1
-	if occurrence == 0 {
-		return base
-	}
-	return fmt.Sprintf("%s-%d", base, occurrence)
 }
 
 func stringValue(value any) string {

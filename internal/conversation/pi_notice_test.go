@@ -64,10 +64,13 @@ func TestPiNoticeBoundsAndNonTextContent(t *testing.T) {
 	for _, content := range []any{strings.Repeat("界", maxEntryBytes), []any{map[string]any{"type": "image", "data": "PRIVATE_IMAGE"}}} {
 		row := map[string]any{"type": "custom_message", "display": true, "content": content}
 		raw, _ := json.Marshal(row)
-		entries := parseTranscript("pi", string(raw))
 		projector := newMemoryProjector("pi", "revision")
 		projector.apply(JSONLRecord{Raw: raw, Complete: true})
-		if len(entries) != 1 || len(projector.entries) != 1 || entries[0].Kind != "notice" || entries[0].Text == "" || !utf8.ValidString(entries[0].Text) || len(entries[0].Text) > maxEntryBytes || strings.Contains(entries[0].Text, "PRIVATE_") {
+		entries := make([]Entry, len(projector.entries))
+		for index, projected := range projector.entries {
+			entries[index] = projected.Entry
+		}
+		if len(entries) != 1 || entries[0].Kind != "notice" || entries[0].Text == "" || !utf8.ValidString(entries[0].Text) || len(entries[0].Text) > maxEntryBytes || strings.Contains(entries[0].Text, "PRIVATE_") {
 			t.Fatalf("bounded notice = %+v", entries)
 		}
 		if _, ok := content.(string); ok && !entries[0].Truncated {

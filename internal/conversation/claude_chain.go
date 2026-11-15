@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const (
@@ -368,49 +370,26 @@ func (segment claudeSegment) compareSource(source fileSource) sourceChange {
 	return segment.stamp().compare(source.info)
 }
 
-// readCapturedSegment reads at most limit bytes ending at a descriptor's
-// captured boundary. It is used by the legacy reader and deliberately verifies
-// the descriptor before reading, so an old chain never grows into a new leaf.
-func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64) (string, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return "", false, err
-	}
+// readEntries rejects a segment whose file changed after capture, so an old
+// chain never grows into a new leaf, then reads at most budget bytes ending at
+// the captured boundary.
+func (segment claudeSegment) readEntries(budget int64) ([]Entry, error) {
 	source, err := captureFileSource(segment.Location)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	defer source.close()
 	if segment.compareSource(source) == sourceChanged {
-		return "", false, errors.New("Claude chain source changed")
+		return nil, errors.New("Claude chain source changed")
 	}
 	end := segment.CapturedEnd
 	if end == 0 {
-		return "", false, nil
+		return nil, nil
 	}
-	if limit < 1 {
-		return "", false, errors.New("invalid Claude segment budget")
+	if budget < 1 {
+		return nil, errors.New("invalid Claude segment budget")
 	}
-	start := int64(0)
-	clipped := end > limit
-	if clipped {
-		start = end - limit
-	}
-	data := make([]byte, end-start)
-	read, err := source.file.ReadAt(data, start)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", false, err
-	}
-	if int64(read) != end-start {
-		return "", false, io.ErrUnexpectedEOF
-	}
-	if clipped {
-		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
-			data = data[newline+1:]
-		} else {
-			data = nil
-		}
-	}
-	return string(data), clipped, nil
+	return readJSONLEntries(source.file, agentkind.Claude, source.revision, max(0, end-budget), end)
 }
 
 func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) ([]Entry, error) {
@@ -432,23 +411,22 @@ func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) (
 		if segment.CapturedEnd < budget {
 			budget = segment.CapturedEnd
 		}
-		text, segmentClipped, readErr := readCapturedSegment(context.Background(), segment, budget)
+		entries, readErr := segment.readEntries(budget)
 		if readErr != nil {
 			if index == len(chain.Segments)-1 {
 				return nil, fmt.Errorf("read Claude conversation segment: %w", readErr)
 			}
 			break
 		}
-		entries := parseTranscript("claude", text)
 		groups[index] = entries
 		consumed := segment.CapturedEnd
 		if consumed > remaining {
 			consumed = remaining
 		}
 		remaining -= consumed
-		if segmentClipped {
+		if segment.CapturedEnd > budget {
 			// The tail of this segment is readable, but no older segment can be
-			// certified within the shared 16 MiB legacy budget.
+			// certified within the shared 16 MiB budget.
 			break
 		}
 	}
