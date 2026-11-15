@@ -457,16 +457,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			if reserved[strings.ToLower(command)] {
 				continue
 			}
-			description := metadata["description"]
-			if description == "" {
-				description = strings.ToUpper(name[:1]) + name[1:] + " skill"
-			}
-			list.set([]Command{{
-				Command:      command,
-				Description:  textutil.Compact(description, 240),
-				Source:       source,
-				ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
-			}})
+			list.set([]Command{skillCommand(command, skillDescription(metadata, name), source, metadata)})
 		}
 	}
 	if ctx.Cwd != "" {

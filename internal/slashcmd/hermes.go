@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
-	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 type hermesProvider struct{}
@@ -65,16 +64,8 @@ func parseHermesSkillMetadata(metadata map[string]string, dirName, source string
 	if slug == "" || !commandNamePattern.MatchString(slug) || !userInvocable(metadata) {
 		return nil
 	}
-	description := metadata["description"]
-	if description == "" {
-		description = strings.ToUpper(slug[:1]) + slug[1:] + " skill"
-	}
-	return &Command{
-		Command:      "/" + slug,
-		Description:  textutil.Compact(description, 240),
-		Source:       source,
-		ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
-	}
+	command := skillCommand("/"+slug, skillDescription(metadata, slug), source, metadata)
+	return &command
 }
 
 func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
