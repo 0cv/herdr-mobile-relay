@@ -16,6 +16,8 @@ type cursorProvider struct{}
 
 func (p *cursorProvider) ID() string { return "cursor" }
 
+func (p *cursorProvider) Builtins() []Command { return cursorBuiltins }
+
 var cursorBuiltins = []Command{
 	{"/about", "About", "builtin", ""},
 	{"/add-dir", "Add directory", "builtin", "<path>"},
@@ -368,11 +370,6 @@ func (reader *catalogReader) scanCursorCommandDirBudget(dir, source string, budg
 
 func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(cursorBuiltins))
-		copy(builtins, cursorBuiltins)
-		return builtins, reader.truncated
-	}
 
 	budget := maxCustomFiles
 	truncated := false

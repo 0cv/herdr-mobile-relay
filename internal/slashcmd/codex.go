@@ -1,8 +1,12 @@
 package slashcmd
 
+import "slices"
+
 type codexProvider struct{}
 
 func (p *codexProvider) ID() string { return "codex" }
+
+func (p *codexProvider) Builtins() []Command { return codexBuiltinsBase }
 
 var codexBuiltinsBase = []Command{
 	{"/permissions", "Change approval and sandbox permissions", "builtin", ""},
@@ -58,7 +62,7 @@ var codexBuiltinsBase = []Command{
 }
 
 func (p *codexProvider) Discover(DiscoverContext) ([]Command, bool) {
-	return codexBuiltinsBase, false
+	return slices.Clone(codexBuiltinsBase), false
 }
 
 func init() {

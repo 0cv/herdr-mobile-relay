@@ -38,12 +38,11 @@ type openCodeProvider struct{}
 
 func (p *openCodeProvider) ID() string { return "opencode" }
 
+func (p *openCodeProvider) Builtins() []Command { return openCodeBuiltins }
+
 func (p *openCodeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
 	commands := append([]Command(nil), openCodeBuiltins...)
-	if ctx.SuppressNative {
-		return commands, reader.truncated
-	}
 	config := os.Getenv("XDG_CONFIG_HOME")
 	if !filepath.IsAbs(config) {
 		config = filepath.Join(ctx.Home, ".config")

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
@@ -21,6 +22,8 @@ const maxSettingsSize = 256 * 1024
 type ompProvider struct{}
 
 func (p *ompProvider) ID() string { return "omp" }
+
+func (p *ompProvider) Builtins() []Command { return ompBuiltins }
 
 // ompBuiltins mirrors the primary TUI commands in OMP 17.1.7.
 var ompBuiltins = []Command{
@@ -105,11 +108,6 @@ var ompBuiltins = []Command{
 // important skills, never the highest-priority ones.
 func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(ompBuiltins))
-		copy(builtins, ompBuiltins)
-		return builtins, reader.truncated
-	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.
@@ -119,9 +117,7 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	settings := reader.loadOMPSkillSettings(ctx)
 	if !settings.enabled || !settings.enableSkillCommands {
-		builtins := make([]Command, len(ompBuiltins))
-		copy(builtins, ompBuiltins)
-		return builtins, reader.truncated
+		return slices.Clone(ompBuiltins), reader.truncated
 	}
 
 	truncated := false

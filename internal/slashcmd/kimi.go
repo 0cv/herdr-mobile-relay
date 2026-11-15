@@ -56,6 +56,8 @@ type kimiProvider struct{}
 
 func (p *kimiProvider) ID() string { return "kimi" }
 
+func (p *kimiProvider) Builtins() []Command { return kimiBuiltins }
+
 // Discover reproduces standalone Kimi Code's native skill roots, verified
 // against MoonshotAI/kimi-code's packages/agent-core/src/skill/scanner.ts:
 // project .kimi-code and .agents roots, the KIMI_CODE_HOME user root, the
@@ -68,11 +70,6 @@ func (p *kimiProvider) ID() string { return "kimi" }
 // skills, never the winners.
 func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(kimiBuiltins))
-		copy(builtins, kimiBuiltins)
-		return builtins, reader.truncated
-	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.

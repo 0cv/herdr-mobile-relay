@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"slices"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
@@ -96,6 +97,9 @@ func CatalogFor(profileID, reportedAgent string, ctx DiscoverContext) Catalog {
 	if provider == nil {
 		commands, truncated := newCatalogReader().discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
 		return finalizeCatalog(commands, truncated)
+	}
+	if ctx.SuppressNative {
+		return finalizeCatalog(slices.Clone(provider.Builtins()), false)
 	}
 	commands, truncated := provider.Discover(ctx)
 	return finalizeCatalog(commands, truncated)

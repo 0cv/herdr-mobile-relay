@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
@@ -13,6 +14,8 @@ import (
 type piProvider struct{}
 
 func (p *piProvider) ID() string { return "pi" }
+
+func (p *piProvider) Builtins() []Command { return piBuiltins }
 
 // piBuiltins mirrors the primary interactive commands in Pi 0.87.0. Keep this
 // list version-aware if a future Pi release removes or renames a command.
@@ -58,11 +61,6 @@ var piBuiltins = []Command{
 // and nothing here filters on it.
 func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(piBuiltins))
-		copy(builtins, piBuiltins)
-		return builtins, reader.truncated
-	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.
@@ -72,9 +70,7 @@ func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	settings := reader.loadPiSkillSettings(ctx)
 	if !settings.enableSkillCommands {
-		builtins := make([]Command, len(piBuiltins))
-		copy(builtins, piBuiltins)
-		return builtins, reader.truncated
+		return slices.Clone(piBuiltins), reader.truncated
 	}
 
 	truncated := false

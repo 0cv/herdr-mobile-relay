@@ -10,6 +10,8 @@ type claudeProvider struct{}
 
 func (p *claudeProvider) ID() string { return "claude" }
 
+func (p *claudeProvider) Builtins() []Command { return claudeBuiltins }
+
 var claudeBuiltins = []Command{
 	{"/add-dir", "Add another working directory", "builtin", "<path>"},
 	{"/agents", "Manage agent configurations", "builtin", ""},
@@ -66,11 +68,6 @@ var claudeBuiltins = []Command{
 
 func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(claudeBuiltins))
-		copy(builtins, claudeBuiltins)
-		return builtins, reader.truncated
-	}
 	truncated := false
 	budget := maxCustomFiles
 	active := make(map[string]Command, len(claudeBuiltins))

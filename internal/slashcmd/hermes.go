@@ -14,6 +14,8 @@ type hermesProvider struct{}
 
 func (p *hermesProvider) ID() string { return "hermes" }
 
+func (p *hermesProvider) Builtins() []Command { return hermesBuiltins }
+
 // hermesBuiltins mirrors commands available in the Hermes Agent CLI.
 var hermesBuiltins = []Command{
 	{"/model", "Switch model or view active configuration", "builtin", "[model] [--provider name]"},
@@ -77,11 +79,6 @@ func parseHermesSkillMetadata(metadata map[string]string, dirName, source string
 
 func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(hermesBuiltins))
-		copy(builtins, hermesBuiltins)
-		return builtins, reader.truncated
-	}
 
 	commands := make([]Command, 0, len(hermesBuiltins))
 	commands = append(commands, hermesBuiltins...)

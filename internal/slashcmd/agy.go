@@ -9,6 +9,8 @@ type agyProvider struct{}
 
 func (p *agyProvider) ID() string { return "agy" }
 
+func (p *agyProvider) Builtins() []Command { return agyBuiltins }
+
 // agyBuiltins mirrors the commands Antigravity CLI 1.4.7 lists under
 // /help > commands before any user skill or workflow. Where the CLI shows only
 // the command name and a truncated description, the description here is a
@@ -73,9 +75,6 @@ func (p *agyProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
 	commands := make([]Command, len(agyBuiltins))
 	copy(commands, agyBuiltins)
-	if ctx.SuppressNative {
-		return commands, reader.truncated
-	}
 	seen := make(map[string]bool, len(commands))
 	for _, command := range commands {
 		seen[command.Command] = true
