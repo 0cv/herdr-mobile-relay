@@ -5,6 +5,7 @@
   import TerminalKeys, { type QueuedKeyCommand } from '$components/TerminalKeys.svelte';
   import AgentInteraction from '$components/AgentInteraction.svelte';
   import TerminalInputMode from '$components/TerminalInputMode.svelte';
+  import TerminalFind from '$components/TerminalFind.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import type { ComposerSubmitAdapter } from '$lib/composer';
   import Button from '$components/ui/Button.svelte';
@@ -23,13 +24,6 @@
     questionInteraction,
     sortedAgents,
   } from '$lib/agents';
-  import {
-    findTerminalText,
-    terminalMatchFragments,
-    terminalRowForOffset,
-    terminalRowOffsets,
-    terminalSearchText,
-  } from '$lib/terminal-find';
   import {
     toggleSpeech,
     speechEnabled,
@@ -88,7 +82,6 @@
 
   let terminalElement = $state<HTMLDivElement>(null!);
   let cellMeasureElement = $state<HTMLSpanElement>(null!);
-  let findInputElement = $state<HTMLInputElement>(null!);
   let transcriptElement = $state<HTMLTextAreaElement>(null!);
   let responseElement = $state<HTMLTextAreaElement>(null!);
   let agentResponsePreviewElement = $state<HTMLTextAreaElement>(null!);
@@ -123,8 +116,7 @@
   let lastPreserveLineEnds = false;
   let lastRenderColumnCap = 0;
   let findOpen = $state(false);
-  let findQuery = $state('');
-  let activeFindIndex = $state(-1);
+  let find = $state<TerminalFind>();
   let sendingPrompt = $state(false);
   let keySending = $state(false);
   const keyQueue: QueuedKeyCommand[] = [];
@@ -237,11 +229,6 @@
       ? terminalMenu
       : null,
   );
-  const terminalFindCorpus = $derived.by(() => ({
-    text: terminalSearchText(renderedRows),
-    offsets: terminalRowOffsets(renderedRows),
-  }));
-  const terminalFind = $derived(findTerminalText(terminalFindCorpus.text, findQuery.trim()));
   const agentResponseCopySupported = $derived.by(() => {
     const connection = $connections.get(agent.relay_id);
     return Boolean(
@@ -269,30 +256,6 @@
       styles.push(`--terminal-content-width: ${(virtualContentColumns * measuredCellWidth).toFixed(4)}px`);
     }
     return styles.join(';');
-  });
-
-  $effect(() => {
-    const count = terminalFind.matches.length;
-    const query = findQuery.trim();
-    untrack(() => {
-      if (!query || !count) {
-        activeFindIndex = -1;
-        return;
-      }
-      if (activeFindIndex < 0 || activeFindIndex >= count) activeFindIndex = 0;
-    });
-  });
-
-  $effect(() => {
-    const highlightState = [
-      findOpen,
-      findQuery,
-      activeFindIndex,
-      virtualHtml,
-      terminalFind.matches.length,
-    ];
-    void highlightState;
-    void tick().then(applyTerminalFindHighlights);
   });
 
   // The ANSI palette follows the theme's terminal scheme, so a theme change
@@ -523,15 +486,6 @@
       lease.request(true);
     };
     paneVisibilityChanged = visibilityChanged;
-    const findShortcut = (event: KeyboardEvent) => {
-      if (questionMode
-        || event.altKey
-        || (!event.ctrlKey && !event.metaKey)
-        || event.key.toLocaleLowerCase() !== 'f') return;
-      event.preventDefault();
-      openTerminalFind();
-    };
-    window.addEventListener('keydown', findShortcut);
     window.addEventListener('resize', measurePane);
     window.visualViewport?.addEventListener('resize', measurePane);
     document.addEventListener('visibilitychange', visibilityChanged);
@@ -549,7 +503,6 @@
       window.visualViewport?.removeEventListener('resize', measurePane);
       document.removeEventListener('visibilitychange', visibilityChanged);
       paneVisibilityChanged = null;
-      window.removeEventListener('keydown', findShortcut);
       clearInterval(refresh);
       relayStore.unwatchPane(agent);
       lease.stop();
@@ -914,119 +867,19 @@
     });
   }
 
-  function clearTerminalFindHighlights() {
-    if (!terminalElement) return;
-    const parents = new Set<Node>();
-    for (const mark of terminalElement.querySelectorAll<HTMLElement>('mark[data-terminal-find]')) {
-      if (mark.parentNode) parents.add(mark.parentNode);
-      mark.replaceWith(document.createTextNode(mark.textContent || ''));
-    }
-    for (const parent of parents) parent.normalize();
-  }
-
-  function applyTerminalFindHighlights() {
-    clearTerminalFindHighlights();
-    if (!terminalElement || !findOpen || !findQuery.trim() || !terminalFind.matches.length) return;
-    const byRow = new Map<number, Array<{ start: number; end: number; active: boolean }>>();
-    terminalFind.matches.forEach((match, matchIndex) => {
-      for (const fragment of terminalMatchFragments(renderedRows, terminalFindCorpus.offsets, match)) {
-        if (fragment.row < virtualStart || fragment.row >= virtualEnd) continue;
-        const fragments = byRow.get(fragment.row) || [];
-        fragments.push({ start: fragment.start, end: fragment.end, active: matchIndex === activeFindIndex });
-        byRow.set(fragment.row, fragments);
-      }
-    });
-    for (const [row, fragments] of byRow) {
-      const element = terminalElement.querySelector<HTMLElement>(`[data-terminal-row="${row}"]`);
-      if (element) highlightTerminalRow(element, fragments);
-    }
-  }
-
-  function highlightTerminalRow(
-    element: HTMLElement,
-    fragments: Array<{ start: number; end: number; active: boolean }>,
-  ) {
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-    const nodes: Array<{ node: Text; start: number; end: number }> = [];
-    let offset = 0;
-    let node = walker.nextNode();
-    while (node) {
-      const text = node as Text;
-      nodes.push({ node: text, start: offset, end: offset + text.data.length });
-      offset += text.data.length;
-      node = walker.nextNode();
-    }
-    for (const entry of nodes) {
-      const intersections = fragments
-        .map((fragment) => ({
-          start: Math.max(fragment.start, entry.start) - entry.start,
-          end: Math.min(fragment.end, entry.end) - entry.start,
-          active: fragment.active,
-        }))
-        .filter((fragment) => fragment.end > fragment.start)
-        .sort((left, right) => right.start - left.start);
-      for (const fragment of intersections) {
-        entry.node.splitText(fragment.end);
-        const selected = entry.node.splitText(fragment.start);
-        const mark = document.createElement('mark');
-        mark.dataset.terminalFind = '';
-        mark.className = `terminal-find-match${fragment.active ? ' active' : ''}`;
-        selected.replaceWith(mark);
-        mark.append(selected);
-      }
-    }
-  }
-
-  function openTerminalFind() {
-    findOpen = true;
-    void tick().then(() => {
-      findInputElement?.focus();
-      findInputElement?.select();
-    });
-  }
-
   // The header owns the Find control, so the terminal exposes opening it rather
   // than lifting findOpen out: kept here, the bar still closes with the pane.
   export function openFind() {
-    openTerminalFind();
+    find?.open();
   }
 
-  function closeTerminalFind() {
-    findOpen = false;
-  }
-
-  function findInputChanged() {
-    activeFindIndex = -1;
-    void tick().then(() => {
-      if (terminalFind.matches.length) revealFindMatch(0);
-    });
-  }
-
-  function findKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeTerminalFind();
-      return;
-    }
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    revealFindMatch(activeFindIndex + (event.shiftKey ? -1 : 1));
-  }
-
-  function revealFindMatch(index: number) {
-    const count = terminalFind.matches.length;
-    if (!terminalElement || !count) return;
-    const normalized = ((index % count) + count) % count;
-    activeFindIndex = normalized;
-    const match = terminalFind.matches[normalized];
-    const row = terminalRowForOffset(renderedRows, terminalFindCorpus.offsets, match.start);
-    if (row < 0) return;
+  function scrollToRow(row: number) {
     const rowTop = terminalScreenOffset() + virtualIndex.offset(row);
     const nextTop = Math.max(0, rowTop - (terminalElement.clientHeight - virtualIndex.size(row)) / 2);
     virtualStickToBottom = false;
     virtualScrollResetPending = true;
     renderVirtualWindow(nextTop, true);
-    void tick().then(() => {
+    return tick().then(() => {
       if (!terminalElement) return;
       terminalElement.scrollTop = nextTop;
       rememberVirtualScrollGeometry(terminalElement);
@@ -1034,7 +887,6 @@
         - terminalElement.scrollTop
         - terminalElement.clientHeight < 48;
       virtualScrollResetPending = false;
-      applyTerminalFindHighlights();
     });
   }
 
@@ -1291,24 +1143,6 @@
     <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"></path>
   </svg>
 {/snippet}
-{#snippet findPreviousIcon()}
-  <svg class="find-action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="m6 15 6-6 6 6"></path>
-  </svg>
-{/snippet}
-
-{#snippet findNextIcon()}
-  <svg class="find-action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="m6 9 6 6 6-6"></path>
-  </svg>
-{/snippet}
-
-{#snippet findCloseIcon()}
-  <svg class="find-action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="m6 6 12 12M18 6 6 18"></path>
-  </svg>
-{/snippet}
-
 
 <main
   class:question-only={questionMode && !manualInput}
@@ -1324,40 +1158,16 @@
     <TerminalKeys queue={keyQueue} {agent} {readOnly} blocked={inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />
   {/if}
   <div class:hidden={questionMode} class="terminal-view term">
-  {#if findOpen}
-    <section class="terminal-find" aria-label="Find in terminal">
-      <input
-        bind:this={findInputElement}
-        bind:value={findQuery}
-        type="search"
-        aria-label="Find in terminal output"
-        placeholder="Find in terminal"
-        autocomplete="off"
-        autocapitalize="none"
-        spellcheck="false"
-        oninput={findInputChanged}
-        onkeydown={findKeydown}
-      />
-      {#if findQuery.trim()}
-        <span class="terminal-find-count" role="status" aria-live="polite">
-          {#if !terminalFind.matches.length}
-            No matches
-          {:else}
-            {activeFindIndex + 1} of {terminalFind.matches.length}{terminalFind.truncated ? '+' : ''}
-          {/if}
-        </span>
-      {/if}
-      <Button variant="secondary" size="sm" aria-label="Previous match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex - 1)}>
-        {@render findPreviousIcon()}
-      </Button>
-      <Button variant="secondary" size="sm" aria-label="Next match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex + 1)}>
-        {@render findNextIcon()}
-      </Button>
-      <Button variant="ghost" size="sm" aria-label="Close find" onclick={closeTerminalFind}>
-        {@render findCloseIcon()}
-      </Button>
-    </section>
-  {/if}
+  <TerminalFind
+    bind:this={find}
+    bind:open={findOpen}
+    rows={renderedRows}
+    terminal={terminalElement}
+    mountedRange={() => ({ start: virtualStart, end: virtualEnd })}
+    domVersion={virtualHtml}
+    disabled={questionMode}
+    {scrollToRow}
+  />
   <div class="term-wrap">
   <div
     class:resize-layout={resizeLayoutActive} class:resize-pending={resizeLayoutPending}
