@@ -58,7 +58,7 @@ func TestInputAndLifecycleActionClassification(t *testing.T) {
 }
 
 func TestEveryInboundFixtureDecodesAsV3Action(t *testing.T) {
-	root := filepath.Join("..", "..", "contracts", "fixtures", "inbound")
+	root := filepath.Join("testdata", "inbound")
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestInstallUpdateRemainsBootstrapCompatible(t *testing.T) {
 }
 
 func TestPushConfigFixtureHasRequiredCutoverFields(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "push_config.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", "outbound", "push_config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
