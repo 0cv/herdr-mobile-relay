@@ -43,26 +43,9 @@ GATEWAY_FRAGMENT="$(
     HERDR_RELAY_BIN="$FRAGMENT_BIN" HERDR_RELAY_ENV="$GATEWAY_ENV" \
         build_transport_setup_fragment relay-secret-token workstation "wss://relay.example.test"
 )"
-case "$GATEWAY_FRAGMENT" in
-    *"gateways=wss%3A%2F%2Fgw.example.test"*) ;;
-    *)
-        echo "gateway fragment lost the candidate list: $GATEWAY_FRAGMENT" >&2
-        exit 1
-        ;;
-esac
-case "$GATEWAY_FRAGMENT" in
-    *relay=*)
-        echo "gateway fragment still advertises a relay URL: $GATEWAY_FRAGMENT" >&2
-        exit 1
-        ;;
-esac
-case "$GATEWAY_FRAGMENT" in
-    *"setup=relay-secret-token"*) ;;
-    *)
-        echo "gateway fragment dropped the relay token" >&2
-        exit 1
-        ;;
-esac
+expect "$GATEWAY_FRAGMENT" "gateways=wss%3A%2F%2Fgw.example.test"
+reject "$GATEWAY_FRAGMENT" relay=
+expect "$GATEWAY_FRAGMENT" "setup=relay-secret-token"
 
 TUNNEL_FRAGMENT="$(
     unset HERDR_GATEWAY_URL

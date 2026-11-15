@@ -127,9 +127,6 @@ if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$CHOOSER_ENV"; then
     echo "temporary tunnel selection left the gateway configured" >&2
     exit 1
 fi
-case "$TEMPORARY_OUTPUT" in
-    *"Temporary Cloudflare tunnel selected."*) ;;
-    *) echo "temporary tunnel selection was not reported" >&2; exit 1 ;;
-esac
+expect "$TEMPORARY_OUTPUT" "Temporary Cloudflare tunnel selected."
 
 echo "plugin-choose-transport shell tests passed"

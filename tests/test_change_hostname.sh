@@ -148,14 +148,7 @@ MOVE_OUTPUT="$(
     HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
         HERDR_RELAY_ENV="$MOVE_ENV" bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
 )"
-case "$MOVE_OUTPUT" in
-    *"does not run a Cloudflare tunnel"*) ;;
-    *)
-        echo "a gateway relay was not told hostnames do not apply" >&2
-        printf '%s\n' "$MOVE_OUTPUT" >&2
-        exit 1
-        ;;
-esac
+expect "$MOVE_OUTPUT" "does not run a Cloudflare tunnel"
 
 # cloudflared exits 0 while creating a different name when its certificate does
 # not cover the zone. Believing it once left a live relay serving a hostname
@@ -172,14 +165,7 @@ MOVE_OUTPUT="$(
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
         bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
 )"
-case "$MOVE_OUTPUT" in
-    *"created relay-fedora.new.test.old.test, not relay-fedora.new.test"*) ;;
-    *)
-        echo "a mis-zoned route was accepted" >&2
-        printf '%s\n' "$MOVE_OUTPUT" >&2
-        exit 1
-        ;;
-esac
+expect "$MOVE_OUTPUT" "created relay-fedora.new.test.old.test, not relay-fedora.new.test"
 grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" &&
     { echo "a mis-zoned route still rewrote the ingress" >&2; exit 1; }
 
@@ -201,14 +187,7 @@ MOVE_OUTPUT="$(
         HERDR_STABLE_DNS_TIMEOUT=0 \
         bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
 )"
-case "$MOVE_OUTPUT" in
-    *"does not resolve to Cloudflare yet"*) ;;
-    *)
-        echo "an unresolvable new hostname was accepted" >&2
-        printf '%s\n' "$MOVE_OUTPUT" >&2
-        exit 1
-        ;;
-esac
+expect "$MOVE_OUTPUT" "does not resolve to Cloudflare yet"
 grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
     { echo "the old hostname was lost while the new one was unreachable" >&2; exit 1; }
 

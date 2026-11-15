@@ -47,3 +47,16 @@ esac
 printf '%s://%s\n' "$scheme" "$host"
 EOF
 }
+
+fail() {
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+
+expect() {
+    [[ "$1" == *"$2"* ]] || fail "$(printf 'Missing: %s\nIn:\n%s' "$2" "$1")"
+}
+
+reject() {
+    [[ "$1" != *"$2"* ]] || fail "$(printf 'Unexpected: %s\nIn:\n%s' "$2" "$1")"
+}

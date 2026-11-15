@@ -52,38 +52,17 @@ MENU_OUTPUT="$(
         HERDR_RELAY_ENV="$MENU_ENV" \
         "$BASH" "$REPO_DIR/relay/plugin-setup-menu.sh"
 )"
-case "$MENU_OUTPUT" in
-    *"Herdr Mobile Relay status"*) ;;
-    *) echo "setup menu did not open the status action" >&2; exit 1 ;;
-esac
+expect "$MENU_OUTPUT" "Herdr Mobile Relay status"
 test "$(printf '%s\n' "$MENU_OUTPUT" | grep -c 'Herdr Mobile Relay Setup')" -ge 2 ||
     { echo "setup menu did not come back after an action" >&2; exit 1; }
-case "$MENU_OUTPUT" in
-    *"Relay:      9.9.9 running"*) ;;
-    *) echo "setup menu did not report the running release" >&2; exit 1 ;;
-esac
+expect "$MENU_OUTPUT" "Relay:      9.9.9 running"
 # The status line names the rule that picked this gateway, so "why that one"
 # is answerable without opening relay.env.
-case "$MENU_OUTPUT" in
-    *"gateway wss://gw-b.example.test runs 9.9.8; latest available 9.9.10 (+1 fallback, first listed wins)"*) ;;
-    *) echo "setup menu did not report the active gateway, version, and selection rule" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"serves 9.9.8, this relay ships 9.9.9 - Cloudflare → Configure App Deployment"*) ;;
-    *) echo "setup menu did not report the stale phone app" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Own gateway: gw-owned.example.test runs 9.9.8; plugin offers 9.9.10 - run herdr plugin install 0cv/herdr-mobile-relay, then redeploy with WebRTC → Deploy or Upgrade Your Own WebRTC Gateway"*) ;;
-    *) echo "setup menu did not report how to update the stale self-hosted gateway" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Exit, change nothing"*) ;;
-    *) echo "setup menu did not offer a way out" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Choose Phone App and Show QR"*) ;;
-    *) echo "setup menu did not expose the phone app origin chooser" >&2; exit 1 ;;
-esac
+expect "$MENU_OUTPUT" "gateway wss://gw-b.example.test runs 9.9.8; latest available 9.9.10 (+1 fallback, first listed wins)"
+expect "$MENU_OUTPUT" "serves 9.9.8, this relay ships 9.9.9 - Cloudflare → Configure App Deployment"
+expect "$MENU_OUTPUT" "Own gateway: gw-owned.example.test runs 9.9.8; plugin offers 9.9.10 - run herdr plugin install 0cv/herdr-mobile-relay, then redeploy with WebRTC → Deploy or Upgrade Your Own WebRTC Gateway"
+expect "$MENU_OUTPUT" "Exit, change nothing"
+expect "$MENU_OUTPUT" "Choose Phone App and Show QR"
 case "$MENU_OUTPUT" in
     *"  1. Cloudflare"*"  2. WebRTC (active)"*"  3. Tailscale"*"  1. Community WebRTC Gateway"*"  2. Deploy or Upgrade Your Own WebRTC Gateway"*) ;;
     *) echo "setup menu did not group WebRTC actions or mark it active" >&2; exit 1 ;;

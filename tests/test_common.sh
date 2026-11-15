@@ -7,6 +7,8 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
+# shellcheck source=lib.sh
+. "$REPO_DIR/tests/lib.sh"
 
 (
     for hostname in relay.example.test RELAY.EXAMPLE.TEST. \
@@ -630,13 +632,7 @@ if arm_setup_link "$ARM_ENV"; then
     echo "a missing relay.pid was treated as a running relay" >&2
     exit 1
 fi
-case "$(print_setup_link_arming 0)" in
-    *"pairs one phone within 10 minutes"*) ;;
-    *) echo "the armed link hint is missing" >&2; exit 1 ;;
-esac
-case "$(print_setup_link_arming 1)" in
-    *"relay is not running here"*) ;;
-    *) echo "the not-running hint is missing" >&2; exit 1 ;;
-esac
+expect "$(print_setup_link_arming 0)" "pairs one phone within 10 minutes"
+expect "$(print_setup_link_arming 1)" "relay is not running here"
 
 echo "common shell tests passed"

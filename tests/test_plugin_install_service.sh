@@ -46,10 +46,7 @@ if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$STABLE_SWITCH_ENV"; then
     echo "the direct stable tunnel action left the gateway configured" >&2
     exit 1
 fi
-case "$STABLE_SWITCH_OUTPUT" in
-    *"Switching this relay from the WebRTC gateway to Cloudflare."*) ;;
-    *) echo "the stable tunnel action did not explain the transport switch" >&2; exit 1 ;;
-esac
+expect "$STABLE_SWITCH_OUTPUT" "Switching this relay from the WebRTC gateway to Cloudflare."
 test "$(printf '%s\n' "$STABLE_SWITCH_OUTPUT" |
     grep -c 'Herdr Mobile Relay stable tunnel setup')" -eq 1 ||
     { echo "stable tunnel action printed its heading more than once" >&2; exit 1; }

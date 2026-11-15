@@ -97,21 +97,8 @@ fi
 # what the run did: it stopped at the project step without complaining about the
 # origin again, and wrote nothing.
 DEPLOY_OUTPUT="$(run_configure_app_deploy 'unserved.example.test\napp.example.test\nq\n' || true)"
-case "$DEPLOY_OUTPUT" in
-    *"No Pages project serves https://app.example.test either"*)
-        echo "a corrected origin was rejected" >&2
-        printf '%s\n' "$DEPLOY_OUTPUT" >&2
-        exit 1
-        ;;
-esac
-case "$DEPLOY_OUTPUT" in
-    *"Configuration cancelled."*) ;;
-    *)
-        echo "the project question could not be escaped" >&2
-        printf '%s\n' "$DEPLOY_OUTPUT" >&2
-        exit 1
-        ;;
-esac
+reject "$DEPLOY_OUTPUT" "No Pages project serves https://app.example.test either"
+expect "$DEPLOY_OUTPUT" "Configuration cancelled."
 if grep -q 'HERDR_CLOUDFLARE_PAGES_PROJECT' "$DEPLOY_ENV"; then
     echo "escaping the project question still wrote to relay.env" >&2
     exit 1
@@ -159,14 +146,7 @@ DEPLOY_OUTPUT="$(
     HERDR_APP_DEPLOY_ATTACH_DOMAIN=true \
         run_configure_app_deploy 'other.example.test\nq\n' || true
 )"
-case "$DEPLOY_OUTPUT" in
-    *"set CLOUDFLARE_API_TOKEN in"*) ;;
-    *)
-        echo "app deploy did not name the credential it needs to attach a domain" >&2
-        printf '%s\n' "$DEPLOY_OUTPUT" >&2
-        exit 1
-        ;;
-esac
+expect "$DEPLOY_OUTPUT" "set CLOUDFLARE_API_TOKEN in"
 [ ! -e "$DEPLOY_ATTACHED" ] ||
     { echo "a domain was attached without a token" >&2; exit 1; }
 
