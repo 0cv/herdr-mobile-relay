@@ -24,7 +24,6 @@ export interface PaneSizeLeaseHost {
 export interface PaneSizeLeaseInputs {
   enabled: boolean;
   active: boolean;
-  readOnly: boolean;
   questionMode: boolean;
   connected: boolean;
 }
@@ -94,7 +93,7 @@ export class PaneSizeLease {
       this.error = '';
       return;
     }
-    if (!inputs.active || inputs.readOnly) {
+    if (!inputs.active) {
       this.release(this.mounted);
       this.error = '';
       return;

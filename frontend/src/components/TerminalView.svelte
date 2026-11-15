@@ -397,7 +397,6 @@
     lease.sync({
       enabled: $terminalResizeSession,
       active: resizeSessionActive,
-      readOnly,
       questionMode,
       connected: $connections.get(agent.relay_id)?.status === 'connected',
     });
@@ -1215,11 +1214,7 @@
 
   function paneSizeLeaseSupported(target: Agent): boolean {
     const connection = $connections.get(target.relay_id);
-    return resizeSessionActive
-      && !readOnly
-      && !questionMode
-      && connection?.status === 'connected'
-      && connection.capabilities.includes('pane_size_opt_in');
+    return resizeSessionActive && !questionMode && connection?.status === 'connected';
   }
 
   function paneSizeRowLeaseSupported(target: Agent): boolean {
