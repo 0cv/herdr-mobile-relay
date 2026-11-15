@@ -3,9 +3,12 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -43,6 +46,9 @@ type fakeGatewayLink struct {
 	conn   *websocket.Conn
 	frames chan gatewayTestFrame
 	closed chan struct{}
+	// readGate stops the link from consuming relay frames while a test holds
+	// its write lock, so the relay's writer backs up like a slow gateway.
+	readGate sync.RWMutex
 }
 
 func (l *fakeGatewayLink) readLoop() {
@@ -52,6 +58,8 @@ func (l *fakeGatewayLink) readLoop() {
 		if err != nil {
 			return
 		}
+		l.readGate.RLock()
+		l.readGate.RUnlock()
 		if messageType != websocket.MessageBinary {
 			return
 		}
@@ -575,20 +583,38 @@ func TestGatewayClientRejectsInvalidProof(t *testing.T) {
 
 func TestGatewayCarriesUnauthorizedCloseReason(t *testing.T) {
 	harness := newGatewayHarness(t, 4)
+	harness.hub.SetE2EEAuthResolver(rejectingResolver{})
 	harness.waitRegistered(t)
 	harness.link.write(t, gatewaywire.OpOpen, 4, harness.openPayload(t, harness.rendezvousKey))
-	waitFor(t, "gateway connection", func() bool { return harness.client.Status().Clients == 1 })
 
-	conn := harness.client.lookupConn(4)
-	if conn == nil {
-		t.Fatal("gateway connection is missing")
+	clientKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
-	conn.pipe.Close(CloseUnauthorized, "ignored")
+	selector := E2EEAuthSelector{Kind: E2EEAuthCredential, ID: "credential-test", Version: 7}
+	hello, err := json.Marshal(e2eeClientHello{
+		Type:        "e2ee_client_hello",
+		Version:     e2eeVersion,
+		AuthKind:    selector.Kind,
+		AuthID:      selector.ID,
+		AuthVersion: selector.Version,
+		Nonce:       base64.RawURLEncoding.EncodeToString(make([]byte, e2eeNonceBytes)),
+		PublicKey:   base64.RawURLEncoding.EncodeToString(clientKey.PublicKey().Bytes()),
+		Proof:       base64.RawURLEncoding.EncodeToString(make([]byte, sha256.Size)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone := &gatewayTestPhone{link: harness.link, connID: 4}
+	phone.send(t, hello)
 
 	frame := harness.link.expect(t, gatewaywire.OpClose, 4)
 	if string(frame.payload) != DeviceUnauthorizedReason {
 		t.Fatalf("close reason = %q, want %q", frame.payload, DeviceUnauthorizedReason)
 	}
+	waitFor(t, "the rejected connection to be dropped", func() bool {
+		return harness.client.Status().Clients == 0
+	})
 }
 
 func TestGatewayClientEnforcesMaxClients(t *testing.T) {
@@ -1297,10 +1323,10 @@ func TestGatewaySweepsStalledAssemblies(t *testing.T) {
 		t.Fatalf("expected a fragmented frame, got %d chunks", len(partial))
 	}
 	harness.link.write(t, gatewaywire.OpData, 41, partial[0])
-	waitFor(t, "the partial assembly to be recorded", func() bool {
-		conn := harness.client.lookupConn(41)
-		return conn != nil && conn.stalled(time.Now().Add(framing.StallTimeout+time.Second))
-	})
+	// The read loop handles messages in order, so the pong proves the partial
+	// chunk was already processed.
+	harness.link.write(t, gatewaywire.OpPing, 41, nil)
+	harness.link.expect(t, gatewaywire.OpPong, 41)
 
 	harness.client.sweepStalled(time.Now().Add(framing.StallTimeout + time.Second))
 
@@ -1311,6 +1337,122 @@ func TestGatewaySweepsStalledAssemblies(t *testing.T) {
 	waitFor(t, "the stalled connection to be dropped", func() bool {
 		return harness.client.Status().Clients == 0
 	})
+}
+
+// gatewayTestInboundQueue is how many complete frames a connection can hold
+// for the hub before the relay treats its phone as too slow to serve.
+const gatewayTestInboundQueue = 32
+
+// A hub that stops reading one phone must evict only that phone. The hub is
+// held in its connect callback, which keeps it from reading the victim, by
+// filling the harness's connect channel so the callback blocks.
+func TestGatewayEvictsPhoneTheHubStopsReading(t *testing.T) {
+	harness := newGatewayHarness(t, 4)
+	harness.waitRegistered(t)
+	survivor, survivorClient := openGatewayPhone(t, harness, 51)
+
+	for range cap(harness.connected) {
+		harness.connected <- nil
+	}
+	release := sync.OnceFunc(func() {
+		for len(harness.connected) > 0 {
+			<-harness.connected
+		}
+	})
+	t.Cleanup(release)
+
+	harness.link.write(t, gatewaywire.OpOpen, 52, harness.openPayload(t, harness.rendezvousKey))
+	victim := &gatewayTestPhone{link: harness.link, connID: 52}
+	victim.handshake(t, gatewayTestRelayKey)
+	for range gatewayTestInboundQueue + 1 {
+		victim.send(t, []byte("unread"))
+	}
+
+	closed := harness.link.expect(t, gatewaywire.OpClose, 52)
+	if string(closed.payload) != gatewayReasonSlow {
+		t.Fatalf("close reason = %q, want %q", closed.payload, gatewayReasonSlow)
+	}
+	waitFor(t, "the slow connection to be dropped", func() bool {
+		return harness.client.Status().Clients == 1
+	})
+	release()
+
+	if !harness.hub.Send(survivorClient, map[string]any{"type": "pane_content", "content": "still here"}) {
+		t.Fatal("hub refused to send on the surviving connection")
+	}
+	if plaintext := survivor.readMessage(t); !bytes.Contains(plaintext, []byte("still here")) {
+		t.Fatalf("surviving connection read %s", plaintext)
+	}
+	survivor.sendMessage(t, `{"type":"refresh_agents"}`)
+	select {
+	case received := <-harness.received:
+		if received["type"] != "refresh_agents" {
+			t.Fatalf("received type = %v, want refresh_agents", received["type"])
+		}
+	case <-time.After(gatewayTestTimeout):
+		t.Fatal("surviving connection stopped delivering to the hub")
+	}
+}
+
+// A link that stops draining backs up the shared writer queue. The connection
+// that was writing is dropped without a close frame, and the link and the other
+// connection keep working.
+func TestGatewaySaturatedWriteQueueDropsOnlyTheWritingConnection(t *testing.T) {
+	harness := newGatewayHarness(t, 4)
+	harness.waitRegistered(t)
+	survivor, survivorClient := openGatewayPhone(t, harness, 61)
+	_, writerClient := openGatewayPhone(t, harness, 62)
+
+	harness.link.readGate.Lock()
+	resume := sync.OnceFunc(harness.link.readGate.Unlock)
+	t.Cleanup(resume)
+
+	frame := make([]byte, framing.MaxLogicalBytes)
+	ctx, cancel := context.WithTimeout(t.Context(), gatewayTestTimeout)
+	defer cancel()
+	var writeErr error
+	for range 16 {
+		if writeErr = writerClient.conn.WriteFrame(ctx, frame); writeErr != nil {
+			break
+		}
+	}
+	if !errors.Is(writeErr, errGatewayWriteQueueFull) {
+		t.Fatalf("write on a saturated link = %v, want %v", writeErr, errGatewayWriteQueueFull)
+	}
+	waitFor(t, "the writing connection to be dropped", func() bool {
+		return harness.client.Status().Clients == 1
+	})
+	if !harness.client.Status().Registered {
+		t.Fatal("link was dropped together with the writing connection")
+	}
+	resume()
+
+	for idle := false; !idle; {
+		select {
+		case wire := <-harness.link.frames:
+			if wire.op == gatewaywire.OpClose && wire.connID == 62 {
+				t.Fatalf("relay sent a close for the dropped connection: %q", wire.payload)
+			}
+		case <-time.After(300 * time.Millisecond):
+			idle = true
+		}
+	}
+
+	if !harness.hub.Send(survivorClient, map[string]any{"type": "pane_content", "content": "still here"}) {
+		t.Fatal("hub refused to send on the surviving connection")
+	}
+	if plaintext := survivor.readMessage(t); !bytes.Contains(plaintext, []byte("still here")) {
+		t.Fatalf("surviving connection read %s", plaintext)
+	}
+	survivor.sendMessage(t, `{"type":"refresh_agents"}`)
+	select {
+	case received := <-harness.received:
+		if received["type"] != "refresh_agents" {
+			t.Fatalf("received type = %v, want refresh_agents", received["type"])
+		}
+	case <-time.After(gatewayTestTimeout):
+		t.Fatal("surviving connection stopped delivering to the hub")
+	}
 }
 
 func TestRegisterLinkRegistrationProof(t *testing.T) {
