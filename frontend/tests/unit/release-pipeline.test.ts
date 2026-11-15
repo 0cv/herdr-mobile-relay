@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { brotliDecompressSync } from 'node:zlib';
@@ -140,5 +140,25 @@ describe('finished release directory', () => {
     expect(script).not.toContain('ownership_invalid_binding');
     expect(script).not.toContain('__HERDR_BUILD_ID__');
     expect(script).toContain(descriptor.build);
+  });
+});
+
+describe('build without a build identity marker', () => {
+  it('fails and publishes nothing', () => {
+    const unmarked = mkdtempSync(join(tmpdir(), 'herdr-release-unmarked-'));
+    try {
+      mkdirSync(join(unmarked, 'assets'));
+      writeFileSync(join(unmarked, 'assets/app.js'), 'const color="--pf";\n');
+      writeFileSync(join(unmarked, 'assets/app.css'), '.leaf{color:var(--pf)}\n');
+      writeFileSync(join(unmarked, 'index.html'), '<link href="assets/app.css"><script src="assets/app.js"></script>\n');
+      const result = spawnSync('bun', ['scripts/finalize-build.mjs', unmarked], { cwd: frontend, encoding: 'utf8', timeout: 60_000 });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('Application bundle is missing its build identity marker');
+      expect(existsSync(join(unmarked, 'release.json'))).toBe(false);
+      expect(existsSync(join(unmarked, 'builds'))).toBe(false);
+      expect(readdirSync(join(unmarked, 'assets')).sort()).toEqual(['app.css', 'app.js']);
+    } finally {
+      rmSync(unmarked, { recursive: true, force: true });
+    }
   });
 });
