@@ -170,14 +170,7 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 }
 
 func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -232,14 +225,7 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 }
 
 func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
 		map[string]int64{"pane-1": 0},
@@ -396,14 +382,7 @@ func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
 }
 
 func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
 		map[string]int64{"pane-1": 0},
@@ -453,14 +432,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 }
 
 func TestSchedulerRejectsOperationAdmittedBeforeReplacementTopology(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},

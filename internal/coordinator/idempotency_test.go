@@ -68,14 +68,7 @@ func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
 }
 
 func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 
 	const ledgerKey = "approval\x00pane-1\x00event-1"
 	options := func() ScheduleOptions {
@@ -682,14 +675,7 @@ func TestUnchangedQuestionNavigationReturnsReplayableError(t *testing.T) {
 }
 
 func TestSchedulerEvictsOldCompletedLedgerEntries(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 
 	executions := make(map[string]int)
 	run := func(key string) *CommandResult {
