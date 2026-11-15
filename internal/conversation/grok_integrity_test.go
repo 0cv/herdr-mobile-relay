@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -213,7 +212,7 @@ func TestGrokRepresentativeFullFileProjection(t *testing.T) {
 		}
 	}
 	start := time.Now()
-	projection, err := projectGrokUpdates(context.Background(), strings.NewReader(data.String()))
+	projection, err := projectGrokUpdates(newJSONLBytesReader(context.Background(), data.Bytes(), 0, false, maxGrokRecordBytes))
 	if err != nil || len(projection.Entries) != 4000 {
 		t.Fatalf("projection entries = %d, %v", len(projection.Entries), err)
 	}

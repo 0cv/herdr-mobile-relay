@@ -97,6 +97,8 @@ var refusalCodes = map[string]struct{}{
 	"unknown_method":                         {},
 	"method_not_found":                       {},
 	"unsupported_method":                     {},
+	"worktree_operation_in_progress":         {},
+	"dirty_worktree_requires_force":          {},
 }
 
 var transientRefusalCodes = map[string]struct{}{

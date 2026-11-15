@@ -1,7 +1,6 @@
 package conversation
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -25,7 +24,6 @@ const (
 	maxGrokRecordBytes  = maxConversationBytes
 	maxGrokSummaryBytes = 256 * 1024
 	maxGrokTitleBytes   = 400
-	grokCancelInterval  = 1024
 )
 
 // grokProjectDirName mirrors Rust urlencoding::encode, which Grok uses for
@@ -568,7 +566,15 @@ func captureGrokUpdates(ctx context.Context, location Location, cursor browseCur
 	}
 	defer file.Close()
 	digest := sha256.New()
-	projection, err := projectGrokUpdates(ctx, io.TeeReader(io.NewSectionReader(file, 0, info.Size()), digest))
+	records, err := NewJSONLRecordReader(ctx, file, 0, info.Size(), maxGrokRecordBytes, nil)
+	if err != nil {
+		return grokProjection{}, "", "", 0, err
+	}
+	records.SetDigestWriter(digest)
+	projection, err := projectGrokUpdates(records)
+	if errors.Is(err, errJSONLSourceTruncated) {
+		return grokProjection{}, "", "", 0, errGrokSourceChanged
+	}
 	if err != nil {
 		return grokProjection{}, "", "", 0, err
 	}
@@ -607,67 +613,24 @@ func captureGrokUpdates(ctx context.Context, location Location, cursor browseCur
 	return projection, fmt.Sprintf("%x", revision), capturedDigest, info.Size(), nil
 }
 
-func projectGrokUpdates(ctx context.Context, source io.Reader) (grokProjection, error) {
-	reader := bufio.NewReaderSize(source, 256*1024)
+func projectGrokUpdates(records *JSONLRecordReader) (grokProjection, error) {
 	projector := newGrokProjector()
-	var line []byte
-	var offset int64
-	for count := 0; ; count++ {
-		if count%grokCancelInterval == 0 {
-			if err := ctx.Err(); err != nil {
-				return grokProjection{}, err
-			}
-		}
-		start := offset
-		var consumed int64
-		var oversized, complete bool
-		var err error
-		line, consumed, oversized, complete, err = readGrokLine(reader, line)
-		offset += consumed
-		if err != nil && !errors.Is(err, io.EOF) {
-			return grokProjection{}, err
-		}
-		switch {
-		case oversized:
-			projector.oversized++
-		case len(line) == 0:
-		case !complete && !json.Valid(line):
-			// A trailing record still being written is not corruption.
-		default:
-			projector.apply(line, start)
-		}
+	for {
+		record, err := records.Next()
 		if errors.Is(err, io.EOF) {
 			return projector.finish(), nil
 		}
-	}
-}
-
-// readGrokLine returns the next line without its newline, how many bytes it
-// consumed, whether it exceeded maxGrokRecordBytes (its content is then
-// discarded), and whether it ended with a newline.
-func readGrokLine(reader *bufio.Reader, buffer []byte) ([]byte, int64, bool, bool, error) {
-	buffer = buffer[:0]
-	var consumed int64
-	oversized := false
-	for {
-		chunk, err := reader.ReadSlice('\n')
-		consumed += int64(len(chunk))
-		if !oversized {
-			if len(buffer)+len(chunk) > maxGrokRecordBytes+1 {
-				oversized = true
-				buffer = buffer[:0]
-			} else {
-				buffer = append(buffer, chunk...)
-			}
+		if err != nil {
+			return grokProjection{}, err
 		}
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
+		switch {
+		case record.Oversized:
+			projector.oversized++
+		case !record.Complete:
+			// A trailing record still being written is not corruption.
+		default:
+			projector.apply(record.Raw, record.Start)
 		}
-		complete := err == nil
-		if complete && !oversized {
-			buffer = buffer[:len(buffer)-1]
-		}
-		return bytes.TrimSpace(buffer), consumed, oversized, complete, err
 	}
 }
 

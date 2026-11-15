@@ -291,10 +291,9 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 		t.Fatal("filter never reached pacing")
 	}
 	admitted := make(chan struct{})
-	sameCtx := context.WithValue(context.Background(), admissionContextKey{}, func() { close(admitted) })
 	sameResult := make(chan *CommandResult, 1)
 	go func() {
-		sameResult <- d.Handle(sameCtx, map[string]any{"type": "send_input", "pane_id": "pane-1", "text": "same"})
+		sameResult <- d.HandleAdmitted(context.Background(), map[string]any{"type": "send_input", "pane_id": "pane-1", "text": "same"}, func() { close(admitted) })
 	}()
 	select {
 	case <-admitted:

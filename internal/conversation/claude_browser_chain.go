@@ -645,20 +645,13 @@ func (b *Browser) claudeChainObservedRangesMatch(ctx context.Context, old, candi
 		return errClaudeChainLineageChanged
 	}
 	defer source.close()
-	if source.end < old.CapturedEnd || source.end < candidate.CapturedEnd ||
-		old.FileIdentity != "" && fileIdentity(source.info) != old.FileIdentity ||
-		candidate.FileIdentity != "" && fileIdentity(source.info) != candidate.FileIdentity ||
-		source.revision != candidate.FileRevision {
+	if source.end < old.CapturedEnd || old.FileIdentity != "" && fileIdentity(source.info) != old.FileIdentity {
 		return errClaudeChainLineageChanged
 	}
-	// A token changes on ordinary append too. An open newer than discovery is
-	// not the candidate we can authenticate; rediscover before considering the
-	// append-sensitive metadata. The retry must still check every old digest.
-	if source.end > candidate.CapturedEnd {
-		return errClaudeChainValidationStale
-	}
-	if candidate.SourceChangeToken != "" && fileChangeToken(source.info) != candidate.SourceChangeToken {
-		return errClaudeChainLineageChanged
+	// An open newer than discovery is not the candidate we can authenticate;
+	// rediscover. The retry must still check every old digest.
+	if err := claudeChainSourceChangeError(candidate.compareSource(source)); err != nil {
+		return err
 	}
 	for _, item := range evidence {
 		if err := ctx.Err(); err != nil {
@@ -789,12 +782,14 @@ func (b *Browser) runClaudeChainValidation(candidate claudeSegment, identity str
 	if statErr != nil {
 		return errClaudeChainLineageChanged
 	}
-	if latest.Size() > candidate.CapturedEnd {
+	return claudeChainSourceChangeError(candidate.stamp().compare(latest))
+}
+
+func claudeChainSourceChangeError(change sourceChange) error {
+	switch change {
+	case sourceGrown:
 		return errClaudeChainValidationStale
-	}
-	if latest.Size() < candidate.CapturedEnd ||
-		(candidate.SourceModTime != 0 && latest.ModTime().UnixNano() != candidate.SourceModTime) ||
-		(candidate.SourceChangeToken != "" && fileChangeToken(latest) != candidate.SourceChangeToken) {
+	case sourceChanged:
 		return errClaudeChainLineageChanged
 	}
 	return nil
@@ -810,28 +805,16 @@ func (b *Browser) validateClaudeChainCandidateMetadata(source fileSource, candid
 	if err != nil {
 		return errClaudeChainLineageChanged
 	}
-	if info.Size() > candidate.CapturedEnd {
-		return errClaudeChainValidationStale
-	}
-	if !info.Mode().IsRegular() || info.Size() < candidate.CapturedEnd ||
-		candidate.FileIdentity != "" && fileIdentity(info) != candidate.FileIdentity ||
-		candidate.SourceModTime != 0 && info.ModTime().UnixNano() != candidate.SourceModTime ||
-		candidate.SourceChangeToken != "" && fileChangeToken(info) != candidate.SourceChangeToken {
+	if !info.Mode().IsRegular() {
 		return errClaudeChainLineageChanged
 	}
-	if !source.info.Mode().IsRegular() ||
-		candidate.FileIdentity != "" && fileIdentity(source.info) != candidate.FileIdentity ||
-		source.revision != candidate.FileRevision || source.end < candidate.CapturedEnd ||
-		candidate.SourceChangeToken != "" && fileChangeToken(source.info) != candidate.SourceChangeToken {
+	if err := claudeChainSourceChangeError(candidate.stamp().compare(info)); err != nil {
+		return err
+	}
+	if !source.info.Mode().IsRegular() {
 		return errClaudeChainLineageChanged
 	}
-	if source.end > candidate.CapturedEnd {
-		return errClaudeChainValidationStale
-	}
-	if candidate.SourceModTime != 0 && source.info.ModTime().UnixNano() != candidate.SourceModTime {
-		return errClaudeChainLineageChanged
-	}
-	return nil
+	return claudeChainSourceChangeError(candidate.compareSource(source))
 }
 
 func (b *Browser) revalidateClaudeChainCandidate(ctx context.Context, candidate claudeSegment) error {
@@ -843,14 +826,8 @@ func (b *Browser) revalidateClaudeChainCandidate(ctx context.Context, candidate 
 		return errClaudeChainLineageChanged
 	}
 	defer file.Close()
-	if info.Size() > candidate.CapturedEnd {
-		return errClaudeChainValidationStale
-	}
-	if info.Size() < candidate.CapturedEnd ||
-		candidate.FileIdentity != "" && fileIdentity(info) != candidate.FileIdentity ||
-		candidate.SourceModTime != 0 && info.ModTime().UnixNano() != candidate.SourceModTime ||
-		candidate.SourceChangeToken != "" && fileChangeToken(info) != candidate.SourceChangeToken {
-		return errClaudeChainLineageChanged
+	if err := claudeChainSourceChangeError(candidate.stamp().compare(info)); err != nil {
+		return err
 	}
 	// The completed task's key already binds FileRevision and every content
 	// range. The metadata reopen above detects a replacement, append, or
@@ -1190,9 +1167,7 @@ func (b *Browser) runClaudeChainEvidenceCompaction(task *claudeChainEvidenceComp
 		result = errClaudeChainLineageChanged
 	} else {
 		defer source.close()
-		if task.start < 0 || task.end <= task.start || source.end < task.end || task.candidate.FileIdentity != "" && fileIdentity(source.info) != task.candidate.FileIdentity ||
-			(source.end == task.candidate.CapturedEnd && (source.revision != task.candidate.FileRevision ||
-				task.candidate.SourceChangeToken != "" && fileChangeToken(source.info) != task.candidate.SourceChangeToken)) {
+		if task.start < 0 || task.end <= task.start || source.end < task.end || task.candidate.compareSource(source) == sourceChanged {
 			result = errClaudeChainLineageChanged
 		} else {
 			items := uniqueClaudeRangeEvidence(task.evidence)
@@ -1234,12 +1209,7 @@ func (b *Browser) runClaudeChainEvidenceCompaction(task *claudeChainEvidenceComp
 						switch {
 						case statErr != nil || latest.Size() < task.end:
 							result = errClaudeChainLineageChanged
-						case latest.Size() == source.info.Size() &&
-							(latest.ModTime().UnixNano() != source.info.ModTime().UnixNano() || fileChangeToken(latest) != fileChangeToken(source.info)):
-							result = errClaudeChainLineageChanged
-						case latest.Size() == task.candidate.CapturedEnd &&
-							(task.candidate.SourceModTime != 0 && latest.ModTime().UnixNano() != task.candidate.SourceModTime ||
-								task.candidate.SourceChangeToken != "" && fileChangeToken(latest) != task.candidate.SourceChangeToken):
+						case source.stamp().compare(latest) == sourceChanged || task.candidate.stamp().compare(latest) == sourceChanged:
 							result = errClaudeChainLineageChanged
 						default:
 							result = nil
@@ -1542,13 +1512,7 @@ func (b *Browser) loadClaudeChainRecentWithBudget(ctx context.Context, scope Bro
 		return recentProjection{}, err
 	}
 	defer source.close()
-	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
-		segment.FileIdentity != "" && fileIdentity(source.info) != segment.FileIdentity {
-		return recentProjection{}, errors.New("Claude chain source changed")
-	}
-	if source.end == segment.CapturedEnd &&
-		(segment.SourceModTime != 0 && source.info.ModTime().UnixNano() != segment.SourceModTime ||
-			segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken) {
+	if segment.compareSource(source) == sourceChanged {
 		return recentProjection{}, errors.New("Claude chain source changed")
 	}
 	source.end = segment.CapturedEnd
@@ -1658,12 +1622,7 @@ func (b *Browser) validateClaudeChainSegment(ctx context.Context, segment claude
 		return err
 	}
 	defer source.close()
-	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd {
-		return errors.New("Claude chain source changed")
-	}
-	if source.end == segment.CapturedEnd &&
-		(segment.SourceModTime != 0 && source.info.ModTime().UnixNano() != segment.SourceModTime ||
-			segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken) {
+	if segment.compareSource(source) == sourceChanged {
 		return errors.New("Claude chain source changed")
 	}
 	if segment.FooterStart < 0 || segment.FooterEnd < segment.FooterStart || segment.FooterEnd > segment.CapturedEnd {
@@ -1814,10 +1773,7 @@ func (b *Browser) startClaudeChainJob(scope BrowseScope, chain *claudeChainConte
 		page := browseSourceChanged()
 		return nil, &page
 	}
-	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
-		source.end == segment.CapturedEnd &&
-			(segment.SourceModTime != 0 && source.info.ModTime().UnixNano() != segment.SourceModTime ||
-				segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken) {
+	if segment.compareSource(source) == sourceChanged {
 		source.close()
 		page := browseSourceChanged()
 		return nil, &page

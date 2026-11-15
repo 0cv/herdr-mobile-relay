@@ -25,6 +25,23 @@ type hermesReader struct {
 	executor sqliteexec.Executor
 }
 
+// Rows that agree on these columns are one logical message. The SQL page
+// query and the live feed's hermesRow.logicalKey must name the same fields.
+const hermesLogicalColumns = "role,content,tool_call_id,tool_calls,tool_name,logical_timestamp"
+
+type hermesLogicalKey struct {
+	Role       string
+	ContentHex string
+	ToolCallID string
+	ToolCalls  string
+	ToolName   string
+	Timestamp  float64
+}
+
+func (r hermesRow) logicalKey() hermesLogicalKey {
+	return hermesLogicalKey{r.Role, r.ContentHex, r.ToolCallID, r.ToolCalls, r.ToolName, r.Timestamp}
+}
+
 type hermesRow struct {
 	SchemaVersion int     `json:"schema_version"`
 	SessionID     string  `json:"session_id"`
@@ -173,10 +190,10 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 			`), visible AS (`+
 			`SELECT raw.*,`+
 			`MIN(id) OVER (`+
-			`PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp`+
+			`PARTITION BY `+hermesLogicalColumns+
 			`) AS logical_id,`+
 			`ROW_NUMBER() OVER (`+
-			`PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp `+
+			`PARTITION BY `+hermesLogicalColumns+` `+
 			`ORDER BY active DESC,id DESC`+
 			`) AS generation `+
 			`FROM raw`+

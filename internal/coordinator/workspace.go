@@ -35,23 +35,26 @@ func (d *Dispatcher) HandleWorkspaceCreate(
 	if err != nil {
 		return d.fail(requestID, action, "", err.Error())
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-	created, err := d.herdr.WorkspaceCreate(commandCtx, resolved, label)
-	if err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "created", "Created workspace "+label, "", requestID)
-	return completed(requestID, action, "", map[string]any{
-		"workspace_id": created.WorkspaceID,
-		"pane_id":      created.PaneID,
-		"tab_id":       created.TabID,
-		"cwd":          resolved,
-		"label":        label,
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: workspaceCommandDeadline,
+		status:  "created",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			created, err := d.herdr.WorkspaceCreate(commandCtx, resolved, label)
+			if err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{
+				summary: "Created workspace " + label,
+				data: map[string]any{
+					"workspace_id": created.WorkspaceID,
+					"pane_id":      created.PaneID,
+					"tab_id":       created.TabID,
+					"cwd":          resolved,
+					"label":        label,
+				},
+			}, nil
+		},
 	})
 }
 
@@ -68,17 +71,20 @@ func (d *Dispatcher) HandleWorkspaceRename(
 	if err := validWorkspaceLabel(label); err != nil {
 		return d.fail(requestID, action, "", err.Error())
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-	if err := d.herdr.WorkspaceRename(commandCtx, workspace.ID, label); err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "renamed", "Renamed workspace to "+label, "", requestID)
-	return completed(requestID, action, "", map[string]any{"workspace_id": workspace.ID, "label": label})
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: workspaceCommandDeadline,
+		status:  "renamed",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			if err := d.herdr.WorkspaceRename(commandCtx, workspace.ID, label); err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{
+				summary: "Renamed workspace to " + label,
+				data:    map[string]any{"workspace_id": workspace.ID, "label": label},
+			}, nil
+		},
+	})
 }
 
 func (d *Dispatcher) HandleWorkspaceReorder(
@@ -94,17 +100,20 @@ func (d *Dispatcher) HandleWorkspaceReorder(
 	if insertIndex == nil || *insertIndex < 0 || *insertIndex > maxTabInsertIndex {
 		return d.fail(requestID, action, "", "Workspace position is invalid")
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-	if err := d.herdr.WorkspaceMove(commandCtx, workspace.ID, *insertIndex); err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "reordered", "Reordered workspace", "", requestID)
-	return completed(requestID, action, "", map[string]any{"workspace_id": workspace.ID, "insert_index": *insertIndex})
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: workspaceCommandDeadline,
+		status:  "reordered",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			if err := d.herdr.WorkspaceMove(commandCtx, workspace.ID, *insertIndex); err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{
+				summary: "Reordered workspace",
+				data:    map[string]any{"workspace_id": workspace.ID, "insert_index": *insertIndex},
+			}, nil
+		},
+	})
 }
 
 func (d *Dispatcher) HandleWorkspaceReorderBlock(
@@ -135,19 +144,22 @@ func (d *Dispatcher) HandleWorkspaceReorderBlock(
 			return d.fail(requestID, action, "", "Workspace destination is unavailable")
 		}
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-	if err := d.herdr.WorkspaceMoveBlock(commandCtx, workspaceIDs, beforeWorkspaceID); err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "reordered", "Reordered workspace group", "", requestID)
-	return completed(requestID, action, "", map[string]any{
-		"workspace_ids":       workspaceIDs,
-		"before_workspace_id": beforeWorkspaceID,
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: workspaceCommandDeadline,
+		status:  "reordered",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			if err := d.herdr.WorkspaceMoveBlock(commandCtx, workspaceIDs, beforeWorkspaceID); err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{
+				summary: "Reordered workspace group",
+				data: map[string]any{
+					"workspace_ids":       workspaceIDs,
+					"before_workspace_id": beforeWorkspaceID,
+				},
+			}, nil
+		},
 	})
 }
 
@@ -162,67 +174,69 @@ func (d *Dispatcher) HandleWorkspaceClose(
 	if workspaceID == "" {
 		return d.fail(requestID, action, "", "Workspace is required")
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-
-	authoritative, err := d.herdr.WorkspaceList(commandCtx)
-	if err != nil {
-		return d.workspaceCloseRefusal(
-			requestID,
-			action,
-			"workspace_group_validation_unavailable",
-			nil,
-		)
-	}
-	current, ok := workspaceByID(authoritative, workspaceID)
-	if !ok {
-		if closeGroup {
-			return d.workspaceCloseRefusal(requestID, action, "workspace_group_changed", nil)
-		}
-		return d.fail(requestID, action, "", "Workspace is unavailable")
-	}
-	groupIDs, primaryID := workspaceGroupIDs(authoritative, current)
-	if !validWorkspaceGroupIDs(groupIDs, primaryID) {
-		return d.workspaceCloseRefusal(
-			requestID,
-			action,
-			"workspace_group_validation_unavailable",
-			nil,
-		)
-	}
-	if !closeGroup && current.Worktree != nil && !current.Worktree.IsLinkedWorktree && len(groupIDs) > 1 {
-		return d.workspaceCloseRefusal(requestID, action, "workspace_group_close_required", groupIDs)
-	}
-	if closeGroup {
-		// These IDs are a relay-level confirmation check only. Herdr 0.9.0
-		// closes the group that exists when its close_group mutation executes;
-		// membership added after this list cannot be excluded atomically.
-		if current.Worktree != nil && current.Worktree.IsLinkedWorktree {
-			return d.workspaceCloseRefusal(requestID, action, "workspace_group_primary_required", groupIDs)
-		}
-		if !validWorkspaceGroupIDs(expectedWorkspaceIDs, primaryID) {
-			return d.workspaceCloseRefusal(requestID, action, "workspace_group_consent_invalid", groupIDs)
-		}
-		if !sameWorkspaceIDSet(expectedWorkspaceIDs, groupIDs) {
-			return d.workspaceCloseRefusal(requestID, action, "workspace_group_changed", groupIDs)
-		}
-	}
-	affectedIDs := []string{current.ID}
-	if closeGroup {
-		affectedIDs = append([]string(nil), groupIDs...)
-	}
-	if err := d.herdr.WorkspaceClose(commandCtx, current.ID, closeGroup); err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "closed", "Closed workspace "+current.Label, "", requestID)
-	return completed(requestID, action, "", map[string]any{
-		"workspace_id":  current.ID,
-		"close_group":   closeGroup,
-		"workspace_ids": affectedIDs,
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: workspaceCommandDeadline,
+		status:  "closed",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			authoritative, err := d.herdr.WorkspaceList(commandCtx)
+			if err != nil {
+				return topologyDone{result: d.workspaceCloseRefusal(
+					requestID,
+					action,
+					"workspace_group_validation_unavailable",
+					nil,
+				)}, nil
+			}
+			current, ok := workspaceByID(authoritative, workspaceID)
+			if !ok {
+				if closeGroup {
+					return topologyDone{result: d.workspaceCloseRefusal(requestID, action, "workspace_group_changed", nil)}, nil
+				}
+				return topologyDone{result: d.fail(requestID, action, "", "Workspace is unavailable")}, nil
+			}
+			groupIDs, primaryID := workspaceGroupIDs(authoritative, current)
+			if !validWorkspaceGroupIDs(groupIDs, primaryID) {
+				return topologyDone{result: d.workspaceCloseRefusal(
+					requestID,
+					action,
+					"workspace_group_validation_unavailable",
+					nil,
+				)}, nil
+			}
+			if !closeGroup && current.Worktree != nil && !current.Worktree.IsLinkedWorktree && len(groupIDs) > 1 {
+				return topologyDone{result: d.workspaceCloseRefusal(requestID, action, "workspace_group_close_required", groupIDs)}, nil
+			}
+			if closeGroup {
+				// These IDs are a relay-level confirmation check only. Herdr 0.9.0
+				// closes the group that exists when its close_group mutation executes;
+				// membership added after this list cannot be excluded atomically.
+				if current.Worktree != nil && current.Worktree.IsLinkedWorktree {
+					return topologyDone{result: d.workspaceCloseRefusal(requestID, action, "workspace_group_primary_required", groupIDs)}, nil
+				}
+				if !validWorkspaceGroupIDs(expectedWorkspaceIDs, primaryID) {
+					return topologyDone{result: d.workspaceCloseRefusal(requestID, action, "workspace_group_consent_invalid", groupIDs)}, nil
+				}
+				if !sameWorkspaceIDSet(expectedWorkspaceIDs, groupIDs) {
+					return topologyDone{result: d.workspaceCloseRefusal(requestID, action, "workspace_group_changed", groupIDs)}, nil
+				}
+			}
+			affectedIDs := []string{current.ID}
+			if closeGroup {
+				affectedIDs = append([]string(nil), groupIDs...)
+			}
+			if err := d.herdr.WorkspaceClose(commandCtx, current.ID, closeGroup); err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{
+				summary: "Closed workspace " + current.Label,
+				data: map[string]any{
+					"workspace_id":  current.ID,
+					"close_group":   closeGroup,
+					"workspace_ids": affectedIDs,
+				},
+			}, nil
+		},
 	})
 }
 
@@ -243,7 +257,7 @@ func (d *Dispatcher) workspaceCloseRefusal(
 	if len(workspaceIDs) > 0 {
 		data["workspace_ids"] = workspaceIDs
 	}
-	d.recordActivity(action, "failed", strings.ReplaceAll(action, "_", " ")+" failed: "+public, "", requestID)
+	d.activities.record(action, "failed", failureSummary(action, public), "", requestID)
 	return &CommandResult{
 		RequestID: requestID,
 		Action:    action,
@@ -356,18 +370,18 @@ func (d *Dispatcher) HandleWorktreeCreate(
 	if err := validWorktreeValues(branch, base, path, label); err != nil {
 		return d.fail(requestID, action, "", err.Error())
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-	created, err := d.herdr.WorktreeCreate(commandCtx, workspace.ID, branch, base, label)
-	if err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "created", "Created worktree "+branch, "", requestID)
-	return completed(requestID, action, "", created)
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: worktreeCommandDeadline,
+		status:  "created",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			created, err := d.herdr.WorktreeCreate(commandCtx, workspace.ID, branch, base, label)
+			if err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{summary: "Created worktree " + branch, data: created}, nil
+		},
+	})
 }
 
 func (d *Dispatcher) HandleWorktreeOpen(
@@ -388,18 +402,18 @@ func (d *Dispatcher) HandleWorktreeOpen(
 	if err := validWorktreeValues(branch, "", path, label); err != nil {
 		return d.fail(requestID, action, "", err.Error())
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-	opened, err := d.herdr.WorktreeOpen(commandCtx, workspace.ID, path, branch, label)
-	if err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "opened", "Opened worktree "+opened.Worktree.Label, "", requestID)
-	return completed(requestID, action, "", opened)
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: worktreeCommandDeadline,
+		status:  "opened",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			opened, err := d.herdr.WorktreeOpen(commandCtx, workspace.ID, path, branch, label)
+			if err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{summary: "Opened worktree " + opened.Worktree.Label, data: opened}, nil
+		},
+	})
 }
 
 func (d *Dispatcher) HandleWorktreeRemove(
@@ -415,18 +429,18 @@ func (d *Dispatcher) HandleWorktreeRemove(
 	if workspace.Worktree == nil || !workspace.Worktree.IsLinkedWorktree {
 		return d.fail(requestID, action, "", "Workspace is not a removable linked worktree")
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
-	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
-	removed, err := d.herdr.WorktreeRemove(commandCtx, workspace.ID, force)
-	if err != nil {
-		return d.failTopologyErr(requestID, action, "", err)
-	}
-	d.topologyChanged()
-	d.recordActivity(action, "removed", "Removed worktree "+workspace.Label, "", requestID)
-	return completed(requestID, action, "", removed)
+	return d.mutateTopology(ctx, requestID, topologyMutation{
+		action:  action,
+		timeout: worktreeCommandDeadline,
+		status:  "removed",
+		run: func(commandCtx context.Context) (topologyDone, error) {
+			removed, err := d.herdr.WorktreeRemove(commandCtx, workspace.ID, force)
+			if err != nil {
+				return topologyDone{}, err
+			}
+			return topologyDone{summary: "Removed worktree " + workspace.Label, data: removed}, nil
+		},
+	})
 }
 
 func (d *Dispatcher) workspaceTarget(
@@ -441,6 +455,39 @@ func (d *Dispatcher) workspaceTarget(
 		return herdr.Workspace{}, d.fail(requestID, action, "", "Workspace is unavailable")
 	}
 	return workspace, nil
+}
+
+type topologyMutation struct {
+	action  string
+	timeout time.Duration
+	status  string
+	run     func(context.Context) (topologyDone, error)
+}
+
+// topologyDone is what a successful mutation reports. A non-nil result is
+// returned as is, for refusals decided under the topology lock.
+type topologyDone struct {
+	summary string
+	data    any
+	result  *CommandResult
+}
+
+func (d *Dispatcher) mutateTopology(ctx context.Context, requestID string, mutation topologyMutation) *CommandResult {
+	commandCtx, cancel := context.WithTimeout(ctx, mutation.timeout)
+	defer cancel()
+	d.admitTopology(ctx)
+	d.topologyMu.Lock()
+	defer d.topologyMu.Unlock()
+	done, err := mutation.run(commandCtx)
+	if err != nil {
+		return d.failTopologyErr(requestID, mutation.action, "", err)
+	}
+	if done.result != nil {
+		return done.result
+	}
+	d.topologyChanged()
+	d.activities.record(mutation.action, mutation.status, done.summary, "", requestID)
+	return completed(requestID, mutation.action, "", done.data)
 }
 
 func (d *Dispatcher) topologyChanged() {
@@ -485,64 +532,52 @@ func validWorktreeValues(values ...string) error {
 }
 
 func (d *Dispatcher) failTopologyErr(requestID, action, paneID string, err error) *CommandResult {
-	phase := "failed"
+	class := classifyFailure(err)
+	phase := class.phase()
 	public := "Command failed"
 	var data any
 	var cliErr *herdr.CLIError
+	isCLI := errors.As(err, &cliErr)
 	switch {
-	// An earlier applied step outranks any refusal from the failing step alone.
-	case errors.Is(err, herdr.ErrPartiallyApplied):
-		phase = "dispatched_unknown"
-		public = "Part of the command already reached the agent; review it before retrying"
-		data = map[string]any{"dispatched_unknown": true}
-	case errors.As(err, &cliErr) && cliErr.Code == "dirty_worktree_requires_force":
-		phase = "not_started"
+	case class.kind == failurePartiallyApplied:
+		public = partiallyAppliedMessage
+	case class.kind == failureRefused && class.code == "dirty_worktree_requires_force":
 		public = "Worktree has uncommitted changes; force removal is required"
-		data = map[string]any{"code": cliErr.Code, "force_available": true}
-	case errors.As(err, &cliErr) && topologyRefusalCode(cliErr.Code):
-		phase = "not_started"
-		public = strings.TrimSpace(cliErr.Message)
-		switch cliErr.Code {
-		case "protocol_mismatch", "workspace_group_close_required", "workspace_group_changed",
-			"workspace_group_primary_required", "workspace_group_consent_invalid",
-			"workspace_group_validation_unavailable":
-			public = herdr.RefusalMessage(cliErr.Code)
-		}
-		if public == "" {
-			public = "Herdr refused the command"
-		}
-		data = map[string]any{"code": cliErr.Code}
+		data = map[string]any{"code": class.code, "force_available": true}
+	case class.kind == failureRefused:
+		public = topologyRefusalMessage(class.code, cliErr.Message)
+		data = map[string]any{"code": class.code}
 	case action == "worktree_list":
+		phase = "failed"
 		public = "Worktrees could not be listed"
-		if errors.As(err, &cliErr) && strings.TrimSpace(cliErr.Message) != "" {
+		if isCLI && strings.TrimSpace(cliErr.Message) != "" {
 			public = strings.TrimSpace(cliErr.Message)
 			data = map[string]any{"code": cliErr.Code}
 		}
-	case errors.Is(err, herdr.ErrCreatedTargetUnknown), errors.Is(err, herdr.ErrDispatchedUnknown):
-		phase = "dispatched_unknown"
+	case class.kind == failureCreatedTargetUnknown, class.kind == failureDispatchedUnknown:
 		public = "Herdr may have completed this command; refresh before retrying"
-		data = map[string]any{"dispatched_unknown": true}
-	case errors.Is(err, herdr.ErrNotStarted), errors.Is(err, context.DeadlineExceeded):
-		phase = "not_started"
-		public = "Command was not sent; retry is safe"
+	case class.kind == failureNotStarted:
+		public = notSentRetrySafe
+	}
+	if phase == "dispatched_unknown" {
+		data = uncertainOutcomeData()
 	}
 	d.logger.Warn("topology command failed", "action", action, "request_id", requestID, "phase", phase, "error", err)
 	if action != "worktree_list" {
-		d.recordActivity(action, "failed", strings.ReplaceAll(action, "_", " ")+" failed: "+public, paneID, requestID)
+		d.activities.record(action, "failed", failureSummary(action, public), paneID, requestID)
 	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: phase, Error: public, PaneID: paneID, Data: data}
 }
 
-func topologyRefusalCode(code string) bool {
+func topologyRefusalMessage(code, message string) string {
 	switch code {
-	case "invalid_request", "workspace_not_found", "worktree_not_found", "not_git_worktree",
-		"linked_worktree_source", "worktree_operation_in_progress", "protocol_mismatch",
-		"workspace_group_close_required", "workspace_group_changed",
+	case "protocol_mismatch", "workspace_group_close_required", "workspace_group_changed",
 		"workspace_group_primary_required", "workspace_group_consent_invalid",
-		"workspace_group_validation_unavailable", "workspace_move_block_failed",
-		"invalid_params", "layout_conflict":
-		return true
-	default:
-		return false
+		"workspace_group_validation_unavailable":
+		return herdr.RefusalMessage(code)
 	}
+	if message = strings.TrimSpace(message); message != "" {
+		return message
+	}
+	return "Herdr refused the command"
 }

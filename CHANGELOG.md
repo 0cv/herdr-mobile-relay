@@ -36,6 +36,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Self-hosted gateways deployed with the generated Compose bundle now honor
   `HERDR_GATEWAY_MAX_RELAYS` and `HERDR_GATEWAY_MAX_CLIENTS` from `.env`, so
   operators can change the gateway-wide connection limits.
+- Clearing activity history no longer leaves the relay stuck when the clear
+  fails; the phone now gets the failure result.
 
 ### Removed
 

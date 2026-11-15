@@ -15,7 +15,7 @@ type grokCaptureMutationContext struct {
 
 func (ctx *grokCaptureMutationContext) Err() error {
 	ctx.checks++
-	if ctx.checks == 2 {
+	if ctx.checks == 1024 {
 		ctx.mutate()
 	}
 	return ctx.Context.Err()
@@ -54,7 +54,7 @@ func TestGrokAppendDuringCapture(t *testing.T) {
 				}
 				mutated := false
 				ctx := &grokCaptureMutationContext{Context: t.Context(), mutate: func() {
-					// The second parser cancellation checkpoint follows 1,024 records.
+					// Cancellation checks happen while records are read, so this fires mid-capture.
 					mutated = true
 					if rewrite {
 						file, err := os.OpenFile(path, os.O_RDWR, 0)

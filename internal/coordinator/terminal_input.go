@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -30,27 +29,22 @@ func (d *Dispatcher) terminalTextConflictToken(text string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (d *Dispatcher) handleTerminalText(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handleTerminalText(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "send_terminal_text"
-	if paneID == "" || !validTerminalText(stringValue(message, "text")) || message["keys"] != nil {
-		return d.fail(requestID, action, paneID, "Use a single line of text up to 65,536 UTF-8 bytes, without control characters; send Enter separately")
+	if req.paneID == "" || !validTerminalText(stringValue(req.message, "text")) || req.message["keys"] != nil {
+		return d.fail(req.requestID, action, req.paneID, "Use a single line of text up to 65,536 UTF-8 bytes, without control characters; send Enter separately")
 	}
-	text := stringValue(message, "text")
-	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, action, paneID, commandDeadline),
-		LedgerKey:   action + "\x00" + paneID + "\x00" + requestID,
-		PayloadHash: d.terminalTextConflictToken(text),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if err := d.herdr.SendInput(effectCtx, paneID, herdr.PaneInput{Text: text}); err != nil {
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
-		}
-		return EffectResult{Result: completed(requestID, action, paneID, nil)}
-	}))
+	text := stringValue(req.message, "text")
+	result := d.callPane(ctx, req, paneCall{
+		action:      action,
+		ledgerKey:   action + "\x00" + req.paneID + "\x00" + req.requestID,
+		payloadHash: d.terminalTextConflictToken(text),
+		run: func(callCtx context.Context) error {
+			return d.herdr.SendInput(callCtx, req.paneID, herdr.PaneInput{Text: text})
+		},
+	})
 	if result.OK && !result.replayed {
-		d.recordActivity(action, "sent", "Terminal text delivered; Enter not sent", paneID, requestID)
+		d.activities.record(action, "sent", "Terminal text delivered; Enter not sent", req.paneID, req.requestID)
 		d.wake()
 	}
 	return result

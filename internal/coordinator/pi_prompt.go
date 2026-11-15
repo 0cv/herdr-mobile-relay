@@ -15,8 +15,8 @@ func PiPromptEligible(agent *AgentState) bool {
 
 func (d *Dispatcher) HandlePiPrompt(ctx context.Context, requestID, paneID string, admitted func(), send func(context.Context) *CommandResult) *CommandResult {
 	const action = "send_pi_prompt_unconfirmed"
-	ctx = context.WithValue(ctx, admissionContextKey{}, admitted)
-	return d.schedule(ctx, ScheduleOptions{Command: d.command(ctx, time.Now(), requestID, action, paneID, commandDeadline)}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+	req := d.newCommandRequest(time.Now(), requestID, paneID, nil, admitted)
+	return d.schedule(ctx, req, ScheduleOptions{Command: d.command(req, action, commandDeadline)}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		reject := func(message string) EffectResult {
 			return EffectResult{Result: &CommandResult{RequestID: requestID, Action: action, PaneID: paneID, Phase: "not_started", Error: message}}
 		}

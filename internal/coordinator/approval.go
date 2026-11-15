@@ -38,69 +38,69 @@ type questionPayload struct {
 	Navigation    string
 }
 
-func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handleApproval(ctx context.Context, req commandRequest) *CommandResult {
 	payload := approvalPayload{
-		EventID:     stringValue(message, "event_id"),
-		Fingerprint: stringValue(message, "approval_fingerprint"),
-		Choice:      stringValue(message, "choice"),
-		Index:       intValue(message["index"], 0),
-		Total:       intValue(message["total"], 2),
+		EventID:     stringValue(req.message, "event_id"),
+		Fingerprint: stringValue(req.message, "approval_fingerprint"),
+		Choice:      stringValue(req.message, "choice"),
+		Index:       intValue(req.message["index"], 0),
+		Total:       intValue(req.message["total"], 2),
 	}
-	if paneID == "" || payload.EventID == "" || payload.Fingerprint == "" || payload.Choice == "" {
-		return d.fail(requestID, "approval", paneID, "Agent and exact approval identity are required")
+	if req.paneID == "" || payload.EventID == "" || payload.Fingerprint == "" || payload.Choice == "" {
+		return d.fail(req.requestID, "approval", req.paneID, "Agent and exact approval identity are required")
 	}
 	if payload.Total < 2 || payload.Total > 20 || payload.Index < 0 || payload.Index >= payload.Total {
-		return d.fail(requestID, "approval", paneID, "Approval choice is no longer available")
+		return d.fail(req.requestID, "approval", req.paneID, "Approval choice is no longer available")
 	}
-	ledgerKey := approvalLedgerKey(paneID, payload.EventID)
+	ledgerKey := approvalLedgerKey(req.paneID, payload.EventID)
 	payloadHash := hashPayload(payload)
-	agent, ok := d.state.Agent(paneID)
+	agent, ok := d.state.Agent(req.paneID)
 	if ok && agent.Status == "blocked" &&
 		(agent.BlockedEventID == "" || agent.BlockedEventID != payload.EventID) {
-		return d.fail(requestID, "approval", paneID, "This approval request is no longer current")
+		return d.fail(req.requestID, "approval", req.paneID, "This approval request is no longer current")
 	}
 	if ok && agent.Status == "blocked" &&
 		(agent.AttentionKind != question.AttentionApproval ||
 			len(agent.Options) != payload.Total ||
 			agent.ApprovalFingerprint != payload.Fingerprint ||
 			agent.Options[payload.Index] != payload.Choice) {
-		return d.fail(requestID, "approval", paneID, "Approval choices are no longer available")
+		return d.fail(req.requestID, "approval", req.paneID, "Approval choices are no longer available")
 	}
 	if !ok || agent.Status != "blocked" {
 		replay, found, replayErr := d.scheduler.ReplayLedger(ledgerKey, payloadHash)
 		switch {
 		case errors.Is(replayErr, ErrConflict):
-			return d.fail(requestID, "approval", paneID, "A different response was already submitted")
+			return d.fail(req.requestID, "approval", req.paneID, "A different response was already submitted")
 		case replayErr == nil && replay != nil:
-			replay.RequestID = requestID
+			replay.RequestID = req.requestID
 			return replay
 		case replayErr == nil && found:
 			// The matching operation is still in flight. Submit below to attach
 			// this caller to its existing scheduler waiter set.
 		default:
-			return d.fail(requestID, "approval", paneID, "Agent is no longer waiting for approval")
+			return d.fail(req.requestID, "approval", req.paneID, "Agent is no longer waiting for approval")
 		}
 	}
 
-	generation := d.state.Generation(paneID)
+	generation := d.state.Generation(req.paneID)
 
-	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, "approval", paneID, approvalDeadline),
+	result := d.schedule(ctx, req, ScheduleOptions{
+		Command:     d.command(req, "approval", approvalDeadline),
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		current, ok := d.state.Agent(paneID)
+		current, ok := d.state.Agent(req.paneID)
 		if !ok || current.Status != "blocked" ||
 			current.BlockedEventID == "" || current.BlockedEventID != payload.EventID ||
 			current.AttentionKind != question.AttentionApproval ||
 			len(current.Options) != payload.Total ||
 			current.ApprovalFingerprint != payload.Fingerprint ||
 			current.Options[payload.Index] != payload.Choice {
-			return EffectResult{Result: d.fail(requestID, "approval", paneID, "This approval request is no longer current")}
+			return EffectResult{Result: d.fail(req.requestID, "approval", req.paneID, "This approval request is no longer current")}
 		}
-		read, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
+		read, err := d.herdr.ReadPane(effectCtx, req.paneID, 80, "ansi")
 		if err != nil {
-			return EffectResult{Result: d.failErr(requestID, "approval", paneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, "approval", req.paneID, err)}
 		}
 		classification := question.Classify(string(read.Content), current.Agent)
 		if classification.Kind != question.AttentionApproval ||
@@ -108,19 +108,19 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 			payload.Index >= len(classification.Options) ||
 			classification.Options[payload.Index] != payload.Choice ||
 			question.ApprovalFingerprint(classification) != payload.Fingerprint {
-			return EffectResult{Result: d.fail(requestID, "approval", paneID, "Approval choices are no longer available")}
+			return EffectResult{Result: d.fail(req.requestID, "approval", req.paneID, "Approval choices are no longer available")}
 		}
-		if stale := d.paneSessionCurrent(token, requestID, "approval"); stale != nil {
+		if stale := d.paneSessionCurrent(token, req.requestID, "approval"); stale != nil {
 			return EffectResult{Result: stale}
 		}
 		if err := d.herdr.SendKeys(
 			effectCtx,
-			paneID,
+			req.paneID,
 			approvalKeys(payload.Index, classification.ApprovalFocus),
 		); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "approval", paneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, "approval", req.paneID, err)}
 		}
-		accepted := completed(requestID, "approval", paneID, nil)
+		accepted := completed(req.requestID, "approval", req.paneID, nil)
 		accepted.Phase = "accepted"
 		return EffectResult{Result: accepted}
 	}))
@@ -130,10 +130,10 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 	if result.replayed {
 		return result
 	}
-	d.recordActivity("approval", "approved", fmt.Sprintf("Approved option %d", payload.Index+1), paneID, requestID)
+	d.activities.record("approval", "approved", fmt.Sprintf("Approved option %d", payload.Index+1), req.paneID, req.requestID)
 	d.wake()
 	d.startWatcher(func(ctx context.Context) {
-		d.watchApproval(ctx, requestID, paneID, payload.EventID, generation)
+		d.watchApproval(ctx, req.requestID, req.paneID, payload.EventID, generation)
 	})
 	return result
 }
@@ -203,35 +203,35 @@ func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, ev
 	}
 }
 
-func (d *Dispatcher) handleQuestion(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
-	payload, err := decodeQuestionPayload(message)
+func (d *Dispatcher) handleQuestion(ctx context.Context, req commandRequest) *CommandResult {
+	payload, err := decodeQuestionPayload(req.message)
 	if err != nil {
-		return d.fail(requestID, "answer_question", paneID, err.Error())
+		return d.fail(req.requestID, "answer_question", req.paneID, err.Error())
 	}
-	return d.submitQuestion(ctx, receivedAt, requestID, paneID, payload)
+	return d.submitQuestion(ctx, req, payload)
 }
 
-func (d *Dispatcher) handleClarifyQuestion(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handleClarifyQuestion(ctx context.Context, req commandRequest) *CommandResult {
 	payload := questionPayload{
-		InteractionID: stringValue(message, "interaction_id"),
+		InteractionID: stringValue(req.message, "interaction_id"),
 		Clarify:       true,
 	}
 	if payload.InteractionID == "" {
-		return d.fail(requestID, "clarify_question", paneID, "Agent and question are required")
+		return d.fail(req.requestID, "clarify_question", req.paneID, "Agent and question are required")
 	}
-	return d.submitQuestion(ctx, receivedAt, requestID, paneID, payload)
+	return d.submitQuestion(ctx, req, payload)
 }
 
-func (d *Dispatcher) handleNavigateQuestion(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
-	direction := stringValue(message, "direction")
+func (d *Dispatcher) handleNavigateQuestion(ctx context.Context, req commandRequest) *CommandResult {
+	direction := stringValue(req.message, "direction")
 	if direction != "previous" && direction != "next" {
-		return d.fail(requestID, "navigate_question", paneID, "Question navigation is no longer available")
+		return d.fail(req.requestID, "navigate_question", req.paneID, "Question navigation is no longer available")
 	}
-	payload := questionPayload{InteractionID: stringValue(message, "interaction_id"), Navigation: direction}
+	payload := questionPayload{InteractionID: stringValue(req.message, "interaction_id"), Navigation: direction}
 	if payload.InteractionID == "" {
-		return d.fail(requestID, "navigate_question", paneID, "Question is required")
+		return d.fail(req.requestID, "navigate_question", req.paneID, "Question is required")
 	}
-	return d.submitQuestion(ctx, receivedAt, requestID, paneID, payload)
+	return d.submitQuestion(ctx, req, payload)
 }
 
 func decodeQuestionPayload(message map[string]any) (questionPayload, error) {
@@ -273,9 +273,9 @@ func decodeQuestionPayload(message map[string]any) (questionPayload, error) {
 	return payload, nil
 }
 
-func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, requestID, paneID string, payload questionPayload) *CommandResult {
-	if paneID == "" {
-		return d.fail(requestID, "answer_question", paneID, "Agent is required")
+func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, payload questionPayload) *CommandResult {
+	if req.paneID == "" {
+		return d.fail(req.requestID, "answer_question", req.paneID, "Agent is required")
 	}
 	action := "answer_question"
 	if payload.Clarify {
@@ -284,69 +284,69 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 	if payload.Navigation != "" {
 		action = "navigate_question"
 	}
-	ledgerKey := questionOperationLedgerKey(action, paneID, payload.InteractionID, requestID)
+	ledgerKey := questionOperationLedgerKey(action, req.paneID, payload.InteractionID, req.requestID)
 	payloadHash := hashPayload(payload)
 	var submittedInteraction *question.Interaction
 	replay, found, replayErr := d.scheduler.ReplayLedger(ledgerKey, payloadHash)
 	if errors.Is(replayErr, ErrConflict) {
-		return d.fail(requestID, action, paneID, "A different response was already submitted")
+		return d.fail(req.requestID, action, req.paneID, "A different response was already submitted")
 	}
 
-	agent, ok := d.state.Agent(paneID)
+	agent, ok := d.state.Agent(req.paneID)
 	if !ok || (agent.Status != "blocked" && agent.Status != "done") {
 		switch {
 		case replayErr == nil && replay != nil:
-			replay.RequestID = requestID
+			replay.RequestID = req.requestID
 			return replay
 		case replayErr == nil && found:
 			// Attach to the matching in-flight operation below.
 		default:
-			return d.fail(requestID, action, paneID, "Agent is no longer waiting for a question")
+			return d.fail(req.requestID, action, req.paneID, "Agent is no longer waiting for a question")
 		}
 	} else if replay != nil {
-		replay.RequestID = requestID
+		replay.RequestID = req.requestID
 		return replay
 	}
-	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, action, paneID, questionDeadline),
+	result := d.schedule(ctx, req, ScheduleOptions{
+		Command:     d.command(req, action, questionDeadline),
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		current, ok := d.state.Agent(paneID)
+		current, ok := d.state.Agent(req.paneID)
 		if !ok || (current.Status != "blocked" && current.Status != "done") {
-			return EffectResult{Result: d.fail(requestID, action, paneID, "The question changed before the answer was applied")}
+			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, "The question changed before the answer was applied")}
 		}
-		read, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
+		read, err := d.herdr.ReadPane(effectCtx, req.paneID, 80, "ansi")
 		if err != nil {
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, action, req.paneID, err)}
 		}
 		interaction := question.Parse(string(read.Content), current.Agent)
 		if payload.OtherSelected && interaction != nil {
-			d.state.RecordCustomAnswer(paneID, interaction.Question, payload.OtherText)
+			d.state.RecordCustomAnswer(req.paneID, interaction.Question, payload.OtherText)
 		}
 		if interaction == nil || interaction.ID != payload.InteractionID {
-			return EffectResult{Result: d.fail(requestID, action, paneID, "The question changed before the answer was applied")}
+			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, "The question changed before the answer was applied")}
 		}
 		if err := validateQuestionPayload(payload, interaction); err != nil {
-			return EffectResult{Result: d.fail(requestID, action, paneID, err.Error())}
+			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, err.Error())}
 		}
 		copy := *interaction
 		submittedInteraction = &copy
-		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
+		if stale := d.paneSessionCurrent(token, req.requestID, action); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.executeQuestion(effectCtx, token, paneID, payload, interaction); err != nil {
+		if err := d.executeQuestion(effectCtx, token, req.paneID, payload, interaction); err != nil {
 			if errors.Is(err, errQuestionTextUnsupported) {
-				result := d.fail(requestID, action, paneID, err.Error())
+				result := d.fail(req.requestID, action, req.paneID, err.Error())
 				result.Phase = "not_started"
 				return EffectResult{Result: result}
 			}
 			if errors.Is(err, ErrPaneReplaced) {
-				return EffectResult{Result: d.fail(requestID, action, paneID, ErrPaneReplaced.Error())}
+				return EffectResult{Result: d.fail(req.requestID, action, req.paneID, ErrPaneReplaced.Error())}
 			}
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, action, req.paneID, err)}
 		}
-		accepted := completed(requestID, action, paneID, nil)
+		accepted := completed(req.requestID, action, req.paneID, nil)
 		accepted.Phase = "accepted"
 		return EffectResult{Result: accepted}
 	}))
@@ -356,12 +356,12 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 			d.watchQuestion(
 				ctx,
 				ledgerKey,
-				requestID,
+				req.requestID,
 				action,
-				paneID,
+				req.paneID,
 				interactionSnapshot(payload.InteractionID, submittedInteraction),
 				payload.Navigation,
-				d.state.Generation(paneID),
+				d.state.Generation(req.paneID),
 			)
 		})
 	}
@@ -621,11 +621,11 @@ func (d *Dispatcher) finishQuestionWatch(
 	}
 	switch {
 	case navigation == "previous":
-		d.recordActivity("question", "navigated", "Opened previous question", paneID, requestID)
+		d.activities.record("question", "navigated", "Opened previous question", paneID, requestID)
 	case navigation == "next":
-		d.recordActivity("question", "navigated", "Opened next question", paneID, requestID)
+		d.activities.record("question", "navigated", "Opened next question", paneID, requestID)
 	case action == "answer_question":
-		d.recordActivity("question", "answered", "Answered question", paneID, requestID)
+		d.activities.record("question", "answered", "Answered question", paneID, requestID)
 	}
 }
 

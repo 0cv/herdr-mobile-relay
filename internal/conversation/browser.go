@@ -903,6 +903,54 @@ func fileChangeToken(info os.FileInfo) string {
 	return fmt.Sprintf("mtime=%d", info.ModTime().UnixNano())
 }
 
+type sourceChange int
+
+const (
+	sourceUnchanged sourceChange = iota
+	sourceGrown
+	sourceChanged
+)
+
+// sourceStamp is what a capture recorded about a file. A zero modTime, an
+// empty changeToken or an empty identity means the capture did not record it.
+type sourceStamp struct {
+	size        int64
+	modTime     int64
+	changeToken string
+	identity    string
+}
+
+func stampOfInfo(info os.FileInfo) sourceStamp {
+	return sourceStamp{
+		size: info.Size(), modTime: info.ModTime().UnixNano(),
+		changeToken: fileChangeToken(info), identity: fileIdentity(info),
+	}
+}
+
+// compare reports whether info is still the captured file. Growth past the
+// captured size is allowed, so metadata is only compared at the captured size.
+func (stamp sourceStamp) compare(info os.FileInfo) sourceChange {
+	switch {
+	case stamp.identity != "" && fileIdentity(info) != stamp.identity:
+		return sourceChanged
+	case info.Size() < stamp.size:
+		return sourceChanged
+	case info.Size() > stamp.size:
+		return sourceGrown
+	case stamp.modTime != 0 && info.ModTime().UnixNano() != stamp.modTime:
+		return sourceChanged
+	case stamp.changeToken != "" && fileChangeToken(info) != stamp.changeToken:
+		return sourceChanged
+	}
+	return sourceUnchanged
+}
+
+func (source fileSource) stamp() sourceStamp {
+	stamp := stampOfInfo(source.info)
+	stamp.size = source.end
+	return stamp
+}
+
 func writeFileRangeObserved(ctx context.Context, file *os.File, start, end int64, output io.Writer, checkpoint func() error, observe func(int64) error) error {
 	if start < 0 || end < start {
 		return errors.New("invalid file range")
@@ -1892,8 +1940,7 @@ func validateSnapshotSource(source fileSource) error {
 		}
 		return err
 	}
-	if !os.SameFile(source.info, info) || info.Size() < source.end ||
-		info.Size() == source.end && fileChangeToken(source.info) != "" && fileChangeToken(info) != fileChangeToken(source.info) {
+	if !os.SameFile(source.info, info) || source.stamp().compare(info) == sourceChanged {
 		return errors.New("conversation source changed")
 	}
 	pathInfo, err := os.Stat(source.path)
@@ -1977,10 +2024,9 @@ func (b *Browser) ensureClaudeChainJobValidation(job *browseJob, source fileSour
 	b.mu.Unlock()
 	location := source.location
 	capturedEnd := source.end
-	expectedSize := currentInfo.Size()
-	expectedModTime := currentInfo.ModTime().UnixNano()
-	expectedChangeToken := fileChangeToken(currentInfo)
-	expectedIdentity := fileIdentity(source.info)
+	expected := stampOfInfo(currentInfo)
+	captured := expected
+	captured.size = capturedEnd
 	go func() {
 		defer b.validationWG.Done()
 		validationErr := error(nil)
@@ -1989,8 +2035,7 @@ func (b *Browser) ensureClaudeChainJobValidation(job *browseJob, source fileSour
 			validationErr = err
 		} else {
 			defer validated.close()
-			if expectedIdentity != "" && fileIdentity(validated.info) != expectedIdentity || validated.end < capturedEnd ||
-				expectedChangeToken != "" && validated.end == capturedEnd && fileChangeToken(validated.info) != expectedChangeToken {
+			if captured.compare(validated.info) == sourceChanged {
 				validationErr = errors.New("conversation source changed")
 			} else {
 				b.observeRangeRead(capturedEnd)
@@ -2002,16 +2047,17 @@ func (b *Browser) ensureClaudeChainJobValidation(job *browseJob, source fileSour
 				if validationErr == nil {
 					latest, statErr := validated.file.Stat()
 					switch {
-					case statErr != nil || latest.Size() < expectedSize || latest.Size() < capturedEnd:
+					case statErr != nil || latest.Size() < capturedEnd:
 						validationErr = errors.New("conversation source changed")
-					case latest.Size() > expectedSize:
-						// The source advanced after this candidate was captured. Do
-						// not admit the result; the next request has a new key.
-						validationErr = errClaudeChainValidationStale
-					case latest.Size() == expectedSize &&
-						(latest.ModTime().UnixNano() != expectedModTime ||
-							expectedChangeToken != "" && fileChangeToken(latest) != expectedChangeToken):
-						validationErr = errors.New("conversation source changed")
+					default:
+						switch expected.compare(latest) {
+						case sourceChanged:
+							validationErr = errors.New("conversation source changed")
+						case sourceGrown:
+							// The source advanced after this candidate was captured. Do
+							// not admit the result; the next request has a new key.
+							validationErr = errClaudeChainValidationStale
+						}
 					}
 				}
 			}
@@ -2164,7 +2210,7 @@ func (b *Browser) runJob(job *browseJob) {
 	chainContextID := job.chainContextID
 	chainEvidence := append([]claudeRangeEvidence(nil), job.chainObservedRanges...)
 	chainIdentity := fileIdentity(job.source.info)
-	sourceChangeToken := fileChangeToken(job.source.info)
+	capturedStamp := job.source.stamp()
 	job.mu.Unlock()
 	if chainContextID != "" {
 		b.observeChainWorkerCapture(chainEvidence)
@@ -2174,8 +2220,7 @@ func (b *Browser) runJob(job *browseJob) {
 		return
 	}
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || !os.SameFile(job.source.info, info) || info.Size() < job.source.end ||
-		info.Size() == job.source.end && sourceChangeToken != "" && fileChangeToken(info) != sourceChangeToken {
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(job.source.info, info) || capturedStamp.compare(info) == sourceChanged {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
 		return
 	}

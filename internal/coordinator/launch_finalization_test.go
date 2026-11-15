@@ -31,7 +31,7 @@ func TestAgentStartRetryReplaysInitialPromptWarning(t *testing.T) {
 func TestLateLaunchReceivesFreshPromptBudget(t *testing.T) {
 	f := newLaunchFixture(t)
 	d, record := f.dispatcher, f.calls
-	result := d.handleAgentStart(f.ctx, time.Now().Add(-13*time.Second), "late", map[string]any{"profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"})
+	result := d.handleAgentStart(f.ctx, d.newCommandRequest(time.Now().Add(-13*time.Second), "late", "", map[string]any{"profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}, nil))
 	f.assertLaunch(t, result)
 	f.assertCalls(t, 1)
 	if result.Phase != "completed" {

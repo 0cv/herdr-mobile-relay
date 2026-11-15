@@ -158,7 +158,7 @@ func TestClearNamesDoNotCollide(t *testing.T) {
 	receivedAt := time.Now()
 	for i := range 2 {
 		f, _ := newClearFixture(t, launchFixtureOptions{})
-		result := f.dispatcher.handleClear(f.ctx, receivedAt.Add(time.Duration(i)), "clear", "pane-old")
+		result := f.dispatcher.handleClear(f.ctx, f.dispatcher.newCommandRequest(receivedAt.Add(time.Duration(i)), "clear", "pane-old", nil, nil))
 		if !result.OK {
 			t.Fatalf("clear: %+v", result)
 		}
