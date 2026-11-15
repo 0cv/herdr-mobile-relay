@@ -115,7 +115,7 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 			t.Fatalf("Supported(%q) = false", name)
 		}
 	}
-	page, err := reader.ReadFor("agy", t.TempDir(), session, "", 80)
+	page, err := reader.ReadLatest("agy", ProjectContext{CWD: t.TempDir()}, session, 80)
 	if err != nil || !page.Available {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
@@ -141,7 +141,7 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 func TestAgyReaderRejectsUnsafeSessions(t *testing.T) {
 	reader, _, _ := agyFixture(t)
 	for _, session := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
-		page, err := reader.ReadFor("agy", "", session, "", 10)
+		page, err := reader.ReadLatest("agy", ProjectContext{CWD: ""}, session, 10)
 		if err != nil || page.Available || len(page.Entries) != 0 {
 			t.Fatalf("session %q page = %#v, err = %v", session, page, err)
 		}

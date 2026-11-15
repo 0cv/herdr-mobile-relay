@@ -155,7 +155,7 @@ func TestDatabaseReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
 	scope := BrowseScope{Provider: "opencode", SessionID: session}
 	read := func() []Entry {
 		t.Helper()
-		page, err := reader.ReadFor(scope.Provider, root, session, "", 10)
+		page, err := reader.ReadLatest(scope.Provider, ProjectContext{CWD: root}, session, 10)
 		if err != nil || !page.Available {
 			t.Fatalf("read failed: %+v %v", page, err)
 		}
@@ -232,7 +232,7 @@ func TestAgyReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
 	scope := BrowseScope{Provider: "agy", SessionID: agySessionID}
 	read := func() []Entry {
 		t.Helper()
-		page, err := reader.ReadFor(scope.Provider, root, scope.SessionID, "", 10)
+		page, err := reader.ReadLatest(scope.Provider, ProjectContext{CWD: root}, scope.SessionID, 10)
 		if err != nil || !page.Available {
 			t.Fatalf("read failed: %+v %v", page, err)
 		}

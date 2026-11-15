@@ -40,7 +40,7 @@ func TestCursorConversationReadsAgentTranscripts(t *testing.T) {
 		},
 	)
 
-	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: cwd}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestCursorConversationLocatesByWorkspaceTrusted(t *testing.T) {
 		map[string]any{"role": "assistant", "message": map[string]any{"content": "ok"}},
 	)
 
-	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: cwd}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestCursorConversationLocatesByUUIDScan(t *testing.T) {
 		map[string]any{"role": "assistant", "message": map[string]any{"content": "hi"}},
 	)
 
-	page, err := reader.ReadFor("cursor-agent", filepath.Join(home, "missing", "cwd"), testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor-agent", ProjectContext{CWD: filepath.Join(home, "missing", "cwd")}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestCursorConversationLocatesFlatTranscriptLayout(t *testing.T) {
 		map[string]any{"role": "user", "message": map[string]any{"content": "<user_query>flat</user_query>"}},
 		map[string]any{"role": "assistant", "message": map[string]any{"content": "ok"}},
 	)
-	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: cwd}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestCursorConversationHidesHarnessUserText(t *testing.T) {
 		map[string]any{"role": "user", "message": map[string]any{"content": "<user_query>real</user_query>"}},
 		map[string]any{"role": "assistant", "message": map[string]any{"content": "answer"}},
 	)
-	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: cwd}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestCursorConversationHidesHarnessUserText(t *testing.T) {
 
 func TestCursorConversationRejectsNonUUIDSession(t *testing.T) {
 	reader, home := testReader(t)
-	page, err := reader.ReadFor("cursor", home, "not-a-uuid", "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: home}, "not-a-uuid", 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestCursorTimestampNormalization(t *testing.T) {
 		},
 	)
 
-	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: cwd}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestCursorTimestampOnlyFromUserRecords(t *testing.T) {
 		},
 	)
 
-	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: cwd}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestCursorTimestampRejectsUnrecognizedLabels(t *testing.T) {
 		},
 	)
 
-	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	page, err := reader.ReadLatest("cursor", ProjectContext{CWD: cwd}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -665,15 +665,11 @@ func validGrokCursor(before string) bool {
 	return err == nil && value >= 0
 }
 
-func (r *Reader) readGrokFor(project ProjectContext, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readGrokFor(project ProjectContext, sessionID string, limit int) (Page, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !safeSessionID(sessionID) {
 		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
-	if !validGrokCursor(before) {
-		return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
-	}
-	limit = clampPageLimit(limit)
 	location := r.LocateWithProject("grok", project, sessionID)
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
@@ -682,10 +678,7 @@ func (r *Reader) readGrokFor(project ProjectContext, sessionID, before string, l
 	if err != nil {
 		return Page{}, fmt.Errorf("read conversation log: %w", err)
 	}
-	page, hasMore, total, ok := grokPage(projection.Entries, before, limit)
-	if !ok {
-		return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
-	}
+	page := latest(projection.Entries, limit)
 	normalizeEntriesForResponse(page)
-	return Page{Available: true, Entries: page, HasMore: hasMore, Total: total, SourceCorrupt: projection.Corrupt > 0}, nil
+	return Page{Available: true, Entries: page, HasMore: len(page) < len(projection.Entries), Total: len(projection.Entries), SourceCorrupt: projection.Corrupt > 0}, nil
 }

@@ -64,7 +64,7 @@ func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 					}
 					payload = page
 				} else {
-					page, err := reader.ReadFor("grok", grokCWD, testSessionID, "", 2)
+					page, err := reader.ReadLatest("grok", ProjectContext{CWD: grokCWD}, testSessionID, 2)
 					if err == nil && page.Available {
 						t.Fatalf("outside source accepted: %#v", page)
 					}

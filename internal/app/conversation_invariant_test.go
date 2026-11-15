@@ -93,7 +93,7 @@ func TestTitleAndTranscriptAgreeForANonDefaultProfile(t *testing.T) {
 	writeClaudeTranscript(t, filepath.Join(profile, "projects", "-work-app", invariantSession+".jsonl"), "Profile Title")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", cwd, invariantSession)
-	page, err := conversation.NewReader(home).ReadFor("claude", cwd, invariantSession, "", 80)
+	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: cwd}, invariantSession, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestTitleAndTranscriptAgreeForTheHomeDefault(t *testing.T) {
 	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Home Title")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", cwd, invariantSession)
-	page, err := conversation.NewReader(home).ReadFor("claude", cwd, invariantSession, "", 80)
+	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: cwd}, invariantSession, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestTitleAndTranscriptFailTogetherWhenNoRootHasTheSession(t *testing.T) {
 	}
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
-	page, err := conversation.NewReader(home).ReadFor("claude", "/work/app", invariantSession, "", 80)
+	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestLegacyConfigDirDoesNotSplitTitleFromTranscript(t *testing.T) {
 	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Home Title")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
-	page, err := conversation.NewReader(home).ReadFor("claude", "/work/app", invariantSession, "", 80)
+	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestLegacyConfigDirDoesNotSplitTitleFromTranscript(t *testing.T) {
 
 func TestMissingSessionIDIsUnavailable(t *testing.T) {
 	clearAgentEnv(t)
-	page, err := conversation.NewReader(t.TempDir()).Read("claude", "", "", 80)
+	page, err := conversation.NewReader(t.TempDir()).ReadLatest("claude", conversation.ProjectContext{}, "", 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestTitleAndTranscriptComeFromTheSameRootForADuplicateSessionID(t *testing.
 		"Second Root Title", "second root answer")
 
 	title := session.NewResolverWithReader(home, nil).SessionName("claude", "/work/app", invariantSession)
-	page, err := conversation.NewReader(home).ReadFor("claude", "/work/app", invariantSession, "", 80)
+	page, err := conversation.NewReader(home).ReadLatest("claude", conversation.ProjectContext{CWD: "/work/app"}, invariantSession, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestTitleAndTranscriptInvariantAcrossSupportedAgents(t *testing.T) {
 			reader := conversation.NewReader(home)
 			resolver := session.NewResolverWithReader(home, reader)
 			title := resolver.SessionName(fixture.agent, cwd, sessionID)
-			page, err := reader.ReadFor(fixture.agent, cwd, sessionID, "", 80)
+			page, err := reader.ReadLatest(fixture.agent, conversation.ProjectContext{CWD: cwd}, sessionID, 80)
 			if err != nil {
 				t.Fatal(err)
 			}

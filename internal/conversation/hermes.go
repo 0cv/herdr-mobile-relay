@@ -128,10 +128,6 @@ func sameHermesDirectory(cwd, directory string) bool {
 	return cwdErr == nil && directoryErr == nil && realCwd == realDirectory
 }
 
-func (r *hermesReader) readFrom(database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
-	return r.readFromContext(context.Background(), database, sessionID, before, limit)
-}
-
 func (r *hermesReader) readFromContext(ctx context.Context, database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
 	if !safeSessionID(sessionID) {
 		return nil, false, false, hermesRow{}, "invalid_session"
@@ -428,26 +424,20 @@ func hermesTimestamp(value float64) string {
 	return time.Unix(0, int64(value*float64(time.Second))).UTC().Format(time.RFC3339Nano)
 }
 
-func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readHermesFor(agent, cwd, sessionID string, limit int) (Page, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !safeSessionID(sessionID) {
 		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
-	if before != "" {
-		cursor, err := strconv.ParseInt(before, 10, 64)
-		if err != nil || cursor <= 0 {
-			return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
-		}
-	}
 	limit = clampPageLimit(limit)
-	location := r.Locate(agent, cwd, sessionID)
+	location := r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
 	if location.Path == "" {
 		if _, code := r.hermes.databases(); code != "" {
 			return unavailableCode(code, "Hermes conversation history is unavailable."), nil
 		}
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
-	entries, hasMore, corrupt, metadata, code := r.hermes.readFrom(location.Path, sessionID, before, limit)
+	entries, hasMore, corrupt, metadata, code := r.hermes.readFromContext(context.Background(), location.Path, sessionID, "", limit)
 	if code != "" {
 		return unavailableCode(code, "Hermes conversation history is unavailable."), nil
 	}

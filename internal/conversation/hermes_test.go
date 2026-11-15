@@ -176,11 +176,11 @@ func TestHermesReaderBindsWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := browser.reader
-	own, err := reader.ReadFor("hermes", scope.CWD, sessionID, "", 80)
+	own, err := reader.ReadLatest("hermes", ProjectContext{CWD: scope.CWD}, sessionID, 80)
 	if err != nil || !own.Available || len(own.Entries) != 1 {
 		t.Fatalf("own workspace page = %#v, err = %v", own, err)
 	}
-	wrongWorkspace, err := reader.ReadFor("hermes", other, sessionID, "", 80)
+	wrongWorkspace, err := reader.ReadLatest("hermes", ProjectContext{CWD: other}, sessionID, 80)
 	if err != nil || wrongWorkspace.Available || len(wrongWorkspace.Entries) != 0 {
 		t.Fatalf("Hermes wrong-workspace page = %#v, err = %v", wrongWorkspace, err)
 	}
@@ -224,7 +224,7 @@ COMMIT;`, sessionID, cwd, sessionID, sessionID, sessionID)
 	t.Setenv("HERMES_HOME", "")
 	reader := NewReader(t.TempDir())
 
-	page, err := reader.ReadFor("hermes-agent", cwd, sessionID, "", 80)
+	page, err := reader.ReadLatest("hermes-agent", ProjectContext{CWD: cwd}, sessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestHermesReaderUsesCachedDatabaseForTitleAndContent(t *testing.T) {
 	databaseA := filepath.Join(rootA, "state.db")
 	createHermesTestDatabase(t, databaseA, sessionID, cwd, "Title A",
 		fmt.Sprintf("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','Transcript A',100,1,0);", sessionID))
-	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 80)
+	page, err := reader.ReadLatest("hermes", ProjectContext{CWD: cwd}, sessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -62,7 +62,7 @@ type omoCacheEntry struct {
 
 func (r *Reader) omoRoots() []string { return agentroots.OMO(r.home) }
 
-func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readOMO(cwd, sessionID string, limit int) (Page, error) {
 	location, identity, code := r.locateOMO(cwd, strings.TrimSpace(sessionID))
 	if code != "" {
 		return unavailableCode(code, "OMO conversation history is unavailable."), nil
@@ -75,28 +75,10 @@ func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error)
 		}
 		return unavailableCode(code, reason), nil
 	}
-	limit = clampPageLimit(limit)
-	end := len(entries)
-	if before != "" {
-		found := false
-		for index := range entries {
-			if entries[index].ID == before {
-				end = index
-				found = true
-				break
-			}
-		}
-		if !found {
-			return unavailableCode("invalid_cursor", "The conversation cursor is invalid."), nil
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
+	page := latest(entries, limit)
 	return Page{
-		Available: true, Entries: append([]Entry(nil), entries[start:end]...),
-		HasMore: start > 0, Total: len(entries), FileTruncated: clipped, SourceCorrupt: plan.ReasonCode == "source_corrupt", OMOPlan: &plan,
+		Available: true, Entries: page,
+		HasMore: len(page) < len(entries), Total: len(entries), FileTruncated: clipped, SourceCorrupt: plan.ReasonCode == "source_corrupt", OMOPlan: &plan,
 	}, nil
 }
 

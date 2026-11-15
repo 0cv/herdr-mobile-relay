@@ -231,7 +231,7 @@ func TestKimiLocatorIdentityAndBoundaries(t *testing.T) {
 	if _, _, code := reader.SelectKimiSession(ProjectContext{CWD: "/wrong"}, id); code == "" {
 		t.Fatal("cwd mismatch")
 	}
-	page, err := reader.ReadFor("kimi", cwd, "", "", 200)
+	page, err := reader.ReadLatest("kimi", ProjectContext{CWD: cwd}, "", 200)
 	if err != nil || page.Available {
 		t.Fatalf("sessionless=%+v %v", page, err)
 	}
@@ -354,7 +354,7 @@ func TestKimiReaderPublicAdmission(t *testing.T) {
 	root := filepath.Join(home, ".kimi-code")
 	cwd, id := "/fixture/kimi-project", "session_public"
 	kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Public", 1, kimiSample(t, "v0.36.1-v2/wire.jsonl"))
-	page, err := NewReader(home).ReadFor("kimi", cwd, id, "", 200)
+	page, err := NewReader(home).ReadLatest("kimi", ProjectContext{CWD: cwd}, id, 200)
 	if err != nil || !page.Available || len(page.Entries) != 6 {
 		t.Fatalf("Kimi reader admission: %+v %v", page, err)
 	}

@@ -28,7 +28,7 @@ func TestHermesReadUsesNativeBackendWithoutCLI(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	reader := NewReader(t.TempDir())
 
-	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 10)
+	page, err := reader.ReadLatest("hermes", ProjectContext{CWD: cwd}, sessionID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

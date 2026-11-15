@@ -143,7 +143,7 @@ func (f *grokFixture) write(t *testing.T, path string) {
 
 func readGrok(t *testing.T, reader *Reader, limit int) Page {
 	t.Helper()
-	page, err := reader.ReadFor("grok", grokCWD, testSessionID, "", limit)
+	page, err := reader.ReadLatest("grok", ProjectContext{CWD: grokCWD}, testSessionID, limit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestGrokCLIIntegration(t *testing.T) {
 		if location.Path == "" || containedRegularFile(location.Path, state) == "" {
 			t.Fatal("production lookup did not locate the isolated live updates.jsonl")
 		}
-		page, err := reader.ReadFor("grok", work, response.SessionID, "", 80)
+		page, err := reader.ReadLatest("grok", ProjectContext{CWD: work}, response.SessionID, 80)
 		scope := BrowseScope{Provider: "grok", CWD: work, SessionID: response.SessionID}
 		browsed, browseErr := newTestBrowser(t, reader, DefaultBrowserOptions()).ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 80})
 		if err != nil || !page.Available || browseErr != nil || browsed.Diagnostics.CorruptRecords > 0 {

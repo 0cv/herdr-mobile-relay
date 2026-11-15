@@ -20,9 +20,9 @@ func (s *Server) readAgentConversation(ctx context.Context, agent *coordinator.A
 	var page conversation.Page
 	var err error
 	if conversation.IsKimi(agent.Agent) && agent.ConversationInferred {
-		page, err = s.conversationM.ReadKimiSource(ctx, conversationScope(agent), "", limit)
+		page, err = s.conversationM.ReadKimiSource(ctx, conversationScope(agent), limit)
 	} else {
-		page, err = s.conversationM.ReadWithProject(agent.Agent, projectContextForAgent(agent), agent.SessionID, "", limit)
+		page, err = s.conversationM.ReadLatest(agent.Agent, projectContextForAgent(agent), agent.SessionID, limit)
 	}
 	if s.conversationHistoryReadObserver != nil {
 		s.conversationHistoryReadObserver()

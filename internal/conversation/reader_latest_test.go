@@ -78,7 +78,7 @@ func TestReadWithProjectLatestEntriesForJSONLProviders(t *testing.T) {
 		t.Run(test.agent, func(t *testing.T) {
 			reader, home := testReader(t)
 			sessionID := test.write(t, home)
-			page, err := reader.ReadWithProject(test.agent, ProjectContext{CWD: cwd}, sessionID, "", 80)
+			page, err := reader.ReadLatest(test.agent, ProjectContext{CWD: cwd}, sessionID, 80)
 			assertLatestReply(t, page, err, test.want)
 		})
 	}
@@ -107,7 +107,7 @@ func TestReadWithProjectLatestEntriesFollowClaudeChain(t *testing.T) {
 	)
 	writeRows(t, filepath.Join(root, child+".jsonl"), claudeToolRows()...)
 
-	page, err := reader.ReadWithProject("claude", ProjectContext{CWD: "/work"}, testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, testSessionID, 80)
 	if err != nil || !page.Available || len(page.Entries) != 3 || page.Entries[0].Text != "parent question" {
 		t.Fatalf("page = %#v, err = %v, want the parent prompt before the child turns", page, err)
 	}
@@ -128,7 +128,7 @@ func TestReadWithProjectLatestEntriesForOMO(t *testing.T) {
 		}}},
 		map[string]any{"type": "message", "id": "t1", "timestamp": "2026-09-02T12:00:02Z", "message": map[string]any{"role": "toolResult", "toolCallId": "call-1", "content": "file body"}},
 	)
-	page, err := NewReader(home).ReadWithProject("omo", ProjectContext{CWD: cwd}, sessionID, "", 80)
+	page, err := NewReader(home).ReadLatest("omo", ProjectContext{CWD: cwd}, sessionID, 80)
 	assertLatestReply(t, page, err, latestReplyWant{"latest reply", "2026-09-02T12:00:01Z", "read", "file body"})
 }
 
@@ -142,7 +142,7 @@ func TestReadWithProjectLatestEntriesForOpenCode(t *testing.T) {
 		openCodeV2Message("m2", "ses_latest", "assistant", 2, 1792068926669, assistant)
 	createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, root)
-	page, err := reader.ReadWithProject("opencode", ProjectContext{CWD: "/work"}, "ses_latest", "", 80)
+	page, err := reader.ReadLatest("opencode", ProjectContext{CWD: "/work"}, "ses_latest", 80)
 	assertLatestReply(t, page, err, latestReplyWant{"latest reply", "2026-10-15T12:55:26.669Z", "read", "file body"})
 }
 
@@ -156,7 +156,7 @@ func TestReadWithProjectLatestEntriesForKimi(t *testing.T) {
 		`{"type":"context.append_message","message":{"id":"a1","role":"assistant","content":[{"type":"text","text":"latest reply"}],"toolCalls":[{"type":"function","id":"call-1","name":"read","arguments":"{\"path\":\"a.go\"}"}]},"time":1786680002000}` + "\n" +
 		`{"type":"context.append_message","message":{"role":"tool","toolCallId":"call-1","content":[{"type":"text","text":"file body"}]},"time":1786680003000}` + "\n"
 	kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Latest", 1, []byte(wire))
-	page, err := NewReader(home).ReadWithProject("kimi", ProjectContext{CWD: cwd}, id, "", 80)
+	page, err := NewReader(home).ReadLatest("kimi", ProjectContext{CWD: cwd}, id, 80)
 	assertLatestReply(t, page, err, latestReplyWant{"latest reply", "2026-08-14T04:00:02Z", "read", "file body"})
 }
 
@@ -169,7 +169,7 @@ func TestReadWithProjectLatestEntriesForCodex(t *testing.T) {
 		map[string]any{"timestamp": "2026-08-12T10:00:02Z", "type": "response_item", "payload": map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "file body"}},
 		map[string]any{"timestamp": "2026-08-12T10:00:03Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "latest reply"}}}},
 	)
-	page, err := reader.ReadWithProject("codex", ProjectContext{CWD: "/work"}, testSessionID, "", 80)
+	page, err := reader.ReadLatest("codex", ProjectContext{CWD: "/work"}, testSessionID, 80)
 	if err != nil || !page.Available || len(page.Entries) != 3 {
 		t.Fatalf("page = %#v, err = %v, want prompt, tool turn and reply", page, err)
 	}

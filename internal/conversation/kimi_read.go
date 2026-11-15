@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-func (r *Reader) ReadKimiSource(ctx context.Context, scope BrowseScope, before string, limit int) (Page, error) {
+func (r *Reader) ReadKimiSource(ctx context.Context, scope BrowseScope, limit int) (Page, error) {
 	if err := ctx.Err(); err != nil {
 		return Page{}, err
 	}
@@ -33,24 +33,10 @@ func (r *Reader) ReadKimiSource(ctx context.Context, scope BrowseScope, before s
 	if code != "" {
 		return unavailableCode(code, kimiReason(code)), nil
 	}
-	return kimiPage(projection, before, limit), nil
+	return kimiPage(projection, limit), nil
 }
 
-func kimiPage(projection kimiProjection, before string, limit int) Page {
-	entries := projection.entries
-	end := len(entries)
-	if before != "" {
-		for i := range entries {
-			if entries[i].ID == before {
-				end = i
-				break
-			}
-		}
-	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	limit = min(limit, maxPageSize)
-	start := max(0, end-limit)
-	return Page{Available: true, Entries: entries[start:end], Total: len(entries), HasMore: start > 0, ContinuationIncomplete: projection.diagnostics.ContinuationIncomplete, ContinuationReason: projection.diagnostics.ContinuationReason}
+func kimiPage(projection kimiProjection, limit int) Page {
+	entries := latest(projection.entries, limit)
+	return Page{Available: true, Entries: entries, Total: len(projection.entries), HasMore: len(entries) < len(projection.entries), ContinuationIncomplete: projection.diagnostics.ContinuationIncomplete, ContinuationReason: projection.diagnostics.ContinuationReason}
 }

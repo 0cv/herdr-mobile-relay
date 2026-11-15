@@ -13,7 +13,7 @@ func TestCoreAgentAliases(t *testing.T) {
 	}
 	reader, home := testReader(t)
 	normalGrokSession().write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-	page, err := reader.ReadFor("grok-build", grokCWD, testSessionID, "", 80)
+	page, err := reader.ReadLatest("grok-build", ProjectContext{CWD: grokCWD}, testSessionID, 80)
 	if err != nil || !page.Available || len(page.Entries) != 3 {
 		t.Fatalf("core Grok page=%+v err=%v", page, err)
 	}

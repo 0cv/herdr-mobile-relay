@@ -413,18 +413,6 @@ func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64
 	return string(data), clipped, nil
 }
 
-func namespaceClaudeEntries(entries []Entry, segment claudeSegment, anchor bool) []Entry {
-	if anchor || len(entries) == 0 {
-		return entries
-	}
-	hash := sha256.Sum256([]byte(segment.SessionID + "\x00" + segment.FileRevision))
-	prefix := hex.EncodeToString(hash[:])[:12]
-	for index := range entries {
-		entries[index].ID = prefix + "-" + entries[index].ID
-	}
-	return entries
-}
-
 func continuationDiagnostic(reason string) (bool, string) {
 	switch reason {
 	case continuationReasonMissingSource, continuationReasonInvalidLink, continuationReasonAmbiguous, continuationReasonCycle, continuationReasonLimit, continuationReasonPartial:
@@ -434,7 +422,7 @@ func continuationDiagnostic(reason string) (bool, string) {
 	}
 }
 
-func (r *Reader) readClaudeChain(sessionID string, anchor Location, before string, limit int) (Page, error) {
+func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) (Page, error) {
 	chain, err := resolveClaudeChain(context.Background(), anchor, sessionID)
 	if err != nil {
 		return Page{}, fmt.Errorf("resolve Claude conversation chain: %w", err)
@@ -442,7 +430,6 @@ func (r *Reader) readClaudeChain(sessionID string, anchor Location, before strin
 	if len(chain.Segments) == 0 {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
-	limit = clampPageLimit(limit)
 	groups := make([][]Entry, len(chain.Segments))
 	remaining := int64(maxConversationBytes)
 	clipped := false
@@ -466,7 +453,7 @@ func (r *Reader) readClaudeChain(sessionID string, anchor Location, before strin
 			break
 		}
 		entries := parseTranscript("claude", text)
-		groups[index] = namespaceClaudeEntries(entries, segment, index == 0)
+		groups[index] = entries
 		consumed := segment.CapturedEnd
 		if consumed > remaining {
 			consumed = remaining
@@ -486,27 +473,9 @@ func (r *Reader) readClaudeChain(sessionID string, anchor Location, before strin
 	for _, group := range groups {
 		entries = append(entries, group...)
 	}
-	end := len(entries)
-	if before != "" {
-		found := false
-		for index := range entries {
-			if entries[index].ID == before {
-				end = index
-				found = true
-				break
-			}
-		}
-		if !found {
-			return Page{Available: true, ReasonCode: "source_changed", Reason: "The conversation chain changed; reload history.", Entries: []Entry{}}, nil
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
-	pageEntries := append([]Entry(nil), entries[start:end]...)
+	pageEntries := latest(entries, limit)
 	page := Page{
-		Available: true, Entries: pageEntries, HasMore: start > 0, Total: len(entries), FileTruncated: clipped,
+		Available: true, Entries: pageEntries, HasMore: len(pageEntries) < len(entries), Total: len(entries), FileTruncated: clipped,
 	}
 	if chain.IncompleteReason != "" {
 		page.ContinuationIncomplete, page.ContinuationReason = continuationDiagnostic(chain.IncompleteReason)

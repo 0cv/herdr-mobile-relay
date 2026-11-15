@@ -26,7 +26,7 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 		map[string]any{"type": "user", "uuid": "u1", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"content": "from profile root"}},
 		map[string]any{"type": "assistant", "uuid": "a1", "timestamp": "2026-08-12T10:00:01Z", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "profile answer"}}}},
 	)
-	profilePage, err := reader.Read("claude", testSessionID, "", 80)
+	profilePage, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 	writeRows(t, homePath,
 		map[string]any{"type": "user", "uuid": "u2", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"content": "from home root"}},
 	)
-	homePage, err := reader.Read("claude", secondSessionID, "", 80)
+	homePage, err := reader.ReadLatest("claude", ProjectContext{}, secondSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 
 func TestClaudeConversationUnavailableWhenSessionMissingFromAllRoots(t *testing.T) {
 	reader, _ := testReader(t)
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestPiConversationConfinesReportedPathAcrossMultipleRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := reader.Read("pi", link, "", 80)
+	page, err := reader.ReadLatest("pi", ProjectContext{}, link, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestOMPConversationResolvesFromConfiguredProfileRoot(t *testing.T) {
 		map[string]any{"type": "message", "id": "a1", "timestamp": "2026-08-12T10:00:01Z", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "response"}}}},
 	)
 
-	page, err := reader.Read("omp", testSessionID, "", 80)
+	page, err := reader.ReadLatest("omp", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestClaudeConversationEarliestRootWinsForDuplicateSessionID(t *testing.T) {
 		map[string]any{"type": "user", "uuid": "u2", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"content": "home default copy"}},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestOMPConversationDiscoversProfileCreatedAfterReaderConstructed(t *testing
 		map[string]any{"type": "message", "id": "u1", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "question"}}}},
 	)
 
-	page, err := reader.Read("omp", testSessionID, "", 80)
+	page, err := reader.ReadLatest("omp", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestClaudeConversationSearchesSymlinkedProjectDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestReaderKeepsLocatedDuplicateStableAcrossRequests(t *testing.T) {
 	if got := reader.LocateWithProject("claude", ProjectContext{CWD: "/work"}, testSessionID); got.Path != secondPath {
 		t.Fatalf("cached location flipped to %q, want stable %q", got.Path, secondPath)
 	}
-	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}

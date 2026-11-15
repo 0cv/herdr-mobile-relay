@@ -157,22 +157,10 @@ func Supported(agent string) bool {
 	return agentkind.Of(agent) != ""
 }
 
-// Read resolves a conversation without project context. It is used for
-// historical activity where the pane cwd is no longer available.
-func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{}, sessionID, before, limit)
-}
-
-// ReadFor resolves a pane conversation using the same cwd-aware locator as the
-// session-title resolver.
-func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
-}
-
-// ReadWithProject resolves a conversation with the pane and, for Claude Code,
+// ReadLatest resolves a conversation with the pane and, for Claude Code,
 // foreground directory hints. Once the anchor is located, Claude continuation
 // descendants stay in that anchor's project and root.
-func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) ReadLatest(agent string, project ProjectContext, sessionID string, limit int) (Page, error) {
 	project = NormalizeProjectContext(agent, project)
 	kind := agentkind.Of(agent)
 	if kind == agentkind.Kimi {
@@ -180,22 +168,22 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 		if code != "" {
 			return unavailableCode(code, kimiReason(code)), nil
 		}
-		return kimiPage(projection, before, limit), nil
+		return kimiPage(projection, limit), nil
 	}
 	if kind == agentkind.Hermes {
-		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
+		return r.readHermesFor(agent, project.CWD, sessionID, limit)
 	}
 	if kind == agentkind.Agy {
-		return r.readAgyFor(sessionID, before, limit)
+		return r.readAgyFor(sessionID, limit)
 	}
 	if kind == agentkind.OpenCode {
-		return r.readOpenCode(sessionID, before, limit)
+		return r.readOpenCode(sessionID, limit)
 	}
 	if kind == agentkind.OMO {
-		return r.readOMO(project.CWD, sessionID, before, limit)
+		return r.readOMO(project.CWD, sessionID, limit)
 	}
 	if kind == agentkind.Grok {
-		return r.readGrokFor(project, sessionID, before, limit)
+		return r.readGrokFor(project, sessionID, limit)
 	}
 	if !Supported(agent) {
 		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
@@ -209,32 +197,18 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
 	if agentkind.Of(agent) == agentkind.Claude {
-		return r.readClaudeChain(sessionID, location, before, limit)
+		return r.readClaudeChain(sessionID, location, limit)
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
 		return Page{}, fmt.Errorf("read conversation log: %w", err)
 	}
 	entries := parseTranscript(agent, text)
-	limit = clampPageLimit(limit)
-	end := len(entries)
-	if before != "" {
-		for index := range entries {
-			if entries[index].ID == before {
-				end = index
-				break
-			}
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
-	pageEntries := append([]Entry(nil), entries[start:end]...)
+	pageEntries := latest(entries, limit)
 	return Page{
 		Available:     true,
 		Entries:       pageEntries,
-		HasMore:       start > 0,
+		HasMore:       len(pageEntries) < len(entries),
 		Total:         len(entries),
 		FileTruncated: clipped,
 	}, nil
@@ -247,22 +221,21 @@ func clampPageLimit(limit int) int {
 	return min(limit, maxPageSize)
 }
 
+func latest(entries []Entry, limit int) []Entry {
+	start := max(0, len(entries)-clampPageLimit(limit))
+	return append([]Entry(nil), entries[start:]...)
+}
+
 func unavailableCode(code, reason string) Page {
 	return Page{Available: false, ReasonCode: code, Reason: reason, Entries: []Entry{}}
 }
 
-// Locate returns the exact contained transcript selected for agent, cwd and
-// sessionID. Root order is authoritative; within Claude roots the foreground
-// directory is tried before the pane cwd. Cached tuple locations are returned
-// before any filesystem walk, keeping title and history on the same copy.
-func (r *Reader) Locate(agent, cwd, sessionID string) Location {
-	return r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
-}
-
 // LocateWithProject returns the exact contained transcript selected for the
-// supplied project context. The effective foreground hint is part of the
-// cache and single-flight keys, so changing it cannot reuse an old hit or
-// miss.
+// supplied project context. Root order is authoritative; within Claude roots
+// the foreground directory is tried before the pane cwd. The effective
+// foreground hint is part of the cache and single-flight keys, so changing it
+// cannot reuse an old hit or miss. Cached tuple locations are returned before
+// any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) LocateWithProject(agent string, project ProjectContext, sessionID string) Location {
 	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)

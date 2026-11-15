@@ -2280,7 +2280,7 @@ func (s *Server) latestConversationResponse(agent, sessionID string, project con
 	if s.conversationM == nil || conversation.IsKimi(agent) || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
 	}
-	page, err := s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
+	page, err := s.conversationM.ReadLatest(agent, project, sessionID, 1)
 	if err != nil || !page.Available || len(page.Entries) == 0 {
 		return ""
 	}
@@ -3863,7 +3863,7 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 			var loaded bool
 			page, loaded = pages[cacheKey]
 			if !loaded {
-				page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
+				page, _ = s.conversationM.ReadLatest(agentName, project, sessionID, 200)
 				pages[cacheKey] = page
 			}
 		}

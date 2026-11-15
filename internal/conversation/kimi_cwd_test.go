@@ -14,7 +14,7 @@ func TestKimiForegroundCWDWhitespaceIsIdentity(t *testing.T) {
 	kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Whitespace", 1, kimiSample(t, "rewrites/before.jsonl"))
 	reader := NewReader(home)
 	project := ProjectContext{CWD: "/wrong", ForegroundCWD: cwd}
-	page, err := reader.ReadWithProject("kimi", project, id, "", 1)
+	page, err := reader.ReadLatest("kimi", project, id, 1)
 	if err != nil || !page.Available || len(page.Entries) != 1 {
 		t.Fatalf("reader changed lexical cwd: %+v %v", page, err)
 	}

@@ -37,7 +37,7 @@ func TestKimiTitleAndTranscriptShareSelectedRoot(t *testing.T) {
 	if title := resolver.SessionName("kimi", cwd, id); title != "Title 0" {
 		t.Fatal(title)
 	}
-	page, err := reader.ReadFor("kimi", cwd, id, "", 1)
+	page, err := reader.ReadLatest("kimi", conversation.ProjectContext{CWD: cwd}, id, 1)
 	if err != nil || len(page.Entries) != 1 || page.Entries[0].Text != "Root 0" {
 		t.Fatalf("page=%+v error=%v", page, err)
 	}
@@ -47,7 +47,7 @@ func TestKimiTitleAndTranscriptShareSelectedRoot(t *testing.T) {
 	if title := resolver.SessionName("Kimi-Code", cwd, id); title != "Title 1" {
 		t.Fatal(title)
 	}
-	page, err = reader.ReadFor("kimi", cwd, id, "", 1)
+	page, err = reader.ReadLatest("kimi", conversation.ProjectContext{CWD: cwd}, id, 1)
 	if err != nil || len(page.Entries) != 1 || page.Entries[0].Text != "Root 1" {
 		t.Fatalf("page=%+v error=%v", page, err)
 	}

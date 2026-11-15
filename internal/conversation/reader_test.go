@@ -64,7 +64,7 @@ func TestProjectSessionWithPunctuationWithoutCWDFile(t *testing.T) {
 			if got := reader.LocateWithProject(agent, ProjectContext{CWD: cwd}, testSessionID); got.Path != path {
 				t.Fatalf("location = %#v, want %s", got, path)
 			}
-			page, err := reader.ReadFor(agent, cwd, testSessionID, "", 80)
+			page, err := reader.ReadLatest(agent, ProjectContext{CWD: cwd}, testSessionID, 80)
 			if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "hello" {
 				t.Fatalf("page = %#v, error = %v", page, err)
 			}
@@ -82,7 +82,7 @@ func TestClaudeConversationFiltersInjectedAndSidechainRows(t *testing.T) {
 		map[string]any{"type": "assistant", "uuid": "a2", "isSidechain": true, "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "subagent"}}}},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestCodexConversationUsesResponseItemsWithoutDuplicates(t *testing.T) {
 		map[string]any{"timestamp": "2026-08-12T10:00:01Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "done"}}}},
 	)
 
-	page, err := reader.Read("codex", testSessionID, "", 80)
+	page, err := reader.ReadLatest("codex", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestPiConversationConfinesReportedPath(t *testing.T) {
 		map[string]any{"type": "message", "id": "a1", "timestamp": "2026-08-12T10:00:01Z", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "response"}}}},
 		map[string]any{"type": "message", "id": "t1", "message": map[string]any{"role": "toolResult", "content": []any{map[string]any{"type": "text", "text": "secret output"}}}},
 	)
-	page, err := reader.Read("pi", path, "", 80)
+	page, err := reader.ReadLatest("pi", ProjectContext{}, path, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestPiConversationConfinesReportedPath(t *testing.T) {
 
 	external := filepath.Join(t.TempDir(), "outside.jsonl")
 	writeRows(t, external, map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "outside"}})
-	outside, err := reader.Read("pi", external, "", 80)
+	outside, err := reader.ReadLatest("pi", ProjectContext{}, external, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestPiConversationConfinesReportedPath(t *testing.T) {
 	if err := os.Symlink(external, link); err != nil {
 		t.Fatal(err)
 	}
-	linked, err := reader.Read("pi", link, "", 80)
+	linked, err := reader.ReadLatest("pi", ProjectContext{}, link, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestClaudeConversationAssociatesToolResultsWithCallingTurn(t *testing.T) {
 		},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestClaudeConversationKeepsArrayShapedUserPrompts(t *testing.T) {
 		},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestClaudeConversationDropsToolResultOnlyUserRowButKeepsToolOutput(t *testi
 		},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestClaudeConversationFiltersArrayShapedEnvelopes(t *testing.T) {
 		},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestClaudeConversationKeepsOnlyTextFromMixedUserBlocks(t *testing.T) {
 		},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestClaudeConversationDropsEmptyArrayUserRow(t *testing.T) {
 		},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestClaudeConversationRendersArrayShapedSlashCommands(t *testing.T) {
 		},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestClaudeConversationDropsEnvelopeBlocksAfterTheFirst(t *testing.T) {
 			"message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "done"}}}},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func TestClaudeConversationKeepsPromptWhenEnvelopeComesFirst(t *testing.T) {
 			}}},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestClaudeConversationReadForSelectsCurrentProjectOnDuplicateID(t *testing.
 	writeRows(t, filepath.Join(projects, "-work", testSessionID+".jsonl"),
 		map[string]any{"type": "assistant", "uuid": "current", "message": map[string]any{"content": "current response"}})
 
-	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestClaudeConversationReadForDistinguishesDottedProjectDirectory(t *testing
 		{cwd: "/home/cv/Development/testcom", want: "plain response"},
 	} {
 		t.Run(filepath.Base(test.cwd), func(t *testing.T) {
-			page, err := reader.ReadFor("claude", test.cwd, testSessionID, "", 80)
+			page, err := reader.ReadLatest("claude", ProjectContext{CWD: test.cwd}, testSessionID, 80)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -501,7 +501,7 @@ func TestClaudeConversationReadForRejectsProjectDirectoryEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestClaudeConversationHidesHarnessGeneratedUserRows(t *testing.T) {
 		user("u13", nil, []any{map[string]any{"type": "text", "text": "[Request interrupted by user] block form"}}),
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}

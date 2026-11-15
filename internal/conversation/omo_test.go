@@ -71,7 +71,7 @@ func TestOMOReadFollowsGrowthAndSkipsOversizedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := NewReader(home)
-	page, err := reader.ReadWithProject("omo", ProjectContext{CWD: cwd}, sessionID, "", 50)
+	page, err := reader.ReadLatest("omo", ProjectContext{CWD: cwd}, sessionID, 50)
 	if err != nil || !page.Available || len(page.Entries) != 0 {
 		t.Fatalf("OMO page without entries = %#v, err = %v", page, err)
 	}
@@ -91,7 +91,7 @@ func TestOMOReadFollowsGrowthAndSkipsOversizedRows(t *testing.T) {
 	if err = file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	page, err = reader.ReadWithProject("omo", ProjectContext{CWD: cwd}, sessionID, "", 50)
+	page, err = reader.ReadLatest("omo", ProjectContext{CWD: cwd}, sessionID, 50)
 	if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "after growth" {
 		t.Fatalf("OMO page after the file grew = %#v, err = %v", page, err)
 	}
@@ -117,7 +117,7 @@ func TestOMOInvalidOnlyTodoStatePreservesHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := NewReader(home)
-	page, err := reader.ReadWithProject("omo", ProjectContext{CWD: cwd}, sessionID, "", 50)
+	page, err := reader.ReadLatest("omo", ProjectContext{CWD: cwd}, sessionID, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
