@@ -972,7 +972,7 @@ if (state.runtimeKind !== 'bun' || state.setup !== 'installed' || state.wrapperS
       assert.equal(androidProductImpact(check, observationsFixture()).status, 'FAIL', mode);
       const withoutAdverse = resultContract(); withoutAdverse.environment_qualification = { platform: 'android', status: check.status, collection: check.collection.status, assessmentSha256: '', measurementId: withoutAdverse.identity.measurementId };
       assert.equal(qualified(withoutAdverse), false, mode);
-      const adverseLine = '1789100405.000 546 546 I ActivityManager: Killing 5820:com.android.chrome:sandboxed_process0/u0a146 (adj 0): signal death\n';
+      const adverseLine = '1789100405.000 546 546 I ActivityManager: Killing 5820:com.android.chrome:privileged_process0/u0a146 (adj 0): signal death\n';
       const endMarker = marker(9, 'END').trimEnd();
       const endIndex = input.log.lastIndexOf(endMarker);
       if (endIndex < 0) input.log += `${input.log && !input.log.endsWith('\n') ? '\n' : ''}${adverseLine}`;

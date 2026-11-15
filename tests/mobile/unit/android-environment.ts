@@ -3610,9 +3610,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         };
         let events = '';
         if (signal) {
-          const child = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:8';
-          events += native('ActivityManager', `Start proc 5835:${child}/u0a146i-9000 for service {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:8}`);
-          events += native('ActivityManager', `Killing 5835:${child}/u0a146i-9000 (adj 0): isolated not needed`, true);
+          const child = 'com.android.chrome:privileged_process0';
+          events += native('ActivityManager', `Start proc 5835:${child}/u0a146 for service {com.android.chrome/org.chromium.content.app.PrivilegedProcessService0}`);
+          events += native('ActivityManager', `Killing 5835:${child}/u0a146 (adj 0): isolated not needed`, true);
           events += native('Process', 'Sending signal. PID: 5835 SIG: 9', true);
         }
         if (stop) {
@@ -3854,7 +3854,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
   for (const violation of ['earlier SIGKILL', 'unknown close force-stop', 'both'] as const) {
     test(`smoke53 successful scenario and session close cannot qualify ${violation}`, async () => {
       const fixture = await harness.createFixture();
-      const child = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
+      const child = 'com.android.chrome:privileged_process0';
       await state(fixture, { absent: true, children: { '5759': child } });
       const { before, after } = await snapshots(fixture);
       let deletes = 0;
@@ -3874,7 +3874,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(driver.snapshot().unusable, false);
       // Source-derived event shapes with fixture times/PIDs. The observed
       // initiator 9970 stays UNKNOWN; DELETE is not an am force-stop receipt.
-      const early = `09-10 08:45:09.265 546 1761 I ActivityManager: Killing 5759:${child}/u0a146i-9000 (adj 0): isolated not needed\n`
+      const early = `09-10 08:45:09.265 546 1761 I ActivityManager: Killing 5759:${child}/u0a146 (adj 0): isolated not needed\n`
         + '09-10 08:45:09.401 5759 5759 I Process: Sending signal. PID: 5759 SIG: 9\n';
       const close = marker('20.000', 'CLOSE_BEGIN bootstrap')
         + '09-10 08:45:21.180 546 1761 I ActivityManager: Force stopping com.android.chrome appid=10146 user=0: from pid 9970\n'
