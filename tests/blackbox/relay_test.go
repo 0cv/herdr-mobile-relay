@@ -1,11 +1,9 @@
 package blackbox
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -20,16 +18,15 @@ import (
 const defaultScenario = `{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
 
 type TestEnv struct {
-	relayCmd       *exec.Cmd
-	fakeBin        string
-	tmpDir         string
-	operationsLog  string
-	socketPath     string
-	socketListener net.Listener
-	port           int
-	pluginPort     int
-	wsURL          string
-	httpBase       string
+	relayCmd      *exec.Cmd
+	fakeBin       string
+	tmpDir        string
+	operationsLog string
+	socketPath    string
+	port          int
+	pluginPort    int
+	wsURL         string
+	httpBase      string
 }
 
 type relayOptions struct {
@@ -80,7 +77,7 @@ func startRelay(t *testing.T, opts relayOptions) *TestEnv {
 		herdrBin = "/bin/false"
 		readyPath = "/health"
 	} else {
-		env.socketListener = startInventorySocket(t, socketPath, opts.scenario)
+		startFakeSocket(t, socketPath, scenarioPath)
 	}
 
 	env.relayCmd = exec.Command(builtBinaries.relay)
@@ -109,12 +106,7 @@ func startRelay(t *testing.T, opts relayOptions) *TestEnv {
 		t.Fatalf("start relay: %v", err)
 	}
 
-	t.Cleanup(func() {
-		stopProcess(env.relayCmd)
-		if env.socketListener != nil {
-			_ = env.socketListener.Close()
-		}
-	})
+	t.Cleanup(func() { stopProcess(env.relayCmd) })
 	waitForStatus(t, env.httpBase, readyPath, http.StatusOK)
 	return env
 }
@@ -131,132 +123,26 @@ func dial(t *testing.T, env *TestEnv, timeout time.Duration) (context.Context, *
 	return ctx, conn
 }
 
-func startInventorySocket(t *testing.T, socketPath, scenario string) net.Listener {
+func startFakeSocket(t *testing.T, socketPath, scenarioPath string) {
 	t.Helper()
-	var fixture struct {
-		Panes      []map[string]any  `json:"panes"`
-		Tabs       []map[string]any  `json:"tabs"`
-		Workspaces []map[string]any  `json:"workspaces"`
-		Content    map[string]string `json:"content"`
+	cmd := exec.Command(builtBinaries.fakeHerdr, "socket-server")
+	cmd.Env = append(os.Environ(),
+		"FAKE_HERDR_SOCKET="+socketPath,
+		"FAKE_HERDR_SCENARIO="+scenarioPath,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake Herdr socket server: %v", err)
 	}
-	if err := json.Unmarshal([]byte(scenario), &fixture); err != nil {
-		t.Fatalf("decode fake Herdr scenario: %v", err)
-	}
-	if fixture.Panes == nil {
-		fixture.Panes = []map[string]any{}
-	}
-	if fixture.Tabs == nil {
-		fixture.Tabs = []map[string]any{}
-	}
-	if fixture.Workspaces == nil {
-		ids := make(map[string]struct{})
-		for _, item := range fixture.Panes {
-			if id, ok := item["workspace_id"].(string); ok && id != "" {
-				ids[id] = struct{}{}
-			}
+	t.Cleanup(func() { stopProcess(cmd) })
+	for i := 0; i < 200; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			return
 		}
-		for _, item := range fixture.Tabs {
-			if id, ok := item["workspace_id"].(string); ok && id != "" {
-				ids[id] = struct{}{}
-			}
-		}
-		for id := range ids {
-			fixture.Workspaces = append(fixture.Workspaces, map[string]any{
-				"workspace_id": id,
-				"number":       len(fixture.Workspaces) + 1,
-				"label":        id,
-				"pane_count":   0,
-				"tab_count":    0,
-			})
-		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen fake Herdr socket: %v", err)
-	}
-	go func() {
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer conn.Close()
-				var request struct {
-					ID     string `json:"id"`
-					Method string `json:"method"`
-					Params struct {
-						PaneID string `json:"pane_id"`
-					} `json:"params"`
-				}
-				if json.NewDecoder(bufio.NewReader(conn)).Decode(&request) != nil {
-					return
-				}
-				send := func(result any) {
-					_ = json.NewEncoder(conn).Encode(map[string]any{
-						"id": request.ID, "result": result,
-					})
-				}
-				sendError := func(code, message string) {
-					_ = json.NewEncoder(conn).Encode(map[string]any{
-						"id":    request.ID,
-						"error": map[string]any{"code": code, "message": message},
-					})
-				}
-				switch request.Method {
-				case "ping":
-					send(map[string]any{
-						"type": "pong", "version": "0.9.0", "protocol": 1,
-						"capabilities": map[string]any{"endpoint_protocol_generation": 1},
-					})
-				case "agent.list":
-					send(map[string]any{"type": "agent_list", "agents": fixture.Panes})
-				case "pane.list":
-					send(map[string]any{"type": "pane_list", "panes": fixture.Panes})
-				case "workspace.list":
-					send(map[string]any{"type": "workspace_list", "workspaces": fixture.Workspaces})
-				case "tab.list":
-					send(map[string]any{"type": "tab_list", "tabs": fixture.Tabs})
-				case "session.snapshot":
-					send(map[string]any{
-						"type": "session_snapshot",
-						"snapshot": map[string]any{
-							"version": "0.9.0", "protocol": 1,
-							"workspaces": fixture.Workspaces, "tabs": fixture.Tabs,
-							"panes": fixture.Panes, "agents": fixture.Panes,
-						},
-					})
-				case "events.subscribe":
-					send(map[string]any{"type": "subscription_started"})
-					_, _ = io.Copy(io.Discard, conn)
-				case "workspace.move_block":
-					sendError("workspace_move_block_failed", "empty selection")
-				case "workspace.move":
-					send(map[string]any{"type": "workspace_list"})
-				case "pane.read":
-					if len(fixture.Content) > 0 {
-						sendError("unknown_method", "scenario content uses the CLI fixture")
-						break
-					}
-					if request.Params.PaneID == "" {
-						sendError("pane_not_found", "pane  not found")
-						break
-					}
-					content := fixture.Content[request.Params.PaneID]
-					if content == "" {
-						content = "blackbox fixture pane"
-					}
-					send(map[string]any{
-						"type": "pane_read",
-						"read": map[string]any{"text": content, "truncated": false},
-					})
-				default:
-					sendError("unknown_method", "unknown method")
-				}
-			}(conn)
-		}
-	}()
-	return listener
+	t.Fatalf("fake Herdr socket %s did not appear", socketPath)
 }
 
 func waitForStatus(t *testing.T, base, endpoint string, status int) {
