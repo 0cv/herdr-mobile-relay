@@ -206,12 +206,6 @@ func (c *pipeConn) Close(status CloseStatus, reason string) {
 
 func (c *pipeConn) CloseNow() { c.Close(CloseNormal, "") }
 
-// Shutdown ends the logical connection without notifying the peer, for use
-// when the underlying multiplexed link already failed.
-func (c *pipeConn) Shutdown() {
-	c.closeOnce.Do(func() { close(c.closed) })
-}
-
 func (c *pipeConn) Codec() FrameCodec { return c.codec }
 
 func (c *pipeConn) TransportName() string { return c.name }
