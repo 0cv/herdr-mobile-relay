@@ -29,10 +29,6 @@ declare global {
 }
 
 interface BootOptions {
-  standalone?: boolean;
-  navigatorStandalone?: boolean;
-  userAgent?: string;
-  largeSlashCatalog?: boolean;
   answerHealthPings?: boolean;
 }
 
@@ -72,28 +68,37 @@ async function replyToPaneRead(page: Page, content = 'Ready', noEcho = false) {
   return read.request_id;
 }
 
+const IPHONE_SAFARI_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+
+async function emulateStandalone(page: Page, options: { navigatorStandalone?: boolean } = {}) {
+  await page.addInitScript((setNavigatorStandalone) => {
+    if (setNavigatorStandalone) {
+      Object.defineProperty(navigator, 'standalone', { configurable: true, value: true });
+    }
+    const nativeMatchMedia = window.matchMedia.bind(window);
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value(query: string) {
+        const result = nativeMatchMedia(query);
+        if (query === '(display-mode: standalone)') {
+          Object.defineProperty(result, 'matches', { configurable: true, value: true });
+        }
+        return result;
+      },
+    });
+  }, options.navigatorStandalone ?? false);
+}
+
+async function emulateIphoneSafari(page: Page) {
+  await page.addInitScript((agent) => {
+    Object.defineProperty(navigator, 'standalone', { configurable: true, value: false });
+    Object.defineProperty(navigator, 'userAgent', { configurable: true, value: agent });
+  }, IPHONE_SAFARI_UA);
+}
+
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent, largeSlashCatalog, answerHealthPings }) => {
+  await page.addInitScript(({ savedRelays, answerHealthPings }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
-    if (navigatorStandalone !== null) {
-      Object.defineProperty(navigator, 'standalone', { configurable: true, value: navigatorStandalone });
-    }
-    if (userAgent) {
-      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: userAgent });
-    }
-    if (standalone) {
-      const nativeMatchMedia = window.matchMedia.bind(window);
-      Object.defineProperty(window, 'matchMedia', {
-        configurable: true,
-        value(query: string) {
-          const result = nativeMatchMedia(query);
-          if (query === '(display-mode: standalone)') {
-            Object.defineProperty(result, 'matches', { configurable: true, value: true });
-          }
-          return result;
-        },
-      });
-    }
     const sockets: MockSocket[] = [];
     const commands: Record<string, unknown>[] = [];
     const socketCommands: Record<string, unknown>[][] = [];
@@ -208,32 +213,17 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           return;
         }
         if (message.type === 'list_slash_commands') {
-          const commands = largeSlashCatalog
-            ? Array.from({ length: 4096 }, (_, index) => ({
-              command: `/catalog-${String(index).padStart(4, '0')}`,
-              description: 'D'.repeat(240),
-              argument_hint: 'H'.repeat(120),
-              source: 'personal',
-            }))
-            : [
-              { command: '/help', description: 'Show the full command reference and explain every available action', source: 'builtin' },
-              { command: '/copy', description: 'Copy the latest agent response', source: 'builtin' },
-              { command: '/model', description: 'Choose the active model', source: 'builtin' },
-              { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
-              ...Array.from({ length: 18 }, (_, index) => ({
-                command: `/sample-${index + 1}`,
-                description: `Example command ${index + 1}`,
-                source: 'builtin',
-              })),
-            ];
-          if (largeSlashCatalog) {
-            commands[350] = {
-              command: '/late-command',
-              description: 'Late command',
-              argument_hint: 'H'.repeat(120),
-              source: 'personal',
-            };
-          }
+          const commands = [
+            { command: '/help', description: 'Show the full command reference and explain every available action', source: 'builtin' },
+            { command: '/copy', description: 'Copy the latest agent response', source: 'builtin' },
+            { command: '/model', description: 'Choose the active model', source: 'builtin' },
+            { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
+            ...Array.from({ length: 18 }, (_, index) => ({
+              command: `/sample-${index + 1}`,
+              description: `Example command ${index + 1}`,
+              source: 'builtin',
+            })),
+          ];
           queueMicrotask(() => this.server({
             type: 'command_result', request_id: message.request_id, ok: true, phase: 'completed',
             data: { commands, truncated: false },
@@ -442,7 +432,6 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           }));
           return;
         }
-        if (message.type === 'push_subscribe' || message.type === 'push_unsubscribe') return;
         const phase = message.type === 'send_secret' ? 'completed' : message.type === 'answer_question' && nextInteraction
           ? 'advanced'
           : message.type === 'navigate_question' && nextInteraction ? 'navigated' : 'confirmed';
@@ -500,10 +489,6 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     });
   }, {
     savedRelays: relays,
-    standalone: options.standalone ?? false,
-    navigatorStandalone: options.navigatorStandalone ?? null,
-    userAgent: options.userAgent ?? '',
-    largeSlashCatalog: options.largeSlashCatalog ?? false,
     answerHealthPings: options.answerHealthPings ?? true,
   });
   await page.goto(path);
@@ -1040,12 +1025,11 @@ test('keeps device verification modal until native authentication succeeds', asy
   await expect.poll(() => socketCount(page)).toBe(1);
 });
 
-const IPHONE_SAFARI_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-
 test('keeps an iOS setup link unredeemed for Home Screen installation', async ({ page }) => {
   await page.clock.install();
   const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
-  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+  await emulateIphoneSafari(page);
+  await boot(page, [], `/${setupHash}`);
 
   // The bootstrap key is one-use and the installed copy has its own storage:
   // a Safari tab that dialled would spend it before the Home Screen app opens.
@@ -1075,16 +1059,17 @@ test('keeps an iOS setup link unredeemed for Home Screen installation', async ({
 });
 
 test('an iOS browser tab without pairing material still connects', async ({ page }) => {
-  await boot(page, [fedora], '/', { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+  await emulateIphoneSafari(page);
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
 });
 
 test('imports quick setup and merges agents from multiple relays', async ({ page }) => {
+  await emulateStandalone(page, { navigatorStandalone: true });
   await boot(
     page,
     [],
     '/#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com',
-    { standalone: true, navigatorStandalone: true },
   );
   await expect(page.getByRole('button', { name: 'Activity history' }).locator('svg')).toBeVisible();
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -1644,7 +1629,8 @@ document.head.append(manifestLink);`,
       startedAt: Date.now(),
     }));
   }, { metadata: APP_METADATA, relayIds: [fedora.id, mac.id] });
-  await boot(page, [fedora, mac], '/?herdr_reload=resume#settings', { standalone: true });
+  await emulateStandalone(page);
+  await boot(page, [fedora, mac], '/?herdr_reload=resume#settings');
   await setAutoCommands(page, false);
   await expect.poll(() => socketCount(page)).toBe(2);
   await handshake(page, 0, { release_version: APP_RELEASE });
@@ -5747,11 +5733,8 @@ test('discovers slash commands per terminal and fills them before sending', asyn
 });
 
 test('keeps a large slash catalog responsive in the installed PWA', async ({ page }) => {
-  await boot(page, [fedora], '/', {
-    largeSlashCatalog: true,
-    standalone: true,
-    navigatorStandalone: true,
-  });
+  await emulateStandalone(page, { navigatorStandalone: true });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
   await server(page, 0, {
@@ -5760,7 +5743,18 @@ test('keeps a large slash catalog responsive in the installed PWA', async ({ pag
   });
   await page.getByRole('button', { name: 'Open Large catalog app on Fedora' }).click();
   const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await setAutoCommands(page, false);
   await composer.fill('/');
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_slash_commands').length).toBe(1);
+  const catalogRequest = (await commands(page)).find(command => command.type === 'list_slash_commands')!;
+  const catalog: Record<string, unknown>[] = Array.from({ length: 4096 }, (_, index) => ({
+    command: `/catalog-${String(index).padStart(4, '0')}`,
+    description: 'D'.repeat(240),
+    argument_hint: 'H'.repeat(120),
+    source: 'personal',
+  }));
+  catalog[350] = { command: '/late-command', description: 'Late command', argument_hint: 'H'.repeat(120), source: 'personal' };
+  await server(page, 0, { type: 'command_result', request_id: catalogRequest.request_id, ok: true, phase: 'completed', data: { commands: catalog, truncated: false } });
   const popover = page.getByRole('region', { name: 'Command suggestions' });
   await expect(popover).toBeVisible();
   await expect(popover.getByRole('option')).toHaveCount(200);
