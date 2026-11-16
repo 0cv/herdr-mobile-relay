@@ -3177,21 +3177,21 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
     if (mode === 'listener-pending-child-error') {
       supervisorPath = await writeSupervisorVariant(supportCopy, [{
         file: 'ios-xctest.ts',
-        anchor: "const initial = inspectListeners(deadline, 'initial');",
-        replacement: "        if (existsSync(join(required('STARTUP_TEST_ROOT'), 'pending-child-error')) && owner.diagnostics.lifecycle.some(event => event.event === 'runner-candidate-pinned')) {\n          child?.emit('error', new Error('XCTEST: pending child error'));\n          throw new Error('XCTEST: child process error');\n        }\n        const initial = inspectListeners(deadline, 'initial');",
+        anchor: "const initial = inspectListeners(state, state.deadline, 'initial');",
+        replacement: "        if (existsSync(join(required('STARTUP_TEST_ROOT'), 'pending-child-error')) && state.owner.diagnostics.lifecycle.some(event => event.event === 'runner-candidate-pinned')) {\n          state.child?.emit('error', new Error('XCTEST: pending child error'));\n          throw new Error('XCTEST: child process error');\n        }\n        const initial = inspectListeners(state, state.deadline, 'initial');",
       }]);
     }
     if (mode === 'listener-ready-owner-evidence-write') {
       supervisorPath = await writeSupervisorVariant(supportCopy, [
         {
           file: 'ios-xctest.ts',
-          anchor: 'owner.ready = true;',
-          replacement: "          writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-boundary'), 'ready');\n          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-continue'))) {\n            if (stop || owner.firstFailure || childExited || existsSync(join(required('STARTUP_TEST_ROOT'), 'stop'))) throw new Error('XCTEST: readiness evidence boundary cancelled');\n            await sleep(1);\n          }\n          owner.ready = true;",
+          anchor: 'state.owner.ready = true;',
+          replacement: "          writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-boundary'), 'ready');\n          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-continue'))) {\n            if (state.stop || state.owner.firstFailure || state.childExited || existsSync(join(required('STARTUP_TEST_ROOT'), 'stop'))) throw new Error('XCTEST: readiness evidence boundary cancelled');\n            await sleep(1);\n          }\n          state.owner.ready = true;",
         },
         {
           file: 'ios-xctest.ts',
-          anchor: "writeFileSync(join(root, 'owner.json'), ownerContent(owner, true), { mode: 0o600 });",
-          replacement: "      writeFileSync(join(root, 'owner.json'), ownerContent(owner, true), { mode: 0o600 });\n      writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-written'), 'written');\n      while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-continue'))) {}",
+          anchor: "writeFileSync(join(state.root, 'owner.json'), ownerContent(state.owner, true), { mode: 0o600 });",
+          replacement: "      writeFileSync(join(state.root, 'owner.json'), ownerContent(state.owner, true), { mode: 0o600 });\n      writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-written'), 'written');\n      while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-continue'))) {}",
         },
       ]);
     }
@@ -3199,41 +3199,41 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       supervisorPath = await writeSupervisorVariant(supportCopy, [
         {
           file: 'ios-xctest.ts',
-          anchor: 'childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });',
-          replacement: `    childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });
+          anchor: 'state.childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });',
+          replacement: `    state.childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });
     let exitResolverReturned = false;
     const productionExitResolver = resolveChildExit;
     resolveChildExit = () => { productionExitResolver(); exitResolverReturned = true; };
-    childExitObserved.then(() => writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-promise-resolved'), 'resolved'));`,
+    state.childExitObserved.then(() => writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-promise-resolved'), 'resolved'));`,
         },
         {
           file: 'ios-xctest.ts',
-          anchor: "child!.on('close', (code, signal) => {",
+          anchor: "state.child!.on('close', (code, signal) => {",
           replacement: `      // Second listener: genuine event only, registered AFTER production exit.
-      child!.on('exit', (code, signal) => {
+      state.child!.on('exit', (code, signal) => {
         const fixture = required('STARTUP_TEST_ROOT');
         const ack = join(fixture, 'exit-callback-returned');
-        writeFileSync(ack + '.next', JSON.stringify({schema: 1, code, signal, exitResolverReturned, childExited, childEnded}));
+        writeFileSync(ack + '.next', JSON.stringify({schema: 1, code, signal, exitResolverReturned, childExited: state.childExited, childEnded: state.childEnded}));
         renameSync(ack + '.next', ack);
-        while (!existsSync(join(fixture, 'exit-callback-continue')) && Date.now() < deadline) {}
+        while (!existsSync(join(fixture, 'exit-callback-continue')) && Date.now() < state.deadline) {}
         if (!existsSync(join(fixture, 'exit-callback-continue'))) {
           writeFileSync(join(fixture, 'exit-callback-timeout'), 'ERROR');
           process.exitCode = 1;
         }
       });
-      child!.on('close', (code, signal) => {`,
+      state.child!.on('close', (code, signal) => {`,
         },
         {
           file: 'ios-xctest.ts',
-          anchor: "diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port, frozenOwner: true});",
-          replacement: `          diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port, frozenOwner: true});
+          anchor: "state.diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port: state.port, frozenOwner: true});",
+          replacement: `          state.diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port: state.port, frozenOwner: true});
           writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-ready-ack'), 'ready');` + (mode === 'listener-exit-after-ready-first-failure' ? `
-          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-first-failure-request')) && Date.now() < deadline) await sleep(1);
-          if (Date.now() >= deadline) throw new Error('XCTEST: first failure handshake deadline');
-          if (save()) throw new Error('XCTEST: expected actual owner writer failure');
+          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-first-failure-request')) && Date.now() < state.deadline) await sleep(1);
+          if (Date.now() >= state.deadline) throw new Error('XCTEST: first failure handshake deadline');
+          if (save(state)) throw new Error('XCTEST: expected actual owner writer failure');
           writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-first-failure-ack'), 'failed');
           // Keep cleanup from doing the revocation/exit bookkeeping under test.
-          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-callback-continue')) && Date.now() < deadline) await sleep(1);` : ''),
+          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-callback-continue')) && Date.now() < state.deadline) await sleep(1);` : ''),
         },
       ]);
       const hash = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -5504,14 +5504,14 @@ xctestOwnerTests.push(['Native startup XCTest terminal witness', async () => { a
 xctestOwnerTests.push(['Native startup owner holds the WDA status before the status file is published', async () => {
   const candidateEdits: SupervisorEdit[] = [{
     file: 'ios-xctest.ts',
-    anchor: `owner.status = bounded;
-if (!save()) throw new Error('XCTEST: owner evidence write failed');`,
-    replacement: `          owner.status = bounded;
-          if (!save()) throw new Error('XCTEST: owner evidence write failed');
-          writeFileSync(join(root, 'candidate-owner-saved'), '');
-          while (!stop && Date.now() < deadline && !existsSync(join(root, 'candidate-continue'))) await sleep(1);
-          if (stop) throw new Error('XCTEST: publication ordering barrier cancelled');
-          if (Date.now() >= deadline) throw new Error('XCTEST: publication ordering barrier deadline');`,
+    anchor: `state.owner.status = bounded;
+if (!save(state)) throw new Error('XCTEST: owner evidence write failed');`,
+    replacement: `          state.owner.status = bounded;
+          if (!save(state)) throw new Error('XCTEST: owner evidence write failed');
+          writeFileSync(join(state.root, 'candidate-owner-saved'), '');
+          while (!state.stop && Date.now() < state.deadline && !existsSync(join(state.root, 'candidate-continue'))) await sleep(1);
+          if (state.stop) throw new Error('XCTEST: publication ordering barrier cancelled');
+          if (Date.now() >= state.deadline) throw new Error('XCTEST: publication ordering barrier deadline');`,
   }];
 
   const assertForgedStatus = (value: unknown): void => {
