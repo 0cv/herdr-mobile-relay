@@ -218,6 +218,22 @@ bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.
 
+The preflight `xcrun simctl install` of the WDA runner is attempted at most three
+times, three seconds apart, and only after exit status 53 (`ECONNABORTED`, the
+connection to the simulator service was aborted). Hosted runs 43884641913
+attempt 1 and 43863348485 attempt 1 hit it about two seconds into the step.
+Every attempt stays in the owner command records and each retry adds an
+`install-wda-retry` lifecycle event. Any other status fails at once.
+
+When `xcodebuild test-without-building` exits with status 65 before any WDA
+listener was admitted and at least 120 seconds of the 300-second startup
+deadline remain, `start` launches one fresh supervisor. This happened once, in
+run 43893623691 attempt 2, 47 seconds after the spawn. The failed attempt's
+sanitized owner record is kept as `owner-attempt-1.json` and uploaded with the
+other owner evidence; the private log of that attempt is dropped. Any other exit,
+a second failure or a late failure is reported as before. No scenario has started
+at this point.
+
 Android fresh CI setup permits at most one additional create per setup-session
 helper invocation, before any retained Chrome owner or initial installed launch.
 The existing literal `adb: device offline` path is unchanged. A completed HTTP 500
@@ -304,6 +320,13 @@ and a nonzero step result; record values and parsing errors are never printed.
 This additional failure does not replace the SDK's primary fatal result. Upload and
 cleanup still always run. Evidence collection never invokes Appium, the gate, driver
 construction, HTTP or discovery after failure.
+
+When the installed icon is not on the current Home page, the adapter swipes right
+exactly (current page - 1) times to reach the first page and then searches to the
+left. It never swipes past the first page: the Today View there publishes no page
+indicator, and a swipe over its widgets is probably what opened an app. Hosted run
+43884641913 attempt 2 failed with `Home page indicator is missing` and run
+43774131109 attempt 1 ended in Apple News after the former fixed eight right swipes.
 
 When Safari's compact layout exposes Page Menu instead of Share, installation
 opens the visible, enabled native `MoreMenuButton` once, verifies Safari remains
