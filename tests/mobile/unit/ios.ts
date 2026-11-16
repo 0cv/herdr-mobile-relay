@@ -8,9 +8,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnOwnedProcess } from '../support/owned-process';
-import { setTimeout as wait } from 'node:timers/promises';
 import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, type IOSPlatformIO, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
-import { AppiumClient, WebDriverError, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
+import { AppiumClient, WebDriverError, isRetryableElementLookupError, type WebDriverSnapshot } from '../support/webdriver';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure } from '../support/ios-launch-receipt';
 import { PhaseBudget, timingScale } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
@@ -51,6 +50,40 @@ async function within<T>(promise: Promise<T>, description: string, timeoutMs = 5
   }
 }
 
+function sleepUnlessAborted(clock: FakeClock, ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const abort = () => { clock.clear(timer); reject(signal.reason); };
+    const timer = clock.timer(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
+async function advanceAndSettle(clock: FakeClock, ms: number) {
+  clock.advance(ms);
+  await new Promise<void>(resolve => setImmediate(resolve));
+}
+
+async function deliverLateReply(clock: FakeClock, ms: number) {
+  assert.ok(clock.timers.size > 0, 'the late reply must still be pending');
+  await advanceAndSettle(clock, ms);
+  assert.equal(clock.timers.size, 0, 'the late reply must have been delivered');
+}
+
+function advanceUntil(clock: FakeClock, stop: () => boolean) {
+  while (!stop() && clock.timers.size) {
+    const next = Math.min(...[...clock.timers.values()].map(timer => timer.at));
+    clock.advance(Math.max(0, next - clock.elapsed));
+  }
+}
+
+function sleepPastTimeout(clock: FakeClock, ms: number, signal: AbortSignal): Promise<void> {
+  let replied = false;
+  const reply = new Promise<void>(resolve => { clock.timer(() => { replied = true; resolve(); }, ms); });
+  advanceUntil(clock, () => replied || signal.aborted);
+  return reply;
+}
+
 async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) throw signal.reason || new Error('fixture aborted');
@@ -66,12 +99,12 @@ async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
   }
 }
 
-async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, sleep?: (ms: number) => Promise<void>, nativeDefaults = true,
-  enforcementClock?: RequestEnforcementClock, onRequest?: (request: Request) => void, fixtureSignal?: AbortSignal,
+async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, clock = new FakeClock(), nativeDefaults = true,
+  onRequest?: (request: Request) => void, fixtureSignal?: AbortSignal,
   beforeNativeDispatch?: (phase: PhaseBudget) => void, timeoutMs = 120_000) {
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
-  const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now, sleep });
+  const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now: clock.now, sleep: clock.sleep });
   const io: IOSPlatformIO = {
     navigationCommand: command,
     launchCollector: collectIOSLaunchReceipt,
@@ -123,7 +156,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
     } finally {
       inFlight -= 1;
     }
-  }, now, enforcementClock || (now ? { now, timer: (callback, ms) => setTimeout(callback, ms), clear: timer => clearTimeout(timer) } : undefined));
+  }, clock.now, clock);
   const nativeRequestPolicy = driver.nativeRequestPolicy.bind(driver);
   driver.nativeRequestPolicy = (phase) => {
     const policy = nativeRequestPolicy(phase);
@@ -141,7 +174,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
   (platform as any).driver = driver;
   (platform as any).installedBundleId = 'com.apple.webapp';
   (platform as any).springBoardRoot = 'springboard-root';
-  return { platform, driver, requests, budget, outputDir, nativeAdmissions, io };
+  return { platform, driver, requests, budget, outputDir, nativeAdmissions, io, clock };
 }
 
 function commandForRequest(driver: AppiumClient, requests: Request[], matchesRequest: (request: Request) => boolean) {
@@ -162,8 +195,7 @@ async function attachment(name: string, overrides: {
   url?: () => string;
   document?: () => unknown;
   switchContext?: (id: string) => Response | undefined;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
+  clock?: FakeClock;
 } = {}) {
   return adapter(name, ({ path, body }) => {
     if (body.script === 'mobile: getInstalledContexts') {
@@ -180,7 +212,7 @@ async function attachment(name: string, overrides: {
       return value(overrides.document?.() ?? { origin, standalone: true, applicationInitialized: true });
     }
     throw new Error(`unexpected attachment operation ${path} ${JSON.stringify(body)}`);
-  }, overrides.now, overrides.sleep);
+  }, overrides.clock);
 }
 
 async function assertPermanentFailure(platform: IOSPlatform, requests: Request[], operation: () => Promise<void>, pattern = /IOS_CONTEXT_OWNERSHIP/u) {
@@ -193,7 +225,7 @@ async function assertPermanentFailure(platform: IOSPlatform, requests: Request[]
 
 for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const) {
   test(`iOS attachment timing second native bracket ${mode} preserves original admission and late-settlement fences`, async () => {
-    const clock = new FakeClock();
+    const clock = new FakeClock(mode === 'timeout');
     let activeObservations = 0;
     let alerts = 0;
     let roots = 0;
@@ -254,7 +286,7 @@ for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const)
         return value(`${origin}/`);
       }
       throw new Error(`unexpected attachment timing operation ${path}`);
-    }, clock.now, clock.sleep, false); // No default handler may silently satisfy a native fence.
+    }, clock, false); // No default handler may silently satisfy a native fence.
     const fatal = mode === 'timeout' || mode === 'interrupted';
     await assert.rejects(() => platform.attachToInstalledView(), fatal
       ? mode === 'timeout' ? /APPIUM_TIMEOUT/u : /APPIUM_INTERRUPTED/u
@@ -378,8 +410,7 @@ test('installed scoped discovery carries a fresh native PID and rejects a change
 test('installed scoped discovery admits no partial request after native observation consumes its original reserve', async () => {
   const clock = new FakeClock();
   const { platform, driver, requests, budget } = await attachment('scope-reserve', {
-    now: clock.now,
-    sleep: clock.sleep,
+    clock,
     foreground: () => { clock.elapsed += 3_000 * timingScale; return recorded.foreground; },
   });
   await assert.rejects(() => platform.attachToInstalledView(30_000), /IOS_CONTEXT: no installed/u);
@@ -431,6 +462,7 @@ test('installed discovery timeout preserves the hosted phase and ignores late li
 
 for (const mode of ['delayed', 'hung'] as const) {
   test(`${mode} initial publication preserves complete Appium transaction admission and failure evidence`, async () => {
+    const clock = new FakeClock(true);
     let discoveries = 0;
     let completed = 0;
     let failure = '';
@@ -441,10 +473,10 @@ for (const mode of ['delayed', 'hung'] as const) {
       if (mode === 'hung') {
         return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
       }
-      await wait(4_900, undefined, { signal: signal! });
+      await sleepUnlessAborted(clock, 4_900, signal!);
       completed += 1;
       return value(recorded.contexts);
-    });
+    }, clock);
     try {
       await assert.rejects(() => platform.attachToInstalledView(), (error) => {
         failure = String(error);
@@ -485,12 +517,13 @@ for (const mode of ['delayed', 'hung'] as const) {
 }
 
 test('recorded 18302ms native-only discovery settles before subsequent Safari publication within original phase', async () => {
+  const clock = new FakeClock(true);
   let discoveries = 0;
   const { platform, driver, requests, budget } = await adapter('recorded-safari-discovery', async ({ path, body, signal }) => {
     if (body.script === 'mobile: getContexts') {
       discoveries += 1;
       if (discoveries === 1) {
-        await wait(18_302, undefined, { signal: signal! });
+        await sleepUnlessAborted(clock, 18_302, signal!);
         return value([{ id: 'NATIVE_APP' }]);
       }
       return value([{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
@@ -498,11 +531,10 @@ test('recorded 18302ms native-only discovery settles before subsequent Safari pu
     if (path.endsWith('/context')) return value(null);
     if (path.endsWith('/url') && !body.url) return value(`${origin}/`);
     throw new Error(`unexpected Safari operation ${path}`);
-  });
-  const start = Date.now();
+  }, clock);
   await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget.phaseView('navigation', 136_000));
   assert.equal(discoveries, 2);
-  assert.ok(Date.now() - start < 96_000);
+  assert.ok(clock.elapsed > 18_302 && clock.elapsed < 96_000);
   assert.equal(driver.snapshot().unusable, false);
   assert.equal(driver.snapshot().firstFatal, undefined);
   assert.equal(requests.some((request) => request.body.url || request.body.script === 'mobile: activateApp'), false);
@@ -531,7 +563,7 @@ for (const mode of ['ready', 'absent'] as const) {
         return value(`${origin}/`);
       }
       throw new Error(`unexpected hosted Safari operation ${path}`);
-    }, clock.now, clock.sleep);
+    }, clock);
     (platform as any).simulatorReadyAt = '2026-10-22T09:56:48.108Z';
     io.navigationCommand = async (binary, args, timeoutMs = 0) => {
       assert.equal(binary, 'xcrun');
@@ -573,13 +605,14 @@ for (const mode of ['ready', 'absent'] as const) {
 }
 
 test('cold Safari attach consumes recorded backend duration plus synthetic send and full-body overhead', async () => {
+  const clock = new FakeClock(true);
   const { platform, driver, requests, budget } = await adapter('cold-safari-attach', async ({ path, body, signal }) => {
     if (body.script === 'mobile: getContexts') return value([{ id: 'WEBVIEW_23086.1', bundleId: 'com.apple.mobilesafari' }]);
     if (path.endsWith('/context') && body.name !== 'NATIVE_APP') {
-      await wait(500, undefined, { signal: signal! });
-      await wait(10_927, undefined, { signal: signal! });
+      await sleepUnlessAborted(clock, 500, signal!);
+      await sleepUnlessAborted(clock, 10_927, signal!);
       return new Response(new ReadableStream({ async start(controller) {
-        await wait(500);
+        await clock.sleep(500);
         controller.enqueue(new TextEncoder().encode('{"value":null}'));
         controller.close();
       } }));
@@ -587,7 +620,7 @@ test('cold Safari attach consumes recorded backend duration plus synthetic send 
     if (path.endsWith('/context')) return value(null);
     if (path.endsWith('/url')) return value(`${origin}/`);
     throw new Error(`unexpected cold attach operation ${path}`);
-  });
+  }, clock);
   await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget);
   const switches = driver.snapshot().commands.filter(entry => entry.path.endsWith('/context'));
   assert.deepEqual(switches.map(entry => entry.timeoutMs), [15_000, 1_000]);
@@ -597,9 +630,8 @@ test('cold Safari attach consumes recorded backend duration plus synthetic send 
 
 for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
   test(`cold Safari attach ${mode} preserves admission and quarantine`, async () => {
-    const clock = new FakeClock();
+    const clock = new FakeClock(mode === 'late');
     let settled = false;
-    const clocked = mode === 'insufficient';
     const { platform, driver, requests, budget } = await adapter(`cold-attach-${mode}`, async ({ path, body }) => {
       if (body.script === 'mobile: getContexts') {
         if (mode === 'insufficient') clock.elapsed = 80_000;
@@ -607,10 +639,10 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
       }
       assert.ok(path.endsWith('/context'));
       if (mode === 'interrupted') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('interrupted attach body')); } }));
-      await wait(15_300);
+      await clock.sleep(15_300);
       settled = true;
       return value(null);
-    }, clocked ? clock.now : undefined, clocked ? clock.sleep : undefined);
+    }, clock);
     await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget), mode === 'insufficient' ? /IOS_NAVIGATION/u : /APPIUM_/u);
     const count = requests.length;
     assert.equal(requests.filter(request => request.path.endsWith('/context')).length, mode === 'insufficient' ? 0 : 1);
@@ -621,7 +653,7 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
     }
     const first = driver.snapshot().firstFatal;
     if (mode === 'late') {
-      await wait(500);
+      await advanceAndSettle(clock, 500);
       assert.equal(settled, true);
     }
     await assert.rejects(() => driver.switchContext('NATIVE_APP', 1_000), /APPIUM_SESSION_UNUSABLE/u);
@@ -631,16 +663,17 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
 }
 
 test('bounded discovery admits initial app wait plus settled RPC and completion work', async () => {
+  const clock = new FakeClock(true);
   const { platform, driver, budget } = await adapter('discovery-envelope', async ({ path, body, signal }) => {
     if (body.script === 'mobile: getContexts') {
-      await wait(5_000, undefined, { signal: signal! });
-      await wait(39_500, undefined, { signal: signal! });
+      await sleepUnlessAborted(clock, 5_000, signal!);
+      await sleepUnlessAborted(clock, 39_500, signal!);
       return value([{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
     }
     if (path.endsWith('/context')) return value(null);
     if (path.endsWith('/url')) return value(`${origin}/`);
     throw new Error(`unexpected bounded discovery operation ${path}`);
-  });
+  }, clock);
   await (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget);
   assert.equal(driver.snapshot().unusable, false);
   assert.ok(driver.snapshot().commands.every((entry) => !entry.timedOut));
@@ -655,7 +688,7 @@ for (const mode of ['parent', 'absent', 'backend-error', 'interrupted-body'] as 
       clock.elapsed += 44_750;
       if (mode === 'backend-error') return Response.json({ value: { error: 'unknown error', message: 'discovery backend unavailable' } }, { status: 500 });
       return value([{ id: 'NATIVE_APP' }]);
-    }, clock.now, clock.sleep);
+    }, clock);
     const phase = budget.phaseView('navigation', mode === 'parent' ? 50_999 : 96_000);
     await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, phase), mode === 'interrupted-body' ? /APPIUM_/u : /IOS_NAVIGATION/u);
     assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, mode === 'parent' ? 0 : mode === 'interrupted-body' ? 1 : 2);
@@ -667,17 +700,18 @@ for (const mode of ['parent', 'absent', 'backend-error', 'interrupted-body'] as 
 
 for (const late of [[{ id: 'NATIVE_APP' }], [{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]]) {
   test(`late discovery ${late[0].id} cannot clear timeout quarantine`, async () => {
+    const clock = new FakeClock(true);
     let settled = false;
     const { platform, driver, requests, budget } = await adapter('late-safari-discovery', async ({ body }) => {
       assert.equal(body.script, 'mobile: getContexts');
-      await wait(45_300);
+      await clock.sleep(45_300);
       settled = true;
       return value(late);
-    });
+    }, clock);
     await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget), /APPIUM_TIMEOUT/u);
     const first = driver.snapshot().firstFatal;
     const count = requests.length;
-    await wait(500);
+    await advanceAndSettle(clock, 500);
     assert.equal(settled, true);
     assert.equal(driver.snapshot().unusable, true);
     assert.deepEqual(driver.snapshot().firstFatal, first);
@@ -708,22 +742,16 @@ test('Safari native-only discovery retains the first cause and reserve boundary 
       return value(availableContexts);
     }
     throw new Error(`unexpected late-publication operation ${JSON.stringify(body)}`);
-  }, clock.now, clock.sleep);
+  }, clock);
 
-  const originalSetTimeout = globalThis.setTimeout;
-  (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
   let failure = '';
-  try {
-    await assert.rejects(
-      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
-      (error) => {
-        failure = String(error);
-        return /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u.test(failure);
-      },
-    );
-  } finally {
-    (globalThis as any).setTimeout = originalSetTimeout;
-  }
+  await assert.rejects(
+    () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
+    (error) => {
+      failure = String(error);
+      return /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u.test(failure);
+    },
+  );
   const beforeLatePublication = structuredClone(platform.evidenceSnapshot().safariNavigation);
   const eventsBeforeLatePublication = (platform.evidenceSnapshot().events as any[])
     .filter((event) => event.operation === 'safari-navigation-first-failure');
@@ -774,17 +802,11 @@ test('Safari diagnostic inspection caps oversized metadata without changing sele
       return value(oversizedMetadata);
     }
     throw new Error(`unexpected oversized-diagnostics operation ${JSON.stringify(body)}`);
-  }, clock.now, clock.sleep);
-  const originalSetTimeout = globalThis.setTimeout;
-  (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
-  try {
-    await assert.rejects(
-      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
-      /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u,
-    );
-  } finally {
-    (globalThis as any).setTimeout = originalSetTimeout;
-  }
+  }, clock);
+  await assert.rejects(
+    () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
+    /not enough time for WebKit discovery and Safari observation \(50999ms remains\)/u,
+  );
   const navigation = platform.evidenceSnapshot().safariNavigation as any;
   assert.equal(discoveries, 1);
   assert.equal(navigation.lastDiscovery.result, 'inspection-truncated');
@@ -809,7 +831,7 @@ test('Safari discovery and observation evidence remain separate at reserve exhau
     }
     if (path.endsWith('/url') && body.url) return value(null);
     throw new Error(`unexpected observation-reserve operation ${path} ${JSON.stringify(body)}`);
-  }, clock.now, clock.sleep);
+  }, clock);
 
   await assert.rejects(
     () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
@@ -835,7 +857,7 @@ for (const budgetSource of ['attachment', 'parent'] as const) {
     const clock = new FakeClock();
     const { platform, driver, requests } = await adapter(`publication-budget-${budgetSource}`, () => {
       throw new Error('no partial discovery is admissible');
-    }, clock.now, clock.sleep);
+    }, clock);
     if (budgetSource === 'parent') clock.elapsed = 103_000;
     await assert.rejects(() => platform.attachToInstalledView(budgetSource === 'attachment' ? 17_000 : undefined), /IOS_CONTEXT: no installed.*not enough time for WebKit discovery/u);
     assert.equal(requests.length, 1);
@@ -849,8 +871,7 @@ for (const metadata of ['blank', 'absent', 'unrelated-browser'] as const) {
     const clock = new FakeClock();
     let discoveries = 0;
     const { platform, driver, requests } = await attachment(`never-${metadata}`, {
-      now: clock.now,
-      sleep: clock.sleep,
+      clock,
       contexts: () => { discoveries += 1; clock.elapsed += 10_000; return metadata === 'blank' ? [installed] : metadata === 'absent' ? [] : [recorded.contexts[1]]; },
     });
     const reason = metadata === 'blank' ? /initial page publication is pending/u : metadata === 'absent' ? /installed page metadata is unavailable/u : /no installed page for/u;
@@ -972,7 +993,7 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
     const clicks: string[] = [];
     let confirmationLookups = 0;
     let confirming = false;
-    const clock = new FakeClock();
+    const clock = new FakeClock(mode.endsWith('-hung'));
     const scrolling = mode === 'limit' || mode === 'eighth';
     const ready = () => scrolling ? scrolls >= (mode === 'eighth' ? 8 : 9) : scrolls > 0;
     const currentSource = () => {
@@ -984,7 +1005,6 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
       if (!scrolling) return before;
       return before.replace(/\by="(-?\d+)"/gu, (match, y) => Number(y) >= 645 ? `y="${Number(y) - scrolls * 2}"` : match);
     };
-    const clocked = mode.startsWith('add-') && mode !== 'add-hung';
     const { platform, driver, requests } = await adapter(`share-${mode}`, async ({ path, body, signal }) => {
       if (path.endsWith('/context')) return value(null);
       if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.mobilesafari', pid: 20640 });
@@ -1027,7 +1047,7 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
           if (mode === 'add-missing') { clock.elapsed += 5_000; return missing(); }
           const latency = confirmationProfiles[mode]?.[confirmationLookups - 1];
           if (latency !== undefined) {
-            await wait(latency, undefined, { signal: signal! });
+            await clock.sleep(latency);
             return missing();
           }
           return value(element('add'));
@@ -1064,7 +1084,7 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
         return value(null);
       }
       throw new Error(`unexpected Share command ${path} ${JSON.stringify(body)}`);
-    }, clocked ? clock.now : undefined, clocked ? clock.sleep : undefined);
+    }, clock);
     if (scrolling) {
       const operation = () => (platform as any).findNativeScrollable([{ using: 'xpath', value: "//*[@name='ActivityListView']//*[@name='activityCollectionView']//*[@name='actionGroupCell' and contains(@label, 'Add to Home Screen')]" }], 'Add to Home Screen', 60_000);
       if (mode === 'limit') await assert.rejects(operation, /scroll limit/u);
@@ -1118,7 +1138,7 @@ for (const mode of ['ready', 'unchanged', 'no-target', 'ambiguous', 'hidden', 'd
     });
     if (mode === 'foreign-app') collapsed = collapsed.replace('name="Safari"', 'name="Other"');
     assert.equal(nativeActionListEvidence(collapsed, 'Add to Home Screen'), undefined);
-    const clock = new FakeClock();
+    const clock = new FakeClock(mode.endsWith('-timeout'));
     let expanded = false;
     let source = '';
     let expansionLookups = 0;
@@ -1162,7 +1182,7 @@ for (const mode of ['ready', 'unchanged', 'no-target', 'ambiguous', 'hidden', 'd
         return value(null);
       }
       throw new Error(`unexpected expansion command ${path} ${JSON.stringify(body)}`);
-    }, clock.now, clock.sleep);
+    }, clock);
     if (mode === 'context-lookup') {
       const findAll = driver.findAll.bind(driver);
       driver.findAll = async (...args: Parameters<AppiumClient['findAll']>) => {
@@ -1394,7 +1414,7 @@ async function confirmationReplay(name: string, options: {
   const fixture = options.recorded;
   const { before, after, browser, hypotheticalConfirmation } = await shareFixtures();
   const shareSources = fixture ? await Promise.all(Object.values(fixture.sources).map((path) => readFile(join(fixtureDir, path), 'utf8'))) : [browser, before, after];
-  const clock = new FakeClock();
+  const clock = new FakeClock(['hung', 'body-hung'].includes(options.fault as string));
   let confirmationStart = 0;
   let sheet = false;
   let confirming = false;
@@ -1417,7 +1437,6 @@ async function confirmationReplay(name: string, options: {
       observations.push({ boundary, lookup: lookups, now: clock.elapsed });
     });
   };
-  const clocked = !(fixture || options.latency || options.faultAt === 'activity-click');
   const { platform, driver, requests, budget, outputDir, io } = await adapter(`confirmation-${name}`, async ({ path, body, signal }) => {
     const responseBody = (kind: 'hung' | 'interrupted' | 'late') => new Response(new ReadableStream({
       start(controller) {
@@ -1425,10 +1444,13 @@ async function confirmationReplay(name: string, options: {
           controller.enqueue(new TextEncoder().encode('{"value":'));
           queueMicrotask(() => controller.error(new Error('synthetic response body interruption')));
         } else if (kind === 'late') {
-          setTimeout(() => {
+          let delivered = false;
+          clock.timer(() => {
+            delivered = true;
             controller.enqueue(new TextEncoder().encode(JSON.stringify({ value: element('late') })));
             controller.close();
           }, 12_500);
+          setImmediate(() => advanceUntil(clock, () => delivered || signal!.aborted));
         }
       },
     }));
@@ -1437,7 +1459,7 @@ async function confirmationReplay(name: string, options: {
       if (options.fault === 'body-hung') return responseBody('hung');
       if (options.fault === 'body-interrupted') return responseBody('interrupted');
       if (options.fault === 'body-late') return responseBody('late');
-      if (options.fault === 'late-missing') return wait(8_100).then(() => missing());
+      if (options.fault === 'late-missing') return sleepPastTimeout(clock, 8_100, signal!).then(() => missing());
       if (options.fault === 'transport') throw new Error('synthetic connection reset');
       if (options.fault === 'interrupted') throw new DOMException('synthetic interrupted transport', 'TimeoutError');
       if (options.fault === 'malformed') return new Response('not-json', { status: 200 });
@@ -1472,7 +1494,7 @@ async function confirmationReplay(name: string, options: {
     if (path.endsWith('/elements')) {
       assert.equal(body.using, 'xpath');
       if (confirming) {
-        await wait(options.latency?.identity || 0);
+        await sleepPastTimeout(clock, options.latency?.identity || 0, signal!);
         identityReads++;
         advance('identity');
         if (identityReads === options.staleIdentityRead) return stale();
@@ -1497,10 +1519,10 @@ async function confirmationReplay(name: string, options: {
       assert.ok(confirming, 'confirmation lookup cannot precede the verified activity click');
       assert.deepEqual(body, { using: 'xpath', value: IOS_CONFIRMATION_ADD_XPATH }, 'no optional or unscoped replacement selectors');
       lookups++;
-      await wait(options.latency?.lookup || 0);
+      await sleepPastTimeout(clock, options.latency?.lookup || 0, signal!);
       advance('lookup');
       if (options.persistent || (options.fault && lookups > 1)) clock.elapsed += 3_000;
-      if (fixture && lookups === 1) await wait(fixture.lookup.endedAt - fixture.lookup.startedAt, undefined, { signal: signal! });
+      if (fixture && lookups === 1) await clock.sleep(fixture.lookup.endedAt - fixture.lookup.startedAt);
       if (options.faultAt === 'lookup') return fault();
       if (state() === 'missing') return missing();
       if (state() === 'stale-lookup') return stale();
@@ -1520,7 +1542,7 @@ async function confirmationReplay(name: string, options: {
         if (options.faultAt === attribute) return fault();
         if (options.fourthReadStale && attributes.length === 4) return stale();
         if (state() === `stale-${attribute}`) {
-          if (fixture && lookups === 1) await wait(fixture.attribute.durationMs, undefined, { signal: signal! });
+          if (fixture && lookups === 1) await clock.sleep(fixture.attribute.durationMs);
           return stale();
         }
         if (state() === 'disabled' && attribute === 'enabled') return value('false');
@@ -1551,7 +1573,7 @@ async function confirmationReplay(name: string, options: {
       return value(null);
     }
     throw new Error(`unexpected confirmation request ${path} ${JSON.stringify(body)}`);
-  }, clocked ? clock.now : undefined, clocked ? clock.sleep : undefined);
+  }, clock);
   const originalCommand = driver.command.bind(driver);
   driver.command = async (path, method, body, timeoutMs, policy) => {
     try {
@@ -1609,7 +1631,7 @@ async function confirmationReplay(name: string, options: {
     assert.equal(settingsWrites.length, driver.snapshot().firstFatal || driver.snapshot().unusable || restoreRefused ? 1 : 2);
     if (!driver.snapshot().firstFatal && !driver.snapshot().unusable && !restoreRefused) assert.deepEqual(settingsWrites[1].body.settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
   }
-  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now: clock.elapsed, outputDir, io };
+  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now: clock.elapsed, outputDir, io, clock };
 }
 
 test('confirmation product-first proceeds directly from acknowledged row to foreground and final Add checks', async () => {
@@ -1763,7 +1785,7 @@ test('confirmation late404 lookup cannot replace first fatal or persisted diagno
   const first = structuredClone(a.driver.snapshot().firstFatal);
   const capture = a.platform.evidenceSnapshot().confirmationCapture;
   const count = a.requests.length;
-  await wait(200);
+  await deliverLateReply(a.clock, 200);
   assert.deepEqual(a.driver.snapshot().firstFatal, first);
   assert.deepEqual(a.platform.evidenceSnapshot().confirmationCapture, capture);
   assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
@@ -1964,7 +1986,7 @@ test('confirmation cycle13 old 8s policy rejects recorded 8650ms aggregate plus 
   assert.deepEqual(replay.clicks, ['share', 'target-1']);
   assert.equal(replay.driver.snapshot().commands.find(entry => entry.timedOut)?.timeoutMs, 8_000);
   const count = replay.requests.length;
-  await wait(800);
+  await deliverLateReply(replay.clock, 800);
   await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
   assert.equal(replay.requests.length, count);
 });
@@ -2402,7 +2424,7 @@ for (const scenario of [
       assert.equal(replay.requests.length, count);
     }
     if (scenario.fault === 'body-late') {
-      await wait(scenario.boundary === 'foreground' ? 7_700 : 1_000);
+      await deliverLateReply(replay.clock, scenario.boundary === 'foreground' ? 7_700 : 1_000);
       assert.equal(replay.requests.length, count);
       assert.deepEqual(replay.driver.snapshot().firstFatal, first);
     }
@@ -2438,7 +2460,7 @@ for (const boundary of ['lookup', 'identity'] as const) {
       assert.deepEqual(replay.clicks, ['share', 'target-1']);
       const first = replay.driver.snapshot().firstFatal;
       const count = replay.requests.length;
-      await wait(300);
+      await deliverLateReply(replay.clock, 300);
       await assert.rejects(() => replay.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
       assert.deepEqual(replay.driver.snapshot().firstFatal, first);
       assert.equal(replay.requests.length, count);
@@ -2489,6 +2511,7 @@ test('recorded openurl timeout preserves signal and duration without inventing a
 for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeout', 'diagnostic-failure', 'discovery-interrupted', 'pre-diagnostic-timeout', 'post-simulator-timeout'] as const) {
   test(`openurl ${mode} records bounded serial diagnostics without reissuing navigation`, async () => {
     const { browser } = await shareFixtures();
+    const clock = new FakeClock(mode === 'discovery-interrupted');
     let processActive = false;
     const { platform, io, requests, outputDir } = await adapter(`navigation-${mode}`, ({ path, body, signal }) => {
       assert.equal(processActive, false, 'no Appium request while a process is unsettled');
@@ -2502,7 +2525,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
         return value([recorded.contexts[0], { ...recorded.contexts[1], url: 'about:blank' }]);
       }
       throw new Error(`unexpected navigation diagnostic ${path} ${JSON.stringify(body)}`);
-    });
+    }, clock);
     assert.equal(typeof io.navigationCommand, 'function', 'diagnostics must be available before invoking any process');
     if (mode === 'discovery-interrupted') {
       const discover = platform.driver.contextMetadata.bind(platform.driver);
@@ -2590,7 +2613,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
 
 test('an insufficient navigation budget records prerequisite skips without admitting a command', async () => {
   const clock = new FakeClock();
-  const { platform, io, requests } = await adapter('navigation-budget', () => { throw new Error('no diagnostic request is admissible'); }, clock.now, clock.sleep);
+  const { platform, io, requests } = await adapter('navigation-budget', () => { throw new Error('no diagnostic request is admissible'); }, clock);
   io.navigationCommand = () => { throw new Error('no process is admissible'); };
   clock.elapsed = 119_900;
   await assert.rejects(() => platform.openSetupURL(`${origin}/`), /insufficient time for a complete openurl command/u);
@@ -2624,11 +2647,12 @@ type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' 
 
 async function lifecycleReplay(name: string, options: {
   foreground?: string; home?: HomeLaunchMode; page?: string;
-  now?: () => number; sleep?: (ms: number) => Promise<void>; timeoutMs?: number;
+  clock?: FakeClock; timeoutMs?: number;
   reply?: (request: Request) => Response | undefined;
   beforeNativeDispatch?: (phase: PhaseBudget) => void;
 } = {}) {
   const homeMode = options.home || 'ready';
+  const clock = options.clock ?? new FakeClock(homeMode === 'timeout');
   const state = {
     safariRunning: true, foreground: options.foreground ?? 'com.apple.mobilesafari', installed: false, pid: 16089 as unknown,
     overlay: '', documentOrigin: origin, standalone: true, url: `${origin}/`,
@@ -2674,7 +2698,7 @@ async function lifecycleReplay(name: string, options: {
       return value(state.activeFault ?? { bundleId, pid: bundleId === 'com.apple.webapp' ? state.pid : 42 });
     }
     if (path.endsWith('/alert/text')) {
-      if (state.slowInstalledObservation && state.foreground === 'com.apple.webapp') await wait(2_300);
+      if (state.slowInstalledObservation && state.foreground === 'com.apple.webapp') await clock.sleep(2_300);
       if (!active()) return Response.json({ value: lifecycleError }, { status: 400 });
       if (state.alertFault) return Response.json({ value: { error: 'unknown command', message: 'no such alert is not the error code' } }, { status: 404 });
       if (state.overlay === 'alert' || state.overlay === 'app-dialog') return value('System or native dialog');
@@ -2702,7 +2726,7 @@ async function lifecycleReplay(name: string, options: {
       return value(true);
     }
     if (path.endsWith('/element/springboard-root/elements')) {
-      if (state.slowInstalledObservation && state.foreground === 'com.apple.webapp') await wait(2_800);
+      if (state.slowInstalledObservation && state.foreground === 'com.apple.webapp') await clock.sleep(2_800);
       assert.equal(body.using, 'xpath');
       if (state.systemObservationFault === 'empty') return value([]);
       if (state.systemObservationFault === 'malformed') return value({});
@@ -2762,7 +2786,7 @@ async function lifecycleReplay(name: string, options: {
     if (path.endsWith('/url')) return value(state.url);
     if (body.script?.startsWith('return {')) return value({ origin: state.documentOrigin, standalone: state.standalone, applicationInitialized: true });
     throw new Error(`unexpected lifecycle request ${path} ${JSON.stringify(body)}`);
-  }, options.now, options.sleep, false, undefined, undefined, undefined, options.beforeNativeDispatch, options.timeoutMs);
+  }, clock, false, undefined, undefined, options.beforeNativeDispatch, options.timeoutMs);
   (replay.platform as any).installedBundleId = '';
   (replay.platform as any).springBoardRoot = '';
   const marker = join(replay.outputDir, 'ios-ownership');
@@ -2944,9 +2968,9 @@ test('cold relaunch keeps waiting for a first page that publishes after the ordi
   await a.owned(() => a.platform.terminateInstalledApp());
   a.state.pid = 17001;
   a.state.blankPublications = 20;
-  const started = Date.now();
+  const started = a.clock.elapsed;
   await a.owned(() => a.platform.relaunchInstalledApp());
-  assert.ok(Date.now() - started > 4_000);
+  assert.ok(a.clock.elapsed - started > 4_000);
   assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
   assert.equal(a.platform.evidenceSnapshot().nativePid, '17001');
   const pending = (a.platform.evidenceSnapshot().events as any[]).filter((event) => event.operation === 'initial-publication-pending');
@@ -3124,7 +3148,7 @@ async function homeBoundaryReplay(mode: HomeBoundaryMode) {
   const originalParse = JSON.parse;
   const deadline = () => clock.elapsed + phases.get('ios-home-readiness')!.remainingMs;
   const a = await lifecycleReplay(`Home-boundary-${mode}`, {
-    now: clock.now, sleep: clock.sleep, timeoutMs: 45 * 60_000,
+    clock, timeoutMs: 45 * 60_000,
     reply: ({ path, body }) => {
       if (!cold) return undefined;
       if (body.script === 'mobile: swipe') {
@@ -3374,7 +3398,7 @@ for (const mode of ['missing', 'query-gap', 'attribute-gap', 'minimum-gap', 'gua
 test('Home boundary SDK poison precedes nominal minimum admission with one unsent receipt', async () => {
   for (const poisoned of [true, false]) {
     const clock = new FakeClock();
-    const a = await adapter(`minimum-poison-${poisoned}`, () => value(null), clock.now, clock.sleep);
+    const a = await adapter(`minimum-poison-${poisoned}`, () => value(null), clock);
     const policy = a.driver.nativeRequestPolicy(a.budget);
     const followups: Promise<void>[] = [];
     a.driver.setCommandGuard({
@@ -3570,7 +3594,9 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
   ]), 'hierarchy XML fixture reads');
   if (fixtureSignal.aborted) throw fixtureSignal.reason || new Error('fixture aborted');
   let source = sources[0];
-  const clock = new FakeClock();
+  const gesture = mode === 'hung-gesture' || mode === 'late-gesture';
+  const timed = mode === 'recorded-latency' || (mode.startsWith('slow-') && !mode.endsWith('-gesture'));
+  const clock = new FakeClock(!gesture && (timed || /^(?:hung|late|interrupted)-/u.test(mode)));
   let sheet = false;
   let scrolls = 0;
   let swipes = 0;
@@ -3581,7 +3607,6 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
   let identities = 0;
   const clicks: string[] = [];
   const pending: Promise<unknown>[] = [];
-  const requestClock = mode === 'hung-gesture' || mode === 'late-gesture' ? new FakeClock() : undefined;
   let releaseGesture: ((response: Response) => void) | undefined;
   let rejectGesture: ((error: Error) => void) | undefined;
   let reportGestureDispatch!: (request: Request) => void;
@@ -3592,13 +3617,11 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
     releaseGesture?.(value(null));
   };
   fixtureSignal.addEventListener('abort', cleanupGesture, { once: true });
-  const timed = mode === 'recorded-latency' || (mode.startsWith('slow-') && !mode.endsWith('-gesture'));
-  const waitFor = async (ms: number, signal?: AbortSignal | null) => {
-    const promise = wait(ms, undefined, { signal: signal || fixtureSignal });
+  const sleepFor = async (ms: number, signal?: AbortSignal | null) => {
+    const promise = sleepUnlessAborted(clock, ms, signal || fixtureSignal);
     pending.push(promise);
     await promise;
   };
-  const clocked = !timed && !/^(?:hung|late|interrupted)-/u.test(mode);
   const a = await within(adapter(`hierarchy-${mode}`, async ({ path, body, signal }) => {
     if (path.endsWith('/context')) {
       if (mode === 'parent-initial') clock.elapsed = 112_001;
@@ -3616,7 +3639,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       if (mode === 'search-tail' && sheetReads === 1) clock.elapsed += 76_001;
       if (mode === 'malformed-source' && scrolls === 1) return value(source.slice(0, -100));
       if (mode === 'hung-source' && scrolls === 1) return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
-      if (mode === 'late-source' && scrolls === 1) await waitFor(8_200, signal);
+      if (mode === 'late-source' && scrolls === 1) await sleepFor(8_200, signal);
       if (mode.startsWith('interrupted-') && scrolls === 1) {
         const error = mode === 'interrupted-reset' ? new TypeError('hypothetical source connection reset')
           : new DOMException('interrupted source body', mode === 'interrupted-abort' ? 'AbortError' : 'TimeoutError');
@@ -3627,7 +3650,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
         return new Response(new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode(payload.slice(0, 50_000)));
-            const completion = wait(mode === 'slow-body' ? 5_764 : 8_200, undefined, { signal: signal! }).then(() => {
+            const completion = sleepUnlessAborted(clock, mode === 'slow-body' ? 5_764 : 8_200, signal!).then(() => {
               controller.enqueue(new TextEncoder().encode(payload.slice(50_000)));
               controller.close();
             }, (error: unknown) => controller.error(error));
@@ -3637,16 +3660,16 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       }
       if ((mode === 'slow-initial' && !sheet) || (mode === 'slow-publication' && sheetReads === 1)
         || (mode === 'slow-search' && sheetReads === 2) || (mode === 'slow-fallback' && sheetReads === 3)) {
-        await waitFor(recordedIteration13.share.sourceBackendMs, signal);
+        await sleepFor(recordedIteration13.share.sourceBackendMs, signal);
       }
-      if (mode === 'recorded-latency') await waitFor(!sheet ? recordedIteration13.share.initialSourceMs : scrolls ? recordedIteration13.share.sourceBackendMs : recordedIteration13.share.sourceMs[sheetReads - 1] || 0, signal);
+      if (mode === 'recorded-latency') await sleepFor(!sheet ? recordedIteration13.share.initialSourceMs : scrolls ? recordedIteration13.share.sourceBackendMs : recordedIteration13.share.sourceMs[sheetReads - 1] || 0, signal);
       return value(source);
     }
     if (path.endsWith('/screenshot')) return value('');
     if (body.script === 'mobile: scroll') {
       assert.deepEqual(body.args, { element: `container-${scrolls}`, direction: 'down', distance: 0.75 });
       scrolls++;
-      if (mode === 'recorded-latency') await waitFor(recordedIteration13.share.scrollClientMs, signal);
+      if (mode === 'recorded-latency') await sleepFor(recordedIteration13.share.scrollClientMs, signal);
       if (mode === 'slow-gesture') clock.elapsed += 5_250;
       if (mode === 'hung-gesture') return new Promise<Response>((_resolve, reject) => {
         rejectGesture = reject;
@@ -3678,7 +3701,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       assert.ok(xpathCount(xml, body.value) > 0);
       if (confirming) {
         identities++;
-        if (mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.identityMs[identities - 1], signal);
+        if (mode === 'recorded-latency') await sleepFor(recordedIteration13.confirmation.identityMs[identities - 1], signal);
         return value([element('add')]);
       }
       return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
@@ -3688,21 +3711,21 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       assert.equal(body.value, IOS_CONFIRMATION_ADD_XPATH);
       lookups++;
       if (mode === 'recorded-latency') {
-        await waitFor(recordedIteration13.confirmation.lookupMs[lookups - 1], signal);
+        await sleepFor(recordedIteration13.confirmation.lookupMs[lookups - 1], signal);
         if (lookups === 1) return missing();
       }
       return value(element('add'));
     }
     if (path.endsWith('/rect')) {
       assert.ok(path.includes(`-${scrolls}/`));
-      if (mode === 'slow-rect') await waitFor(1_448, signal);
+      if (mode === 'slow-rect') await sleepFor(1_448, signal);
       const list = nativeActionListEvidence(source, 'Add to Home Screen')!;
       return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
     }
     if (path.includes('/attribute/')) {
       if (mode === 'recorded-latency' && path.includes('/add/')) {
         const attribute = path.split('/attribute/')[1] as keyof typeof recordedIteration13.confirmation.attributeMs;
-        await waitFor(recordedIteration13.confirmation.attributeMs[attribute], signal);
+        await sleepFor(recordedIteration13.confirmation.attributeMs[attribute], signal);
       }
       if (path.includes('/container-') && path.endsWith('/visible')) {
         if (mode === 'parent-gesture') clock.elapsed = 104_001;
@@ -3719,12 +3742,12 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       clicks.push(id);
       if (id === 'share') sheet = true;
       if (id.startsWith('target')) confirming = true;
-      if (id === 'add' && mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.clickMs, signal);
+      if (id === 'add' && mode === 'recorded-latency') await sleepFor(recordedIteration13.confirmation.clickMs, signal);
       return value(null);
     }
     throw new Error(`unexpected hierarchy request ${path} ${JSON.stringify(body)}`);
-  }, clocked ? clock.now : undefined, clocked ? clock.sleep : undefined,
-  true, requestClock, (request) => {
+  }, clock,
+  true, (request) => {
     if (request.body.script === 'mobile: scroll') reportGestureDispatch(request);
   }, fixtureSignal, (phase) => {
     if (phase.phase !== 'ios-share-gesture') return;
@@ -3772,14 +3795,14 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       assert.ok(dispatched.signal);
       assert.equal(dispatched.signal?.aborted, false);
       await within(new Promise<void>((resolve) => setImmediate(resolve)), 'gesture timer arm');
-      const armedTimers = [...requestClock!.timers.values()].filter((timer) => timer.at - requestClock!.elapsed === 8_000);
+      const armedTimers = [...clock.timers.values()].filter((timer) => timer.at - clock.elapsed === 8_000);
       if (armedTimers.length !== 1) {
         if (mode === 'late-gesture') releaseGesture?.(value(null));
         else rejectGesture?.(new Error('fixture cleanup: gesture deadline timer was not armed'));
         await within(completion, 'gesture fixture cleanup');
         assert.fail(`expected one armed 8000ms gesture deadline, received ${armedTimers.length}`);
       }
-      requestClock!.advance(8_000);
+      clock.advance(8_000);
       await within(completion, 'timed-out gesture completion');
       if (mode === 'late-gesture') {
         const saved = a.driver.snapshot();
@@ -3805,7 +3828,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
     cleanupGesture();
     if (operation) await within(operation.then(() => undefined, () => undefined), `hierarchy install cleanup ${mode}`, 5_000);
     await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 5_000);
-    assert.equal(requestClock?.timers.size || 0, 0, 'fixture failure retires every fake-clock request timer');
+    assert.equal(clock.timers.size, 0, 'fixture failure retires every fake-clock request timer');
     fixtureSignal.removeEventListener('abort', cleanupGesture);
     throw caught;
   }
@@ -3819,7 +3842,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
     assert.equal(a.requests.length, stopped);
     assert.deepEqual(a.driver.snapshot().firstFatal, first);
   } else await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 10_000);
-  assert.equal(requestClock?.timers.size || 0, 0, 'settled gesture fixtures leave no fake-clock request timer');
+  assert.equal(clock.timers.size, 0, 'settled gesture fixtures leave no fake-clock request timer');
   await within(writeSanitizedJson(join(a.outputDir, 'ios-hierarchy-result.json'), {
     proofKind: 'Actual-client protocol replay. PR pre-scroll XML and latencies recorded; completing post-scroll XML from push, confirmation XML hypothetical. Budget, body and hung controls hypothetical. No native acceptance.',
     error: String(error || ''), clicks, reads, sheetReads, scrolls, swipes, lookups, evidence: a.platform.evidenceSnapshot(),
@@ -4388,7 +4411,7 @@ async function receiptCaptureAdapter(name: string, clock = new FakeClock()) {
   const a = await adapter(`receipt-${name}`, ({ path }) => {
     if (path.endsWith('/screenshot')) return value('');
     throw new Error('unexpected receipt gameplay command');
-  }, clock.mono, clock.sleep);
+  }, clock);
   const internal = a.platform as any;
   internal.udid = receiptUdid;
   internal.launchObservation = new IOSLaunchObservation(clock);
@@ -4452,7 +4475,7 @@ async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode
     if (path.endsWith('/url')) return value(`${origin}/`);
     if (body.script?.startsWith('return {')) return value({ origin, standalone: true, applicationInitialized: true });
     throw new Error('unexpected receipt launch command');
-  }, clock.mono, clock.sleep, false);
+  }, clock, false);
   const internal = a.platform as any;
   internal.udid = receiptUdid;
   internal.launchObservation = new IOSLaunchObservation(clock);
