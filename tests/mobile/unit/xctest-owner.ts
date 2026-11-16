@@ -1301,7 +1301,8 @@ if (mode === 'listener-pending-invalid-pid' && process.env.STARTUP_TEST_INVALID_
 if (role !== 'endpoint') appendFileSync(join(root, 'launches'), JSON.stringify(args) + '\\n');
 if (mode === 'early' || mode === 'disposition-write-failure') process.exit(43);
 if (mode === 'exit-before-close') {
-  spawn(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  const holdStdioUntilExitRecorded = "const {readFileSync} = require('node:fs'); const giveUp = Date.now() + 10000; const exitRecorded = () => { try { return JSON.parse(readFileSync(process.argv[1], 'utf8')).diagnostics.lifecycle.some(event => event.event === 'child-exit'); } catch { return false; } }; const wait = () => { if (exitRecorded() || Date.now() >= giveUp) setTimeout(() => {}, 400); else setTimeout(wait, 10); }; wait();";
+  spawn(process.execPath, ['-e', holdStdioUntilExitRecorded, join(root, 'state', 'owner.json')], { stdio: ['ignore', 'inherit', 'inherit'] });
   process.exit(44);
 }
 if (mode === 'receipt-product-changed' || mode === 'listener-initial-race-product') {
@@ -4135,8 +4136,11 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       if (mode === 'exit-before-close') {
         const childExit = lifecycle.find((event: { event: string }) => event.event === 'child-exit');
         const childClose = lifecycle.find((event: { event: string }) => event.event === 'child-close');
-        assert.ok(childExit && childClose && childExit.id < childClose.id && childExit.id < cleanupEntry.id);
-        assert.ok(childClose.monotonicMs - childExit.monotonicMs >= 300);
+        assert.ok(childExit, 'child-exit lifecycle event was not recorded');
+        assert.ok(childClose, 'child-close lifecycle event was not recorded');
+        assert.ok(childExit.id < childClose.id, 'child-exit must be recorded before child-close');
+        assert.ok(childExit.id < cleanupEntry.id, 'child-exit must be recorded before cleanup-enter');
+        assert.ok(childClose.monotonicMs - childExit.monotonicMs >= 300, 'child-close must be held back at least 300ms after child-exit was recorded');
         assert.equal((childExit.detail as { exitCode: number }).exitCode, 44);
         assert.equal(lifecycle.some((event: { event: string }) => event.event === 'child-signal-requested'), false);
       }
