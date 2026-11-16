@@ -1092,6 +1092,15 @@ xcrun)
   fi
   ;;
 xcodebuild)
+  if [ -n "$STARTUP_TEST_FAULT" ]; then
+    launches=$(cat "$root/xcodebuild-count" 2>/dev/null || printf 0)
+    printf '%s' "$((launches + 1))" > "$root/xcodebuild-count"
+    case "$STARTUP_TEST_FAULT" in
+      test-failed-once) [ "$launches" -lt 1 ] && exit 65 ;;
+      test-failed-always) exit 65 ;;
+      other-exit-once) [ "$launches" -lt 1 ] && exit 70 ;;
+    esac
+  fi
   case "$mode" in
     listener-pending-*) publish_fixture_pid "$root/runner.pid" "$$" || exit 2 ;;
     listener-concurrent-exit-before-close|listener-exit-after-ready*) publish_fixture_pid "$root/xcode.pid" "$$" || exit 2 ;;
@@ -5712,7 +5721,7 @@ xctestOwnerTests.push(['Native startup stop CLI propagates recorded cleanup erro
   }
 }]);
 
-type StartFault = 'install-aborted-once' | 'install-aborted-always' | 'install-other-failure';
+type StartFault = 'install-aborted-once' | 'install-aborted-always' | 'install-other-failure' | 'test-failed-once' | 'test-failed-always' | 'other-exit-once';
 
 async function startCliWithFault(fault: StartFault) {
   const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-start-'));
@@ -5784,6 +5793,29 @@ for (const [name, fault, run] of [
     assert.notEqual(f.started.code, 0);
     assert.deepEqual(await f.installStatuses(), [52]);
     assert.equal(await f.count('xcodebuild-count'), 0);
+  }],
+  ['relaunches xcodebuild once after a test failure before WDA is admitted', 'test-failed-once', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.equal(f.started.code, 0, f.started.stderr);
+    assert.equal(await f.count('xcodebuild-count'), 2);
+    const first = await f.readOwner('owner-attempt-1.json');
+    assert.equal(first.firstFailure.stage, 'child-exit');
+    assert.equal(first.exitCode, 65);
+    assert.ok(first.endedAt);
+    const owner = await f.readOwner();
+    assert.equal(owner.ready, true);
+    assert.equal(owner.firstFailure, undefined);
+  }],
+  ['gives up when the relaunched xcodebuild fails the same way', 'test-failed-always', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.notEqual(f.started.code, 0);
+    assert.match(f.started.stderr, /XCTEST: child-exit/u);
+    assert.equal(await f.count('xcodebuild-count'), 2);
+    assert.equal((await f.readOwner('owner-attempt-1.json')).exitCode, 65);
+  }],
+  ['does not relaunch xcodebuild after another exit status', 'other-exit-once', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.notEqual(f.started.code, 0);
+    assert.match(f.started.stderr, /XCTEST: child-exit/u);
+    assert.equal(await f.count('xcodebuild-count'), 1);
+    assert.equal(existsSync(join(f.root, 'state/owner-attempt-1.json')), false);
   }],
 ] as const) {
   xctestOwnerTests.push([`Native startup ${name}`, async () => {

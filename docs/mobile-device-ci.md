@@ -266,6 +266,15 @@ attempt 1 and 43863348485 attempt 1 hit it about two seconds into the step.
 Every attempt stays in the owner command records and each retry adds an
 `install-wda-retry` lifecycle event. Any other status fails at once.
 
+When `xcodebuild test-without-building` exits with status 65 before any WDA
+listener was admitted and at least 120 seconds of the 300-second startup
+deadline remain, `start` launches one fresh supervisor. This happened once, in
+run 43893623691 attempt 2, 47 seconds after the spawn. The failed attempt's
+sanitized owner record is kept as `owner-attempt-1.json` and uploaded with the
+other owner evidence; the private log of that attempt is dropped. Any other exit,
+a second failure or a late failure is reported as before. No scenario has started
+at this point.
+
 Android fresh CI setup permits at most one additional create per setup-session
 helper invocation, before any retained Chrome owner or initial installed launch.
 The existing literal `adb: device offline` path is unchanged. A completed HTTP 500
