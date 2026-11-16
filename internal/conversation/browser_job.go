@@ -143,6 +143,14 @@ type claudeChainJobBinding struct {
 	observedRanges []claudeRangeEvidence
 }
 
+type jobAdmission struct {
+	id         string
+	snapshotID string
+	scopeID    string
+	dedupKey   string
+	existing   *browseJob
+}
+
 func (b *Browser) createJob(scope BrowseScope, source fileSource, captured capturedRange, binding claudeChainJobBinding) (*browseJob, *BrowsePage) {
 	if b.cacheErr != nil {
 		page := failPage("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true)
@@ -156,20 +164,45 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, captured captu
 			b.unlockCapacity()
 		}
 	}()
+	admission, page := b.admitJob(scope, source, captured, binding)
+	if page != nil {
+		return nil, page
+	}
+	if admission.existing != nil {
+		return admission.existing, nil
+	}
+	index, page := b.openAdmissionSnapshot(admission, source, captured.boundary)
+	if page != nil {
+		return nil, page
+	}
+	job, page := b.enqueueJob(admission, scope, source, captured, binding, index)
+	if page != nil {
+		return nil, page
+	}
+	b.unlockCapacity()
+	capacityLocked = false
+	b.signalWake()
+	if binding.contextID != "" {
+		b.observe(browserObservation{kind: "chain_queue_admission", job: job})
+	}
+	return job, nil
+}
+
+func (b *Browser) admitJob(scope BrowseScope, source fileSource, captured capturedRange, binding claudeChainJobBinding) (jobAdmission, *BrowsePage) {
 	scopeID := browseScopeID(scope)
 	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%d", scopeID, source.revision, captured.start, captured.end, captured.boundary, captured.digest, binding.contextID, binding.segment)
 	b.mu.Lock()
 	if b.closing {
 		b.mu.Unlock()
 		page := failPage("index_failed", "Older history preparation is shutting down.", true)
-		return nil, &page
+		return jobAdmission{}, &page
 	}
 	if id := b.dedup[dedupKey]; id != "" {
 		job := b.jobs[id]
 		b.mu.Unlock()
 		if job != nil {
 			b.renewJob(job)
-			return job, nil
+			return jobAdmission{existing: job}, nil
 		}
 		b.mu.Lock()
 		delete(b.dedup, dedupKey)
@@ -177,31 +210,35 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, captured captu
 	if b.closing {
 		b.mu.Unlock()
 		page := failPage("index_failed", "Older history preparation is shutting down.", true)
-		return nil, &page
+		return jobAdmission{}, &page
 	}
 	if len(b.queue) >= browseQueuedPreparations {
 		b.mu.Unlock()
 		page := failPage("index_busy", "Another history preparation is already queued. Try again shortly.", true)
-		return nil, &page
+		return jobAdmission{}, &page
 	}
 	id, err := randomIdentifier()
 	if err != nil {
 		b.mu.Unlock()
 		page := failPage("index_failed", "History preparation could not be started.", true)
-		return nil, &page
+		return jobAdmission{}, &page
 	}
 	snapshotID, err := randomIdentifier()
 	if err != nil {
 		b.mu.Unlock()
 		page := failPage("index_failed", "History preparation could not be started.", true)
-		return nil, &page
+		return jobAdmission{}, &page
 	}
 	b.mu.Unlock()
-	request := &browseJob{scopeID: scopeID, source: source}
+	return jobAdmission{id: id, snapshotID: snapshotID, scopeID: scopeID, dedupKey: dedupKey}, nil
+}
+
+func (b *Browser) openAdmissionSnapshot(admission jobAdmission, source fileSource, boundary int64) (*snapshotIndex, *BrowsePage) {
+	request := &browseJob{scopeID: admission.scopeID, source: source}
 	if code := b.ensureCapacity(request, nil, "admission", true); code != "" {
 		return nil, capacityFailurePage(code)
 	}
-	index, code, err := b.openSnapshotWithCapacity(request, "admission", snapshotID, source, captured.boundary)
+	index, code, err := b.openSnapshotWithCapacity(request, "admission", admission.snapshotID, source, boundary)
 	if err != nil {
 		page := failPage("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true)
 		return nil, &page
@@ -209,6 +246,10 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, captured captu
 	if code != "" {
 		return nil, capacityFailurePage(code)
 	}
+	return index, nil
+}
+
+func (b *Browser) enqueueJob(admission jobAdmission, scope BrowseScope, source fileSource, captured capturedRange, binding claudeChainJobBinding, index *snapshotIndex) (*browseJob, *BrowsePage) {
 	b.mu.Lock()
 	if b.closing {
 		b.mu.Unlock()
@@ -218,16 +259,16 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, captured captu
 	}
 	binding.observedRanges = append([]claudeRangeEvidence(nil), binding.observedRanges...)
 	job := &browseJob{
-		id: id, dedupKey: dedupKey, scope: scope, scopeID: scopeID, source: source,
+		id: admission.id, dedupKey: admission.dedupKey, scope: scope, scopeID: admission.scopeID, source: source,
 		boundary: captured.boundary, rangeStart: captured.start, rangeEnd: captured.end, rangeDigest: captured.digest,
 		chainContextID: binding.contextID, chainSegment: binding.segment,
 		chainFooterStart: binding.footerStart, chainFooterEnd: binding.footerEnd,
 		chainFooterDigest: binding.footerDigest, chainObservedRanges: binding.observedRanges,
-		snapshotID: snapshotID, index: index, state: BrowsePreparing, phase: "queued",
+		snapshotID: admission.snapshotID, index: index, state: BrowsePreparing, phase: "queued",
 		sourceBytes: source.end, lastInterest: time.Now(), lastAccess: time.Now(),
 	}
-	job.cursor, err = encodeBrowseCursor(b.key, browseCursor{
-		Mode: "prepare", Scope: scopeID, Revision: source.revision, JobID: id,
+	cursor, err := encodeBrowseCursor(b.key, browseCursor{
+		Mode: "prepare", Scope: admission.scopeID, Revision: source.revision, JobID: admission.id,
 		Boundary: browseOffset(captured.boundary), RangeStart: browseOffset(captured.start), RangeEnd: browseOffset(captured.end),
 		RangeDigest: captured.digest, ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 	})
@@ -237,17 +278,12 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, captured captu
 		page := failPage("index_failed", "History preparation could not be started.", true)
 		return nil, &page
 	}
+	job.cursor = cursor
 	job.queued = true
-	b.jobs[id] = job
-	b.dedup[dedupKey] = id
+	b.jobs[admission.id] = job
+	b.dedup[admission.dedupKey] = admission.id
 	b.queue = append(b.queue, job)
 	b.mu.Unlock()
-	b.unlockCapacity()
-	capacityLocked = false
-	b.signalWake()
-	if binding.contextID != "" {
-		b.observe(browserObservation{kind: "chain_queue_admission", job: job})
-	}
 	return job, nil
 }
 
@@ -327,37 +363,36 @@ func (b *Browser) retryFailedJob(ctx context.Context, job *browseJob, failure *B
 	return b.retryJob(ctx, job, foregroundBudget)
 }
 
+type retryTarget struct {
+	scope          BrowseScope
+	revision       string
+	rangeStart     int64
+	rangeEnd       int64
+	rangeDigest    string
+	chainContextID string
+	location       Location
+	footerStart    int64
+	footerEnd      int64
+	footerDigest   string
+}
+
+type retryClaim struct {
+	oldIndex      *snapshotIndex
+	oldSourceFile *os.File
+	boundary      int64
+}
+
 func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget *claudeChainForegroundBudget) bool {
-	job.mu.RLock()
-	scope := job.scope
-	sourceRevision := job.source.revision
-	rangeStart := job.rangeStart
-	rangeEnd := job.rangeEnd
-	rangeDigest := job.rangeDigest
-	chainContextID := job.chainContextID
-	chainLocation := job.source.location
-	chainFooterStart := job.chainFooterStart
-	chainFooterEnd := job.chainFooterEnd
-	chainFooterDigest := job.chainFooterDigest
-	job.mu.RUnlock()
-	omo := agentkind.Of(scope.Provider) == agentkind.OMO
+	target := captureRetryTarget(job)
 	var source fileSource
-	var code string
-	var err error
-	if chainContextID != "" {
-		source, err = b.captureClaudeChainSource(chainLocation, foregroundBudget)
+	var ok bool
+	if target.chainContextID != "" {
+		source, ok = b.recaptureChainSource(ctx, target, foregroundBudget)
 	} else {
-		source, code = b.sourceFor(scope, omo)
+		source, ok = b.recaptureSingleFileSource(ctx, target)
 	}
-	if err != nil || code != "" {
+	if !ok {
 		return false
-	}
-	if chainContextID != "" {
-		if chainFooterStart < 0 || chainFooterEnd < chainFooterStart {
-			source.close()
-			return false
-		}
-		source.end = rangeEnd
 	}
 	sourceOwned := true
 	defer func() {
@@ -365,17 +400,6 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget
 			source.close()
 		}
 	}()
-	if source.revision != sourceRevision || source.end < rangeEnd {
-		return false
-	}
-	if chainContextID != "" {
-		digest, digestErr := b.digestClaudeChainValidationRange(ctx, source.file, chainFooterStart, chainFooterEnd, foregroundBudget)
-		if digestErr != nil || digest != chainFooterDigest {
-			return false
-		}
-	} else if digest, err := fileRangeDigest(ctx, source.file, rangeStart, rangeEnd); err != nil || digest != rangeDigest {
-		return false
-	}
 	b.observeCapacityOperation("retry", job, false)
 	b.capacityMu.Lock()
 	capacityLocked := true
@@ -384,22 +408,10 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget
 			b.unlockCapacity()
 		}
 	}()
-	b.mu.Lock()
-	if b.closing || len(b.queue) >= browseQueuedPreparations {
-		b.mu.Unlock()
+	claim, ok := b.claimFailedJob(job, target.revision)
+	if !ok {
 		return false
 	}
-	job.mu.Lock()
-	if b.jobs[job.id] != job || job.retired || job.state != BrowseFailed || job.running || job.queued || job.source.revision != sourceRevision {
-		job.mu.Unlock()
-		b.mu.Unlock()
-		return false
-	}
-	oldIndex := job.index
-	oldSourceFile := job.source.file
-	boundary := job.boundary
-	job.mu.Unlock()
-	b.mu.Unlock()
 	if code := b.ensureCapacity(job, nil, "retry", true); code != "" {
 		return false
 	}
@@ -407,20 +419,102 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget
 	if err != nil {
 		return false
 	}
-	index, code, err := b.openSnapshotWithCapacity(job, "retry", snapshotID, source, boundary)
+	index, code, err := b.openSnapshotWithCapacity(job, "retry", snapshotID, source, claim.boundary)
 	if err != nil || code != "" {
 		return false
 	}
-	b.mu.Lock()
-	job.mu.Lock()
-	if b.closing || b.jobs[job.id] != job || job.retired || job.running || job.queued {
-		job.mu.Unlock()
-		b.mu.Unlock()
+	if !b.requeueFailedJob(job, source, snapshotID, index) {
 		_ = index.remove()
 		return false
 	}
-	job.source = source
 	sourceOwned = false
+	if claim.oldSourceFile != nil {
+		_ = claim.oldSourceFile.Close()
+	}
+	if claim.oldIndex != nil {
+		_ = claim.oldIndex.remove()
+	}
+	b.unlockCapacity()
+	capacityLocked = false
+	b.signalWake()
+	if job.chainContextID != "" {
+		b.observe(browserObservation{kind: "chain_queue_admission", job: job})
+	}
+	return true
+}
+
+func captureRetryTarget(job *browseJob) retryTarget {
+	job.mu.RLock()
+	defer job.mu.RUnlock()
+	return retryTarget{
+		scope: job.scope, revision: job.source.revision,
+		rangeStart: job.rangeStart, rangeEnd: job.rangeEnd, rangeDigest: job.rangeDigest,
+		chainContextID: job.chainContextID, location: job.source.location,
+		footerStart: job.chainFooterStart, footerEnd: job.chainFooterEnd, footerDigest: job.chainFooterDigest,
+	}
+}
+
+func (b *Browser) recaptureSingleFileSource(ctx context.Context, target retryTarget) (fileSource, bool) {
+	source, code := b.sourceFor(target.scope, agentkind.Of(target.scope.Provider) == agentkind.OMO)
+	if code != "" {
+		return fileSource{}, false
+	}
+	if source.revision != target.revision || source.end < target.rangeEnd {
+		source.close()
+		return fileSource{}, false
+	}
+	if digest, err := fileRangeDigest(ctx, source.file, target.rangeStart, target.rangeEnd); err != nil || digest != target.rangeDigest {
+		source.close()
+		return fileSource{}, false
+	}
+	return source, true
+}
+
+func (b *Browser) recaptureChainSource(ctx context.Context, target retryTarget, foregroundBudget *claudeChainForegroundBudget) (fileSource, bool) {
+	source, err := b.captureClaudeChainSource(target.location, foregroundBudget)
+	if err != nil {
+		return fileSource{}, false
+	}
+	if target.footerStart < 0 || target.footerEnd < target.footerStart {
+		source.close()
+		return fileSource{}, false
+	}
+	source.end = target.rangeEnd
+	if source.revision != target.revision {
+		source.close()
+		return fileSource{}, false
+	}
+	digest, err := b.digestClaudeChainValidationRange(ctx, source.file, target.footerStart, target.footerEnd, foregroundBudget)
+	if err != nil || digest != target.footerDigest {
+		source.close()
+		return fileSource{}, false
+	}
+	return source, true
+}
+
+func (b *Browser) claimFailedJob(job *browseJob, sourceRevision string) (retryClaim, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closing || len(b.queue) >= browseQueuedPreparations {
+		return retryClaim{}, false
+	}
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if b.jobs[job.id] != job || job.retired || job.state != BrowseFailed || job.running || job.queued || job.source.revision != sourceRevision {
+		return retryClaim{}, false
+	}
+	return retryClaim{oldIndex: job.index, oldSourceFile: job.source.file, boundary: job.boundary}, true
+}
+
+func (b *Browser) requeueFailedJob(job *browseJob, source fileSource, snapshotID string, index *snapshotIndex) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if b.closing || b.jobs[job.id] != job || job.retired || job.running || job.queued {
+		return false
+	}
+	job.source = source
 	job.snapshotID = snapshotID
 	job.index = index
 	job.state = BrowsePreparing
@@ -441,20 +535,6 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob, foregroundBudget
 	job.lastInterest = time.Now()
 	job.lastAccess = time.Now()
 	b.queue = append(b.queue, job)
-	job.mu.Unlock()
-	b.mu.Unlock()
-	if oldSourceFile != nil {
-		_ = oldSourceFile.Close()
-	}
-	if oldIndex != nil {
-		_ = oldIndex.remove()
-	}
-	b.unlockCapacity()
-	capacityLocked = false
-	b.signalWake()
-	if job.chainContextID != "" {
-		b.observe(browserObservation{kind: "chain_queue_admission", job: job})
-	}
 	return true
 }
 
@@ -634,12 +714,7 @@ func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, sourc
 	validatedChangeToken := job.validatedChangeToken
 	expectedDigest := job.sourceDigest
 	chainContextID := job.chainContextID
-	chainFooterStart := job.chainFooterStart
-	chainFooterEnd := job.chainFooterEnd
-	chainFooterDigest := job.chainFooterDigest
 	job.mu.RUnlock()
-	modTime := info.ModTime().UnixNano()
-	changeToken := fileChangeToken(info)
 	if expectedDigest == "" {
 		return errors.New("conversation snapshot has no source digest")
 	}
@@ -650,41 +725,17 @@ func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, sourc
 	if err != nil || currentRevision != source.revision {
 		return errors.New("conversation source changed")
 	}
-	if info.Size() == validatedSize && modTime == validatedModTime &&
-		(validatedChangeToken == "" || changeToken == validatedChangeToken) {
+	if info.Size() == validatedSize && info.ModTime().UnixNano() == validatedModTime &&
+		(validatedChangeToken == "" || fileChangeToken(info) == validatedChangeToken) {
 		return nil
 	}
 	if chainContextID != "" && info.Size() >= source.end {
-		// Footer validation gives a cheap early rejection. If the source metadata
-		// changed, the worker-owned captured digest must also authenticate the
-		// entire frozen range. Large ranges are checked by a cancellable browser
-		// validation task rather than by this request goroutine.
-		if chainFooterStart < 0 || chainFooterEnd < chainFooterStart || chainFooterEnd > source.end {
-			return errors.New("conversation source changed")
-		}
-		if chainFooterDigest != "" {
-			digest, digestErr := b.digestClaudeChainValidationRange(ctx, source.file, chainFooterStart, chainFooterEnd, foregroundBudget)
-			if errors.Is(digestErr, errClaudeChainForegroundBudget) {
-				return errClaudeChainValidationPending
-			}
-			if digestErr != nil || digest != chainFooterDigest {
-				return errors.New("conversation source changed")
-			}
-		}
-		if validationErr := b.ensureClaudeChainJobValidation(job, source, expectedDigest); validationErr != nil {
-			return validationErr
-		}
-		job.mu.Lock()
-		job.validatedSize = info.Size()
-		job.validatedModTime = modTime
-		job.validatedChangeToken = changeToken
-		job.mu.Unlock()
-		return nil
+		return b.validateChainSnapshotJob(ctx, job, source, info, expectedDigest, foregroundBudget)
 	}
 	if info.Size() > validatedSize && info.Size() >= source.end {
 		job.mu.Lock()
 		job.validatedSize = info.Size()
-		job.validatedModTime = modTime
+		job.validatedModTime = info.ModTime().UnixNano()
 		job.mu.Unlock()
 		return nil
 	}
@@ -702,12 +753,45 @@ func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, sourc
 	if digest != expectedDigest {
 		return errors.New("conversation source changed")
 	}
+	recordValidatedSource(job, info)
+	return nil
+}
+
+func (b *Browser) validateChainSnapshotJob(ctx context.Context, job *browseJob, source fileSource, info os.FileInfo, expectedDigest string, foregroundBudget *claudeChainForegroundBudget) error {
+	job.mu.RLock()
+	chainFooterStart := job.chainFooterStart
+	chainFooterEnd := job.chainFooterEnd
+	chainFooterDigest := job.chainFooterDigest
+	job.mu.RUnlock()
+	// Footer validation gives a cheap early rejection. If the source metadata
+	// changed, the worker-owned captured digest must also authenticate the
+	// entire frozen range. Large ranges are checked by a cancellable browser
+	// validation task rather than by this request goroutine.
+	if chainFooterStart < 0 || chainFooterEnd < chainFooterStart || chainFooterEnd > source.end {
+		return errors.New("conversation source changed")
+	}
+	if chainFooterDigest != "" {
+		digest, digestErr := b.digestClaudeChainValidationRange(ctx, source.file, chainFooterStart, chainFooterEnd, foregroundBudget)
+		if errors.Is(digestErr, errClaudeChainForegroundBudget) {
+			return errClaudeChainValidationPending
+		}
+		if digestErr != nil || digest != chainFooterDigest {
+			return errors.New("conversation source changed")
+		}
+	}
+	if validationErr := b.ensureClaudeChainJobValidation(job, source, expectedDigest); validationErr != nil {
+		return validationErr
+	}
+	recordValidatedSource(job, info)
+	return nil
+}
+
+func recordValidatedSource(job *browseJob, info os.FileInfo) {
 	job.mu.Lock()
 	job.validatedSize = info.Size()
-	job.validatedModTime = modTime
-	job.validatedChangeToken = changeToken
+	job.validatedModTime = info.ModTime().UnixNano()
+	job.validatedChangeToken = fileChangeToken(info)
 	job.mu.Unlock()
-	return nil
 }
 
 type jobCapture struct {
