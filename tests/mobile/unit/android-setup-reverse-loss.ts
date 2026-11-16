@@ -35,7 +35,7 @@ async function replay(test: Replay): Promise<void> {
   const saved = { adb: process.env.ADB, marker: process.env.MOBILE_DEVICE_OWNERSHIP_FILE };
   const diagnostics = new DiagnosticRecorder();
   let now = 0;
-  const budget = new PhaseBudget('setup-reverse-loss', { timeoutMs: 300_000, recoveryLimit: test.cap ? 0 : 4, now: () => now });
+  const budget = new PhaseBudget('setup-reverse-loss', { timeoutMs: 300_000, recoveryLimit: test.cap ? 0 : 4, now: () => now, sleep: async ms => { now += ms } });
   const originalDeadline = budget.snapshot().deadline;
   let creates = 0;
   let original: unknown;

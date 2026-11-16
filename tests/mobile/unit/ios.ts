@@ -65,12 +65,12 @@ async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
   }
 }
 
-async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, nativeDefaults = true,
+async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, sleep?: (ms: number) => Promise<void>, nativeDefaults = true,
   enforcementClock?: RequestEnforcementClock, onRequest?: (request: Request) => void, fixtureSignal?: AbortSignal,
   beforeNativeDispatch?: (phase: PhaseBudget) => void, timeoutMs = 120_000) {
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
-  const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now });
+  const budget = new PhaseBudget(name, { timeoutMs, recoveryLimit: 0, now, sleep });
   const io: IOSPlatformIO = {
     navigationCommand: command,
     launchCollector: collectIOSLaunchReceipt,
@@ -162,6 +162,7 @@ async function attachment(name: string, overrides: {
   document?: () => unknown;
   switchContext?: (id: string) => Response | undefined;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 } = {}) {
   return adapter(name, ({ path, body }) => {
     if (body.script === 'mobile: getInstalledContexts') {
@@ -178,7 +179,7 @@ async function attachment(name: string, overrides: {
       return value(overrides.document?.() ?? { origin, standalone: true, applicationInitialized: true });
     }
     throw new Error(`unexpected attachment operation ${path} ${JSON.stringify(body)}`);
-  }, overrides.now);
+  }, overrides.now, overrides.sleep);
 }
 
 async function assertPermanentFailure(platform: IOSPlatform, requests: Request[], operation: () => Promise<void>, pattern = /IOS_CONTEXT_OWNERSHIP/u) {
@@ -252,7 +253,7 @@ for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const)
         return value(`${origin}/`);
       }
       throw new Error(`unexpected attachment timing operation ${path}`);
-    }, () => now, false); // No default handler may silently satisfy a native fence.
+    }, () => now, async ms => { now += ms }, false); // No default handler may silently satisfy a native fence.
     const fatal = mode === 'timeout' || mode === 'interrupted';
     await assert.rejects(() => platform.attachToInstalledView(), fatal
       ? mode === 'timeout' ? /APPIUM_TIMEOUT/u : /APPIUM_INTERRUPTED/u
@@ -377,6 +378,7 @@ test('installed scoped discovery admits no partial request after native observat
   let now = 0;
   const { platform, driver, requests, budget } = await attachment('scope-reserve', {
     now: () => now,
+    sleep: async ms => { now += ms },
     foreground: () => { now += 3_000 * timingScale; return recorded.foreground; },
   });
   await assert.rejects(() => platform.attachToInstalledView(30_000), /IOS_CONTEXT: no installed/u);
@@ -391,7 +393,7 @@ test('installed discovery timeout preserves the hosted phase and ignores late li
   let discoveries = 0;
   let reply!: (response: Response) => void;
   const now = () => clockMs;
-  const budget = new PhaseBudget('recorded-hosted-discovery', { timeoutMs: 45 * 60_000, now, recoveryLimit: 0 });
+  const budget = new PhaseBudget('recorded-hosted-discovery', { timeoutMs: 45 * 60_000, now, sleep: async ms => { clockMs += ms }, recoveryLimit: 0 });
   const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir: outputRoot, certificate: '', deviceId: 'protocol-only', budget });
   const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
     if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
@@ -533,7 +535,7 @@ for (const mode of ['ready', 'absent'] as const) {
         return value(`${origin}/`);
       }
       throw new Error(`unexpected hosted Safari operation ${path}`);
-    }, () => now);
+    }, () => now, async ms => { now += ms });
     (platform as any).simulatorReadyAt = '2026-10-22T09:56:48.108Z';
     io.navigationCommand = async (binary, args, timeoutMs = 0) => {
       assert.equal(binary, 'xcrun');
@@ -601,6 +603,7 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
   test(`cold Safari attach ${mode} preserves admission and quarantine`, async () => {
     let now = 0;
     let settled = false;
+    const clocked = mode === 'insufficient';
     const { platform, driver, requests, budget } = await adapter(`cold-attach-${mode}`, async ({ path, body }) => {
       if (body.script === 'mobile: getContexts') {
         if (mode === 'insufficient') now = 80_000;
@@ -611,7 +614,7 @@ for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
       await wait(15_300);
       settled = true;
       return value(null);
-    }, mode === 'insufficient' ? () => now : undefined);
+    }, clocked ? () => now : undefined, clocked ? async ms => { now += ms } : undefined);
     await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget), mode === 'insufficient' ? /IOS_NAVIGATION/u : /APPIUM_/u);
     const count = requests.length;
     assert.equal(requests.filter(request => request.path.endsWith('/context')).length, mode === 'insufficient' ? 0 : 1);
@@ -653,10 +656,10 @@ for (const mode of ['parent', 'absent', 'backend-error', 'interrupted-body'] as 
     const { platform, driver, requests, budget } = await adapter(`safari-discovery-${mode}`, ({ body }) => {
       assert.equal(body.script, 'mobile: getContexts');
       if (mode === 'interrupted-body') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('interrupted discovery body')); } }));
-      now += 45_000;
+      now += 44_750;
       if (mode === 'backend-error') return Response.json({ value: { error: 'unknown error', message: 'discovery backend unavailable' } }, { status: 500 });
       return value([{ id: 'NATIVE_APP' }]);
-    }, () => now);
+    }, () => now, async ms => { now += ms });
     const phase = budget.phaseView('navigation', mode === 'parent' ? 50_999 : 96_000);
     await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, phase), mode === 'interrupted-body' ? /APPIUM_/u : /IOS_NAVIGATION/u);
     assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, mode === 'parent' ? 0 : mode === 'interrupted-body' ? 1 : 2);
@@ -705,11 +708,11 @@ test('Safari native-only discovery retains the first cause and reserve boundary 
     if (body.script === 'mobile: getContexts') {
       assert.equal(published, false, 'late page publication must not trigger another discovery');
       discoveries += 1;
-      now = discoveries === 1 ? 45_000 : 45_001;
+      now = discoveries === 1 ? 44_750 : 44_751;
       return value(availableContexts);
     }
     throw new Error(`unexpected late-publication operation ${JSON.stringify(body)}`);
-  }, () => now);
+  }, () => now, async ms => { now += ms });
 
   const originalSetTimeout = globalThis.setTimeout;
   (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
@@ -732,7 +735,7 @@ test('Safari native-only discovery retains the first cause and reserve boundary 
   assert.equal((beforeLatePublication as any).lastDiscovery.result, 'native-only');
   assert.equal((beforeLatePublication as any).lastDiscovery.cause, 'Safari did not publish a web context');
   assert.equal(discoveries, 2);
-  assert.equal((beforeLatePublication as any).lastDiscovery.remainingMs, 50_999);
+  assert.equal((beforeLatePublication as any).lastDiscovery.remainingMs, 51_249);
   assert.equal((beforeLatePublication as any).reserveExhaustion.reason, 'discovery-observation');
   assert.equal((beforeLatePublication as any).reserveExhaustion.remainingMs, 50_999);
   assert.equal((beforeLatePublication as any).firstFailure.kind, 'discovery');
@@ -771,11 +774,11 @@ test('Safari diagnostic inspection caps oversized metadata without changing sele
   const { platform, driver, requests, budget } = await adapter('safari-oversized-diagnostics', ({ body }) => {
     if (body.script === 'mobile: getContexts') {
       discoveries += 1;
-      now = 45_001;
+      now = 44_751;
       return value(oversizedMetadata);
     }
     throw new Error(`unexpected oversized-diagnostics operation ${JSON.stringify(body)}`);
-  }, () => now);
+  }, () => now, async ms => { now += ms });
   const originalSetTimeout = globalThis.setTimeout;
   (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
   try {
@@ -810,7 +813,7 @@ test('Safari discovery and observation evidence remain separate at reserve exhau
     }
     if (path.endsWith('/url') && body.url) return value(null);
     throw new Error(`unexpected observation-reserve operation ${path} ${JSON.stringify(body)}`);
-  }, () => now);
+  }, () => now, async ms => { now += ms });
 
   await assert.rejects(
     () => (platform as any).waitForSafariFixturePage(`${origin}/`, 96_000, budget),
@@ -836,7 +839,7 @@ for (const budgetSource of ['attachment', 'parent'] as const) {
     let now = 0;
     const { platform, driver, requests } = await adapter(`publication-budget-${budgetSource}`, () => {
       throw new Error('no partial discovery is admissible');
-    }, () => now);
+    }, () => now, async ms => { now += ms });
     if (budgetSource === 'parent') now = 103_000;
     await assert.rejects(() => platform.attachToInstalledView(budgetSource === 'attachment' ? 17_000 : undefined), /IOS_CONTEXT: no installed.*not enough time for WebKit discovery/u);
     assert.equal(requests.length, 1);
@@ -851,6 +854,7 @@ for (const metadata of ['blank', 'absent', 'unrelated-browser'] as const) {
     let discoveries = 0;
     const { platform, driver, requests } = await attachment(`never-${metadata}`, {
       now: () => now,
+      sleep: async ms => { now += ms },
       contexts: () => { discoveries += 1; now += 10_000; return metadata === 'blank' ? [installed] : metadata === 'absent' ? [] : [recorded.contexts[1]]; },
     });
     const reason = metadata === 'blank' ? /initial page publication is pending/u : metadata === 'absent' ? /installed page metadata is unavailable/u : /no installed page for/u;
@@ -984,6 +988,7 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
       if (!scrolling) return before;
       return before.replace(/\by="(-?\d+)"/gu, (match, y) => Number(y) >= 645 ? `y="${Number(y) - scrolls * 2}"` : match);
     };
+    const clocked = mode.startsWith('add-') && mode !== 'add-hung';
     const { platform, driver, requests } = await adapter(`share-${mode}`, async ({ path, body, signal }) => {
       if (path.endsWith('/context')) return value(null);
       if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.mobilesafari', pid: 20640 });
@@ -1063,7 +1068,7 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
         return value(null);
       }
       throw new Error(`unexpected Share command ${path} ${JSON.stringify(body)}`);
-    }, mode.startsWith('add-') && mode !== 'add-hung' ? () => now : undefined);
+    }, clocked ? () => now : undefined, clocked ? async ms => { now += ms } : undefined);
     if (scrolling) {
       const operation = () => (platform as any).findNativeScrollable([{ using: 'xpath', value: "//*[@name='ActivityListView']//*[@name='activityCollectionView']//*[@name='actionGroupCell' and contains(@label, 'Add to Home Screen')]" }], 'Add to Home Screen', 60_000);
       if (mode === 'limit') await assert.rejects(operation, /scroll limit/u);
@@ -1161,7 +1166,7 @@ for (const mode of ['ready', 'unchanged', 'no-target', 'ambiguous', 'hidden', 'd
         return value(null);
       }
       throw new Error(`unexpected expansion command ${path} ${JSON.stringify(body)}`);
-    }, () => now);
+    }, () => now, async ms => { now += ms });
     if (mode === 'context-lookup') {
       const findAll = driver.findAll.bind(driver);
       driver.findAll = async (...args: Parameters<AppiumClient['findAll']>) => {
@@ -1416,6 +1421,7 @@ async function confirmationReplay(name: string, options: {
       observations.push({ boundary, lookup: lookups, now });
     });
   };
+  const clocked = !(fixture || options.latency || options.faultAt === 'activity-click');
   const { platform, driver, requests, budget, outputDir, io } = await adapter(`confirmation-${name}`, async ({ path, body, signal }) => {
     const responseBody = (kind: 'hung' | 'interrupted' | 'late') => new Response(new ReadableStream({
       start(controller) {
@@ -1488,7 +1494,6 @@ async function confirmationReplay(name: string, options: {
       }
       assert.ok(xpathCount(source, body.value) > 0, 'real adapter selector must match recorded Share XML');
       const target = body.value.includes('Add to Home Screen');
-      if (target && options.parentRemaining !== undefined && !confirming) now = 120_000 - options.parentRemaining;
       return value([element(`${target ? 'target' : 'container'}-${scrolls}`)]);
     }
     if (path.endsWith('/element')) {
@@ -1527,6 +1532,7 @@ async function confirmationReplay(name: string, options: {
         if (state() === 'not-hittable' && attribute === 'hittable') return value('false');
         if (state() === 'indeterminate' && attribute === 'enabled') return value(null);
       }
+      if (path.includes('/container-') && path.endsWith('/visible') && options.parentRemaining !== undefined && !confirming) now = 120_000 - options.parentRemaining;
       if (path.includes('/target-') && /\/(?:visible|hittable)$/u.test(path)) return value(String(scrolls > 0));
       return value('true');
     }
@@ -1549,7 +1555,7 @@ async function confirmationReplay(name: string, options: {
       return value(null);
     }
     throw new Error(`unexpected confirmation request ${path} ${JSON.stringify(body)}`);
-  }, fixture || options.latency || options.faultAt === 'activity-click' ? undefined : () => now);
+  }, clocked ? () => now : undefined, clocked ? async ms => { now += ms } : undefined);
   const originalCommand = driver.command.bind(driver);
   driver.command = async (path, method, body, timeoutMs, policy) => {
     try {
@@ -2039,14 +2045,14 @@ test('confirmation child starts after activity click and keeps its full completi
   const skip = requireXmlLint();
   if (skip) return skip;
   const replay = await confirmationReplay('activity-click-duration', {
-    states: [...Array.from({ length: 12 }, () => 'disabled' as const), 'ready'],
+    states: [...Array.from({ length: 11 }, () => 'disabled' as const), 'ready'],
     activityDuration: 4_000,
     after: (boundary) => boundary === 'lookup' ? 3_000 : 0,
   });
   assert.equal(replay.error, undefined);
-  assert.equal(replay.lookups, 13);
-  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-13']);
-  assert.ok(replay.observations.some((entry) => entry.lookup === 13 && entry.boundary === 'enabled' && entry.now === 43_000));
+  assert.equal(replay.lookups, 12);
+  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-12']);
+  assert.ok(replay.observations.some((entry) => entry.lookup === 12 && entry.boundary === 'enabled' && entry.now === 42_750));
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
@@ -2588,7 +2594,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
 
 test('an insufficient navigation budget records prerequisite skips without admitting a command', async () => {
   let now = 0;
-  const { platform, io, requests } = await adapter('navigation-budget', () => { throw new Error('no diagnostic request is admissible'); }, () => now);
+  const { platform, io, requests } = await adapter('navigation-budget', () => { throw new Error('no diagnostic request is admissible'); }, () => now, async ms => { now += ms });
   io.navigationCommand = () => { throw new Error('no process is admissible'); };
   now = 119_900;
   await assert.rejects(() => platform.openSetupURL(`${origin}/`), /insufficient time for a complete openurl command/u);
@@ -2622,7 +2628,7 @@ type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' 
 
 async function lifecycleReplay(name: string, options: {
   foreground?: string; home?: HomeLaunchMode; page?: string;
-  now?: () => number; timeoutMs?: number;
+  now?: () => number; sleep?: (ms: number) => Promise<void>; timeoutMs?: number;
   reply?: (request: Request) => Response | undefined;
   beforeNativeDispatch?: (phase: PhaseBudget) => void;
 } = {}) {
@@ -2760,7 +2766,7 @@ async function lifecycleReplay(name: string, options: {
     if (path.endsWith('/url')) return value(state.url);
     if (body.script?.startsWith('return {')) return value({ origin: state.documentOrigin, standalone: state.standalone, applicationInitialized: true });
     throw new Error(`unexpected lifecycle request ${path} ${JSON.stringify(body)}`);
-  }, options.now, false, undefined, undefined, undefined, options.beforeNativeDispatch, options.timeoutMs);
+  }, options.now, options.sleep, false, undefined, undefined, undefined, options.beforeNativeDispatch, options.timeoutMs);
   (replay.platform as any).installedBundleId = '';
   (replay.platform as any).springBoardRoot = '';
   const marker = join(replay.outputDir, 'ios-ownership');
@@ -3122,7 +3128,7 @@ async function homeBoundaryReplay(mode: HomeBoundaryMode) {
   const originalParse = JSON.parse;
   const deadline = () => now + phases.get('ios-home-readiness')!.remainingMs;
   const a = await lifecycleReplay(`Home-boundary-${mode}`, {
-    now: () => now, timeoutMs: 45 * 60_000,
+    now: () => now, sleep: async ms => { now += ms }, timeoutMs: 45 * 60_000,
     reply: ({ path, body }) => {
       if (!cold) return undefined;
       if (body.script === 'mobile: swipe') {
@@ -3371,7 +3377,8 @@ for (const mode of ['missing', 'query-gap', 'attribute-gap', 'minimum-gap', 'gua
 
 test('Home boundary SDK poison precedes nominal minimum admission with one unsent receipt', async () => {
   for (const poisoned of [true, false]) {
-    const a = await adapter(`minimum-poison-${poisoned}`, () => value(null), () => 0);
+    let now = 0;
+    const a = await adapter(`minimum-poison-${poisoned}`, () => value(null), () => now, async ms => { now += ms });
     const policy = a.driver.nativeRequestPolicy(a.budget);
     const followups: Promise<void>[] = [];
     a.driver.setCommandGuard({
@@ -3595,6 +3602,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
     pending.push(promise);
     await promise;
   };
+  const clocked = !timed && !/^(?:hung|late|interrupted)-/u.test(mode);
   const a = await within(adapter(`hierarchy-${mode}`, async ({ path, body, signal }) => {
     if (path.endsWith('/context')) {
       if (mode === 'parent-initial') now = 112_001;
@@ -3719,7 +3727,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
       return value(null);
     }
     throw new Error(`unexpected hierarchy request ${path} ${JSON.stringify(body)}`);
-  }, timed || /^(?:hung|late|interrupted)-/u.test(mode) ? undefined : () => now,
+  }, clocked ? () => now : undefined, clocked ? async ms => { now += ms } : undefined,
   true, requestClock, (request) => {
     if (request.body.script === 'mobile: scroll') reportGestureDispatch(request);
   }, fixtureSignal, (phase) => {
@@ -4411,7 +4419,7 @@ async function receiptCaptureAdapter(name: string, clock = new ReceiptClock()) {
   const a = await adapter(`receipt-${name}`, ({ path }) => {
     if (path.endsWith('/screenshot')) return value('');
     throw new Error('unexpected receipt gameplay command');
-  }, clock.mono);
+  }, clock.mono, async ms => { clock.elapsed += ms });
   const internal = a.platform as any;
   internal.udid = receiptUdid;
   internal.launchObservation = new IOSLaunchObservation(clock);
@@ -4475,7 +4483,7 @@ async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode
     if (path.endsWith('/url')) return value(`${origin}/`);
     if (body.script?.startsWith('return {')) return value({ origin, standalone: true, applicationInitialized: true });
     throw new Error('unexpected receipt launch command');
-  }, clock.mono, false);
+  }, clock.mono, async ms => { clock.elapsed += ms }, false);
   const internal = a.platform as any;
   internal.udid = receiptUdid;
   internal.launchObservation = new IOSLaunchObservation(clock);

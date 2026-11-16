@@ -31,7 +31,7 @@ async function fixture(mode: Mode) {
     },
     clear: id => { timers.delete(id); },
   };
-  const budget = new PhaseBudget('handoff-scenario', { timeoutMs: 45 * 60_000, now: clock.now, recoveryLimit: 0 });
+  const budget = new PhaseBudget('handoff-scenario', { timeoutMs: 45 * 60_000, now: clock.now, sleep: async ms => { now += ms }, recoveryLimit: 0 });
   const phaseView = budget.phaseView.bind(budget);
   budget.phaseView = (name, timeout, reserve) => {
     const phase = phaseView(name, timeout, reserve);
@@ -189,14 +189,14 @@ for (const mode of ['boundary', 'early'] as const) {
     assert.ok(observed.validatedAt < observed.providerDeadline);
     if (mode === 'boundary') {
       assert.equal(observed.providerDeadline - observed.validatedAt, 35);
-      assert.ok(Math.abs(observed.now - observed.providerDeadline - 47.67) < 0.001);
+      assert.ok(Math.abs(observed.now - observed.providerDeadline - 797.67) < 0.001);
       assert.equal(observed.queryTimerMs, Math.floor((timingScale === 1 ? 1_000 : 1_261) / timingScale) * timingScale);
     }
     assert.equal(observed.attachmentEntries, 1);
     assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
     assert.equal(a.driver.snapshot().unusable, false);
     assert.equal(a.driver.snapshot().firstFatal, undefined);
-    assert.equal(a.phases.get('ios-provider')!.snapshot().deadline, new Date(30_000 * timingScale).toISOString());
+    assert.equal(a.phases.get('ios-provider')!.snapshot().deadline, new Date(30_000 * timingScale + 750).toISOString());
     assert.equal(a.phases.get('ios-launch')!.snapshot().deadline, new Date(180_000 * timingScale).toISOString());
     assert.equal(a.budget.recoveryCount, 0);
     assert.equal(a.timers.size, 0);

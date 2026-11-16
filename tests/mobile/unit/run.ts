@@ -1279,7 +1279,7 @@ test('Android fixture verification rejects unsafe HTTP response identities witho
     const platform = new AndroidPlatform({
       origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
       certificate: '', deviceId: 'emulator-5554',
-      budget: new PhaseBudget(`android-fixture-rejection-${index}`, { timeoutMs: 350, recoveryLimit: 1, now: () => clock.value }),
+      budget: new PhaseBudget(`android-fixture-rejection-${index}`, { timeoutMs: 350, recoveryLimit: 1, now: () => clock.value, sleep: async ms => { clock.value += ms } }),
     });
     const driver = platform.driver as any;
     driver.contexts = async () => ['NATIVE_APP', 'CHROMIUM'];

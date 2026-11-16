@@ -17,7 +17,7 @@ async function replay(mode: Mode): Promise<void> {
   const start = AndroidStartupLog.prototype.start;
   AndroidStartupLog.prototype.start = function () {};
   let now = 0;
-  const budget = new PhaseBudget('startup-replay', { timeoutMs: 300_000, now: () => now });
+  const budget = new PhaseBudget('startup-replay', { timeoutMs: 300_000, now: () => now, sleep: async ms => { now += ms } });
   const trace: string[] = [];
   const log = join(root, 'adb.log');
   let chromeAttempts = 0;
