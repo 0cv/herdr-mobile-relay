@@ -90,6 +90,25 @@ const ANDROID_LAUNCHER_CONFIRMATION_MS = 90_000;
 const ANDROID_PICKER_PACKAGE = 'com.google.android.documentsui';
 const ANDROID_PICKER_ACTIVITY = 'com.android.documentsui.picker.PickActivity';
 const ANDROID_NATIVE_SCROLL_COMMAND_MS = 5_000;
+const CHROME_SHORTCUT_WAIT_MS = 30_000;
+const NATIVE_CONTEXT_SWITCH_MS = 2_000;
+const FOREGROUND_EVIDENCE_MS = 5_000;
+const CHROME_STOPPED_CHECK_MS = 5_000;
+const CHROME_PROCESS_READ_MS = 5_000;
+const SIGNED_INTENT_COMMAND_MS = 30_000;
+const INSTALLED_TARGET_WAIT_MS = 30_000;
+const INSTALLED_TARGET_TAIL_MS = 10_000;
+const DEVTOOLS_WAIT_MS = 30_000;
+const DEVTOOLS_TAIL_MS = 10_000;
+const INSTALLED_VIEW_INSPECTION_MS = 26_000;
+const INSTALLED_VIEW_WARM_INSPECTION_MS = 13_000;
+const CHROME_SESSION_CREATE_MS = 70_000;
+const NATIVE_SETTINGS_MS = 20_000;
+const NATIVE_SETTINGS_REQUEST_MS = 10_000;
+const HOME_KEYEVENT_COMMAND_MS = 30_000;
+const CLOSE_OWNED_SESSION_MS = 30_000;
+const COLD_INTENT_TAIL_MS = 146_000;
+const BACKGROUND_SETTLE_MS = 500;
 const ANDROID_NATIVE_SCROLL_LIMIT = 8;
 const CHROME_WEBAPP_ACTION = 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP';
 const CHROME_WEBAPP_COMPONENT = 'com.android.chrome/org.chromium.chrome.browser.webapps.WebappLauncherActivity';
@@ -499,7 +518,7 @@ export class AndroidPlatform implements MobilePlatform {
     // Do not proceed merely because the launcher overlay disappeared. Chrome
     // publishes the signed ShortcutInfo asynchronously, and that record is
     // the durable install evidence when no WebAPK package or icon exists.
-    await this.waitForChromeShortcut(30_000);
+    await this.waitForChromeShortcut(CHROME_SHORTCUT_WAIT_MS);
     await delay(1_500);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
   }
@@ -531,16 +550,16 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async launchInstalledTarget(mode: 'initial' | 'warm' | 'cold'): Promise<void> {
-    const selectionTail = mode === 'warm' ? 13_000 : 26_000;
-    const attachmentTail = (mode === 'cold' ? 70_000 + 20_000 : 0) + 5_000 + selectionTail;
-    const contextTail = mode === 'initial' ? 2_000 : 0;
-    const intentTail = 5_000 + 10_000 + 10_000 + attachmentTail;
-    this.requireLifecycleAllowance(30_000 + contextTail + 5_000 + 5_000 + 30_000 + intentTail);
+    const selectionTail = mode === 'warm' ? INSTALLED_VIEW_WARM_INSPECTION_MS : INSTALLED_VIEW_INSPECTION_MS;
+    const attachmentTail = (mode === 'cold' ? CHROME_SESSION_CREATE_MS + NATIVE_SETTINGS_MS : 0) + CHROME_PROCESS_READ_MS + selectionTail;
+    const contextTail = mode === 'initial' ? NATIVE_CONTEXT_SWITCH_MS : 0;
+    const intentTail = FOREGROUND_EVIDENCE_MS + INSTALLED_TARGET_TAIL_MS + DEVTOOLS_TAIL_MS + attachmentTail;
+    this.requireLifecycleAllowance(CHROME_SHORTCUT_WAIT_MS + contextTail + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
     await requireOwnedDevice('android', this.serial);
-    this.requireLifecycleAllowance(30_000 + contextTail + 5_000 + 5_000 + 30_000 + intentTail);
-    const shortcut = await this.waitForChromeShortcut(30_000, contextTail + 5_000 + 5_000 + 30_000 + intentTail,
+    this.requireLifecycleAllowance(CHROME_SHORTCUT_WAIT_MS + contextTail + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
+    const shortcut = await this.waitForChromeShortcut(CHROME_SHORTCUT_WAIT_MS, contextTail + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail,
       mode === 'initial' ? undefined : this.installedTarget?.shortcut);
-    this.requireLifecycleAllowance(5_000 + 5_000 + 30_000 + intentTail);
+    this.requireLifecycleAllowance(FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
     if (mode === 'initial') {
       this.installedTarget = Object.freeze({
         packageName: 'com.android.chrome',
@@ -551,23 +570,23 @@ export class AndroidPlatform implements MobilePlatform {
     this.lastLaunch = { shortcut: this.shortcutEvidence(shortcut), transitions: [] };
     this.diagnostics.record({ phase: 'android-launch', operation: 'shortcut-observed', detail: this.lastLaunch.shortcut });
     if (mode === 'initial') {
-      this.requireLifecycleAllowance(2_000 + 5_000 + 5_000 + 30_000 + intentTail);
-      await this.driver.switchContext('NATIVE_APP', 2_000);
+      this.requireLifecycleAllowance(NATIVE_CONTEXT_SWITCH_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
+      await this.driver.switchContext('NATIVE_APP', NATIVE_CONTEXT_SWITCH_MS);
     }
     await this.recordLaunchForeground('before-command');
-    this.requireLifecycleAllowance(5_000 + 30_000 + intentTail);
+    this.requireLifecycleAllowance(CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
     if (mode === 'cold') await this.assertChromeStopped();
     else await this.assertRetainedOwner();
-    this.requireLifecycleAllowance(30_000 + intentTail);
+    this.requireLifecycleAllowance(SIGNED_INTENT_COMMAND_MS + intentTail);
     await this.launchChromeShortcut(shortcut, intentTail);
     this.requireLifecycleAllowance(intentTail);
     await this.recordLaunchForeground('after-command');
-    this.requireLifecycleAllowance(10_000 + 10_000 + attachmentTail);
-    await this.waitForInstalledTarget(30_000, undefined, 10_000 + attachmentTail);
-    this.requireLifecycleAllowance(10_000 + attachmentTail);
-    await this.waitForChromeDevTools(30_000, attachmentTail);
+    this.requireLifecycleAllowance(INSTALLED_TARGET_TAIL_MS + DEVTOOLS_TAIL_MS + attachmentTail);
+    await this.waitForInstalledTarget(INSTALLED_TARGET_WAIT_MS, undefined, DEVTOOLS_TAIL_MS + attachmentTail);
+    this.requireLifecycleAllowance(DEVTOOLS_TAIL_MS + attachmentTail);
+    await this.waitForChromeDevTools(DEVTOOLS_WAIT_MS, attachmentTail);
     this.requireLifecycleAllowance(attachmentTail);
-    if (mode === 'cold') await this.createChromeSession(true, 26_000);
+    if (mode === 'cold') await this.createChromeSession(true, INSTALLED_VIEW_INSPECTION_MS);
     else await this.assertRetainedOwner();
     this.requireLifecycleAllowance(selectionTail);
     await this.inspectInstalledView();
@@ -614,9 +633,9 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async assertChromeStopped(): Promise<void> {
-    this.requireLifecycleAllowance(5_000);
+    this.requireLifecycleAllowance(CHROME_STOPPED_CHECK_MS);
     try {
-      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'pidof', 'com.android.chrome'], 5_000, { budget: this.budget });
+      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'pidof', 'com.android.chrome'], CHROME_STOPPED_CHECK_MS, { budget: this.budget });
     } catch (error) {
       this.assertDriverClear();
       if (error instanceof CommandError && error.exitCode === 1 && !error.timedOut && !error.signal
@@ -736,12 +755,12 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async launchChromeShortcut(shortcut?: AndroidChromeShortcut, reserveMs = 0): Promise<CommandResult> {
-    const launchShortcut = shortcut || await this.waitForChromeShortcut(30_000, reserveMs);
-    const phase = this.budget.phaseView('android-signed-intent', 30_000, reserveMs);
-    this.requireLifecycleAllowance(30_000 + reserveMs);
+    const launchShortcut = shortcut || await this.waitForChromeShortcut(CHROME_SHORTCUT_WAIT_MS, reserveMs);
+    const phase = this.budget.phaseView('android-signed-intent', SIGNED_INTENT_COMMAND_MS, reserveMs);
+    this.requireLifecycleAllowance(SIGNED_INTENT_COMMAND_MS + reserveMs);
     const args = androidChromeShortcutArgs(this.serial, launchShortcut);
     try {
-      const result = await command(process.env.ADB || 'adb', args, 30_000, { budget: phase });
+      const result = await command(process.env.ADB || 'adb', args, SIGNED_INTENT_COMMAND_MS, { budget: phase });
       phase.assertAvailable('signed intent settlement');
       this.requireLifecycleAllowance(reserveMs);
       if (result.stderr.trim() || !/^\s*Status:\s*ok\s*$/mu.test(result.stdout) || /(?:^|\n)\s*Error:/u.test(result.stdout)) {
@@ -811,7 +830,7 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async recordLaunchForeground(label: string): Promise<void> {
     try {
-      const evidence = await this.foregroundEvidence(5_000, this.budget);
+      const evidence = await this.foregroundEvidence(FOREGROUND_EVIDENCE_MS, this.budget);
       this.assertOwnershipClear();
       this.budget.assertAvailable('foreground settlement');
       const detail = {
@@ -1064,15 +1083,15 @@ export class AndroidPlatform implements MobilePlatform {
   async backgroundApp(): Promise<void> {
     this.beginLifecycle();
     try {
-      this.requireLifecycleAllowance(5_000 + 2_000 + 30_000 + 500);
+      this.requireLifecycleAllowance(CHROME_PROCESS_READ_MS + NATIVE_CONTEXT_SWITCH_MS + HOME_KEYEVENT_COMMAND_MS + BACKGROUND_SETTLE_MS);
       await requireOwnedDevice('android', this.serial);
       await this.assertRetainedOwner();
-      this.requireLifecycleAllowance(2_000 + 30_000 + 500);
-      await this.driver.switchContext('NATIVE_APP', 2_000);
-      this.requireLifecycleAllowance(30_000 + 500);
-      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], 30_000, { budget: this.budget });
-      this.requireLifecycleAllowance(500);
-      await delay(500, this.budget);
+      this.requireLifecycleAllowance(NATIVE_CONTEXT_SWITCH_MS + HOME_KEYEVENT_COMMAND_MS + BACKGROUND_SETTLE_MS);
+      await this.driver.switchContext('NATIVE_APP', NATIVE_CONTEXT_SWITCH_MS);
+      this.requireLifecycleAllowance(HOME_KEYEVENT_COMMAND_MS + BACKGROUND_SETTLE_MS);
+      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], HOME_KEYEVENT_COMMAND_MS, { budget: this.budget });
+      this.requireLifecycleAllowance(BACKGROUND_SETTLE_MS);
+      await delay(BACKGROUND_SETTLE_MS, this.budget);
       this.requireLifecycleAllowance(0);
     } catch (error) {
       this.failLifecycle(error);
@@ -1107,12 +1126,12 @@ export class AndroidPlatform implements MobilePlatform {
         }
       };
       this.assertRetainedSession();
-      this.requireLifecycleAllowance(5_000 + 30_000 + 30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      this.requireLifecycleAllowance(CHROME_STOPPED_CHECK_MS + CLOSE_OWNED_SESSION_MS + CHROME_SHORTCUT_WAIT_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + COLD_INTENT_TAIL_MS);
       await this.assertChromeStopped();
       this.assertRetainedSession();
-      this.requireLifecycleAllowance(30_000 + 30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      this.requireLifecycleAllowance(CLOSE_OWNED_SESSION_MS + CHROME_SHORTCUT_WAIT_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + COLD_INTENT_TAIL_MS);
       await this.closeOwnedSession();
-      this.requireLifecycleAllowance(30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      this.requireLifecycleAllowance(CHROME_SHORTCUT_WAIT_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + COLD_INTENT_TAIL_MS);
       if (this.retainedOwner !== handoff.owner) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'retired cold owner changed');
       this.retainedOwner = undefined;
       this.coldProductHandoff = true;
@@ -1136,9 +1155,9 @@ export class AndroidPlatform implements MobilePlatform {
       await this.assertRetainedOwner();
       await this.inspectInstalledView();
       this.requireLifecycleAllowance(157_000);
-      await this.driver.switchContext('NATIVE_APP', 2_000);
+      await this.driver.switchContext('NATIVE_APP', NATIVE_CONTEXT_SWITCH_MS);
       this.requireLifecycleAllowance(155_000);
-      const foreground = await this.foregroundEvidence(5_000, this.budget);
+      const foreground = await this.foregroundEvidence(FOREGROUND_EVIDENCE_MS, this.budget);
       this.requireLifecycleAllowance(150_000);
       const owner = this.retainedOwner!;
       const target = this.installedTarget!;
@@ -1155,9 +1174,9 @@ export class AndroidPlatform implements MobilePlatform {
       };
       this.assertRetainedSession();
       await measurement.terminate(foreground.packageName, foreground.pid);
-      this.requireLifecycleAllowance(30_000);
+      this.requireLifecycleAllowance(HOME_KEYEVENT_COMMAND_MS);
       this.assertRetainedSession();
-      const home = await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], 30_000, { budget: this.budget });
+      const home = await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], HOME_KEYEVENT_COMMAND_MS, { budget: this.budget });
       this.requireLifecycleAllowance(0);
       if (home.stdout.trim() || home.stderr.trim()) throw new Error('ANDROID_TERMINATE: HOME returned unexpected output');
       this.assertRetainedSession();
@@ -1328,22 +1347,22 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async createChromeSession(attachToRunningApp: boolean, reserveMs = 0): Promise<void> {
     this.assertDriverClear();
-    if (reserveMs) this.requireLifecycleAllowance(70_000 + 20_000 + 5_000 + reserveMs);
-    if (this.budget.remainingMs < 70_000) throw new Error('ANDROID_SESSION: insufficient parent allowance including retained producer startup');
+    if (reserveMs) this.requireLifecycleAllowance(CHROME_SESSION_CREATE_MS + NATIVE_SETTINGS_MS + CHROME_PROCESS_READ_MS + reserveMs);
+    if (this.budget.remainingMs < CHROME_SESSION_CREATE_MS) throw new Error('ANDROID_SESSION: insufficient parent allowance including retained producer startup');
     if (this.driver.snapshot().sessionId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'previous session was not retired before creation');
     this.ownedSessionClose = undefined;
     const options: SessionOptions = {
       capabilities: androidChromeCapabilities(this.serial, attachToRunningApp),
-      requestTimeoutMs: 70_000,
+      requestTimeoutMs: CHROME_SESSION_CREATE_MS,
       budget: this.budget,
     };
     if (!attachToRunningApp && this.setupAttempted) await this.createSetupSession(options);
     else await this.driver.create(options);
     this.assertDriverClear();
-    if (reserveMs) this.requireLifecycleAllowance(20_000 + 5_000 + reserveMs);
-    await this.configureNativeSettings(reserveMs + (reserveMs ? 5_000 : 0));
+    if (reserveMs) this.requireLifecycleAllowance(NATIVE_SETTINGS_MS + CHROME_PROCESS_READ_MS + reserveMs);
+    await this.configureNativeSettings(reserveMs + (reserveMs ? CHROME_PROCESS_READ_MS : 0));
     this.assertDriverClear();
-    if (reserveMs) this.requireLifecycleAllowance(5_000 + reserveMs);
+    if (reserveMs) this.requireLifecycleAllowance(CHROME_PROCESS_READ_MS + reserveMs);
     const assertSession = this.driver.retainSessionOwner();
     try {
       const process = await this.readChromeProcess();
@@ -1450,15 +1469,15 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async configureNativeSettings(reserveMs = 0): Promise<void> {
-    if (reserveMs) this.requireLifecycleAllowance(20_000 + reserveMs);
-    const timeoutMs = Math.min(10_000, this.budget.remainingMs);
+    if (reserveMs) this.requireLifecycleAllowance(NATIVE_SETTINGS_MS + reserveMs);
+    const timeoutMs = Math.min(NATIVE_SETTINGS_REQUEST_MS, this.budget.remainingMs);
     if (timeoutMs < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to configure native settings');
     const requested = {
       waitForIdleTimeout: ANDROID_NATIVE_IDLE_TIMEOUT_MS,
       waitForSelectorTimeout: ANDROID_NATIVE_SELECTOR_TIMEOUT_MS,
     };
     await this.driver.updateSettings(requested, timeoutMs);
-    if (reserveMs) this.requireLifecycleAllowance(10_000 + reserveMs);
+    if (reserveMs) this.requireLifecycleAllowance(NATIVE_SETTINGS_REQUEST_MS + reserveMs);
     const readbackTimeout = Math.min(timeoutMs, this.budget.remainingMs);
     if (readbackTimeout < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to read back native settings');
     const response = await this.driver.settings(readbackTimeout);
