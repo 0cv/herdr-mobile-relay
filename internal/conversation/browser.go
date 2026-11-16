@@ -1274,35 +1274,35 @@ func (b *Browser) readAgyNative(ctx context.Context, request BrowseRequest, curs
 	if locateCode != "" {
 		return nativeFailure(locateCode, unavailable), nil
 	}
-	entries, hasMore, corrupt, metadata, code := b.reader.agy.readFromContext(ctx, location.Path, before, request.Limit)
+	result := b.reader.agy.readFromContext(ctx, location.Path, before, request.Limit)
 	if ctx.Err() != nil {
 		return browseRequestCancelled(), nil
 	}
-	if code != "" {
-		return nativeFailure(code, unavailable), nil
+	if result.Code != "" {
+		return nativeFailure(result.Code, unavailable), nil
 	}
-	revision := nativeDatabaseRevision(location.Path, metadata.SchemaVersion, "agy")
+	revision := nativeDatabaseRevision(location.Path, result.Metadata.SchemaVersion, "agy")
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return failPage("source_changed", "The Antigravity database changed while history was being browsed.", false), nil
 	}
-	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, fmt.Sprint(metadata.OldestIdx), revision, cursor), nil
+	return b.nativePage(request.Scope, result.Entries, result.HasMore, result.Corrupt, result.Metadata.Total, fmt.Sprint(result.Metadata.OldestIdx), revision, cursor), nil
 }
 
 func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
-	entries, hasMore, corrupt, metadata, code := b.reader.openCode.readContext(ctx, request.Scope.SessionID, before, request.Limit)
+	result := b.reader.openCode.readContext(ctx, request.Scope.SessionID, before, request.Limit)
 	if ctx.Err() != nil {
 		return browseRequestCancelled(), nil
 	}
-	if code != "" {
-		return nativeFailure(code, "OpenCode conversation history is unavailable."), nil
+	if result.Code != "" {
+		return nativeFailure(result.Code, "OpenCode conversation history is unavailable."), nil
 	}
 	// The session ID is authoritative for OpenCode; see readOpenCode.
-	revision := nativeOpenCodeRevision(metadata)
+	revision := nativeOpenCodeRevision(result.Metadata)
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return failPage("source_changed", "The OpenCode database changed while history was being browsed.", false), nil
 	}
-	page := b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, metadata.MessageID, revision, cursor)
-	page.recordedPending = metadata.pendingIDs
+	page := b.nativePage(request.Scope, result.Entries, result.HasMore, result.Corrupt, result.Metadata.Total, result.Metadata.MessageID, revision, cursor)
+	page.recordedPending = result.Metadata.pendingIDs
 	return page, nil
 }
 
@@ -1320,21 +1320,29 @@ func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, c
 		}
 		return nativeFailure(locateCode, "Hermes conversation history is unavailable."), nil
 	}
-	entries, hasMore, corrupt, metadata, code := b.reader.hermes.readFromContext(ctx, location.Path, request.Scope.SessionID, before, request.Limit)
+	result := b.reader.hermes.readFromContext(ctx, location.Path, request.Scope.SessionID, before, request.Limit)
 	if ctx.Err() != nil {
 		return browseRequestCancelled(), nil
 	}
-	if code != "" {
-		return nativeFailure(code, "Hermes conversation history is unavailable."), nil
+	if result.Code != "" {
+		return nativeFailure(result.Code, "Hermes conversation history is unavailable."), nil
 	}
-	if request.Scope.CWD != "" && metadata.CWD != "" && !sameHermesDirectory(request.Scope.CWD, metadata.CWD) {
+	if request.Scope.CWD != "" && result.Metadata.CWD != "" && !sameHermesDirectory(request.Scope.CWD, result.Metadata.CWD) {
 		return browseUnavailable("invalid_session", "This conversation belongs to a different workspace."), nil
 	}
-	revision := nativeHermesRevision(location.Path, metadata)
+	revision := nativeHermesRevision(location.Path, result.Metadata)
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return failPage("source_changed", "The Hermes database changed while history was being browsed.", false), nil
 	}
-	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, fmt.Sprint(metadata.MessageID), revision, cursor), nil
+	return b.nativePage(request.Scope, result.Entries, result.HasMore, result.Corrupt, result.Metadata.Total, fmt.Sprint(result.Metadata.MessageID), revision, cursor), nil
+}
+
+type nativeReadResult[Metadata any] struct {
+	Entries  []Entry
+	HasMore  bool
+	Corrupt  bool
+	Metadata Metadata
+	Code     string
 }
 
 func nativeOpenCodeRevision(metadata openCodeRow) string {
