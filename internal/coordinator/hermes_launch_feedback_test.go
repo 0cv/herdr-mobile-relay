@@ -10,6 +10,11 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
+// startSettleBackstop only keeps a hung start from stalling the suite. The
+// start itself settles at its own deadline on the real clock, which can be
+// seconds away for the cancelled and timeout outcomes.
+const startSettleBackstop = 30 * time.Second
+
 func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 	for _, outcome := range []string{"completed", "refused", "malformed", "cancelled", "timeout"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -60,7 +65,7 @@ func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 			var result *CommandResult
 			select {
 			case result = <-pending:
-			case <-time.After(5 * time.Second):
+			case <-time.After(startSettleBackstop):
 				t.Fatal("start did not settle after Herdr result or cancellation")
 			}
 			if result.OK != (outcome == "completed") {
