@@ -2319,6 +2319,63 @@ test('mobile timing scale stretches phase views and request caps only when confi
   assert.deepEqual(JSON.parse(output.trim().split('\n').at(-1)!), { root: 100_000, child: 20_000, reserved: 98_000, source: 2_000, native: 8_000, admitted: true });
 });
 
+function clockedBudget(timeoutMs: number) {
+  let now = 1_000;
+  const sleeps: number[] = [];
+  const budget = new PhaseBudget('clocked', {
+    timeoutMs,
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      now += ms;
+    },
+  });
+  return { budget, sleeps, time: () => now };
+}
+
+test('PhaseBudget wait uses the injected clock and takes no real time', async () => {
+  const { budget, sleeps, time } = clockedBudget(60_000);
+  const started = performance.now();
+  await budget.wait(30_000);
+  assert.ok(performance.now() - started < 1_000);
+  assert.deepEqual(sleeps, [30_000]);
+  assert.equal(time(), 31_000);
+  assert.equal(budget.remainingMs, 30_000);
+});
+
+test('PhaseBudget wait stops at the remaining time and throws once the budget is exhausted', async () => {
+  const { budget, sleeps, time } = clockedBudget(5_000);
+  await assert.rejects(() => budget.wait(60_000), /PHASE_BUDGET_EXHAUSTED/);
+  assert.deepEqual(sleeps, [5_000]);
+  assert.equal(time(), 6_000);
+  await assert.rejects(() => budget.wait(1), /PHASE_BUDGET_EXHAUSTED/);
+  assert.deepEqual(sleeps, [5_000]);
+});
+
+test('PhaseBudget sleep waits the full time without throwing when the budget is exhausted', async () => {
+  const { budget, sleeps, time } = clockedBudget(5_000);
+  await budget.sleep(20_000);
+  assert.deepEqual(sleeps, [20_000]);
+  assert.equal(time(), 21_000);
+  assert.equal(budget.exhausted, true);
+  await budget.sleep(250);
+  assert.deepEqual(sleeps, [20_000, 250]);
+  assert.equal(budget.now(), 21_250);
+});
+
+test('PhaseBudget phase views use the parent clock and sleep', async () => {
+  const { budget, sleeps, time } = clockedBudget(60_000);
+  const child = budget.phaseView('child', 10_000);
+  assert.equal(child.now(), budget.now());
+  await child.sleep(2_000);
+  assert.deepEqual(sleeps, [2_000]);
+  assert.equal(time(), 3_000);
+  assert.equal(child.now(), 3_000);
+  await child.wait(1_000);
+  assert.deepEqual(sleeps, [2_000, 1_000]);
+  assert.equal(budget.now(), 4_000);
+});
+
 test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
