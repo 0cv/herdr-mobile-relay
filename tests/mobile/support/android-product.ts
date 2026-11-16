@@ -328,6 +328,7 @@ export function publicMobileSummary(result: MobileResultContract, check?: Androi
     componentDeltaCount: check?.componentDeltas.length || 0, omittedComponentDeltas: Math.max(0, (check?.componentDeltas.length || 0) - components.length),
     omittedEvents: Math.max(0, (check?.nativeEvents.length || 0) - events.length),
     fatalEvents: Number.isSafeInteger(check?.eventCounts.fatalEvents) && check!.eventCounts.fatalEvents >= 0 ? check!.eventCounts.fatalEvents : null,
+    helperDeaths: check ? check.helperDeaths.length : null,
   };
   for (const delta of [...components].reverse()) for (const field of [delta.after, delta.before]) {
     while (field.names.length && new TextEncoder().encode(JSON.stringify(summary)).length > 60_000) { field.names.pop(); field.withheldCount++; }

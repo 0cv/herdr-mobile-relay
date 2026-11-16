@@ -584,7 +584,7 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       assert.equal(check.nativeEvents[0].initiatorPid, initiator ? '100' : undefined);
     }
   }],
-  ['Android product/environment SM59 04 retirement and cold handoff', async () => {
+  ['Android product/environment SM59 04 helper deaths and cold handoff', async () => {
     const input = environmentFixture();
     const normal = [
       '1789100401.000 77 77 I Zygote: Forked child process 5820',
@@ -596,21 +596,31 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
     input.log = marker(0, 'START') + normal.join('\n') + '\n' + marker(9, 'END');
     input.collector = JSON.stringify({ bytes: Buffer.byteLength(input.log) });
     assert.equal(assessAndroidEnvironment(input, measurementIdentity()).normalRetirements.length, 1);
-    for (const mutation of ['fork', 'birth', 'producer', 'uid', 'service', 'exit', 'boundary', 'signal', 'reuse']) {
+    const helperName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
+    for (const mutation of ['fork', 'birth', 'producer', 'uid', 'exit', 'signal', 'reuse']) {
       const lines = [...normal];
       if (mutation === 'fork') lines.splice(0, 1);
       if (mutation === 'birth') lines.splice(1, 1);
       if (mutation === 'producer') lines[0] = lines[0].replace('77 77', '78 78');
       if (mutation === 'uid') lines[1] = lines[1].replace('u0ai0', 'u0ai9999');
-      if (mutation === 'service') lines[1] = lines[1].replace('Service0:0}', 'Service0:1}');
       if (mutation === 'exit') lines[3] = lines[3].replace('(0)', '(1)');
-      if (mutation === 'boundary') lines[0] = lines[0].replace('1789100401', '1789100399');
       if (mutation === 'signal') lines.splice(3, 0, '1789100403.500 5820 5820 I Process: Sending signal. PID: 5820 SIG: 9');
       if (mutation === 'reuse') lines.splice(2, 0, lines[1]);
-      const log = marker(0, 'START') + lines.join('\n') + '\n' + marker(9, 'END');
-      const check = assessAndroidEnvironment(releaseEnvironmentFixture({ ...input, log, collector: JSON.stringify({ bytes: Buffer.byteLength(log) }) }), measurementIdentity());
-      assert.equal(check.normalRetirements.length, 0, mutation);
-      for (const pid of ['42', '5820']) assert.notEqual(androidProductImpact(check, observationsFixture(measurementIdentity(), pid)).status, 'PASS', `${mutation}/${pid}`);
+      const assess = (name: string) => {
+        const log = marker(0, 'START') + lines.join('\n').replaceAll(helperName, name) + '\n' + marker(9, 'END');
+        return assessAndroidEnvironment(releaseEnvironmentFixture({ ...input, log, collector: JSON.stringify({ bytes: Buffer.byteLength(log) }) }), measurementIdentity());
+      };
+      const helper = assess(helperName);
+      assert.equal(helper.status, 'PASS', mutation);
+      assert.ok(helper.helperDeaths.length > 0, mutation);
+      assert.deepEqual(helper.forcedRestartEvents, [], mutation);
+      assert.equal(androidProductImpact(helper, observationsFixture()).status, 'PASS', mutation);
+      for (const name of ['com.android.chrome:privileged_process0', 'com.android.chrome']) {
+        const other = assess(name);
+        assert.notEqual(other.status, 'PASS', `${mutation}/${name}`);
+        assert.deepEqual(other.helperDeaths, [], `${mutation}/${name}`);
+        assert.notEqual(androidProductImpact(other, observationsFixture()).status, 'PASS', `${mutation}/${name}`);
+      }
     }
     const identity = measurementIdentity();
     const operation: AndroidPlannedTermination = { id: 'cold-1', measurementId: identity.measurementId, packageName: 'com.android.chrome', pid: '42', processes: { '42': 'com.android.chrome' }, command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'], succeeded: true };
@@ -1074,7 +1084,9 @@ if (state.runtimeKind !== 'bun' || state.setup !== 'installed' || state.wrapperS
     const check = assessAndroidEnvironment(releaseEnvironmentFixture(input), measurementIdentity());
     check.nativeEvents.push({ kind: 'process-death', line: `1789100405.000 77 77 I Zygote: Process 5820 exited due to signal 9 (${sentinel})`, pid: '5820', processName: sentinel, reason: `https://private/#${sentinel}` });
     check.findings.push(...Array.from({ length: 80 }, () => ({ category: 'ADVERSE_DEATH' as const, packageName: sentinel })));
+    check.helperDeaths.push('1789100405.000 546 546 I ActivityManager: Killing 5821:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:1/u0a146i-1 (adj 0): isolated not needed');
     const result = resultContract(); const projection = publicMobileSummary(result, check), bytes = JSON.stringify(projection);
+    assert.equal(projection.helperDeaths, 1); assert.equal(publicMobileSummary(result).helperDeaths, null);
     assert.doesNotMatch(bytes, /PRIVATE_SENTINEL|https:\/\/private/u); assert.ok(Buffer.byteLength(bytes) <= 65_536);
     assert.equal((projection.components as any[])[0].after.total, 200); assert.equal((projection.components as any[])[0].after.withheldCount, 72);
     assert.equal((projection.events as any[])[0].signal, 9); assert.equal((projection.events as any[])[0].pid, '5820'); assert.ok(Number(projection.omittedFindings) > 0);
