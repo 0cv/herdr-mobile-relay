@@ -144,7 +144,7 @@
   "inputs": {
     "../support/appium-patch.ts": "b31c6665baa5914c604d1f01ebec30eaae7cdd461f83fbf20e5c1d61b0d5aae2",
     "appium-runtime-manifest.json": "1d14bd9592fb1bf076abdd520f3e96c0f9007361cda17cf1e2cc5fe99e5e4063",
-    "gate.ts": "33804be4ba844b4e48e7c99cf16d887051fdc6f815871b0053c06f6fb199bb84",
+    "gate.ts": "6799fdd967440af43b999a18021c0ef861ecbacde166c97c0d5a470066c4ac8f",
     "producer-transform.json": "57eefd547f5278f5be4ea6323d11433efebc056354e997e158b25a7fdbb305bd",
     "runtime-manifest.json": "d8418ab84297f350737b4318b43b01b4e406918329cc569c2d0ab780fdda2dce"
   }
