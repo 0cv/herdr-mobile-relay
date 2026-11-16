@@ -33,6 +33,15 @@ function parseRecord(line: string, index = 0): LogRecord | undefined {
   return { line, lineNumber: index + 1, time, pid: match[3], tid: match[4], priority: match[5], tag: match[6].trim(), message: match[7] };
 }
 
+function recordedProcess(record: LogRecord): { pid: string; name: string } | undefined {
+  if (record.tag !== 'ActivityManager') return undefined;
+  const start = record.message.match(/^(?:Start proc|Killing) (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?:\s|:)/u);
+  const death = record.message.match(/^Process (\S+) \(pid (\d+)\) has died(?::|\s|$)/u);
+  const pid = start?.[1] || death?.[2];
+  const name = start?.[2] || death?.[1];
+  return pid && name && relevant(name) ? { pid, name } : undefined;
+}
+
 export function androidLogEvents(log: string, processes: Record<string, string> = {}, planned: PlannedInterval[] = [], snapshotBoundary?: Pick<LogRecord, 'time' | 'lineNumber'>): string[] {
   const records = log.split(/\r?\n/u).map(parseRecord).filter((record): record is LogRecord => Boolean(record));
   const known = new Map(Object.entries(processes).map(([pid, name]) => [pid, {
@@ -41,12 +50,9 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
   const previousIdentities = new Map<string, { name: string; untilTime: number; untilLine: number }[]>();
   const capturedIdentities = new Map<string, { name: string; time: number; lineNumber: number }[]>();
   for (const record of records) {
-    if (record.tag !== 'ActivityManager') continue;
-    const start = record.message.match(/^(?:Start proc|Killing) (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?:\s|:)/u);
-    const death = record.message.match(/^Process (\S+) \(pid (\d+)\) has died(?::|\s|$)/u);
-    const pid = start?.[1] || death?.[2];
-    const name = start?.[2] || death?.[1];
-    if (!pid || !name || !relevant(name)) continue;
+    const named = recordedProcess(record);
+    if (!named) continue;
+    const { pid, name } = named;
     const identities = capturedIdentities.get(pid) || [];
     identities.push({ name, time: record.time, lineNumber: record.lineNumber });
     capturedIdentities.set(pid, identities);
@@ -176,6 +182,26 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     if (!events.some((line) => androidEventDetails(line).pid === pid)) events.push(record.line);
   }
   return events;
+}
+
+export function isAndroidHelperProcess(name: string): boolean {
+  return /^com\.android\.chrome:sandboxed_process\d+(?::|$)/u.test(name);
+}
+
+export function androidHelperDeaths(log: string, startProcesses: Record<string, string>, events: string[]): string[] {
+  const names = new Map<string, Set<string>>();
+  const count = (pid: string, name: string) => names.set(pid, (names.get(pid) || new Set<string>()).add(name));
+  for (const [pid, name] of Object.entries(startProcesses)) if (relevant(name)) count(pid, name);
+  for (const line of log.split(/\r?\n/u)) {
+    const record = parseRecord(line);
+    const named = record && recordedProcess(record);
+    if (named) count(named.pid, named.name);
+  }
+  return events.filter((line) => {
+    const pid = androidEventDetails(line).pid;
+    const counted = pid ? [...names.get(pid) || []] : [];
+    return counted.length > 0 && counted.every(isAndroidHelperProcess);
+  });
 }
 
 export function androidEventDetails(line: string): { kind: 'process-death' | 'module-config' | 'package-replacement'; line: string; pid?: string; processName?: string; uid?: string; reason?: string; initiatorPid?: string } {
