@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync, type ChildProcess } from 'node:child_process';
-import { closeSync, createWriteStream, openSync, readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { readFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { spawnOwnedProcess } from '../support/owned-process';
 import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, type IOSPlatformIO, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
 import { AppiumClient, WebDriverError, isRetryableElementLookupError, type WebDriverSnapshot } from '../support/webdriver';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure } from '../support/ios-launch-receipt';
@@ -3855,7 +3853,9 @@ async function boundedHierarchyReplay(mode: string) {
   const fixture = new AbortController();
   const replay = hierarchyReplay(mode, fixture);
   try {
-    return await within(replay, `hierarchy ${mode} fixture`, 70_000);
+    const result = await within(replay, `hierarchy ${mode} fixture`, 70_000);
+    assert.equal(result.clock.timers.size, 0, `hierarchy ${mode} leaves no pending fake-clock timers`);
+    return result;
   } catch (error) {
     fixture.abort(error);
     await within(replay.then(() => undefined, () => undefined), `hierarchy ${mode} fixture cleanup`, 5_000);
@@ -5065,98 +5065,6 @@ test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering',
   }
 });
 
-async function runIsolatedHierarchyCase(name: string): Promise<void> {
-  const observerDirectory = await mkdtemp(join(tmpdir(), 'herdr-ios-hierarchy-'));
-  const observerPath = join(observerDirectory, 'supervisor.jsonl');
-  const observerFD = openSync(observerPath, 'wx', 0o600);
-  const observerSupervisor = createWriteStream('', { fd: observerFD, autoClose: false });
-  const runStartedAt = performance.now();
-  const boundaries: Array<{ phase: string; startedAtMs: number; durationMs?: number; outcome?: string }> = [];
-  const timeBoundary = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
-    const startedAt = performance.now();
-    const boundary: { phase: string; startedAtMs: number; durationMs?: number; outcome?: string } = {
-      phase, startedAtMs: Math.floor(startedAt - runStartedAt),
-    };
-    boundaries.push(boundary);
-    try {
-      const value = await operation();
-      boundary.durationMs = Math.floor(performance.now() - startedAt);
-      boundary.outcome = 'completed';
-      return value;
-    } catch (error) {
-      boundary.durationMs = Math.floor(performance.now() - startedAt);
-      boundary.outcome = 'failed';
-      throw error;
-    }
-  };
-  let owned: ReturnType<typeof spawnOwnedProcess> | undefined;
-  let output = '';
-  let diagnostic = '';
-  let binding: Awaited<ReturnType<typeof spawnOwnedProcess>['started']> | undefined;
-  let exit: Awaited<ReturnType<typeof spawnOwnedProcess>['targetExit']> | undefined;
-  let close: Awaited<ReturnType<typeof spawnOwnedProcess>['targetClose']> | undefined;
-  let retirement: Awaited<ReturnType<typeof spawnOwnedProcess>['retirement']> | undefined;
-  let lifecycleFailure: unknown;
-  let retirementFailure: unknown;
-  try {
-    owned = spawnOwnedProcess(process.execPath, ['--no-env-file', fileURLToPath(import.meta.url), '--case', name], {
-      timeoutMs: 70_000, cleanupReservationMs: 5_000, observerSupervisor,
-    });
-    owned.stdout.on('data', (chunk: Buffer) => { output = (output + chunk.toString('utf8')).slice(-8_000); });
-    owned.stderr.on('data', (chunk: Buffer) => { diagnostic = (diagnostic + chunk.toString('utf8')).slice(-8_000); });
-    await timeBoundary('ready', () => owned!.ready);
-    binding = await timeBoundary('started', async () => { owned!.start(); return owned!.started; });
-    exit = await timeBoundary('targetExit', () => owned!.targetExit);
-    close = await timeBoundary('targetClose', () => owned!.targetClose);
-  } catch (error) {
-    lifecycleFailure = error;
-  }
-  if (owned) {
-    try {
-      retirement = await timeBoundary('retire', () => owned!.retire('ios-hierarchy-fixture-complete'));
-    } catch (error) {
-      retirementFailure = error;
-      lifecycleFailure ||= error;
-    }
-  }
-  try {
-    await new Promise<void>(resolve => observerSupervisor.end(resolve));
-  } finally {
-    closeSync(observerFD);
-  }
-  const observerRecords = readFileSync(observerPath, 'utf8').split('\n').filter(Boolean).flatMap(line => {
-    try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
-  });
-  const evidenceFields = ['targetExitObserved', 'targetCloseObserved', 'anchorExitObserved', 'anchorCloseObserved',
-    'groupAbsent', 'inputClosedObserved', 'stdoutNaturalEnd', 'stdoutCloseObserved', 'stderrNaturalEnd', 'stderrCloseObserved',
-    'targetStdoutNaturalEnd', 'targetStdoutCloseObserved', 'targetStderrNaturalEnd', 'targetStderrCloseObserved',
-    'managerStdoutNaturalEnd', 'managerStdoutCloseObserved', 'managerStderrNaturalEnd', 'managerStderrCloseObserved',
-    'supervisorStdoutFinished', 'supervisorStdoutCloseObserved', 'supervisorStderrFinished', 'supervisorStderrCloseObserved',
-    'targetDispatchRequested', 'targetProcessCreated', 'targetNoChildObserved', 'targetExecConfirmed',
-    'targetUnconfirmedCloseObserved', 'stopReason', 'firstFailure'];
-  const supervisorSummary = observerRecords.filter(record => ['supervisor-stopping', 'supervisor-retirement-ready',
-    'supervisor-retirement-unproved', 'supervisor-hard-deadline'].includes(String(record.type))).map(record => {
-    const evidence = record.evidence && typeof record.evidence === 'object' ? record.evidence as Record<string, unknown> : undefined;
-    return {
-      type: record.type,
-      reason: record.reason,
-      evidence: evidence && Object.fromEntries(evidenceFields.filter(key => key in evidence).map(key => [key, evidence[key]])),
-    };
-  });
-  const failureDetails = { name, failure: lifecycleFailure instanceof Error ? lifecycleFailure.message : String(lifecycleFailure || ''),
-    retirementFailure: retirementFailure instanceof Error ? retirementFailure.message : undefined,
-    boundaries, binding, exit, close, retirement, output, diagnostic, supervisor: supervisorSummary };
-  await rm(observerDirectory, { recursive: true, force: true });
-  if (lifecycleFailure) throw new Error(`iOS hierarchy fixture lifecycle failed: ${JSON.stringify(failureDetails)}`);
-  if (!owned || !retirement || !binding || exit?.code !== 0 || exit.signal || close?.code !== 0 || close.signal
-    || !retirement.targetExitObserved || !retirement.targetCloseObserved || !retirement.targetStdoutNaturalEnd
-    || !retirement.targetStderrNaturalEnd || !retirement.stdoutNaturalEnd || !retirement.stderrNaturalEnd
-    || !retirement.groupAbsent || !retirement.supervisorExitObserved || !retirement.supervisorCloseObserved
-    || retirement.supervisorExitCode !== 0 || retirement.supervisorSignal !== null || output || diagnostic) {
-    throw new Error(`iOS hierarchy fixture did not complete and retire: ${JSON.stringify(failureDetails)}`);
-  }
-}
-
 export const iosRegressionCases = stableTestIdentities('ios-inner', tests.map(([name]) => `iOS ${name}`));
 
 export async function runIOSRegressions(selectedIds?: readonly string[], honorEnvironmentFilter = true): Promise<void> {
@@ -5170,8 +5078,7 @@ export async function runIOSRegressions(selectedIds?: readonly string[], honorEn
     if (filter && !filter.test(name)) continue;
     executedTests++;
     try {
-      const outcome = name.startsWith('Plan13 hierarchy full install ')
-        ? await runIsolatedHierarchyCase(name) : await body();
+      const outcome = await body();
       process.stdout.write(outcome ? `ok - iOS ${name} # SKIP ${outcome}\n` : `ok - iOS ${name}\n`);
     } catch (error) {
       failures += 1;
@@ -5185,12 +5092,4 @@ export async function runIOSRegressions(selectedIds?: readonly string[], honorEn
   if (failures) throw new Error(`iOS regressions: ${failures} failures`);
 }
 
-if (import.meta.main) {
-  if (process.argv[2] === '--case') {
-    const name = process.argv[3];
-    const selected = tests.find(([candidate]) => candidate === name && candidate.startsWith('Plan13 hierarchy full install '));
-    if (!selected) throw new Error(`unknown iOS hierarchy case: ${String(name)}`);
-    const outcome = await selected[1]();
-    if (outcome) throw new Error(`iOS hierarchy fixture skipped: ${outcome}`);
-  } else await runIOSRegressions();
-}
+if (import.meta.main) await runIOSRegressions();
