@@ -330,7 +330,6 @@ export class AndroidTransportTriggerDetector {
 }
 
 export class AndroidTransportObservation {
-  private readonly triggerDetector = new AndroidTransportTriggerDetector();
   private task?: Promise<void>;
   failure?: string;
 
@@ -338,23 +337,9 @@ export class AndroidTransportObservation {
     private readonly run: typeof transportCommand = transportCommand,
     private readonly runAdb: typeof transportAdbObservation = transportAdbObservation) {}
 
-  observe(chunk: Buffer): void {
-    const candidate = this.triggerDetector.observe(chunk)[0];
-    this.failure ||= this.triggerDetector.failure;
-    if (candidate && !this.task && this.triggerDetector.accept()) {
-      this.start({ guestEpochSeconds: candidate.guestEpochSeconds, triggeredAt: candidate.triggeredAt });
-    }
-  }
-
   async observeTrigger(trigger: AndroidTransportTrigger): Promise<void> {
     if (!this.task) this.start(trigger);
     await this.task;
-  }
-
-  async finish(): Promise<void> {
-    this.triggerDetector.finish();
-    await this.task;
-    this.failure ||= this.triggerDetector.failure;
   }
 
   private start(trigger: AndroidTransportTrigger): void {
