@@ -3,12 +3,12 @@ import { createConnection, createServer } from 'node:net';
 import { mkdtemp, mkdir, rm, chmod, lstat, symlink, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import redactionCases from '../contracts/fixtures/pi_provenance_redaction.json';
 import bridge, { createCatalog, normalizeCommands, startBridge, instanceIdentity, bridgeIdentity } from '../relay/pi-command-bridge/bridge.mjs';
 import { herdrSocketFixture } from './fixtures/pi-herdr-socket.mjs';
+import { nodeTestTimeout, spawnNode } from './fixtures/pi-node-process.mjs';
 
 const sourceInfo = { path: '/fixture/extension.ts', source: 'npm:test', scope: 'user', origin: 'package' };
 const entry = (name, source = 'extension', info = sourceInfo) => ({ name, source, sourceInfo: info, description: `${name} description`, handler: () => { throw new Error('must not execute'); }, body: 'secret prompt body' });
@@ -109,12 +109,10 @@ test('redacts authenticated package provenance before bridge serialization', asy
 
 test('Node subprocess survives null and malformed request frames and serves a later valid request', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pi-node-'));
-  const child = spawn('node', ['--unhandled-rejections=strict', fileURLToPath(new URL('./fixtures/pi-bridge-server.mjs', import.meta.url)), identity.instance, identity.pane, identity.session, directory], { stdio: ['ignore', 'pipe', 'pipe'] });
-  const exited = once(child, 'exit');
-  let errors = '';
-  child.stderr.on('data', data => { errors += data; });
+  const bridgeProcess = spawnNode(['--unhandled-rejections=strict', fileURLToPath(new URL('./fixtures/pi-bridge-server.mjs', import.meta.url)), identity.instance, identity.pane, identity.session, directory]);
+  const { child, output } = bridgeProcess;
   try {
-    await Promise.race([once(child.stdout, 'data'), exited.then(() => { throw new Error('Bridge exited before ready'); })]);
+    await bridgeProcess.waitForStdout('ready\n');
     const path = join(directory, `${child.pid}.sock`);
     for (const frame of ['null', '[]', '"text"', '12', '{']) {
       await new Promise((resolve, reject) => {
@@ -126,13 +124,12 @@ test('Node subprocess survives null and malformed request frames and serves a la
       expect(child.exitCode).toBeNull();
       expect((await query(path, { ...identity, pid: child.pid })).status).toBe('available');
     }
-    expect(errors).toBe('');
+    expect(output.stderr).toBe('');
   } finally {
-    child.kill('SIGTERM');
-    await exited;
+    await bridgeProcess.stop();
     await rm(directory, { recursive: true, force: true });
   }
-});
+}, nodeTestTimeout);
 
 test('passes request signals and recovers metadata discovery without accumulating stalled autocomplete work', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pi-cancellation-'));
