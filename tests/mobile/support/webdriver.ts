@@ -489,33 +489,33 @@ export class AppiumClient {
   async find(locator: Locator, timeoutMs = 30_000): Promise<string> {
     this.assertUsable('/element');
     const budget = this.phaseBudget(timeoutMs, `find ${locator.using}`);
-    const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
+    const deadline = budget.now() + Math.min(timeoutMs, budget.remainingMs);
     const allowance = driverCommandAllowance('/element', 'POST', locator);
     let lastError = 'element not found';
-    while (!budget.exhausted && Date.now() < deadline) {
+    while (!budget.exhausted && budget.now() < deadline) {
       this.assertBudgetAvailable(budget, `find ${locator.using}`);
-      const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
+      const remaining = Math.min(deadline - budget.now(), budget.remainingMs);
       if (remaining <= 1) break;
       if (this.budget && remaining < Math.max(minimumDriverRequestMs, allowance)) {
         lastError = `lookup was not admitted with ${remaining}ms remaining; ${allowance}ms is required`;
         break;
       }
       const sliceMs = Math.min(lookupSliceMs, remaining);
-      const startedAt = Date.now();
+      const startedAt = budget.now();
       try {
         const element = await this.findOnce(locator, sliceMs);
-        this.recordLookup(locator, sliceMs, startedAt, deadline, 'matched');
+        this.recordLookup(budget, locator, sliceMs, startedAt, deadline, 'matched');
         return element;
       } catch (error) {
         const retryable = isRetryableElementLookupError(error);
-        this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
+        this.recordLookup(budget, locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
         if (!retryable) throw error;
         lastError = error instanceof Error ? error.message : String(error);
         if (isCommandAdmissionError(error)) break;
       }
-      const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);
+      const waitMs = Math.min(100, deadline - budget.now(), budget.remainingMs);
       if (waitMs <= 0) break;
-      await delay(waitMs);
+      await budget.sleep(waitMs);
       if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, `find ${locator.using}`);
     }
     if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, `find ${locator.using}`);
@@ -1013,12 +1013,12 @@ export class AppiumClient {
   async findAnyOnce(locators: Locator[], timeoutMs = 30_000): Promise<string> {
     this.assertUsable('/element');
     const budget = this.phaseBudget(timeoutMs, 'find any once');
-    const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
+    const deadline = budget.now() + Math.min(timeoutMs, budget.remainingMs);
     let lastError = 'no locator matched';
     for (const locator of locators) {
-      if (budget.exhausted || Date.now() >= deadline) break;
+      if (budget.exhausted || budget.now() >= deadline) break;
       this.assertBudgetAvailable(budget, `find ${locator.using}`);
-      const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
+      const remaining = Math.min(deadline - budget.now(), budget.remainingMs);
       const allowance = driverCommandAllowance('/element', 'POST', locator);
       if (remaining <= 1) break;
       if (this.budget && remaining < Math.max(minimumDriverRequestMs, allowance)) {
@@ -1026,14 +1026,14 @@ export class AppiumClient {
         break;
       }
       const sliceMs = Math.min(lookupSliceMs, remaining);
-      const startedAt = Date.now();
+      const startedAt = budget.now();
       try {
         const element = await this.findOnce(locator, sliceMs);
-        this.recordLookup(locator, sliceMs, startedAt, deadline, 'matched');
+        this.recordLookup(budget, locator, sliceMs, startedAt, deadline, 'matched');
         return element;
       } catch (error) {
         const retryable = isRetryableElementLookupError(error);
-        this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
+        this.recordLookup(budget, locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
         if (!retryable) throw error;
         lastError = error instanceof Error ? error.message : String(error);
         if (isCommandAdmissionError(error)) break;
@@ -1046,14 +1046,14 @@ export class AppiumClient {
   async findAny(locators: Locator[], timeoutMs = 30_000): Promise<string> {
     this.assertUsable('/element');
     const budget = this.phaseBudget(timeoutMs, 'find any');
-    const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
+    const deadline = budget.now() + Math.min(timeoutMs, budget.remainingMs);
     let lastError = 'no locator matched';
     let nextLocator = 0;
-    while (locators.length > 0 && !budget.exhausted && Date.now() < deadline) {
+    while (locators.length > 0 && !budget.exhausted && budget.now() < deadline) {
       const locator = locators[nextLocator % locators.length];
       nextLocator += 1;
       this.assertBudgetAvailable(budget, `find ${locator.using}`);
-      const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
+      const remaining = Math.min(deadline - budget.now(), budget.remainingMs);
       const allowance = driverCommandAllowance('/element', 'POST', locator);
       if (remaining <= 1) break;
       if (this.budget && remaining < Math.max(minimumDriverRequestMs, allowance)) {
@@ -1061,22 +1061,22 @@ export class AppiumClient {
         break;
       }
       const sliceMs = Math.min(lookupSliceMs, remaining);
-      const startedAt = Date.now();
+      const startedAt = budget.now();
       try {
         const element = await this.findOnce(locator, sliceMs);
-        this.recordLookup(locator, sliceMs, startedAt, deadline, 'matched');
+        this.recordLookup(budget, locator, sliceMs, startedAt, deadline, 'matched');
         return element;
       } catch (error) {
         const retryable = isRetryableElementLookupError(error);
-        this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
+        this.recordLookup(budget, locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
         if (!retryable) throw error;
         lastError = error instanceof Error ? error.message : String(error);
         if (isCommandAdmissionError(error)) break;
       }
       if (nextLocator % locators.length === 0) {
-        const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);
+        const waitMs = Math.min(100, deadline - budget.now(), budget.remainingMs);
         if (waitMs <= 0) break;
-        await delay(waitMs);
+        await budget.sleep(waitMs);
         if (this.budget?.exhausted) this.assertBudgetAvailable(this.budget, 'find any');
       }
     }
@@ -1107,13 +1107,13 @@ export class AppiumClient {
     });
   }
 
-  private recordLookup(locator: Locator, sliceMs: number, startedAt: number, operationDeadline: number, outcome: WebDriverLookupEvidence['outcome'], error?: unknown): void {
+  private recordLookup(budget: PhaseBudget, locator: Locator, sliceMs: number, startedAt: number, operationDeadline: number, outcome: WebDriverLookupEvidence['outcome'], error?: unknown): void {
     this.lookupHistory.push({
       locator: { using: locator.using, value: redactText(locator.value).slice(0, 500) },
       sliceMs,
       startedAt,
-      endedAt: Date.now(),
-      remainingMs: Math.max(0, operationDeadline - Date.now()),
+      endedAt: budget.now(),
+      remainingMs: Math.max(0, operationDeadline - budget.now()),
       outcome,
       ...(error === undefined ? {} : { error: redactText(error instanceof Error ? error.message : String(error)).slice(0, 500) }),
     });
