@@ -404,8 +404,8 @@ export class AndroidPlatform implements MobilePlatform {
           checkReplacement();
           await checkOwned();
           checkReplacement();
-          // Only raw-empty successful output proves all baseline mappings disappeared.
-          if (after.stdout !== '' || after.stderr.trim()) throw new Error('ANDROID_SETUP: reverse loss not proven', { cause: error });
+          // adb prints a lone newline for an empty listing, so blank stdout and stderr prove all baseline mappings disappeared.
+          if (after.stdout.trim() || after.stderr.trim()) throw new Error('ANDROID_SETUP: reverse loss not proven', { cause: error });
           reverses = complete;
         }
         stage = 'recovery-admission';
