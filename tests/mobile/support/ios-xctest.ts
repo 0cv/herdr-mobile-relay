@@ -11,6 +11,9 @@ const runnerId = 'com.facebook.WebDriverAgentRunner.xctrunner';
 const productId = 'com.facebook.WebDriverAgentRunner';
 const version = '16.12.8';
 const maxStartupMs = 300_000;
+const simctlInstallAttempts = 3;
+const simctlInstallRetryDelayMs = 3_000;
+const simctlConnectionAbortedStatus = 53;
 const maxStartupLogBytes = 100 * 1024 * 1024;
 const startupOutputMarker = '[startup output suppressed]\n';
 const maxStatusBytes = 65_536;
@@ -2093,7 +2096,16 @@ async function supervise(): Promise<void> {
     const selectedXctestrun = safeXctestrunEvidence(data);
     if (Buffer.byteLength(selectedXctestrun) > maxOwnerBytes) throw new Error('XCTEST: selected xctestrun evidence limit');
     writeFileSync(join(root, 'selected.xctestrun'), selectedXctestrun, { mode: 0o600 });
-    run('xcrun', ['simctl', 'install', udid, product], remaining(), commandContext('preflight', 'install-wda', {endpoint: 'simulator'}));
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        run('xcrun', ['simctl', 'install', udid, product], remaining(), commandContext('preflight', 'install-wda', {endpoint: 'simulator'}));
+        break;
+      } catch (error) {
+        if (attempt >= simctlInstallAttempts || errorMessage(error) !== `XCTEST: xcrun failed (${simctlConnectionAbortedStatus})`) throw error;
+        diagnostics.lifecycle('install-wda-retry', {phase: 'preflight', attempt});
+        await sleep(Math.min(simctlInstallRetryDelayMs, remaining()));
+      }
+    }
     owner.receipt = receipt('preflight-install');
     owner.installReceipt = owner.receipt;
     writeFileSync(join(root, 'installed-Info.plist'), installedInfoEvidence(join(owner.receipt, 'Info.plist'), 'preflight-install'), { mode: 0o600 });

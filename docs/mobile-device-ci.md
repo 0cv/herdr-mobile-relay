@@ -259,6 +259,13 @@ bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.
 
+The preflight `xcrun simctl install` of the WDA runner is attempted at most three
+times, three seconds apart, and only after exit status 53 (`ECONNABORTED`, the
+connection to the simulator service was aborted). Hosted runs 43884641913
+attempt 1 and 43863348485 attempt 1 hit it about two seconds into the step.
+Every attempt stays in the owner command records and each retry adds an
+`install-wda-retry` lifecycle event. Any other status fails at once.
+
 Android fresh CI setup permits at most one additional create per setup-session
 helper invocation, before any retained Chrome owner or initial installed launch.
 The existing literal `adb: device offline` path is unchanged. A completed HTTP 500
