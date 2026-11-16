@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { AppiumClient as PolicyClient, WebDriverError as PolicyError, type RequestEnforcementClock, type WebDriverError, type WebDriverRequestTiming } from '../support/webdriver';
 import { PhaseBudget } from '../support/budget';
+import { FakeClock } from './fake-clock';
 
 type Test = [string, () => Promise<void>];
 
@@ -28,25 +29,21 @@ function assertTimingOrder(timing: Readonly<WebDriverRequestTiming>) {
 }
 
 async function policyClient(handler: (init?: RequestInit) => Promise<Response>) {
-  let now = 0;
+  const fake = new FakeClock();
   let sent = 0;
   let signal: AbortSignal | null | undefined;
   let onNow: (() => void) | undefined;
   let timerMode: 'normal' | 'inline' | 'throw' | 'inline-throw' = 'normal';
   const wire: { url: string; method?: string }[] = [];
-  const timers = new Map<ReturnType<typeof setTimeout>, () => void>();
-  let ordinal = 0;
   const clock: RequestEnforcementClock = {
-    now: () => { onNow?.(); return now; },
-    timer: (callback) => {
+    now: () => { onNow?.(); return fake.now(); },
+    timer: (callback, ms) => {
       if (timerMode === 'throw') throw new Error('injected timer setup failure');
       if (timerMode === 'inline' || timerMode === 'inline-throw') callback();
       if (timerMode === 'inline-throw') throw new Error('injected failure after inline timeout');
-      const id = ++ordinal as unknown as ReturnType<typeof setTimeout>;
-      timers.set(id, callback);
-      return id;
+      return fake.timer(callback, ms);
     },
-    clear: id => { timers.delete(id); },
+    clear: fake.clear,
   };
   const client = new PolicyClient('http://policy.invalid', 30_000, async (input, init) => {
     wire.push({ url: String(input), method: init?.method });
@@ -61,11 +58,11 @@ async function policyClient(handler: (init?: RequestInit) => Promise<Response>) 
   client.setBudget(root);
   const phase = root.phaseView('policy-confirmation', 75_000);
   const policy = Object.freeze({ ...client.nativeRequestPolicy(phase), finalAction: true });
-  return { client, root, phase, policy, clock, timers, wire, sent: () => sent, signal: () => signal,
+  return { client, root, phase, policy, clock, timers: fake.timers, wire, sent: () => sent, signal: () => signal,
     observeNow: (callback: () => void) => { onNow = callback; },
     timerMode: (mode: 'normal' | 'inline' | 'throw' | 'inline-throw') => { timerMode = mode; },
-    advance: (ms: number) => { now += ms; },
-    expire: (ms: number) => { now += ms; for (const callback of [...timers.values()]) callback(); },
+    advance: (ms: number) => { fake.elapsed += ms; },
+    expire: (ms: number) => fake.advance(ms),
   };
 }
 
