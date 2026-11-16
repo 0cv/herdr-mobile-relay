@@ -2588,12 +2588,12 @@ function fakeCommand(file: string, args: string[], timeout: number, phase?: stri
 `;
       const path = await writeSupervisorVariant(join(root, 'support'), [
         {
-          file: 'ios-xctest.ts',
-          anchor: 'function executeSync(file: string, args: string[], timeout: number, maxBuffer: number, context?: DiagnosticContext): SpawnSyncReturns<string> {',
-          replacement: injection + 'function executeSync(file: string, args: string[], timeout: number, maxBuffer: number, context?: DiagnosticContext): SpawnSyncReturns<string> {',
+          file: 'ios-xctest-listeners.ts',
+          anchor: 'export function executeSync(file: string, args: string[], timeout: number, maxBuffer: number, context?: DiagnosticContext): SpawnSyncReturns<string> {',
+          replacement: injection + 'export function executeSync(file: string, args: string[], timeout: number, maxBuffer: number, context?: DiagnosticContext): SpawnSyncReturns<string> {',
         },
         {
-          file: 'ios-xctest.ts',
+          file: 'ios-xctest-listeners.ts',
           anchor: "const result = spawnSync(file, args, {encoding: 'utf8', timeout, maxBuffer}) as SpawnSyncReturns<string>;",
           replacement: 'const result = fakeCommand(file, args, timeout, context?.phase) as SpawnSyncReturns<string>;',
         },

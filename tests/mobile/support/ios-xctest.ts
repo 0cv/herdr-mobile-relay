@@ -1,308 +1,73 @@
-import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, basename } from 'node:path';
-import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
-import { redactText, sanitizeValue } from './diagnostics';
-import { XCTestOutputDiagnostics, type XCTestOutputSummary } from './xctest-output';
+import { redactText } from './diagnostics';
+import { XCTestOutputDiagnostics } from './xctest-output';
+import {
+  runnerId,
+  productId,
+  version,
+  maxOwnerBytes,
+  diagnosticSource,
+  redactedBounded,
+  safeCommand,
+  type DiagnosticContext,
+  type CommandDiagnostic,
+  WdaDiagnosticsRecorder,
+  type PartialProcessEvidence,
+  type ReceiptSnapshot,
+  safeProcessBirth,
+  type StatusResponse,
+  type RunnerIdentity,
+  type ListenerEvidence,
+  type ListenerCommandStatus,
+  type CleanupListenerSnapshot,
+  type ListenerEndpointSnapshot,
+  type ListenerSnapshot,
+  type RunnerMatchEvidence,
+  type DiagnosticCheckStatus,
+  type DiagnosticCheck,
+  type DiagnosticHashCheck,
+  type InitialCandidateDiagnostic,
+  type ListenerValidation,
+  type Owner,
+  type BoundedStatus,
+  boundedStatus,
+  safeXctestrunEvidence,
+  ownerContent,
+  endpointDiagnostic,
+  listenerValidation,
+  diagnosticCheck,
+  diagnosticHashCheck,
+  diagnosticPathShape,
+} from './ios-xctest-diagnostics';
+import {
+  maxProcessCommandMs,
+  uuidPattern,
+  deadlineTimeout,
+  executeSync,
+  run,
+  listeners,
+  processEvidence,
+  diagnosticProcessEvidence,
+  commandContainsPath,
+  runnerExecutableMatches,
+  binaryHash,
+  boundedBinaryHash,
+} from './ios-xctest-listeners';
 
-const runnerId = 'com.facebook.WebDriverAgentRunner.xctrunner';
-const productId = 'com.facebook.WebDriverAgentRunner';
-const version = '16.12.8';
 const maxStartupMs = 300_000;
 const maxStartupLogBytes = 100 * 1024 * 1024;
 const startupOutputMarker = '[startup output suppressed]\n';
 const maxStatusBytes = 65_536;
-const maxProcessCommandMs = 2_000;
 const maxRunnerCleanupMs = 10_000;
 const maxCleanupMs = 30_000;
 const maxPreFreezeDiagnosticMs = 8_000;
-const maxOwnerBytes = 1_048_576;
-const maxDiagnosticCommands = 128;
-const maxDiagnosticInspections = 8;
-const maxDiagnosticLifecycle = 128;
-const maxDiagnosticOutputBytes = 4_096;
-const maxDiagnosticSerializedBytes = 384 * 1024;
-const maxOwnerStatusBytes = 16 * 1024;
-const maxOwnerCausalArgumentBytes = 128;
-const maxOwnerCausalOutputBytes = 512;
-const maxOwnerListenerCommandBytes = 4 * 1024;
-const diagnosticSource = 'tests/mobile/support/ios-xctest.ts';
-const privateOwnerKeyPattern = /(?:password|passwd|secret|token|credential|private|api[_-]?key)/iu;
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const yieldToChildExit = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 
-function monotonicMilliseconds(): number {
-  return Number(process.hrtime.bigint()) / 1_000_000;
-}
-
-function redactDiagnosticText(value: string): string {
-  return redactText(value);
-}
-
-function redactedBounded(value: string | Buffer, maximum: number): string {
-  const text = typeof value === 'string' ? value : value.toString('utf8');
-  return Buffer.from(redactDiagnosticText(text)).subarray(0, maximum).toString('utf8');
-}
-
-function diagnosticText(value: unknown, maximum = maxDiagnosticOutputBytes, operation = ''): { content: string; bytes: number; truncated: boolean; suppressed?: boolean } {
-  const text = value === undefined || value === null ? '' : typeof value === 'string' ? value : value instanceof Buffer ? value.toString('utf8') : String(value);
-  const bytes = Buffer.byteLength(text);
-  const classification = operation === 'inspect-listener' ? 'listener command' : operation ? `${operation} command` : 'command';
-  const content = bytes ? `[${classification} output suppressed]\n` : '';
-  return {
-    content: Buffer.from(content).subarray(0, maximum).toString('utf8'),
-    bytes,
-    truncated: bytes > maximum,
-    ...(bytes ? {suppressed: true} : {}),
-  };
-}
-
-function safeCommand(file: string, args: string[]): string[] {
-  return [file, ...args].slice(0, 32).map(argument => redactedBounded(String(argument), 512));
-}
-
-interface DiagnosticContext {
-  recorder?: WdaDiagnosticsRecorder;
-  phase: string;
-  source: string;
-  operation: string;
-  endpoint?: string;
-  port?: number;
-  pid?: string;
-  frozenOwner?: boolean;
-}
-
-interface CommandDiagnostic {
-  id: number;
-  phase: string;
-  source: string;
-  operation: string;
-  command: string[];
-  timeoutMs: number;
-  startedAt: string;
-  endedAt: string;
-  monotonicStartMs: number;
-  monotonicEndMs: number;
-  durationMs: number;
-  status: number | null;
-  signal: NodeJS.Signals | null;
-  endpoint?: string;
-  port?: number;
-  pid?: string;
-  frozenOwner?: boolean;
-  stdout: { content: string; bytes: number; truncated: boolean; suppressed?: boolean };
-  stderr: { classification: string; content: string; bytes: number; truncated: boolean; suppressed?: boolean };
-  error?: { category: string; code?: string; message?: string };
-}
-
-interface LifecycleDiagnostic {
-  id: number;
-  event: string;
-  at: string;
-  monotonicMs: number;
-  detail?: unknown;
-}
-
-interface InspectionDiagnostic {
-  id: number;
-  phase: string;
-  startedAt: string;
-  endedAt: string;
-  monotonicStartMs: number;
-  monotonicEndMs: number;
-  durationMs: number;
-  frozenOwner: boolean;
-  commandIds: number[];
-  endpoints: { wda: unknown; mjpeg: unknown };
-  processIds: string[];
-  error?: string;
-}
-
-interface WdaDiagnostics {
-  schema: 1;
-  clock: { kind: 'process-relative-monotonic'; startedAt: string };
-  commands: CommandDiagnostic[];
-  inspections: InspectionDiagnostic[];
-  lifecycle: LifecycleDiagnostic[];
-  droppedCommands?: number;
-  droppedInspections?: number;
-  droppedLifecycle?: number;
-}
-
-interface InspectionToken {
-  id: number;
-  phase: string;
-  frozenOwner: boolean;
-  startedAt: string;
-  monotonicStartMs: number;
-  commandStart: number;
-}
-
-class WdaDiagnosticsRecorder {
-  readonly data: WdaDiagnostics;
-  private readonly origin = monotonicMilliseconds();
-  private commandSequence = 0;
-  private inspectionSequence = 0;
-  private lifecycleSequence = 0;
-
-  constructor() {
-    this.data = {
-      schema: 1,
-      clock: {kind: 'process-relative-monotonic', startedAt: new Date().toISOString()},
-      commands: [],
-      inspections: [],
-      lifecycle: [],
-    };
-  }
-
-  now(): number {
-    return Math.max(0, monotonicMilliseconds() - this.origin);
-  }
-
-  command(
-    file: string,
-    args: string[],
-    timeoutMs: number,
-    startedAt: string,
-    monotonicStartMs: number,
-    result?: SpawnSyncReturns<string>,
-    thrown?: unknown,
-    context?: DiagnosticContext,
-  ): number {
-    const endedAt = new Date().toISOString();
-    const monotonicEndMs = this.now();
-    const error = result?.error || (thrown instanceof Error ? thrown : undefined);
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    const category = code === 'ETIMEDOUT' ? 'timeout'
-      : code === 'ENOBUFS' ? 'output-limit'
-      : error ? 'spawn-error'
-      : result && result.status !== 0 ? 'nonzero-exit' : 'none';
-    const stderr = diagnosticText(result?.stderr, maxDiagnosticOutputBytes, context?.operation);
-    const stderrClassification = code === 'ETIMEDOUT' ? 'timeout'
-      : stderr.bytes > 0 ? 'present'
-      : result?.status === 1 && context?.operation === 'inspect-listener' ? 'empty-or-no-listener'
-      : 'empty';
-    const record: CommandDiagnostic = {
-      id: ++this.commandSequence,
-      phase: context?.phase || 'unknown',
-      source: context?.source || diagnosticSource,
-      operation: context?.operation || 'command',
-      command: safeCommand(file, args),
-      timeoutMs,
-      startedAt,
-      endedAt,
-      monotonicStartMs,
-      monotonicEndMs,
-      durationMs: Math.max(0, Number((monotonicEndMs - monotonicStartMs).toFixed(3))),
-      status: result?.status ?? null,
-      signal: result?.signal ?? null,
-      ...(context?.endpoint ? {endpoint: context.endpoint} : {}),
-      ...(context?.port !== undefined ? {port: context.port} : {}),
-      ...(context?.pid ? {pid: context.pid} : {}),
-      ...(context?.frozenOwner !== undefined ? {frozenOwner: context.frozenOwner} : {}),
-      stdout: diagnosticText(result?.stdout, maxDiagnosticOutputBytes, context?.operation),
-      stderr: {classification: stderrClassification, ...stderr},
-      ...(error ? {error: {category, ...(code ? {code} : {}), message: diagnosticText(error.message, 1_024).content}} : {}),
-    };
-    this.data.commands.push(record);
-    if (this.data.commands.length > maxDiagnosticCommands) {
-      this.data.commands.splice(0, this.data.commands.length - maxDiagnosticCommands);
-      this.data.droppedCommands = (this.data.droppedCommands || 0) + 1;
-    }
-    this.trimToBudget();
-    return record.id;
-  }
-
-  recentCommandIds(limit = 8): number[] {
-    return this.data.commands.slice(-limit).map(command => command.id);
-  }
-
-  commandIdsFrom(start: number): number[] {
-    return this.data.commands.filter(command => command.id >= start).map(command => command.id);
-  }
-
-  lifecycle(event: string, detail: Record<string, unknown> = {}): number {
-    const record: LifecycleDiagnostic = {
-      id: ++this.lifecycleSequence,
-      event,
-      at: new Date().toISOString(),
-      monotonicMs: Number(this.now().toFixed(3)),
-      detail: sanitizeValue(detail),
-    };
-    this.data.lifecycle.push(record);
-    if (this.data.lifecycle.length > maxDiagnosticLifecycle) {
-      this.data.lifecycle.splice(0, this.data.lifecycle.length - maxDiagnosticLifecycle);
-      this.data.droppedLifecycle = (this.data.droppedLifecycle || 0) + 1;
-    }
-    this.trimToBudget();
-    return record.id;
-  }
-
-  beginInspection(phase: string, frozenOwner: boolean): InspectionToken {
-    return {
-      id: ++this.inspectionSequence,
-      phase,
-      frozenOwner,
-      startedAt: new Date().toISOString(),
-      monotonicStartMs: this.now(),
-      commandStart: this.commandSequence + 1,
-    };
-  }
-
-  finishInspection(token: InspectionToken, endpoints: { wda: unknown; mjpeg: unknown }, processIds: string[], error?: unknown): void {
-    const monotonicEndMs = this.now();
-    const record: InspectionDiagnostic = {
-      id: token.id,
-      phase: token.phase,
-      startedAt: token.startedAt,
-      endedAt: new Date().toISOString(),
-      monotonicStartMs: token.monotonicStartMs,
-      monotonicEndMs,
-      durationMs: Math.max(0, Number((monotonicEndMs - token.monotonicStartMs).toFixed(3))),
-      frozenOwner: token.frozenOwner,
-      commandIds: this.commandIdsFrom(token.commandStart),
-      endpoints,
-      processIds: processIds.slice(0, 16),
-      ...(error ? {error: diagnosticText(error instanceof Error ? error.message : error, 1_024).content} : {}),
-    };
-    this.data.inspections.push(record);
-    if (this.data.inspections.length > maxDiagnosticInspections) {
-      this.data.inspections.splice(0, this.data.inspections.length - maxDiagnosticInspections);
-      this.data.droppedInspections = (this.data.droppedInspections || 0) + 1;
-    }
-    this.trimToBudget();
-  }
-
-  checkpoint(): number {
-    return this.commandSequence + 1;
-  }
-
-  commandsForIds(ids: number[]): CommandDiagnostic[] {
-    const wanted = new Set(ids);
-    return this.data.commands.filter(command => wanted.has(command.id));
-  }
-
-  private trimToBudget(): void {
-    const size = (): number => Buffer.byteLength(JSON.stringify(this.data));
-    while (size() > maxDiagnosticSerializedBytes) {
-      if (this.data.commands.length) {
-        this.data.commands.shift();
-        this.data.droppedCommands = (this.data.droppedCommands || 0) + 1;
-      } else if (this.data.inspections.length) {
-        this.data.inspections.shift();
-        this.data.droppedInspections = (this.data.droppedInspections || 0) + 1;
-      } else if (this.data.lifecycle.length) {
-        this.data.lifecycle.shift();
-        this.data.droppedLifecycle = (this.data.droppedLifecycle || 0) + 1;
-      } else {
-        break;
-      }
-    }
-  }
-}
 
 const required = (key: string): string => {
   const value = process.env[key];
@@ -310,32 +75,8 @@ const required = (key: string): string => {
   return value;
 };
 
-function deadlineTimeout(deadline: number): number {
-  const timeout = deadline - Date.now();
-  if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('XCTEST: startup deadline');
-  return timeout;
-}
 
-function executeSync(file: string, args: string[], timeout: number, maxBuffer: number, context?: DiagnosticContext): SpawnSyncReturns<string> {
-  if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('XCTEST: startup deadline');
-  const startedAt = context?.recorder ? new Date().toISOString() : '';
-  const monotonicStartMs = context?.recorder?.now() || 0;
-  try {
-    const result = spawnSync(file, args, {encoding: 'utf8', timeout, maxBuffer}) as SpawnSyncReturns<string>;
-    if (context?.recorder) context.recorder.command(file, args, timeout, startedAt, monotonicStartMs, result, undefined, context);
-    return result;
-  } catch (error) {
-    if (context?.recorder) context.recorder.command(file, args, timeout, startedAt, monotonicStartMs, undefined, error, context);
-    throw error;
-  }
-}
 
-function run(file: string, args: string[], timeout = 10_000, context?: DiagnosticContext): string {
-  const result = executeSync(file, args, timeout, 4_194_304, context);
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new Error('XCTEST: startup deadline');
-  if (result.error || result.status !== 0) throw new Error(`XCTEST: ${file} failed (${result.status ?? 'unknown'})`);
-  return result.stdout.trim();
-}
 
 function ownership(udid: string): void {
   if (!uuidPattern.test(udid) || readFileSync(required('MOBILE_DEVICE_OWNERSHIP_FILE'), 'utf8').trim() !== `ios:${udid}`) {
@@ -349,190 +90,16 @@ function portValue(key: string, fallback: number): number {
   return value;
 }
 
-function listeners(port: number, timeout = maxProcessCommandMs, observed?: (status: number | null, stderrBytes: number) => void, context?: DiagnosticContext): string[] {
-  if (!Number.isInteger(port) || port < 1 || port > 65535 || timeout <= 0) throw new Error('XCTEST: startup deadline');
-  const result = executeSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], timeout, 65_536, context ? {...context, port} : undefined);
-  observed?.(result.status, Buffer.byteLength(result.stderr || ''));
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new Error('XCTEST: startup deadline');
-  if (result.error || (result.status !== 0 && result.status !== 1)) throw new Error('XCTEST: cannot inspect endpoint ownership');
-  const values = [...new Set(result.stdout.trim().split(/\s+/u).filter(Boolean))];
-  if (values.some(value => !/^[1-9]\d{0,9}$/u.test(value) || Number(value) > 2_147_483_647)) throw new Error('XCTEST: endpoint returned an invalid process identifier');
-  return values;
-}
 
-function processExecutable(pid: string, deadline: number, context?: DiagnosticContext): string {
-  const output = run('lsof', ['-nP', '-a', '-p', pid, '-d', 'txt', '-Fn'], deadlineTimeout(deadline), context ? {
-    ...context,
-    source: diagnosticSource,
-    operation: 'inspect-process-executable',
-    pid,
-  } : undefined);
-  const executable = output.split(/\r?\n/u).find(line => line.startsWith('n'))?.slice(1);
-  if (!executable || !executable.startsWith('/')) throw new Error('XCTEST: process executable is unavailable');
-  return realpathSync(executable);
-}
 
-interface ProcessEvidence {
-  pid: string;
-  executable: string;
-  command: string;
-  birth: string;
-}
 
-interface PartialProcessEvidence {
-  pid: string;
-  executable?: string;
-  birth?: string;
-}
 
-interface ReceiptSnapshot {
-  path: string;
-  applicationPathMatches: boolean;
-  bundleIdentifierMatches?: boolean;
-  installedExecutableHash?: string;
-  productExecutableHash?: string;
-  executableHashMatches?: boolean;
-  failureStage?: 'bundle-id' | 'installed-hash' | 'product-hash';
-  failureCategory?: 'command-error' | 'timeout';
-}
 
-function processEvidence(pid: string, deadline: number, context?: DiagnosticContext): ProcessEvidence {
-  const processContext = context ? {...context, source: diagnosticSource, pid} : undefined;
-  const executable = processExecutable(pid, deadline, processContext);
-  const command = run('ps', ['-p', pid, '-o', 'command='], deadlineTimeout(deadline), processContext ? {
-    ...processContext,
-    operation: 'inspect-process-command',
-  } : undefined);
-  return {
-    pid,
-    executable,
-    command: command.includes('test-without-building') && command.includes('-xctestrun') && command.includes('-destination')
-      ? '[expected XCTest process]'
-      : '[unrecognized process command]',
-    birth: run('ps', ['-p', pid, '-o', 'lstart='], deadlineTimeout(deadline), processContext ? {
-      ...processContext,
-      operation: 'inspect-process-birth',
-    } : undefined),
-  };
-}
 
-function diagnosticProcessEvidence(pid: string, deadline: number, context?: DiagnosticContext): {evidence: PartialProcessEvidence; error?: unknown} {
-  const processContext = context ? {...context, source: diagnosticSource, pid} : undefined;
-  const evidence: PartialProcessEvidence = {pid};
-  try {
-    evidence.executable = processExecutable(pid, deadline, processContext);
-    run('ps', ['-p', pid, '-o', 'command='], deadlineTimeout(deadline), processContext ? {
-      ...processContext,
-      operation: 'inspect-process-command',
-    } : undefined);
-    evidence.birth = run('ps', ['-p', pid, '-o', 'lstart='], deadlineTimeout(deadline), processContext ? {
-      ...processContext,
-      operation: 'inspect-process-birth',
-    } : undefined);
-    return {evidence};
-  } catch (error) {
-    return {evidence, error};
-  }
-}
 
-function safeProcessBirth(value: string, sanitized: boolean): string {
-  if (!sanitized) return value;
-  const trimmed = value.trim();
-  return /^(?:[A-Za-z]{3} [A-Za-z]{3} {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}|birth-[A-Za-z0-9_-]+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)$/u.test(trimmed)
-    ? trimmed
-    : '[unrecognized process birth]';
-}
-
-function commandContainsPath(command: string, path: string): boolean {
-  const resolved = resolve(path);
-  const variants = [resolved];
-  if (resolved.startsWith('/private/')) variants.push(resolved.slice('/private'.length));
-  if (resolved.startsWith('/var/')) variants.push(`/private${resolved}`);
-  return variants.some(variant => command.includes(variant));
-}
-
-function runnerExecutableMatches(executable: string, product: string, udid: string, deadline: number, productBinaryHash?: string, evaluation?: RunnerMatchEvidence, context?: DiagnosticContext, boundedHash = false): boolean {
-  try {
-    const hash = (path: string): string => boundedHash ? boundedBinaryHash(path, deadline, context) : binaryHash(path);
-    const resolved = realpathSync(executable);
-    const app = dirname(resolved);
-    const container = dirname(app);
-    const applicationDirectory = dirname(container);
-    const expectedApplicationDirectory = `/Devices/${udid}/data/Containers/Bundle/Application`;
-    const productPath = realpathSync(product);
-    const pathShape: RunnerPathShape = {};
-    const pathChecks: Array<[keyof RunnerPathShape, () => boolean, string]> = [
-      ['applicationNameMatches', () => basename(app) === basename(productPath), 'runner-application-name'],
-      ['containerUuid', () => uuidPattern.test(basename(container)), 'runner-container-uuid'],
-      ['simulatorPath', () => applicationDirectory.endsWith(expectedApplicationDirectory), 'runner-simulator-path'],
-      ['executableName', () => basename(resolved) === 'WebDriverAgentRunner-Runner', 'runner-executable-name'],
-    ];
-    for (const [key, check, stage] of pathChecks) {
-      pathShape[key] = check();
-      if (evaluation) evaluation.pathShape = {...pathShape};
-      if (!pathShape[key]) {
-        if (evaluation) { evaluation.failureStage = stage; evaluation.errorCategory = 'runner-path-mismatch'; }
-        return false;
-      }
-    }
-    let bundleIdentifier: string;
-    try {
-      bundleIdentifier = run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', join(app, 'Info.plist')], deadlineTimeout(deadline), context ? {
-        ...context,
-        source: diagnosticSource,
-        operation: 'inspect-runner-bundle-id',
-      } : undefined);
-    } catch (error) {
-      if (evaluation) { evaluation.bundleId = {status: 'error'}; evaluation.failureStage = 'runner-bundle-id-command'; evaluation.errorCategory = 'runner-command-error'; }
-      throw error;
-    }
-    const bundleMatches = bundleIdentifier === runnerId;
-    if (evaluation) evaluation.bundleId = {status: 'evaluated', matches: bundleMatches};
-    if (!bundleMatches) {
-      if (evaluation) { evaluation.failureStage = 'runner-bundle-id'; evaluation.errorCategory = 'runner-bundle-mismatch'; }
-      return false;
-    }
-    if (evaluation) evaluation.executableHash = {status: 'not-evaluated', ...(productBinaryHash ? {expected: productBinaryHash} : {})};
-    let actualHash: string;
-    try {
-      actualHash = hash(resolved);
-    } catch (error) {
-      if (evaluation) { evaluation.executableHash = {status: 'error', ...(productBinaryHash ? {expected: productBinaryHash} : {})}; evaluation.failureStage = 'runner-executable-hash-command'; evaluation.errorCategory = 'runner-command-error'; }
-      throw error;
-    }
-    let expectedHash: string;
-    try {
-      expectedHash = productBinaryHash || hash(join(productPath, 'WebDriverAgentRunner-Runner'));
-    } catch (error) {
-      if (evaluation) {
-        evaluation.executableHash = {status: 'error', actual: actualHash, ...(productBinaryHash ? {expected: productBinaryHash} : {})};
-        evaluation.failureStage = 'runner-product-hash-command';
-        evaluation.errorCategory = 'runner-command-error';
-      }
-      throw error;
-    }
-    const hashMatches = actualHash === expectedHash;
-    if (evaluation) evaluation.executableHash = {status: 'evaluated', expected: expectedHash, actual: actualHash, matches: hashMatches};
-    if (!hashMatches && evaluation) { evaluation.failureStage = 'runner-executable-hash'; evaluation.errorCategory = 'runner-hash-mismatch'; }
-    return hashMatches;
-  } catch (error) {
-    if (error instanceof Error && error.message === 'XCTEST: startup deadline') throw error;
-    if (evaluation && !evaluation.errorCategory) {
-      evaluation.failureStage ||= 'runner-executable-observation';
-      evaluation.errorCategory = 'runner-observation-error';
-    }
-    return false;
-  }
-}
 
 class ReceiptValidationError extends Error {}
 
-interface StatusResponse {
-  statusCode: number;
-  body: unknown;
-  bytes?: number;
-  truncated?: boolean;
-}
 
 async function readStatus(url: string, timeout: number): Promise<StatusResponse> {
   if (timeout <= 0) throw new Error('XCTEST: startup deadline');
@@ -603,361 +170,7 @@ export function selectXctestrun(root: string, product: string, deadline = Date.n
   return path;
 }
 
-type RunnerIdentity = Pick<ProcessEvidence, 'pid' | 'executable' | 'birth'>;
-type ListenerEvidence = Partial<ProcessEvidence> & Pick<ProcessEvidence, 'pid' | 'executable'>;
 
-interface ListenerCommandStatus {
-  port: number;
-  status: number | null;
-  stderr?: 'present';
-}
-
-interface CleanupListenerSnapshot {
-  wda: ListenerEndpointSnapshot;
-  mjpeg: ListenerEndpointSnapshot;
-}
-
-interface CleanupListenerObservation {
-  phase: 'cleanup';
-  checkedAt: string;
-  monotonicMs: number;
-  endpoints: {
-    wda: {observation: ListenerEndpointDiagnostic; commandId?: number};
-    mjpeg: {observation: ListenerEndpointDiagnostic; commandId?: number};
-  };
-  commandIds: number[];
-}
-
-type ListenerEndpointStatus = 'not-evaluated' | 'evaluated' | 'error';
-type AssociationStatus = 'not-evaluated' | 'match' | 'mismatch';
-
-interface ListenerEndpointSnapshot {
-  status: ListenerEndpointStatus;
-  pids?: string[];
-  errorCategory?: string;
-}
-
-interface ListenerSnapshot {
-  wda: ListenerEndpointSnapshot;
-  mjpeg: ListenerEndpointSnapshot;
-  evidence: ListenerEvidence[];
-  commands: ListenerCommandStatus[];
-  inspectionId?: number;
-  commandStart?: number;
-  commandIds?: number[];
-}
-
-type RunnerPathShape = Partial<Record<'applicationNameMatches' | 'containerUuid' | 'simulatorPath' | 'executableName', boolean>>;
-
-interface RunnerMatchEvidence {
-  pathShape?: RunnerPathShape;
-  bundleId?: { status: 'not-evaluated' | 'evaluated' | 'error'; matches?: boolean };
-  executableHash?: { status: 'not-evaluated' | 'evaluated' | 'error'; expected?: string; actual?: string; matches?: boolean };
-  failureStage?: string;
-  errorCategory?: string;
-}
-
-type DiagnosticCheckStatus = 'evaluated' | 'rejected' | 'not-evaluated' | 'budget-exhausted';
-
-interface DiagnosticCheck {
-  status: DiagnosticCheckStatus;
-  matches?: boolean;
-  category?: string;
-}
-
-interface DiagnosticHashCheck extends DiagnosticCheck {
-  expected?: string;
-  actual?: string;
-}
-
-type DiagnosticPathShape = {
-  [key in 'applicationNameMatches' | 'containerUuid' | 'simulatorPath' | 'executableName']: DiagnosticCheck;
-};
-
-interface InitialCandidateDiagnostic {
-  schema: 1;
-  phase: 'initial-diagnostic';
-  candidatePid: string;
-  initial: {
-    status: DiagnosticCheckStatus;
-    birth?: string;
-    executable: DiagnosticCheck;
-  };
-  current: {
-    status: DiagnosticCheckStatus;
-    category?: string;
-    birth?: string;
-    executable: DiagnosticCheck;
-  };
-  comparisons: {
-    pid: DiagnosticCheck;
-    birth: DiagnosticCheck;
-    executable: DiagnosticCheck;
-    pathShape: DiagnosticPathShape;
-    runnerBundleId: DiagnosticCheck;
-    runnerExecutableHash: DiagnosticHashCheck;
-    productExecutableHash: DiagnosticHashCheck;
-    refreshedReceipt: {
-      status: DiagnosticCheckStatus;
-      category?: string;
-      sameAsInstallReceipt: DiagnosticCheck;
-      applicationPath: DiagnosticCheck;
-      bundleId: DiagnosticCheck;
-      executableHash: DiagnosticHashCheck;
-    };
-  };
-  cleanup: {
-    status: DiagnosticCheckStatus;
-    wda: DiagnosticCheck;
-    mjpeg: DiagnosticCheck;
-  };
-  startedAtMonotonicMs: number;
-  endedAtMonotonicMs: number;
-  budgetMs: number;
-}
-
-type ListenerEndpointDiagnostic =
-  | { status: 'not-evaluated' }
-  | { status: 'error'; errorCategory: string }
-  | { status: 'evaluated'; count: number; pids: string[] };
-
-interface ListenerValidation {
-  checkedAt: string;
-  endpoints: {
-    wda: ListenerEndpointDiagnostic;
-    mjpeg: ListenerEndpointDiagnostic;
-  };
-  commandStatus: ListenerCommandStatus[];
-  runnerEvidencePresent: 'not-evaluated' | 'present' | 'absent';
-  runnerAssociation: AssociationStatus;
-  mjpegAssociation: AssociationStatus;
-  bundleId: { status: 'not-evaluated' | 'evaluated' | 'error'; matches?: boolean };
-  executableHash: { status: 'not-evaluated' | 'evaluated' | 'error'; expected?: string; actual?: string; matches?: boolean };
-  cachedProductExecutableHash?: string;
-  cachedProductExecutableHashAt?: string;
-  pathShape?: RunnerMatchEvidence['pathShape'];
-  failureStage: string;
-  errorCategory: string;
-}
-
-interface FirstFailure {
-  at: string;
-  monotonicMs: number;
-  phase: string;
-  source: string;
-  stage: string;
-  category: string;
-  message: string;
-  frozenOwner: boolean;
-  predicate: {
-    status: 'evaluated' | 'not-evaluated';
-    listenerValidation?: ListenerValidation;
-  };
-  commandIds: number[];
-  causalCommands: CommandDiagnostic[];
-  inspectionId?: number;
-}
-
-interface Owner {
-  udid: string;
-  cleanupListenerObservation?: CleanupListenerObservation;
-  initialCandidateDiagnostic?: InitialCandidateDiagnostic;
-  pid?: number;
-  command?: string[];
-  runnerPid?: string;
-  runnerExecutable?: string;
-  receipt?: string;
-  installReceipt?: string;
-  listenerEvidence?: ListenerEvidence[];
-  listenerValidation?: ListenerValidation;
-  firstFailure?: FirstFailure;
-  exitRevocation?: { primaryWriteFailed?: true; callbackFailed?: true; persistencePrerequisite?: 'failed' };
-  diagnostics?: WdaDiagnostics;
-  cachedProductExecutableHash?: string;
-  cachedProductExecutableHashAt?: string;
-  pidBirth?: string;
-  runnerBirth?: string;
-  startedAt: string;
-  ready: boolean;
-  endedAt?: string;
-  exitCode?: number | null;
-  signal?: string | null;
-  error?: string;
-  receiptError?: string;
-  url: string;
-  product: string;
-  xctestrun?: string;
-  xctestrunHash?: string;
-  status?: StatusResponse;
-  logBytes?: number;
-  logTruncated?: boolean;
-  receivedLogBytes?: number;
-  receivedStreamBytes?: { stdout: number; stderr: number };
-  xctestOutput?: XCTestOutputSummary;
-  safeLogBytes?: number;
-  pendingLogBytes?: number;
-  logPersistenceTruncated?: boolean;
-  startupOutputLimit?: {
-    limitBytes: number;
-    receivedBytes: number;
-    stream: 'stdout' | 'stderr';
-    streamOffset: number;
-    chunkBytes: number;
-    acceptedBytes: number;
-    overLimitBytes: number;
-  };
-}
-
-function sanitizeOwnerValue(value: unknown, key = ''): unknown {
-  if (privateOwnerKeyPattern.test(key)) return '[REDACTED]';
-  if (typeof value === 'string') return redactDiagnosticText(value);
-  if (Array.isArray(value)) return value.map(entry => sanitizeOwnerValue(entry));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([entryKey, entry]) => [entryKey, sanitizeOwnerValue(entry, entryKey)]));
-  return value;
-}
-
-function ownerText(value: unknown, maximum: number, sanitized: boolean): string {
-  const text = value === undefined || value === null ? '' : String(value);
-  const safe = sanitized ? redactDiagnosticText(text) : text;
-  return Buffer.from(safe).subarray(0, maximum).toString('utf8');
-}
-
-function boundedRecord<T extends {content: string; bytes: number; truncated: boolean; suppressed?: boolean}>(record: T, maximum: number, sanitized: boolean): T {
-  const content = ownerText(record.content, maximum, sanitized);
-  return {...record, content, truncated: record.truncated || Buffer.byteLength(record.content) > maximum || content !== record.content};
-}
-
-function boundedCausalCommand(command: CommandDiagnostic, sanitized: boolean): CommandDiagnostic {
-  return {
-    ...command,
-    command: command.command.slice(0, 32).map(argument => ownerText(argument, maxOwnerCausalArgumentBytes, sanitized)),
-    stdout: boundedRecord(command.stdout, maxOwnerCausalOutputBytes, sanitized),
-    stderr: boundedRecord(command.stderr, maxOwnerCausalOutputBytes, sanitized),
-    ...(command.error ? {error: {...command.error, ...(command.error.message ? {message: ownerText(command.error.message, 2_048, sanitized)} : {})}} : {}),
-  };
-}
-
-const boundedStatusMarker = Symbol('boundedStatus');
-type BoundedStatus = StatusResponse & { readonly [boundedStatusMarker]: true };
-
-function boundedStatus(status: StatusResponse): BoundedStatus {
-  const body = status.body as { value?: unknown } | null;
-  const value = body?.value as {
-    ready?: unknown;
-    state?: unknown;
-    build?: { version?: unknown; productBundleIdentifier?: unknown };
-    os?: { version?: unknown };
-  } | undefined;
-  const structured = Boolean(value && typeof value === 'object');
-  const ready = value?.ready === true || value?.ready === false ? value.ready : 'not-evaluated';
-  const state = value?.state === 'success' || value?.state === 'failure' ? value.state : 'unrecognized';
-  const buildVersion = value?.build?.version === version ? version : 'unrecognized';
-  const productBundleIdentifier = value?.build?.productBundleIdentifier === productId ? productId : 'unrecognized';
-  const osVersion = typeof value?.os?.version === 'string' && /^\d+(?:\.\d+){1,3}$/u.test(value.os.version)
-    ? value.os.version
-    : 'unrecognized';
-  const bounded: StatusResponse = {
-    statusCode: status.statusCode,
-    ...(status.bytes !== undefined ? {bytes: status.bytes} : {}),
-    ...(status.truncated ? {truncated: true} : {}),
-    body: {
-      classification: structured ? 'wda-status' : 'unrecognized',
-      ready,
-      state,
-      buildVersion,
-      productBundleIdentifier,
-      osVersion,
-      payload: 'suppressed',
-      diagnostic: 'suppressed',
-      diagnosticBytes: status.bytes || 0,
-      diagnosticTruncated: (status.bytes || 0) > maxOwnerStatusBytes || Boolean(status.truncated),
-      ...(status.bytes !== undefined ? {bodyBytes: status.bytes} : {}),
-      ...(status.truncated ? {bodyTruncated: true} : {}),
-    },
-  };
-  Object.defineProperty(bounded, boundedStatusMarker, {value: true});
-  return bounded as BoundedStatus;
-}
-
-function isBoundedStatus(status: StatusResponse): status is BoundedStatus {
-  return typeof status === 'object' && status !== null
-    && (status as Partial<BoundedStatus>)[boundedStatusMarker] === true;
-}
-
-function safeXctestrunEvidence(data: unknown): string {
-  const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
-  const target = record.WebDriverAgentRunner && typeof record.WebDriverAgentRunner === 'object'
-    ? record.WebDriverAgentRunner as Record<string, unknown>
-    : {};
-  const known = (value: unknown, expected: string): string => value === expected ? expected : 'unrecognized';
-  const environmentVariables = target.EnvironmentVariables && typeof target.EnvironmentVariables === 'object'
-    ? Object.keys(target.EnvironmentVariables as Record<string, unknown>)
-    : [];
-  const evidence = {
-    schema: 1,
-    format: 'xctestrun',
-    targets: Object.keys(record).filter(key => key !== '__xctestrun_metadata__').slice(0, 16),
-    WebDriverAgentRunner: {
-      TestHostBundleIdentifier: known(target.TestHostBundleIdentifier, runnerId),
-      TestBundlePath: known(target.TestBundlePath, '__TESTHOST__/PlugIns/WebDriverAgentRunner.xctest'),
-      TestHostPath: known(target.TestHostPath, '__TESTROOT__/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app'),
-      EnvironmentVariables: {
-        count: environmentVariables.length,
-        values: 'suppressed',
-      },
-    },
-    payload: 'suppressed',
-  };
-  return `${JSON.stringify(evidence, null, 2)}\n`;
-}
-
-function boundedOwnerValue(value: Owner, sanitized: boolean): Owner {
-  return {
-    ...value,
-    ...(value.command ? {command: value.command.slice(0, 32).map(argument => ownerText(argument, 512, sanitized))} : {}),
-    ...(value.pidBirth ? {pidBirth: safeProcessBirth(value.pidBirth, sanitized)} : {}),
-    ...(value.runnerBirth ? {runnerBirth: safeProcessBirth(value.runnerBirth, sanitized)} : {}),
-    ...(value.listenerEvidence ? {
-      listenerEvidence: value.listenerEvidence.slice(0, 16).map(entry => ({
-        ...entry,
-        executable: ownerText(entry.executable, maxOwnerListenerCommandBytes, sanitized),
-        ...(entry.command ? {command: ownerText(entry.command, maxOwnerListenerCommandBytes, sanitized)} : {}),
-        ...(entry.birth ? {birth: safeProcessBirth(entry.birth, sanitized)} : {}),
-      })),
-    } : {}),
-    ...(value.firstFailure ? {
-      firstFailure: {
-        ...value.firstFailure,
-        message: ownerText(value.firstFailure.message, 2_048, sanitized),
-        causalCommands: value.firstFailure.causalCommands.map(command => boundedCausalCommand(command, sanitized)),
-      },
-    } : {}),
-    ...(value.diagnostics ? {
-      diagnostics: {
-        ...value.diagnostics,
-        commands: value.diagnostics.commands.map(command => boundedCausalCommand(command, sanitized)),
-      },
-    } : {}),
-    ...(value.status ? {status: isBoundedStatus(value.status) ? value.status : boundedStatus(value.status)} : {}),
-  };
-}
-
-function ownerContent(owner: Owner, sanitized: boolean): string {
-  const bounded = boundedOwnerValue(owner, sanitized);
-  const value = (sanitized ? sanitizeOwnerValue(sanitizeValue(bounded)) : bounded) as Owner;
-  const serialize = (entry: Owner): string => `${JSON.stringify(entry, null, 2)}\n`;
-  const content = serialize(value);
-  if (Buffer.byteLength(content) <= maxOwnerBytes) return content;
-  const reduced: Owner = {
-    ...value,
-    ...(value.listenerEvidence ? {listenerEvidence: value.listenerEvidence.slice(0, 1)} : {}),
-    ...(value.diagnostics ? {diagnostics: {...value.diagnostics, commands: [], inspections: [], lifecycle: []}} : {}),
-    ...(value.xctestOutput ? {xctestOutput: {...value.xctestOutput, events: [], droppedEvents: value.xctestOutput.droppedEvents + value.xctestOutput.events.length}} : {}),
-  };
-  const reducedContent = serialize(reduced);
-  if (Buffer.byteLength(reducedContent) > maxOwnerBytes) throw new Error('XCTEST: owner evidence limit');
-  return reducedContent;
-}
 
 function writeOwner(root: string, owner: Owner): void {
   const privateNext = join(root, 'owner-private.next.json');
@@ -974,101 +187,7 @@ function writeStatusEvidence(root: string, status: BoundedStatus): void {
   renameSync(next, join(root, 'wda-status.json'));
 }
 
-function binaryHash(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
 
-function boundedBinaryHash(path: string, deadline: number, context?: DiagnosticContext): string {
-  const script = "const{createHash}=require('node:crypto');const{readFileSync}=require('node:fs');process.stdout.write(createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));";
-  const hash = run(process.execPath, ['-e', script, path], deadlineTimeout(deadline), context);
-  if (!/^[0-9a-f]{64}$/u.test(hash)) throw new Error('XCTEST: binary hash is unavailable');
-  return hash;
-}
-
-const diagnosticPids = (values: string[]): string[] => values.slice(0, 16);
-
-function endpointDiagnostic(endpoint: ListenerEndpointSnapshot): ListenerEndpointDiagnostic {
-  if (endpoint.status === 'evaluated') {
-    const pids = endpoint.pids || [];
-    return {status: 'evaluated', count: pids.length, pids: diagnosticPids(pids)};
-  }
-  return endpoint.status === 'error'
-    ? {status: 'error', errorCategory: endpoint.errorCategory || 'command-error'}
-    : {status: 'not-evaluated'};
-}
-
-function listenerValidation(
-  snapshot: ListenerSnapshot,
-  commands: ListenerCommandStatus[],
-  runnerAssociation: ListenerValidation['runnerAssociation'],
-  mjpegAssociation: ListenerValidation['mjpegAssociation'],
-  evaluation: RunnerMatchEvidence,
-  failureStage: string,
-  errorCategory: string,
-  cachedProductExecutableHash?: string,
-  cachedProductExecutableHashAt?: string,
-  observedRunnerPid?: string,
-): ListenerValidation {
-  const runnerPid = observedRunnerPid ?? (snapshot.wda.status === 'evaluated' ? snapshot.wda.pids?.[0] : undefined);
-  return {
-    checkedAt: new Date().toISOString(),
-    endpoints: {wda: endpointDiagnostic(snapshot.wda), mjpeg: endpointDiagnostic(snapshot.mjpeg)},
-    commandStatus: commands.slice(0, 4),
-    runnerEvidencePresent: runnerPid
-      ? snapshot.evidence.length === 0 ? 'not-evaluated' : snapshot.evidence.some(entry => entry.pid === runnerPid) ? 'present' : 'absent'
-      : 'not-evaluated',
-    runnerAssociation,
-    mjpegAssociation,
-    bundleId: evaluation.bundleId || {status: 'not-evaluated'},
-    executableHash: evaluation.executableHash || {status: 'not-evaluated'},
-    ...(cachedProductExecutableHash ? {cachedProductExecutableHash} : {}),
-    ...(cachedProductExecutableHashAt ? {cachedProductExecutableHashAt} : {}),
-    ...(evaluation.pathShape ? {pathShape: evaluation.pathShape} : {}),
-    failureStage,
-    errorCategory,
-  };
-}
-
-function diagnosticCheck(value: boolean | undefined, budgetExhausted = false, category?: string): DiagnosticCheck {
-  if (value === undefined) return {status: budgetExhausted ? 'budget-exhausted' : 'not-evaluated'};
-  return value
-    ? {status: 'evaluated', matches: true}
-    : {status: 'rejected', matches: false, ...(category ? {category} : {})};
-}
-
-function diagnosticHashCheck(
-  value: RunnerMatchEvidence['executableHash'] | undefined,
-  budgetExhausted = false,
-): DiagnosticHashCheck {
-  if (!value) return {status: budgetExhausted ? 'budget-exhausted' : 'not-evaluated'};
-  if (value.status === 'error') return {
-    status: 'rejected',
-    category: 'runner-command-error',
-    ...(value.expected ? {expected: value.expected} : {}),
-    ...(value.actual ? {actual: value.actual} : {}),
-  };
-  if (value.status === 'not-evaluated') return {
-    status: budgetExhausted ? 'budget-exhausted' : 'not-evaluated',
-    ...(value.expected ? {expected: value.expected} : {}),
-  };
-  return {
-    status: value.matches ? 'evaluated' : 'rejected',
-    ...(value.matches !== undefined ? {matches: value.matches} : {}),
-    ...(value.matches === false ? {category: 'runner-hash-mismatch'} : {}),
-    ...(value.expected ? {expected: value.expected} : {}),
-    ...(value.actual ? {actual: value.actual} : {}),
-  };
-}
-
-function diagnosticPathShape(evaluation: RunnerMatchEvidence, budgetExhausted = false): DiagnosticPathShape {
-  const path = evaluation.pathShape;
-  return {
-    applicationNameMatches: diagnosticCheck(path?.applicationNameMatches, budgetExhausted, 'runner-path-mismatch'),
-    containerUuid: diagnosticCheck(path?.containerUuid, budgetExhausted, 'runner-path-mismatch'),
-    simulatorPath: diagnosticCheck(path?.simulatorPath, budgetExhausted, 'runner-path-mismatch'),
-    executableName: diagnosticCheck(path?.executableName, budgetExhausted, 'runner-path-mismatch'),
-  };
-}
 
 type StartupOutputStream = 'stdout' | 'stderr';
 
