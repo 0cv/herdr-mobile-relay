@@ -1,0 +1,116 @@
+=== idle-claude-direct-real agent=claude
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Review updated. Your correction actually sharpens the main diagnosis:
+
+The silent fallback is what hid both blockers. copyTerminalOutput swallows every relay failure with a bare catch {} and quietly serves parser output
+— which is exactly why a feature that never once succeeds for Qoder, and fails on any Claude response containing an em-dash, passes CI and looks fine
+by hand. Removing the fallback is right, and it makes those failures visible. But only after they're fixed, or Copy goes from silently-degraded to
+visibly broken.
+
+What changed in the review:
+
+- H1 promoted to blocking. With no fallback behind them, the missing codex/omp/pi/kimi profiles aren't a degraded experience — those four agents have
+no working Copy at all. omp is the one with genuinely new behaviour (the post-submission picker), and its machinery currently only executes in a
+test that synthesises PostSubmission because no shipped profile sets it.
+- New dead-code section, since that was part of what you asked me to look for. The copy-parser block is 213 lines; OpenCode needs
+latestOpenCodeResponse (~27 lines), two patterns, and the shared helpers. The Claude/codex/Kimi bullet machinery, latestOmpResponse, and
+latestQoderResponse all become dead — roughly 150 lines plus their tests. Worth knowing it's dead in effect, not unreachable: latestCompletedResponse
+still runs its main path on OpenCode input and simply never matches, so it won't surface as unreferenced, and the helpers.test.ts cases for
+Claude/codex/Qoder/OMP will keep passing while covering paths no user reaches.
+- Sequenced recommendation. Fix B1/B2 → add the four profiles → replace synthetic fixtures with real captures → then surface errors and trim the
+parser. Deleting the fallback first turns every remaining defect into a hard failure with nothing behind it.
+
+One factual consequence I'd flag rather than decide for you: on a headless relay there's no clipboard reader, so the capability is never advertised
+and /copy can't be read back by any route. If the parser stops covering non-OpenCode agents there, Copy stops working entirely for that deployment.
+Keeping it as a headless-only path costs nothing, since the code has to exist for OpenCode anyway — but that's your call, and it doesn't block the
+change either way. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-claude-direct-real agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Review updated. Your correction actually sharpens the main diagnosis:
+
+The silent fallback is what hid both blockers. copyTerminalOutput swallows every relay failure with a bare catch {} and quietly serves parser output
+— which is exactly why a feature that never once succeeds for Qoder, and fails on any Claude response containing an em-dash, passes CI and looks fine
+by hand. Removing the fallback is right, and it makes those failures visible. But only after they're fixed, or Copy goes from silently-degraded to
+visibly broken.
+
+What changed in the review:
+
+- H1 promoted to blocking. With no fallback behind them, the missing codex/omp/pi/kimi profiles aren't a degraded experience — those four agents have
+no working Copy at all. omp is the one with genuinely new behaviour (the post-submission picker), and its machinery currently only executes in a
+test that synthesises PostSubmission because no shipped profile sets it.
+- New dead-code section, since that was part of what you asked me to look for. The copy-parser block is 213 lines; OpenCode needs
+latestOpenCodeResponse (~27 lines), two patterns, and the shared helpers. The Claude/codex/Kimi bullet machinery, latestOmpResponse, and
+latestQoderResponse all become dead — roughly 150 lines plus their tests. Worth knowing it's dead in effect, not unreachable: latestCompletedResponse
+still runs its main path on OpenCode input and simply never matches, so it won't surface as unreferenced, and the helpers.test.ts cases for
+Claude/codex/Qoder/OMP will keep passing while covering paths no user reaches.
+- Sequenced recommendation. Fix B1/B2 → add the four profiles → replace synthetic fixtures with real captures → then surface errors and trim the
+parser. Deleting the fallback first turns every remaining defect into a hard failure with nothing behind it.
+
+One factual consequence I'd flag rather than decide for you: on a headless relay there's no clipboard reader, so the capability is never advertised
+and /copy can't be read back by any route. If the parser stops covering non-OpenCode agents there, Copy stops working entirely for that deployment.
+Keeping it as a headless-only path costs nothing, since the code has to exist for OpenCode anyway — but that's your call, and it doesn't block the
+change either way. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-claude-direct-real agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Review updated. Your correction actually sharpens the main diagnosis:
+
+The silent fallback is what hid both blockers. copyTerminalOutput swallows every relay failure with a bare catch {} and quietly serves parser output
+— which is exactly why a feature that never once succeeds for Qoder, and fails on any Claude response containing an em-dash, passes CI and looks fine
+by hand. Removing the fallback is right, and it makes those failures visible. But only after they're fixed, or Copy goes from silently-degraded to
+visibly broken.
+
+What changed in the review:
+
+- H1 promoted to blocking. With no fallback behind them, the missing codex/omp/pi/kimi profiles aren't a degraded experience — those four agents have
+no working Copy at all. omp is the one with genuinely new behaviour (the post-submission picker), and its machinery currently only executes in a
+test that synthesises PostSubmission because no shipped profile sets it.
+- New dead-code section, since that was part of what you asked me to look for. The copy-parser block is 213 lines; OpenCode needs
+latestOpenCodeResponse (~27 lines), two patterns, and the shared helpers. The Claude/codex/Kimi bullet machinery, latestOmpResponse, and
+latestQoderResponse all become dead — roughly 150 lines plus their tests. Worth knowing it's dead in effect, not unreachable: latestCompletedResponse
+still runs its main path on OpenCode input and simply never matches, so it won't surface as unreferenced, and the helpers.test.ts cases for
+Claude/codex/Qoder/OMP will keep passing while covering paths no user reaches.
+- Sequenced recommendation. Fix B1/B2 → add the four profiles → replace synthetic fixtures with real captures → then surface errors and trim the
+parser. Deleting the fallback first turns every remaining defect into a hard failure with nothing behind it.
+
+One factual consequence I'd flag rather than decide for you: on a headless relay there's no clipboard reader, so the capability is never advertised
+and /copy can't be read back by any route. If the parser stops covering non-OpenCode agents there, Copy stops working entirely for that deployment.
+Keeping it as a headless-only path costs nothing, since the code has to exist for OpenCode anyway — but that's your call, and it doesn't block the
+change either way. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-claude-direct-real agent=claude crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Review updated. Your correction actually sharpens the main diagnosis:
+
+The silent fallback is what hid both blockers. copyTerminalOutput swallows every relay failure with a bare catch {} and quietly serves parser output
+— which is exactly why a feature that never once succeeds for Qoder, and fails on any Claude response containing an em-dash, passes CI and looks fine
+by hand. Removing the fallback is right, and it makes those failures visible. But only after they're fixed, or Copy goes from silently-degraded to
+visibly broken.
+
+What changed in the review:
+
+- H1 promoted to blocking. With no fallback behind them, the missing codex/omp/pi/kimi profiles aren't a degraded experience — those four agents have
+no working Copy at all. omp is the one with genuinely new behaviour (the post-submission picker), and its machinery currently only executes in a
+test that synthesises PostSubmission because no shipped profile sets it.
+- New dead-code section, since that was part of what you asked me to look for. The copy-parser block is 213 lines; OpenCode needs
+latestOpenCodeResponse (~27 lines), two patterns, and the shared helpers. The Claude/codex/Kimi bullet machinery, latestOmpResponse, and
+latestQoderResponse all become dead — roughly 150 lines plus their tests. Worth knowing it's dead in effect, not unreachable: latestCompletedResponse
+still runs its main path on OpenCode input and simply never matches, so it won't surface as unreferenced, and the helpers.test.ts cases for
+Claude/codex/Qoder/OMP will keep passing while covering paths no user reaches.
+- Sequenced recommendation. Fix B1/B2 → add the four profiles → replace synthetic fixtures with real captures → then surface errors and trim the
+parser. Deleting the fallback first turns every remaining defect into a hard failure with nothing behind it.
+
+One factual consequence I'd flag rather than decide for you: on a headless relay there's no clipboard reader, so the capability is never advertised
+and /copy can't be read back by any route. If the parser stops covering non-OpenCode agents there, Copy stops working entirely for that deployment.
+Keeping it as a headless-only path costs nothing, since the code has to exist for OpenCode anyway — but that's your call, and it doesn't block the
+change either way. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

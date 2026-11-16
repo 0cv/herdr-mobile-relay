@@ -7,7 +7,7 @@ import (
 
 func TestHermesBuiltinCatalog(t *testing.T) {
 	isolateAgentEnv(t)
-	catalog := CatalogForProfile("hermes", "hermes", "/tmp", "/nonexistent", nil, "", "")
+	catalog := catalogFor("hermes", "/tmp", "/nonexistent")
 	if catalog.Truncated {
 		t.Fatal("Hermes builtins should not be truncated")
 	}
@@ -25,7 +25,7 @@ func TestHermesBuiltinCatalog(t *testing.T) {
 func TestHermesCatalogForAlias(t *testing.T) {
 	isolateAgentEnv(t)
 	for _, name := range []string{"hermes", "hermes-agent", "hermes agent"} {
-		catalog := CatalogFor(name, "/tmp", "/nonexistent")
+		catalog := catalogFor(name, "/tmp", "/nonexistent")
 		if !hasCommand(catalog, "/model") {
 			t.Errorf("CatalogFor(%q) missing /model", name)
 		}
@@ -39,7 +39,7 @@ func TestHermesSkillDiscovery(t *testing.T) {
 	writeSkill(t, filepath.Join(tempDir, ".hermes", "skills"), "weather", "Check local weather forecast")
 	writeSkill(t, filepath.Join(tempDir, ".hermes", "skills", "devops"), "nested", "Nested skill")
 
-	catalog := CatalogForProfile("hermes", "hermes", tempDir, "/nonexistent", nil, "", "")
+	catalog := catalogFor("hermes", tempDir, "/nonexistent")
 	if !hasCommand(catalog, "/weather") {
 		t.Errorf("Hermes skill discovery failed to find /weather")
 	}
@@ -56,7 +56,7 @@ func TestHermesUsesActiveProfileHome(t *testing.T) {
 		writeSkill(t, filepath.Join(profileHome, "skills"), "coderonly", "Coder skill")
 		t.Setenv("HERMES_HOME", profileHome)
 
-		catalog := CatalogForProfile("hermes", "hermes", t.TempDir(), home, nil, "", "")
+		catalog := catalogFor("hermes", t.TempDir(), home)
 		if !hasCommand(catalog, "/coderonly") {
 			t.Fatal("explicit Hermes home skill was not discovered")
 		}
@@ -74,7 +74,7 @@ func TestHermesUsesActiveProfileHome(t *testing.T) {
 		writeSkill(t, filepath.Join(profileHome, "skills"), "coderonly", "Coder skill")
 		t.Setenv("HERMES_HOME", "")
 
-		catalog := CatalogForProfile("hermes", "hermes", t.TempDir(), home, nil, "", "")
+		catalog := catalogFor("hermes", t.TempDir(), home)
 		if !hasCommand(catalog, "/coderonly") {
 			t.Fatal("sticky Hermes profile skill was not discovered")
 		}
@@ -93,7 +93,7 @@ func TestHermesProjectSkillsUseGitRoot(t *testing.T) {
 	writeSkill(t, filepath.Join(subdir, ".hermes", "skills"), "subonly", "Subdirectory skill")
 	t.Setenv("HERMES_HOME", "")
 
-	catalog := CatalogForProfile("hermes", "hermes", subdir, t.TempDir(), nil, "", "")
+	catalog := catalogFor("hermes", subdir, t.TempDir())
 	if !hasCommand(catalog, "/rootonly") {
 		t.Fatal("Git-root Hermes skill was not discovered from a subdirectory")
 	}
@@ -107,7 +107,7 @@ func TestHermesSkillDiscoveryUsesNativeSlugs(t *testing.T) {
 	writeSkill(t, filepath.Join(tempDir, ".hermes", "skills"), "Code Review", "Review code")
 	writeSkill(t, filepath.Join(tempDir, ".hermes", "skills"), "code_review", "Duplicate slug")
 
-	catalog := CatalogForProfile("hermes", "hermes", tempDir, "/nonexistent", nil, "", "")
+	catalog := catalogFor("hermes", tempDir, "/nonexistent")
 	count := 0
 	for _, command := range catalog.Commands {
 		if command.Command == "/code-review" {

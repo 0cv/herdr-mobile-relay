@@ -13,18 +13,13 @@ import (
 	"time"
 )
 
-func TestJSONLProjectorMatchesLegacyProjection(t *testing.T) {
+func TestJSONLProjectorProjectsToolRoundTrip(t *testing.T) {
 	lines := []string{
 		`{"type":"user","uuid":"u1","timestamp":"2026-09-02T10:00:00Z","message":{"content":"question"}}`,
 		`{"type":"assistant","uuid":"a1","timestamp":"2026-09-02T10:00:01Z","message":{"content":[{"type":"text","text":"checking"},{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"README.md"}}]}}`,
 		`{"type":"user","uuid":"r1","timestamp":"2026-09-02T10:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"contents"}]}}`,
 		`{"type":"assistant","uuid":"a2","timestamp":"2026-09-02T10:00:03Z","message":{"content":[{"type":"text","text":"finished"}]}}`,
 	}
-	transcript := ""
-	for _, line := range lines {
-		transcript += line + "\n"
-	}
-	legacy := parseTranscript("claude", transcript)
 	projector := newMemoryProjector("claude", "revision")
 	var offset int64
 	for _, line := range lines {
@@ -35,21 +30,26 @@ func TestJSONLProjectorMatchesLegacyProjection(t *testing.T) {
 		}
 		offset += int64(len(raw) + 1)
 	}
-	if len(projector.entries) != len(legacy) {
-		t.Fatalf("projected entries = %d, legacy entries = %d", len(projector.entries), len(legacy))
+	want := []Entry{
+		{Role: "user", Timestamp: "2026-09-02T10:00:00Z", Text: "question"},
+		{Role: "assistant", Timestamp: "2026-09-02T10:00:01Z", Text: "checking", Tools: []ToolActivity{{ID: "call-1", Name: "Read", Input: `{"file_path":"README.md"}`, Output: "contents"}}},
+		{Role: "assistant", Timestamp: "2026-09-02T10:00:03Z", Text: "finished"},
+	}
+	if len(projector.entries) != len(want) {
+		t.Fatalf("projected entries = %#v", projector.entries)
 	}
 	for index, projected := range projector.entries {
-		want := legacy[index]
 		got := projected.Entry
-		if got.Role != want.Role || got.Timestamp != want.Timestamp || got.Text != want.Text || got.Truncated != want.Truncated {
-			t.Fatalf("entry %d differs: projected %#v, legacy %#v", index, got, want)
+		if got.Role != want[index].Role || got.Timestamp != want[index].Timestamp || got.Text != want[index].Text || got.Truncated != want[index].Truncated {
+			t.Fatalf("entry %d differs: projected %#v, want %#v", index, got, want[index])
 		}
-		if len(got.Tools) != len(want.Tools) {
-			t.Fatalf("entry %d tools = %#v, legacy %#v", index, got.Tools, want.Tools)
+		if len(got.Tools) != len(want[index].Tools) {
+			t.Fatalf("entry %d tools = %#v, want %#v", index, got.Tools, want[index].Tools)
 		}
 		for toolIndex := range got.Tools {
-			if got.Tools[toolIndex] != want.Tools[toolIndex] {
-				t.Fatalf("entry %d tool %d differs: projected %#v, legacy %#v", index, toolIndex, got.Tools[toolIndex], want.Tools[toolIndex])
+			gotTool, wantTool := got.Tools[toolIndex], want[index].Tools[toolIndex]
+			if gotTool.ID != wantTool.ID || gotTool.Name != wantTool.Name || gotTool.Input != wantTool.Input || gotTool.Output != wantTool.Output || gotTool.Error != wantTool.Error || gotTool.Truncated != wantTool.Truncated {
+				t.Fatalf("entry %d tool %d differs: projected %#v, want %#v", index, toolIndex, gotTool, wantTool)
 			}
 		}
 	}
@@ -82,11 +82,6 @@ func TestToolAssociationPreservesFullProviderScopedIDs(t *testing.T) {
 	records := []JSONLRecord{
 		{Start: 0, End: int64(len(callRaw)), Raw: callRaw, Complete: true},
 		{Start: int64(len(callRaw)), End: int64(len(callRaw) + len(resultRaw)), Raw: resultRaw, Complete: true},
-	}
-
-	legacy := parseTranscript("claude", string(callRaw)+"\n"+string(resultRaw))
-	if len(legacy) != 1 || len(legacy[0].Tools) != 2 || legacy[0].Tools[0].Output != "first output" || legacy[0].Tools[1].Output != "second output" {
-		t.Fatalf("legacy projection = %#v", legacy)
 	}
 
 	projector := newMemoryProjector("claude", "revision")

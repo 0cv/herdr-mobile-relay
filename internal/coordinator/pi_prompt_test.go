@@ -2,9 +2,8 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"testing"
-
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
 func TestPiPromptAdmissionAndNoTerminalFallback(t *testing.T) {
@@ -26,14 +25,18 @@ func TestPiPromptAdmissionAndNoTerminalFallback(t *testing.T) {
 			if scenario == "secret" {
 				content = "Password:"
 			}
-			var changed func()
-			if scenario == "session-replaced" {
-				changed = func() { state.BumpGeneration("pane-1") }
+			client := newFakeBackend()
+			client.contents["pane-1"] = content
+			if scenario == "read-failed" {
+				client.readErr = errors.New("controlled read failure")
 			}
-			client := herdr.NewClient("/nonexistent-private-fixture-command", secretReadSocket(t, content, scenario == "read-failed", changed))
-			defer client.Close()
-			dispatcher := NewDispatcher(client, state, nil, testLogger())
-			defer dispatcher.Close(context.Background())
+			if scenario == "session-replaced" {
+				client.setHook("ReadPaneVisible", func(context.Context, fakeCall) error {
+					state.BumpGeneration("pane-1")
+					return nil
+				})
+			}
+			dispatcher := newTestDispatcher(t, client, state)
 			calls, admissions := 0, 0
 			result := dispatcher.HandlePiPrompt(context.Background(), "req-1", "pane-1", func() { admissions++ }, func(ctx context.Context) *CommandResult {
 				calls++

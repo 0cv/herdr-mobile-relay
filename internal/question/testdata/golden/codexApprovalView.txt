@@ -1,0 +1,36 @@
+=== codexApprovalView agent=codex
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:• I need to run the checks. ─ Worked for 2s ─ $ make check ❯ 1. Approve 2. Reject Command:make check Options:[Approve Reject] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Would you like to run this command?
+$ make check
+❯ 1. Approve
+  2. Reject}
+Classify.Interaction: nil
+ApprovalFingerprint: "b1d3b86f2e0b31be198df837d77bd6bcd3f5d7efdecc96f9bcc3531eceb7c7f1"
+=== codexApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:• I need to run the checks. ─ Worked for 2s ─ $ make check ❯ 1. Approve 2. Reject Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== codexApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:• I need to run the checks. ─ Worked for 2s ─ $ make check 1. Approve 2. Reject Command:make check Options:[Approve Reject] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Would you like to run this command?
+$ make check
+❯ 1. Approve
+  2. Reject}
+Classify.Interaction: nil
+ApprovalFingerprint: "c60651b8623dfc2340430a6f0e41410955d425f42a4e0e8f309fef6131aee6d6"
+=== codexApprovalView agent=codex crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:• I need to run the checks. ─ Worked for 2s ─ $ make check ❯ 1. Approve 2. Reject Command:make check Options:[Approve Reject] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Would you like to run this command?
+$ make check
+❯ 1. Approve
+  2. Reject}
+Classify.Interaction: nil
+ApprovalFingerprint: "b1d3b86f2e0b31be198df837d77bd6bcd3f5d7efdecc96f9bcc3531eceb7c7f1"

@@ -1,0 +1,68 @@
+=== idle-qoder-direct-real agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:- direction: NONE 354 · BEARISH 23 · MIXED_OR_AMBIGUOUS 21 · BULLISH 19
+- horizon: UNSTATED_OR_AMBIGUOUS 369 · 1_SESSION 24 · OTHER_EXPLICIT 17 · 5_SESSIONS 7
+- confidence: NOT_USABLE 354 · UNHEDGED_DIRECT 50 · HEDGED_OR_ATTRIBUTED 13
+Integrity verified: UTF-8, LF line endings, 418 rows (header + 417), all values within the allowed enums, tweet_ids unchanged as text, and
+multi-line quoted tweet text round-trips intact. The bulk of the corpus is macro/commodity/promo content with no equity-index subject, hence the
+NONE/NOT_USABLE majority.
+> /copy
+● Copied to clipboard (801 characters, 9 lines)
+Also written to /tmp/relay-copy/response.md
+Accept Edits Shift+Tab to YOLO                                                                                                              14 skills
+>   Type your message or @path/to/file
+demo@relay:/tmp/demo-project | ⎇ feature/copy-response | Qwen3.8-Max | ctx 22% of 200k | tok 43.5k↑/0↓ Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-qoder-direct-real agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:- direction: NONE 354 · BEARISH 23 · MIXED_OR_AMBIGUOUS 21 · BULLISH 19
+- horizon: UNSTATED_OR_AMBIGUOUS 369 · 1_SESSION 24 · OTHER_EXPLICIT 17 · 5_SESSIONS 7
+- confidence: NOT_USABLE 354 · UNHEDGED_DIRECT 50 · HEDGED_OR_ATTRIBUTED 13
+Integrity verified: UTF-8, LF line endings, 418 rows (header + 417), all values within the allowed enums, tweet_ids unchanged as text, and
+multi-line quoted tweet text round-trips intact. The bulk of the corpus is macro/commodity/promo content with no equity-index subject, hence the
+NONE/NOT_USABLE majority.
+> /copy
+● Copied to clipboard (801 characters, 9 lines)
+Also written to /tmp/relay-copy/response.md
+Accept Edits Shift+Tab to YOLO                                                                                                              14 skills
+>   Type your message or @path/to/file
+demo@relay:/tmp/demo-project | ⎇ feature/copy-response | Qwen3.8-Max | ctx 22% of 200k | tok 43.5k↑/0↓ Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-qoder-direct-real agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:- direction: NONE 354 · BEARISH 23 · MIXED_OR_AMBIGUOUS 21 · BULLISH 19
+- horizon: UNSTATED_OR_AMBIGUOUS 369 · 1_SESSION 24 · OTHER_EXPLICIT 17 · 5_SESSIONS 7
+- confidence: NOT_USABLE 354 · UNHEDGED_DIRECT 50 · HEDGED_OR_ATTRIBUTED 13
+Integrity verified: UTF-8, LF line endings, 418 rows (header + 417), all values within the allowed enums, tweet_ids unchanged as text, and
+multi-line quoted tweet text round-trips intact. The bulk of the corpus is macro/commodity/promo content with no equity-index subject, hence the
+NONE/NOT_USABLE majority.
+> /copy
+● Copied to clipboard (801 characters, 9 lines)
+Also written to /tmp/relay-copy/response.md
+Accept Edits Shift+Tab to YOLO                                                                                                              14 skills
+>   Type your message or @path/to/file
+demo@relay:/tmp/demo-project | ⎇ feature/copy-response | Qwen3.8-Max | ctx 22% of 200k | tok 43.5k↑/0↓ Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-qoder-direct-real agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:- direction: NONE 354 · BEARISH 23 · MIXED_OR_AMBIGUOUS 21 · BULLISH 19
+- horizon: UNSTATED_OR_AMBIGUOUS 369 · 1_SESSION 24 · OTHER_EXPLICIT 17 · 5_SESSIONS 7
+- confidence: NOT_USABLE 354 · UNHEDGED_DIRECT 50 · HEDGED_OR_ATTRIBUTED 13
+Integrity verified: UTF-8, LF line endings, 418 rows (header + 417), all values within the allowed enums, tweet_ids unchanged as text, and
+multi-line quoted tweet text round-trips intact. The bulk of the corpus is macro/commodity/promo content with no equity-index subject, hence the
+NONE/NOT_USABLE majority.
+> /copy
+● Copied to clipboard (801 characters, 9 lines)
+Also written to /tmp/relay-copy/response.md
+Accept Edits Shift+Tab to YOLO                                                                                                              14 skills
+>   Type your message or @path/to/file
+demo@relay:/tmp/demo-project | ⎇ feature/copy-response | Qwen3.8-Max | ctx 22% of 200k | tok 43.5k↑/0↓ Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

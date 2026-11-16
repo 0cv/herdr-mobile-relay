@@ -14,12 +14,7 @@ func TestSchedulerCompletesBurstWithinOwnedCapacity(t *testing.T) {
 		capacity = 4
 		total    = 80
 	)
-	scheduler := NewScheduler(capacity)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = scheduler.Close(ctx)
-	})
+	scheduler := newTestScheduler(t, capacity)
 
 	release := make(chan struct{})
 	firstWave := make(chan struct{}, capacity)
@@ -90,12 +85,7 @@ func TestSchedulerCompletesBurstWithinOwnedCapacity(t *testing.T) {
 
 func TestSchedulerPreservesTenClientReceiptOrderForOnePane(t *testing.T) {
 	const total = 10
-	scheduler := NewScheduler(8)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = scheduler.Close(ctx)
-	})
+	scheduler := newTestScheduler(t, 8)
 
 	var mu sync.Mutex
 	order := make([]int, 0, total)
@@ -170,12 +160,7 @@ func TestSchedulerShutdownCancelsPendingWork(t *testing.T) {
 }
 
 func TestApprovalExpiresNotStartedWhileQueued(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = scheduler.Close(ctx)
-	})
+	scheduler := newTestScheduler(t, 1)
 	blockingStarted := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
@@ -223,12 +208,7 @@ func TestApprovalExpiresNotStartedWhileQueued(t *testing.T) {
 }
 
 func TestConfirmationWatchCannotLandAfterGenerationBump(t *testing.T) {
-	scheduler := NewScheduler(1)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = scheduler.Close(ctx)
-	})
+	scheduler := newTestScheduler(t, 1)
 	const approvalKey = "approval\x00pane-1\x00event-1"
 	execute := func(action string, key string, bump bool) {
 		t.Helper()

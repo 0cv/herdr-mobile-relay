@@ -1,12 +1,9 @@
 package coordinator
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
-	"net"
-	"path/filepath"
+	"io"
 	"reflect"
 	"sync"
 	"testing"
@@ -16,129 +13,76 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
-type filterSocketWrite struct {
+type filterWrite struct {
 	Pane   string
 	Method string
 	Text   string
 }
 
-type controlledFilterSocket struct {
+type controlledFilterScreen struct {
+	backend             *fakeBackend
 	mu                  sync.Mutex
 	accepted            map[string]string
 	visible             map[string]string
-	writes              []filterSocketWrite
 	reads               map[string]int
 	deferRepaint        bool
 	failReadsAfterWrite bool
 	dropInputReply      bool
 }
 
-func newControlledFilterDispatcher(t *testing.T) (*Dispatcher, *controlledFilterSocket) {
+func newControlledFilterDispatcher(t *testing.T) (*Dispatcher, *controlledFilterScreen) {
 	t.Helper()
-	fake := &controlledFilterSocket{accepted: make(map[string]string), visible: make(map[string]string), reads: make(map[string]int)}
-	path := filepath.Join(testSocketDir(t), "native.sock")
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
+	fake := &controlledFilterScreen{
+		backend:  newFakeBackend(),
+		accepted: make(map[string]string),
+		visible:  make(map[string]string),
+		reads:    make(map[string]int),
 	}
-	var workers sync.WaitGroup
-	var connections sync.Map
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			connections.Store(conn, true)
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				defer connections.Delete(conn)
-				defer conn.Close()
-				decoder := json.NewDecoder(bufio.NewReader(conn))
-				for {
-					var request struct {
-						ID     string `json:"id"`
-						Method string `json:"method"`
-						Params struct {
-							Pane string   `json:"pane_id"`
-							Text string   `json:"text"`
-							Keys []string `json:"keys"`
-						} `json:"params"`
-					}
-					if decoder.Decode(&request) != nil {
-						return
-					}
-					fake.mu.Lock()
-					pane := request.Params.Pane
-					response := map[string]any{"id": request.ID, "result": map[string]any{"type": "ok"}}
-					switch request.Method {
-					case "pane.read":
-						fake.reads[pane]++
-						if fake.failReadsAfterWrite && fake.accepted[pane] != "" {
-							delete(response, "result")
-							response["error"] = map[string]any{"code": "read_failed", "message": "controlled read failure"}
-						} else {
-							response["result"] = map[string]any{"type": "pane_read", "read": map[string]any{"text": filterScreen(fake.visible[pane])}}
-						}
-					case "pane.send_keys":
-						text := ""
-						if len(request.Params.Keys) == 1 {
-							text = request.Params.Keys[0]
-						}
-						if text == "Space" {
-							text = " "
-						}
-						fake.writes = append(fake.writes, filterSocketWrite{pane, request.Method, text})
-						if len(text) == 1 {
-							fake.accepted[pane] += text
-							if !fake.deferRepaint {
-								fake.visible[pane] = fake.accepted[pane]
-							}
-						}
-					case "pane.send_input":
-						fake.writes = append(fake.writes, filterSocketWrite{pane, request.Method, request.Params.Text})
-					default:
-						delete(response, "result")
-						response["error"] = map[string]any{"code": "unknown_method", "message": "unsupported test method"}
-					}
-					drop := fake.dropInputReply && request.Method == "pane.send_input"
-					fake.mu.Unlock()
-					if drop {
-						return
-					}
-					if json.NewEncoder(conn).Encode(response) != nil {
-						return
-					}
-				}
-			}()
+	fake.backend.setHook("ReadPaneVisible", func(_ context.Context, call fakeCall) error {
+		pane := call.Args[0].(string)
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		fake.reads[pane]++
+		if fake.failReadsAfterWrite && fake.accepted[pane] != "" {
+			return &herdr.CLIError{Code: "read_failed", Message: "controlled read failure"}
 		}
-	}()
-	client := herdr.NewClient(filepath.Join(t.TempDir(), "no-cli-fallback"), path)
+		fake.backend.update(func(b *fakeBackend) { b.contents[pane] = filterScreen(fake.visible[pane]) })
+		return nil
+	})
+	fake.backend.setHook("SendLiteralKey", func(_ context.Context, call fakeCall) error {
+		pane, character := call.Args[0].(string), call.Args[1].(string)
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		fake.accepted[pane] += character
+		if !fake.deferRepaint {
+			fake.visible[pane] = fake.accepted[pane]
+		}
+		return nil
+	})
+	fake.backend.setHook("SendInput", func(context.Context, fakeCall) error {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		if fake.dropInputReply {
+			return &herdr.OutcomeError{Started: true, Err: io.EOF}
+		}
+		return nil
+	})
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "cursor", Status: "working"}, {PaneID: "pane-2", Agent: "cursor", Status: "working"}}, state.RevisionCounter())
-	d := NewDispatcher(client, state, nil, testLogger())
-	t.Cleanup(func() {
-		_ = listener.Close()
-		<-stopped
-		connections.Range(func(key, value any) bool { _ = key.(net.Conn).Close(); return true })
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := d.Close(ctx); err != nil {
-			t.Errorf("dispatcher cleanup: %v", err)
-		}
-		_ = client.Close()
-		workers.Wait()
-	})
-	return d, fake
+	return newTestDispatcher(t, fake.backend, state), fake
 }
 
-func (f *controlledFilterSocket) recordedWrites() []filterSocketWrite {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]filterSocketWrite(nil), f.writes...)
+func (f *controlledFilterScreen) recordedWrites() []filterWrite {
+	var writes []filterWrite
+	for _, call := range f.backend.recorded() {
+		switch call.Method {
+		case "SendLiteralKey":
+			writes = append(writes, filterWrite{call.Args[0].(string), call.Method, call.Args[1].(string)})
+		case "SendInput":
+			writes = append(writes, filterWrite{call.Args[0].(string), call.Method, call.Args[1].(herdr.PaneInput).Text})
+		}
+	}
+	return writes
 }
 
 func receiveFilterResult(t *testing.T, result <-chan *CommandResult) *CommandResult {
@@ -184,7 +128,7 @@ func TestFilterDelayedRepaintConfirmsWithoutResending(t *testing.T) {
 	if !reflect.DeepEqual(waits, wantWaits) {
 		t.Fatalf("waits=%v, want %v", waits, wantWaits)
 	}
-	want := []filterSocketWrite{{"pane-1", "pane.send_keys", "g"}, {"pane-1", "pane.send_keys", "r"}}
+	want := []filterWrite{{"pane-1", "SendLiteralKey", "g"}, {"pane-1", "SendLiteralKey", "r"}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("writes=%+v, want %+v", got, want)
 	}
@@ -201,7 +145,7 @@ func TestFilterReadFailureAfterPrefixIsUnknown(t *testing.T) {
 	d.testFilterWait = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	result := d.Handle(context.Background(), protocol.Inbound{Type: "send_filter_text", PaneID: "pane-1", Text: "grok"})
 	assertFilterUnknown(t, result)
-	want := []filterSocketWrite{{"pane-1", "pane.send_keys", "g"}}
+	want := []filterWrite{{"pane-1", "SendLiteralKey", "g"}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("continued or retried after read failure: %+v", got)
 	}
@@ -245,7 +189,7 @@ func TestFilterSchedulerDeadlineAfterPrefixIsUnknown(t *testing.T) {
 	if !errors.Is(effectCtx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("not a scheduler deadline expiry: %v", effectCtx.Err())
 	}
-	want := []filterSocketWrite{{"pane-1", "pane.send_keys", "g"}}
+	want := []filterWrite{{"pane-1", "SendLiteralKey", "g"}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("continued after deadline: %+v", got)
 	}
@@ -320,7 +264,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 		t.Fatalf("same-pane command interleaved: %+v", result)
 	default:
 	}
-	beforeRelease := []filterSocketWrite{{"pane-1", "pane.send_keys", "g"}, {"pane-2", "pane.send_input", "other"}}
+	beforeRelease := []filterWrite{{"pane-1", "SendLiteralKey", "g"}, {"pane-2", "SendInput", "other"}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, beforeRelease) {
 		t.Fatalf("writes while filter paused: %+v", got)
 	}
@@ -331,7 +275,7 @@ func testFilterFIFOWhilePaused(t *testing.T, pause time.Duration) {
 	if result := receiveFilterResult(t, sameResult); !result.OK {
 		t.Fatalf("queued command failed: %+v", result)
 	}
-	want := append(beforeRelease, filterSocketWrite{"pane-1", "pane.send_keys", "r"}, filterSocketWrite{"pane-1", "pane.send_input", "same"})
+	want := append(beforeRelease, filterWrite{"pane-1", "SendLiteralKey", "r"}, filterWrite{"pane-1", "SendInput", "same"})
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("FIFO order=%+v, want %+v", got, want)
 	}

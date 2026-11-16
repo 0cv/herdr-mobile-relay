@@ -13,6 +13,9 @@ import (
 func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 	for _, paginated := range []bool{false, true} {
 		for _, browserPath := range []bool{false, true} {
+			if paginated && !browserPath {
+				continue
+			}
 			name := "reader"
 			if browserPath {
 				name = "browser"
@@ -36,12 +39,9 @@ func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 						cursor = page.NextCursor
 					}
 				} else {
-					page := readGrok(t, reader, "", 2)
-					if len(page.Entries) != 2 {
+					page := readGrok(t, reader, 2)
+					if len(page) != 2 {
 						t.Fatalf("initial page = %#v", page)
-					}
-					if paginated {
-						cursor = page.Entries[0].ID
 					}
 				}
 				outside := t.TempDir()
@@ -64,8 +64,8 @@ func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 					}
 					payload = page
 				} else {
-					page, err := reader.ReadFor("grok", grokCWD, testSessionID, cursor, 2)
-					if err == nil && page.Available {
+					page, err := reader.ReadLatest("grok", ProjectContext{CWD: grokCWD}, testSessionID, 2)
+					if err == nil {
 						t.Fatalf("outside source accepted: %#v", page)
 					}
 					payload = page
@@ -93,7 +93,7 @@ func TestGrokUntaggedInterjectionsRemainSeparate(t *testing.T) {
 		})
 	}
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-	assertGrokTexts(t, readGrok(t, reader, "", 80).Entries, "user:first", "user:second")
+	assertGrokTexts(t, readGrok(t, reader, 80), "user:first", "user:second")
 }
 
 func TestGrokHiddenEventsCloseUntaggedTurns(t *testing.T) {
@@ -108,9 +108,9 @@ func TestGrokHiddenEventsCloseUntaggedTurns(t *testing.T) {
 			f.other(kind)
 			f.rewind(1)
 			f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-			page := readGrok(t, reader, "", 80)
-			assertGrokTexts(t, page.Entries, "user:first\ncontinued")
-			if page.SourceCorrupt {
+			page := readGrok(t, reader, 80)
+			assertGrokTexts(t, page, "user:first\ncontinued")
+			if grokBrowserCorrupt(t, reader) {
 				t.Fatal("valid rewind reported as corrupt")
 			}
 		})

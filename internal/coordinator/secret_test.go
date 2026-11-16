@@ -1,62 +1,34 @@
 package coordinator
 
 // Tests for the no-echo secret path. A secret must reach the pane as a single
-// keystroke batch (no bracketed paste, no partial submission) and must never
+// secret send (no bracketed paste, no partial submission) and must never
 // appear in the activity journal.
-// Helpers testLogger/writeScript live in safety_test.go and
-// dispatch_safety_test.go.
 
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
-func recordingSecretHerdr(t *testing.T, dir, record string) string {
-	t.Helper()
-	return writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"{ printf '%s\\n' \"$@\"; echo '--'; } >> \""+record+"\"\n"+
-		"printf '{\"ok\":true}\\n'\n")
-}
-
-func recordedInvocations(t *testing.T, record string) [][]string {
-	t.Helper()
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatalf("read invocations: %v", err)
-	}
-	invocations := make([][]string, 0, 2)
-	for _, block := range strings.Split(string(data), "--\n") {
-		if block == "" {
-			continue
-		}
-		invocations = append(invocations, strings.Split(strings.TrimSuffix(block, "\n"), "\n"))
-	}
-	return invocations
-}
-
 func TestSendSecretDispatchesOneKeystrokeBatch(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	bin := recordingSecretHerdr(t, dir, record)
+	client := newFakeBackend()
+	client.contents["pane-1"] = "Password:"
 	state := NewState(testLogger())
 	state.CommitInventory(
 		[]*AgentState{{PaneID: "pane-1", Agent: "omp", Status: "working"}},
 		state.RevisionCounter(),
 	)
-	journal, err := activity.OpenJournal(filepath.Join(dir, "cache"))
+	journal, err := activity.OpenJournal(filepath.Join(t.TempDir(), "cache"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := NewDispatcher(herdr.NewClient(bin, secretReadSocket(t, "Password:", false, nil)), state, journal, testLogger())
+	d := NewDispatcher(client, state, journal, testLogger())
 	t.Cleanup(func() {
 		_ = d.Close(context.Background())
 	})
@@ -71,16 +43,14 @@ func TestSendSecretDispatchesOneKeystrokeBatch(t *testing.T) {
 		t.Fatalf("send_secret result = %+v", result)
 	}
 
-	invocations := recordedInvocations(t, record)
-	if len(invocations) != 1 {
-		t.Fatalf("send_secret ran %d Herdr invocations, want 1: %#v", len(invocations), invocations)
+	want := []fakeCall{{Method: "SendSecret", Args: []any{"pane-1", "hunter 2!"}}}
+	if got := client.callsTo("SendSecret"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SendSecret calls = %+v, want %+v", got, want)
 	}
-	want := []string{
-		"pane", "send-keys", "pane-1",
-		"h", "u", "n", "t", "e", "r", " ", "2", "!", "Enter",
-	}
-	if !reflect.DeepEqual(invocations[0], want) {
-		t.Fatalf("Herdr arguments = %#v, want %#v", invocations[0], want)
+	for _, call := range client.recorded() {
+		if call.Method != "ReadPaneVisible" && call.Method != "SendSecret" {
+			t.Fatalf("send_secret made an unexpected Herdr call: %+v", call)
+		}
 	}
 
 	recent := journal.Recent(5)
@@ -112,18 +82,14 @@ func TestSendSecretRejectsUnsendableSecrets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			record := filepath.Join(dir, "invocations.log")
-			bin := recordingSecretHerdr(t, dir, record)
+			client := newFakeBackend()
+			client.contents["pane-1"] = "Password:"
 			state := NewState(testLogger())
 			state.CommitInventory(
 				[]*AgentState{{PaneID: "pane-1", Agent: "omp", Status: "working"}},
 				state.RevisionCounter(),
 			)
-			d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
-			t.Cleanup(func() {
-				_ = d.Close(context.Background())
-			})
+			d := newTestDispatcher(t, client, state)
 
 			result := d.Handle(context.Background(), protocol.Inbound{
 				Type:      "send_secret",
@@ -134,8 +100,8 @@ func TestSendSecretRejectsUnsendableSecrets(t *testing.T) {
 			if result.OK {
 				t.Fatalf("send_secret accepted %q: %+v", tt.name, result)
 			}
-			if _, err := os.Stat(record); !os.IsNotExist(err) {
-				t.Fatalf("rejected secret still reached Herdr: %#v", recordedInvocations(t, record))
+			if calls := client.recorded(); len(calls) != 0 {
+				t.Fatalf("rejected secret still reached Herdr: %+v", calls)
 			}
 		})
 	}

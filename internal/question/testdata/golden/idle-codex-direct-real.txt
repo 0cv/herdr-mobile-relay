@@ -1,0 +1,88 @@
+=== idle-codex-direct-real agent=codex
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Created the 417-row blinded annotation CSV:
+
+project/data/review.csv
+
+Fill only these four columns:
+
+- target: SPY, QQQ, BOTH_OR_AMBIGUOUS, or NONE
+- direction: BULLISH, BEARISH, MIXED_OR_AMBIGUOUS, or NONE
+- horizon: 1_SESSION, 5_SESSIONS, OTHER_EXPLICIT, or UNSTATED_OR_AMBIGUOUS
+- confidence: UNHEDGED_DIRECT, HEDGED_OR_ATTRIBUTED, or NOT_USABLE
+
+Keep all identity and context columns unchanged. Import every column as text in your spreadsheet application and save as UTF-8 CSV—especially to
+prevent long tweet IDs from being converted to numbers.
+
+Validation confirmed all 417 rows, tweet text, IDs, and text hashes match the locked packet. CSV SHA-256: c6cee138…b365.
+
+I also added a reproducible exporter at project/scripts/export_annotations.py. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-codex-direct-real agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Created the 417-row blinded annotation CSV:
+
+project/data/review.csv
+
+Fill only these four columns:
+
+- target: SPY, QQQ, BOTH_OR_AMBIGUOUS, or NONE
+- direction: BULLISH, BEARISH, MIXED_OR_AMBIGUOUS, or NONE
+- horizon: 1_SESSION, 5_SESSIONS, OTHER_EXPLICIT, or UNSTATED_OR_AMBIGUOUS
+- confidence: UNHEDGED_DIRECT, HEDGED_OR_ATTRIBUTED, or NOT_USABLE
+
+Keep all identity and context columns unchanged. Import every column as text in your spreadsheet application and save as UTF-8 CSV—especially to
+prevent long tweet IDs from being converted to numbers.
+
+Validation confirmed all 417 rows, tweet text, IDs, and text hashes match the locked packet. CSV SHA-256: c6cee138…b365.
+
+I also added a reproducible exporter at project/scripts/export_annotations.py. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-codex-direct-real agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Created the 417-row blinded annotation CSV:
+
+project/data/review.csv
+
+Fill only these four columns:
+
+- target: SPY, QQQ, BOTH_OR_AMBIGUOUS, or NONE
+- direction: BULLISH, BEARISH, MIXED_OR_AMBIGUOUS, or NONE
+- horizon: 1_SESSION, 5_SESSIONS, OTHER_EXPLICIT, or UNSTATED_OR_AMBIGUOUS
+- confidence: UNHEDGED_DIRECT, HEDGED_OR_ATTRIBUTED, or NOT_USABLE
+
+Keep all identity and context columns unchanged. Import every column as text in your spreadsheet application and save as UTF-8 CSV—especially to
+prevent long tweet IDs from being converted to numbers.
+
+Validation confirmed all 417 rows, tweet text, IDs, and text hashes match the locked packet. CSV SHA-256: c6cee138…b365.
+
+I also added a reproducible exporter at project/scripts/export_annotations.py. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-codex-direct-real agent=codex crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt:Created the 417-row blinded annotation CSV:
+
+project/data/review.csv
+
+Fill only these four columns:
+
+- target: SPY, QQQ, BOTH_OR_AMBIGUOUS, or NONE
+- direction: BULLISH, BEARISH, MIXED_OR_AMBIGUOUS, or NONE
+- horizon: 1_SESSION, 5_SESSIONS, OTHER_EXPLICIT, or UNSTATED_OR_AMBIGUOUS
+- confidence: UNHEDGED_DIRECT, HEDGED_OR_ATTRIBUTED, or NOT_USABLE
+
+Keep all identity and context columns unchanged. Import every column as text in your spreadsheet application and save as UTF-8 CSV—especially to
+prevent long tweet IDs from being converted to numbers.
+
+Validation confirmed all 417 rows, tweet text, IDs, and text hashes match the locked packet. CSV SHA-256: c6cee138…b365.
+
+I also added a reproducible exporter at project/scripts/export_annotations.py. Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

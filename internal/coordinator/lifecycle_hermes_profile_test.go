@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
@@ -66,11 +65,11 @@ func hermesLifecycle(t *testing.T, names ...string) *Lifecycle {
 	t.Helper()
 	t.Setenv("HERMES_HOME", "")
 	t.Setenv("HERDR_HERMES_DATA_DIRS", "")
-	home := t.TempDir()
+	env := newLaunchEnv(t, "hermes", "codex")
 	for _, name := range names {
 		// The profile needs an identity marker: hermesprofiles mirrors hermes'
 		// named_profile_is_live, so a bare directory is a ghost, not a profile.
-		dir := filepath.Join(home, ".hermes", "profiles", name)
+		dir := filepath.Join(env.home, ".hermes", "profiles", name)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("create profile %q: %v", name, err)
 		}
@@ -78,20 +77,9 @@ func hermesLifecycle(t *testing.T, names ...string) *Lifecycle {
 			t.Fatalf("write marker for profile %q: %v", name, err)
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(home, "project"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	binDir := filepath.Join(home, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, binary := range []string{"hermes", "codex"} {
-		writeScript(t, binDir, binary, "#!/bin/sh\nexit 0\n")
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return &Lifecycle{
-		profiles: profiles.NewResolver(filepath.Join(home, "config"), nil),
-		home:     home,
+		profiles: profiles.NewResolver(env.config, nil),
+		home:     env.home,
 	}
 }
 
@@ -164,66 +152,34 @@ func TestValidateStartRejectsUninstalledHermesProfile(t *testing.T) {
 func TestLifecycleStartsHermesWithSelectedProfile(t *testing.T) {
 	for _, name := range []string{"apollo", hermesprofiles.Default} {
 		t.Run("profile="+name, func(t *testing.T) {
-			dir := t.TempDir()
-			writeScript(t, dir, "hermes", "#!/bin/sh\nexit 0\n")
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			home := filepath.Join(dir, "home")
-			for _, profile := range []string{"apollo"} {
-				profileDir := filepath.Join(home, ".hermes", "profiles", profile)
-				if err := os.MkdirAll(profileDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				// hermesprofiles only reports a profile with an identity marker,
-				// matching hermes' named_profile_is_live.
-				if err := os.WriteFile(filepath.Join(profileDir, "config.yaml"), []byte("{}"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			cwd := filepath.Join(home, "project")
-			if err := os.MkdirAll(cwd, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			record := filepath.Join(dir, "invocations.log")
-			bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-				"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-				"case \"$1 $2\" in\n"+
-				"  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n"+
-				"  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n"+
-				"  'workspace create') printf '%s\\n' '{\"result\":{\"type\":\"workspace_created\",\"workspace\":{\"workspace_id\":\"workspace-new\",\"label\":\"project\"},\"tab\":{\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\",\"label\":\"project\"},\"root_pane\":{\"pane_id\":\"pane-new\",\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"}}}' ;;\n"+
-				"  'tab rename') printf '%s\\n' '{\"result\":{\"tab_id\":\"tab-new\"}}' ;;\n"+
-				"  'agent start') printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"hermes\",\"name\":\"project-hermes\"}}}' ;;\n"+
-				"  *) exit 2 ;;\n"+
-				"esac\n")
-
-			socketPath := filepath.Join(testSocketDir(t), "s")
-			startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
-			lifecycle := &Lifecycle{
-				herdr:    herdr.NewClient(bin, socketPath),
-				profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),
-				home:     home,
-			}
+			lifecycle := hermesLifecycle(t, "apollo")
+			client := newLaunchFake()
+			lifecycle.herdr = client
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			if _, err := lifecycle.Start(ctx, profiles.Profile{ID: "hermes", Kind: "hermes"}, StartRequest{
+			result, err := lifecycle.Start(ctx, profiles.Profile{ID: "hermes", Kind: "hermes"}, StartRequest{
 				ProfileID:     "hermes",
 				Name:          "project-hermes",
-				Cwd:           cwd,
+				Cwd:           filepath.Join(lifecycle.home, "project"),
 				HermesProfile: name,
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatalf("Start() error = %v", err)
 			}
+			if result.PaneID != "pane-new" {
+				t.Fatalf("Start() pane_id = %q, want pane-new", result.PaneID)
+			}
 
-			invocations, err := os.ReadFile(record)
-			if err != nil {
-				t.Fatalf("read invocations: %v", err)
+			starts := client.callsTo("StartAgent")
+			if len(starts) != 1 {
+				t.Fatalf("agent start not recorded as expected: %+v", client.recorded())
 			}
-			want := "agent start project-hermes --kind hermes --pane pane-new --timeout "
-			if !strings.Contains(string(invocations), want) {
-				t.Fatalf("agent start not recorded as expected:\n%s", invocations)
+			if !reflect.DeepEqual(starts[0].Args[:3], []any{"project-hermes", "hermes", "pane-new"}) {
+				t.Fatalf("agent start arguments = %+v", starts[0].Args)
 			}
-			if !strings.Contains(string(invocations), "-- -p "+name) {
-				t.Fatalf("selected profile missing from argv:\n%s", invocations)
+			if got := starts[0].Args[4]; !reflect.DeepEqual(got, []string{"-p", name}) {
+				t.Fatalf("selected profile missing from argv: %#v", got)
 			}
 		})
 	}
@@ -232,47 +188,28 @@ func TestLifecycleStartsHermesWithSelectedProfile(t *testing.T) {
 // TestLifecycleOmitsProfileFlagWhenUnset keeps the pre-existing argv for a
 // Hermes launch that never named a profile.
 func TestLifecycleOmitsProfileFlagWhenUnset(t *testing.T) {
-	dir := t.TempDir()
-	writeScript(t, dir, "hermes", "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	home := filepath.Join(dir, "home")
-	cwd := filepath.Join(home, "project")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	record := filepath.Join(dir, "invocations.log")
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"case \"$1 $2\" in\n"+
-		"  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n"+
-		"  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n"+
-		"  'workspace create') printf '%s\\n' '{\"result\":{\"type\":\"workspace_created\",\"workspace\":{\"workspace_id\":\"workspace-new\",\"label\":\"project\"},\"tab\":{\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"},\"root_pane\":{\"pane_id\":\"pane-new\",\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"}}}' ;;\n"+
-		"  'tab rename') printf '%s\\n' '{\"result\":{\"tab_id\":\"tab-new\"}}' ;;\n"+
-		"  'agent start') printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"hermes\"}}}' ;;\n"+
-		"  *) exit 2 ;;\n"+
-		"esac\n")
-	socketPath := filepath.Join(testSocketDir(t), "s")
-	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
-	lifecycle := &Lifecycle{
-		herdr:    herdr.NewClient(bin, socketPath),
-		profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),
-		home:     home,
-	}
+	lifecycle := hermesLifecycle(t)
+	client := newLaunchFake()
+	lifecycle.herdr = client
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if _, err := lifecycle.Start(ctx, profiles.Profile{ID: "hermes", Kind: "hermes"}, StartRequest{
+	result, err := lifecycle.Start(ctx, profiles.Profile{ID: "hermes", Kind: "hermes"}, StartRequest{
 		ProfileID: "hermes",
 		Name:      "project-hermes",
-		Cwd:       cwd,
-	}); err != nil {
+		Cwd:       filepath.Join(lifecycle.home, "project"),
+	})
+	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	invocations, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
+	if result.PaneID != "pane-new" {
+		t.Fatalf("Start() pane_id = %q, want pane-new", result.PaneID)
 	}
-	if strings.Contains(string(invocations), " -- -p ") {
-		t.Fatalf("unset profile must not add -p:\n%s", invocations)
+	starts := client.callsTo("StartAgent")
+	if len(starts) != 1 {
+		t.Fatalf("agent start not recorded as expected: %+v", client.recorded())
+	}
+	if got := starts[0].Args[4]; len(got.([]string)) != 0 {
+		t.Fatalf("unset profile must not add -p: %#v", got)
 	}
 }

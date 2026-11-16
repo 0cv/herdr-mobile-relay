@@ -2,13 +2,10 @@ package coordinator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
@@ -38,19 +35,8 @@ Context [░░░░░░░░] 11.1k/1M (1%) │ 5h [░░░░░░░�
 		{"changed choice rejects stale approval", strings.Replace(moved, "Yes, run command", "Yes, run command once", 1), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			panePath := filepath.Join(dir, "pane.ansi")
-			if err := os.WriteFile(panePath, []byte(test.live), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			record := filepath.Join(dir, "invocations.log")
-			bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-				"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-				"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-				"  cat \""+panePath+"\"\n"+
-				"else\n"+
-				"  printf '{\"ok\":true}\\n'\n"+
-				"fi\n")
+			client := newFakeBackend()
+			client.contents["pane-1"] = test.live
 			classification := question.Classify(original, "agy")
 			if classification.Kind != question.AttentionApproval {
 				t.Fatalf("original classification = %+v", classification)
@@ -62,14 +48,7 @@ Context [░░░░░░░░] 11.1k/1M (1%) │ 5h [░░░░░░░�
 				Options:             append([]string(nil), classification.Options...),
 				ApprovalFingerprint: question.ApprovalFingerprint(classification),
 			}}, state.RevisionCounter())
-			d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
-			t.Cleanup(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				if err := d.Close(ctx); err != nil {
-					t.Fatalf("close dispatcher: %v", err)
-				}
-			})
+			d := newTestDispatcher(t, client, state)
 			fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 			result := d.Handle(context.Background(), protocol.Inbound{
 				Type:                "respond",
@@ -81,23 +60,20 @@ Context [░░░░░░░░] 11.1k/1M (1%) │ 5h [░░░░░░░�
 				Index:               intPtr(0),
 				Total:               intPtr(len(classification.Options)),
 			})
-			data, err := os.ReadFile(record)
-			if err != nil {
-				t.Fatal(err)
-			}
 			if test.wantAccepted {
 				if !result.OK || result.Phase != "accepted" {
 					t.Fatalf("repaint approval result = %+v", result)
 				}
-				if !strings.Contains(string(data), "pane send-keys pane-1 Up Enter") {
-					t.Fatalf("approval did not navigate from reparsed live focus:\n%s", data)
+				want := []fakeCall{{Method: "SendKeys", Args: []any{"pane-1", []string{"Up", "Enter"}}}}
+				if got := client.callsTo("SendKeys"); !reflect.DeepEqual(got, want) {
+					t.Fatalf("approval keys = %+v, want %+v", got, want)
 				}
 			} else {
 				if result.OK || result.Error != "Approval choices are no longer available" {
 					t.Fatalf("stale approval result = %+v", result)
 				}
-				if strings.Contains(string(data), "send-keys") {
-					t.Fatalf("stale dialog received approval keys:\n%s", data)
+				if sends := client.callsTo("SendKeys"); len(sends) != 0 {
+					t.Fatalf("stale dialog received approval keys: %+v", sends)
 				}
 			}
 		})

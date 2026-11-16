@@ -28,8 +28,7 @@ func TestManualTerminalNativeFixture(t *testing.T) {
 	defer client.Close()
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "native-dialog", TerminalID: "native-terminal", Agent: "pi", Status: "blocked", AttentionKind: "unknown"}}, state.RevisionCounter())
-	d := NewDispatcher(client, state, nil, testLogger())
-	defer d.Close(context.Background())
+	d := newTestDispatcher(t, client, state)
 	text := "  /literal-command 界😀  "
 	result := d.Handle(context.Background(), protocol.Inbound{Type: "send_terminal_text", RequestID: "native-text", PaneID: "native-dialog", Text: text})
 	if !result.OK {
@@ -78,7 +77,7 @@ func TestTerminalTextLiteralDispatchAndIdempotency(t *testing.T) {
 			t.Fatalf("result: %+v", result)
 		}
 	}
-	want := []filterSocketWrite{{"pane-1", "pane.send_input", text}}
+	want := []filterWrite{{"pane-1", "SendInput", text}}
 	if got := fake.recordedWrites(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("writes = %#v", got)
 	}

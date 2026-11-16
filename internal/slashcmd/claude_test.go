@@ -24,7 +24,7 @@ func TestClaudeLargePersonalCatalogIncludesLateSkills(t *testing.T) {
 	}
 	for index := 0; index < 30; index++ {
 		name := fmt.Sprintf("custom-command-%03d", index)
-		writeTestFile(t, filepath.Join(commandDir, name+".md"), "Custom command")
+		writeFile(t, filepath.Join(commandDir, name+".md"), "Custom command")
 		expected["/"+name] = "personal"
 	}
 	for index := 0; index < 341; index++ {
@@ -37,7 +37,7 @@ func TestClaudeLargePersonalCatalogIncludesLateSkills(t *testing.T) {
 	writeSkill(t, skillDir, "rrrerun", "Late personal skill")
 	expected["/rrrerun"] = "personal"
 
-	catalog := CatalogFor("claude", t.TempDir(), home)
+	catalog := catalogFor("claude", t.TempDir(), home)
 	if catalog.Truncated {
 		t.Fatal("large personal catalog should fit within the raised discovery budget")
 	}
@@ -66,7 +66,7 @@ func TestClaudeRecursiveNamespace(t *testing.T) {
 	os.MkdirAll(cmdDir, 0o755)
 	os.WriteFile(filepath.Join(cmdDir, "commit.md"), []byte("Commit changes"), 0o644)
 
-	catalog := CatalogFor("claude", "/tmp", home)
+	catalog := catalogFor("claude", "/tmp", home)
 	if !hasCommand(catalog, "/git:commit") {
 		t.Error("missing /git:commit")
 	}
@@ -78,7 +78,7 @@ func TestClaudeDeepNesting(t *testing.T) {
 	os.MkdirAll(deep, 0o755)
 	os.WriteFile(filepath.Join(deep, "c.md"), []byte("Deep"), 0o644)
 
-	catalog := CatalogFor("claude", "/tmp", home)
+	catalog := catalogFor("claude", "/tmp", home)
 	if !hasCommand(catalog, "/a:b:c") {
 		t.Error("missing /a:b:c")
 	}
@@ -95,7 +95,7 @@ func TestClaudeGitRoot(t *testing.T) {
 	os.MkdirAll(sub, 0o755)
 
 	home := t.TempDir()
-	catalog := CatalogFor("claude", sub, home)
+	catalog := catalogFor("claude", sub, home)
 	if !hasCommand(catalog, "/build") {
 		t.Error("project command not found from subdirectory via git root")
 	}
@@ -113,7 +113,7 @@ func TestClaudeGitRootFallback(t *testing.T) {
 	os.MkdirAll(sub, 0o755)
 
 	home := t.TempDir()
-	catalog := CatalogFor("claude", sub, home)
+	catalog := catalogFor("claude", sub, home)
 	if !hasCommand(catalog, "/lint") {
 		t.Error("project command not found via upward walk from git root")
 	}
@@ -125,7 +125,7 @@ func TestClaudeFrontmatterDescription(t *testing.T) {
 	os.MkdirAll(cmdDir, 0o755)
 	os.WriteFile(filepath.Join(cmdDir, "deploy.md"), []byte("---\ndescription: Custom deploy desc\n---\nBody text here"), 0o644)
 
-	catalog := CatalogFor("claude", "/tmp", home)
+	catalog := catalogFor("claude", "/tmp", home)
 	for _, cmd := range catalog.Commands {
 		if cmd.Command == "/deploy" {
 			if cmd.Description != "Custom deploy desc" {
@@ -148,7 +148,7 @@ func TestClaudePersonalOverridesProject(t *testing.T) {
 	os.MkdirAll(projectDir, 0o755)
 	os.WriteFile(filepath.Join(projectDir, "deploy.md"), []byte("Project deploy"), 0o644)
 
-	catalog := CatalogFor("claude", cwd, home)
+	catalog := catalogFor("claude", cwd, home)
 	count := 0
 	for _, cmd := range catalog.Commands {
 		if cmd.Command == "/deploy" {
@@ -170,7 +170,7 @@ func TestClaudeHiddenCommandSkipped(t *testing.T) {
 	os.WriteFile(filepath.Join(cmdDir, "secret.md"), []byte("---\nhidden: true\n---\nSecret"), 0o644)
 	os.WriteFile(filepath.Join(cmdDir, "public.md"), []byte("Public"), 0o644)
 
-	catalog := CatalogFor("claude", "/tmp", home)
+	catalog := catalogFor("claude", "/tmp", home)
 	if hasCommand(catalog, "/secret") {
 		t.Error("hidden command should not appear")
 	}
@@ -185,14 +185,14 @@ func TestClaudeSkillUserInvocableFalse(t *testing.T) {
 	os.MkdirAll(skillDir, 0o755)
 	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: internal-only\nuser-invocable: false\n---\n"), 0o644)
 
-	catalog := CatalogFor("claude", "/tmp", home)
+	catalog := catalogFor("claude", "/tmp", home)
 	if hasCommand(catalog, "/internal-only") {
 		t.Error("user-invocable: false skill should not appear")
 	}
 }
 
 func TestClaudeBuiltinArgumentHints(t *testing.T) {
-	catalog := CatalogFor("claude", "/tmp", "/nonexistent")
+	catalog := catalogFor("claude", "/tmp", "/nonexistent")
 	for _, cmd := range catalog.Commands {
 		if cmd.Command == "/remote-control" {
 			if cmd.ArgumentHint != "[name]" {
@@ -218,10 +218,10 @@ func TestClaudeLaterScopeRestoresSuppressedCommand(t *testing.T) {
 	if err := os.MkdirAll(personalSkill, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(projectSkill, "SKILL.md"), "---\nname: deploy\nuser-invocable: false\n---\n")
-	writeTestFile(t, filepath.Join(personalSkill, "SKILL.md"), "---\nname: deploy\ndescription: Personal deploy\n---\n")
+	writeFile(t, filepath.Join(projectSkill, "SKILL.md"), "---\nname: deploy\nuser-invocable: false\n---\n")
+	writeFile(t, filepath.Join(personalSkill, "SKILL.md"), "---\nname: deploy\ndescription: Personal deploy\n---\n")
 
-	catalog := CatalogFor("claude", cwd, home)
+	catalog := catalogFor("claude", cwd, home)
 	if !hasCommand(catalog, "/deploy") {
 		t.Fatal("later personal skill did not restore a project-suppressed command")
 	}
@@ -239,27 +239,11 @@ func TestClaudeLaterSettingsReenableEarlierOff(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cwd, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(home, ".claude", "settings.json"), `{"skillOverrides":{"review":"off"}}`)
-	writeTestFile(t, filepath.Join(cwd, ".claude", "settings.json"), `{"skillOverrides":{"review":"on"}}`)
+	writeFile(t, filepath.Join(home, ".claude", "settings.json"), `{"skillOverrides":{"review":"off"}}`)
+	writeFile(t, filepath.Join(cwd, ".claude", "settings.json"), `{"skillOverrides":{"review":"on"}}`)
 
-	catalog := CatalogFor("claude", cwd, home)
+	catalog := catalogFor("claude", cwd, home)
 	if !hasCommand(catalog, "/review") {
 		t.Fatal("later project setting did not re-enable /review")
-	}
-}
-
-func hasCommand(catalog Catalog, name string) bool {
-	for _, cmd := range catalog.Commands {
-		if cmd.Command == name {
-			return true
-		}
-	}
-	return false
-}
-
-func writeTestFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
 	}
 }

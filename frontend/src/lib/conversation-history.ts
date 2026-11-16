@@ -42,6 +42,22 @@ type EntryLanes = {
   networkSnapshotId?: string;
 };
 
+type LaneContext = Pick<PageContext, 'isFreshHead' | 'previewWasVisible' | 'olderContinuationBefore' | 'planBefore'>;
+
+type PageContext = Readonly<{
+  demand: Demand;
+  requestedCursor: string;
+  pageState: ConversationBrowseState;
+  previewWasVisible: boolean;
+  previousSource: string;
+  networkBefore: ConversationEntry[];
+  bridgeWasActive: boolean;
+  planBefore: OmoTodoState | null;
+  isFreshHead: boolean;
+  preserveOlderContinuation: boolean;
+  olderContinuationBefore: OlderContinuation | null;
+}>;
+
 type OlderContinuation = {
   nextCursor: string;
   hasMore: boolean;
@@ -456,8 +472,7 @@ export class ConversationHistoryController {
           signal: abort.signal,
         });
         if (!this.canContinue(demandEpoch, abort)) return;
-        const result = this.acceptPage(page, demand, requestedCursor);
-        if (!result.accepted) return;
+        if (!this.acceptPage(page, demand, requestedCursor)) return;
         if (page.state === 'preparing') {
           if (!this.advancePreparation(page, demandEpoch, abort)) return;
           await this.wait(this.preparationIntervalMs, demandEpoch, abort, demandStartedAt);
@@ -468,7 +483,7 @@ export class ConversationHistoryController {
         this.readyPages++;
         this.emit();
         if (requestedCursor && page.nextCursor === requestedCursor && !this.rawProgressThisPage) {
-          this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
+          this.pauseOnRepeatedCursor();
           return;
         }
         if (!this.bridgeActive) {
@@ -481,7 +496,7 @@ export class ConversationHistoryController {
           return;
         }
         if (this.seenReadyCursors.has(continuationCursor)) {
-          this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
+          this.pauseOnRepeatedCursor();
           return;
         }
         this.seenReadyCursors.add(continuationCursor);
@@ -503,6 +518,10 @@ export class ConversationHistoryController {
     } catch (failure) {
       if (demandEpoch !== this.stateValue.epoch || isAbortFailure(failure)) return;
       const error = conversationError(failure, 'Conversation history could not be loaded.');
+      if (error.code === workDeadlineError().code) {
+        this.pauseWithError(error.message, error.retryable, error.code);
+        return;
+      }
       this.stateValue.error = error;
       this.stateValue.requestPhase = 'idle';
       this.stateValue.pausedReason = error.retryable ? '' : error.message;
@@ -534,48 +553,73 @@ export class ConversationHistoryController {
     };
   }
 
-  private restoreOlderContinuation(value: OlderContinuation, restoreNetworkSnapshot = true, restorePlan = true, restoreDiagnostics = true): void {
+  private restoreOlderCursor(value: OlderContinuation): void {
     this.stateValue.nextCursor = value.nextCursor;
     this.stateValue.hasMore = value.hasMore;
     this.stateValue.snapshotId = value.snapshotId;
     this.stateValue.beginningReached = value.beginningReached;
-    if (restorePlan) this.stateValue.omoPlan = value.omoPlan;
-    if (restoreDiagnostics) this.stateValue.diagnostics = value.diagnostics;
-    if (restoreNetworkSnapshot) this.networkSnapshotId = value.snapshotId;
   }
 
-  private acceptPage(page: ConversationPage, demand: Demand, requestedCursor: string): { accepted: boolean } {
+  private restoreOlderContinuation(value: OlderContinuation): void {
+    this.restoreOlderCursor(value);
+    this.stateValue.omoPlan = value.omoPlan;
+    this.stateValue.diagnostics = value.diagnostics;
+    this.networkSnapshotId = value.snapshotId;
+  }
+
+  private keepCursor(requestedCursor: string, page?: ConversationPage): void {
+    this.stateValue.nextCursor = page?.nextCursor || requestedCursor || this.stateValue.nextCursor;
+    this.stateValue.hasMore = Boolean(this.stateValue.nextCursor || page?.hasMore);
+  }
+
+  private pageContext(page: ConversationPage, demand: Demand, requestedCursor: string): PageContext {
     const previewWasVisible = this.stateValue.preview && !this.stateValue.authoritative;
-    const previousSource = this.networkSourceRevision || (previewWasVisible ? '' : this.stateValue.sourceRevision);
-    const networkBefore = this.networkEntries;
-    const bridgeWasActive = this.bridgeActive;
-    const planBefore = this.stateValue.omoPlan;
     const isFreshHead = (demand === 'initial' || demand === 'refresh') && !requestedCursor;
     const preserveOlderContinuation = isFreshHead
       && demand === 'refresh'
       && !previewWasVisible
       && this.stateValue.authoritative
       && (this.rawEntries.length > 0 || Boolean(this.stateValue.nextCursor) || this.stateValue.beginningReached);
-    const olderContinuationBefore = preserveOlderContinuation ? this.captureOlderContinuation() : null;
-    const pageState = page.state || 'ready';
+    return {
+      demand,
+      requestedCursor,
+      pageState: page.state || 'ready',
+      previewWasVisible,
+      previousSource: this.networkSourceRevision || (previewWasVisible ? '' : this.stateValue.sourceRevision),
+      networkBefore: this.networkEntries,
+      bridgeWasActive: this.bridgeActive,
+      planBefore: this.stateValue.omoPlan,
+      isFreshHead,
+      preserveOlderContinuation,
+      olderContinuationBefore: preserveOlderContinuation ? this.captureOlderContinuation() : null,
+    };
+  }
+
+  private validatePage(page: ConversationPage, context: PageContext): { code: string; message: string } | undefined {
+    const { demand, requestedCursor, previewWasVisible, previousSource, isFreshHead } = context;
     if (requestedCursor && previousSource && page.sourceRevision && previousSource !== page.sourceRevision) {
-      return this.rejectPage('source_changed', 'The conversation source changed while history was being browsed.', false, requestedCursor);
+      return { code: 'source_changed', message: 'The conversation source changed while history was being browsed.' };
     }
     if (requestedCursor && this.networkSnapshotId) {
       if (page.mode !== 'snapshot' || !page.snapshotId || this.networkSnapshotId !== page.snapshotId) {
-        return this.rejectPage('source_changed', 'The conversation snapshot changed while history was being browsed.', false, requestedCursor);
+        return { code: 'source_changed', message: 'The conversation snapshot changed while history was being browsed.' };
       }
     }
     if (isFreshHead && demand === 'refresh' && !previewWasVisible
       && previousSource && page.sourceRevision && previousSource !== page.sourceRevision) {
-      return this.rejectPage('source_changed', 'The conversation source changed while history was being refreshed.', false, requestedCursor);
+      return { code: 'source_changed', message: 'The conversation source changed while history was being refreshed.' };
     }
     if (page.mode === 'snapshot' && !page.snapshotId) {
-      return this.rejectPage('invalid_page', 'Conversation history returned an incomplete snapshot identity.', false, requestedCursor);
+      return { code: 'invalid_page', message: 'Conversation history returned an incomplete snapshot identity.' };
     }
-    if (!isFreshHead && demand === 'refresh' && previousSource && page.sourceRevision && previousSource !== page.sourceRevision) {
-      return this.rejectPage('source_changed', 'The conversation source changed while history was being refreshed.', false, requestedCursor);
-    }
+    return undefined;
+  }
+
+  private acceptPage(page: ConversationPage, demand: Demand, requestedCursor: string): boolean {
+    const context = this.pageContext(page, demand, requestedCursor);
+    const { isFreshHead, previewWasVisible, preserveOlderContinuation, pageState } = context;
+    const rejection = this.validatePage(page, context);
+    if (rejection) return this.rejectPage(rejection.code, rejection.message, false, requestedCursor);
     if (page.sourceRevision === this.liveSourceRevision && page.sequence !== undefined && page.sequence < this.liveSequence) {
       const currentEntries = new Map(this.rawEntries.map(entry => [entry.id, entry]));
       page = { ...page, entries: page.entries.map(entry => currentEntries.get(entry.id) || entry) };
@@ -583,46 +627,17 @@ export class ConversationHistoryController {
     const incoming = cloneEntries(page.entries);
     const incomingPlan = page.omoPlan ? clonePlan(page.omoPlan) : null;
     const carriesContent = page.available && !page.error && pageState === 'ready' && !(page.hasMore && !page.nextCursor);
-    const lanes = carriesContent
-      ? this.nextLanes(page, demand, incoming, incomingPlan, { isFreshHead, previewWasVisible, olderContinuationBefore, planBefore })
-      : null;
+    const lanes = carriesContent ? nextLanes(this.currentLanes(), page, demand, incoming, incomingPlan, context) : null;
     if (lanes) {
       const retained = previewWasVisible && lanes.network.length ? [lanes.network] : [lanes.raw, lanes.network, lanes.bridge];
       if (retainedEntryCount(...retained) > HISTORY_MAX_RAW_ENTRIES || retainedEntryBytes(...retained) > this.maxContentBytes) {
         this.pauseWithError('History is too large to load further on this device. Loaded messages are still available.', false, 'memory_limit');
-        return { accepted: false };
+        return false;
       }
     }
-    this.stateValue.progress = page.progress;
-    this.stateValue.reason = page.reason || (isFreshHead ? '' : this.stateValue.reason);
-    this.stateValue.sourceRevision = page.sourceRevision || this.stateValue.sourceRevision;
-    if (page.snapshotId && !preserveOlderContinuation) this.stateValue.snapshotId = page.snapshotId;
-    if (isFreshHead && page.mode && page.mode !== 'snapshot' && !preserveOlderContinuation) this.stateValue.snapshotId = '';
-    this.stateValue.state = pageState;
-    // A cursorless latest response is authoritative for the live head. Keep
-    // the older cursor lane separately, but do not carry its continuation
-    // warning into a successful refresh that has rediscovered the child.
-    this.stateValue.diagnostics = isFreshHead
-      ? cloneDiagnostics(page.diagnostics)
-      : mergeDiagnostics(this.stateValue.diagnostics, page.diagnostics);
-    if (incomingPlan && !bridgeWasActive) this.stateValue.omoPlan = incomingPlan;
+    this.applyPageHeader(page, context, incomingPlan);
 
-    if (page.error || pageState === 'failed') {
-      this.stateValue.error = page.error || {
-        code: 'history_failed',
-        message: page.reason || 'Conversation history could not be loaded.',
-        retryable: false,
-      };
-      this.stateValue.requestPhase = 'idle';
-      if (olderContinuationBefore) this.restoreOlderContinuation(olderContinuationBefore);
-      else if (!this.restoreBridgeAfterFailure()) {
-        this.stateValue.nextCursor = page.nextCursor || requestedCursor || this.stateValue.nextCursor;
-        this.stateValue.hasMore = Boolean(this.stateValue.nextCursor) || page.hasMore;
-      }
-      this.stateValue.contextSearching = false;
-      this.emit();
-      return { accepted: false };
-    }
+    if (page.error || pageState === 'failed') return this.acceptFailedPage(page, context);
 
     if (pageState !== 'preparing' && page.hasMore && !page.nextCursor) {
       return this.rejectPage('invalid_page', 'Conversation history returned an incomplete continuation.', false, requestedCursor);
@@ -633,46 +648,7 @@ export class ConversationHistoryController {
       this.onInitialPage?.({ ...page, provisional: undefined });
     }
 
-    if (!page.available) {
-      // A cursorless result is the only result allowed to replace a warm
-      // preview with an authoritative unavailable state. A continuation that
-      // disappears keeps the accepted window and exposes a recoverable error.
-      if (requestedCursor || demand === 'older' || demand === 'full') {
-        this.stateValue.error = page.error || {
-          code: page.reasonCode || 'history_unavailable',
-          message: page.reason || 'Older conversation history is unavailable.',
-          retryable: true,
-        };
-        this.stateValue.requestPhase = 'idle';
-        this.stateValue.contextSearching = false;
-        if (!this.restoreBridgeAfterFailure()) {
-          this.stateValue.nextCursor = page.nextCursor || requestedCursor || this.stateValue.nextCursor;
-          this.stateValue.hasMore = Boolean(this.stateValue.nextCursor) || page.hasMore;
-        }
-        this.emit();
-        return { accepted: false };
-      }
-      this.rawEntries = [];
-      this.networkEntries = [];
-      this.previewEntries = [];
-      this.clearBridge();
-      this.headCursor = '';
-      this.networkSourceRevision = '';
-      this.networkSnapshotId = '';
-      this.stateValue.error = null;
-      this.stateValue.entries = [];
-      this.stateValue.available = false;
-      this.stateValue.authoritative = true;
-      this.stateValue.preview = false;
-      this.stateValue.previewHistorical = false;
-      this.stateValue.hasMore = false;
-      this.stateValue.nextCursor = '';
-      this.stateValue.beginningReached = false;
-      this.stateValue.contextSearching = false;
-      this.stateValue.pendingPrefix = [];
-      this.emit();
-      return { accepted: true };
-    }
+    if (!page.available) return this.acceptUnavailablePage(page, context);
 
     if (isFreshHead) {
       if (page.sourceRevision) this.networkSourceRevision = page.sourceRevision;
@@ -686,41 +662,124 @@ export class ConversationHistoryController {
       else if (page.snapshotId) this.networkSnapshotId = page.snapshotId;
     }
     if (demand === 'refresh') this.headCursor = page.nextCursor || requestedCursor || this.headCursor;
-    if (pageState === 'preparing') {
-      // Preparation pages are status, not content. An empty preparation page
-      // must not erase a warm preview or replace the fresh lane with nothing.
-      if (olderContinuationBefore) this.restoreOlderContinuation(olderContinuationBefore, false, true, false);
-      else {
-        this.stateValue.nextCursor = page.nextCursor || requestedCursor || this.stateValue.nextCursor;
-        this.stateValue.hasMore = Boolean(page.hasMore || this.stateValue.nextCursor);
-      }
-      this.stateValue.error = null;
-      this.stateValue.available = true;
-      this.stateValue.contextSearching = true;
-      this.stateValue.pendingPrefix = [];
-      this.stateValue.entries = this.rawEntries;
-      this.stateValue.authoritative = !previewWasVisible && this.rawEntries.length > 0;
-      this.stateValue.preview = previewWasVisible;
-      this.rawProgressThisPage = false;
+    if (pageState === 'preparing') return this.acceptPreparingPage(page, context);
+    if (!lanes) return false;
+    this.applyLanes(lanes);
+    return this.publishAccepted(page, context, lanes);
+  }
+
+  private applyPageHeader(page: ConversationPage, context: PageContext, incomingPlan: OmoTodoState | null): void {
+    const { isFreshHead, preserveOlderContinuation, bridgeWasActive, pageState } = context;
+    this.stateValue.progress = page.progress;
+    this.stateValue.reason = page.reason || (isFreshHead ? '' : this.stateValue.reason);
+    this.stateValue.sourceRevision = page.sourceRevision || this.stateValue.sourceRevision;
+    if (page.snapshotId && !preserveOlderContinuation) this.stateValue.snapshotId = page.snapshotId;
+    if (isFreshHead && page.mode && page.mode !== 'snapshot' && !preserveOlderContinuation) this.stateValue.snapshotId = '';
+    this.stateValue.state = pageState;
+    // A cursorless latest response is authoritative for the live head. Keep
+    // the older cursor lane separately, but do not carry its continuation
+    // warning into a successful refresh that has rediscovered the child.
+    this.stateValue.diagnostics = isFreshHead
+      ? cloneDiagnostics(page.diagnostics)
+      : mergeDiagnostics(this.stateValue.diagnostics, page.diagnostics);
+    if (incomingPlan && !bridgeWasActive) this.stateValue.omoPlan = incomingPlan;
+  }
+
+  private acceptFailedPage(page: ConversationPage, context: PageContext): boolean {
+    this.stateValue.error = page.error || {
+      code: 'history_failed',
+      message: page.reason || 'Conversation history could not be loaded.',
+      retryable: false,
+    };
+    this.stateValue.requestPhase = 'idle';
+    if (context.olderContinuationBefore) this.restoreOlderContinuation(context.olderContinuationBefore);
+    else if (!this.restoreBridgeAfterFailure()) this.keepCursor(context.requestedCursor, page);
+    this.stateValue.contextSearching = false;
+    this.emit();
+    return false;
+  }
+
+  private acceptUnavailablePage(page: ConversationPage, context: PageContext): boolean {
+    const { demand, requestedCursor } = context;
+    // A cursorless result is the only result allowed to replace a warm
+    // preview with an authoritative unavailable state. A continuation that
+    // disappears keeps the accepted window and exposes a recoverable error.
+    if (requestedCursor || demand === 'older' || demand === 'full') {
+      this.stateValue.error = page.error || {
+        code: page.reasonCode || 'history_unavailable',
+        message: page.reason || 'Older conversation history is unavailable.',
+        retryable: true,
+      };
+      this.stateValue.requestPhase = 'idle';
+      this.stateValue.contextSearching = false;
+      if (!this.restoreBridgeAfterFailure()) this.keepCursor(requestedCursor, page);
       this.emit();
-      return { accepted: true };
+      return false;
     }
-    const accepted = lanes!;
-    this.rawEntries = accepted.raw;
-    this.networkEntries = accepted.network;
-    this.bridgeEntries = accepted.bridge;
-    this.bridgeActive = accepted.bridgeActive;
-    this.bridgeRestore = accepted.bridgeRestore;
-    this.bridgePlan = accepted.bridgePlan;
-    this.stateValue.latestGapOutstanding = accepted.latestGapOutstanding;
-    if (accepted.networkSnapshotId !== undefined) this.networkSnapshotId = accepted.networkSnapshotId;
-    const replacedWindow = accepted.replacedWindow;
+    this.rawEntries = [];
+    this.networkEntries = [];
+    this.previewEntries = [];
+    this.clearBridge();
+    this.headCursor = '';
+    this.networkSourceRevision = '';
+    this.networkSnapshotId = '';
+    this.stateValue.error = null;
+    this.stateValue.entries = [];
+    this.stateValue.available = false;
+    this.stateValue.authoritative = true;
+    this.stateValue.preview = false;
+    this.stateValue.previewHistorical = false;
+    this.stateValue.hasMore = false;
+    this.stateValue.nextCursor = '';
+    this.stateValue.beginningReached = false;
+    this.stateValue.contextSearching = false;
+    this.stateValue.pendingPrefix = [];
+    this.emit();
+    return true;
+  }
+
+  private acceptPreparingPage(page: ConversationPage, context: PageContext): boolean {
+    const { olderContinuationBefore, previewWasVisible, requestedCursor } = context;
+    // Preparation pages are status, not content. An empty preparation page
+    // must not erase a warm preview or replace the fresh lane with nothing.
+    if (olderContinuationBefore) {
+      this.restoreOlderCursor(olderContinuationBefore);
+      this.stateValue.omoPlan = olderContinuationBefore.omoPlan;
+    } else this.keepCursor(requestedCursor, page);
+    this.stateValue.error = null;
+    this.stateValue.available = true;
+    this.stateValue.contextSearching = true;
+    this.stateValue.pendingPrefix = [];
+    this.stateValue.entries = this.rawEntries;
+    this.stateValue.authoritative = !previewWasVisible && this.rawEntries.length > 0;
+    this.stateValue.preview = previewWasVisible;
+    this.rawProgressThisPage = false;
+    this.emit();
+    return true;
+  }
+
+  private applyLanes(lanes: EntryLanes): void {
+    this.rawEntries = lanes.raw;
+    this.networkEntries = lanes.network;
+    this.bridgeEntries = lanes.bridge;
+    this.bridgeActive = lanes.bridgeActive;
+    this.bridgeRestore = lanes.bridgeRestore;
+    this.bridgePlan = lanes.bridgePlan;
+    this.stateValue.latestGapOutstanding = lanes.latestGapOutstanding;
+    if (lanes.networkSnapshotId !== undefined) this.networkSnapshotId = lanes.networkSnapshotId;
+  }
+
+  private publishAccepted(page: ConversationPage, context: PageContext, lanes: EntryLanes): boolean {
+    const { previewWasVisible, olderContinuationBefore, bridgeWasActive, networkBefore, pageState } = context;
     const preservedOlderLane = olderContinuationBefore || this.bridgeRestore;
-    if (preservedOlderLane && !replacedWindow) {
+    if (preservedOlderLane && !lanes.replacedWindow) {
       // A fresh head may use a different cursor chain. Keep the accepted older
       // boundary visible and usable while that head is merged or bridged.
-      this.restoreOlderContinuation(preservedOlderLane, !this.bridgeActive, false, false);
-      if (!this.bridgeActive) this.bridgeRestore = null;
+      this.restoreOlderCursor(preservedOlderLane);
+      if (!this.bridgeActive) {
+        this.networkSnapshotId = preservedOlderLane.snapshotId;
+        this.bridgeRestore = null;
+      }
     } else {
       this.stateValue.nextCursor = page.nextCursor || '';
       this.stateValue.hasMore = Boolean(page.hasMore || this.stateValue.nextCursor);
@@ -742,7 +801,7 @@ export class ConversationHistoryController {
       || (this.stateValue.beginningReached && !page.diagnostics?.source_truncated));
     if (previewWasVisible && !freshUsable && !page.hasMore && !page.nextCursor) {
       this.pauseWithError('History loading ended before the current conversation could be verified. Reload to try again.', true, 'incomplete_history');
-      return { accepted: false };
+      return false;
     }
     if (previewWasVisible && freshUsable) {
       this.rawEntries = this.networkEntries;
@@ -773,23 +832,11 @@ export class ConversationHistoryController {
 
     if (!this.bridgeActive) this.savePreview();
     this.emit();
-    return { accepted: true };
+    return true;
   }
 
-  private nextLanes(
-    page: ConversationPage,
-    demand: Demand,
-    incoming: ConversationEntry[],
-    incomingPlan: OmoTodoState | null,
-    context: {
-      isFreshHead: boolean;
-      previewWasVisible: boolean;
-      olderContinuationBefore: OlderContinuation | null;
-      planBefore: OmoTodoState | null;
-    },
-  ): EntryLanes {
-    const { isFreshHead, previewWasVisible, olderContinuationBefore, planBefore } = context;
-    const lanes: EntryLanes = {
+  private currentLanes(): EntryLanes {
+    return {
       raw: this.rawEntries,
       network: this.networkEntries,
       bridge: this.bridgeEntries,
@@ -799,72 +846,6 @@ export class ConversationHistoryController {
       latestGapOutstanding: this.stateValue.latestGapOutstanding,
       replacedWindow: false,
     };
-    if (isFreshHead) {
-      if (previewWasVisible) {
-        // Never merge a fresh page into cache-owned content merely because a
-        // source revision or entry ID happens to match. The fresh lane is
-        // promoted only after it provides usable/authoritatively empty data.
-        lanes.network = incoming;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      } else if (demand === 'refresh' && this.rawEntries.length > 0 && !sharedEntryId(this.rawEntries, incoming)) {
-        lanes.bridgeRestore = olderContinuationBefore;
-        lanes.bridgePlan = incomingPlan || planBefore;
-        lanes.bridge = incoming;
-        lanes.network = incoming;
-        lanes.bridgeActive = Boolean(page.hasMore || page.nextCursor);
-        lanes.latestGapOutstanding = lanes.bridgeActive;
-        // A bridge uses the fresh head's cursor and snapshot cohort. The
-        // established older lane is restored after overlap is proven.
-        lanes.networkSnapshotId = page.mode === 'snapshot' ? page.snapshotId || '' : '';
-        if (!lanes.bridgeActive) {
-          lanes.raw = incoming;
-          lanes.bridge = [];
-          lanes.bridgeRestore = null;
-          lanes.latestGapOutstanding = false;
-          lanes.replacedWindow = true;
-        }
-      } else if (demand === 'refresh' && this.rawEntries.length > 0) {
-        lanes.raw = mergeFreshEntries(this.rawEntries, incoming);
-        lanes.network = lanes.raw;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      } else {
-        lanes.raw = incoming;
-        lanes.network = incoming;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      }
-    } else if (this.bridgeActive) {
-      lanes.bridge = mergeOlderEntries(this.bridgeEntries, incoming);
-      lanes.network = lanes.bridge;
-      if (sharedEntryId(this.rawEntries, lanes.bridge)) {
-        lanes.raw = mergeBridgedEntries(this.rawEntries, lanes.bridge);
-        lanes.network = lanes.raw;
-        lanes.bridge = [];
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-      } else if (!page.hasMore && !page.nextCursor) {
-        // The new chain reached source start without overlap. It is safe to
-        // replace the old window, but never mix the two disconnected chains.
-        lanes.raw = lanes.bridge;
-        lanes.network = lanes.raw;
-        lanes.bridge = [];
-        lanes.bridgeRestore = null;
-        lanes.bridgeActive = false;
-        lanes.latestGapOutstanding = false;
-        lanes.replacedWindow = true;
-      }
-    } else {
-      lanes.network = previewWasVisible
-        ? mergeOlderEntries(this.networkEntries, incoming)
-        : mergeOlderEntries(this.rawEntries, incoming);
-      if (!previewWasVisible) lanes.raw = lanes.network;
-    }
-    return lanes;
   }
 
   private restoreBridgeAfterFailure(): boolean {
@@ -880,18 +861,15 @@ export class ConversationHistoryController {
     return true;
   }
 
-  private rejectPage(code: string, message: string, retryable: boolean, requestedCursor: string): { accepted: boolean } {
-    if (!this.restoreBridgeAfterFailure()) {
-      this.stateValue.nextCursor = requestedCursor || this.stateValue.nextCursor;
-      this.stateValue.hasMore = Boolean(this.stateValue.nextCursor);
-    }
+  private rejectPage(code: string, message: string, retryable: boolean, requestedCursor: string): boolean {
+    if (!this.restoreBridgeAfterFailure()) this.keepCursor(requestedCursor);
     this.stateValue.error = { code, message, retryable };
     this.stateValue.requestPhase = 'idle';
     this.stateValue.contextSearching = false;
     this.stateValue.beginningReached = false;
     this.queuedDemand = null;
     this.emit();
-    return { accepted: false };
+    return false;
   }
 
   private advancePreparation(page: ConversationPage, demandEpoch: number, abort: AbortController): boolean {
@@ -909,6 +887,10 @@ export class ConversationHistoryController {
       return false;
     }
     return this.canContinue(demandEpoch, abort);
+  }
+
+  private pauseOnRepeatedCursor(): void {
+    this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
   }
 
   private finishDemand(): void {
@@ -938,10 +920,7 @@ export class ConversationHistoryController {
     abort: AbortController,
     request: ConversationHistoryRequest,
   ): Promise<ConversationPage> {
-    const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
-    if (remaining <= 0) {
-      throw { error: workDeadlineError() };
-    }
+    const remaining = remainingWorkMs(startedAt);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     const timeout = new Promise<ConversationPage>((_, reject) => {
@@ -967,7 +946,7 @@ export class ConversationHistoryController {
   private async wait(milliseconds: number, epoch: number, abort: AbortController, startedAt?: number): Promise<void> {
     if (milliseconds <= 0) return;
     if (startedAt !== undefined) {
-      const remaining = HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
+      const remaining = remainingWorkMs(startedAt);
       if (remaining <= 0) {
         throw { error: workDeadlineError() };
       }
@@ -1118,6 +1097,130 @@ function sharedEntryId(first: ConversationEntry[], second: ConversationEntry[]):
   return second.some((entry) => ids.has(entry.id));
 }
 
+function nextLanes(
+  current: EntryLanes,
+  page: ConversationPage,
+  demand: Demand,
+  incoming: ConversationEntry[],
+  incomingPlan: OmoTodoState | null,
+  context: LaneContext,
+): EntryLanes {
+  if (context.isFreshHead) {
+    if (context.previewWasVisible) return previewHeadLanes(current, incoming);
+    return freshHeadLanes(current, page, demand, incoming, incomingPlan, context);
+  }
+  if (current.bridgeActive) return bridgeContinuationLanes(current, page, incoming);
+  return olderPageLanes(current, incoming, context.previewWasVisible);
+}
+
+function previewHeadLanes(current: EntryLanes, incoming: ConversationEntry[]): EntryLanes {
+  // Never merge a fresh page into cache-owned content merely because a
+  // source revision or entry ID happens to match. The fresh lane is
+  // promoted only after it provides usable/authoritatively empty data.
+  return {
+    ...current,
+    network: incoming,
+    bridge: [],
+    bridgeActive: false,
+    latestGapOutstanding: false,
+  };
+}
+
+function freshHeadLanes(
+  current: EntryLanes,
+  page: ConversationPage,
+  demand: Demand,
+  incoming: ConversationEntry[],
+  incomingPlan: OmoTodoState | null,
+  context: LaneContext,
+): EntryLanes {
+  if (demand === 'refresh' && current.raw.length > 0 && !sharedEntryId(current.raw, incoming)) {
+    const bridgeActive = Boolean(page.hasMore || page.nextCursor);
+    // A bridge uses the fresh head's cursor and snapshot cohort. The
+    // established older lane is restored after overlap is proven.
+    const networkSnapshotId = page.mode === 'snapshot' ? page.snapshotId || '' : '';
+    if (!bridgeActive) {
+      return {
+        ...current,
+        raw: incoming,
+        network: incoming,
+        bridge: [],
+        bridgeActive,
+        bridgeRestore: null,
+        bridgePlan: incomingPlan || context.planBefore,
+        latestGapOutstanding: false,
+        replacedWindow: true,
+        networkSnapshotId,
+      };
+    }
+    return {
+      ...current,
+      network: incoming,
+      bridge: incoming,
+      bridgeActive,
+      bridgeRestore: context.olderContinuationBefore,
+      bridgePlan: incomingPlan || context.planBefore,
+      latestGapOutstanding: true,
+      networkSnapshotId,
+    };
+  }
+  if (demand === 'refresh' && current.raw.length > 0) {
+    const merged = mergeFreshEntries(current.raw, incoming);
+    return {
+      ...current,
+      raw: merged,
+      network: merged,
+      bridge: [],
+      bridgeActive: false,
+      latestGapOutstanding: false,
+    };
+  }
+  return {
+    ...current,
+    raw: incoming,
+    network: incoming,
+    bridge: [],
+    bridgeActive: false,
+    latestGapOutstanding: false,
+  };
+}
+
+function bridgeContinuationLanes(current: EntryLanes, page: ConversationPage, incoming: ConversationEntry[]): EntryLanes {
+  const bridge = mergeOlderEntries(current.bridge, incoming);
+  if (sharedEntryId(current.raw, bridge)) {
+    const raw = mergeBridgedEntries(current.raw, bridge);
+    return {
+      ...current,
+      raw,
+      network: raw,
+      bridge: [],
+      bridgeActive: false,
+      latestGapOutstanding: false,
+    };
+  }
+  if (!page.hasMore && !page.nextCursor) {
+    // The new chain reached source start without overlap. It is safe to
+    // replace the old window, but never mix the two disconnected chains.
+    return {
+      ...current,
+      raw: bridge,
+      network: bridge,
+      bridge: [],
+      bridgeRestore: null,
+      bridgeActive: false,
+      latestGapOutstanding: false,
+      replacedWindow: true,
+    };
+  }
+  return { ...current, network: bridge, bridge };
+}
+
+function olderPageLanes(current: EntryLanes, incoming: ConversationEntry[], previewWasVisible: boolean): EntryLanes {
+  if (previewWasVisible) return { ...current, network: mergeOlderEntries(current.network, incoming) };
+  const raw = mergeOlderEntries(current.raw, incoming);
+  return { ...current, raw, network: raw };
+}
+
 function mergeDiagnostics(
   previous: ConversationBrowseDiagnostics | undefined,
   next: ConversationBrowseDiagnostics | undefined,
@@ -1134,6 +1237,10 @@ function mergeDiagnostics(
     ...(next?.continuation_reason || previous?.continuation_reason
       ? { continuation_reason: next?.continuation_reason || previous?.continuation_reason } : {}),
   };
+}
+
+function remainingWorkMs(startedAt: number): number {
+  return HISTORY_ACTIVE_DEADLINE_MS - (Date.now() - startedAt);
 }
 
 function workDeadlineError(): ConversationBrowseError {

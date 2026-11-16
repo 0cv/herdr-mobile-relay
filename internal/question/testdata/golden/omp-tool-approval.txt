@@ -1,0 +1,42 @@
+=== omp-tool-approval agent=omp
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Tip: `/shake` rips heavy tool results out of context to reclaim tokens without a full /compact — `/shake images` drops just images Run this shell command: touch /tmp/fixture-capture-test $ touch /tmp/fixture-capture-test 2026-08-28 19:28:46  14K  72  21K  1.3s  37.8/s 󱊷 Working… ╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ Command: touch Command:touch /tmp/fixture-capture-test Options:[Approve Deny] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+
+Command: touch /tmp/fixture-capture-test
+
+ Approve
+Deny
+
+up/down navigate  enter select  esc cancel
+
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯}
+Classify.Interaction: nil
+ApprovalFingerprint: "323d6319b449176a1091843523cecb967a682aedf63de314b171d96c6a9d2129"
+=== omp-tool-approval agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Tip: `/shake` rips heavy tool results out of context to reclaim tokens without a full /compact — `/shake images` drops just images Run this shell command: touch /tmp/fixture-capture-test $ touch /tmp/fixture-capture-test 2026-08-28 19:28:46  14K  72  21K  1.3s  37.8/s 󱊷 Working… ╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ Command: touch Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== omp-tool-approval agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Tip: `/shake` rips heavy tool results out of context to reclaim tokens without a full /compact — `/shake images` drops just images Run this shell command: touch /tmp/fixture-capture-test $ touch /tmp/fixture-capture-test 2026-08-28 19:28:46  14K  72  21K  1.3s  37.8/s 󱊷 Working… ╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ Command: touch Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== omp-tool-approval agent=omp crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Tip: `/shake` rips heavy tool results out of context to reclaim tokens without a full /compact — `/shake images` drops just images Run this shell command: touch /tmp/fixture-capture-test $ touch /tmp/fixture-capture-test 2026-08-28 19:28:46  14K  72  21K  1.3s  37.8/s 󱊷 Working… ╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ Command: touch Command:touch /tmp/fixture-capture-test Options:[Approve Deny] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+
+Command: touch /tmp/fixture-capture-test
+
+ Approve
+Deny
+
+up/down navigate  enter select  esc cancel
+
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯}
+Classify.Interaction: nil
+ApprovalFingerprint: "323d6319b449176a1091843523cecb967a682aedf63de314b171d96c6a9d2129"

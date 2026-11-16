@@ -18,7 +18,7 @@ func TestAuthoritativeOptionalKindInventory(t *testing.T) {
 			var reply atomic.Value
 			reply.Store(json.RawMessage(`{"type":"agent_list","agents":[{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"tab","name":"Named agent","agent_status":"unknown","cwd":"/home/example/Development"}]}`))
 			var failed atomic.Bool
-			socket := startPollerTestSocket(t, func(method string) (any, string) {
+			socket := startSocketFixture(t, func(method string) (any, string) {
 				switch method {
 				case "agent.list":
 					if failed.Load() {

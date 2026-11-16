@@ -10,10 +10,6 @@ type catalogReader struct {
 	truncated bool
 }
 
-func discoverGenericSkills(dirs []string, format string) ([]Command, bool) {
-	return newCatalogReader().discoverGenericSkills(dirs, format)
-}
-
 func newCatalogReader() *catalogReader {
 	return &catalogReader{remaining: maxCatalogReadSize}
 }

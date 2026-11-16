@@ -3,14 +3,11 @@ package coordinator
 // Regression tests for the §10.3 stale-status pin and approval-ledger handling
 // across dispatched_unknown outcomes. Each asserts the observable invariant,
 // independent of the fix mechanism.
-// Helpers testLogger/ts/writeScript live in safety_test.go and dispatch_safety_test.go.
+// Helpers testLogger/ts live in safety_test.go.
 
 import (
 	"context"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -88,30 +85,19 @@ func TestEventDoesNotPinStaleStatus(t *testing.T) {
 // handler deletes the claim on any error, so a retry re-dispatches — the double
 // execution the ledger exists to prevent.
 func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	// Records the invocation's argv, then hangs so the command is definitely
-	// started and then killed by the deadline (a post-dispatch timeout).
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf '"+approvalPane+"\\n'\n"+
-		"else\n"+
-		"  sleep 30\n"+
-		"fi\n")
-	if _, err := exec.Command(bin, "pane", "read").Output(); err != nil {
-		t.Fatal(err)
-	}
-
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	client := newFakeBackend()
+	client.contents["pane-1"] = approvalPane
+	client.setHook("SendKeys", func(ctx context.Context, _ fakeCall) error {
+		<-ctx.Done()
+		return &herdr.OutcomeError{Started: true, Err: ctx.Err()}
+	})
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
 	approve := func() *CommandResult {
-		// A short parent deadline wins over the handler's approval deadline, so
-		// the herdr child starts and is then cancelled quickly.
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
 		return d.Handle(ctx, protocol.Inbound{
 			Type:                "respond",
@@ -133,11 +119,9 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 	// The client retries the same (pane, event_id, index) after the uncertain outcome.
 	_ = approve()
 
-	data, _ := os.ReadFile(record)
-	sends := strings.Count(string(data), "send-keys")
-	if sends != 1 {
-		t.Fatalf("approval re-dispatched after dispatched_unknown: %d send-keys invocations, want 1 "+
-			"(the ledger must retain the claim on an uncertain dispatch to block retry)\nrecord:\n%s",
-			sends, data)
+	if sends := client.callsTo("SendKeys"); len(sends) != 1 {
+		t.Fatalf("approval re-dispatched after dispatched_unknown: %d SendKeys calls, want 1 "+
+			"(the ledger must retain the claim on an uncertain dispatch to block retry)\ncalls: %+v",
+			len(sends), client.recorded())
 	}
 }

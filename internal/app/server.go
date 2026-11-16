@@ -296,14 +296,14 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 		return
 	}
 	agent.SessionName = ""
-	// Every other consumer of a pane's reported session (Reader.Read,
+	// Every other consumer of a pane's reported session (Reader.ReadLatest,
 	// latestConversationResponse, the activity backfill path) TrimSpaces it
 	// before deciding anything. Trimming once here, before it reaches
 	// SessionID or the resolver, is what keeps a whitespace-only value from
 	// looking like a real session id: untrimmed, it survives the `== ""`
 	// checks below and can still reach the resolver's empty-id
 	// sole-transcript heuristic, inventing a title over a conversation view
-	// that Reader.Read reports as unavailable.
+	// that Reader.ReadLatest reports as unavailable.
 	sessionID := strings.TrimSpace(agent.Session)
 	if conversation.IsKimi(agent.Agent) && agent.ConversationReason != "" {
 		sessionID = ""

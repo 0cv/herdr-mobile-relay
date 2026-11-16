@@ -1,13 +1,10 @@
 package coordinator
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -81,7 +78,7 @@ func TestPollerRequiredFetchFailuresAccumulateAndRecover(t *testing.T) {
 	t.Run("inventory", func(t *testing.T) {
 		var mode atomic.Int32
 		var logs bytes.Buffer
-		socketPath := startPollerTestSocket(t, func(method string) (any, string) {
+		socketPath := startSocketFixture(t, func(method string) (any, string) {
 			if method == "agent.list" && mode.Load() == 0 {
 				return nil, "upstream_down"
 			}
@@ -125,7 +122,7 @@ func TestPollerRequiredFetchFailuresAccumulateAndRecover(t *testing.T) {
 
 	t.Run("workspace", func(t *testing.T) {
 		var mode atomic.Int32
-		socketPath := startPollerTestSocket(t, func(method string) (any, string) {
+		socketPath := startSocketFixture(t, func(method string) (any, string) {
 			if method == "workspace.list" && mode.Load() == 0 {
 				return nil, "upstream_down"
 			}
@@ -158,7 +155,7 @@ func TestPollerRequiredFetchFailuresAccumulateAndRecover(t *testing.T) {
 
 func TestPollerOptionalFetchFailuresDoNotBackOff(t *testing.T) {
 	var optionalFailures atomic.Bool
-	socketPath := startPollerTestSocket(t, func(method string) (any, string) {
+	socketPath := startSocketFixture(t, func(method string) (any, string) {
 		if optionalFailures.Load() && (method == "tab.list" || method == "pane.list") {
 			return nil, "optional_fetch_failed"
 		}
@@ -184,7 +181,7 @@ func TestPollerOptionalFetchFailuresDoNotBackOff(t *testing.T) {
 
 func TestPollerTopologyStaleCommitDoesNotBackOff(t *testing.T) {
 	state := testState()
-	socketPath := startPollerTestSocket(t, func(method string) (any, string) {
+	socketPath := startSocketFixture(t, func(method string) (any, string) {
 		return pollerSuccessResult(method), ""
 	})
 	poller := NewPoller(
@@ -207,7 +204,7 @@ func TestPollerTopologyStaleCommitDoesNotBackOff(t *testing.T) {
 }
 
 func TestEventTopologyRecoveryDoesNotResetPollRetryStreak(t *testing.T) {
-	socket := startPollerTestSocket(t, func(method string) (any, string) {
+	socket := startSocketFixture(t, func(method string) (any, string) {
 		return pollerSuccessResult(method), ""
 	})
 	client := herdr.NewClient("unused", socket)
@@ -228,7 +225,7 @@ func TestEventTopologyRecoveryDoesNotResetPollRetryStreak(t *testing.T) {
 func TestPollerWakeDuringBackoffIsPromptAndCoalesced(t *testing.T) {
 	attempts := make(chan struct{}, 8)
 	warnings := make(chan struct{}, 8)
-	socketPath := startPollerTestSocket(t, func(method string) (any, string) {
+	socketPath := startSocketFixture(t, func(method string) (any, string) {
 		if method == "agent.list" {
 			attempts <- struct{}{}
 			return nil, "upstream_down"
@@ -307,7 +304,7 @@ func TestPollerWakeRequestsAreCoalesced(t *testing.T) {
 func TestPollerCancellationDuringFetchDoesNotRecordFailure(t *testing.T) {
 	fetchStarted := make(chan struct{}, 1)
 	releaseFetch := make(chan struct{})
-	socketPath := startPollerTestSocket(t, func(method string) (any, string) {
+	socketPath := startSocketFixture(t, func(method string) (any, string) {
 		if method == "agent.list" {
 			fetchStarted <- struct{}{}
 			<-releaseFetch
@@ -368,53 +365,6 @@ func (h *pollerSignalHandler) WithAttrs([]slog.Attr) slog.Handler {
 
 func (h *pollerSignalHandler) WithGroup(string) slog.Handler {
 	return h
-}
-
-func startPollerTestSocket(t *testing.T, responder func(method string) (result any, errorCode string)) string {
-	t.Helper()
-	socketPath := filepath.Join(testSocketDir(t), "s")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen poller socket: %v", err)
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			func() {
-				defer conn.Close()
-				request := struct {
-					ID     string `json:"id"`
-					Method string `json:"method"`
-				}{}
-				if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&request); err != nil {
-					return
-				}
-				result, errorCode := responder(request.Method)
-				if errorCode != "" {
-					_ = json.NewEncoder(conn).Encode(map[string]any{
-						"id": request.ID,
-						"error": map[string]string{
-							"code": errorCode, "message": errorCode,
-						},
-					})
-					return
-				}
-				_ = json.NewEncoder(conn).Encode(map[string]any{
-					"id": request.ID, "result": result,
-				})
-			}()
-		}
-	}()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		<-done
-	})
-	return socketPath
 }
 
 func pollerSuccessResult(method string) any {

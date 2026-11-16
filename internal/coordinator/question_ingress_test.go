@@ -2,44 +2,36 @@ package coordinator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
-	dir := t.TempDir()
-	started := filepath.Join(dir, "read-started")
-	releaseRead := filepath.Join(dir, "release-read")
 	questionView := "Which deployment target?\n❯ 1. Development\n2. Staging\n3. Type something.\n4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel"
 	interaction := question.Parse(questionView, "claude")
 	if interaction == nil {
 		t.Fatal("test question did not parse")
 	}
-	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"if [ \"$1 $2 $3\" = \"pane read pane-1\" ]; then\n"+
-		"  touch \""+started+"\"\n"+
-		"  while [ ! -f \""+releaseRead+"\" ]; do sleep 0.01; done\n"+
-		"  printf '%s\\n' '"+questionView+"'\n"+
-		"else\n"+
-		"  printf '{\"ok\":true}\\n'\n"+
-		"fi\n")
-
-	dispatcher := NewDispatcher(
-		herdr.NewClient(bin, filepath.Join(dir, "sock")),
-		NewState(testLogger()),
-		nil,
-		testLogger(),
-	)
-	t.Cleanup(func() {
-		_ = os.WriteFile(releaseRead, nil, 0o600)
-		_ = dispatcher.Close(context.Background())
+	client := newFakeBackend()
+	client.contents["pane-1"] = questionView
+	releaseRead := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(releaseRead) }) }
+	client.setHook("ReadPane", func(ctx context.Context, _ fakeCall) error {
+		select {
+		case <-releaseRead:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	})
+
+	dispatcher := newTestDispatcher(t, client, NewState(testLogger()))
+	t.Cleanup(unblock)
 	dispatcher.state.CommitInventory([]*AgentState{
 		{PaneID: "pane-1", Agent: "claude", Status: "blocked"},
 		{PaneID: "pane-2", Agent: "codex", Status: "working"},
@@ -80,9 +72,7 @@ func TestQuestionPaneReadDoesNotBlockIngressAdmission(t *testing.T) {
 		t.Fatalf("unrelated pane command was blocked behind question validation: %+v", prompt)
 	}
 
-	if err := os.WriteFile(releaseRead, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	unblock()
 	select {
 	case result := <-questionDone:
 		if !result.OK {

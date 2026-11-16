@@ -44,6 +44,13 @@ func TestPromptDispatchesOnce(t *testing.T) {
 			transient:  true,
 		},
 		{
+			name:       "agent pane busy",
+			diagnostic: `{"error":{"code":"agent_pane_busy","message":"agent pane is still starting"}}`,
+			code:       "agent_pane_busy",
+			refused:    true,
+			transient:  true,
+		},
+		{
 			name:       "protocol mismatch",
 			diagnostic: `{"error":{"code":"protocol_mismatch","message":"incompatible"}}`,
 			code:       "protocol_mismatch",

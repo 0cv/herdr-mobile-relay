@@ -28,21 +28,18 @@ func TestHermesReadUsesNativeBackendWithoutCLI(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	reader := NewReader(t.TempDir())
 
-	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 10)
+	page, err := reader.ReadLatest("hermes", ProjectContext{CWD: cwd}, sessionID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available {
-		t.Fatalf("page unavailable: %s %s", page.ReasonCode, page.Reason)
+	if len(page) != 2 {
+		t.Fatalf("entries = %#v", page)
 	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("entries = %#v", page.Entries)
+	if page[0].Role != "user" || page[0].Text != "hello" {
+		t.Fatalf("first entry = %#v", page[0])
 	}
-	if page.Entries[0].Role != "user" || page.Entries[0].Text != "hello" {
-		t.Fatalf("first entry = %#v", page.Entries[0])
-	}
-	if page.Entries[1].Role != "assistant" || page.Entries[1].Text != "world" {
-		t.Fatalf("second entry = %#v", page.Entries[1])
+	if page[1].Role != "assistant" || page[1].Text != "world" {
+		t.Fatalf("second entry = %#v", page[1])
 	}
 }
 

@@ -1,0 +1,84 @@
+=== qodercli-allow-deny agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▪ Plan mode is already exited — creating the file now. ? Write /workspace/project/test.txt Permission Required Tool: Write File: test.txt No changes detected. Apply this change? ❯ 1. Allow once 2. Allow for this session [session] 3. Modify with external editor 4. Reject and type something 5. No Command:Apply this change? Options:[Allow once Allow for this session [session] Modify with external editor Reject and type something No] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource: ▪ Plan mode is already exited — creating the file now.
+
+ ? Write /workspace/project/test.txt
+
+ Permission Required
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool: Write
+ File: test.txt
+
+ ╭────────────────────────╮
+
+ │  No changes detected.
+
+ ╰────────────────────────╯
+ Apply this change?
+
+  ❯ 1. Allow once
+    2. Allow for this session [session]
+    3. Modify with external editor
+    4. Reject and type something
+    5. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "d160cf26f2db457418eda7d1613d4f8caaf98e88caa7a6bda32a282291856c21"
+=== qodercli-allow-deny agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▪ Plan mode is already exited — creating the file now. ? Write /workspace/project/test.txt Permission Required Tool: Write File: test.txt No changes detected. Apply this change? 1. Allow once 2. Allow for this session [session] 3. Modify with external editor 4. Reject and type something 5. No Command:Apply this change? Options:[Allow once Allow for this session [session] Modify with external editor Reject and type something No] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource: ▪ Plan mode is already exited — creating the file now.
+
+ ? Write /workspace/project/test.txt
+
+ Permission Required
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool: Write
+ File: test.txt
+
+ ╭────────────────────────╮
+
+ │  No changes detected.
+
+ ╰────────────────────────╯
+ Apply this change?
+
+  ❯ 1. Allow once
+    2. Allow for this session [session]
+    3. Modify with external editor
+    4. Reject and type something
+    5. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "50248ce651729912c43aa53a44f0e2cfb099ee8395f3a2e93e19cbc8722e6194"
+=== qodercli-allow-deny agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:▪ Plan mode is already exited — creating the file now. ? Write /workspace/project/test.txt Permission Required Tool: Write File: test.txt No changes detected. Apply this change? ❯ 1. Allow once 2. Allow for this session [session] 3. Modify with external editor 4. Reject and type something 5. No Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-allow-deny agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▪ Plan mode is already exited — creating the file now. ? Write /workspace/project/test.txt Permission Required Tool: Write File: test.txt No changes detected. Apply this change? ❯ 1. Allow once 2. Allow for this session [session] 3. Modify with external editor 4. Reject and type something 5. No Command:Apply this change? Options:[Allow once Allow for this session [session] Modify with external editor Reject and type something No] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource: ▪ Plan mode is already exited — creating the file now.
+
+ ? Write /workspace/project/test.txt
+
+ Permission Required
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool: Write
+ File: test.txt
+
+ ╭────────────────────────╮
+
+ │  No changes detected.
+
+ ╰────────────────────────╯
+ Apply this change?
+
+  ❯ 1. Allow once
+    2. Allow for this session [session]
+    3. Modify with external editor
+    4. Reject and type something
+    5. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "d160cf26f2db457418eda7d1613d4f8caaf98e88caa7a6bda32a282291856c21"

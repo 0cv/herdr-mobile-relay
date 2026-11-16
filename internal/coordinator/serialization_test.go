@@ -1,36 +1,74 @@
 package coordinator
 
 // Regression tests for the coordinator's per-pane FIFO serialization.
-// Helpers writeScript/testLogger live in sibling *_test.go files.
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
-// assertSerializationTrace is shared by the regression and labelled overlay controls.
-func assertSerializationTrace(t *testing.T, path, want string) {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+// serializationRecorder records start and end events of fake Herdr calls and holds the first call until released.
+type serializationRecorder struct {
+	mu          sync.Mutex
+	events      []string
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newSerializationRecorder() *serializationRecorder {
+	return &serializationRecorder{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *serializationRecorder) record(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *serializationRecorder) trace() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.events)
+}
+
+func (r *serializationRecorder) unblock() {
+	r.releaseOnce.Do(func() { close(r.release) })
+}
+
+func (r *serializationRecorder) hook(label string, hold bool) fakeHook {
+	return func(ctx context.Context, _ fakeCall) error {
+		r.record("start " + label)
+		if hold {
+			r.enteredOnce.Do(func() { close(r.entered) })
+			select {
+			case <-r.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		r.record("end " + label)
+		return nil
 	}
-	t.Logf("trace: %q", data)
-	gotLines, wantLines := strings.Split(string(data), "\n"), strings.Split(want, "\n")
-	for i := 0; i < len(gotLines) && i < len(wantLines); i++ {
-		if gotLines[i] != wantLines[i] {
-			t.Fatalf("trace order mismatch at event %d: got %q, want %q", i+1, gotLines[i], wantLines[i])
+}
+
+// assertSerializationTrace is shared by the regression and labelled overlay controls.
+func assertSerializationTrace(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	t.Logf("trace: %q", got)
+	for i := 0; i < len(got) && i < len(want); i++ {
+		if got[i] != want[i] {
+			t.Fatalf("trace order mismatch at event %d: got %q, want %q", i+1, got[i], want[i])
 		}
 	}
-	if string(data) != want {
-		t.Fatalf("trace length mismatch: got %q, want %q", data, want)
+	if len(got) != len(want) {
+		t.Fatalf("trace length mismatch: got %q, want %q", got, want)
 	}
 }
 
@@ -38,56 +76,31 @@ func assertSerializationTrace(t *testing.T, path, want string) {
 func TestSamePaneCommandsSerialize(t *testing.T) {
 	for _, first := range []string{"submit_prompt", "send_keys"} {
 		t.Run(first+"_first", func(t *testing.T) {
-			dir := t.TempDir()
-			trace, entered, release := filepath.Join(dir, "trace"), filepath.Join(dir, "entered"), filepath.Join(dir, "release")
-			bin := writeScript(t, dir, "herdr", `#!/bin/sh
-set -eu
-[ "$#" -eq 4 ] && [ "$3" = pane-1 ] || exit 2
-case "$1:$2:$4" in
- agent:prompt:one) label=submit_prompt ;;
- pane:send-keys:x) label=send_keys ;;
- *) exit 2 ;;
-esac
-printf 'start %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
-if [ "$label" = '`+first+`' ]; then
- mkdir '`+entered+`'
- while [ ! -f '`+release+`' ]; do /bin/sleep 0.01; done
-fi
-printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
-`)
-			client := herdr.NewClient(bin, filepath.Join(dir, "sock"))
+			recorder := newSerializationRecorder()
+			client := newFakeBackend()
+			client.setHook("Prompt", recorder.hook("submit_prompt", first == "submit_prompt"))
+			client.setHook("SendKeys", recorder.hook("send_keys", first == "send_keys"))
 			state := NewState(testLogger())
 			state.CommitInventory([]*AgentState{{
 				PaneID: "pane-1", RawPaneID: "pane-1", TerminalID: "terminal-1",
 				TabID: "tab-1", WorkspaceID: "workspace-1", Agent: "claude", Status: "idle",
 			}}, state.RevisionCounter())
-			d := NewDispatcher(client, state, nil, testLogger())
+			d := newTestDispatcher(t, client, state)
 			ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 			results := [2]chan *CommandResult{make(chan *CommandResult, 1), make(chan *CommandResult, 1)}
 			var joins []chan struct{}
-			unblock := func() {
-				if err := os.WriteFile(release, nil, 0600); err != nil {
-					t.Errorf("release: %v", err)
-				}
-			}
 			t.Cleanup(func() {
-				unblock()
+				recorder.unblock()
 				cancel()
 				d.CancelInflight()
 				cleanupCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 				defer stop()
-				if err := d.Close(cleanupCtx); err != nil {
-					t.Errorf("dispatcher cleanup: %v", err)
-				}
 				for _, done := range joins {
 					select {
 					case <-done:
 					case <-cleanupCtx.Done():
 						t.Error("caller cleanup: ", cleanupCtx.Err())
 					}
-				}
-				if err := client.Close(); err != nil {
-					t.Errorf("client cleanup: %v", err)
 				}
 			})
 			agent, ok := state.Agent("pane-1")
@@ -101,7 +114,7 @@ printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
 				{Type: "submit_prompt", RequestID: "a", PaneID: "pane-1", Text: "one"},
 				{Type: "send_keys", RequestID: "b", PaneID: "pane-1", Keys: []string{"x"}},
 			}
-			events := []string{"submit_prompt agent prompt pane-1 one\n", "send_keys pane send-keys pane-1 x\n"}
+			events := []string{"submit_prompt", "send_keys"}
 			if first == "send_keys" {
 				messages[0], messages[1] = messages[1], messages[0]
 				events[0], events[1] = events[1], events[0]
@@ -120,31 +133,12 @@ printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
 				}()
 			}
 			launch(0)
-			for {
-				select {
-				case result := <-results[0]:
-					t.Fatalf("first command returned before release: %+v", result)
-				case <-ctx.Done():
-					t.Fatal("first gate: ", ctx.Err())
-				default:
-				}
-				info, err := os.Stat(entered)
-				if err == nil {
-					if !info.IsDir() {
-						t.Fatal("invalid first gate: not a directory")
-					}
-					break
-				}
-				if !os.IsNotExist(err) {
-					t.Fatal("first gate: ", err)
-				}
-				select {
-				case result := <-results[0]:
-					t.Fatalf("first command returned before release: %+v", result)
-				case <-ctx.Done():
-					t.Fatal("first gate: ", ctx.Err())
-				case <-time.After(time.Millisecond):
-				}
+			select {
+			case <-recorder.entered:
+			case result := <-results[0]:
+				t.Fatalf("first command returned before release: %+v", result)
+			case <-ctx.Done():
+				t.Fatal("first gate: ", ctx.Err())
 			}
 			launch(1)
 			select {
@@ -169,13 +163,13 @@ printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
 				t.Fatalf("held owner accounting: %+v", metrics)
 			}
 			t.Logf("held owner accounting: %+v", metrics)
-			assertSerializationTrace(t, trace, "start "+events[0])
+			assertSerializationTrace(t, recorder.trace(), "start "+events[0])
 			select {
 			case result := <-results[0]:
 				t.Fatalf("first command returned before release: %+v", result)
 			default:
 			}
-			unblock()
+			recorder.unblock()
 			for i := range results {
 				select {
 				case result := <-results[i]:
@@ -188,7 +182,7 @@ printf 'end %s %s %s %s %s\n' "$label" "$1" "$2" "$3" "$4" >> '`+trace+`'
 					t.Fatal("command join: ", ctx.Err())
 				}
 			}
-			assertSerializationTrace(t, trace, "start "+events[0]+"end "+events[0]+"start "+events[1]+"end "+events[1])
+			assertSerializationTrace(t, recorder.trace(), "start "+events[0], "end "+events[0], "start "+events[1], "end "+events[1])
 		})
 	}
 }
