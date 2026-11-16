@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
@@ -59,6 +59,11 @@ import {
 } from './ios-xctest-listeners';
 
 const maxStartupMs = 300_000;
+const simctlInstallAttempts = 3;
+const simctlInstallRetryDelayMs = 3_000;
+const simctlConnectionAbortedStatus = 53;
+const xcodebuildTestFailedStatus = 65;
+const minRelaunchStartupMs = 120_000;
 const maxStartupLogBytes = 100 * 1024 * 1024;
 const startupOutputMarker = '[startup output suppressed]\n';
 const maxStatusBytes = 65_536;
@@ -1295,7 +1300,7 @@ async function waitForOwnedListenersToExit(state: SupervisorState, cleanupDeadli
   throw new Error('XCTEST: owned WDA listener cleanup deadline');
 }
 
-function preflight(state: SupervisorState): void {
+async function preflight(state: SupervisorState): Promise<void> {
   state.deadline = Number(readFileSync(join(state.root, 'deadline'), 'utf8'));
   if (!Number.isSafeInteger(state.deadline) || state.deadline <= Date.now() || state.deadline > Date.now() + maxStartupMs) {
     throw new Error('XCTEST: invalid startup deadline');
@@ -1337,7 +1342,16 @@ function preflight(state: SupervisorState): void {
   const selectedXctestrun = safeXctestrunEvidence(data);
   if (Buffer.byteLength(selectedXctestrun) > maxOwnerBytes) throw new Error('XCTEST: selected xctestrun evidence limit');
   writeFileSync(join(state.root, 'selected.xctestrun'), selectedXctestrun, { mode: 0o600 });
-  run('xcrun', ['simctl', 'install', state.udid, state.product], remaining(state), commandContext(state, 'preflight', 'install-wda', {endpoint: 'simulator'}));
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      run('xcrun', ['simctl', 'install', state.udid, state.product], remaining(state), commandContext(state, 'preflight', 'install-wda', {endpoint: 'simulator'}));
+      break;
+    } catch (error) {
+      if (attempt >= simctlInstallAttempts || errorMessage(error) !== `XCTEST: xcrun failed (${simctlConnectionAbortedStatus})`) throw error;
+      state.diagnostics.lifecycle('install-wda-retry', {phase: 'preflight', attempt});
+      await sleep(Math.min(simctlInstallRetryDelayMs, remaining(state)));
+    }
+  }
   state.owner.receipt = receipt(state, 'preflight-install');
   state.owner.installReceipt = state.owner.receipt;
   writeFileSync(join(state.root, 'installed-Info.plist'), installedInfoEvidence(state, join(state.owner.receipt, 'Info.plist'), 'preflight-install'), { mode: 0o600 });
@@ -1703,7 +1717,7 @@ async function supervise(): Promise<void> {
   process.on('SIGINT', onSignal);
 
   try {
-    preflight(state);
+    await preflight(state);
     startRunner(state);
     await waitUntilReady(state);
     await waitUntilStopped(state);
@@ -1766,6 +1780,44 @@ export async function managedWdaCapabilities(udid: string): Promise<Record<strin
   return { 'appium:webDriverAgentUrl': owner.url, 'appium:isHeadless': true };
 }
 
+async function superviseUntilSettled(root: string, deadline: number): Promise<Owner> {
+  writeOwner(root, {
+    udid: required('IOS_SIMULATOR_UDID'),
+    product: process.env.IOS_WDA_PREBUILT_PATH || '',
+    url: `http://127.0.0.1:${process.env.IOS_WDA_PORT || '8100'}`,
+    startedAt: new Date().toISOString(),
+    ready: false,
+  });
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'supervise'], { detached: true, stdio: 'ignore', env: process.env });
+  let spawnError: Error | undefined;
+  child.on('error', error => {
+    spawnError = error;
+    try {
+      const current: Owner = JSON.parse(readFileSync(join(root, 'owner.json'), 'utf8'));
+      current.error ||= 'XCTEST: supervisor spawn failed';
+      current.endedAt ||= new Date().toISOString();
+      writeOwner(root, current);
+    } catch (error) {
+      spawnError ||= error instanceof Error ? error : new Error(String(error));
+    }
+  });
+  child.unref();
+  while (Date.now() < deadline) {
+    if (spawnError) throw spawnError;
+    if (existsSync(join(root, 'owner.json'))) {
+      const current: Owner = JSON.parse(readFileSync(join(root, 'owner.json'), 'utf8'));
+      if (current.ready || current.endedAt) return current;
+    }
+    await sleep(100);
+  }
+  writeFileSync(join(root, 'stop'), 'startup deadline', { mode: 0o600 });
+  throw new Error('XCTEST: startup deadline');
+}
+
+function exitedBeforeWdaAdmission(owner: Owner): boolean {
+  return owner.firstFailure?.stage === 'child-exit' && owner.exitCode === xcodebuildTestFailedStatus && !owner.runnerPid;
+}
+
 async function main(): Promise<void> {
   const mode = process.argv[2];
   const root = required('IOS_XCTEST_STATE_DIR');
@@ -1777,39 +1829,14 @@ async function main(): Promise<void> {
     mkdirSync(root, { recursive: false, mode: 0o700 });
     const deadline = Date.now() + maxStartupMs;
     writeFileSync(join(root, 'deadline'), String(deadline), { mode: 0o600 });
-    const owner: Owner = {
-      udid: required('IOS_SIMULATOR_UDID'),
-      product: process.env.IOS_WDA_PREBUILT_PATH || '',
-      url: `http://127.0.0.1:${process.env.IOS_WDA_PORT || '8100'}`,
-      startedAt: new Date().toISOString(),
-      ready: false,
-    };
-    writeOwner(root, owner);
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'supervise'], { detached: true, stdio: 'ignore', env: process.env });
-    let spawnError: Error | undefined;
-    child.on('error', error => {
-      spawnError = error;
-      try {
-        const current: Owner = JSON.parse(readFileSync(join(root, 'owner.json'), 'utf8'));
-        current.error ||= 'XCTEST: supervisor spawn failed';
-        current.endedAt ||= new Date().toISOString();
-        writeOwner(root, current);
-      } catch (error) {
-        spawnError ||= error instanceof Error ? error : new Error(String(error));
-      }
-    });
-    child.unref();
-    while (Date.now() < deadline) {
-      if (spawnError) throw spawnError;
-      if (existsSync(join(root, 'owner.json'))) {
-        const current: Owner = JSON.parse(readFileSync(join(root, 'owner.json'), 'utf8'));
-        if (current.ready) return;
-        if (current.endedAt) throw new Error(current.error || 'XCTEST: startup exited');
-      }
-      await sleep(100);
+    let settled = await superviseUntilSettled(root, deadline);
+    if (!settled.ready && exitedBeforeWdaAdmission(settled) && deadline - Date.now() >= minRelaunchStartupMs) {
+      renameSync(join(root, 'owner.json'), join(root, 'owner-attempt-1.json'));
+      rmSync(join(root, 'wda-preflight-private.log'), { force: true });
+      settled = await superviseUntilSettled(root, deadline);
     }
-    writeFileSync(join(root, 'stop'), 'startup deadline', { mode: 0o600 });
-    throw new Error('XCTEST: startup deadline');
+    if (settled.ready) return;
+    throw new Error(settled.error || 'XCTEST: startup exited');
   }
   if (mode === 'stop') {
     if (!existsSync(root)) return;

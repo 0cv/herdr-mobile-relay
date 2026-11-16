@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { measuredAndroidEvents, parseAndroidAuditSubject } from '../android-events';
+import { androidHelperDeaths, measuredAndroidEvents, parseAndroidAuditSubject } from '../android-events';
 import type { AndroidEnvironmentSnapshot, AndroidPlannedTermination } from '../android-environment';
 
 const processName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:2';
@@ -1049,4 +1049,69 @@ androidEventTests.push(['synthetic mixed fatal and normal observations and inven
   for (const [before, after] of [[snapshot('start', { '200': processName }), snapshot('end')], [snapshot('start'), snapshot('end', { '200': 'com.example' })]]) {
     assert.equal(measure(start + body + end, before, after).normalRetirements.length, 0);
   }
+}]);
+
+const helperName = (index: number) => `com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:${index}`;
+const hostedHelperDeathCases: [string, Record<string, string>][] = [
+  ['39634239574-helper-retirements', hostedProcesses.before],
+  ['39656482139-helper-retirements', lateProcesses.before],
+  ['39793077230-planned-stop', {
+    '5409': 'com.android.chrome', '5460': helperName(0), '5489': 'com.android.chrome:privileged_process0', '6132': helperName(10),
+    '558': 'system_server', '5449': 'com.android.chrome_zygote',
+  }],
+  ['39822066139-helper-clock-skew', { '361': 'zygote64', '561': 'system_server', '5294': 'com.android.chrome', '5332': 'com.android.chrome_zygote' }],
+  ['40095544451-helper-missing-zygote-exit', hostedMissingExitProcesses],
+  ['40306915048-helper-late-audit', { '559': 'system_server', '5526': 'com.android.chrome', '5564': 'com.android.chrome_zygote' }],
+  ['40317275070-helper-pid-equals-chrome-uid', { '366': 'zygote64', '563': 'system_server', '5502': 'com.android.chrome', '5542': 'com.android.chrome_zygote' }],
+  ['40427620028-helpers-running-at-start', { '366': 'zygote64', '556': 'system_server', '5399': 'com.android.chrome', '5439': 'com.android.chrome_zygote',
+    '5909': helperName(5), '5920': helperName(6), '5947': helperName(7), '5956': 'com.android.chrome_zygote' }],
+  ['40445020397-helper-departure-without-zygote-exit', { '369': 'zygote64', '568': 'system_server', '5467': 'com.android.chrome', '5509': 'com.android.chrome_zygote' }],
+  ['41131823277-helper-notice-before-death', { '555': 'system_server', '5349': 'com.android.chrome', '5389': 'com.android.chrome_zygote' }],
+];
+const hostedDeaths = async (name: string, processes: Record<string, string>, transform = (log: string) => log) => {
+  const log = transform(await readFile(new URL(`./fixtures/android-hosted-${name}.log`, import.meta.url), 'utf8'));
+  const id = log.match(/HerdrMeasure: (\S+) START/u)![1];
+  const before = snapshot('start', processes);
+  const after = snapshot('end', {});
+  before.measurement!.id = after.measurement!.id = id;
+  const { events } = measuredAndroidEvents(log, before, after, []);
+  return { log, events, helperDeaths: androidHelperDeaths(log, processes, events) };
+};
+
+androidEventTests.push(['hosted helper deaths are every death line of the recorded logs except the planned main Chrome stop', async () => {
+  let helperLines = 0;
+  for (const [name, processes] of hostedHelperDeathCases) {
+    const { events, helperDeaths } = await hostedDeaths(name, processes);
+    assert.ok(events.length > 0, name);
+    const gating = events.filter((event) => !helperDeaths.includes(event));
+    if (name === '39793077230-planned-stop') {
+      assert.equal(gating.length, 2, name);
+      assert.match(gating[0], /Killing 5409:com\.android\.chrome\/\S+ .*: stop com\.android\.chrome /u);
+      assert.match(gating[1], /Process 5409 exited due to signal 9 \(Killed\)$/u);
+      assert.deepEqual(helperDeaths.map((event) => event.match(/Killing (\d+):/u)?.[1]), ['5460']);
+    } else assert.deepEqual(gating, [], name);
+    helperLines += helperDeaths.length;
+  }
+  assert.equal(helperLines, 17);
+  const running = hostedHelperDeathCases.find(([name]) => name.startsWith('40427620028'))!;
+  const { helperDeaths } = await hostedDeaths(...running);
+  assert.ok(helperDeaths.some((event) => /Killing 5956:\S+ .*isolated not needed$/u.test(event)));
+  const withoutKilling = await hostedDeaths(running[0], running[1], (log) => log.split('\n').filter((entry) => !/Killing 5956:/u.test(entry)).join('\n'));
+  assert.ok(withoutKilling.helperDeaths.some((event) => /Process 5956 exited cleanly \(0\)$/u.test(event)));
+}]);
+
+androidEventTests.push(['synthetic helper deaths exclude PIDs named by Chrome, named only by its zygote, or without a PID', async () => {
+  const running = hostedHelperDeathCases.find(([name]) => name.startsWith('40427620028'))!;
+  const renamed = await hostedDeaths(running[0], { ...running[1], '5956': 'com.android.chrome' });
+  assert.ok(renamed.events.some((event) => event.includes('Killing 5956:')));
+  assert.ok(!renamed.helperDeaths.some((event) => event.includes('5956')));
+  assert.ok(renamed.helperDeaths.some((event) => event.includes('5909')));
+  const zygoteExit = line(5, 100, 'Zygote', 'Process 700 exited due to signal 9 (Killed)').trimEnd();
+  assert.deepEqual(androidHelperDeaths(zygoteExit + '\n', { '700': 'com.android.chrome_zygote' }, [zygoteExit]), []);
+  const replacement = line(5, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: installPackageLI').trimEnd();
+  assert.deepEqual(androidHelperDeaths(replacement + '\n', {}, [replacement]), []);
+  const helperKill = death.trimEnd();
+  const reused = birth.replace(processName, 'com.android.chrome');
+  assert.deepEqual(androidHelperDeaths(body, {}, [helperKill]), [helperKill]);
+  assert.deepEqual(androidHelperDeaths(body + reused, {}, [helperKill]), []);
 }]);

@@ -169,6 +169,8 @@ The UI journeys suite runs Chromium on the host and its whole WebKit project
 inside the container (`HERDR_WEBKIT_WORKERS` sets the container's worker count,
 default 2), because some of its tests launch WebKit directly.
 
+Journeys live in `frontend/tests/browser`, one file per journey, on the fake relay in `frontend/tests/support/journey-relay.ts`.
+
 Ubuntu CI continues to use native browsers; `HERDR_WEBKIT_CONTAINER=1` selects
 Docker for hosts that explicitly want containerized WebKit. Directly invoking
 `playwright test` bypasses the wrapper; use the Make targets or the package

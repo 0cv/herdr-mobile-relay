@@ -1,0 +1,36 @@
+=== omp-plan-approval agent=omp
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:3. From /tmp/omp-plan-verify, run test "$(cat README.md)" = "# omp-plan-verify"; success confirms the file exists with the intended content. Verification Step 3 is the end-to-end check; expected output is none and exit status is 0. Plan mode - next step continue with ◂  default  OPUS  FABLE  SONNET  LUNA  SOL ▸ ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~18k / 272k) Refine plan ↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G e Command:↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G editor · esc cancel Options:[Approve and execute Approve and compact context Approve and keep context (~18k / 272k) Refine plan] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:Plan mode - next step
+continue with  ◂   default   OPUS  FABLE  SONNET  LUNA  SOL  ▸
+↳ GPT-5.6-Sol
+ Approve and execute
+Approve and compact context
+Approve and keep context (~18k / 272k)
+Refine plan}
+Classify.Interaction: nil
+ApprovalFingerprint: "e25fc71f5bf081fab8987c4d0e4b02b10f70ff598777ef7f77935645c62c0a17"
+=== omp-plan-approval agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:3. From /tmp/omp-plan-verify, run test "$(cat README.md)" = "# omp-plan-verify"; success confirms the file exists with the intended content. Verification Step 3 is the end-to-end check; expected output is none and exit status is 0. Plan mode - next step continue with ◂  default  OPUS  FABLE  SONNET  LUNA  SOL ▸ ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~18k / 272k) Refine plan ↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G e Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== omp-plan-approval agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:3. From /tmp/omp-plan-verify, run test "$(cat README.md)" = "# omp-plan-verify"; success confirms the file exists with the intended content. Verification Step 3 is the end-to-end check; expected output is none and exit status is 0. Plan mode - next step continue with ◂  default  OPUS  FABLE  SONNET  LUNA  SOL ▸ ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~18k / 272k) Refine plan ↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G e Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== omp-plan-approval agent=omp crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:3. From /tmp/omp-plan-verify, run test "$(cat README.md)" = "# omp-plan-verify"; success confirms the file exists with the intended content. Verification Step 3 is the end-to-end check; expected output is none and exit status is 0. Plan mode - next step continue with ◂  default  OPUS  FABLE  SONNET  LUNA  SOL ▸ ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~18k / 272k) Refine plan ↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G e Command:↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G editor · esc cancel Options:[Approve and execute Approve and compact context Approve and keep context (~18k / 272k) Refine plan] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:Plan mode - next step
+continue with  ◂   default   OPUS  FABLE  SONNET  LUNA  SOL  ▸
+↳ GPT-5.6-Sol
+ Approve and execute
+Approve and compact context
+Approve and keep context (~18k / 272k)
+Refine plan}
+Classify.Interaction: nil
+ApprovalFingerprint: "e25fc71f5bf081fab8987c4d0e4b02b10f70ff598777ef7f77935645c62c0a17"

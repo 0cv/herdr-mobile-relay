@@ -5,7 +5,7 @@ import { detectTerminalMenu, terminalTextInputMode } from '../../src/lib/termina
 describe('terminalTextInputMode', () => {
   it('keeps matching the Hermes approval footer it was built for', () => {
     // Real Hermes question footer, as captured in this repo's own fixtures
-    // (tests/browser/mobile-journeys.spec.ts, tests/unit/components.test.ts).
+    // (tests/browser/terminal.spec.ts, tests/unit/components.test.ts).
     expect(terminalTextInputMode('Custom answer: Which weekend?\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor')).toBe('submit');
     expect(terminalTextInputMode('press enter submit')).toBe('submit');
   });

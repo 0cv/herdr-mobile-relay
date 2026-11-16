@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestDirtyWorktreeRemovalOffersExplicitForceRetry(t *testing.T) {
@@ -89,11 +90,11 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 	default:
 	}
 
-	prompt := dispatcher.Handle(ctx, map[string]any{
-		"type":       "submit_prompt",
-		"request_id": "prompt",
-		"pane_id":    "pane-1",
-		"text":       "continue",
+	prompt := dispatcher.Handle(ctx, protocol.Inbound{
+		Type:      "submit_prompt",
+		RequestID: "prompt",
+		PaneID:    "pane-1",
+		Text:      "continue",
 	})
 	if !prompt.OK {
 		t.Fatalf("unrelated command was blocked behind the workspace mutation: %+v", prompt)

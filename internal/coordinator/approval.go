@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -40,11 +42,16 @@ type questionPayload struct {
 
 func (d *Dispatcher) handleApproval(ctx context.Context, req commandRequest) *CommandResult {
 	payload := approvalPayload{
-		EventID:     stringValue(req.message, "event_id"),
-		Fingerprint: stringValue(req.message, "approval_fingerprint"),
-		Choice:      stringValue(req.message, "choice"),
-		Index:       intValue(req.message["index"], 0),
-		Total:       intValue(req.message["total"], 2),
+		EventID:     req.in.EventID,
+		Fingerprint: req.in.ApprovalFingerprint,
+		Choice:      req.in.Choice,
+		Total:       2,
+	}
+	if req.in.Index != nil {
+		payload.Index = *req.in.Index
+	}
+	if req.in.Total != nil {
+		payload.Total = *req.in.Total
 	}
 	if req.paneID == "" || payload.EventID == "" || payload.Fingerprint == "" || payload.Choice == "" {
 		return d.fail(req.requestID, "approval", req.paneID, "Agent and exact approval identity are required")
@@ -204,7 +211,7 @@ func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, ev
 }
 
 func (d *Dispatcher) handleQuestion(ctx context.Context, req commandRequest) *CommandResult {
-	payload, err := decodeQuestionPayload(req.message)
+	payload, err := decodeQuestionPayload(req.in)
 	if err != nil {
 		return d.fail(req.requestID, "answer_question", req.paneID, err.Error())
 	}
@@ -213,7 +220,7 @@ func (d *Dispatcher) handleQuestion(ctx context.Context, req commandRequest) *Co
 
 func (d *Dispatcher) handleClarifyQuestion(ctx context.Context, req commandRequest) *CommandResult {
 	payload := questionPayload{
-		InteractionID: stringValue(req.message, "interaction_id"),
+		InteractionID: req.in.InteractionID,
 		Clarify:       true,
 	}
 	if payload.InteractionID == "" {
@@ -223,45 +230,44 @@ func (d *Dispatcher) handleClarifyQuestion(ctx context.Context, req commandReque
 }
 
 func (d *Dispatcher) handleNavigateQuestion(ctx context.Context, req commandRequest) *CommandResult {
-	direction := stringValue(req.message, "direction")
+	direction := req.in.Direction
 	if direction != "previous" && direction != "next" {
 		return d.fail(req.requestID, "navigate_question", req.paneID, "Question navigation is no longer available")
 	}
-	payload := questionPayload{InteractionID: stringValue(req.message, "interaction_id"), Navigation: direction}
+	payload := questionPayload{InteractionID: req.in.InteractionID, Navigation: direction}
 	if payload.InteractionID == "" {
 		return d.fail(req.requestID, "navigate_question", req.paneID, "Question is required")
 	}
 	return d.submitQuestion(ctx, req, payload)
 }
 
-func decodeQuestionPayload(message map[string]any) (questionPayload, error) {
-	payload := questionPayload{
-		InteractionID: stringValue(message, "interaction_id"),
-		OtherText:     stringValue(message, "other_text"),
+// A null element decodes to 0 in a typed list, so it is found in the raw message.
+func selectionHasNull(raw json.RawMessage) bool {
+	var selection struct {
+		Indices []*int `json:"selected_indices"`
 	}
-	payload.OtherSelected, _ = message["other_selected"].(bool)
+	if json.Unmarshal(raw, &selection) != nil {
+		return false
+	}
+	return slices.Contains(selection.Indices, nil)
+}
+
+func decodeQuestionPayload(in protocol.Inbound) (questionPayload, error) {
+	payload := questionPayload{
+		InteractionID: in.InteractionID,
+		OtherText:     in.OtherText,
+		OtherSelected: in.OtherSelected,
+	}
 	if payload.InteractionID == "" {
 		return payload, fmt.Errorf("agent and question are required")
 	}
 	if len([]rune(payload.OtherText)) > promptMaxChars {
 		return payload, fmt.Errorf("other answer is longer than 100,000 characters")
 	}
-	raw, ok := message["selected_indices"].([]any)
-	if !ok {
-		if typed, typedOK := message["selected_indices"].([]int); typedOK {
-			payload.Selected = append([]int(nil), typed...)
-		} else {
-			return payload, fmt.Errorf("invalid question selection")
-		}
-	} else {
-		for _, value := range raw {
-			number, ok := value.(float64)
-			if !ok || number < 0 || number != float64(int(number)) {
-				return payload, fmt.Errorf("invalid question selection")
-			}
-			payload.Selected = append(payload.Selected, int(number))
-		}
+	if in.SelectedIndices == nil || slices.ContainsFunc(in.SelectedIndices, func(index int) bool { return index < 0 }) || selectionHasNull(in.Raw) {
+		return payload, fmt.Errorf("invalid question selection")
 	}
+	payload.Selected = slices.Clone(in.SelectedIndices)
 	sort.Ints(payload.Selected)
 	payload.Selected = slices.Compact(payload.Selected)
 	if len(payload.Selected) == 0 && payload.OtherText == "" && !payload.OtherSelected {

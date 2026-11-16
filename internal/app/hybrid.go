@@ -418,10 +418,9 @@ var errSignalUnavailable = errors.New("direct connections are not available on t
 func (s *Server) handleWebRTCSignal(
 	ctx context.Context,
 	client *transport.ClientConn,
-	action string,
-	requestID string,
-	msg map[string]any,
+	inbound protocol.Inbound,
 ) {
+	action, requestID := inbound.Type, inbound.RequestID
 	h := s.hybrid
 	reply := s.reply(client, requestID, action, "")
 	if !h.directEnabled() {
@@ -446,7 +445,7 @@ func (s *Server) handleWebRTCSignal(
 			reply.fail("too many direct-connection attempts; retry shortly")
 			return
 		}
-		offer := stringField(msg, "sdp")
+		offer := inbound.SDP
 		if offer == "" {
 			reply.fail("sdp is required")
 			return
@@ -464,9 +463,9 @@ func (s *Server) handleWebRTCSignal(
 		})
 	case "webrtc_ice":
 		candidate := webrtclink.Candidate{
-			Candidate:     stringField(msg, "candidate"),
-			SDPMid:        stringField(msg, "sdp_mid"),
-			SDPMLineIndex: uint16(intField(msg, "sdp_mline_index")),
+			Candidate:     inbound.Candidate,
+			SDPMid:        inbound.SDPMid,
+			SDPMLineIndex: uint16(inbound.SDPMLineIndex),
 		}
 		if candidate.Candidate == "" {
 			return
@@ -482,24 +481,6 @@ func (s *Server) handleWebRTCSignal(
 			"reason":     "closed by client",
 		})
 	}
-}
-
-// stringField reads a signaling field verbatim. SDP and ICE candidate bodies
-// are line-oriented and their trailing terminator is significant: trimming an
-// offer's final newline makes every SDP parser fail at EOF.
-func stringField(msg map[string]any, key string) string {
-	value, _ := msg[key].(string)
-	return value
-}
-
-func intField(msg map[string]any, key string) int {
-	switch value := msg[key].(type) {
-	case float64:
-		return int(value)
-	case int:
-		return value
-	}
-	return 0
 }
 
 // gatewayAvailableVersion is the newest gateway source this relay knows how to

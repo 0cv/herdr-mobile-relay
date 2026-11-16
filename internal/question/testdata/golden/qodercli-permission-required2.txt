@@ -1,0 +1,84 @@
+=== qodercli-permission-required2 agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▪ Creating the dummy file now. ? Write /home/.../sample-project/dummy.txt Permission Required Tool: Write File: dummy.txt 1 This is a dummy file. Apply this change? 1. Allow once 2. Allow for this session [session] ❯ 3. Modify with external editor 4. Reject and type something 5. No Command:Apply this change? Options:[Allow once Allow for this session [session] Modify with external editor Reject and type something No] ApprovalFocus:2 Interaction:<nil> ApprovalIdentity: approvalSource: Thinking
+ │ I'll go ahead and create the dummy file as requested.
+ ▪ Creating the dummy file now.
+
+ ? Write /home/.../sample-project/dummy.txt
+
+ Permission Required
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool: Write
+ File: dummy.txt
+
+ ╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │  1 This is a dummy file.
+ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Apply this change?
+
+    1. Allow once
+    2. Allow for this session [session]
+  ❯ 3. Modify with external editor
+    4. Reject and type something
+    5. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "9a39f8479045e9ade45b2dd1981e75b44f363ace2be6e4dd966911923d1e4999"
+=== qodercli-permission-required2 agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▪ Creating the dummy file now. ? Write /home/.../sample-project/dummy.txt Permission Required Tool: Write File: dummy.txt 1 This is a dummy file. Apply this change? 1. Allow once 2. Allow for this session [session] 3. Modify with external editor 4. Reject and type something 5. No Command:Apply this change? Options:[Allow once Allow for this session [session] Modify with external editor Reject and type something No] ApprovalFocus:2 Interaction:<nil> ApprovalIdentity: approvalSource: Thinking
+ │ I'll go ahead and create the dummy file as requested.
+ ▪ Creating the dummy file now.
+
+ ? Write /home/.../sample-project/dummy.txt
+
+ Permission Required
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool: Write
+ File: dummy.txt
+
+ ╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │  1 This is a dummy file.
+ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Apply this change?
+
+    1. Allow once
+    2. Allow for this session [session]
+  ❯ 3. Modify with external editor
+    4. Reject and type something
+    5. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "8e5c2bb8d806aa08035021223fd1f238712fca5c7c212c89ce584c1af3c48161"
+=== qodercli-permission-required2 agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:▪ Creating the dummy file now. ? Write /home/.../sample-project/dummy.txt Permission Required Tool: Write File: dummy.txt 1 This is a dummy file. Apply this change? 1. Allow once 2. Allow for this session [session] ❯ 3. Modify with external editor 4. Reject and type something 5. No Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-permission-required2 agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▪ Creating the dummy file now. ? Write /home/.../sample-project/dummy.txt Permission Required Tool: Write File: dummy.txt 1 This is a dummy file. Apply this change? 1. Allow once 2. Allow for this session [session] ❯ 3. Modify with external editor 4. Reject and type something 5. No Command:Apply this change? Options:[Allow once Allow for this session [session] Modify with external editor Reject and type something No] ApprovalFocus:2 Interaction:<nil> ApprovalIdentity: approvalSource: Thinking
+ │ I'll go ahead and create the dummy file as requested.
+ ▪ Creating the dummy file now.
+
+ ? Write /home/.../sample-project/dummy.txt
+
+ Permission Required
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool: Write
+ File: dummy.txt
+
+ ╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │  1 This is a dummy file.
+ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Apply this change?
+
+    1. Allow once
+    2. Allow for this session [session]
+  ❯ 3. Modify with external editor
+    4. Reject and type something
+    5. No}
+Classify.Interaction: nil
+ApprovalFingerprint: "9a39f8479045e9ade45b2dd1981e75b44f363ace2be6e4dd966911923d1e4999"

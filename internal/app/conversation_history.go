@@ -155,11 +155,11 @@ func (s *Server) latestConversationResponse(agent, sessionID string, project con
 	if s.conversationM == nil || conversation.IsKimi(agent) || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
 	}
-	page, err := s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
-	if err != nil || !page.Available || len(page.Entries) == 0 {
+	entries, err := s.conversationM.ReadLatest(agent, project, sessionID, 1)
+	if err != nil || len(entries) == 0 {
 		return ""
 	}
-	entry := page.Entries[len(page.Entries)-1]
+	entry := entries[len(entries)-1]
 	if entry.Role != "assistant" || strings.TrimSpace(entry.Text) == "" {
 		return ""
 	}
@@ -172,12 +172,12 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 		if !exists || current.Agent != agent || current.SessionID != sessionID || current.Cwd != cwd || s.conversationM == nil {
 			return ""
 		}
-		page, err := s.readAgentConversation(ctx, current, 1)
-		if err != nil || !page.Available {
+		entries, err := s.readAgentConversation(ctx, current, 1)
+		if err != nil {
 			return ""
 		}
-		if len(page.Entries) > 0 {
-			entry := page.Entries[len(page.Entries)-1]
+		if len(entries) > 0 {
+			entry := entries[len(entries)-1]
 			if entry.Role == "assistant" && strings.TrimSpace(entry.Text) != "" {
 				return entry.Text
 			}

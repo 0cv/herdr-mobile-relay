@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func generationResult(t *testing.T, ctx context.Context, results <-chan *CommandResult) *CommandResult {
@@ -22,7 +24,7 @@ func generationResult(t *testing.T, ctx context.Context, results <-chan *Command
 	}
 }
 
-func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, client *fakeBackend, message map[string]any) *CommandResult {
+func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, client *fakeBackend, message protocol.Inbound) *CommandResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
@@ -38,8 +40,10 @@ func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, client *fakeBackend, 
 	})
 	stopped := make(chan *CommandResult, 1)
 	go func() {
-		stopped <- d.Handle(ctx, map[string]any{
-			"type": "agent_stop", "request_id": "stop", "pane_id": "pane-1",
+		stopped <- d.Handle(ctx, protocol.Inbound{
+			Type:      "agent_stop",
+			RequestID: "stop",
+			PaneID:    "pane-1",
 		})
 	}()
 	select {
@@ -86,8 +90,8 @@ func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
 	d := newTestDispatcher(t, client, NewState(testLogger()))
 
 	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, d.state.RevisionCounter())
-	res := mutationQueuedBehindStop(t, d, client, map[string]any{
-		"type": "submit_prompt", "request_id": "p", "pane_id": "pane-1", "text": "hi",
+	res := mutationQueuedBehindStop(t, d, client, protocol.Inbound{
+		Type: "submit_prompt", RequestID: "p", PaneID: "pane-1", Text: "hi",
 	})
 	if res.OK || res.Error != "pane session was replaced" {
 		t.Fatalf("prompt dispatched after generation advanced: ok=%v phase=%q err=%q "+
@@ -110,18 +114,24 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
-	first := mutationQueuedBehindStop(t, d, client, map[string]any{
-		"type": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
-		"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
+	first := mutationQueuedBehindStop(t, d, client, protocol.Inbound{
+		Type: "respond", RequestID: "a", PaneID: "pane-1", EventID: eventID,
+		ApprovalFingerprint: fingerprint, Choice: choice, Index: intPtr(0), Total: intPtr(2),
 	})
 	if first.OK || first.Error != "pane session was replaced" {
 		t.Fatalf("precondition: first approval err=%q, want stale-generation abort", first.Error)
 	}
 
 	// The claim must have been released: a retry can now dispatch.
-	second := d.Handle(context.Background(), map[string]any{
-		"type": "respond", "request_id": "b", "pane_id": "pane-1", "event_id": eventID,
-		"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
+	second := d.Handle(context.Background(), protocol.Inbound{
+		Type:                "respond",
+		RequestID:           "b",
+		PaneID:              "pane-1",
+		EventID:             eventID,
+		ApprovalFingerprint: fingerprint,
+		Choice:              choice,
+		Index:               intPtr(0),
+		Total:               intPtr(2),
 	})
 	if !second.OK {
 		t.Fatalf("retry after stale-generation abort was blocked: phase=%q err=%q (ledger not released)", second.Phase, second.Error)
@@ -269,8 +279,10 @@ func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
 	f, old := newClearFixture(t, launchFixtureOptions{})
 	d := f.dispatcher
 	d.state.CommitInventory(nil, d.state.RevisionCounter())
-	if got := d.Handle(f.ctx, map[string]any{
-		"type": "submit_prompt", "pane_id": old.PaneID, "text": "must not cross sessions",
+	if got := d.Handle(f.ctx, protocol.Inbound{
+		Type:   "submit_prompt",
+		PaneID: old.PaneID,
+		Text:   "must not cross sessions",
 	}); got.OK || got.Error != ErrPaneReplaced.Error() {
 		t.Fatalf("absent prompt result = %+v, want replaced-session failure", got)
 	}
@@ -322,19 +334,19 @@ func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
 	client := newFakeBackend()
 	d := newTestDispatcher(t, client, NewState(testLogger()))
 
-	messages := []map[string]any{
-		{"type": "send_keys", "request_id": "keys", "pane_id": "missing", "keys": []any{"Enter"}},
-		{"type": "send_input", "request_id": "text", "pane_id": "missing", "text": "text"},
-		{"type": "agent_stop", "request_id": "stop", "pane_id": "missing"},
-		{"type": "agent_rename", "request_id": "rename", "pane_id": "missing", "name": "new-name"},
-		{"type": "agent_clear", "request_id": "clear", "pane_id": "missing"},
-		{"type": "acknowledge_pane", "request_id": "ack", "pane_id": "missing"},
-		{"type": "respond", "request_id": "approval", "pane_id": "missing", "event_id": "old-event", "index": float64(0)},
-		{"type": "answer_question", "request_id": "question", "pane_id": "missing", "interaction_id": "old-question", "selected": []any{float64(0)}},
+	messages := []protocol.Inbound{
+		{Type: "send_keys", RequestID: "keys", PaneID: "missing", Keys: []string{"Enter"}},
+		{Type: "send_input", RequestID: "text", PaneID: "missing", Text: "text"},
+		{Type: "agent_stop", RequestID: "stop", PaneID: "missing"},
+		{Type: "agent_rename", RequestID: "rename", PaneID: "missing", Name: "new-name"},
+		{Type: "agent_clear", RequestID: "clear", PaneID: "missing"},
+		{Type: "acknowledge_pane", RequestID: "ack", PaneID: "missing"},
+		{Type: "respond", RequestID: "approval", PaneID: "missing", EventID: "old-event", Index: intPtr(0)},
+		{Type: "answer_question", RequestID: "question", PaneID: "missing", InteractionID: "old-question"},
 	}
 	for _, message := range messages {
 		if result := d.Handle(context.Background(), message); result.OK {
-			t.Errorf("%s unexpectedly succeeded for absent pane", message["type"])
+			t.Errorf("%s unexpectedly succeeded for absent pane", message.Type)
 		}
 	}
 	if calls := client.recorded(); len(calls) != 0 {

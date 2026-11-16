@@ -106,11 +106,7 @@ func TestHCRefusesOwnerCommandsWithoutInvokingManagers(t *testing.T) {
 	for _, action := range []string{"set_pi_integration", "check_update", "install_update", "deploy_app_update"} {
 		message := map[string]any{"type": action, "request_id": action, "protocol": protocol.Version, "enabled": true, "instance": "core"}
 		if action == "set_pi_integration" {
-			inbound, err := protocol.DecodeMap(message)
-			if err != nil {
-				t.Fatal(err)
-			}
-			s.handlePiIntegration(ctx, client, inbound, message)
+			s.handlePiIntegration(ctx, client, inboundFromMap(t, message))
 		} else {
 			request, _ := json.Marshal(message)
 			if err := conn.Write(ctx, websocket.MessageText, request); err != nil {

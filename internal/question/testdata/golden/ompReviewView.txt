@@ -1,0 +1,36 @@
+=== ompReviewView agent=omp
+LayoutHint: true
+Parse: {ID:795e020c670252243d4f Kind:single_select Question:Review answers Options:[{Index:0 Label:Submit answers Description:1. region: Upper Midwest lakes
+2. budget: Mid-range ($150–300/night)
+3. party_timing: Couple, a future weekend Selected:true Summary:[{Question:region Answer:Upper Midwest lakes} {Question:budget Answer:Mid-range ($150–300/night)} {Question:party_timing Answer:Couple, a future weekend}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Submit CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:omp NotesActive:false}
+Parse.json: {"id":"795e020c670252243d4f","kind":"single_select","question":"Review answers","options":[{"index":0,"label":"Submit answers","description":"1. region: Upper Midwest lakes\n2. budget: Mid-range ($150–300/night)\n3. party_timing: Couple, a future weekend","selected":true,"summary":[{"q":"region","a":"Upper Midwest lakes"},{"q":"budget","a":"Mid-range ($150–300/night)"},{"q":"party_timing","a":"Couple, a future weekend"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Submit","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+Classify: {Kind:question Prompt:Review answers Command:Review answers Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: {ID:795e020c670252243d4f Kind:single_select Question:Review answers Options:[{Index:0 Label:Submit answers Description:1. region: Upper Midwest lakes
+2. budget: Mid-range ($150–300/night)
+3. party_timing: Couple, a future weekend Selected:true Summary:[{Question:region Answer:Upper Midwest lakes} {Question:budget Answer:Mid-range ($150–300/night)} {Question:party_timing Answer:Couple, a future weekend}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Submit CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:omp NotesActive:false}
+Classify.Interaction.json: {"id":"795e020c670252243d4f","kind":"single_select","question":"Review answers","options":[{"index":0,"label":"Submit answers","description":"1. region: Upper Midwest lakes\n2. budget: Mid-range ($150–300/night)\n3. party_timing: Couple, a future weekend","selected":true,"summary":[{"q":"region","a":"Upper Midwest lakes"},{"q":"budget","a":"Mid-range ($150–300/night)"},{"q":"party_timing","a":"Couple, a future weekend"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Submit","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+ApprovalFingerprint: ""
+=== ompReviewView agent=hermes
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:├─── [budget] · options:3 ───────────────────┤ What's the budget per night for the cabin? ├─── [party_timing] · options:4 ─────────────┤ Who's going, and when? ╭─ Ask ──────────────────────────────────────╮ region budget party_timing Submit Review answers 1. region: Upper Midwest lakes 2. budget: Mid-range ($150–300/night) 3. party_timing: Couple, a future weekend  Submit Enter submit · ↑/↓ scroll · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompReviewView agent=agy
+LayoutHint: true
+Parse: nil
+Classify: {Kind:unknown Prompt:├─── [budget] · options:3 ───────────────────┤ What's the budget per night for the cabin? ├─── [party_timing] · options:4 ─────────────┤ Who's going, and when? ╭─ Ask ──────────────────────────────────────╮ region budget party_timing Submit Review answers 1. region: Upper Midwest lakes 2. budget: Mid-range ($150–300/night) 3. party_timing: Couple, a future weekend  Submit Enter submit · ↑/↓ scroll · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompReviewView agent=omp crlf
+LayoutHint: true
+Parse: {ID:795e020c670252243d4f Kind:single_select Question:Review answers Options:[{Index:0 Label:Submit answers Description:1. region: Upper Midwest lakes
+2. budget: Mid-range ($150–300/night)
+3. party_timing: Couple, a future weekend Selected:true Summary:[{Question:region Answer:Upper Midwest lakes} {Question:budget Answer:Mid-range ($150–300/night)} {Question:party_timing Answer:Couple, a future weekend}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Submit CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:omp NotesActive:false}
+Parse.json: {"id":"795e020c670252243d4f","kind":"single_select","question":"Review answers","options":[{"index":0,"label":"Submit answers","description":"1. region: Upper Midwest lakes\n2. budget: Mid-range ($150–300/night)\n3. party_timing: Couple, a future weekend","selected":true,"summary":[{"q":"region","a":"Upper Midwest lakes"},{"q":"budget","a":"Mid-range ($150–300/night)"},{"q":"party_timing","a":"Couple, a future weekend"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Submit","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+Classify: {Kind:question Prompt:Review answers Command:Review answers Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: {ID:795e020c670252243d4f Kind:single_select Question:Review answers Options:[{Index:0 Label:Submit answers Description:1. region: Upper Midwest lakes
+2. budget: Mid-range ($150–300/night)
+3. party_timing: Couple, a future weekend Selected:true Summary:[{Question:region Answer:Upper Midwest lakes} {Question:budget Answer:Mid-range ($150–300/night)} {Question:party_timing Answer:Couple, a future weekend}]}] Other:{Selected:false Text: Label: Placeholder: AllowEmpty:false Hidden:true} SubmitLabel:Submit CanChat:false CanGoBack:true QuestionIndex:4 QuestionTotal:4 Focus:{Kind:option Index:0} AllOptionCount:1 Agent:omp NotesActive:false}
+Classify.Interaction.json: {"id":"795e020c670252243d4f","kind":"single_select","question":"Review answers","options":[{"index":0,"label":"Submit answers","description":"1. region: Upper Midwest lakes\n2. budget: Mid-range ($150–300/night)\n3. party_timing: Couple, a future weekend","selected":true,"summary":[{"q":"region","a":"Upper Midwest lakes"},{"q":"budget","a":"Mid-range ($150–300/night)"},{"q":"party_timing","a":"Couple, a future weekend"}]}],"other":{"selected":false,"text":"","hidden":true},"submit_label":"Submit","can_chat":false,"can_go_back":true,"question_index":4,"question_total":4}
+ApprovalFingerprint: ""

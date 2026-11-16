@@ -1,0 +1,36 @@
+=== ompPlanApprovalView agent=omp
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:╭─ Plan Review ──────────────────────────────────────────────╮ 3-Day Itinerary Template (Fri evening – Sun) Applies to whichever option is chosen. Plan mode - next step continue with ◂ default OPUS FABLE SONNET LU… ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~59k / 1m) Refine plan ↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate … Command:↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate … Options:[Approve and execute Approve and compact context Approve and keep context (~59k / 1m) Refine plan] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:Plan mode - next step
+continue with  ◂   default   OPUS  FABLE  SONNET  LU…
+↳ GPT-5.6-Sol
+ Approve and execute
+Approve and compact context
+Approve and keep context (~59k / 1m)
+Refine plan}
+Classify.Interaction: nil
+ApprovalFingerprint: "91993a9b18efcf50c879d44d43bdaa75a954958b253cfafa748c75c27ba1caee"
+=== ompPlanApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:╭─ Plan Review ──────────────────────────────────────────────╮ 3-Day Itinerary Template (Fri evening – Sun) Applies to whichever option is chosen. Plan mode - next step continue with ◂ default OPUS FABLE SONNET LU… ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~59k / 1m) Refine plan ↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate … Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompPlanApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:╭─ Plan Review ──────────────────────────────────────────────╮ 3-Day Itinerary Template (Fri evening – Sun) Applies to whichever option is chosen. Plan mode - next step continue with ◂ default OPUS FABLE SONNET LU… ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~59k / 1m) Refine plan ↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate … Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompPlanApprovalView agent=omp crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:╭─ Plan Review ──────────────────────────────────────────────╮ 3-Day Itinerary Template (Fri evening – Sun) Applies to whichever option is chosen. Plan mode - next step continue with ◂ default OPUS FABLE SONNET LU… ↳ GPT-5.6-Sol  Approve and execute Approve and compact context Approve and keep context (~59k / 1m) Refine plan ↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate … Command:↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate … Options:[Approve and execute Approve and compact context Approve and keep context (~59k / 1m) Refine plan] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:Plan mode - next step
+continue with  ◂   default   OPUS  FABLE  SONNET  LU…
+↳ GPT-5.6-Sol
+ Approve and execute
+Approve and compact context
+Approve and keep context (~59k / 1m)
+Refine plan}
+Classify.Interaction: nil
+ApprovalFingerprint: "91993a9b18efcf50c879d44d43bdaa75a954958b253cfafa748c75c27ba1caee"

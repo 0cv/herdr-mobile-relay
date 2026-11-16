@@ -1,0 +1,24 @@
+=== qodercli-approval agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule create a file in this repo Any use of the create a file in this repo tool Where should this rule be saved? ❯ Project settings (local) Saved in ./.qoder/settings.local.json (gitignored) Project settings Checked in at ./.qoder/settings.json User settings Saved in ~/.qoder/settings.json ↑↓ navigate · Enter select · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-approval agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule create a file in this repo Any use of the create a file in this repo tool Where should this rule be saved? ❯ Project settings (local) Saved in ./.qoder/settings.local.json (gitignored) Project settings Checked in at ./.qoder/settings.json User settings Saved in ~/.qoder/settings.json ↑↓ navigate · Enter select · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-approval agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule create a file in this repo Any use of the create a file in this repo tool Where should this rule be saved? ❯ Project settings (local) Saved in ./.qoder/settings.local.json (gitignored) Project settings Checked in at ./.qoder/settings.json User settings Saved in ~/.qoder/settings.json ↑↓ navigate · Enter select · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-approval agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> /permissions Add ask permission rule create a file in this repo Any use of the create a file in this repo tool Where should this rule be saved? ❯ Project settings (local) Saved in ./.qoder/settings.local.json (gitignored) Project settings Checked in at ./.qoder/settings.json User settings Saved in ~/.qoder/settings.json ↑↓ navigate · Enter select · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

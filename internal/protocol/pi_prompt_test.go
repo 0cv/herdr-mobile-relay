@@ -11,7 +11,7 @@ func TestPiPromptActionsAreSeparateAndFailClosed(t *testing.T) {
 	if !ok || send.Class != ActionMutating || !send.Coordinated || !send.Audited || !send.RequiresProtocol {
 		t.Fatalf("bad submit metadata: %+v", send)
 	}
-	request, err := DecodeMap(map[string]any{"type": "send_pi_prompt_unconfirmed", "protocol": Version, "text": "hello", "pi_prompt_lease": map[string]any{"token": "synthetic-token"}})
+	request, err := DecodeFrame([]byte(`{"type":"send_pi_prompt_unconfirmed","protocol":3,"text":"hello","pi_prompt_lease":{"token":"synthetic-token"}}`))
 	if err != nil || !Compatible(request) || len(request.PiPromptLease) == 0 {
 		t.Fatal("lease was not decoded")
 	}

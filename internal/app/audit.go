@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/audit"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -16,37 +18,27 @@ func serializedState(value any) string {
 	return string(data)
 }
 
-func (s *Server) recordWriteAudit(
-	client *transport.ClientConn,
-	message map[string]any,
-	result *coordinator.CommandResult,
-) {
-	if s.auditLog == nil {
+func (s *Server) recordWriteAudit(client *transport.ClientConn, inbound protocol.Inbound, result *coordinator.CommandResult) {
+	action := inbound.Type
+	if s.auditLog == nil || action == "" {
 		return
 	}
-	action := auditAction(message)
-	if action == "" {
-		return
+	paneID := inbound.PaneID
+	if paneID == "" && inbound.Target != nil {
+		paneID = inbound.Target.PaneID
 	}
-	requestID, _ := message["request_id"].(string)
-	paneID, _ := message["pane_id"].(string)
-	if paneID == "" {
-		if target, ok := message["target"].(map[string]any); ok {
-			paneID, _ = target["pane_id"].(string)
-		}
-	}
-	clientID, _ := message["client_id"].(string)
+	clientID := inbound.ClientID
 	if clientID == "" {
 		clientID = "connection:" + client.ID()
 	}
 	record := audit.Record{
 		Stage:        "attempt",
 		Action:       action,
-		RequestID:    requestID,
+		RequestID:    inbound.RequestID,
 		ClientID:     clientID,
 		ConnectionID: client.ID(),
 		PaneID:       paneID,
-		Details:      auditWriteDetails(message),
+		Details:      auditWriteDetails(inbound),
 	}
 	if agent, ok := s.state.Agent(paneID); ok {
 		record.Agent = agent.Agent
@@ -76,20 +68,15 @@ func (s *Server) recordWriteAudit(
 	}
 }
 
-func auditAction(message map[string]any) string {
-	action, _ := message["type"].(string)
-	return action
-}
-
-func auditWriteDetails(message map[string]any) map[string]any {
-	action := auditAction(message)
+func auditWriteDetails(inbound protocol.Inbound) map[string]any {
+	action := inbound.Type
 	if action == "" {
 		return nil
 	}
 	if action == "set_pi_integration" {
 		details := make(map[string]any)
-		if enabled, ok := message["enabled"].(bool); ok {
-			details["enabled"] = enabled
+		if inbound.Enabled != nil {
+			details["enabled"] = *inbound.Enabled
 		}
 		return details
 	}
@@ -97,77 +84,71 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	// digest of a low-entropy secret is crackable offline and the keys spell the
 	// secret out. Only its shape is auditable.
 	if action == "send_secret" || action == "send_terminal_text" || action == "send_pi_prompt_unconfirmed" {
-		details := make(map[string]any, 1)
-		if text, ok := message["text"].(string); ok {
-			details["text_bytes"] = len(text)
-		}
-		return details
+		return map[string]any{"text_bytes": len(inbound.Text)}
 	}
 	details := make(map[string]any)
-	if encoded, err := json.Marshal(message); err == nil {
-		digest := sha256.Sum256(encoded)
+	if len(inbound.Raw) > 0 {
+		digest := sha256.Sum256(inbound.Raw)
 		details["payload_sha256"] = fmt.Sprintf("%x", digest[:])
-		details["payload_bytes"] = len(encoded)
+		details["payload_bytes"] = len(inbound.Raw)
 	}
-	stringLimits := map[string]int{
-		"name": 256, "label": 256, "profile_id": 160, "workspace_id": 160,
-		"before_workspace_id": 160, "cwd": 1024, "path": 1024, "branch": 512,
-		"base": 512, "filename": 512, "mime": 128, "activity_label": 256,
-	}
-	for key, limit := range stringLimits {
-		if value, ok := message[key].(string); ok && value != "" {
-			details[key] = boundedAuditString(value, limit)
+	for key, value := range map[string]struct {
+		text  string
+		limit int
+	}{
+		"name": {inbound.Name, 256}, "label": {inbound.Label, 256}, "profile_id": {inbound.ProfileID, 160},
+		"workspace_id": {inbound.WorkspaceID, 160}, "before_workspace_id": {inbound.BeforeWorkspaceID, 160},
+		"cwd": {inbound.Cwd, 1024}, "path": {inbound.Path, 1024}, "branch": {inbound.Branch, 512},
+		"base": {inbound.Base, 512}, "activity_label": {inbound.ActivityLabel, 256},
+	} {
+		if value.text != "" {
+			details[key] = boundedAuditString(value.text, value.limit)
 		}
 	}
-	for _, key := range []string{"text", "prompt", "choice", "data"} {
-		if value, ok := message[key].(string); ok && value != "" {
+	for key, value := range map[string]string{
+		"text": inbound.Text, "prompt": inbound.Prompt, "choice": inbound.Choice, "data": inbound.Data,
+	} {
+		if value != "" {
 			details[key+"_bytes"] = len(value)
 		}
 	}
-	for _, key := range []string{"index", "insert_index", "total", "_server_sequence"} {
-		if value, ok := auditInteger(message[key]); ok {
-			details[key] = value
+	for key, value := range map[string]*int{"index": inbound.Index, "insert_index": inbound.InsertIndex, "total": inbound.Total} {
+		if value != nil && *value >= 0 {
+			details[key] = int64(*value)
 		}
 	}
-	if force, ok := message["force"].(bool); ok {
-		details["force"] = force
+	if inbound.ReceiptSequence != 0 && inbound.ReceiptSequence <= math.MaxInt64 {
+		details["_server_sequence"] = int64(inbound.ReceiptSequence)
 	}
-	if closeGroup, ok := message["close_group"].(bool); ok {
-		details["close_group"] = closeGroup
+	if inbound.Force {
+		details["force"] = true
 	}
-	if workspaceIDs := auditWorkspaceIDList(message["workspace_ids"]); len(workspaceIDs) > 0 {
+	if inbound.CloseGroup {
+		details["close_group"] = true
+	}
+	if workspaceIDs := auditWorkspaceIDList(inbound.WorkspaceIDs); len(workspaceIDs) > 0 {
 		details["workspace_ids"] = workspaceIDs
 	}
-	if expectedWorkspaceIDs := auditWorkspaceIDList(message["expected_workspace_ids"]); len(expectedWorkspaceIDs) > 0 {
+	if expectedWorkspaceIDs := auditWorkspaceIDList(inbound.ExpectedWorkspaceIDs); len(expectedWorkspaceIDs) > 0 {
 		details["expected_workspace_ids"] = expectedWorkspaceIDs
 	}
-	keys := make([]string, 0, 16)
-	switch values := message["keys"].(type) {
-	case []any:
-		for _, value := range values {
-			key, valid := value.(string)
-			if !valid {
-				continue
-			}
-			keys = append(keys, boundedAuditString(key, 64))
-			if len(keys) == 32 {
-				break
-			}
+	keys := make([]string, 0, min(len(inbound.Keys), 32))
+	for _, key := range inbound.Keys {
+		keys = append(keys, boundedAuditString(key, 64))
+		if len(keys) == 32 {
+			break
 		}
 	}
 	if len(keys) > 0 {
 		details["keys"] = keys
 	}
 	indices := make([]int64, 0, 8)
-	switch values := message["selected_indices"].(type) {
-	case []any:
-		for _, value := range values {
-			if index, ok := auditInteger(value); ok {
-				indices = append(indices, index)
-			}
-			if len(indices) == 128 {
-				break
-			}
+	for _, index := range inbound.SelectedIndices {
+		if index >= 0 {
+			indices = append(indices, int64(index))
+		}
+		if len(indices) == 128 {
+			break
 		}
 	}
 	if len(indices) > 0 {
@@ -176,17 +157,14 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	return details
 }
 
-func auditWorkspaceIDList(value any) []string {
+func auditWorkspaceIDList(values []string) []string {
 	ids := make([]string, 0, 8)
-	switch values := value.(type) {
-	case []any:
-		for _, item := range values {
-			if id, ok := item.(string); ok && id != "" {
-				ids = append(ids, boundedAuditString(id, 160))
-			}
-			if len(ids) == 32 {
-				break
-			}
+	for _, id := range values {
+		if id != "" {
+			ids = append(ids, boundedAuditString(id, 160))
+		}
+		if len(ids) == 32 {
+			break
 		}
 	}
 	return ids
@@ -199,26 +177,4 @@ func boundedAuditString(value string, limit int) string {
 		return value
 	}
 	return string(runes[:limit])
-}
-
-func auditInteger(value any) (int64, bool) {
-	switch number := value.(type) {
-	case int:
-		if number >= 0 {
-			return int64(number), true
-		}
-	case int64:
-		if number >= 0 {
-			return number, true
-		}
-	case uint64:
-		if number <= uint64(^uint64(0)>>1) {
-			return int64(number), true
-		}
-	case float64:
-		if number >= 0 && number <= 1<<53 && number == float64(int64(number)) {
-			return int64(number), true
-		}
-	}
-	return 0, false
 }

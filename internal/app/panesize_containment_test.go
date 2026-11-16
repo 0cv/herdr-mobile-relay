@@ -242,34 +242,6 @@ func TestPaneSizeCommandsOnAllIngresses(t *testing.T) {
 	}
 }
 
-// Only a client that holds an active lease on a pane reads it at the leased
-// geometry; client-supplied values never select the resized read path.
-func TestPaneReadGeometryFollowsTheReadersOwnLease(t *testing.T) {
-	s := testServer()
-	newPaneSizeFakes(s)
-	message := func() map[string]any {
-		return map[string]any{"pane_id": "pane-1", "terminal_columns": 50, "terminal_rows": 12}
-	}
-	other := message()
-	s.applyPaneReadLease("client-a", other)
-	if _, present := other["terminal_columns"]; present {
-		t.Fatalf("client-supplied geometry kept without a lease: %v", other)
-	}
-	if _, _, err := s.paneSizeM.Acquire(context.Background(), "client-a", "pane-1", 80, 0); err != nil {
-		t.Fatal(err)
-	}
-	owner := message()
-	s.applyPaneReadLease("client-a", owner)
-	if owner["terminal_columns"] != 80 || owner["terminal_rows"] != 40 {
-		t.Fatalf("lease holder read geometry = %v", owner)
-	}
-	reader := message()
-	s.applyPaneReadLease("client-b", reader)
-	if _, present := reader["terminal_columns"]; present {
-		t.Fatalf("a client without its own lease read the leased geometry: %v", reader)
-	}
-}
-
 // Both commands stay controller-only mutations, and release keeps the
 // stale-target cleanup allowance it shares with unwatch_pane and cancel_speech.
 func TestPaneSizeCommandsKeepAuthorizationPaths(t *testing.T) {

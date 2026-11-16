@@ -93,12 +93,12 @@ func (r *agyReader) databasePaths(sessionID string) []string {
 	return paths
 }
 
-func (r *agyReader) readFromContext(ctx context.Context, database, before string, limit int) ([]Entry, bool, bool, agyPageMeta, string) {
+func (r *agyReader) readFromContext(ctx context.Context, database, before string, limit int) nativeReadResult[agyPageMeta] {
 	var cursor int64 = -1
 	if before != "" {
 		value, err := strconv.ParseInt(before, 10, 64)
 		if err != nil || value < 0 {
-			return nil, false, false, agyPageMeta{}, "invalid_cursor"
+			return nativeReadResult[agyPageMeta]{Code: "invalid_cursor"}
 		}
 		cursor = value
 	}
@@ -115,7 +115,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 	)
 	rows, code := r.queryRows(ctx, database, query)
 	if code != "" {
-		return nil, false, false, agyPageMeta{}, code
+		return nativeReadResult[agyPageMeta]{Code: code}
 	}
 	hasMore := len(rows) > limit
 	if hasMore {
@@ -133,7 +133,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 			corrupt = true
 		}
 	}
-	return entries, hasMore, corrupt, meta, ""
+	return nativeReadResult[agyPageMeta]{Entries: entries, HasMore: hasMore, Corrupt: corrupt, Metadata: meta}
 }
 
 func (r *agyReader) queryRows(ctx context.Context, database, query string) ([]agyRow, string) {
@@ -308,25 +308,19 @@ func agyTimestamp(step []pbField) string {
 	return time.Unix(int64(seconds), int64(nanos)).UTC().Format(time.RFC3339Nano)
 }
 
-func (r *Reader) readAgyFor(sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readAgyFor(sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !canonicalSessionID.MatchString(sessionID) {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	location, code := r.agy.locateContext(sessionID)
 	if code != "" {
-		return unavailableCode(code, "Antigravity conversation history is unavailable."), nil
+		return nil, ErrUnavailable
 	}
-	entries, hasMore, corrupt, _, code := r.agy.readFromContext(context.Background(), location.Path, before, limit)
-	if code != "" {
-		return unavailableCode(code, "Antigravity conversation history is unavailable."), nil
+	result := r.agy.readFromContext(context.Background(), location.Path, "", limit)
+	if result.Code != "" {
+		return nil, ErrUnavailable
 	}
-	normalizeEntriesForResponse(entries)
-	return Page{
-		Available:     true,
-		Entries:       append([]Entry(nil), entries...),
-		HasMore:       hasMore,
-		Total:         UnknownTotal,
-		SourceCorrupt: corrupt,
-	}, nil
+	normalizeEntriesForResponse(result.Entries)
+	return append([]Entry(nil), result.Entries...), nil
 }

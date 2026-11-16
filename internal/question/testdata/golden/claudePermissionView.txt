@@ -1,0 +1,32 @@
+=== claudePermissionView agent=claude
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Claude needs your permission to use Bash. $ npm test ❯ 1. Allow once 2. Reject Command:npm test Options:[Allow once Reject] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Claude needs your permission to use Bash.
+$ npm test
+❯ 1. Allow once
+  2. Reject}
+Classify.Interaction: nil
+ApprovalFingerprint: "d6c29b69165d9f4d8d93af9d87927723df1b3b272f5aee5c09f88acadd33d709"
+=== claudePermissionView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Claude needs your permission to use Bash. $ npm test ❯ 1. Allow once 2. Reject Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== claudePermissionView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Claude needs your permission to use Bash. $ npm test ❯ 1. Allow once 2. Reject Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== claudePermissionView agent=claude crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Claude needs your permission to use Bash. $ npm test ❯ 1. Allow once 2. Reject Command:npm test Options:[Allow once Reject] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Claude needs your permission to use Bash.
+$ npm test
+❯ 1. Allow once
+  2. Reject}
+Classify.Interaction: nil
+ApprovalFingerprint: "d6c29b69165d9f4d8d93af9d87927723df1b3b272f5aee5c09f88acadd33d709"

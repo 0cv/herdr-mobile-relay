@@ -1,0 +1,24 @@
+=== omp-copy-button-review agent=omp
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:- Added regression coverage for Claude fixtures, Codex plans, prose collisions, unknown tools, and Markdown lists. - Added browser assertions for both copy-toast paths and removed test formatting noise. - Updated README.md and CHANGELOG.md. Verification: - make frontend-check — lint clean, svelte-check: 454 files / 0 errors / 0 warnings, 121 unit tests passed, production build and size validation passed. - make frontend-browser — 44 Chromium tests passed and 44 WebKit tests passed. - Focused cop Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== omp-copy-button-review agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:- Added regression coverage for Claude fixtures, Codex plans, prose collisions, unknown tools, and Markdown lists. - Added browser assertions for both copy-toast paths and removed test formatting noise. - Updated README.md and CHANGELOG.md. Verification: - make frontend-check — lint clean, svelte-check: 454 files / 0 errors / 0 warnings, 121 unit tests passed, production build and size validation passed. - make frontend-browser — 44 Chromium tests passed and 44 WebKit tests passed. - Focused cop Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== omp-copy-button-review agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:- Added regression coverage for Claude fixtures, Codex plans, prose collisions, unknown tools, and Markdown lists. - Added browser assertions for both copy-toast paths and removed test formatting noise. - Updated README.md and CHANGELOG.md. Verification: - make frontend-check — lint clean, svelte-check: 454 files / 0 errors / 0 warnings, 121 unit tests passed, production build and size validation passed. - make frontend-browser — 44 Chromium tests passed and 44 WebKit tests passed. - Focused cop Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== omp-copy-button-review agent=omp crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:- Added regression coverage for Claude fixtures, Codex plans, prose collisions, unknown tools, and Markdown lists. - Added browser assertions for both copy-toast paths and removed test formatting noise. - Updated README.md and CHANGELOG.md. Verification: - make frontend-check — lint clean, svelte-check: 454 files / 0 errors / 0 warnings, 121 unit tests passed, production build and size validation passed. - make frontend-browser — 44 Chromium tests passed and 44 WebKit tests passed. - Focused cop Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

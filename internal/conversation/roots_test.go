@@ -6,6 +6,7 @@ package conversation
 // unrelated parsing work.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,12 +27,12 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 		map[string]any{"type": "user", "uuid": "u1", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"content": "from profile root"}},
 		map[string]any{"type": "assistant", "uuid": "a1", "timestamp": "2026-08-12T10:00:01Z", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "profile answer"}}}},
 	)
-	profilePage, err := reader.Read("claude", testSessionID, "", 80)
+	profilePage, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !profilePage.Available || profilePage.Total != 2 ||
-		profilePage.Entries[0].Text != "from profile root" || profilePage.Entries[1].Text != "profile answer" {
+	if len(profilePage) != 2 ||
+		profilePage[0].Text != "from profile root" || profilePage[1].Text != "profile answer" {
 		t.Fatalf("profile page = %#v, want two entries resolved from the additional root", profilePage)
 	}
 
@@ -39,26 +40,20 @@ func TestClaudeConversationResolvesFromAdditionalConfiguredRoot(t *testing.T) {
 	writeRows(t, homePath,
 		map[string]any{"type": "user", "uuid": "u2", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"content": "from home root"}},
 	)
-	homePage, err := reader.Read("claude", secondSessionID, "", 80)
+	homePage, err := reader.ReadLatest("claude", ProjectContext{}, secondSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !homePage.Available || homePage.Total != 1 || homePage.Entries[0].Text != "from home root" {
+	if len(homePage) != 1 || homePage[0].Text != "from home root" {
 		t.Fatalf("home page = %#v, want the home-default root to still resolve alongside the configured list", homePage)
 	}
 }
 
 func TestClaudeConversationUnavailableWhenSessionMissingFromAllRoots(t *testing.T) {
 	reader, _ := testReader(t)
-	page, err := reader.Read("claude", testSessionID, "", 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page.Available {
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("page = %#v, want unavailable", page)
-	}
-	if page.Reason != "No conversation log is available for this session." {
-		t.Fatalf("reason = %q", page.Reason)
 	}
 }
 
@@ -80,11 +75,8 @@ func TestPiConversationConfinesReportedPathAcrossMultipleRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := reader.Read("pi", link, "", 80)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page.Available {
+	_, err := reader.ReadLatest("pi", ProjectContext{}, link, 80)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatal("symlink inside a configured root pointing outside every root was served")
 	}
 }
@@ -101,12 +93,12 @@ func TestOMPConversationResolvesFromConfiguredProfileRoot(t *testing.T) {
 		map[string]any{"type": "message", "id": "a1", "timestamp": "2026-08-12T10:00:01Z", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "response"}}}},
 	)
 
-	page, err := reader.Read("omp", testSessionID, "", 80)
+	page, err := reader.ReadLatest("omp", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 2 ||
-		page.Entries[0].Text != "question" || page.Entries[1].Text != "response" {
+	if len(page) != 2 ||
+		page[0].Text != "question" || page[1].Text != "response" {
 		t.Fatalf("page = %#v, want the omp profile root to resolve", page)
 	}
 }
@@ -132,11 +124,11 @@ func TestClaudeConversationEarliestRootWinsForDuplicateSessionID(t *testing.T) {
 		map[string]any{"type": "user", "uuid": "u2", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"content": "home default copy"}},
 	)
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 1 || page.Entries[0].Text != "earlier root copy" {
+	if len(page) != 1 || page[0].Text != "earlier root copy" {
 		t.Fatalf("page = %#v, want the earliest configured root's copy served over the home default's", page)
 	}
 }
@@ -154,11 +146,11 @@ func TestOMPConversationDiscoversProfileCreatedAfterReaderConstructed(t *testing
 		map[string]any{"type": "message", "id": "u1", "timestamp": "2026-08-12T10:00:00Z", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "question"}}}},
 	)
 
-	page, err := reader.Read("omp", testSessionID, "", 80)
+	page, err := reader.ReadLatest("omp", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 1 || page.Entries[0].Text != "question" {
+	if len(page) != 1 || page[0].Text != "question" {
 		t.Fatalf("page = %#v, want the profile created after NewReader to be discovered", page)
 	}
 }
@@ -184,11 +176,11 @@ func TestClaudeConversationSearchesSymlinkedProjectDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := reader.Read("claude", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Total != 1 || page.Entries[0].Text != "via symlinked project directory" {
+	if len(page) != 1 || page[0].Text != "via symlinked project directory" {
 		t.Fatalf("page = %#v, want the symlinked project directory to be searched", page)
 	}
 }
@@ -203,21 +195,21 @@ func TestReaderKeepsLocatedDuplicateStableAcrossRequests(t *testing.T) {
 	secondPath := filepath.Join(second, "projects", "-work", testSessionID+".jsonl")
 	writeRows(t, secondPath,
 		map[string]any{"type": "user", "uuid": "u1", "message": map[string]any{"content": "second root"}})
-	firstLocation := reader.Locate("claude", "/work", testSessionID)
+	firstLocation := reader.LocateWithProject("claude", ProjectContext{CWD: "/work"}, testSessionID)
 	if firstLocation.Path != secondPath {
 		t.Fatalf("initial location = %q, want %q", firstLocation.Path, secondPath)
 	}
 
 	writeRows(t, filepath.Join(first, "projects", "-work", testSessionID+".jsonl"),
 		map[string]any{"type": "user", "uuid": "u2", "message": map[string]any{"content": "new first root"}})
-	if got := reader.Locate("claude", "/work", testSessionID); got.Path != secondPath {
+	if got := reader.LocateWithProject("claude", ProjectContext{CWD: "/work"}, testSessionID); got.Path != secondPath {
 		t.Fatalf("cached location flipped to %q, want stable %q", got.Path, secondPath)
 	}
-	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)
+	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work"}, testSessionID, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available || page.Entries[0].Text != "second root" {
+	if page[0].Text != "second root" {
 		t.Fatalf("page = %#v, want the originally located transcript", page)
 	}
 }

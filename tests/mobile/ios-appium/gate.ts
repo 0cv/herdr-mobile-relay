@@ -14,6 +14,7 @@ type Manifest = {
 };
 const { artifact, load } = artifactReader(import.meta.url);
 const contract = 'herdr-installed-contexts-v1';
+const driverListTimeoutMs = 300_000;
 
 export async function configure(home: string): Promise<void> {
   await configureHome(home, [['package.json', artifact('package.json')]], 'Fresh iOS Appium home required');
@@ -93,7 +94,7 @@ async function installation(home: string, patched: boolean): Promise<Record<stri
     const driver = new XCUITestDriver();
     assert.deepEqual(driver.mobileInstalledContextContract(), { contract, selector: contract });
     const selected = JSON.parse(execFileSync(process.execPath, [main, 'driver', 'list', '--installed', '--json'], {
-      env: { ...process.env, APPIUM_HOME: root }, encoding: 'utf8', timeout: 30_000,
+      env: { ...process.env, APPIUM_HOME: root }, encoding: 'utf8', timeout: driverListTimeoutMs,
     }));
     assert.deepEqual(Object.keys(selected), ['xcuitest'], 'Unexpected selected iOS driver');
     assert.equal(selected.xcuitest.pkgName, manifest.packages.xcuitest.name);

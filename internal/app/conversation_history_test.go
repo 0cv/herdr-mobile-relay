@@ -133,7 +133,7 @@ func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
 		map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "question"}})
 
 	reader := conversation.NewReader(home)
-	location := reader.Locate("omp", "/work", sessionID)
+	location := reader.LocateWithProject("omp", conversation.ProjectContext{CWD: "/work"}, sessionID)
 	if location.Path != path {
 		t.Fatalf("location = %#v, want profile transcript %q", location, path)
 	}

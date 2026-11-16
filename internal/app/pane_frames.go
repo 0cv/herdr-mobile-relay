@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
@@ -15,15 +16,15 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
-func (s *Server) handleReadPane(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any) {
-	s.applyPaneReadLease(client.ID(), msg)
+func (s *Server) handleReadPane(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound) {
+	request := s.paneReadRequest(client.ID(), inbound)
 	s.stopPaneWatch(client.ID(), inbound.PaneID)
-	resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
+	resp := s.preparePaneResponse(request, s.dispatcher.HandleReadPane(ctx, request))
 	resp["request_id"] = inbound.RequestID
 	if inbound.Target != nil {
 		resp["target"] = *inbound.Target
 	}
-	if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
+	if unchanged := unchangedPaneResponse(inbound.ContentFingerprint, resp); unchanged != nil {
 		s.hub.Send(client, unchanged)
 		return
 	}
@@ -78,8 +79,8 @@ func (s *Server) currentPaneRevision(ctx context.Context, paneID string) (int64,
 // to decide what it may offer the operator. The no-echo flag is computed last,
 // on the content the phone will actually render, so full reads, deltas and the
 // history-merged frames all agree on the tail.
-func (s *Server) preparePaneResponse(message, response map[string]any) map[string]any {
-	response = s.classifyPaneResponse(message, response)
+func (s *Server) preparePaneResponse(request coordinator.PaneReadRequest, response map[string]any) map[string]any {
+	response = s.classifyPaneResponse(request, response)
 	content, ok := successfulPaneContent(response)
 	if !ok {
 		return response
@@ -92,12 +93,12 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 	return response
 }
 
-func (s *Server) classifyPaneResponse(message, response map[string]any) map[string]any {
+func (s *Server) classifyPaneResponse(request coordinator.PaneReadRequest, response map[string]any) map[string]any {
 	content, ok := successfulPaneContent(response)
 	if !ok {
 		return response
 	}
-	paneID, _ := message["pane_id"].(string)
+	paneID := request.PaneID
 	agent, _ := s.state.Agent(paneID)
 	agentName := ""
 	if agent != nil {
@@ -128,7 +129,7 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly {
 		return response
 	}
-	historyLimit := messageInt(message["lines"], 30)
+	historyLimit := request.Lines
 	if historyLimit < 1 {
 		historyLimit = 1
 	} else if historyLimit > history.MaxLines {
@@ -175,15 +176,14 @@ func paneFrameFingerprint(response map[string]any) string {
 	return paneFingerprint(string(encoded))
 }
 
-func unchangedPaneResponse(message, response map[string]any) map[string]any {
+func unchangedPaneResponse(knownFingerprint string, response map[string]any) map[string]any {
 	content, ok := successfulPaneContent(response)
 	if !ok {
 		return nil
 	}
 	fingerprint := paneFingerprint(content)
 	response["content_fingerprint"] = fingerprint
-	known, _ := message["content_fingerprint"].(string)
-	if known == "" || known != fingerprint {
+	if knownFingerprint == "" || knownFingerprint != fingerprint {
 		return nil
 	}
 	paneID, _ := response["pane_id"].(string)

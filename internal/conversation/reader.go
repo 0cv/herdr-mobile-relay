@@ -1,7 +1,6 @@
 package conversation
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -67,31 +66,7 @@ type Entry struct {
 	Truncated bool           `json:"truncated,omitempty"`
 }
 
-type Page struct {
-	Available              bool          `json:"available"`
-	ReasonCode             string        `json:"reason_code,omitempty"`
-	Reason                 string        `json:"reason,omitempty"`
-	Entries                []Entry       `json:"entries"`
-	HasMore                bool          `json:"has_more"`
-	Total                  int           `json:"total"`
-	FileTruncated          bool          `json:"file_truncated,omitempty"`
-	SourceCorrupt          bool          `json:"source_corrupt,omitempty"`
-	ContinuationIncomplete bool          `json:"continuation_incomplete,omitempty"`
-	ContinuationReason     string        `json:"continuation_reason,omitempty"`
-	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
-}
-
-func (page Page) MarshalJSON() ([]byte, error) {
-	type wirePage Page
-	var total *int
-	if page.Total != UnknownTotal {
-		total = &page.Total
-	}
-	return json.Marshal(struct {
-		wirePage
-		Total *int `json:"total"`
-	}{wirePage(page), total})
-}
+var ErrUnavailable = errors.New("conversation source is unavailable")
 
 type locationKey struct {
 	Agent         string
@@ -157,87 +132,58 @@ func Supported(agent string) bool {
 	return agentkind.Of(agent) != ""
 }
 
-// Read resolves a conversation without project context. It is used for
-// historical activity where the pane cwd is no longer available.
-func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{}, sessionID, before, limit)
-}
-
-// ReadFor resolves a pane conversation using the same cwd-aware locator as the
-// session-title resolver.
-func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
-}
-
-// ReadWithProject resolves a conversation with the pane and, for Claude Code,
+// ReadLatest resolves a conversation with the pane and, for Claude Code,
 // foreground directory hints. Once the anchor is located, Claude continuation
 // descendants stay in that anchor's project and root.
-func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) ReadLatest(agent string, project ProjectContext, sessionID string, limit int) ([]Entry, error) {
 	project = NormalizeProjectContext(agent, project)
 	kind := agentkind.Of(agent)
 	if kind == agentkind.Kimi {
 		projection, _, code := r.readKimi(context.Background(), project, sessionID)
 		if code != "" {
-			return unavailableCode(code, kimiReason(code)), nil
+			return nil, ErrUnavailable
 		}
-		return kimiPage(projection, before, limit), nil
+		return latest(projection.entries, limit), nil
 	}
 	if kind == agentkind.Hermes {
-		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
+		return r.readHermesFor(agent, project.CWD, sessionID, limit)
 	}
 	if kind == agentkind.Agy {
-		return r.readAgyFor(sessionID, before, limit)
+		return r.readAgyFor(sessionID, limit)
 	}
 	if kind == agentkind.OpenCode {
-		return r.readOpenCode(sessionID, before, limit)
+		return r.readOpenCode(sessionID, limit)
 	}
 	if kind == agentkind.OMO {
-		return r.readOMO(project.CWD, sessionID, before, limit)
+		return r.readOMO(project.CWD, sessionID, limit)
 	}
 	if kind == agentkind.Grok {
-		return r.readGrokFor(project, sessionID, before, limit)
+		return r.readGrokFor(project, sessionID, limit)
 	}
 	if !Supported(agent) {
-		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
+		return nil, ErrUnavailable
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	location := r.LocateWithProject(agent, project, sessionID)
 	if location.Path == "" {
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+		return nil, ErrUnavailable
 	}
 	if agentkind.Of(agent) == agentkind.Claude {
-		return r.readClaudeChain(sessionID, location, before, limit)
+		return r.readClaudeChain(sessionID, location, limit)
 	}
-	text, clipped, err := loadTail(location.Path, maxConversationBytes)
+	source, err := captureFileSource(location)
 	if err != nil {
-		return Page{}, fmt.Errorf("read conversation log: %w", err)
+		return nil, fmt.Errorf("read conversation log: %w", err)
 	}
-	entries := parseTranscript(agent, text)
-	limit = clampPageLimit(limit)
-	end := len(entries)
-	if before != "" {
-		for index := range entries {
-			if entries[index].ID == before {
-				end = index
-				break
-			}
-		}
+	defer source.close()
+	entries, err := readJSONLTail(source.file, agent, source.revision, source.end)
+	if err != nil {
+		return nil, fmt.Errorf("read conversation log: %w", err)
 	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
-	pageEntries := append([]Entry(nil), entries[start:end]...)
-	return Page{
-		Available:     true,
-		Entries:       pageEntries,
-		HasMore:       start > 0,
-		Total:         len(entries),
-		FileTruncated: clipped,
-	}, nil
+	return latest(entries, limit), nil
 }
 
 func clampPageLimit(limit int) int {
@@ -247,22 +193,17 @@ func clampPageLimit(limit int) int {
 	return min(limit, maxPageSize)
 }
 
-func unavailableCode(code, reason string) Page {
-	return Page{Available: false, ReasonCode: code, Reason: reason, Entries: []Entry{}}
-}
-
-// Locate returns the exact contained transcript selected for agent, cwd and
-// sessionID. Root order is authoritative; within Claude roots the foreground
-// directory is tried before the pane cwd. Cached tuple locations are returned
-// before any filesystem walk, keeping title and history on the same copy.
-func (r *Reader) Locate(agent, cwd, sessionID string) Location {
-	return r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+func latest(entries []Entry, limit int) []Entry {
+	start := max(0, len(entries)-clampPageLimit(limit))
+	return append([]Entry(nil), entries[start:]...)
 }
 
 // LocateWithProject returns the exact contained transcript selected for the
-// supplied project context. The effective foreground hint is part of the
-// cache and single-flight keys, so changing it cannot reuse an old hit or
-// miss.
+// supplied project context. Root order is authoritative; within Claude roots
+// the foreground directory is tried before the pane cwd. The effective
+// foreground hint is part of the cache and single-flight keys, so changing it
+// cannot reuse an old hit or miss. Cached tuple locations are returned before
+// any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) LocateWithProject(agent string, project ProjectContext, sessionID string) Location {
 	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
@@ -580,46 +521,31 @@ func containedRegularFile(path, root string) string {
 	return realPath
 }
 
-func loadTail(path string, limit int64) (string, bool, error) {
-	file, err := openConversationSource(path)
+func readJSONLEntries(file *os.File, agent, revision string, start, end int64) ([]Entry, error) {
+	records, err := NewJSONLRecordReader(context.Background(), file, start, end, maxConversationBytes, nil)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	defer file.Close()
-	return loadTailFile(file, limit)
+	projector := newMemoryProjector(agent, revision)
+	for {
+		record, err := records.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		projector.apply(record)
+	}
+	entries := make([]Entry, len(projector.entries))
+	for index, projected := range projector.entries {
+		entries[index] = projected.Entry
+	}
+	return entries, nil
 }
 
-func loadTailFile(file *os.File, limit int64) (string, bool, error) {
-	if file == nil {
-		return "", false, errors.New("conversation source is closed")
-	}
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		if err == nil {
-			err = errors.New("conversation source is not a regular file")
-		}
-		return "", false, err
-	}
-	clipped := info.Size() > limit
-	start := int64(0)
-	if clipped {
-		start = info.Size() - limit
-	}
-	if _, err := file.Seek(start, 0); err != nil {
-		return "", false, err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, limit))
-	if err != nil {
-		return "", false, err
-	}
-	if clipped {
-		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
-			data = data[newline+1:]
-		} else {
-			data = nil
-		}
-	}
-	return string(data), clipped, nil
+func readJSONLTail(file *os.File, agent, revision string, size int64) ([]Entry, error) {
+	return readJSONLEntries(file, agent, revision, max(0, size-maxConversationBytes), size)
 }
 
 type toolResult struct {
@@ -631,47 +557,6 @@ type toolResult struct {
 type toolLocation struct {
 	entry int
 	tool  int
-}
-
-func parseTranscript(agent, text string) []Entry {
-	normalized := agentkind.Of(agent)
-	entries := make([]Entry, 0)
-	seenIDs := make(map[string]int)
-	pendingTools := make(map[string]toolLocation)
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) != nil {
-			continue
-		}
-		calls, results := parseToolActivity(normalized, record)
-		for _, result := range results {
-			location, ok := pendingTools[toolAssociationKey(normalized, result.id)]
-			if !ok || location.entry >= len(entries) || location.tool >= len(entries[location.entry].Tools) {
-				continue
-			}
-			tool := &entries[location.entry].Tools[location.tool]
-			applyProjectedToolResult(tool, result)
-			delete(pendingTools, toolAssociationKey(normalized, result.id))
-		}
-
-		entry := prepareJSONLEntry(agent, record, calls)
-		if entry == nil {
-			continue
-		}
-		normalizeEntryTools(entry)
-		entry.ID = stableRowID(line, seenIDs)
-		entryIndex := len(entries)
-		entries = append(entries, *entry)
-		for toolIndex := range calls {
-			if id := toolAssociationID(calls[toolIndex]); id != "" {
-				pendingTools[toolAssociationKey(normalized, id)] = toolLocation{entry: entryIndex, tool: toolIndex}
-			}
-		}
-	}
-	return entries
 }
 
 func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []toolResult) {
@@ -1057,17 +942,6 @@ func clampText(text string, limit int) (string, bool) {
 		clipped = clipped[:len(clipped)-1]
 	}
 	return strings.TrimSpace(clipped), true
-}
-
-func stableRowID(line string, seen map[string]int) string {
-	digest := sha256.Sum256([]byte(line))
-	base := hex.EncodeToString(digest[:12])
-	occurrence := seen[base]
-	seen[base] = occurrence + 1
-	if occurrence == 0 {
-		return base
-	}
-	return fmt.Sprintf("%s-%d", base, occurrence)
 }
 
 func stringValue(value any) string {

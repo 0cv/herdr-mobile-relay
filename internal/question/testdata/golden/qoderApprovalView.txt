@@ -1,0 +1,32 @@
+=== qoderApprovalView agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Allow this command? $ go test ./... ❯ 1. Allow 2. Reject Tab/←→ switch · Enter select · Esc cancel Command:go test ./... Options:[Allow Reject] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Allow this command?
+$ go test ./...
+❯ 1. Allow
+  2. Reject}
+Classify.Interaction: nil
+ApprovalFingerprint: "3032b7b40b50e9da394f5fcbabe35dda65bd07fc72d972b77d7e8c12c8facdc8"
+=== qoderApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Allow this command? $ go test ./... ❯ 1. Allow 2. Reject Tab/←→ switch · Enter select · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qoderApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Allow this command? $ go test ./... ❯ 1. Allow 2. Reject Tab/←→ switch · Enter select · Esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qoderApprovalView agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Allow this command? $ go test ./... ❯ 1. Allow 2. Reject Tab/←→ switch · Enter select · Esc cancel Command:go test ./... Options:[Allow Reject] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Allow this command?
+$ go test ./...
+❯ 1. Allow
+  2. Reject}
+Classify.Interaction: nil
+ApprovalFingerprint: "3032b7b40b50e9da394f5fcbabe35dda65bd07fc72d972b77d7e8c12c8facdc8"

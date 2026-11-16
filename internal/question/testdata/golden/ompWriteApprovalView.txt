@@ -1,0 +1,46 @@
+=== ompWriteApprovalView agent=omp
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:╭─ Allow tool: write ────────────────────────────────────────────────────╮ Path: /tmp/variant-check.txt Content: hello  Approve Deny up/down navigate enter select esc cancel Command:Path: /tmp/variant-check.txt Content: hello Options:[Approve Deny] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:╭─ Allow tool: write ────────────────────────────────────────────────────╮
+
+Path: /tmp/variant-check.txt
+Content:
+hello
+
+ Approve
+Deny
+
+up/down navigate  enter select  esc cancel
+
+╰────────────────────────────────────────────────────────────────────────╯}
+Classify.Interaction: nil
+ApprovalFingerprint: "a057d495c5e4d8fc5e3004a956247542ef8ae00f7d163e7f066a36809e5116d3"
+=== ompWriteApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:╭─ Allow tool: write ────────────────────────────────────────────────────╮ Path: /tmp/variant-check.txt Content: hello  Approve Deny up/down navigate enter select esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompWriteApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:╭─ Allow tool: write ────────────────────────────────────────────────────╮ Path: /tmp/variant-check.txt Content: hello  Approve Deny up/down navigate enter select esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompWriteApprovalView agent=omp crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:╭─ Allow tool: write ────────────────────────────────────────────────────╮ Path: /tmp/variant-check.txt Content: hello  Approve Deny up/down navigate enter select esc cancel Command:Path: /tmp/variant-check.txt Content: hello Options:[Approve Deny] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:╭─ Allow tool: write ────────────────────────────────────────────────────╮
+
+Path: /tmp/variant-check.txt
+Content:
+hello
+
+ Approve
+Deny
+
+up/down navigate  enter select  esc cancel
+
+╰────────────────────────────────────────────────────────────────────────╯}
+Classify.Interaction: nil
+ApprovalFingerprint: "a057d495c5e4d8fc5e3004a956247542ef8ae00f7d163e7f066a36809e5116d3"

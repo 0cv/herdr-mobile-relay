@@ -1,0 +1,32 @@
+=== codexSubagentApprovalView agent=codex
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Approve all pending agents? ❯ 1. Approve all pending 2. Configure individually 3. Exit (cancel subagents) Command:Approve all pending agents? Options:[Approve all pending Configure individually Exit (cancel subagents)] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Approve all pending agents?
+❯ 1. Approve all pending
+  2. Configure individually
+  3. Exit (cancel subagents)}
+Classify.Interaction: nil
+ApprovalFingerprint: "dcc72e02af78155ca9a088efe1574abc65f8e533f5ff4e89946341dcec58bc17"
+=== codexSubagentApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Approve all pending agents? ❯ 1. Approve all pending 2. Configure individually 3. Exit (cancel subagents) Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== codexSubagentApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:Approve all pending agents? ❯ 1. Approve all pending 2. Configure individually 3. Exit (cancel subagents) Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== codexSubagentApprovalView agent=codex crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:Approve all pending agents? ❯ 1. Approve all pending 2. Configure individually 3. Exit (cancel subagents) Command:Approve all pending agents? Options:[Approve all pending Configure individually Exit (cancel subagents)] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+Approve all pending agents?
+❯ 1. Approve all pending
+  2. Configure individually
+  3. Exit (cancel subagents)}
+Classify.Interaction: nil
+ApprovalFingerprint: "dcc72e02af78155ca9a088efe1574abc65f8e533f5ff4e89946341dcec58bc17"

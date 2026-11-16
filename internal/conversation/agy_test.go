@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -115,15 +116,15 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 			t.Fatalf("Supported(%q) = false", name)
 		}
 	}
-	page, err := reader.ReadFor("agy", t.TempDir(), session, "", 80)
-	if err != nil || !page.Available || page.SourceCorrupt {
+	page, err := reader.ReadLatest("agy", ProjectContext{CWD: t.TempDir()}, session, 80)
+	if err != nil {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
-	if len(page.Entries) != 4 {
-		t.Fatalf("entries = %d, want 4 (tool-result and type 23 steps skipped): %#v", len(page.Entries), page.Entries)
+	if len(page) != 4 {
+		t.Fatalf("entries = %d, want 4 (tool-result and type 23 steps skipped): %#v", len(page), page)
 	}
-	user, firstCall, secondCall, final := page.Entries[0], page.Entries[1], page.Entries[2], page.Entries[3]
-	if user.Role != "user" || user.Text != "check the gateway" || user.ID != "0" || user.Timestamp == "" {
+	user, firstCall, secondCall, final := page[0], page[1], page[2], page[3]
+	if user.Role != "user" || user.Text != "check the gateway" || user.ID != "0" || user.Timestamp != "1970-01-01T00:16:40.0000005Z" {
 		t.Fatalf("user entry = %#v", user)
 	}
 	if len(firstCall.Tools) != 1 || firstCall.Tools[0].Name != "run_command" || firstCall.Tools[0].State != "completed" ||
@@ -133,34 +134,38 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 	if secondCall.Text != "It was the memory watchdog." || len(secondCall.Tools) != 1 || secondCall.Tools[0].State != "running" {
 		t.Fatalf("running tool entry = %#v", secondCall)
 	}
-	if final.Role != "assistant" || final.Text != "Done." || strings.Contains(final.Text, "private thinking") {
+	if final.Role != "assistant" || final.Text != "Done." || final.Timestamp != "1970-01-01T00:16:44.0000005Z" || strings.Contains(final.Text, "private thinking") {
 		t.Fatalf("final entry = %#v", final)
-	}
-}
-
-func TestAgyReaderPagesBackwardByStep(t *testing.T) {
-	reader, _, session := agyFixture(t)
-	latest, err := reader.ReadFor("agy", "", session, "", 2)
-	if err != nil || len(latest.Entries) != 2 || !latest.HasMore || latest.Entries[1].Text != "Done." {
-		t.Fatalf("latest = %#v, err = %v", latest, err)
-	}
-	older, err := reader.ReadFor("agy", "", session, latest.Entries[0].ID, 10)
-	if err != nil || older.HasMore || len(older.Entries) != 2 || older.Entries[0].Text != "check the gateway" {
-		t.Fatalf("older = %#v, err = %v", older, err)
-	}
-	bad, err := reader.ReadFor("agy", "", session, "nope", 10)
-	if err != nil || bad.Available || bad.ReasonCode != "invalid_cursor" {
-		t.Fatalf("bad cursor = %#v, err = %v", bad, err)
 	}
 }
 
 func TestAgyReaderRejectsUnsafeSessions(t *testing.T) {
 	reader, _, _ := agyFixture(t)
 	for _, session := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
-		page, err := reader.ReadFor("agy", "", session, "", 10)
-		if err != nil || page.Available || page.ReasonCode != "invalid_session" {
+		page, err := reader.ReadLatest("agy", ProjectContext{CWD: ""}, session, 10)
+		if !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("session %q page = %#v, err = %v", session, page, err)
 		}
+	}
+}
+
+func TestAgyBrowserRejectsUnsafeSessionsAndInvalidCursor(t *testing.T) {
+	reader, _, session := agyFixture(t)
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	for _, unsafe := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
+		page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "agy", SessionID: unsafe}, Limit: 10})
+		if err != nil || page.Available || page.ReasonCode != "invalid_session" {
+			t.Fatalf("session %q page = %#v, err = %v", unsafe, page, err)
+		}
+	}
+	scope := BrowseScope{Provider: "agy", SessionID: session}
+	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
+	if err != nil || latest.SourceRevision == "" {
+		t.Fatalf("latest = %#v, err = %v", latest, err)
+	}
+	bad, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: signedNativeCursor(t, browser, scope, latest.SourceRevision, "nope"), Limit: 10})
+	if err != nil || bad.State != BrowseFailed || bad.ReasonCode != "invalid_cursor" {
+		t.Fatalf("bad cursor = %#v, err = %v", bad, err)
 	}
 }
 
@@ -169,7 +174,7 @@ func TestAgyBrowserNativeCursorAndChangeToken(t *testing.T) {
 	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "agy", SessionID: session}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
-	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 2 || !latest.HasMore || latest.NextCursor == "" {
+	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 2 || !latest.HasMore || latest.NextCursor == "" || latest.Diagnostics.CorruptRecords != 0 {
 		t.Fatalf("latest = %#v, err = %v", latest, err)
 	}
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10, Cursor: latest.NextCursor})

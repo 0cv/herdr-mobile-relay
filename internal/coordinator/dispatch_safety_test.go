@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -21,7 +22,7 @@ func TestDispatcherRequiresDirectActionType(t *testing.T) {
 	for _, admitted := range []bool{false, true} {
 		for _, typ := range []string{"", "command"} {
 			d := newTestDispatcher(t, nil, NewState(testLogger()))
-			message := map[string]any{"type": typ, "action": "send_secret", "request_id": "unsupported", "pane_id": "pane", "text": "fixture"}
+			message := protocol.Inbound{Type: typ, RequestID: "unsupported", PaneID: "pane", Text: "fixture"}
 			var result *CommandResult
 			signals := 0
 			if admitted {
@@ -85,15 +86,15 @@ func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
 	approve := func(reqID string) {
-		d.Handle(context.Background(), map[string]any{
-			"type":                 "respond",
-			"request_id":           reqID,
-			"pane_id":              "pane-1",
-			"event_id":             eventID,
-			"approval_fingerprint": fingerprint,
-			"choice":               choice,
-			"index":                float64(0),
-			"total":                float64(2),
+		d.Handle(context.Background(), protocol.Inbound{
+			Type:                "respond",
+			RequestID:           reqID,
+			PaneID:              "pane-1",
+			EventID:             eventID,
+			ApprovalFingerprint: fingerprint,
+			Choice:              choice,
+			Index:               intPtr(0),
+			Total:               intPtr(2),
 		})
 	}
 
@@ -123,10 +124,15 @@ func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
-	result := d.Handle(context.Background(), map[string]any{
-		"type": "respond", "request_id": "stale", "pane_id": "pane-1",
-		"event_id": eventID, "approval_fingerprint": fingerprint, "choice": choice,
-		"index": float64(0), "total": float64(2),
+	result := d.Handle(context.Background(), protocol.Inbound{
+		Type:                "respond",
+		RequestID:           "stale",
+		PaneID:              "pane-1",
+		EventID:             eventID,
+		ApprovalFingerprint: fingerprint,
+		Choice:              choice,
+		Index:               intPtr(0),
+		Total:               intPtr(2),
 	})
 	if result.OK || result.Error != "Approval choices are no longer available" {
 		t.Fatalf("approval result = %+v", result)
@@ -147,10 +153,15 @@ Enter to select · Esc to cancel`
 	commitApproval(state, "pane-1")
 	d := newTestDispatcher(t, client, state)
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
-	result := d.Handle(context.Background(), map[string]any{
-		"type": "respond", "request_id": "changed", "pane_id": "pane-1",
-		"event_id": blockedEventID(t, d, "pane-1"), "approval_fingerprint": fingerprint,
-		"choice": choice, "index": float64(0), "total": float64(2),
+	result := d.Handle(context.Background(), protocol.Inbound{
+		Type:                "respond",
+		RequestID:           "changed",
+		PaneID:              "pane-1",
+		EventID:             blockedEventID(t, d, "pane-1"),
+		ApprovalFingerprint: fingerprint,
+		Choice:              choice,
+		Index:               intPtr(0),
+		Total:               intPtr(2),
 	})
 	if result.OK || result.Error != "Approval choices are no longer available" {
 		t.Fatalf("changed approval result = %+v", result)
@@ -188,15 +199,15 @@ func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
 	}}, state.RevisionCounter())
 	d := newTestDispatcher(t, client, state)
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
-	result := d.Handle(context.Background(), map[string]any{
-		"type":                 "respond",
-		"request_id":           "focus-aware",
-		"pane_id":              "pane-1",
-		"event_id":             blockedEventID(t, d, "pane-1"),
-		"approval_fingerprint": fingerprint,
-		"choice":               choice,
-		"index":                float64(0),
-		"total":                float64(len(classification.Options)),
+	result := d.Handle(context.Background(), protocol.Inbound{
+		Type:                "respond",
+		RequestID:           "focus-aware",
+		PaneID:              "pane-1",
+		EventID:             blockedEventID(t, d, "pane-1"),
+		ApprovalFingerprint: fingerprint,
+		Choice:              choice,
+		Index:               intPtr(0),
+		Total:               intPtr(len(classification.Options)),
 	})
 	if !result.OK || result.Phase != "accepted" {
 		t.Fatalf("approval result = %+v", result)
@@ -243,11 +254,11 @@ func TestPostDispatchTimeoutIsDispatchedUnknown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
-	res := d.Handle(ctx, map[string]any{
-		"type":       "submit_prompt",
-		"request_id": "r1",
-		"pane_id":    "pane-1",
-		"text":       "hello",
+	res := d.Handle(ctx, protocol.Inbound{
+		Type:      "submit_prompt",
+		RequestID: "r1",
+		PaneID:    "pane-1",
+		Text:      "hello",
 	})
 
 	if res.Phase != "dispatched_unknown" {

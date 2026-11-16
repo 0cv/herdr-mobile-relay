@@ -1,0 +1,24 @@
+=== qodercli-yes-no agent=qoder
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:██ ██ ██ Qoder CLI v1.1.5 │ - Improved Ctrl+B shortcut compatibility ██ ██ │ - Added persistent task management ████ ██ Signed in Browser Login │ /release-notes for more > /permissions Delete ask tool? create a file in this repo Any use of the create a file in this repo tool From local settings Configured in .qoder/settings.local.json (local only, gitignored) Are you sure you want to delete this permission rule? ❯ 1. Yes 2. No Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-yes-no agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:██ ██ ██ Qoder CLI v1.1.5 │ - Improved Ctrl+B shortcut compatibility ██ ██ │ - Added persistent task management ████ ██ Signed in Browser Login │ /release-notes for more > /permissions Delete ask tool? create a file in this repo Any use of the create a file in this repo tool From local settings Configured in .qoder/settings.local.json (local only, gitignored) Are you sure you want to delete this permission rule? ❯ 1. Yes 2. No Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-yes-no agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:██ ██ ██ Qoder CLI v1.1.5 │ - Improved Ctrl+B shortcut compatibility ██ ██ │ - Added persistent task management ████ ██ Signed in Browser Login │ /release-notes for more > /permissions Delete ask tool? create a file in this repo Any use of the create a file in this repo tool From local settings Configured in .qoder/settings.local.json (local only, gitignored) Are you sure you want to delete this permission rule? ❯ 1. Yes 2. No Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== qodercli-yes-no agent=qoder crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:██ ██ ██ Qoder CLI v1.1.5 │ - Improved Ctrl+B shortcut compatibility ██ ██ │ - Added persistent task management ████ ██ Signed in Browser Login │ /release-notes for more > /permissions Delete ask tool? create a file in this repo Any use of the create a file in this repo tool From local settings Configured in .qoder/settings.local.json (local only, gitignored) Are you sure you want to delete this permission rule? ❯ 1. Yes 2. No Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

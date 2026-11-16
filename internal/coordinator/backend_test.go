@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -51,8 +52,9 @@ func TestBackendRefusesUnsupportedAgentLaunch(t *testing.T) {
 			client := newFakeBackend()
 			client.status = herdr.ServerStatus{}
 			dispatcher := newTestDispatcher(t, client, NewState(testLogger()))
-			result := dispatcher.Handle(context.Background(), map[string]any{
-				"type": action, "pane_id": "pane-1",
+			result := dispatcher.Handle(context.Background(), protocol.Inbound{
+				Type:   action,
+				PaneID: "pane-1",
 			})
 			if result.OK || result.Error != "This backend does not support launching agents" {
 				t.Fatalf("result = %+v", result)
@@ -71,11 +73,14 @@ func TestPromptNotStartedKeepsAction(t *testing.T) {
 			state := NewState(testLogger())
 			state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "codex"}}, state.RevisionCounter())
 			dispatcher := newTestDispatcher(t, client, state)
-			message := map[string]any{
-				"type": "submit_prompt", "request_id": "prompt", "pane_id": "pane-1", "text": "hello",
+			message := protocol.Inbound{
+				Type:      "submit_prompt",
+				RequestID: "prompt",
+				PaneID:    "pane-1",
+				Text:      "hello",
 			}
 			if reason == "expired" {
-				message["_server_received_at"] = time.Now().Add(-2 * commandDeadline).Format(time.RFC3339Nano)
+				message.ReceivedAt = time.Now().Add(-2 * commandDeadline)
 			} else if err := dispatcher.scheduler.Close(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -129,8 +134,11 @@ func TestBackendTerminalReplacementInvalidatesQueuedTarget(t *testing.T) {
 	admitted := make(chan struct{})
 	results := make(chan *CommandResult, 1)
 	go func() {
-		results <- dispatcher.HandleAdmitted(ctx, map[string]any{
-			"type": "submit_prompt", "request_id": "queued", "pane_id": "pane-1", "text": "hello",
+		results <- dispatcher.HandleAdmitted(ctx, protocol.Inbound{
+			Type:      "submit_prompt",
+			RequestID: "queued",
+			PaneID:    "pane-1",
+			Text:      "hello",
 		}, func() { close(admitted) })
 	}()
 	select {

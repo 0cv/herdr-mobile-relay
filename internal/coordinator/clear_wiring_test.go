@@ -11,6 +11,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func newClearFixture(t *testing.T, options launchFixtureOptions) (*launchFixture, profiles.PaneIdentity) {
@@ -28,8 +29,8 @@ func reportAgent(f *launchFixture, old profiles.PaneIdentity, agent string) {
 	f.dispatcher.state.CommitInventory([]*AgentState{{PaneID: old.PaneID, RawPaneID: old.PaneID, TerminalID: old.TerminalID, TabID: old.TabID, WorkspaceID: old.WorkspaceID, Agent: agent, Status: "idle", Cwd: f.cwd}}, f.dispatcher.state.RevisionCounter())
 }
 
-func clearMessage() map[string]any {
-	return map[string]any{"type": "agent_clear", "request_id": "clear", "pane_id": "pane-old"}
+func clearMessage() protocol.Inbound {
+	return protocol.Inbound{Type: "agent_clear", RequestID: "clear", PaneID: "pane-old"}
 }
 
 func callIndex(calls []fakeCall, method string, args ...any) int {
@@ -140,7 +141,7 @@ func TestRepeatedClearDoesNotReuseTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.client.update(func(b *fakeBackend) { b.inventoryOverrides = [][]herdr.Pane{{pane}} })
-	clearedAgain := f.dispatcher.Handle(f.ctx, map[string]any{"type": "agent_clear", "request_id": "clear-again", "pane_id": old.PaneID})
+	clearedAgain := f.dispatcher.Handle(f.ctx, protocol.Inbound{Type: "agent_clear", RequestID: "clear-again", PaneID: old.PaneID})
 	if !clearedAgain.OK {
 		t.Fatalf("clear again: %+v", clearedAgain)
 	}
@@ -168,7 +169,7 @@ func TestClearWithoutWiringDoesNotMutate(t *testing.T) {
 				d.lifecycle.profiles = nil
 			}
 			for _, input := range []struct{ pane, want string }{{"", "Agent is required"}, {"absent", "no longer available"}, {"pane-old", "lifecycle is unavailable"}} {
-				result := d.Handle(f.ctx, map[string]any{"type": "agent_clear", "pane_id": input.pane, "request_id": "unwired"})
+				result := d.Handle(f.ctx, protocol.Inbound{Type: "agent_clear", PaneID: input.pane, RequestID: "unwired"})
 				if result.OK || !strings.Contains(result.Error, input.want) {
 					t.Fatalf("result = %+v", result)
 				}
@@ -216,7 +217,7 @@ func runClearSerialization(t *testing.T) {
 	prompt, duplicate := make(chan *CommandResult, 1), make(chan *CommandResult, 1)
 	admitted := make(chan struct{})
 	go func() {
-		prompt <- dispatcher.HandleAdmitted(ctx, map[string]any{"type": "submit_prompt", "request_id": "queued", "pane_id": "pane-old", "text": "one"}, func() { close(admitted) })
+		prompt <- dispatcher.HandleAdmitted(ctx, protocol.Inbound{Type: "submit_prompt", RequestID: "queued", PaneID: "pane-old", Text: "one"}, func() { close(admitted) })
 	}()
 	select {
 	case <-admitted:

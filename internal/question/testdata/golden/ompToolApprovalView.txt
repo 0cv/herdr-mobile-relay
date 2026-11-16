@@ -1,0 +1,42 @@
+=== ompToolApprovalView agent=omp
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:╭─ Allow tool: bash ─────────────────────────────────────────────────────╮ Command: touch /tmp/push-approval-test  Approve Deny up/down navigate enter select esc cancel Command:touch /tmp/push-approval-test Options:[Approve Deny] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:╭─ Allow tool: bash ─────────────────────────────────────────────────────╮
+
+Command: touch /tmp/push-approval-test
+
+ Approve
+Deny
+
+up/down navigate  enter select  esc cancel
+
+╰────────────────────────────────────────────────────────────────────────╯}
+Classify.Interaction: nil
+ApprovalFingerprint: "535974494a0ec30016f3189cd1a333f0143f6b090a9bd2c521ca8a6fe698c79c"
+=== ompToolApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:╭─ Allow tool: bash ─────────────────────────────────────────────────────╮ Command: touch /tmp/push-approval-test  Approve Deny up/down navigate enter select esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompToolApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:╭─ Allow tool: bash ─────────────────────────────────────────────────────╮ Command: touch /tmp/push-approval-test  Approve Deny up/down navigate enter select esc cancel Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== ompToolApprovalView agent=omp crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:╭─ Allow tool: bash ─────────────────────────────────────────────────────╮ Command: touch /tmp/push-approval-test  Approve Deny up/down navigate enter select esc cancel Command:touch /tmp/push-approval-test Options:[Approve Deny] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:╭─ Allow tool: bash ─────────────────────────────────────────────────────╮
+
+Command: touch /tmp/push-approval-test
+
+ Approve
+Deny
+
+up/down navigate  enter select  esc cancel
+
+╰────────────────────────────────────────────────────────────────────────╯}
+Classify.Interaction: nil
+ApprovalFingerprint: "535974494a0ec30016f3189cd1a333f0143f6b090a9bd2c521ca8a6fe698c79c"

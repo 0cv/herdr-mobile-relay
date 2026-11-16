@@ -4,7 +4,7 @@ import { environmentStatus, validateMeasurementIdentity, type EnvironmentStatus,
 import { createHash } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { requireOwnedDevice } from './support/device';
-import { androidEventDetails, androidLogEvents, measuredAndroidEvents } from './android-events';
+import { androidEventDetails, androidHelperDeaths, androidLogEvents, measuredAndroidEvents } from './android-events';
 import { CommandError, command, type CommandResult } from './support/process';
 import { option, required } from './support/cli';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
@@ -149,6 +149,7 @@ export interface AndroidEnvironmentCheck {
   forcedRestartEvents: string[];
   nativeEvents: ReturnType<typeof androidEventDetails>[];
   normalRetirements: ReturnType<typeof measuredAndroidEvents>['normalRetirements'];
+  helperDeaths: string[];
   boundaryDiscordances: ReturnType<typeof measuredAndroidEvents>['boundaryDiscordances'];
   eventCounts: { rawEvents: number; distinctDeathPids: number; fatalEvents: number; normalRetirementPids: number };
   passed: boolean;
@@ -1330,6 +1331,8 @@ export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity:
     collectionIssues.push('event evaluation incomplete');
     events = fatalEvents = androidLogEvents(input.log || '', before?.measurement?.processes);
   }
+  const helperDeaths = androidHelperDeaths(input.log || '', before?.measurement?.processes || {}, events);
+  fatalEvents = fatalEvents.filter(line => !helperDeaths.includes(line));
   for (const line of fatalEvents) {
       const event = androidEventDetails(line);
       const category = event.kind === 'module-config' ? 'MODULE_CHANGE' : event.kind === 'package-replacement' ? 'PACKAGE_REPLACEMENT'
@@ -1352,7 +1355,7 @@ export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity:
     checkedAt: new Date().toISOString(), before: environmentLeaves.before, after: environmentLeaves.after, log: environmentLeaves.log,
     status, collection: { status: collectionIssues.length ? 'UNKNOWN' : 'PASS', issues: collectionIssues }, findings, coverage: 'bounded-operations', plannedOperations: structuredClone(operations), componentDeltas,
     processBoundaryProof: collectionIssues.length ? undefined : processBoundaryProof(input.log, before, after, operations, events),
-    issues, forcedRestartEvents: fatalEvents, nativeEvents: events.map(androidEventDetails), normalRetirements, boundaryDiscordances,
+    issues, forcedRestartEvents: fatalEvents, nativeEvents: events.map(androidEventDetails), normalRetirements, helperDeaths, boundaryDiscordances,
     eventCounts: { rawEvents: events.length, distinctDeathPids: new Set(events.map(line => androidEventDetails(line).pid).filter(Boolean)).size, fatalEvents: fatalEvents.length, normalRetirementPids: normalRetirements.length },
     passed: status === 'PASS', observability: 'Receive-bounded main/system evidence and bounded operations; not continuous child-to-target coverage or initiating actor attribution.',
   };
