@@ -245,9 +245,9 @@ func TestOpenCodeReaderSearchesEveryConfiguredDatabase(t *testing.T) {
 	)
 	t.Setenv(agentroots.OpenCodeListEnv, rootA+string(os.PathListSeparator)+rootB)
 	reader := newOpenCodeReader(t.TempDir())
-	entries, _, _, metadata, code := reader.readContext(t.Context(), "ses_second", "", defaultPageSize)
-	if code != "" || len(entries) != 1 || entries[0].Text != "found" || metadata.Title != "Second root" {
-		t.Fatalf("second-root result = %#v, metadata %#v, code %q", entries, metadata, code)
+	result := reader.readContext(t.Context(), "ses_second", "", defaultPageSize)
+	if result.Code != "" || len(result.Entries) != 1 || result.Entries[0].Text != "found" || result.Metadata.Title != "Second root" {
+		t.Fatalf("second-root result = %#v", result)
 	}
 }
 
@@ -550,9 +550,9 @@ func TestOpenCodeReaderFindsV2SessionInSecondDatabase(t *testing.T) {
 		openCodeV2Message("m1", "ses_second2", "assistant", 1, 1, `{"content":[{"type":"text","text":"found"}]}`))
 	openCodeFixtureReader(t, rootA, rootB)
 	reader := newOpenCodeReader(t.TempDir())
-	entries, _, _, metadata, code := reader.readContext(t.Context(), "ses_second2", "", defaultPageSize)
-	if code != "" || len(entries) != 1 || entries[0].Text != "found" || metadata.Title != "Second v2" {
-		t.Fatalf("second-root result = %#v, metadata %#v, code %q", entries, metadata, code)
+	result := reader.readContext(t.Context(), "ses_second2", "", defaultPageSize)
+	if result.Code != "" || len(result.Entries) != 1 || result.Entries[0].Text != "found" || result.Metadata.Title != "Second v2" {
+		t.Fatalf("second-root result = %#v", result)
 	}
 }
 

@@ -93,12 +93,12 @@ func (r *agyReader) databasePaths(sessionID string) []string {
 	return paths
 }
 
-func (r *agyReader) readFromContext(ctx context.Context, database, before string, limit int) ([]Entry, bool, bool, agyPageMeta, string) {
+func (r *agyReader) readFromContext(ctx context.Context, database, before string, limit int) nativeReadResult[agyPageMeta] {
 	var cursor int64 = -1
 	if before != "" {
 		value, err := strconv.ParseInt(before, 10, 64)
 		if err != nil || value < 0 {
-			return nil, false, false, agyPageMeta{}, "invalid_cursor"
+			return nativeReadResult[agyPageMeta]{Code: "invalid_cursor"}
 		}
 		cursor = value
 	}
@@ -115,7 +115,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 	)
 	rows, code := r.queryRows(ctx, database, query)
 	if code != "" {
-		return nil, false, false, agyPageMeta{}, code
+		return nativeReadResult[agyPageMeta]{Code: code}
 	}
 	hasMore := len(rows) > limit
 	if hasMore {
@@ -133,7 +133,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 			corrupt = true
 		}
 	}
-	return entries, hasMore, corrupt, meta, ""
+	return nativeReadResult[agyPageMeta]{Entries: entries, HasMore: hasMore, Corrupt: corrupt, Metadata: meta}
 }
 
 func (r *agyReader) queryRows(ctx context.Context, database, query string) ([]agyRow, string) {
@@ -317,10 +317,10 @@ func (r *Reader) readAgyFor(sessionID string, limit int) ([]Entry, error) {
 	if code != "" {
 		return nil, ErrUnavailable
 	}
-	entries, _, _, _, code := r.agy.readFromContext(context.Background(), location.Path, "", limit)
-	if code != "" {
+	result := r.agy.readFromContext(context.Background(), location.Path, "", limit)
+	if result.Code != "" {
 		return nil, ErrUnavailable
 	}
-	normalizeEntriesForResponse(entries)
-	return append([]Entry(nil), entries...), nil
+	normalizeEntriesForResponse(result.Entries)
+	return append([]Entry(nil), result.Entries...), nil
 }
