@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { mkdtemp, rm, lstat, mkdir } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { nodeTestTimeout, spawnNode } from './fixtures/pi-node-process.mjs';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
@@ -428,29 +428,25 @@ test('partial updates coalesce at the source cadence without history traversal',
 test.each(['restart', 'crash'])('stock Node socket %s recovers both private endpoints and preserves unrelated paths', async kind => {
   const work = await mkdtemp(join(tmpdir(), `pi-socket-${kind}-`));
   await mkdir(join(work, 'home'), { mode: 0o700 });
+  const fixtureProcess = spawnNode([fileURLToPath(new URL(`./fixtures/pi-socket-${kind}.mjs`, import.meta.url))], { env: { PATH: process.env.PATH, HOME: join(work, 'home'), PI_SOCKET_TEST_WORK: work, PI_OFFLINE: '1' } });
   try {
-    const child = spawn('node', [fileURLToPath(new URL(`./fixtures/pi-socket-${kind}.mjs`, import.meta.url))], { env: { PATH: process.env.PATH, HOME: join(work, 'home'), PI_SOCKET_TEST_WORK: work, PI_OFFLINE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', data => { stdout += data.toString(); }); child.stderr.on('data', data => { stderr += data.toString(); });
-    const code = await new Promise(resolve => { child.on('exit', resolve); child.on('error', error => { stderr += error.message; resolve(-1); }); });
-    expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
-    const result = JSON.parse(stdout);
+    const { code, signal } = await fixtureProcess.finish();
+    expect({ code, signal, stderr: fixtureProcess.output.stderr }).toEqual({ code: 0, signal: null, stderr: '' });
+    const result = JSON.parse(fixtureProcess.output.stdout);
     expect(kind === 'restart' ? result.samePidRestarts : result.recoveredReusedPidPaths).toBe(kind === 'restart' ? 6 : 2);
-  } finally { await rm(work, { recursive: true, force: true }); }
-});
+  } finally { await fixtureProcess.stop(); await rm(work, { recursive: true, force: true }); }
+}, nodeTestTimeout);
 
 test('stock Node serves eight concurrent history pages alongside active subscriptions with independent bounded admission', async () => {
   const work = await mkdtemp(join(tmpdir(), 'pi-activity-capacity-'));
   await mkdir(join(work, 'home'), { mode: 0o700 });
+  const fixtureProcess = spawnNode([fileURLToPath(new URL('./fixtures/pi-activity-capacity.mjs', import.meta.url))], { env: { PATH: process.env.PATH, HOME: join(work, 'home'), PI_SOCKET_TEST_WORK: work, PI_OFFLINE: '1' } });
   try {
-    const child = spawn('node', [fileURLToPath(new URL('./fixtures/pi-activity-capacity.mjs', import.meta.url))], { env: { PATH: process.env.PATH, HOME: join(work, 'home'), PI_SOCKET_TEST_WORK: work, PI_OFFLINE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', data => { stdout += data.toString(); }); child.stderr.on('data', data => { stderr += data.toString(); });
-    const code = await new Promise(resolve => { child.on('exit', resolve); child.on('error', error => { stderr += error.message; resolve(-1); }); });
-    expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
-    expect(JSON.parse(stdout)).toMatchObject({ concurrentPagesWithOneStream: 8, concurrentOlderPages: 8, saturatedStreams: 8, concurrentPagesWithFullStreams: 8, simultaneousStreamAndPageHandshakes: 16, pendingLimit: 16, quietHandshakeExpiry: 16, tricklingHandshakeExpiry: 16, independentLimitsEnforced: true, subscriptionContinuity: true, capacityReleased: true });
-  } finally { await rm(work, { recursive: true, force: true }); }
-});
+    const { code, signal } = await fixtureProcess.finish();
+    expect({ code, signal, stderr: fixtureProcess.output.stderr }).toEqual({ code: 0, signal: null, stderr: '' });
+    expect(JSON.parse(fixtureProcess.output.stdout)).toMatchObject({ concurrentPagesWithOneStream: 8, concurrentOlderPages: 8, saturatedStreams: 8, concurrentPagesWithFullStreams: 8, simultaneousStreamAndPageHandshakes: 16, pendingLimit: 16, quietHandshakeExpiry: 16, tricklingHandshakeExpiry: 16, independentLimitsEnforced: true, subscriptionContinuity: true, capacityReleased: true });
+  } finally { await fixtureProcess.stop(); await rm(work, { recursive: true, force: true }); }
+}, nodeTestTimeout);
 
 test('private sibling socket validates identity, snapshots before batches, and cleans up', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pi-activity-test-'));

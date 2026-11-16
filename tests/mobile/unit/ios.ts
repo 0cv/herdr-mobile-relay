@@ -3064,9 +3064,37 @@ for (const mode of ['missing', 'loading'] as const) {
     if (mode === 'loading') {
       assert.equal(swipes.length, 0);
     } else {
-      assert.equal(swipes.filter((request) => request.body.args.direction === 'right').length, 8);
+      assert.equal(swipes.filter((request) => request.body.args.direction === 'right').length, 0);
       assert.equal(swipes.filter((request) => request.body.args.direction === 'left').length, 7);
     }
+    assert.equal(a.driver.snapshot().unusable, false);
+  });
+}
+
+for (const [start, iconPage, directions] of [[1, 2, ['left']], [3, 1, ['right', 'right']], [2, 3, ['right', 'left', 'left']]] as const) {
+  test(`an icon on page ${iconPage} is reached from page ${start} of 3 without swiping into the Today View`, async () => {
+    let page = start;
+    let armed = false;
+    const a = await lifecycleReplay(`home-page-${start}-icon-${iconPage}`, {
+      reply: ({ path, body }) => {
+        if (!armed) return undefined;
+        if (body.script === 'mobile: swipe') {
+          page += body.args.direction === 'left' ? 1 : -1;
+          return undefined;
+        }
+        if (path.endsWith('/elements') && body.value?.includes('XCUIElementTypePageIndicator') && a.state.foreground === 'com.apple.springboard') {
+          if (page < 1) return value([element('home-container')]);
+          return value([element('home-container'), ...(page === iconPage ? [element('home-icon')] : []), element('home-page')]);
+        }
+        if (path.includes('/home-page/attribute/value')) return value(`Page ${page} of 3`);
+        return undefined;
+      },
+    });
+    armed = true;
+    await a.owned(() => a.platform.launchInstalledApp());
+    const swipes = a.requests.filter((request) => request.body.script === 'mobile: swipe');
+    assert.deepEqual(swipes.map((request) => request.body.args.direction), directions);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
     assert.equal(a.driver.snapshot().unusable, false);
   });
 }
@@ -3349,7 +3377,7 @@ for (const mode of ['missing', 'query-gap', 'attribute-gap', 'minimum-gap', 'gua
     const a = await homeBoundaryReplay(mode);
     let failure: unknown;
     try { await a.launch(); } catch (error) { failure = error; }
-    assert.equal(a.right(), 8, `a complete missing observation must reach the existing page search, not stop at ${String(failure)}`);
+    assert.equal(a.right(), 0, `a complete missing observation on the first page must reach the existing page search, not stop at ${String(failure)}`);
     assert.equal(failure, undefined);
     assert.equal(a.left(), 1);
     assert.equal(a.launchCount(), 2, 'initial and cold launches only, with no replacement launch phase');
@@ -3443,7 +3471,7 @@ for (const mode of ['pending', 'not-ready', 'invalid-page', 'partial-ready', 'ma
       assert.equal(terminal.outcome, 'local-shortfall');
     }
     if (mode === 'partial-ready') {
-      assert.equal(a.right(), 8);
+      assert.equal(a.right(), 0);
       assert.equal(a.left(), 7);
       const short = a.terminal().find(event => event.outcome === 'local-shortfall');
       assert.equal(short.state, 'missing');

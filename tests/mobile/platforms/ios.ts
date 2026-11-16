@@ -1120,7 +1120,7 @@ export class IOSPlatform implements MobilePlatform {
     }
     const currentPageReady = observation.state === 'ready';
     if (observation.state === 'missing') {
-      for (let page = 0; page < 8; page += 1) {
+      for (let page = 1; page < (observation.page?.current ?? 1); page += 1) {
         phase.assertAvailable('show first SpringBoard page');
         await this.driver.mobile('swipe', { direction: 'right' }, Math.max(2, phase.remainingMs));
       }

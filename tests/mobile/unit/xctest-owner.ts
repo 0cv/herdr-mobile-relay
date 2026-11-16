@@ -12,6 +12,7 @@ import { managedWdaCapabilities } from '../support/ios-xctest';
 import { spawnOwnedProcess } from '../support/owned-process';
 import { IOSPlatform } from '../platforms/ios';
 
+const shellClockSkewToleranceMs = 1000;
 const credentialBinaryPlistBase64 = 'YnBsaXN0MDDUAQIDBAUGBwhYUEFTU1dPUkRbUFJJVkFURV9VUkxcQVBJX1BBU1NXT1JEXxASQ0ZCdW5kbGVJZGVudGlmaWVyXxAWYmFyZS1wYXNzd29yZC1zZW50aW5lbF8QN2h0dHBzOi8vcHJpdmF0ZS5leGFtcGxlL2luc3RhbGxlZD9yZWY9cHJpdmF0ZS1yZWZlcmVuY2VecGxhaW4tcGFzc3dvcmRfECtjb20uZmFjZWJvb2suV2ViRHJpdmVyQWdlbnRSdW5uZXIueGN0cnVubmVyCBEaJjNIYZuqAAAAAAAAAQEAAAAAAAAACQAAAAAAAAAAAAAAAAAAANg=';
 
 // Shared with the generated observer; closed over no test/runtime state.
@@ -1052,6 +1053,15 @@ xcrun)
     for argument do printf ' [%s]' "$argument" >> "$root/simctl-command-trace"; done
     printf '\\n' >> "$root/simctl-command-trace"
   fi
+  if [ "$2" = "install" ] && [ -n "$STARTUP_TEST_FAULT" ]; then
+    installs=$(cat "$root/install-count" 2>/dev/null || printf 0)
+    printf '%s' "$((installs + 1))" > "$root/install-count"
+    case "$STARTUP_TEST_FAULT" in
+      install-aborted-once) [ "$installs" -lt 1 ] && exit 53 ;;
+      install-aborted-always) exit 53 ;;
+      install-other-failure) exit 52 ;;
+    esac
+  fi
   if [ "$2" = "list" ]; then
     printf '%s\\n' "$IOS_SIMULATOR_UDID"
   elif [ "$2" = "get_app_container" ]; then
@@ -1082,6 +1092,15 @@ xcrun)
   fi
   ;;
 xcodebuild)
+  if [ -n "$STARTUP_TEST_FAULT" ]; then
+    launches=$(cat "$root/xcodebuild-count" 2>/dev/null || printf 0)
+    printf '%s' "$((launches + 1))" > "$root/xcodebuild-count"
+    case "$STARTUP_TEST_FAULT" in
+      test-failed-once) [ "$launches" -lt 1 ] && exit 65 ;;
+      test-failed-always) exit 65 ;;
+      other-exit-once) [ "$launches" -lt 1 ] && exit 70 ;;
+    esac
+  fi
   case "$mode" in
     listener-pending-*) publish_fixture_pid "$root/runner.pid" "$$" || exit 2 ;;
     listener-concurrent-exit-before-close|listener-exit-after-ready*) publish_fixture_pid "$root/xcode.pid" "$$" || exit 2 ;;
@@ -2204,7 +2223,7 @@ const terminalRelease = async (session: TerminalSession, port: number, productio
   terminalPid(blocked.Data.shellPID);
   assert.equal(blocked.Data.parentPID, shellBinding?.parentPID ?? parentPID);
   if (shellBinding) assert.equal(blocked.Data.shellPID, terminalPid(shellBinding.pid));
-  assert.ok(Number.isSafeInteger(blocked.Data.startedAt) && Number(blocked.Data.startedAt) <= Date.now());
+  assert.ok(Number.isSafeInteger(blocked.Data.startedAt) && Number(blocked.Data.startedAt) <= Date.now() + shellClockSkewToleranceMs);
   const commandDeadline = Math.min(deadline, Number(blocked.Data.startedAt) + 2000);
   terminalCheck(root, commandDeadline);
   const intentBytes = await terminalWait(root, 'intent.json', commandDeadline, ['continue.json', 'terminal.json', 'complete.json']);
@@ -5682,3 +5701,114 @@ xctestOwnerTests.push(['Native startup stop CLI propagates recorded cleanup erro
     await rm(root, { recursive: true, force: true });
   }
 }]);
+
+type StartFault = 'install-aborted-once' | 'install-aborted-always' | 'install-other-failure' | 'test-failed-once' | 'test-failed-always' | 'other-exit-once';
+
+async function startCliWithFault(fault: StartFault) {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-start-'));
+  const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
+  const product = join(root, 'products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app');
+  const receipt = join(root, `Devices/${udid}/data/Containers/Bundle/Application/10C0E9C0-50FD-4C3E-AC55-AC1158A00568/WebDriverAgentRunner-Runner.app`);
+  const runnerReceipt = join(root, `Devices/${udid}/data/Containers/Bundle/Application/1C1FB5F7-2D0E-49AC-BE09-62816F229E5C/WebDriverAgentRunner-Runner.app`);
+  const state = join(root, 'state');
+  const bin = join(root, 'bin');
+  const xctestrun = join(root, 'products/WebDriverAgentRunner_test.xctestrun');
+  await Promise.all([mkdir(bin), mkdir(join(product, 'PlugIns/WebDriverAgentRunner.xctest'), { recursive: true }), mkdir(receipt, { recursive: true }), mkdir(runnerReceipt, { recursive: true }), mkdir(join(root, 'wda'))]);
+  for (const dir of [product, receipt, runnerReceipt]) {
+    await writeFile(join(dir, 'Info.plist'), JSON.stringify({ CFBundleIdentifier: 'com.facebook.WebDriverAgentRunner.xctrunner' }));
+    await writeFile(join(dir, 'WebDriverAgentRunner-Runner'), 'exact built runner');
+  }
+  await writeFile(join(root, 'wda/package.json'), JSON.stringify({ version: '16.12.8' }));
+  await writeFile(xctestrun, JSON.stringify({ WebDriverAgentRunner: {
+    TestHostBundleIdentifier: 'com.facebook.WebDriverAgentRunner.xctrunner',
+    TestBundlePath: '__TESTHOST__/PlugIns/WebDriverAgentRunner.xctest',
+    TestHostPath: '__TESTROOT__/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app',
+  } }));
+  await writeFile(join(root, 'owned'), `ios:${udid}`);
+  const dispatcher = join(bin, 'xctest-command-dispatcher');
+  await writeFile(dispatcher, shim, { mode: 0o700 });
+  for (const cmd of ['plutil', 'lsof', 'ps', 'xcrun', 'xcodebuild']) await symlink(dispatcher, join(bin, cmd));
+  const wdaServerFile = join(bin, 'xctest-wda-server.ts');
+  await writeFile(wdaServerFile, wdaServer, { mode: 0o700 });
+  const reserve = createNetServer();
+  await new Promise<void>((resolve, reject) => {
+    reserve.once('error', reject);
+    reserve.listen(0, '127.0.0.1', resolve);
+  });
+  const port = (reserve.address() as AddressInfo).port;
+  await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: 'ready', STARTUP_TEST_FAULT: fault,
+    STARTUP_TEST_EXECUTABLE: process.execPath, STARTUP_TEST_WDA_SERVER: wdaServerFile,
+    STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_PRODUCT: product, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
+    IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '27.0', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
+    IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
+    MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned') };
+  const started = await new Promise<{ code: number | null; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [join(import.meta.dirname, '../support/ios-xctest.ts'), 'start'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.on('close', code => resolve({ code, stderr }));
+  });
+  const count = async (name: string): Promise<number> => existsSync(join(root, name)) ? Number(await readFile(join(root, name), 'utf8')) : 0;
+  const readOwner = async (name = 'owner.json') => JSON.parse(await readFile(join(state, name), 'utf8'));
+  const installStatuses = async (): Promise<Array<number | null>> => (await readOwner()).diagnostics.commands
+    .filter((command: { operation: string }) => command.operation === 'install-wda').map((command: { status: number | null }) => command.status);
+  return { root, env, started, count, readOwner, installStatuses, cleanup: () => rm(root, { recursive: true, force: true }) };
+}
+
+for (const [name, fault, run] of [
+  ['retries a simulator install that fails with a connection abort', 'install-aborted-once', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.equal(f.started.code, 0, f.started.stderr);
+    assert.deepEqual(await f.installStatuses(), [53, 0]);
+    const owner = await f.readOwner();
+    assert.equal(owner.ready, true);
+    assert.deepEqual(owner.diagnostics.lifecycle.filter((event: { event: string }) => event.event === 'install-wda-retry').map((event: { detail: unknown }) => event.detail), [{ phase: 'preflight', attempt: 1 }]);
+  }],
+  ['stops after three simulator installs that fail with a connection abort', 'install-aborted-always', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.notEqual(f.started.code, 0);
+    assert.match(f.started.stderr, /XCTEST: supervisor-error/u);
+    assert.deepEqual(await f.installStatuses(), [53, 53, 53]);
+    assert.equal(await f.count('xcodebuild-count'), 0);
+  }],
+  ['does not retry a simulator install that fails with another status', 'install-other-failure', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.notEqual(f.started.code, 0);
+    assert.deepEqual(await f.installStatuses(), [52]);
+    assert.equal(await f.count('xcodebuild-count'), 0);
+  }],
+  ['relaunches xcodebuild once after a test failure before WDA is admitted', 'test-failed-once', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.equal(f.started.code, 0, f.started.stderr);
+    assert.equal(await f.count('xcodebuild-count'), 2);
+    const first = await f.readOwner('owner-attempt-1.json');
+    assert.equal(first.firstFailure.stage, 'child-exit');
+    assert.equal(first.exitCode, 65);
+    assert.ok(first.endedAt);
+    const owner = await f.readOwner();
+    assert.equal(owner.ready, true);
+    assert.equal(owner.firstFailure, undefined);
+  }],
+  ['gives up when the relaunched xcodebuild fails the same way', 'test-failed-always', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.notEqual(f.started.code, 0);
+    assert.match(f.started.stderr, /XCTEST: child-exit/u);
+    assert.equal(await f.count('xcodebuild-count'), 2);
+    assert.equal((await f.readOwner('owner-attempt-1.json')).exitCode, 65);
+  }],
+  ['does not relaunch xcodebuild after another exit status', 'other-exit-once', async (f: Awaited<ReturnType<typeof startCliWithFault>>) => {
+    assert.notEqual(f.started.code, 0);
+    assert.match(f.started.stderr, /XCTEST: child-exit/u);
+    assert.equal(await f.count('xcodebuild-count'), 1);
+    assert.equal(existsSync(join(f.root, 'state/owner-attempt-1.json')), false);
+  }],
+] as const) {
+  xctestOwnerTests.push([`Native startup ${name}`, async () => {
+    const fixture = await startCliWithFault(fault);
+    try {
+      await run(fixture);
+      if (fixture.started.code === 0) {
+        const stopped = await runStopCli(fixture.env);
+        assert.equal(stopped.code, 0, stopped.stderr);
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  }]);
+}

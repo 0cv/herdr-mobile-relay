@@ -80,10 +80,9 @@ func TestNativePiActivityBrowserFixture(t *testing.T) {
 		server.hub.Send(client, map[string]any{"type": "agents", "agents": []*coordinator.AgentState{agent}})
 	})
 	server.hub.SetOnDisconnect(func(client *transport.ClientConn) { server.stopConversationFeed(client.ID(), "") })
-	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+	server.hub.SetHandler(func(client *transport.ClientConn, inbound protocol.Inbound, admitted func()) {
 		defer admitted()
-		inbound, err := protocol.DecodeMap(message)
-		if err != nil {
+		if inbound.Invalid {
 			return
 		}
 		counter, _ := received.LoadOrStore(inbound.Type, &atomic.Int64{})

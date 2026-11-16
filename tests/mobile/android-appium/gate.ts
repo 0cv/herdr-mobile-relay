@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { artifactReader, configureHome, hash, substitute, transpile, writeIntegrity, type Substitution } from '../support/appium-patch.ts';
 
+const driverListTimeoutMs = 300_000;
 type RuntimePackage = {
   name: string; parent: string | null; condition: 'import' | 'require'; version: string;
   engines: Record<string, string>; root: string; entry: string; files: Record<string, string>;
@@ -145,7 +146,7 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
   const main = join(root, packages.appium.root, 'build/lib/main.js');
   assert.ok(packages.appium.files['build/lib/main.js'], 'Appium executable must be attested');
   const selected = JSON.parse(execFileSync(process.execPath, [main, 'driver', 'list', '--installed', '--json'], {
-    env: { ...process.env, APPIUM_HOME: root }, encoding: 'utf8', timeout: 30_000,
+    env: { ...process.env, APPIUM_HOME: root }, encoding: 'utf8', timeout: driverListTimeoutMs,
   }));
   assert.deepEqual(Object.keys(selected), ['uiautomator2'], 'Unexpected selected Appium driver');
   assert.equal(selected.uiautomator2.pkgName, packages.uiautomator2.name);

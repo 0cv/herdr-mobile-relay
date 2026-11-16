@@ -10,20 +10,12 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
-func TestPiPromptExcludesNonPromptFieldsAndAuditHashes(t *testing.T) {
-	message := map[string]any{"type": "send_pi_prompt_unconfirmed", "text": "synthetic-hidden-marker"}
-	if !validPiPromptRequest(message) {
-		t.Fatal("normal prompt fields refused")
-	}
-	for _, field := range []string{"no_echo", "secret", "attachments", "images", "keys", "prompt"} {
-		message[field] = true
-		if validPiPromptRequest(message) {
-			t.Fatal("non-prompt field admitted")
-		}
-		delete(message, field)
-	}
-	details := auditWriteDetails(message)
-	if len(details) != 1 || details["text_bytes"] == nil {
+func TestPiPromptAuditKeepsOnlyTheTextLength(t *testing.T) {
+	e := newPiFrameEnv(t)
+	e.piPromptFrame(t, map[string]any{"type": "send_pi_prompt_unconfirmed", "text": "synthetic-hidden-marker"})
+
+	details := e.auditAttempt(t, "send_pi_prompt_unconfirmed").Details
+	if len(details) != 1 || details["text_bytes"] != float64(len("synthetic-hidden-marker")) {
 		t.Fatalf("unsafe audit details: %#v", details)
 	}
 }

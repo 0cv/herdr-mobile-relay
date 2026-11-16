@@ -128,31 +128,31 @@ func sameHermesDirectory(cwd, directory string) bool {
 	return cwdErr == nil && directoryErr == nil && realCwd == realDirectory
 }
 
-func (r *hermesReader) readFromContext(ctx context.Context, database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
+func (r *hermesReader) readFromContext(ctx context.Context, database, sessionID, before string, limit int) nativeReadResult[hermesRow] {
 	if !safeSessionID(sessionID) {
-		return nil, false, false, hermesRow{}, "invalid_session"
+		return nativeReadResult[hermesRow]{Code: "invalid_session"}
 	}
 	if before != "" {
 		cursor, err := strconv.ParseInt(before, 10, 64)
 		if err != nil || cursor <= 0 {
-			return nil, false, false, hermesRow{}, "invalid_cursor"
+			return nativeReadResult[hermesRow]{Code: "invalid_cursor"}
 		}
 	}
 	rows, hasMore, queryCode := r.queryContext(ctx, database, sessionID, before, limit)
 	if queryCode != "" {
-		return nil, false, false, hermesRow{}, queryCode
+		return nativeReadResult[hermesRow]{Code: queryCode}
 	}
 	if len(rows) == 0 || rows[0].SessionID != sessionID {
-		return nil, false, false, hermesRow{}, "invalid_session"
+		return nativeReadResult[hermesRow]{Code: "invalid_session"}
 	}
 	if before != "" && rows[0].CursorFound == 0 {
-		return nil, false, false, hermesRow{}, "invalid_cursor"
+		return nativeReadResult[hermesRow]{Code: "invalid_cursor"}
 	}
 	entries, corrupt := parseHermesRows(rows)
 	if toolCorrupt := r.attachToolResultsContext(ctx, database, sessionID, entries); toolCorrupt {
 		corrupt = true
 	}
-	return entries, hasMore, corrupt, rows[0], ""
+	return nativeReadResult[hermesRow]{Entries: entries, HasMore: hasMore, Corrupt: corrupt, Metadata: rows[0]}
 }
 
 func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
@@ -434,13 +434,13 @@ func (r *Reader) readHermesFor(agent, cwd, sessionID string, limit int) ([]Entry
 	if location.Path == "" {
 		return nil, ErrUnavailable
 	}
-	entries, _, _, metadata, code := r.hermes.readFromContext(context.Background(), location.Path, sessionID, "", limit)
-	if code != "" {
+	result := r.hermes.readFromContext(context.Background(), location.Path, sessionID, "", limit)
+	if result.Code != "" {
 		return nil, ErrUnavailable
 	}
-	if cwd != "" && metadata.CWD != "" && !sameHermesDirectory(cwd, metadata.CWD) {
+	if cwd != "" && result.Metadata.CWD != "" && !sameHermesDirectory(cwd, result.Metadata.CWD) {
 		return nil, ErrUnavailable
 	}
-	normalizeEntriesForResponse(entries)
-	return append([]Entry(nil), entries...), nil
+	normalizeEntriesForResponse(result.Entries)
+	return append([]Entry(nil), result.Entries...), nil
 }

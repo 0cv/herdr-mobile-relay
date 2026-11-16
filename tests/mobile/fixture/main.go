@@ -720,11 +720,10 @@ func (r *scriptedRelay) pushConfig() map[string]any {
 	}
 }
 
-func (r *scriptedRelay) handle(client *transport.ClientConn, raw map[string]any, admitted func()) {
+func (r *scriptedRelay) handle(client *transport.ClientConn, inbound protocol.Inbound, admitted func()) {
 	defer admitted()
-	inbound, err := protocol.DecodeMap(raw)
-	if err != nil {
-		r.hub.Send(client, protocol.DecodeFailureResponse(raw))
+	if inbound.Invalid {
+		r.hub.Send(client, protocol.DecodeFailureResponse(inbound.RequestID))
 		return
 	}
 	switch inbound.Type {

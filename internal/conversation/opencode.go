@@ -90,16 +90,16 @@ func (r *openCodeReader) databases() ([]string, string) {
 	return databases, ""
 }
 
-func (r *openCodeReader) readContext(ctx context.Context, sessionID, before string, limit int) ([]Entry, bool, bool, openCodeRow, string) {
+func (r *openCodeReader) readContext(ctx context.Context, sessionID, before string, limit int) nativeReadResult[openCodeRow] {
 	if !validOpenCodeSessionID(sessionID) {
-		return nil, false, false, openCodeRow{}, "invalid_session"
+		return nativeReadResult[openCodeRow]{Code: "invalid_session"}
 	}
 	if before != "" && (len(before) > 256 || strings.ContainsAny(before, "\x00\r\n")) {
-		return nil, false, false, openCodeRow{}, "invalid_cursor"
+		return nativeReadResult[openCodeRow]{Code: "invalid_cursor"}
 	}
 	databases, code := r.databases()
 	if code != "" {
-		return nil, false, false, openCodeRow{}, code
+		return nativeReadResult[openCodeRow]{Code: code}
 	}
 	firstFailure := ""
 	for _, database := range databases {
@@ -114,18 +114,18 @@ func (r *openCodeReader) readContext(ctx context.Context, sessionID, before stri
 			continue
 		}
 		if before != "" && rows[0].CursorFound == 0 {
-			return nil, false, false, openCodeRow{}, "invalid_cursor"
+			return nativeReadResult[openCodeRow]{Code: "invalid_cursor"}
 		}
 		metadata := rows[0]
 		metadata.Database = database
 		entries, corrupt := parseOpenCodeRows(rows)
 		metadata.pendingIDs = openCodePendingIDs(rows, entries)
-		return entries, hasMore, corrupt, metadata, ""
+		return nativeReadResult[openCodeRow]{Entries: entries, HasMore: hasMore, Corrupt: corrupt, Metadata: metadata}
 	}
 	if firstFailure != "" {
-		return nil, false, false, openCodeRow{}, firstFailure
+		return nativeReadResult[openCodeRow]{Code: firstFailure}
 	}
-	return nil, false, false, openCodeRow{}, "invalid_session"
+	return nativeReadResult[openCodeRow]{Code: "invalid_session"}
 }
 
 func openCodeStamp(database string) (openCodeFileStamp, bool) {
@@ -399,12 +399,12 @@ func (r *openCodeReader) runRows(ctx context.Context, database, query string, li
 func (r *Reader) readOpenCode(sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	limit = clampPageLimit(limit)
-	entries, _, _, _, code := r.openCode.readContext(context.Background(), sessionID, "", limit)
-	if code != "" {
+	result := r.openCode.readContext(context.Background(), sessionID, "", limit)
+	if result.Code != "" {
 		return nil, ErrUnavailable
 	}
-	normalizeEntriesForResponse(entries)
-	return append([]Entry(nil), entries...), nil
+	normalizeEntriesForResponse(result.Entries)
+	return append([]Entry(nil), result.Entries...), nil
 }
 
 func validOpenCodeSessionID(value string) bool {

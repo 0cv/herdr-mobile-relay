@@ -228,8 +228,8 @@ func TestDeviceListAndInvitationWithIdentity(t *testing.T) {
 	t.Run("invitation uses the caller's locale", func(t *testing.T) {
 		identity := credentialIdentity(current)
 		identity.Locale = "fr"
-		inbound := protocol.Inbound{RequestID: "req-1", Name: "Tablet", Role: "reader"}
-		s.handleCreateDeviceInvitation(client, inbound, map[string]any{}, "create_device_invitation", identity, true)
+		inbound := protocol.Inbound{Type: "create_device_invitation", RequestID: "req-1", Name: "Tablet", Role: "reader"}
+		s.handleCreateDeviceInvitation(client, inbound, identity, true)
 		response := readFrame(t, conn)
 		requireCompleted(t, response, "create_device_invitation")
 		invitation, _ := commandData(t, response)["invitation"].(map[string]any)
@@ -250,8 +250,8 @@ func TestDeviceListAndInvitationWithIdentity(t *testing.T) {
 		if wantErr == nil {
 			t.Fatal("store accepted an invalid role")
 		}
-		inbound := protocol.Inbound{RequestID: "req-1", Name: "Tablet", Role: "admin"}
-		s.handleCreateDeviceInvitation(client, inbound, map[string]any{}, "create_device_invitation", credentialIdentity(current), true)
+		inbound := protocol.Inbound{Type: "create_device_invitation", RequestID: "req-1", Name: "Tablet", Role: "admin"}
+		s.handleCreateDeviceInvitation(client, inbound, credentialIdentity(current), true)
 		requireFailedResult(t, readFrame(t, conn), "create_device_invitation", wantErr.Error())
 	})
 }
@@ -269,7 +269,7 @@ func TestDeviceResetWithIdentity(t *testing.T) {
 	}
 	reset := func(s *Server, store *deviceauth.Store, client *transport.ClientConn) {
 		caller := credentialIdentity(store.ListCredentials("")[0])
-		s.handleResetDevices(client, protocol.Inbound{RequestID: "req-1"}, map[string]any{}, "reset_devices", caller, true)
+		s.handleResetDevices(client, protocol.Inbound{RequestID: "req-1", Type: "reset_devices"}, caller, true)
 	}
 
 	t.Run("reset leaves the bootstrap invitation and clears every device's push state", func(t *testing.T) {

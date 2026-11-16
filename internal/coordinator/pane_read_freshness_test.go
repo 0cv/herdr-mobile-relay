@@ -36,7 +36,7 @@ func TestIdentifiedPaneReadDoesNotReuseEarlierInFlightObservation(t *testing.T) 
 	defer cancel()
 	first := make(chan map[string]any, 1)
 	go func() {
-		first <- dispatcher.HandleReadPane(ctx, map[string]any{"pane_id": "pane-1", "format": "ansi", "request_id": "before-send"})
+		first <- dispatcher.HandleReadPane(ctx, PaneReadRequest{PaneID: "pane-1", Format: "ansi", RequestID: "before-send", Lines: 30})
 	}()
 	defer func() {
 		unblock()
@@ -56,7 +56,7 @@ func TestIdentifiedPaneReadDoesNotReuseEarlierInFlightObservation(t *testing.T) 
 	}
 	second := make(chan map[string]any, 1)
 	go func() {
-		second <- dispatcher.HandleReadPane(ctx, map[string]any{"pane_id": "pane-1", "format": "ansi", "request_id": "after-unknown-outcome"})
+		second <- dispatcher.HandleReadPane(ctx, PaneReadRequest{PaneID: "pane-1", Format: "ansi", RequestID: "after-unknown-outcome", Lines: 30})
 	}()
 	select {
 	case response := <-second:

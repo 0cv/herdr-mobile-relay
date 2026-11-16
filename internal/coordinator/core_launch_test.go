@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func coreCalls(client *fakeBackend) []string {
@@ -100,7 +101,7 @@ func TestCoreClear(t *testing.T) {
 			f.client.enableOneStepLaunch()
 			f.client.update(func(b *fakeBackend) { b.workspaces = []herdr.Workspace{{ID: old.WorkspaceID}} })
 			message := clearMessage()
-			message["type"] = action
+			message.Type = action
 			result := f.dispatcher.Handle(f.ctx, message)
 			if calls := coreCalls(f.client); !result.OK || !reflect.DeepEqual(calls, []string{"run", "kill:" + old.PaneID}) {
 				t.Fatalf("result=%+v calls=%v", result, calls)
@@ -138,7 +139,7 @@ func TestClearNamesDoNotCollide(t *testing.T) {
 	receivedAt := time.Now()
 	for i := range 2 {
 		f, _ := newClearFixture(t, launchFixtureOptions{})
-		result := f.dispatcher.handleClear(f.ctx, f.dispatcher.newCommandRequest(receivedAt.Add(time.Duration(i)), "clear", "pane-old", nil, nil))
+		result := f.dispatcher.handleClear(f.ctx, f.dispatcher.newCommandRequest(receivedAt.Add(time.Duration(i)), "clear", "pane-old", protocol.Inbound{}, nil))
 		if !result.OK {
 			t.Fatalf("clear: %+v", result)
 		}
@@ -166,7 +167,7 @@ func TestCoreLaunchPromptAndReplay(t *testing.T) {
 			if mode == "prompt-unknown" {
 				b.setHook("Prompt", func(context.Context, fakeCall) error { return herdr.ErrDispatchedUnknown })
 			}
-			message := map[string]any{"type": "agent_start", "request_id": "core-launch", "profile_id": "claude", "name": "fixture", "cwd": f.cwd, "prompt": "hello"}
+			message := protocol.Inbound{Type: "agent_start", RequestID: "core-launch", ProfileID: "claude", Name: "fixture", Cwd: f.cwd, Prompt: "hello"}
 			result := f.dispatcher.Handle(f.ctx, message)
 			wantPhase := "completed"
 			wantCalls := []string{"run", "prompt"}

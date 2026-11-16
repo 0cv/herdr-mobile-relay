@@ -14,11 +14,10 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
-func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn, msg map[string]any, admitted func()) {
+func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound, admitted func()) {
 	defer admitted()
-	inbound, err := protocol.DecodeMap(msg)
-	if err != nil {
-		s.rejectMessage(client, admitted, protocol.DecodeFailureResponse(msg))
+	if inbound.Invalid {
+		s.rejectMessage(client, admitted, protocol.DecodeFailureResponse(inbound.RequestID))
 		return
 	}
 	scope, knownAction := protocol.ScopeFor(inbound)
@@ -66,7 +65,7 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	coordinated := scope.Action.Coordinated
 	auditedWrite := scope.Action.Audited
 	if auditedWrite {
-		s.recordWriteAudit(client, msg, nil)
+		s.recordWriteAudit(client, inbound, nil)
 	}
 	if !coordinated {
 		admitted()
@@ -86,22 +85,22 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	})
 	switch action {
 	case "get_pi_integration", "set_pi_integration":
-		s.handlePiIntegration(commandCtx, client, inbound, msg)
+		s.handlePiIntegration(commandCtx, client, inbound)
 	case "get_pi_prompt_capability", "send_pi_prompt_unconfirmed":
-		result := s.handlePiPrompt(commandCtx, client, inbound, msg, admitted)
-		s.sendResult(client, msg, auditedWrite, result)
+		result := s.handlePiPrompt(commandCtx, client, inbound, admitted)
+		s.sendResult(client, inbound, auditedWrite, result)
 	case "check_update", "install_update", "deploy_app_update":
 		s.handleUpdate(ctx, client, inbound)
 	case "lease_pane_size", "release_pane_size":
 		s.handlePaneSizeCommand(client, inbound)
 	case "read_pane":
-		s.handleReadPane(ctx, client, inbound, msg)
+		s.handleReadPane(ctx, client, inbound)
 	case "watch_pane":
-		s.startPaneWatch(client, msg)
+		s.startPaneWatch(client, inbound)
 	case "unwatch_pane":
 		s.stopPaneWatch(client.ID(), inbound.PaneID)
 	case "pane_applied":
-		s.handlePaneApplied(client, msg)
+		s.handlePaneApplied(client, inbound)
 	case "get_conversation_history":
 		s.handleConversationHistory(client, inbound)
 	case "get_conversation_updates":
@@ -117,57 +116,49 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	case "device_list":
 		s.handleDeviceList(client, inbound, action, identity, authenticated)
 	case "create_device_invitation":
-		s.handleCreateDeviceInvitation(client, inbound, msg, action, identity, authenticated)
+		s.handleCreateDeviceInvitation(client, inbound, identity, authenticated)
 	case "rename_device":
-		s.handleRenameDevice(client, inbound, msg, action)
+		s.handleRenameDevice(client, inbound)
 	case "revoke_device":
-		s.handleRevokeDevice(client, inbound, msg, action)
+		s.handleRevokeDevice(client, inbound)
 	case "reset_devices":
-		s.handleResetDevices(client, inbound, msg, action, identity, authenticated)
+		s.handleResetDevices(client, inbound, identity, authenticated)
 	case "get_activity":
-		s.handleGetActivity(client, msg)
+		s.handleGetActivity(client, inbound)
 	case "clear_activities":
-		requestID, _ := msg["request_id"].(string)
-		s.dispatcher.HandleClearActivities(requestID, func(result *coordinator.CommandResult) {
+		s.dispatcher.HandleClearActivities(inbound.RequestID, func(result *coordinator.CommandResult) {
 			s.hub.Send(client, coordinator.CommandResultMessage(result))
 		})
 	case "upload_begin":
-		s.handleUploadBegin(client, inbound.RequestID, msg)
+		s.handleUploadBegin(client, inbound)
 	case "upload_chunk":
-		s.handleUploadChunk(client, inbound.RequestID, msg)
+		s.handleUploadChunk(client, inbound)
 	case "upload_finish":
-		s.handleUploadFinish(client, inbound.RequestID, msg)
+		s.handleUploadFinish(client, inbound)
 	case "upload_cancel":
-		s.handleUploadCancel(client, inbound.RequestID, msg)
+		s.handleUploadCancel(client, inbound)
 	case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
 		"worktree_list", "worktree_create", "worktree_open", "worktree_remove":
-		s.handleTopology(commandCtx, client, inbound, msg, action, auditedWrite, admitted)
+		s.handleTopology(commandCtx, client, inbound, action, auditedWrite, admitted)
 	case "list_directories":
-		path, _ := msg["path"].(string)
-		listing := fsutil.ListDirectories(path, s.home)
+		listing := fsutil.ListDirectories(inbound.Path, s.home)
 		s.reply(client, inbound.RequestID, "list_directories", "").complete(listing)
 	case "list_slash_commands":
-		s.handleListSlashCommands(client, inbound, msg)
+		s.handleListSlashCommands(client, inbound)
 	case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
 		s.handleWorkspaceInspect(client, inbound)
 	case "copy_agent_response":
-		paneID, _ := msg["pane_id"].(string)
-		s.copyAgentResponse(client, inbound.RequestID, paneID)
+		s.copyAgentResponse(client, inbound.RequestID, inbound.PaneID)
 	case "cancel_speech":
-		speechRequestID, _ := msg["speech_request_id"].(string)
-		s.cancelSpeech(client.ID(), speechRequestID)
+		s.cancelSpeech(client.ID(), inbound.SpeechRequestID)
 	case "speak_text":
-		speechRequestID, _ := msg["speech_request_id"].(string)
-		text, _ := msg["text"].(string)
-		language, _ := msg["language"].(string)
-		s.speakText(client, inbound.RequestID, speechRequestID, text, language)
+		s.speakText(client, inbound.RequestID, inbound.SpeechRequestID, inbound.Text, inbound.Language)
 	case "speech_voices_list":
 		s.reply(client, inbound.RequestID, action, "").complete(s.speechVoicePayload(nil))
 	case "speech_voice_install", "speech_voice_remove":
-		language, _ := msg["language"].(string)
-		s.changeSpeechVoice(client, inbound.RequestID, action, language)
+		s.changeSpeechVoice(client, inbound.RequestID, action, inbound.Language)
 	case "qr_code":
-		s.handleQRCode(client, inbound, msg, action)
+		s.handleQRCode(client, inbound, action)
 	case "push_policy_get":
 		s.handlePushPolicyGet(client, identity)
 	case "push_policy_set":
@@ -192,9 +183,9 @@ func (s *Server) handleMessage(ctx context.Context, client *transport.ClientConn
 	case "refresh_agents":
 		s.requestAgentRefresh(client)
 	case "webrtc_offer", "webrtc_ice", "webrtc_close":
-		s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
+		s.handleWebRTCSignal(commandCtx, client, inbound)
 	default:
-		s.handleDispatched(commandCtx, client, inbound, msg, action, coordinated, auditedWrite, admitted)
+		s.handleDispatched(commandCtx, client, inbound, action, coordinated, auditedWrite, admitted)
 	}
 }
 
@@ -220,15 +211,15 @@ func (s *Server) rejectMessage(client *transport.ClientConn, admitted func(), re
 	s.hub.Send(client, response)
 }
 
-func (s *Server) sendResult(client *transport.ClientConn, msg map[string]any, auditedWrite bool, result *coordinator.CommandResult) {
+func (s *Server) sendResult(client *transport.ClientConn, inbound protocol.Inbound, auditedWrite bool, result *coordinator.CommandResult) {
 	if auditedWrite {
-		s.recordWriteAudit(client, msg, result)
+		s.recordWriteAudit(client, inbound, result)
 	}
 	s.hub.Send(client, coordinator.CommandResultMessage(result))
 }
 
-func (s *Server) handleGetActivity(client *transport.ClientConn, msg map[string]any) {
-	limit := messageInt(msg["limit"], 500)
+func (s *Server) handleGetActivity(client *transport.ClientConn, inbound protocol.Inbound) {
+	limit := inbound.Limit
 	if limit < 1 || limit > 500 {
 		limit = 500
 	}
@@ -238,10 +229,9 @@ func (s *Server) handleGetActivity(client *transport.ClientConn, msg map[string]
 	})
 }
 
-func (s *Server) handleQRCode(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string) {
+func (s *Server) handleQRCode(client *transport.ClientConn, inbound protocol.Inbound, action string) {
 	reply := s.reply(client, inbound.RequestID, action, "")
-	value, _ := msg["text"].(string)
-	size, packed, qrErr := setuphelper.PackedQR(value)
+	size, packed, qrErr := setuphelper.PackedQR(inbound.Text)
 	if qrErr != nil {
 		s.logger.Warn("qr encoding failed", "error", qrErr)
 		reply.fail("This computer could not encode that QR code")
@@ -253,8 +243,9 @@ func (s *Server) handleQRCode(client *transport.ClientConn, inbound protocol.Inb
 	})
 }
 
-func (s *Server) handleDispatched(commandCtx context.Context, client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any, action string, coordinated bool, auditedWrite bool, admitted func()) {
-	if err := s.expandPromptAttachmentReferences(action, msg, inbound.Target); err != nil {
+func (s *Server) handleDispatched(commandCtx context.Context, client *transport.ClientConn, received protocol.Inbound, action string, coordinated bool, auditedWrite bool, admitted func()) {
+	inbound, err := s.expandPromptAttachmentReferences(action, received)
+	if err != nil {
 		result := &coordinator.CommandResult{
 			RequestID: inbound.RequestID,
 			Action:    action,
@@ -262,14 +253,14 @@ func (s *Server) handleDispatched(commandCtx context.Context, client *transport.
 			Error:     "One or more attachments are no longer available for this agent",
 			PaneID:    inbound.PaneID,
 		}
-		s.sendResult(client, msg, auditedWrite, result)
+		s.sendResult(client, received, auditedWrite, result)
 		return
 	}
 	var result *coordinator.CommandResult
 	if coordinated {
-		result = s.dispatcher.HandleAdmitted(commandCtx, msg, admitted)
+		result = s.dispatcher.HandleAdmitted(commandCtx, inbound, admitted)
 	} else {
-		result = s.dispatcher.Handle(commandCtx, msg)
+		result = s.dispatcher.Handle(commandCtx, inbound)
 	}
-	s.sendResult(client, msg, auditedWrite, result)
+	s.sendResult(client, received, auditedWrite, result)
 }

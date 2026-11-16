@@ -31,10 +31,10 @@ func (d *Dispatcher) terminalTextConflictToken(text string) string {
 
 func (d *Dispatcher) handleTerminalText(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "send_terminal_text"
-	if req.paneID == "" || !validTerminalText(stringValue(req.message, "text")) || req.message["keys"] != nil {
+	if req.paneID == "" || !validTerminalText(req.in.Text) || req.in.Keys != nil {
 		return d.fail(req.requestID, action, req.paneID, "Use a single line of text up to 65,536 UTF-8 bytes, without control characters; send Enter separately")
 	}
-	text := stringValue(req.message, "text")
+	text := req.in.Text
 	result := d.callPane(ctx, req, paneCall{
 		action:      action,
 		ledgerKey:   action + "\x00" + req.paneID + "\x00" + req.requestID,

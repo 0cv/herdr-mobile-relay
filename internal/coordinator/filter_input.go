@@ -49,7 +49,7 @@ func cursorFilterValue(screen string) (string, error) {
 
 func (d *Dispatcher) handleFilterText(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "send_filter_text"
-	text := stringValue(req.message, "text")
+	text := req.in.Text
 	if err := herdr.ValidateFilterText(text); err != nil || req.paneID == "" {
 		return d.fail(req.requestID, action, req.paneID, "Filter text requires an agent and 1–32 ASCII letters, digits, spaces or .-_/+:()[]; no trailing space")
 	}

@@ -374,7 +374,7 @@ runs:
         mkdir -p "$MOBILE_OUTPUT"
         if [ "$MOBILE_PLATFORM" = ios ] && [ -d "$IOS_XCTEST_STATE_DIR" ]; then
           mkdir -p "$MOBILE_OUTPUT/ios-xctest"
-          for artifact in owner.json selected.xctestrun installed-Info.plist ios-wda-system-log-disposition.json wda-status.json; do
+          for artifact in owner.json owner-attempt-1.json selected.xctestrun installed-Info.plist ios-wda-system-log-disposition.json wda-status.json; do
             if [ -f "$IOS_XCTEST_STATE_DIR/$artifact" ]; then cp "$IOS_XCTEST_STATE_DIR/$artifact" "$MOBILE_OUTPUT/ios-xctest/$artifact"; fi
           done
           wda_log="$IOS_XCTEST_STATE_DIR/wda-preflight-private.log"

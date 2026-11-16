@@ -9,8 +9,8 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
-func (s *Server) handleListSlashCommands(client *transport.ClientConn, inbound protocol.Inbound, msg map[string]any) {
-	paneID, _ := msg["pane_id"].(string)
+func (s *Server) handleListSlashCommands(client *transport.ClientConn, inbound protocol.Inbound) {
+	paneID := inbound.PaneID
 	reply := s.reply(client, inbound.RequestID, "list_slash_commands", paneID)
 	if paneID == "" {
 		reply.fail("Agent is required")

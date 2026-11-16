@@ -8,7 +8,13 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
+
+// startSettleBackstop only keeps a hung start from stalling the suite. The
+// start itself settles at its own deadline on the real clock, which can be
+// seconds away for the cancelled and timeout outcomes.
+const startSettleBackstop = 30 * time.Second
 
 func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 	for _, outcome := range []string{"completed", "refused", "malformed", "cancelled", "timeout"} {
@@ -37,7 +43,7 @@ func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), budget)
 			defer cancel()
-			message := map[string]any{"type": "agent_start", "request_id": "hermes-launch", "profile_id": "hermes", "workspace_id": "workspace", "name": "development-hermes", "cwd": env.cwd}
+			message := protocol.Inbound{Type: "agent_start", RequestID: "hermes-launch", ProfileID: "hermes", WorkspaceID: "workspace", Name: "development-hermes", Cwd: env.cwd}
 			pending := make(chan *CommandResult, 1)
 			go func() { pending <- d.Handle(ctx, message) }()
 			select {
@@ -60,7 +66,7 @@ func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 			var result *CommandResult
 			select {
 			case result = <-pending:
-			case <-time.After(5 * time.Second):
+			case <-time.After(startSettleBackstop):
 				t.Fatal("start did not settle after Herdr result or cancellation")
 			}
 			if result.OK != (outcome == "completed") {
