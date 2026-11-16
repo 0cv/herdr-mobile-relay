@@ -20,9 +20,8 @@ func TestHandleReadPaneUsesRecentRowsForResizedPane(t *testing.T) {
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "omp", Status: "idle"}}, state.RevisionCounter())
 	dispatcher := newTestDispatcher(t, client, state)
 
-	response := dispatcher.HandleReadPane(context.Background(), map[string]any{
-		"pane_id": "pane-1", "lines": float64(150), "format": "ansi",
-		"terminal_columns": float64(20), "terminal_rows": float64(46),
+	response := dispatcher.HandleReadPane(context.Background(), PaneReadRequest{
+		PaneID: "pane-1", Lines: 150, Format: "ansi", Columns: 20, Rows: 46,
 	})
 	if response["content"] != recent {
 		t.Fatalf("pane content has %d lines, want the %d-line recent window",
@@ -61,8 +60,8 @@ func TestHandleReadPaneSourceFollowsAgent(t *testing.T) {
 	dispatcher := newTestDispatcher(t, client, state)
 
 	for _, paneID := range []string{"pane-omp", "pane-claude"} {
-		response := dispatcher.HandleReadPane(context.Background(), map[string]any{
-			"pane_id": paneID, "lines": float64(100), "format": "ansi",
+		response := dispatcher.HandleReadPane(context.Background(), PaneReadRequest{
+			PaneID: paneID, Lines: 100, Format: "ansi",
 		})
 		if _, failed := response["error"]; failed {
 			t.Fatalf("read %s failed: %#v", paneID, response)
@@ -93,10 +92,9 @@ func TestTextFormatDisplayReadNeverHarvestsScrollback(t *testing.T) {
 	dispatcher := newTestDispatcher(t, client, state)
 
 	for _, paneID := range []string{"pane-omp", "pane-claude"} {
-		for _, columns := range []float64{0, 59} {
-			response := dispatcher.HandleReadPane(context.Background(), map[string]any{
-				"pane_id": paneID, "lines": float64(400), "format": "text",
-				"terminal_columns": columns,
+		for _, columns := range []int{0, 59} {
+			response := dispatcher.HandleReadPane(context.Background(), PaneReadRequest{
+				PaneID: paneID, Lines: 400, Format: "text", Columns: columns,
 			})
 			if _, failed := response["error"]; failed {
 				t.Fatalf("read %s failed: %#v", paneID, response)

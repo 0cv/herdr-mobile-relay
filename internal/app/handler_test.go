@@ -40,10 +40,23 @@ func dialHub(t *testing.T, s *Server) *websocket.Conn {
 
 func useProductionHandler(t *testing.T, s *Server) {
 	t.Helper()
-	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+	s.hub.SetHandler(func(client *transport.ClientConn, message protocol.Inbound, admitted func()) {
 		s.handleMessage(t.Context(), client, message, admitted)
 	})
 	s.hub.SetOnDisconnect(s.handleDisconnect)
+}
+
+func inboundFromMap(t *testing.T, message map[string]any) protocol.Inbound {
+	t.Helper()
+	frame, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound, err := protocol.DecodeFrame(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inbound
 }
 
 func connectedClient(t *testing.T, s *Server) (*websocket.Conn, *transport.ClientConn) {
@@ -66,6 +79,11 @@ func sendFrame(t *testing.T, conn *websocket.Conn, message map[string]any) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sendRawFrame(t, conn, payload)
+}
+
+func sendRawFrame(t *testing.T, conn *websocket.Conn, payload []byte) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
@@ -236,7 +254,7 @@ func TestHandleMessageAdmitsOnEveryRejectPath(t *testing.T) {
 	for name, message := range messages {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
-			s.handleMessage(t.Context(), client, message, func() { calls.Add(1) })
+			s.handleMessage(t.Context(), client, inboundFromMap(t, message), func() { calls.Add(1) })
 			if got := calls.Load(); got != 2 {
 				t.Fatalf("admitted called %d times, want 2", got)
 			}

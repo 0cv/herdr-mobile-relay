@@ -10,38 +10,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/webrtclink"
 )
 
-// TestStringFieldPreservesSDPTerminator pins the signaling decode contract.
-// SDP is line-oriented and its final terminator is significant; trimming it
-// makes the relay answer no browser offer at all, which only shows up against
-// a real browser. Keep this verbatim.
-func TestStringFieldPreservesSDPTerminator(t *testing.T) {
-	offer := "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
-	msg := map[string]any{"sdp": offer, "candidate": "candidate:1 1 udp 2130706431 192.0.2.1 4444 typ host"}
-
-	if got := stringField(msg, "sdp"); got != offer {
-		t.Fatalf("sdp = %q, want the offer verbatim %q", got, offer)
-	}
-	if got := stringField(msg, "candidate"); got != msg["candidate"] {
-		t.Fatalf("candidate = %q, want it verbatim", got)
-	}
-	if got := stringField(msg, "missing"); got != "" {
-		t.Fatalf("missing field = %q, want empty", got)
-	}
-}
-
-func TestIntFieldAcceptsJSONNumbers(t *testing.T) {
-	// Decoded JSON yields float64; hand-built maps may hold int.
-	if got := intField(map[string]any{"sdp_mline_index": float64(3)}, "sdp_mline_index"); got != 3 {
-		t.Fatalf("float index = %d, want 3", got)
-	}
-	if got := intField(map[string]any{"sdp_mline_index": 2}, "sdp_mline_index"); got != 2 {
-		t.Fatalf("int index = %d, want 2", got)
-	}
-	if got := intField(map[string]any{"sdp_mline_index": "x"}, "sdp_mline_index"); got != 0 {
-		t.Fatalf("non-numeric index = %d, want 0", got)
-	}
-}
-
 // TestSignalBudgetLimitsNegotiation covers the per-client signaling rate limit
 // required by plan section 9: a phone needs one offer per upgrade and one per
 // network flip, so a tight loop must be refused rather than allowed to spawn

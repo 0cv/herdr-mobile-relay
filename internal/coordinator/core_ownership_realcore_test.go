@@ -12,6 +12,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/hc/hctest"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestCoreOwnershipRealCore(t *testing.T) {
@@ -54,7 +55,7 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 	poller := NewPoller(client, state, time.Hour, testLogger())
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
-	result := d.Handle(ctx, map[string]any{"type": "agent_start", "request_id": "launch", "profile_id": "fixture", "name": "fixture", "cwd": cwd})
+	result := d.Handle(ctx, protocol.Inbound{Type: "agent_start", RequestID: "launch", ProfileID: "fixture", Name: "fixture", Cwd: cwd})
 	if !result.OK {
 		t.Fatalf("launch: %+v", result)
 	}
@@ -119,7 +120,7 @@ func TestCoreOwnershipRealCore(t *testing.T) {
 		t.Fatalf("labels changed: %+v %+v %v", pane, observed, err)
 	}
 	for _, requestID := range []string{"clear-first", "clear-second"} {
-		result = d.Handle(ctx, map[string]any{"type": "agent_clear", "request_id": requestID, "pane_id": old})
+		result = d.Handle(ctx, protocol.Inbound{Type: "agent_clear", RequestID: requestID, PaneID: old})
 		if !result.OK {
 			t.Fatalf("%s: %+v", requestID, result)
 		}

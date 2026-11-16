@@ -8,6 +8,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 // startSettleBackstop only keeps a hung start from stalling the suite. The
@@ -42,7 +43,7 @@ func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), budget)
 			defer cancel()
-			message := map[string]any{"type": "agent_start", "request_id": "hermes-launch", "profile_id": "hermes", "workspace_id": "workspace", "name": "development-hermes", "cwd": env.cwd}
+			message := protocol.Inbound{Type: "agent_start", RequestID: "hermes-launch", ProfileID: "hermes", WorkspaceID: "workspace", Name: "development-hermes", Cwd: env.cwd}
 			pending := make(chan *CommandResult, 1)
 			go func() { pending <- d.Handle(ctx, message) }()
 			select {

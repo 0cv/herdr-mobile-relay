@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const (
@@ -84,19 +86,19 @@ type commandRequest struct {
 	receivedAt  time.Time
 	requestID   string
 	paneID      string
-	message     map[string]any
+	in          protocol.Inbound
 	receipt     CommandID
 	paneSession int64
 	admitted    func()
 }
 
-func (d *Dispatcher) newCommandRequest(receivedAt time.Time, requestID, paneID string, message map[string]any, admitted func()) commandRequest {
+func (d *Dispatcher) newCommandRequest(receivedAt time.Time, requestID, paneID string, in protocol.Inbound, admitted func()) commandRequest {
 	generation, _ := d.state.PaneSession(paneID)
 	return commandRequest{
 		receivedAt:  receivedAt,
 		requestID:   requestID,
 		paneID:      paneID,
-		message:     message,
+		in:          in,
 		paneSession: generation,
 		admitted:    admitted,
 	}
@@ -235,36 +237,34 @@ func (d *Dispatcher) SetWakePoll(fn func()) {
 	d.wakePoll = fn
 }
 
-func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *CommandResult {
-	return d.handle(ctx, message, nil)
+func (d *Dispatcher) Handle(ctx context.Context, in protocol.Inbound) *CommandResult {
+	return d.handle(ctx, in, nil)
 }
 
 func (d *Dispatcher) HandleAdmitted(
 	ctx context.Context,
-	message map[string]any,
+	in protocol.Inbound,
 	admitted func(),
 ) *CommandResult {
 	signal := sync.OnceFunc(admitted)
-	result := d.handle(ctx, message, signal)
+	result := d.handle(ctx, in, signal)
 	signal()
 	return result
 }
 
-func (d *Dispatcher) handle(ctx context.Context, message map[string]any, admitted func()) *CommandResult {
-	receivedAt := time.Now()
-	if raw, ok := message["_server_received_at"].(string); ok {
-		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-			receivedAt = parsed
-		}
+func (d *Dispatcher) handle(ctx context.Context, in protocol.Inbound, admitted func()) *CommandResult {
+	receivedAt := in.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
 	}
-	action := stringValue(message, "type")
-	requestID := stringValue(message, "request_id")
+	action := in.Type
+	requestID := in.RequestID
 	if requestID == "" {
 		requestID = fmt.Sprintf("req-%d", receivedAt.UnixNano())
 	}
-	paneID := stringValue(message, "pane_id")
-	req := d.newCommandRequest(receivedAt, requestID, paneID, message, admitted)
-	req.receipt = CommandID(uint64Value(message["_server_sequence"]))
+	paneID := in.PaneID
+	req := d.newCommandRequest(receivedAt, requestID, paneID, in, admitted)
+	req.receipt = CommandID(in.ReceiptSequence)
 
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
 
@@ -331,7 +331,7 @@ func (d *Dispatcher) HandleTopologyAdmitted(
 
 func (d *Dispatcher) handlePrompt(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "submit_prompt"
-	text := stringValue(req.message, "text")
+	text := req.in.Text
 	if req.paneID == "" || text == "" {
 		return d.fail(req.requestID, action, req.paneID, "Text and agent are required")
 	}
@@ -382,8 +382,8 @@ func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text 
 
 func (d *Dispatcher) handleKeys(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "send_keys"
-	keys, err := stringSlice(req.message["keys"])
-	if req.paneID == "" || err != nil || len(keys) == 0 {
+	keys := req.in.Keys
+	if req.paneID == "" || len(keys) == 0 || slices.Contains(keys, "") {
 		return d.fail(req.requestID, action, req.paneID, "Keys and agent are required")
 	}
 	result := d.callPane(ctx, req, paneCall{
@@ -393,7 +393,7 @@ func (d *Dispatcher) handleKeys(ctx context.Context, req commandRequest) *Comman
 		},
 	})
 	if result.OK {
-		label := stringValue(req.message, "activity_label")
+		label := req.in.ActivityLabel
 		if label == "" {
 			label = "keys"
 		}
@@ -404,16 +404,11 @@ func (d *Dispatcher) handleKeys(ctx context.Context, req commandRequest) *Comman
 }
 
 func (d *Dispatcher) handleInput(ctx context.Context, req commandRequest) *CommandResult {
-	var keys []string
-	var err error
-	if rawKeys, present := req.message["keys"]; present {
-		keys, err = stringSlice(rawKeys)
-	}
 	input, inputErr := herdr.ValidatePaneInput(herdr.PaneInput{
-		Text: stringValue(req.message, "text"),
-		Keys: keys,
+		Text: req.in.Text,
+		Keys: req.in.Keys,
 	})
-	if req.paneID == "" || err != nil || inputErr != nil {
+	if req.paneID == "" || inputErr != nil {
 		return d.fail(req.requestID, "send_input", req.paneID, "Valid text or keys and an agent are required")
 	}
 	result := d.callPane(ctx, req, paneCall{
@@ -423,7 +418,7 @@ func (d *Dispatcher) handleInput(ctx context.Context, req commandRequest) *Comma
 		},
 	})
 	if result.OK {
-		label := stringValue(req.message, "activity_label")
+		label := req.in.ActivityLabel
 		if label == "" {
 			label = "Terminal input sent"
 		}
@@ -440,7 +435,7 @@ func (d *Dispatcher) handleInput(ctx context.Context, req commandRequest) *Comma
 // noecho takes the paste markers as part of the secret. The single SendKeys
 // call keeps the whole secret plus its submission atomic.
 func (d *Dispatcher) handleSecret(ctx context.Context, req commandRequest) *CommandResult {
-	text := stringValue(req.message, "text")
+	text := req.in.Text
 	if req.paneID == "" || text == "" {
 		return d.fail(req.requestID, "send_secret", req.paneID, "Secret and agent are required")
 	}
@@ -509,7 +504,7 @@ func (d *Dispatcher) handleStop(ctx context.Context, req commandRequest) *Comman
 }
 
 func (d *Dispatcher) handleTabRename(ctx context.Context, req commandRequest) *CommandResult {
-	label := strings.TrimSpace(stringValue(req.message, "name"))
+	label := strings.TrimSpace(req.in.Name)
 	if req.paneID == "" {
 		return d.fail(req.requestID, "agent_rename", req.paneID, "Agent is required")
 	}
@@ -534,7 +529,11 @@ func (d *Dispatcher) handleTabRename(ctx context.Context, req commandRequest) *C
 }
 
 func (d *Dispatcher) handleTabReorder(ctx context.Context, req commandRequest) *CommandResult {
-	insertIndex, valid := tabInsertIndex(req.message["insert_index"])
+	insertIndex, valid := 0, false
+	if req.in.InsertIndex != nil {
+		insertIndex = *req.in.InsertIndex
+		valid = insertIndex >= 0 && insertIndex <= maxTabInsertIndex
+	}
 	if req.paneID == "" {
 		return d.fail(req.requestID, "tab_reorder", req.paneID, "Agent is required")
 	}
@@ -582,12 +581,12 @@ func (d *Dispatcher) handleAcknowledge(requestID, paneID string) *CommandResult 
 func (d *Dispatcher) handleAgentStart(ctx context.Context, req commandRequest) *CommandResult {
 	req.paneID = ""
 	request := StartRequest{
-		ProfileID:     stringValue(req.message, "profile_id"),
-		WorkspaceID:   stringValue(req.message, "workspace_id"),
-		Name:          stringValue(req.message, "name"),
-		Cwd:           stringValue(req.message, "cwd"),
-		Prompt:        stringValue(req.message, "prompt"),
-		HermesProfile: stringValue(req.message, "hermes_profile"),
+		ProfileID:     req.in.ProfileID,
+		WorkspaceID:   req.in.WorkspaceID,
+		Name:          req.in.Name,
+		Cwd:           req.in.Cwd,
+		Prompt:        req.in.Prompt,
+		HermesProfile: req.in.HermesProfile,
 	}
 	if request.ProfileID == "" || request.Name == "" || request.Cwd == "" {
 		return d.fail(req.requestID, "agent_start", "", "Profile, name, and working directory are required")
@@ -916,89 +915,21 @@ func (d *Dispatcher) HandleClearActivities(
 	})
 }
 
-func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
-	if paneID := stringValue(message, "pane_id"); paneID != "" {
-		d.handleAcknowledge(stringValue(message, "request_id"), paneID)
+func (d *Dispatcher) HandleReadPane(ctx context.Context, request PaneReadRequest) map[string]any {
+	if request.PaneID != "" {
+		d.handleAcknowledge(request.RequestID, request.PaneID)
 	}
-	return d.panes.read(ctx, message)
+	return d.panes.read(ctx, request)
 }
 
-func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {
-	return d.panes.probe(ctx, message)
+func (d *Dispatcher) HandleProbePane(ctx context.Context, request PaneReadRequest) map[string]any {
+	return d.panes.probe(ctx, request)
 }
 
 func (d *Dispatcher) wake() {
 	if d.wakePoll != nil {
 		d.wakePoll()
 	}
-}
-
-func stringValue(message map[string]any, key string) string {
-	value, _ := message[key].(string)
-	return value
-}
-
-func stringSlice(value any) ([]string, error) {
-	switch values := value.(type) {
-	case []string:
-		for _, item := range values {
-			if item == "" {
-				return nil, errors.New("empty string")
-			}
-		}
-		return append([]string(nil), values...), nil
-	case []any:
-		result := make([]string, 0, len(values))
-		for _, item := range values {
-			text, ok := item.(string)
-			if !ok || text == "" {
-				return nil, errors.New("value is not a non-empty string")
-			}
-			result = append(result, text)
-		}
-		return result, nil
-	default:
-		return nil, errors.New("value is not an array")
-	}
-}
-
-func intValue(value any, fallback int) int {
-	switch number := value.(type) {
-	case int:
-		return number
-	case float64:
-		return int(number)
-	default:
-		return fallback
-	}
-}
-
-func tabInsertIndex(value any) (int, bool) {
-	switch number := value.(type) {
-	case int:
-		return number, number >= 0 && number <= maxTabInsertIndex
-	case float64:
-		index := int(number)
-		return index, number >= 0 && number <= maxTabInsertIndex && number == float64(index)
-	default:
-		return 0, false
-	}
-}
-
-func uint64Value(value any) uint64 {
-	switch number := value.(type) {
-	case uint64:
-		return number
-	case int:
-		if number > 0 {
-			return uint64(number)
-		}
-	case float64:
-		if number > 0 {
-			return uint64(number)
-		}
-	}
-	return 0
 }
 
 func hashPayload(value any) string {

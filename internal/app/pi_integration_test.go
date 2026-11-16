@@ -31,31 +31,11 @@ func TestPiIntegrationAuthorization(t *testing.T) {
 	}
 }
 
-func TestPiIntegrationExactRelayAndNoRemotePaths(t *testing.T) {
-	message := map[string]any{"type": "set_pi_integration", "protocol": 3, "instance": "relay-a", "enabled": true, "request_id": "request"}
-	if !validPiIntegrationRequest(message, "relay-a") {
-		t.Fatal("valid request refused")
-	}
-	if validPiIntegrationRequest(message, "relay-b") || validPiIntegrationRequest(message, "") {
-		t.Fatal("wrong relay admitted")
-	}
-	for _, field := range []string{"path", "profiles", "target", "pane_id", "server_session_id", "text"} {
-		message[field] = "remote"
-		if validPiIntegrationRequest(message, "relay-a") {
-			t.Fatal("remote parameter admitted", field)
-		}
-		delete(message, field)
-	}
-	for _, value := range []any{nil, "true", 1} {
-		message["enabled"] = value
-		if validPiIntegrationRequest(message, "relay-a") {
-			t.Fatal("non-boolean admitted")
-		}
-	}
-}
-
 func TestPiIntegrationAudit(t *testing.T) {
-	details := auditWriteDetails(map[string]any{"type": "set_pi_integration", "enabled": true, "instance": "private", "path": "not allowed"})
+	e := newPiFrameEnv(t)
+	e.piIntegrationFrame(t, map[string]any{"type": "set_pi_integration", "enabled": true, "instance": "private", "path": "not allowed"})
+
+	details := e.auditAttempt(t, "set_pi_integration").Details
 	if len(details) != 1 || details["enabled"] != true {
 		t.Fatalf("unsafe audit fields: %#v", details)
 	}

@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"os"
 	"strings"
 	"testing"
@@ -25,7 +26,7 @@ func TestAgentStartWithoutWiringDoesNotMutate(t *testing.T) {
 				{"proj", strings.Repeat("x", promptMaxChars+1), "longer"},
 				{"proj", "hello", "not configured"},
 			} {
-				result := d.Handle(f.ctx, map[string]any{"type": "agent_start", "request_id": "unwired", "profile_id": "claude", "name": input.name, "cwd": f.cwd, "prompt": input.prompt})
+				result := d.Handle(f.ctx, protocol.Inbound{Type: "agent_start", RequestID: "unwired", ProfileID: "claude", Name: input.name, Cwd: f.cwd, Prompt: input.prompt})
 				if result.OK || !strings.Contains(result.Error, input.want) || result.PaneID != "" {
 					t.Fatalf("result = %+v, want %q", result, input.want)
 				}

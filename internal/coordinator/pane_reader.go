@@ -74,23 +74,32 @@ func (r *paneReader) readForDisplay(
 	return r.herdr.ReadPaneRecent(ctx, paneID, lines, format)
 }
 
-func (r *paneReader) read(ctx context.Context, message map[string]any) map[string]any {
-	paneID := stringValue(message, "pane_id")
+type PaneReadRequest struct {
+	PaneID    string
+	RequestID string
+	Format    string
+	Lines     int
+	Columns   int
+	Rows      int
+}
+
+func (r *paneReader) read(ctx context.Context, request PaneReadRequest) map[string]any {
+	paneID := request.PaneID
 	if paneID == "" {
 		return map[string]any{"type": "pane_content", "pane_id": "", "content": "", "format": "text"}
 	}
-	lines := intValue(message["lines"], 30)
+	lines := request.Lines
 	if lines < 1 {
 		lines = 1
 	}
 	if lines > 10000 {
 		lines = 10000
 	}
-	format := stringValue(message, "format")
+	format := request.Format
 	if format != "ansi" {
 		format = "text"
 	}
-	terminalColumns := intValue(message["terminal_columns"], 0)
+	terminalColumns := request.Columns
 	if terminalColumns < 1 {
 		terminalColumns = 0
 	}
@@ -98,7 +107,7 @@ func (r *paneReader) read(ctx context.Context, message map[string]any) map[strin
 	defer cancel()
 	generation := r.state.Generation(paneID)
 	revision := r.state.ContentRevision(paneID)
-	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d\x00%s", paneID, lines, format, terminalColumns, generation, stringValue(message, "request_id"))
+	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d\x00%s", paneID, lines, format, terminalColumns, generation, request.RequestID)
 	r.mu.Lock()
 	call := r.reads[key]
 	owner := call == nil
@@ -136,15 +145,15 @@ func (r *paneReader) read(ctx context.Context, message map[string]any) map[strin
 		"format": format, "truncated": read.Truncated, "viewport_only": terminalColumns > 0,
 		"interaction": nil,
 	}
-	if terminalRows := intValue(message["terminal_rows"], 0); terminalRows > 0 {
+	if terminalRows := request.Rows; terminalRows > 0 {
 		response["viewport_rows"] = terminalRows
 	}
 	return response
 }
 
-func (r *paneReader) probe(ctx context.Context, message map[string]any) map[string]any {
-	paneID := stringValue(message, "pane_id")
-	format := stringValue(message, "format")
+func (r *paneReader) probe(ctx context.Context, request PaneReadRequest) map[string]any {
+	paneID := request.PaneID
+	format := request.Format
 	if format != "ansi" {
 		format = "text"
 	}

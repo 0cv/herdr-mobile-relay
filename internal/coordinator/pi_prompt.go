@@ -7,6 +7,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func PiPromptEligible(agent *AgentState) bool {
@@ -15,7 +16,7 @@ func PiPromptEligible(agent *AgentState) bool {
 
 func (d *Dispatcher) HandlePiPrompt(ctx context.Context, requestID, paneID string, admitted func(), send func(context.Context) *CommandResult) *CommandResult {
 	const action = "send_pi_prompt_unconfirmed"
-	req := d.newCommandRequest(time.Now(), requestID, paneID, nil, admitted)
+	req := d.newCommandRequest(time.Now(), requestID, paneID, protocol.Inbound{}, admitted)
 	return d.schedule(ctx, req, ScheduleOptions{Command: d.command(req, action, commandDeadline)}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		reject := func(message string) EffectResult {
 			return EffectResult{Result: &CommandResult{RequestID: requestID, Action: action, PaneID: paneID, Phase: "not_started", Error: message}}

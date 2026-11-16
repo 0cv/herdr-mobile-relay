@@ -93,15 +93,3 @@ func conversationResponseAt(entries []conversation.Entry, activityTimestamp int6
 	}
 	return ""
 }
-
-func messageInt(value any, fallback int) int {
-	switch number := value.(type) {
-	case int:
-		return number
-	case float64:
-		if number == float64(int(number)) {
-			return int(number)
-		}
-	}
-	return fallback
-}

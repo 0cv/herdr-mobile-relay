@@ -21,7 +21,7 @@ func TestPreparePaneResponsePreservesHistoryForViewportOnlyRead(t *testing.T) {
 		"truncated": false, "viewport_only": true,
 	}
 	s.preparePaneResponse(
-		map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59},
+		coordinator.PaneReadRequest{PaneID: "pane-1", Lines: 100, Columns: 59},
 		response,
 	)
 
@@ -52,7 +52,7 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 	fingerprint := paneFingerprint("unchanged output")
 	unchanged := unchangedPaneResponse(
-		map[string]any{"content_fingerprint": fingerprint},
+		fingerprint,
 		response,
 	)
 	if unchanged == nil {
@@ -75,7 +75,7 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 
 	changed := unchangedPaneResponse(
-		map[string]any{"content_fingerprint": "older"},
+		"older",
 		response,
 	)
 	if changed != nil {

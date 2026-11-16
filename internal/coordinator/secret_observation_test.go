@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestSecretRechecksPromptBeforeAnyWrite(t *testing.T) {
@@ -29,7 +31,7 @@ func TestSecretRechecksPromptBeforeAnyWrite(t *testing.T) {
 				})
 			}
 			d := newTestDispatcher(t, client, state)
-			result := d.Handle(context.Background(), map[string]any{"type": "send_secret", "pane_id": "pane-1", "request_id": "observed-secret", "text": "synthetic-value"})
+			result := d.Handle(context.Background(), protocol.Inbound{Type: "send_secret", PaneID: "pane-1", RequestID: "observed-secret", Text: "synthetic-value"})
 			if scenario == "valid" {
 				if !result.OK || client.count("SendSecret") != 1 {
 					t.Fatalf("valid dispatch: %+v", result)

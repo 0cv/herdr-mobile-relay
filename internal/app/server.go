@@ -34,6 +34,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/piintegration"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
@@ -415,8 +416,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.hub.SetOnDisconnect(s.handleDisconnect)
 
-	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
-		s.handleMessage(ctx, client, msg, admitted)
+	s.hub.SetHandler(func(client *transport.ClientConn, message protocol.Inbound, admitted func()) {
+		s.handleMessage(ctx, client, message, admitted)
 	})
 
 	webHandler, err := web.NewHandler(s.cfg.WebRoot)

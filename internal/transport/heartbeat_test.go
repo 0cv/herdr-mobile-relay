@@ -11,6 +11,7 @@ import (
 	"testing/synctest"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func TestHeartbeatUsesEncryptionAndRejectsReplay(t *testing.T) {
@@ -37,8 +38,8 @@ func TestHeartbeatUsesEncryptionAndRejectsReplay(t *testing.T) {
 		defer cancel()
 		client := &ClientConn{id: "synthetic", conn: conn, secure: secure, ctx: ctx, cancel: cancel,
 			logger: logger, done: make(chan struct{}), buf: newSendBuffer(clientOutboundMaxItems, clientOutboundMaxBytes)}
-		handled := make(chan map[string]any, 8)
-		hub.SetHandler(func(_ *ClientConn, message map[string]any, admitted func()) {
+		handled := make(chan protocol.Inbound, 8)
+		hub.SetHandler(func(_ *ClientConn, message protocol.Inbound, admitted func()) {
 			admitted()
 			handled <- message
 		})
@@ -104,17 +105,17 @@ func TestHeartbeatDoesNotWaitForSlowHandlers(t *testing.T) {
 				defer unblock()
 				started := make(chan struct{}, handlerCapacity)
 				handled := make(chan string, 8)
-				hub.SetHandler(func(client *ClientConn, message map[string]any, admitted func()) {
+				hub.SetHandler(func(client *ClientConn, message protocol.Inbound, admitted func()) {
 					admitted()
-					if message["type"] == "get_conversation_history" {
+					if message.Type == "get_conversation_history" {
 						started <- struct{}{}
 						<-release
 						return
 					}
-					if message["type"] == "refresh_agents" {
+					if message.Type == "refresh_agents" {
 						hub.Send(client, map[string]any{"type": "inventory_status", "state": "ready"})
 					}
-					handled <- message["type"].(string)
+					handled <- message.Type
 				})
 				go hub.Serve(context.Background(), conn)
 				for range handlerCapacity {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func filterScreen(value string) string {
@@ -120,7 +121,7 @@ func TestFilterDelivery(t *testing.T) {
 				return nil
 			})
 			d := newTestDispatcher(t, client, state)
-			result := d.Handle(ctx, map[string]any{"type": "send_filter_text", "pane_id": "pane-1", "text": tc.text})
+			result := d.Handle(ctx, protocol.Inbound{Type: "send_filter_text", PaneID: "pane-1", Text: tc.text})
 			if result.Phase != tc.phase {
 				t.Errorf("result = %+v, want phase %s", result, tc.phase)
 			}

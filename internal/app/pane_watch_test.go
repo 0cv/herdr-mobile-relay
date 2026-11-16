@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
@@ -124,29 +123,5 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 	if update["resize_settling"] == true {
 		t.Fatalf("resize settled update remained transient: %#v", update)
-	}
-}
-
-func TestRequestedPaneWatchInterval(t *testing.T) {
-	tests := []struct {
-		name  string
-		value any
-		want  time.Duration
-	}{
-		{name: "fast", value: float64(100), want: 100 * time.Millisecond},
-		{name: "default", value: float64(250), want: 250 * time.Millisecond},
-		{name: "balanced battery", value: float64(500), want: 500 * time.Millisecond},
-		{name: "slow", value: float64(1_000), want: time.Second},
-		{name: "missing", value: nil, want: defaultPaneWatchInterval},
-		{name: "unsupported", value: float64(333), want: defaultPaneWatchInterval},
-		{name: "fractional", value: 100.5, want: defaultPaneWatchInterval},
-		{name: "wrong type", value: "100", want: defaultPaneWatchInterval},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := requestedPaneWatchInterval(test.value); got != test.want {
-				t.Fatalf("requestedPaneWatchInterval(%v) = %s, want %s", test.value, got, test.want)
-			}
-		})
 	}
 }

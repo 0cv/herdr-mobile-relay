@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/piintegration"
@@ -25,28 +27,33 @@ func (s *Server) refreshPiIntegration() {
 	s.recordPiIntegrationFailures(s.piIntegration.Refresh())
 }
 
-func validPiIntegrationRequest(message map[string]any, instance string) bool {
-	if instance == "" || message["instance"] != instance {
+var (
+	piPromptKeys      = []string{"type", "protocol", "request_id", "target", "pane_id", "server_session_id", "client_id", "text", "pi_prompt_lease"}
+	piIntegrationKeys = []string{"type", "protocol", "request_id", "client_id", "instance", "enabled"}
+)
+
+func piFrameKeysAllowed(inbound protocol.Inbound) bool {
+	allowed := piPromptKeys
+	if inbound.Type == "set_pi_integration" {
+		allowed = piIntegrationKeys
+	}
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(inbound.Raw, &keys) != nil {
 		return false
 	}
-	if _, ok := message["enabled"].(bool); !ok {
-		return false
-	}
-	for key := range message {
-		switch key {
-		case "type", "action", "protocol", "request_id", "client_id", "instance", "enabled", "_server_received_at", "_server_sequence":
-		default:
+	for key := range keys {
+		if !slices.Contains(allowed, key) {
 			return false
 		}
 	}
 	return true
 }
 
-func (s *Server) handlePiIntegration(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound, message map[string]any) {
+func (s *Server) handlePiIntegration(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound) {
 	changing := inbound.Type == "set_pi_integration"
 	reply := s.reply(client, inbound.RequestID, inbound.Type, "")
 	if changing {
-		reply = s.auditedReply(client, message, inbound.RequestID, inbound.Type, "")
+		reply = s.auditedReply(client, inbound, "")
 	}
 	if changing && s.cfg.Backend == "hc" {
 		reply.fail("Pi integration is managed by the TUI relay, not the hc backend")
@@ -58,11 +65,12 @@ func (s *Server) handlePiIntegration(ctx context.Context, client *transport.Clie
 	}
 	var state piintegration.State
 	if changing {
-		if inbound.RequestID == "" || !validPiIntegrationRequest(message, s.piIntegration.Instance()) {
+		instance := s.piIntegration.Instance()
+		if inbound.RequestID == "" || instance == "" || inbound.Instance != instance || inbound.Enabled == nil || !piFrameKeysAllowed(inbound) {
 			reply.fail("Pi integration request does not match this relay")
 			return
 		}
-		state = s.piIntegration.Set(message["enabled"].(bool))
+		state = s.piIntegration.Set(*inbound.Enabled)
 		s.recordPiIntegrationFailures(state)
 	} else {
 		state = s.piIntegration.Status()
