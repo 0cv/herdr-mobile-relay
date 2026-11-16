@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { AppiumClient as PolicyClient, WebDriverError as PolicyError, type RequestEnforcementClock, type WebDriverError, type WebDriverRequestTiming } from '../support/webdriver';
-import { PhaseBudget } from '../support/budget';
+import { PhaseBudget, timingScale } from '../support/budget';
 
 type Test = [string, () => Promise<void>];
 
@@ -680,4 +680,130 @@ webdriverInterruptionTests.push(['Appium completed protocol and malformed JSON r
     await client.activeAppInfo();
     assert.equal(requests, 3);
   }
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing ownership change before admission refuses without calling the dispatch callback', async () => {
+  const a = await policyClient(async () => Response.json({ value: null }));
+  const followups: Promise<void>[] = [];
+  let armed = false;
+  let callbacks = 0;
+  a.observeNow(() => {
+    if (!armed) return;
+    armed = false;
+    followups.push(assert.rejects(a.client.switchContext('WEBVIEW-overlap'), /APPIUM_COMMAND_NOT_ADMITTED/u));
+  });
+  const policy = { ...a.policy, beforeDispatch: () => { callbacks++; a.policy.beforeDispatch(); } };
+  const commandCount = a.client.snapshot().commands.length;
+  armed = true;
+  await assert.rejects(() => a.client.click('add', 12_000, policy), /ownership changed or overlapped/u);
+  await Promise.all(followups);
+  assert.equal(followups.length, 1);
+  assert.equal(callbacks, 0);
+  assert.equal(a.sent(), 0);
+  assert.equal(a.client.snapshot().commands.length, commandCount + 1);
+  assert.equal(a.client.snapshot().lastCommand!.timing!.outcome, 'not-admitted');
+  assert.equal(a.client.snapshot().lastCommand!.timing!.sent, false);
+  assert.equal(a.client.snapshot().unusable, false);
+  assert.equal(a.client.snapshot().firstFatal, undefined);
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing a failing dispatch callback after an ownership change is refused as unsent', async () => {
+  const a = await policyClient(async () => Response.json({ value: null }));
+  const followups: Promise<void>[] = [];
+  const policy = { ...a.policy, beforeDispatch: () => {
+    a.policy.beforeDispatch();
+    followups.push(assert.rejects(a.client.switchContext('WEBVIEW-overlap'), /APPIUM_COMMAND_NOT_ADMITTED/u));
+    throw new Error('synthetic dispatch callback failure');
+  } };
+  const commandCount = a.client.snapshot().commands.length;
+  await assert.rejects(() => a.client.click('add', 12_000, policy), /ownership changed or overlapped/u);
+  await Promise.all(followups);
+  assert.equal(a.sent(), 0);
+  assert.equal(a.client.snapshot().commands.length, commandCount + 1);
+  assert.equal(a.client.snapshot().lastCommand!.timing!.outcome, 'not-admitted');
+  assert.equal(a.client.snapshot().lastCommand!.timing!.sent, false);
+  assert.equal(a.client.snapshot().unusable, false);
+  assert.equal(a.client.snapshot().firstFatal, undefined);
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing session close ignores an exhausted budget for its allowance and failure cause', async () => {
+  const { AppiumClient } = await clientSource();
+  for (const outcome of ['acknowledged', 'transport-reset'] as const) {
+    let now = 0;
+    let sends = 0;
+    const client = new AppiumClient('http://protocol.invalid', 1_000, async (_input, init) => {
+      sends++;
+      if (init?.method !== 'DELETE') return Response.json({ value: {}, sessionId: 'budgeted' });
+      if (outcome === 'transport-reset') throw new TypeError('connection reset');
+      return Response.json({ value: null });
+    });
+    await client.create({ capabilities: {} });
+    client.setBudget(new PhaseBudget('exhausted', { timeoutMs: 30_000, now: () => now }));
+    now = 30_001;
+    if (outcome === 'acknowledged') {
+      await client.close();
+      assert.equal(client.snapshot().lastCommand!.timeoutMs, 1_000 * timingScale);
+      assert.equal(client.snapshot().sessionId, '');
+      assert.equal(client.snapshot().firstFatal, undefined);
+    } else {
+      await assert.rejects(() => client.close(), error => {
+        assert.ok(error instanceof PolicyError);
+        assert.equal(error.code, 'APPIUM_HTTP');
+        assert.equal(error.timedOut, false);
+        return true;
+      });
+      assert.equal(client.snapshot().lastCommand!.timedOut, false);
+    }
+    assert.equal(sends, 2);
+  }
+}]);
+
+webdriverInterruptionTests.push(['Appium request retained inspection failures use fixed messages and command errors stay bounded', async () => {
+  const { AppiumClient, WebDriverError } = await clientSource();
+  const script = { script: 'mobile: inspectRetainedChromeTargets', args: [] };
+  for (const reply of ['transport', 'refusal', 'long'] as const) {
+    let sends = 0;
+    const client = new AppiumClient('http://protocol.invalid', 1_000, async () => {
+      sends++;
+      if (sends === 1) return Response.json({ value: {}, sessionId: 'retained' });
+      if (reply === 'transport') throw new TypeError('secret transport detail');
+      return Response.json({ value: { error: 'unknown error', message: 'x'.repeat(2_000) } }, { status: 400 });
+    });
+    await client.create({ capabilities: {} });
+    await assert.rejects(() => client.command('/execute/sync', 'POST', reply === 'long' ? { script: 'return 1', args: [] } : script), error => {
+      assert.ok(error instanceof WebDriverError);
+      if (reply === 'transport') assert.equal(error.message, 'APPIUM_HTTP: Retained inspection transport failed');
+      if (reply === 'refusal') assert.equal(error.message, 'APPIUM_COMMAND: HTTP 400: Retained inspection refused');
+      if (reply === 'long') assert.equal(error.message.length, 'APPIUM_COMMAND: HTTP 400: '.length + 500);
+      return true;
+    });
+  }
+}]);
+
+webdriverInterruptionTests.push(['Appium request empty replies count as success only for a successful session close', async () => {
+  const { AppiumClient, WebDriverError } = await clientSource();
+  const open = async (reply: () => Response) => {
+    let sends = 0;
+    const client = new AppiumClient('http://protocol.invalid', 1_000, async () => {
+      sends++;
+      return sends === 1 ? Response.json({ value: {}, sessionId: 'empty' }) : reply();
+    });
+    await client.create({ capabilities: {} });
+    return client;
+  };
+  const blank = await open(() => new Response('  \n', { status: 200 }));
+  await blank.close();
+  assert.equal(blank.snapshot().sessionId, '');
+  assert.equal(blank.snapshot().lastCommand!.timing!.outcome, 'success');
+
+  const failed = await open(() => new Response('', { status: 500 }));
+  await assert.rejects(() => failed.close(), /APPIUM_HTTP/u);
+  assert.equal(failed.snapshot().sessionId, '[active]');
+  assert.equal(failed.snapshot().unusable, true);
+  assert.equal(failed.snapshot().lastCommand!.timing!.outcome, 'invalid-json');
+
+  const read = await open(() => new Response('', { status: 200 }));
+  await assert.rejects(() => read.command('/title', 'GET'), error => error instanceof WebDriverError && error.code === 'APPIUM_HTTP');
+  assert.equal(read.snapshot().unusable, false);
+  assert.equal(read.snapshot().firstFatal, undefined);
 }]);
