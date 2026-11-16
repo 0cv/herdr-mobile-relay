@@ -12,6 +12,7 @@ import { managedWdaCapabilities } from '../support/ios-xctest';
 import { spawnOwnedProcess } from '../support/owned-process';
 import { IOSPlatform } from '../platforms/ios';
 
+const shellClockSkewToleranceMs = 1000;
 const credentialBinaryPlistBase64 = 'YnBsaXN0MDDUAQIDBAUGBwhYUEFTU1dPUkRbUFJJVkFURV9VUkxcQVBJX1BBU1NXT1JEXxASQ0ZCdW5kbGVJZGVudGlmaWVyXxAWYmFyZS1wYXNzd29yZC1zZW50aW5lbF8QN2h0dHBzOi8vcHJpdmF0ZS5leGFtcGxlL2luc3RhbGxlZD9yZWY9cHJpdmF0ZS1yZWZlcmVuY2VecGxhaW4tcGFzc3dvcmRfECtjb20uZmFjZWJvb2suV2ViRHJpdmVyQWdlbnRSdW5uZXIueGN0cnVubmVyCBEaJjNIYZuqAAAAAAAAAQEAAAAAAAAACQAAAAAAAAAAAAAAAAAAANg=';
 
 // Shared with the generated observer; closed over no test/runtime state.
@@ -2204,7 +2205,7 @@ const terminalRelease = async (session: TerminalSession, port: number, productio
   terminalPid(blocked.Data.shellPID);
   assert.equal(blocked.Data.parentPID, shellBinding?.parentPID ?? parentPID);
   if (shellBinding) assert.equal(blocked.Data.shellPID, terminalPid(shellBinding.pid));
-  assert.ok(Number.isSafeInteger(blocked.Data.startedAt) && Number(blocked.Data.startedAt) <= Date.now());
+  assert.ok(Number.isSafeInteger(blocked.Data.startedAt) && Number(blocked.Data.startedAt) <= Date.now() + shellClockSkewToleranceMs);
   const commandDeadline = Math.min(deadline, Number(blocked.Data.startedAt) + 2000);
   terminalCheck(root, commandDeadline);
   const intentBytes = await terminalWait(root, 'intent.json', commandDeadline, ['continue.json', 'terminal.json', 'complete.json']);
