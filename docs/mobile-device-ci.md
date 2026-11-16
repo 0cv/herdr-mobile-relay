@@ -353,6 +353,13 @@ This additional failure does not replace the SDK's primary fatal result. Upload 
 cleanup still always run. Evidence collection never invokes Appium, the gate, driver
 construction, HTTP or discovery after failure.
 
+When the installed icon is not on the current Home page, the adapter swipes right
+exactly (current page - 1) times to reach the first page and then searches to the
+left. It never swipes past the first page: the Today View there publishes no page
+indicator, and a swipe over its widgets is probably what opened an app. Hosted run
+43884641913 attempt 2 failed with `Home page indicator is missing` and run
+43774131109 attempt 1 ended in Apple News after the former fixed eight right swipes.
+
 When Safari's compact layout exposes Page Menu instead of Share, installation
 opens the visible, enabled native `MoreMenuButton` once, verifies Safari remains
 foreground, and observes the menu before looking for Share again. A web-content
