@@ -629,17 +629,17 @@ export class IOSPlatform implements MobilePlatform {
       this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, detail: { outcome: 'skipped', reason: 'insufficient diagnostic budget', remainingMs: phase.remainingMs } });
       return;
     }
-    const startedAt = Date.now();
+    const startedAt = this.budget.now();
     try {
       const result = await collect();
-      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: Date.now() - startedAt, detail: { outcome: 'collected', result } });
+      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: this.budget.now() - startedAt, detail: { outcome: 'collected', result } });
     } catch (error) {
       const fatal = isFatalDriverError(error);
       this.diagnostics.record({
         phase: 'ios-navigation',
         operation,
         timeoutMs,
-        durationMs: Date.now() - startedAt,
+        durationMs: this.budget.now() - startedAt,
         detail: { outcome: fatal ? 'failed' : 'unavailable', process: iosOpenURLProcessEvidence(error) },
       });
       if (fatal) throw error;
@@ -889,7 +889,7 @@ export class IOSPlatform implements MobilePlatform {
   async openSetupURLInInstalledApp(url: string): Promise<void> {
     await this.attachToInstalledView();
     await this.driver.navigate(url);
-    await delay(1_000);
+    await this.budget.sleep(1_000);
   }
 
   async installFromBrowser(): Promise<void> {
@@ -1348,10 +1348,10 @@ export class IOSPlatform implements MobilePlatform {
       return '';
     });
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
-    const deadline = Date.now() + 30_000;
+    const deadline = this.budget.now() + 30_000;
     const selector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
     let lastError = '';
-    while (Date.now() < deadline) {
+    while (this.budget.now() < deadline) {
       try {
         await this.attachToInstalledView();
         // Several idle workspaces start as collapsed cards whose agent buttons cannot be clicked until opened.
@@ -1366,7 +1366,7 @@ export class IOSPlatform implements MobilePlatform {
             await this.driver.execute('document.querySelector(arguments[0])?.click();', [summarySelector]);
           }
           lastError = `agent ${relayName} was inside a collapsed workspace card`;
-          await delay(250);
+          await this.budget.sleep(250);
           continue;
         }
         const agent = await this.driver.find(css(selector), 2_000);
@@ -1401,14 +1401,14 @@ export class IOSPlatform implements MobilePlatform {
             );
             if (!result.clicked) throw error;
           }
-          await delay(1_000);
+          await this.budget.sleep(1_000);
           return;
         }
       } catch (error) {
         if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      await this.budget.sleep(250);
     }
     throw new Error(`APPIUM_AGENT: ${relayName}: ${lastError}`);
   }
@@ -1705,11 +1705,11 @@ export class IOSPlatform implements MobilePlatform {
 
   private async captureNativeReadiness(name: string, timeoutMs: number): Promise<string> {
     await mkdir(this.outputDir, { recursive: true });
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(timeoutMs, this.budget.remainingMs);
     const phase = this.budget.phaseView('ios-native-readiness', timeoutMs);
     const source = await this.captureNativeHierarchy(name, phase);
     try {
-      const screenshotTimeout = deadline - Date.now();
+      const screenshotTimeout = deadline - this.budget.now();
       if (screenshotTimeout >= minimumDriverRequestMs) {
         const screenshot = Buffer.from(await this.driver.screenshot(screenshotTimeout), 'base64');
         if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
@@ -1731,7 +1731,7 @@ export class IOSPlatform implements MobilePlatform {
 
   private async nativeControlState(element: string, deadline: number | PhaseBudget): Promise<'ready' | 'hidden' | 'disabled' | 'not-hittable' | 'indeterminate'> {
     const read = async (name: string): Promise<string | null> => {
-      const timeout = typeof deadline === 'number' ? deadline - Date.now()
+      const timeout = typeof deadline === 'number' ? deadline - this.budget.now()
         : deadline.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS ? IOS_NATIVE_LOOKUP_ROUND_MS : 0;
       if (timeout < minimumDriverRequestMs) return null;
       return this.readNativeControlAttribute(element, name, timeout, deadline instanceof PhaseBudget);
@@ -1746,7 +1746,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async assertNativeControl(element: string, description: string, phase: PhaseBudget): Promise<void> {
-    const state = await this.nativeControlState(element, Date.now() + phase.remainingMs);
+    const state = await this.nativeControlState(element, this.budget.now() + phase.remainingMs);
     if (state === 'ready') return;
     if (state === 'disabled') throw new Error(`IOS_SHARE: ${description}: control is disabled`);
     if (state === 'hidden') throw new Error(`IOS_SHARE: ${description}: control is not visible`);
@@ -1756,7 +1756,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async nativeElementBelongsToRows(element: string, rows: NativeActionRow[], deadline: number): Promise<boolean> {
-    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
     if (timeout < minimumDriverRequestMs) return false;
     const bounds = await this.driver.elementRect(element, timeout).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
@@ -1788,14 +1788,14 @@ export class IOSPlatform implements MobilePlatform {
   ): Promise<NativeScrollContainer | undefined> {
     const actionList = nativeActionListEvidence(source, target);
     if (!actionList) return undefined;
-    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
     if (timeout < minimumDriverRequestMs) return undefined;
     const elements = await this.driver.findAll(iosActionCollectionLocator(), timeout).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
       return [];
     });
     for (const element of elements) {
-      const rectTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+      const rectTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
       if (rectTimeout < minimumDriverRequestMs) break;
       const bounds = await this.driver.elementRect(element, rectTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
@@ -1806,14 +1806,14 @@ export class IOSPlatform implements MobilePlatform {
         || Math.abs(actionList.collection.bounds.y - bounds.y) > 2
         || Math.abs(actionList.collection.bounds.width - bounds.width) > 2
         || Math.abs(actionList.collection.bounds.height - bounds.height) > 2) continue;
-      const enabledTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+      const enabledTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
       if (enabledTimeout < minimumDriverRequestMs) break;
       const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
         return null;
       });
       if (enabled !== 'true' && enabled !== null) continue;
-      const visibleTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+      const visibleTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
       if (visibleTimeout < minimumDriverRequestMs) break;
       const visible = await this.driver.attribute(element, 'visible', visibleTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
@@ -1826,10 +1826,10 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async findNativeMatches(locators: Locator[], timeoutMs: number): Promise<string[]> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.budget.now() + timeoutMs;
     const matches: string[] = [];
     for (const locator of locators) {
-      const remaining = deadline - Date.now();
+      const remaining = deadline - this.budget.now();
       if (remaining < minimumDriverRequestMs) break;
       try {
         matches.push(...await this.driver.findAll(locator, Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, remaining)));
@@ -1872,7 +1872,7 @@ export class IOSPlatform implements MobilePlatform {
 
   private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
     if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(timeoutMs, this.budget.remainingMs);
     const phase = this.budget.phaseView('ios-share-search', timeoutMs);
     let readiness = phase.phaseView('ios-share-publication', IOS_SHARE_SHEET_READINESS_MS);
     let expanded = false;
@@ -1910,7 +1910,7 @@ export class IOSPlatform implements MobilePlatform {
         lastError = `${description}: native action list was dismissed or replaced`;
         break;
       }
-      const candidates = await this.findNativeMatches(locators, Math.min(remaining, deadline - Date.now()));
+      const candidates = await this.findNativeMatches(locators, Math.min(remaining, deadline - this.budget.now()));
       const states: Array<Awaited<ReturnType<IOSPlatform['nativeControlState']>>> = [];
       let readyElement = '';
       for (const candidate of candidates) {
@@ -2021,7 +2021,7 @@ export class IOSPlatform implements MobilePlatform {
         } });
         break;
       }
-      const afterMatches = await this.findNativeMatches(locators, Math.min(deadline - Date.now(), 5_000));
+      const afterMatches = await this.findNativeMatches(locators, Math.min(deadline - this.budget.now(), 5_000));
       const afterTargetReady = afterActionList.targetRows.some((row) => row.visible && row.enabled);
       let afterReady = false;
       if (afterTargetReady) {
