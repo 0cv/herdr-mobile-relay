@@ -17,6 +17,15 @@ export const androidTransportNormalRecords = ([
 ] as const).map(([prefix, body, suffix, size]) => prefix
   + body.repeat(size).slice(0, size - Buffer.byteLength(prefix + suffix)) + suffix);
 
+async function observeLog(observation: AndroidTransportObservation, detector: AndroidTransportTriggerDetector, chunks: Buffer[]): Promise<void> {
+  for (const chunk of chunks) {
+    const candidate = detector.observe(chunk)[0];
+    if (candidate && detector.accept()) {
+      await observation.observeTrigger({ guestEpochSeconds: candidate.guestEpochSeconds, triggeredAt: candidate.triggeredAt });
+    }
+  }
+}
+
 function framingResult(bytes: Buffer, partitions: number[]) {
   const detector = new AndroidTransportTriggerDetector(framingId);
   detector.observe(Buffer.from(framingStart), 100);
@@ -195,9 +204,10 @@ export const androidTransportTests: Array<[string, () => Promise<void>]> = [
       let calls = 0;
       const run = async () => { calls++; throw new Error('invalid framing dispatched'); };
       const observation = new AndroidTransportObservation('owned-test-device', tmpdir(), run, run);
-      observation.observe(Buffer.from(text));
-      await observation.finish();
-      assert.match(observation.failure || '', /framing bound|incomplete at EOF/u);
+      const detector = new AndroidTransportTriggerDetector();
+      await observeLog(observation, detector, [Buffer.from(text)]);
+      detector.finish();
+      assert.match(detector.failure || '', /framing bound|incomplete at EOF/u);
       assert.equal(calls, 0);
     }
   }],
@@ -417,12 +427,15 @@ export const androidTransportTests: Array<[string, () => Promise<void>]> = [
       };
       const observation = new AndroidTransportObservation('emulator-5554', root, run,
         async (serial, service) => run('adb-socket', [serial, service]));
-      observation.observe(Buffer.from('123.456 123 456 I unrelated: timeout expired while flushing socket, closing\n'));
+      const detector = new AndroidTransportTriggerDetector();
+      await observeLog(observation, detector, [Buffer.from('123.456 123 456 I unrelated: timeout expired while flushing socket, closing\n')]);
       assert.equal(calls.length, 0);
-      observation.observe(Buffer.from('123.456 123 456 I adbd    : timeout expired while flushing soc'));
-      observation.observe(Buffer.from('ket, closing\n'));
-      observation.observe(Buffer.from('124.456 123 456 I adbd: timeout expired while flushing socket, closing\n'));
-      await observation.finish();
+      await observeLog(observation, detector, [
+        Buffer.from('123.456 123 456 I adbd    : timeout expired while flushing soc'),
+        Buffer.from('ket, closing\n'),
+        Buffer.from('124.456 123 456 I adbd: timeout expired while flushing socket, closing\n'),
+      ]);
+      detector.finish();
       assert.equal(calls.length, 5);
       assert.deepEqual(calls.filter(call => call.file === 'adb-socket').map(call => call.args), [
         ['emulator-5554', 'get-state'],
@@ -488,13 +501,14 @@ export const androidTransportTests: Array<[string, () => Promise<void>]> = [
     await writeFile(output, '');
     const observation = new AndroidTransportObservation('emulator-5554', output,
       async () => { throw new Error('unavailable'); }, async () => { throw new Error('unavailable'); });
+    const detector = new AndroidTransportTriggerDetector();
     let caught: unknown;
     try {
       try {
-        observation.observe(Buffer.from('123.456 123 456 I adbd: timeout expired while flushing socket, closing\n'));
         throw original;
       } finally {
-        await observation.finish();
+        await observeLog(observation, detector, [Buffer.from('123.456 123 456 I adbd: timeout expired while flushing socket, closing\n')]);
+        detector.finish();
       }
     } catch (error) {
       caught = error;

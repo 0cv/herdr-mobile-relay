@@ -54,8 +54,8 @@ async function assertQuarantined(client: AppiumClient, sent: () => number, polic
       () => client.findAnyOnce([]),
       () => client.command('/alert/text', 'GET', undefined, 100, policy),
       // Exercise the shared boundary independently of session/budget flags.
-      () => (client as any).request('/status', 'GET', undefined, 100, false, false),
-      () => (client as any).request('/session', 'POST', {}, 100, false, false),
+      () => (client as any).request({ path: '/status', method: 'GET', timeoutMs: 100, enforceBudget: false }),
+      () => (client as any).request({ path: '/session', method: 'POST', body: {}, timeoutMs: 100, enforceBudget: false }),
     ]) {
       await assert.rejects(followup, /APPIUM_SESSION_UNUSABLE/u, 'every post-fatal operation must reject, including close');
       assert.equal(sent(), count, 'quarantine must prevent every further transport dispatch');

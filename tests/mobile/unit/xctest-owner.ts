@@ -2532,30 +2532,49 @@ function isSystemLogQuery(command: string): boolean {
 
 export const xctestOwnerTests: Array<[string, () => Promise<void>]> = [];
 
+interface SupervisorEdit {
+  file: string;
+  anchor: string;
+  replacement: string;
+}
+
+const supervisorSupportDirectory = join(import.meta.dirname, '../support');
+
+// Copies the whole support directory so every module the supervisor imports is present, then
+// edits the copy. An anchor is one or more consecutive statements and must match exactly once.
+async function writeSupervisorVariant(directory: string, edits: SupervisorEdit[]): Promise<string> {
+  await cp(supervisorSupportDirectory, directory, {recursive: true});
+  for (const edit of edits) {
+    const path = join(directory, edit.file);
+    const lines = (await readFile(path, 'utf8')).split('\n');
+    const anchor = edit.anchor.split('\n').map(line => line.trim());
+    const matches: number[] = [];
+    for (let start = 0; start + anchor.length <= lines.length; start++) {
+      if (anchor.every((statement, offset) => lines[start + offset].trim() === statement)) matches.push(start);
+    }
+    assert.equal(matches.length, 1, `supervisor anchor must appear exactly once in ${edit.file}: ${edit.anchor}`);
+    lines.splice(matches[0], anchor.length, ...edit.replacement.split('\n'));
+    await writeFile(path, lines.join('\n'));
+  }
+  return join(directory, 'ios-xctest.ts');
+}
+
 for (const mode of ['slow-valid', 'preflight-hung-first', 'preflight-hung-second', 'cleanup-hung-first', 'cleanup-hung-second', 'occupied', 'invalid-pid', 'command-error', 'cleanup-unknown'] as const) {
-  xctestOwnerTests.push([`Native startup listener phase budget ${mode}`, async () => {
+  xctestOwnerTests.push([`Native startup listener commands are bounded by the remaining phase budget (${mode})`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-listener-budget-'));
     const state = join(root, 'state');
     const product = join(root, 'products/WebDriverAgentRunner-Runner.app');
-    const support = join(root, 'support');
     const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
     const startedAt = 1_700_000_000_000;
     try {
-      await Promise.all([mkdir(state), mkdir(product, {recursive: true}), mkdir(support)]);
+      await Promise.all([mkdir(state), mkdir(product, {recursive: true})]);
       await writeFile(join(product, 'WebDriverAgentRunner-Runner'), 'exact built runner');
       await writeFile(join(root, 'products/WebDriverAgentRunner_test.xctestrun'), '{}');
       await writeFile(join(root, 'owned'), `ios:${udid}`);
       await writeFile(join(state, 'deadline'), String(startedAt + 300_000));
-      for (const file of ['diagnostics.ts', 'xctest-output.ts']) {
-        await cp(join(import.meta.dirname, '../support', file), join(support, file));
-      }
-      const source = await readFile(join(import.meta.dirname, '../support/ios-xctest.ts'), 'utf8');
-      const marker = "spawnSync(file, args, {encoding: 'utf8', timeout, maxBuffer})";
-      assert.equal(source.split(marker).length, 2);
       // Inject only command execution and its clock; run the actual supervisor,
       // listener parser, failure recording and cleanup without real-time sleeps.
-      const injection = `
-let fakeNow = ${startedAt};
+      const injection = `let fakeNow = ${startedAt};
 Date.now = () => fakeNow;
 const fakeMode = ${JSON.stringify(mode)};
 const fakeCounts = {preflight: 0, cleanup: 0};
@@ -2587,9 +2606,18 @@ function fakeCommand(file: string, args: string[], timeout: number, phase?: stri
   return {status: 1, signal: null, stdout: '', stderr: ''};
 }
 `;
-      const variant = injection + source.replace(marker, 'fakeCommand(file, args, timeout, context?.phase)');
-      const path = join(support, 'ios-xctest.ts');
-      await writeFile(path, variant);
+      const path = await writeSupervisorVariant(join(root, 'support'), [
+        {
+          file: 'ios-xctest-listeners.ts',
+          anchor: 'export function executeSync(file: string, args: string[], timeout: number, maxBuffer: number, context?: DiagnosticContext): SpawnSyncReturns<string> {',
+          replacement: injection + 'export function executeSync(file: string, args: string[], timeout: number, maxBuffer: number, context?: DiagnosticContext): SpawnSyncReturns<string> {',
+        },
+        {
+          file: 'ios-xctest-listeners.ts',
+          anchor: "const result = spawnSync(file, args, {encoding: 'utf8', timeout, maxBuffer}) as SpawnSyncReturns<string>;",
+          replacement: 'const result = fakeCommand(file, args, timeout, context?.phase) as SpawnSyncReturns<string>;',
+        },
+      ]);
       const result = spawnSync(process.execPath, [path, 'supervise'], {
         env: {...process.env, MOBILE_TIMING_SCALE: '3', IOS_XCTEST_STATE_DIR: state,
           IOS_SIMULATOR_UDID: udid, IOS_WDA_PORT: '8100', IOS_WDA_MJPEG_PORT: '9100',
@@ -3049,11 +3077,19 @@ const pendingInvalidControls = [
   ['Native startup actual XCTest supervisor listener-pending-invalid-pid held-start ordering', 'held-start'],
   ['Native startup actual XCTest supervisor listener-pending-invalid-pid withheld-start prerequisite', 'withheld-start'],
 ] as const;
+const patchedSupervisorTestNames: Record<string, string> = {
+  'listener-pending-child-error': 'Native startup a child error while the runner candidate is pending is the first failure and stops the child',
+  'listener-ready-owner-evidence-write': 'Native startup a failed owner write at readiness is the first failure and the owner never reports ready',
+  'listener-exit-after-ready': 'Native startup a child exit after ready revokes readiness in the exit callback, before cleanup runs',
+  'listener-exit-after-ready-private-write-failure': 'Native startup a child exit after ready revokes readiness even when the private owner write fails',
+  'listener-exit-after-ready-public-write-failure': 'Native startup a child exit after ready revokes readiness even when the public owner write fails',
+  'listener-exit-after-ready-first-failure': 'Native startup a child exit after ready revokes readiness and keeps the earlier first failure',
+};
 for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pendingInvalidControls.map(([name]) => name), ...revocationModes, 'ready', 'ready-then-oversized', 'early', 'disposition-write-failure', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-ready-owner-evidence-write', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-uncoordinated-negative', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity', 'listener-http-only', ...pendingModes]) {
   const invalidPidControl = pendingInvalidControls.find(([name]) => name === testMode)?.[1];
   const captureControl = listenerCaptureControls.find(([name]) => name === testMode)?.[1];
   const mode = invalidPidControl ? 'listener-pending-invalid-pid' : captureControl ? 'listener-first-failure' : testMode;
-  xctestOwnerTests.push([invalidPidControl || captureControl ? testMode : `Native startup actual XCTest supervisor ${mode}`, async () => {
+  xctestOwnerTests.push([invalidPidControl || captureControl ? testMode : patchedSupervisorTestNames[mode] ?? `Native startup actual XCTest supervisor ${mode}`, async () => {
     const witnessBuild = mode === 'listener-concurrent-exit-before-close' ? await terminalBuild() : undefined;
     const witnessNonce = witnessBuild ? randomBytes(16).toString('hex') : undefined;
     const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-test-'));
@@ -3156,84 +3192,75 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
     const initialProductHash = createHash('sha256').update(await readFile(join(product, 'WebDriverAgentRunner-Runner'))).digest('hex');
     const deadline = Date.now() + (mode === 'invalid' || mode === 'oversized' ? 2000 : mode === 'delayed' || mode === 'listener-initial-race-budget' || mode === 'listener-initial-race-hash-budget' ? 1500 : mode === 'listener-pending-deadline' ? 5000 : 10_000);
     await writeFile(join(state, 'deadline'), String(deadline));
+    const supportCopy = join(root, 'supervisor-support');
     let supervisorPath = join(import.meta.dirname, '../support/ios-xctest.ts');
     if (mode === 'listener-pending-child-error') {
-      const source = await readFile(supervisorPath, 'utf8');
-      const marker = "        const initial = inspectListeners(deadline, 'initial');\n";
-      const replacement = "        if (existsSync(join(required('STARTUP_TEST_ROOT'), 'pending-child-error')) && owner.diagnostics.lifecycle.some(event => event.event === 'runner-candidate-pinned')) {\n          child?.emit('error', new Error('XCTEST: pending child error'));\n          throw new Error('XCTEST: child process error');\n        }\n" + marker;
-      const variant = source.replace(marker, replacement);
-      assert.notEqual(variant, source);
-      const support = join(root, 'supervisor-support');
-      await mkdir(support);
-      await writeFile(join(support, 'diagnostics.ts'), await readFile(join(import.meta.dirname, '../support/diagnostics.ts')));
-      await writeFile(join(support, 'xctest-output.ts'), await readFile(join(import.meta.dirname, '../support/xctest-output.ts')));
-      supervisorPath = join(support, 'ios-xctest.ts');
-      await writeFile(supervisorPath, variant);
+      supervisorPath = await writeSupervisorVariant(supportCopy, [{
+        file: 'ios-xctest.ts',
+        anchor: "const initial = inspectListeners(state, state.deadline, 'initial');",
+        replacement: "        if (existsSync(join(required('STARTUP_TEST_ROOT'), 'pending-child-error')) && state.owner.diagnostics.lifecycle.some(event => event.event === 'runner-candidate-pinned')) {\n          state.child?.emit('error', new Error('XCTEST: pending child error'));\n          throw new Error('XCTEST: child process error');\n        }\n        const initial = inspectListeners(state, state.deadline, 'initial');",
+      }]);
     }
     if (mode === 'listener-ready-owner-evidence-write') {
-      const source = await readFile(supervisorPath, 'utf8');
-      const marker = '          owner.ready = true;\n';
-      const replacement = "          writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-boundary'), 'ready');\n          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-continue'))) {\n            if (stop || owner.firstFailure || childExited || existsSync(join(required('STARTUP_TEST_ROOT'), 'stop'))) throw new Error('XCTEST: readiness evidence boundary cancelled');\n            await sleep(1);\n          }\n" + marker;
-      const readinessVariant = source.replace(marker, replacement);
-      assert.notEqual(readinessVariant, source);
-      const fallbackMarker = "      writeFileSync(join(root, 'owner.json'), ownerContent(owner, true), { mode: 0o600 });\n";
-      const fallbackReplacement = fallbackMarker + "      writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-written'), 'written');\n      while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-continue'))) {}\n";
-      const variant = readinessVariant.replace(fallbackMarker, fallbackReplacement);
-      assert.notEqual(variant, readinessVariant);
-      const support = join(root, 'supervisor-support');
-      await mkdir(support);
-      await writeFile(join(support, 'diagnostics.ts'), await readFile(join(import.meta.dirname, '../support/diagnostics.ts')));
-      await writeFile(join(support, 'xctest-output.ts'), await readFile(join(import.meta.dirname, '../support/xctest-output.ts')));
-      supervisorPath = join(support, 'ios-xctest.ts');
-      await writeFile(supervisorPath, variant);
+      supervisorPath = await writeSupervisorVariant(supportCopy, [
+        {
+          file: 'ios-xctest.ts',
+          anchor: 'state.owner.ready = true;',
+          replacement: "          writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-boundary'), 'ready');\n          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-evidence-continue'))) {\n            if (state.stop || state.owner.firstFailure || state.childExited || existsSync(join(required('STARTUP_TEST_ROOT'), 'stop'))) throw new Error('XCTEST: readiness evidence boundary cancelled');\n            await sleep(1);\n          }\n          state.owner.ready = true;",
+        },
+        {
+          file: 'ios-xctest.ts',
+          anchor: "writeFileSync(join(state.root, 'owner.json'), ownerContent(state.owner, true), { mode: 0o600 });",
+          replacement: "      writeFileSync(join(state.root, 'owner.json'), ownerContent(state.owner, true), { mode: 0o600 });\n      writeFileSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-written'), 'written');\n      while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'ready-failure-fallback-continue'))) {}",
+        },
+      ]);
     }
     if (revocationModes.includes(mode)) {
-      const source = await readFile(supervisorPath, 'utf8');
-      const replaceOnce = (text: string, marker: string, replacement: string): string => {
-        assert.equal(text.split(marker).length, 2, 'revocation source marker must be unique');
-        return text.replace(marker, replacement);
-      };
-      const promiseMarker = '    childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });\n';
-      let variant = replaceOnce(source, promiseMarker, promiseMarker + `    let exitResolverReturned = false;
+      supervisorPath = await writeSupervisorVariant(supportCopy, [
+        {
+          file: 'ios-xctest.ts',
+          anchor: 'state.childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });',
+          replacement: `    state.childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });
+    let exitResolverReturned = false;
     const productionExitResolver = resolveChildExit;
     resolveChildExit = () => { productionExitResolver(); exitResolverReturned = true; };
-    childExitObserved.then(() => writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-promise-resolved'), 'resolved'));
-`);
-      const closeMarker = "      child!.on('close', (code, signal) => {\n";
-      variant = replaceOnce(variant, closeMarker, `      // Second listener: genuine event only, registered AFTER production exit.
-      child!.on('exit', (code, signal) => {
+    state.childExitObserved.then(() => writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-promise-resolved'), 'resolved'));`,
+        },
+        {
+          file: 'ios-xctest.ts',
+          anchor: "state.child!.on('close', (code, signal) => {",
+          replacement: `      // Second listener: genuine event only, registered AFTER production exit.
+      state.child!.on('exit', (code, signal) => {
         const fixture = required('STARTUP_TEST_ROOT');
         const ack = join(fixture, 'exit-callback-returned');
-        writeFileSync(ack + '.next', JSON.stringify({schema: 1, code, signal, exitResolverReturned, childExited, childEnded}));
+        writeFileSync(ack + '.next', JSON.stringify({schema: 1, code, signal, exitResolverReturned, childExited: state.childExited, childEnded: state.childEnded}));
         renameSync(ack + '.next', ack);
-        while (!existsSync(join(fixture, 'exit-callback-continue')) && Date.now() < deadline) {}
+        while (!existsSync(join(fixture, 'exit-callback-continue')) && Date.now() < state.deadline) {}
         if (!existsSync(join(fixture, 'exit-callback-continue'))) {
           writeFileSync(join(fixture, 'exit-callback-timeout'), 'ERROR');
           process.exitCode = 1;
         }
       });
-` + closeMarker);
-      const readyMarker = "          diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port, frozenOwner: true});\n";
-      variant = replaceOnce(variant, readyMarker, readyMarker + `          writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-ready-ack'), 'ready');
-` + (mode === 'listener-exit-after-ready-first-failure' ? `          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-first-failure-request')) && Date.now() < deadline) await sleep(1);
-          if (Date.now() >= deadline) throw new Error('XCTEST: first failure handshake deadline');
-          if (save()) throw new Error('XCTEST: expected actual owner writer failure');
+      state.child!.on('close', (code, signal) => {`,
+        },
+        {
+          file: 'ios-xctest.ts',
+          anchor: "state.diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port: state.port, frozenOwner: true});",
+          replacement: `          state.diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port: state.port, frozenOwner: true});
+          writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-ready-ack'), 'ready');` + (mode === 'listener-exit-after-ready-first-failure' ? `
+          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-first-failure-request')) && Date.now() < state.deadline) await sleep(1);
+          if (Date.now() >= state.deadline) throw new Error('XCTEST: first failure handshake deadline');
+          if (save(state)) throw new Error('XCTEST: expected actual owner writer failure');
           writeFileSync(join(required('STARTUP_TEST_ROOT'), 'exit-first-failure-ack'), 'failed');
           // Keep cleanup from doing the revocation/exit bookkeeping under test.
-          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-callback-continue')) && Date.now() < deadline) await sleep(1);
-` : ''));
-      const support = join(root, 'supervisor-support');
-      await mkdir(support);
-      const diagnosticsSource = await readFile(join(import.meta.dirname, '../support/diagnostics.ts'));
-      await writeFile(join(support, 'diagnostics.ts'), diagnosticsSource);
-      const outputSource = await readFile(join(import.meta.dirname, '../support/xctest-output.ts'));
-      await writeFile(join(support, 'xctest-output.ts'), outputSource);
-      supervisorPath = join(support, 'ios-xctest.ts');
-      await writeFile(supervisorPath, variant);
-      const hash = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
+          while (!existsSync(join(required('STARTUP_TEST_ROOT'), 'exit-callback-continue')) && Date.now() < state.deadline) await sleep(1);` : ''),
+        },
+      ]);
+      const hash = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex');
       await writeFile(join(root, 'revocation-source-binding.json'), JSON.stringify({
-        schema: 1, source: hash(source), variant: hash(variant), diagnostics: hash(diagnosticsSource), xctestOutput: hash(outputSource),
-        dispatcher: hash(shim), server: hash(wdaServer), mode,
+        schema: 1, source: hash(join(supervisorSupportDirectory, 'ios-xctest.ts')), variant: hash(supervisorPath),
+        diagnostics: hash(join(supportCopy, 'diagnostics.ts')), xctestOutput: hash(join(supportCopy, 'xctest-output.ts')),
+        dispatcher: createHash('sha256').update(shim).digest('hex'), server: createHash('sha256').update(wdaServer).digest('hex'), mode,
       }));
     }
     const child = witnessBuild
@@ -5497,46 +5524,18 @@ xctestOwnerTests.push(['Native startup owned process stop during dispatch still 
 xctestOwnerTests.push(['Native startup XCTest terminal witness registration failure', async () => { await terminalControl(true); }]);
 xctestOwnerTests.push(['Native startup XCTest terminal witness', async () => { await terminalControl(false); }]);
 
-xctestOwnerTests.push(['Native startup status publication ordering is deterministic against the legacy source', async () => {
-  const sourcePath = join(import.meta.dirname, '../support/ios-xctest.ts');
-  const source = await readFile(sourcePath, 'utf8');
-  const currentStatusBlock = [
-    '          const bounded = boundedStatus(status);',
-    '          owner.status = bounded;',
-    "          if (!save()) throw new Error('XCTEST: owner evidence write failed');",
-    '          try {',
-    '            writeStatusEvidence(root, bounded);',
-    '          } catch {',
-    "            const statusError = new Error('XCTEST: WDA status evidence write failed');",
-    "            rememberFailure({error: statusError, phase: 'status', stage: 'status-evidence-write', category: 'status-evidence-write', frozenOwner: Boolean(frozenRunner)});",
-    '            throw statusError;',
-    '          }',
-  ].join('\n');
-  assert.equal(source.includes(currentStatusBlock), true);
-  const legacyStatusBlock = [
-    '          const bounded = boundedStatus(status);',
-    '          owner.status = bounded;',
-    '          try {',
-    "            writeFileSync(join(root, 'wda-status.json'), JSON.stringify({checkedAt: new Date().toISOString(), ...bounded}) + '\\n', { mode: 0o600 });",
-    "            writeFileSync(join(root, 'legacy-status-published'), '');",
-    "            while (!stop && Date.now() < deadline && !existsSync(join(root, 'legacy-continue'))) await sleep(1);",
-    "            if (stop) throw new Error('XCTEST: publication ordering barrier cancelled');",
-    "            if (Date.now() >= deadline) throw new Error('XCTEST: publication ordering barrier deadline');",
-    '          } catch {',
-    "            const statusError = new Error('XCTEST: WDA status evidence write failed');",
-    "            rememberFailure({error: statusError, phase: 'status', stage: 'status-evidence-write', category: 'status-evidence-write', frozenOwner: Boolean(frozenRunner)});",
-    '            throw statusError;',
-    '          }',
-    '          save();',
-  ].join('\n');
-  const legacySource = source.replace(currentStatusBlock, legacyStatusBlock);
-  const candidateStatusBlock = currentStatusBlock.replace(
-    "          if (!save()) throw new Error('XCTEST: owner evidence write failed');",
-    "          if (!save()) throw new Error('XCTEST: owner evidence write failed');\n          writeFileSync(join(root, 'candidate-owner-saved'), '');\n          while (!stop && Date.now() < deadline && !existsSync(join(root, 'candidate-continue'))) await sleep(1);\n          if (stop) throw new Error('XCTEST: publication ordering barrier cancelled');\n          if (Date.now() >= deadline) throw new Error('XCTEST: publication ordering barrier deadline');",
-  );
-  const candidateSource = source.replace(currentStatusBlock, candidateStatusBlock);
-  assert.notEqual(legacySource, source);
-  assert.notEqual(candidateSource, source);
+xctestOwnerTests.push(['Native startup owner holds the WDA status before the status file is published', async () => {
+  const candidateEdits: SupervisorEdit[] = [{
+    file: 'ios-xctest.ts',
+    anchor: `state.owner.status = bounded;
+if (!save(state)) throw new Error('XCTEST: owner evidence write failed');`,
+    replacement: `          state.owner.status = bounded;
+          if (!save(state)) throw new Error('XCTEST: owner evidence write failed');
+          writeFileSync(join(state.root, 'candidate-owner-saved'), '');
+          while (!state.stop && Date.now() < state.deadline && !existsSync(join(state.root, 'candidate-continue'))) await sleep(1);
+          if (state.stop) throw new Error('XCTEST: publication ordering barrier cancelled');
+          if (Date.now() >= state.deadline) throw new Error('XCTEST: publication ordering barrier deadline');`,
+  }];
 
   const assertForgedStatus = (value: unknown): void => {
     assert.ok(value && typeof value === 'object');
@@ -5560,15 +5559,14 @@ xctestOwnerTests.push(['Native startup status publication ordering is determinis
     for (const forbidden of ['status-opaque-secret', 'status-password-sentinel', 'https://status.private.example']) assert.equal(serialized.includes(forbidden), false);
   };
 
-  const runVariant = async (label: 'legacy' | 'candidate', variantSource: string, legacyOrdering: boolean, forceAssertionFailure = false): Promise<void> => {
-    const root = await mkdtemp(join(tmpdir(), `herdr-xctest-publication-${label}-`));
+  const runPausedPublication = async (forceAssertionFailure = false): Promise<void> => {
+    const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-publication-'));
     const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
     const product = join(root, 'products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app');
     const receipt = join(root, `Devices/${udid}/data/Containers/Bundle/Application/10C0E9C0-50FD-4C3E-AC55-AC1158A00568/WebDriverAgentRunner-Runner.app`);
     const runnerReceipt = join(root, `Devices/${udid}/data/Containers/Bundle/Application/1C1FB5F7-2D0E-49AC-BE09-62816F229E5C/WebDriverAgentRunner-Runner.app`);
     const state = join(root, 'state');
     const bin = join(root, 'bin');
-    const support = join(root, 'support');
     const xctestrun = join(root, 'products/WebDriverAgentRunner_test.xctestrun');
     let child: ReturnType<typeof spawn> | undefined;
     let done = false;
@@ -5586,7 +5584,6 @@ xctestOwnerTests.push(['Native startup status publication ordering is determinis
       await Promise.all([
         mkdir(bin),
         mkdir(state),
-        mkdir(support),
         mkdir(join(product, 'PlugIns/WebDriverAgentRunner.xctest'), { recursive: true }),
         mkdir(receipt, { recursive: true }),
         mkdir(runnerReceipt, { recursive: true }),
@@ -5603,10 +5600,7 @@ xctestOwnerTests.push(['Native startup status publication ordering is determinis
         TestHostPath: '__TESTROOT__/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app',
       } }));
       await writeFile(join(root, 'owned'), `ios:${udid}`);
-      await writeFile(join(support, 'diagnostics.ts'), await readFile(join(import.meta.dirname, '../support/diagnostics.ts')));
-      await writeFile(join(support, 'xctest-output.ts'), await readFile(join(import.meta.dirname, '../support/xctest-output.ts')));
-      const variantPath = join(support, `${label}.ts`);
-      await writeFile(variantPath, variantSource);
+      const variantPath = await writeSupervisorVariant(join(root, 'support'), candidateEdits);
       const dispatcher = join(bin, 'xctest-command-dispatcher');
       await writeFile(dispatcher, shim, { mode: 0o700 });
       for (const cmd of ['plutil', 'lsof', 'ps', 'xcrun', 'xcodebuild']) await symlink(dispatcher, join(bin, cmd));
@@ -5632,34 +5626,23 @@ xctestOwnerTests.push(['Native startup status publication ordering is determinis
       exited = new Promise<void>(resolve => child?.on('close', () => { done = true; resolve(); }));
       const waitFor = async (path: string): Promise<void> => {
         while (!done && Date.now() < deadline && !existsSync(path)) await pause();
-        assert.equal(existsSync(path), true, `${label} barrier was not reached: ${errors}`);
+        assert.equal(existsSync(path), true, `publication barrier was not reached: ${errors}`);
       };
       const statusPath = join(state, 'wda-status.json');
       const ownerPath = join(state, 'owner.json');
       const privateOwnerPath = join(state, 'owner-private.json');
-      if (legacyOrdering) {
-        await waitFor(join(state, 'legacy-status-published'));
-        const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { status?: unknown };
-        const privateOwner = JSON.parse(await readFile(privateOwnerPath, 'utf8')) as { status?: unknown };
-        assert.equal(owner.status, undefined);
-        assert.equal(privateOwner.status, undefined);
-        assertForgedStatus(JSON.parse(await readFile(statusPath, 'utf8')));
-        if (forceAssertionFailure) assert.equal(existsSync(statusPath), false);
-        await writeFile(join(state, 'legacy-continue'), 'continue');
-      } else {
-        await waitFor(join(state, 'candidate-owner-saved'));
-        const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { status?: unknown };
-        const privateOwner = JSON.parse(await readFile(privateOwnerPath, 'utf8')) as { status?: unknown };
-        assertForgedStatus(owner.status);
-        assertForgedStatus(privateOwner.status);
-        assert.equal(existsSync(statusPath), false);
-        if (forceAssertionFailure) assert.equal(existsSync(statusPath), true);
-        await writeFile(join(state, 'candidate-continue'), 'continue');
-        await waitFor(statusPath);
-        assertForgedStatus(JSON.parse(await readFile(statusPath, 'utf8')));
-      }
+      await waitFor(join(state, 'candidate-owner-saved'));
+      const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { status?: unknown };
+      const privateOwner = JSON.parse(await readFile(privateOwnerPath, 'utf8')) as { status?: unknown };
+      assertForgedStatus(owner.status);
+      assertForgedStatus(privateOwner.status);
+      assert.equal(existsSync(statusPath), false);
+      if (forceAssertionFailure) assert.equal(existsSync(statusPath), true);
+      await writeFile(join(state, 'candidate-continue'), 'continue');
+      await waitFor(statusPath);
+      assertForgedStatus(JSON.parse(await readFile(statusPath, 'utf8')));
       await writeFile(join(state, 'stop'), 'publication ordering fixture finalization');
-      await Promise.race([exited, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} supervisor deadline: ${errors}`)), 15_000))]);
+      await Promise.race([exited, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`supervisor deadline: ${errors}`)), 15_000))]);
       const finalOwner = JSON.parse(await readFile(ownerPath, 'utf8')) as { status?: unknown };
       const finalPrivateOwner = JSON.parse(await readFile(privateOwnerPath, 'utf8')) as { status?: unknown };
       assertForgedStatus(finalOwner.status);
@@ -5667,26 +5650,24 @@ xctestOwnerTests.push(['Native startup status publication ordering is determinis
       assertForgedStatus(JSON.parse(await readFile(statusPath, 'utf8')));
     } finally {
       if (child && !done) {
-        await writeFile(join(state, `${label}-continue`), 'failed publication ordering fixture cleanup');
+        await writeFile(join(state, 'candidate-continue'), 'failed publication ordering fixture cleanup');
         await writeFile(join(state, 'stop'), 'failed publication ordering fixture cleanup');
         child.kill('SIGTERM');
         if (!await waitForExit(2_000)) {
           child.kill('SIGKILL');
-          assert.equal(await waitForExit(2_000), true, `${label} supervisor did not settle after forced cleanup`);
+          assert.equal(await waitForExit(2_000), true, 'supervisor did not settle after forced cleanup');
         }
       }
       if (child) {
-        assert.equal(existsSync(join(root, 'runner.pid')), false, `${label} WDA runner remained after cleanup`);
-        assert.equal(existsSync(join(root, 'xcode.pid')), false, `${label} WDA subprocess remained after cleanup`);
+        assert.equal(existsSync(join(root, 'runner.pid')), false, 'WDA runner remained after cleanup');
+        assert.equal(existsSync(join(root, 'xcode.pid')), false, 'WDA subprocess remained after cleanup');
       }
       await rm(root, { recursive: true, force: true });
     }
   };
 
-  await runVariant('legacy', legacySource, true);
-  await runVariant('candidate', candidateSource, false);
-  await assert.rejects(() => runVariant('legacy', legacySource, true, true), /true !== false/u);
-  await assert.rejects(() => runVariant('candidate', candidateSource, false, true), /false !== true/u);
+  await runPausedPublication();
+  await assert.rejects(() => runPausedPublication(true), /false !== true/u);
 }]);
 
 const runStopCli = (env: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> => new Promise(resolve => {
