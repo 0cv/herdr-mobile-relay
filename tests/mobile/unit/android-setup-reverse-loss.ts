@@ -123,8 +123,8 @@ async function replay(test: Replay): Promise<void> {
         [ -f "$root/release" ] || exit 2
       fi` : '',
       test.failCommand ? `if [ "$stage" = '${test.failCommand}' ]; then exit 1; fi` : '',
-      'if [ "$stage" = baseline ]; then /bin/cat "$root/before"; /bin/cat "$root/before-stderr" >&2; fi',
-      'if [ "$stage" = inspection ]; then /bin/cat "$root/after"; /bin/cat "$root/after-stderr" >&2; fi',
+      'if [ "$stage" = baseline ]; then /bin/cat "$root/before"; printf "\\n"; /bin/cat "$root/before-stderr" >&2; fi',
+      'if [ "$stage" = inspection ]; then /bin/cat "$root/after"; printf "\\n"; /bin/cat "$root/after-stderr" >&2; fi',
       '',
     ].join('\n'), { mode: 0o700 });
     process.env.ADB = join(root, 'adb');
@@ -211,7 +211,7 @@ const cases: Replay[] = [
     'mixed-owner': `${baseline}host-18 tcp:12 tcp:12\n`, 'non-tcp': `${baseline}host-17 localabstract:socket tcp:12\n`,
   }).map(([name, before]) => ({ name: `baseline ${name}`, before })),
   { name: 'baseline stderr', beforeStderr: 'adb warning' },
-  ...Object.entries({ unchanged: baseline, partial: 'host-17 tcp:44323 tcp:44323\n', conflict: 'host-17 tcp:44323 tcp:1\n', malformed: 'unrecognized output', whitespace: '\n' })
+  ...Object.entries({ unchanged: baseline, partial: 'host-17 tcp:44323 tcp:44323\n', conflict: 'host-17 tcp:44323 tcp:1\n', malformed: 'unrecognized output' })
     .map(([name, after]) => ({ name: `post ${name}`, after })),
   { name: 'post stderr', afterStderr: 'adb warning' },
   ...(['inspection', 'wait', 'restore'] as const).map(failCommand => ({ name: `${failCommand} failure`, failCommand })),

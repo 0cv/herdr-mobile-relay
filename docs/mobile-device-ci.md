@@ -238,8 +238,9 @@ Android fresh CI setup permits at most one additional create per setup-session
 helper invocation, before any retained Chrome owner or initial installed launch.
 The existing literal `adb: device offline` path is unchanged. A completed HTTP 500
 session-create instrumentation 30000 ms deadline error also qualifies only when a
-nonempty, wholly valid, unique TCP reverse baseline becomes raw-empty stdout with
-blank stderr in a successful same-device inspection. Partial, unchanged or
+nonempty, wholly valid, unique TCP reverse baseline becomes blank stdout (adb
+prints a lone newline for an empty listing) with blank stderr in a successful
+same-device inspection. Partial, unchanged or
 unreadable mappings do not qualify. Restoration uses `reverse --no-rebind`; a
 conflict or any inspection/restoration failure preserves the original Appium error
 and records a bounded secondary failure. Ownership, lifecycle and driver health
