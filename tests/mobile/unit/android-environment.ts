@@ -3649,17 +3649,13 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         assert.equal(outcome.assessment?.status, name === 'healthy-warm' ? 'PASS' : 'FAIL');
         const result = JSON.parse(await readFile(join(fixture.root, 'android-environment-check.json'), 'utf8'));
         assert.equal(result.passed, name === 'healthy-warm');
-        assert.deepEqual(result.normalRetirements, []);
         assert.deepEqual(result.boundaryDiscordances, []);
         assert.ok((await readFile(join(fixture.root, 'android-qualification-logcat.log'), 'utf8')).includes(events));
         assert.deepEqual(result.forcedRestartEvents, expectedEvents);
         assert.deepEqual(result.nativeEvents.map((event: { line: string }) => event.line), expectedEvents);
-        assert.deepEqual(result.eventCounts, {
-          rawEvents: expectedEvents.length,
-          distinctDeathPids: Number(signal) + Number(stop),
-          fatalEvents: expectedEvents.length,
-          normalRetirementPids: 0,
-        });
+        assert.equal(result.eventCounts.rawEvents, expectedEvents.length);
+        assert.equal(result.eventCounts.distinctDeathPids, Number(signal) + Number(stop));
+        assert.equal(result.eventCounts.fatalEvents, expectedEvents.length);
         assert.deepEqual(result.issues, [
           ...(components ? [
             'com.google.android.gms dependencyConfigSha256 changed',
@@ -3884,7 +3880,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       if (violation !== 'unknown close force-stop') assert.ok(report.forcedRestartEvents.some((line: string) => line.includes('5759 SIG: 9')));
       if (violation !== 'earlier SIGKILL') assert.ok(report.forcedRestartEvents.some((line: string) => line.includes('from pid 9970')));
       assert.deepEqual(JSON.parse(await readFile(join(fixture.root, 'operations.json'), 'utf8')), [], 'never fabricate device initiator ownership from a host session close');
-      assert.equal(report.normalRetirements.length, 0);
     });
   }
   test('headless version acquisition avoids the GUI runtime and preserves measured identity', async () => {
@@ -4396,7 +4391,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(result.passed, entry.fatal === 0, entry.name);
       assert.equal(report.forcedRestartEvents.length, entry.fatal, entry.name);
       assert.equal(report.eventCounts.fatalEvents, entry.fatal, entry.name);
-      assert.equal(report.normalRetirements.length, 0, entry.name);
     }
   });
   test('planned termination exemption requires the actual operation, matching PID/package and time, never a release-suite label', async () => {

@@ -142,11 +142,13 @@ export const androidEventTests: [string, () => Promise<void>][] = [
       log.replace(firstStartup, firstStartup.replace('1790252389.327', '1790252387.999')),
     ]) rejected(candidate);
     for (const candidate of [log.replace(recordedFork, ''), log.replace(recordedFork, recordedFork.replace('5253', '5254'))]) rejected(candidate);
+  }],
+  ['recorded main Chrome process death stays fatal', async () => {
     const mainDeath = recordedLine('         1790252389.460 553 1783 I ActivityManager: Process com.android.chrome (pid 6538) has died: fg TOP');
-    const mixed = measureRecorded(recordedStart + recordedBody + mainDeath + recordedEnd,
+    const result = measureRecorded(recordedStart + mainDeath + recordedEnd,
       recordedSnapshot('start'), recordedSnapshot('end', { '5253': 'com.android.chrome_zygote', '553': 'system_server' }));
-    assert.equal(mixed.normalRetirements.length, 1);
-    assert.ok(mixed.fatalEvents.includes(mainDeath.trimEnd()), 'main-process death remains fatal');
+    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.fatalEvents, [mainDeath.trimEnd()]);
   }],
 ];
 
@@ -190,12 +192,10 @@ androidEventTests.push(['synthetic delayed audit retains typed subject attributi
 androidEventTests.push(['synthetic receive boundaries retain ordinary producer inversions diagnostically', async () => {
   for (const timestamp of ['1789106369.984', '1789106380.016']) {
     const ordinary = line(1, 888, 'OtherProducer', 'ordinary record').replace('1789106371.000', timestamp);
-    const log = start + ordinary + body + end;
-    const result = measure(log);
+    const mainDeath = line(4, 559, 'ActivityManager', 'Process com.android.chrome (pid 300) has died: fg TOP');
+    const result = measure(start + ordinary + mainDeath + end);
     assert.deepEqual(result.issues, []);
-    assert.equal(result.normalRetirements.length, 1);
     assert.deepEqual(result.boundaryDiscordances, [{ lineNumber: 2, line: ordinary.trimEnd() }]);
-    for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
   }
 }]);
 
@@ -1040,14 +1040,12 @@ for (const [name, log] of [
 ] as [string, string][]) androidEventTests.push([`synthetic invalid coverage: ${name}`, async () => {
   const result = measure(log);
   assert.ok(result.issues.length);
-  assert.equal(result.normalRetirements.length, 0);
 }]);
 androidEventTests.push(['synthetic mixed fatal and normal observations and inventory contradictions stay fatal', async () => {
   const result = measure(start + body + line(6, 559, 'ActivityManager', 'Process com.android.chrome (pid 300) has died: fg TOP') + end);
-  assert.equal(result.normalRetirements.length, 1);
   assert.equal(result.fatalEvents.length, 1);
   for (const [before, after] of [[snapshot('start', { '200': processName }), snapshot('end')], [snapshot('start'), snapshot('end', { '200': 'com.example' })]]) {
-    assert.equal(measure(start + body + end, before, after).normalRetirements.length, 0);
+    assert.deepEqual(measure(start + body + end, before, after).fatalEvents, [death.trimEnd()]);
   }
 }]);
 
