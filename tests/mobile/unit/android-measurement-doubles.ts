@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -87,20 +86,10 @@ export function fixtureTransportObservation(serial: string, output: string, fixt
 async function run(): Promise<void> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-  const input = Buffer.concat(chunks);
-  if (process.argv[2] === '--android-transport-observation-trigger') {
-    const request = JSON.parse(input.toString()) as AndroidTransportTrigger & { serial: string; outputDir: string; fixture: AndroidTransportFixture };
-    const observation = fixtureTransportObservation(request.serial, request.outputDir, request.fixture);
-    await observation.observeTrigger(request);
-    process.stdout.write(`${JSON.stringify({ failure: observation.failure })}\n`);
-    return;
-  }
-  const worker = fileURLToPath(new URL('../android-measurement.ts', import.meta.url));
-  const result = spawnSync(process.execPath, [worker, process.argv[2]], { input, encoding: 'utf8', timeout: 10_000 });
-  if (result.error || result.status !== 0) throw result.error || new Error(result.stderr);
-  process.stderr.write(result.stderr);
-  process.on('SIGTERM', () => undefined);
-  setInterval(() => undefined, 1_000);
+  const request = JSON.parse(Buffer.concat(chunks).toString()) as AndroidTransportTrigger & { serial: string; outputDir: string; fixture: AndroidTransportFixture };
+  const observation = fixtureTransportObservation(request.serial, request.outputDir, request.fixture);
+  await observation.observeTrigger(request);
+  process.stdout.write(`${JSON.stringify({ failure: observation.failure })}\n`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
