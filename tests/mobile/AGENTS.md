@@ -20,9 +20,9 @@
 
 ## Tests
 
-- Run tests with `MOBILE_UNIT_FILTER='<regex>' bun run --cwd tests/mobile test:unit`. The slow groups are:
-  - `^iOS `: about 18 minutes. Narrow it with `IOS_TEST_FILTER`.
-  - `^Android product`: about 11 minutes.
+- Run tests with `MOBILE_UNIT_FILTER='<regex>' make mobile-unit-check`. The slow groups are:
+  - `^iOS `: about 18 minutes. Narrow it with a longer regex.
+  - `^Android product/environment `: about 11 minutes.
   - `^Android production CLI `: about 11 minutes.
 
   Run the group you changed first, then all groups before pushing.

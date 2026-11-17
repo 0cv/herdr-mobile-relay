@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -61,7 +62,7 @@ import { nativeStartupTests } from './native-startup';
 import { xctestOwnerTests } from './xctest-owner';
 import { xctestOutputTests } from './xctest-output';
 import { ownedInputTests } from './owned-input';
-import { iosRegressionCases, runIOSRegressions } from './ios';
+import { iosTests } from './ios';
 import { confirmationSettingsTests } from './confirmation-settings';
 import { initialSettingsTests } from './initial-settings';
 import { scenarioRunnerTests } from './scenario-runner';
@@ -71,18 +72,6 @@ import { webdriverInterruptionTests } from './webdriver-interruption';
 import { webdriverFatalTests } from './webdriver-fatal';
 import { iosProducerPrivacyTests, iosInstalledClientTests } from './ios-producer';
 import { iosIntegrityEvidenceTests } from './ios-integrity-evidence';
-import { stableTestIdentities, type TestCaseIdentity } from './test-registry';
-import { testShardTests } from './test-shards-tests';
-import { testShardCiTests } from './test-shard-ci-tests';
-import { testOutputTests } from './test-output-tests';
-
-type TestOutcome = void | string;
-const tests: Array<[string, () => Promise<TestOutcome>]> = [];
-let selectedIOSIds: readonly string[] | undefined;
-let explicitSelection = false;
-function test(name: string, body: () => Promise<TestOutcome>): void {
-  tests.push([name, body]);
-}
 
 function assertNoKnownSecret(text: string, secrets: readonly string[]): void {
   const normalized = text.replaceAll('\\/', '/');
@@ -396,12 +385,13 @@ test('archive checksum mismatch is rejected before extraction', async () => {
   );
 });
 
-test('valid release archives extract through the verified GNU tar path', async () => {
+test('valid release archives extract through the verified GNU tar path', async (t) => {
   const tar = process.env.MOBILE_GNU_TAR || (process.platform === 'darwin' ? 'gtar' : 'tar');
   try {
     execFileSync(tar, ['--version'], { stdio: 'ignore' });
   } catch {
-    return 'GNU tar is unavailable';
+    t.skip('GNU tar is unavailable');
+    return;
   }
   const sourceRoot = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-valid-archive-'));
   const web = join(sourceRoot, 'web');
@@ -2608,8 +2598,7 @@ for (const [name, body] of iosInstalledClientTests) test(name, body);
 for (const [name, body] of [...iosProducerPrivacyTests, ...iosIntegrityEvidenceTests]) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
 for (const [name, body] of [...androidEmulatorLifetimeTests, ...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests, ...ownedInputTests]) test(name, body);
-test('iOS recorded publication, installation and navigation protocol regressions', async () =>
-  runIOSRegressions(selectedIOSIds, !explicitSelection));
+for (const [name, body] of iosTests) test(`iOS ${name}`, body);
 test('Android CI gates the shared local Appium launch path', async () => {
   await import('./android-appium-ci');
 });
@@ -2633,223 +2622,3 @@ test('Android socket metadata preserves fresh native and selected document owner
   const { runAndroidSocketRegressions } = await import('./android-socket');
   await runAndroidSocketRegressions();
 });
-for (const [name, body] of [...testShardTests, ...testShardCiTests, ...testOutputTests]) test(name, body);
-test('unit runner registration sentinel', async () => {
-  const filename = process.env.MOBILE_UNIT_REGISTRATION_SENTINEL;
-  if (filename) await writeFile(filename, 'body-ran');
-});
-test('unit runner registry ids distinguish repeated display titles', async () => {
-  const first = stableTestIdentities('outer', ['Repeated title', 'Repeated title']);
-  const second = stableTestIdentities('outer', ['Repeated title', 'Repeated title']);
-  assert.notEqual(first[0]!.id, first[1]!.id);
-  assert.deepEqual(first, second);
-});
-test('unit runner listing and selection interface is deterministic and registration-only', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-unit-registry-'));
-  const marker = join(root, 'body-ran');
-  const runner = repositoryPath('tests/mobile/unit/suite.test.ts');
-  const environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    BUN_OPTIONS: '--no-env-file',
-    MOBILE_UNIT_FILTER: '^unit runner registration sentinel$',
-    MOBILE_UNIT_REGISTRATION_SENTINEL: marker,
-  };
-  delete environment.IOS_TEST_FILTER;
-  const invoke = (args: string[]) => execFileSync(process.execPath, ['--no-env-file', runner, ...args], {
-    cwd: repositoryRoot, env: environment, encoding: 'utf8', timeout: 15_000, maxBuffer: 1_000_000,
-  });
-  const assertRejected = (args: string[], expected: RegExp) => {
-    const result = spawnSync(process.execPath, ['--no-env-file', runner, ...args], {
-      cwd: repositoryRoot, env: environment, encoding: 'utf8', timeout: 15_000, maxBuffer: 1_000_000, stdio: 'pipe',
-    });
-    assert.equal(result.error, undefined, `runner could not reject arguments: ${args.join(' ')}`);
-    assert.equal(result.status, 2, `runner accepted invalid arguments: ${args.join(' ')}`);
-    assert.equal(result.stdout, '');
-    assert.match(String(result.stderr), expected);
-  };
-  try {
-    const first = invoke(['--list-tests']);
-    const second = invoke(['--list-tests']);
-    assert.equal(first, second);
-    assert.equal(existsSync(marker), false);
-    const listing = JSON.parse(first) as { schema: number; cases: UnitTestCase[] };
-    assert.equal(listing.schema, 1);
-    assert.deepEqual(listing.cases, unitTestInventory);
-    assert.equal(new Set(listing.cases.map((entry) => entry.id)).size, listing.cases.length);
-    assert.ok(listing.cases.some((entry) => entry.scope === 'ios-inner'));
-    for (const entry of listing.cases.filter((candidate) => candidate.scope === 'ios-inner')) {
-      assert.equal(entry.parentId, iosWrapperId);
-    }
-    assertRejected(['--select-tests', 'unknown-registration-id'], /unknown test id/u);
-    assertRejected(['--select-tests', 'first,,second'], /malformed test selection/u);
-    assertRejected(['--list-tests', 'unexpected'], /does not accept additional arguments/u);
-    const innerCase = unitTestInventory.find((entry) => entry.scope === 'ios-inner');
-    assert.ok(innerCase);
-    assertRejected(['--select-tests', `${iosWrapperId},${innerCase.id}`], /select either the iOS wrapper/u);
-    assert.equal(existsSync(marker), false);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-test('unit runner explicit selection matches default filtered execution', async () => {
-  const name = 'Android launch failures are classified without hiding command diagnostics';
-  const selected = unitTestInventory.filter((entry) => entry.scope === 'outer' && entry.name === name);
-  assert.equal(selected.length, 1);
-  const runner = repositoryPath('tests/mobile/unit/suite.test.ts');
-  const environment: NodeJS.ProcessEnv = { ...process.env, BUN_OPTIONS: '--no-env-file' };
-  delete environment.MOBILE_UNIT_FILTER;
-  delete environment.IOS_TEST_FILTER;
-  const invoke = (args: string[], env: NodeJS.ProcessEnv) => {
-    const result = spawnSync(process.execPath, ['--no-env-file', runner, ...args], {
-      cwd: repositoryRoot, env, encoding: 'utf8', timeout: 15_000, maxBuffer: 1_000_000, stdio: 'pipe',
-    });
-    assert.equal(result.error, undefined, `runner could not run: ${args.join(' ')}`);
-    assert.equal(result.status, 0, String(result.stderr));
-    assert.equal(result.stderr, '', `healthy selected or filtered runs must keep stderr empty for shard output validation: ${args.join(' ')}`);
-    return result.stdout;
-  };
-  const selectedOutput = invoke(['--select-tests', selected[0]!.id], environment);
-  const filteredOutput = invoke([], { ...environment, MOBILE_UNIT_FILTER: `^${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$` });
-  assert.equal(selectedOutput, filteredOutput);
-  assert.equal(selectedOutput, `ok - ${name}\n`);
-  const selectedWithUnrelatedFilters = invoke(['--select-tests', selected[0]!.id], {
-    ...environment, MOBILE_UNIT_FILTER: '^no selected outer case$', IOS_TEST_FILTER: '^no selected inner case$',
-  });
-  assert.equal(selectedWithUnrelatedFilters, selectedOutput);
-  const innerName = 'iOS recorded initial publication waits passively for the same page before actual document binding';
-  const selectedInner = unitTestInventory.find((entry) => entry.scope === 'ios-inner' && entry.name === innerName);
-  assert.ok(selectedInner);
-  const selectedInnerOutput = invoke(['--select-tests', selectedInner.id], environment);
-  const filteredInnerOutput = invoke([], {
-    ...environment,
-    MOBILE_UNIT_FILTER: `^${iosWrapperName.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`,
-    IOS_TEST_FILTER: `^${innerName.slice('iOS '.length).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`,
-  });
-  assert.equal(selectedInnerOutput, filteredInnerOutput);
-  assert.equal(selectedInnerOutput, `ok - iOS ${innerName.slice('iOS '.length)}\nok - ${iosWrapperName}\n`);
-  const selectedInnerWithUnrelatedFilters = invoke(['--select-tests', selectedInner.id], {
-    ...environment, MOBILE_UNIT_FILTER: '^no selected outer case$', IOS_TEST_FILTER: '^no selected inner case$',
-  });
-  assert.equal(selectedInnerWithUnrelatedFilters, selectedInnerOutput);
-});
-test('unit runner filters fail closed when no cases match', async () => {
-  const names = tests.map(([name]) => name);
-  assert.throws(() => matchingUnitTestNames('(?!)', names), /MOBILE_UNIT_FILTER matched no test cases/u);
-  assert.equal(matchingUnitTestNames('^unit runner registration sentinel$', names).size, 1);
-
-  const previousFilter = process.env.IOS_TEST_FILTER;
-  process.env.IOS_TEST_FILTER = '(?!)';
-  try {
-    await assert.rejects(() => runIOSRegressions(undefined, true), /no cases matched IOS_TEST_FILTER/u);
-  } finally {
-    if (previousFilter === undefined) delete process.env.IOS_TEST_FILTER;
-    else process.env.IOS_TEST_FILTER = previousFilter;
-  }
-});
-
-type UnitTestCase = TestCaseIdentity & { parentId?: string };
-type UnitRunnerOptions = { mode: 'list' } | { mode: 'run'; selectedIds?: string[] };
-const iosWrapperName = 'iOS recorded publication, installation and navigation protocol regressions';
-const outerTestIdentities = stableTestIdentities('outer', tests.map(([name]) => name));
-const iosWrapperId = outerTestIdentities.find((entry) => entry.name === iosWrapperName)?.id;
-if (!iosWrapperId) throw new Error('iOS regression wrapper is not registered');
-const unitTestInventory: UnitTestCase[] = [
-  ...outerTestIdentities,
-  ...iosRegressionCases.map((entry) => ({ ...entry, parentId: iosWrapperId })),
-];
-if (new Set(unitTestInventory.map((entry) => entry.id)).size !== unitTestInventory.length) {
-  throw new Error('unit test registration ids are not unique');
-}
-
-function parseUnitRunnerOptions(args: string[]): UnitRunnerOptions {
-  if (args.length === 0) return { mode: 'run' };
-  if (args[0] === '--list-tests') {
-    if (args.length !== 1) throw new Error('--list-tests does not accept additional arguments');
-    return { mode: 'list' };
-  }
-  let selection: string;
-  if (args[0] === '--select-tests' && args.length === 2) selection = args[1]!;
-  else if (args.length === 1 && args[0]!.startsWith('--select-tests=')) selection = args[0]!.slice('--select-tests='.length);
-  else throw new Error('usage: unit/suite.test.ts [--list-tests | --select-tests <comma-separated-ids>]');
-  const selectedIds = selection.split(',');
-  if (!selection || selection.trim() !== selection || selectedIds.some((id) => !id || id.trim() !== id)
-    || new Set(selectedIds).size !== selectedIds.length) {
-    throw new Error('malformed test selection');
-  }
-  const knownIds = new Set(unitTestInventory.map((entry) => entry.id));
-  const unknownId = selectedIds.find((id) => !knownIds.has(id));
-  if (unknownId) throw new Error(`unknown test id: ${unknownId}`);
-  return { mode: 'run', selectedIds };
-}
-
-function matchingUnitTestNames(filter: string, names: readonly string[]): Set<string> {
-  const matcher = new RegExp(filter, 'u');
-  const matchedNames = new Set(names.filter((name) => matcher.test(name)));
-  if (!matchedNames.size) throw new Error('MOBILE_UNIT_FILTER matched no test cases');
-  return matchedNames;
-}
-
-async function runUnitTests(): Promise<void> {
-  let options: UnitRunnerOptions;
-  try {
-    options = parseUnitRunnerOptions(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(`unit runner arguments: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 2;
-    return;
-  }
-  if (options.mode === 'list') {
-    process.stdout.write(`${JSON.stringify({ schema: 1, cases: unitTestInventory })}\n`);
-    return;
-  }
-  explicitSelection = options.selectedIds !== undefined;
-  let selectedOuterIds: Set<string> | undefined;
-  if (options.selectedIds) {
-    const selectedCases = options.selectedIds.map((id) => unitTestInventory.find((entry) => entry.id === id)!);
-    const selectedInnerCases = selectedCases.filter((entry) => entry.scope === 'ios-inner');
-    const selectsIOSWrapper = options.selectedIds.includes(iosWrapperId!);
-    if (selectedInnerCases.length && selectsIOSWrapper) {
-      process.stderr.write('unit runner arguments: select either the iOS wrapper or nested iOS ids, not both\n');
-      process.exitCode = 2;
-      return;
-    }
-    selectedOuterIds = new Set(selectedCases.filter((entry) => entry.scope === 'outer').map((entry) => entry.id));
-    if (selectedInnerCases.length) {
-      selectedOuterIds.add(iosWrapperId!);
-      selectedIOSIds = selectedInnerCases.map((entry) => entry.id);
-    }
-  }
-  let filteredNames: Set<string> | undefined;
-  if (!explicitSelection && process.env.MOBILE_UNIT_FILTER) {
-    try {
-      filteredNames = matchingUnitTestNames(process.env.MOBILE_UNIT_FILTER, tests.map(([name]) => name));
-    } catch (error) {
-      process.stderr.write(`unit runner filter: ${error instanceof Error ? error.message : String(error)}\n`);
-      process.exitCode = 1;
-      return;
-    }
-  }
-  let failures = 0;
-  let executedTests = 0;
-  for (const [index, [name, body]] of tests.entries()) {
-    if (selectedOuterIds && !selectedOuterIds.has(outerTestIdentities[index]!.id)) continue;
-    if (filteredNames && !filteredNames.has(name)) continue;
-    executedTests++;
-    try {
-      const outcome = await body();
-      process.stdout.write(outcome ? `ok - ${name} # SKIP ${outcome}\n` : `ok - ${name}\n`);
-    } catch (error) {
-      failures += 1;
-      process.stderr.write(`not ok - ${name}: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
-    }
-  }
-  if (!executedTests) {
-    const reason = explicitSelection ? 'explicit test selection' : process.env.MOBILE_UNIT_FILTER ? 'MOBILE_UNIT_FILTER' : 'registered cases';
-    process.stderr.write(`unit runner: no test cases matched ${reason}\n`);
-    process.exitCode = 1;
-    return;
-  }
-  if (failures) process.exitCode = 1;
-}
-
-await runUnitTests();

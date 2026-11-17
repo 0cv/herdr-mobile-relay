@@ -16,7 +16,6 @@ import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
 import { FakeClock } from './fake-clock';
-import { stableTestIdentities } from './test-registry';
 import { iosProviderHandoffCases } from './ios-provider-handoff';
 
 const origin = 'https://localhost:52101';
@@ -29,10 +28,9 @@ const missing = () => Response.json({ value: { error: 'no such element', message
 const installed = recorded.contexts.find((context) => context.bundleId === 'com.apple.SafariViewService')!;
 const published = { ...installed, url: recorded.publishedPages[0].url, title: recorded.publishedPages[0].title };
 type Request = { path: string; body: any; method: string; signal?: AbortSignal | null; dispatchedOrdinal: number };
-type TestOutcome = void | string;
-const tests: Array<[string, () => Promise<TestOutcome>]> = [];
-const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([name, body]);
-tests.push(...iosProviderHandoffCases);
+export const iosTests: Array<[string, () => Promise<void>]> = [];
+const test = (name: string, body: () => Promise<void>) => iosTests.push([name, body]);
+iosTests.push(...iosProviderHandoffCases);
 
 async function within<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -5092,32 +5090,3 @@ test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering',
     assert.equal(a.clock.timers.size, 0);
   }
 });
-
-export const iosRegressionCases = stableTestIdentities('ios-inner', tests.map(([name]) => `iOS ${name}`));
-
-export async function runIOSRegressions(selectedIds?: readonly string[], honorEnvironmentFilter = true): Promise<void> {
-  let failures = 0;
-  let executedTests = 0;
-  const selected = selectedIds === undefined ? undefined : new Set(selectedIds);
-  const filter = honorEnvironmentFilter && process.env.IOS_TEST_FILTER
-    ? new RegExp(process.env.IOS_TEST_FILTER, 'u') : undefined;
-  for (const [index, [name, body]] of tests.entries()) {
-    if (selected && !selected.has(iosRegressionCases[index]!.id)) continue;
-    if (filter && !filter.test(name)) continue;
-    executedTests++;
-    try {
-      const outcome = await body();
-      process.stdout.write(outcome ? `ok - iOS ${name} # SKIP ${outcome}\n` : `ok - iOS ${name}\n`);
-    } catch (error) {
-      failures += 1;
-      process.stderr.write(`not ok - iOS ${name}: ${error instanceof Error ? error.stack : String(error)}\n`);
-    }
-  }
-  if (!executedTests) {
-    const reason = selected ? 'explicit iOS selection' : honorEnvironmentFilter && process.env.IOS_TEST_FILTER ? 'IOS_TEST_FILTER' : 'registered cases';
-    throw new Error(`iOS regressions: no cases matched ${reason}`);
-  }
-  if (failures) throw new Error(`iOS regressions: ${failures} failures`);
-}
-
-if (import.meta.main) await runIOSRegressions();

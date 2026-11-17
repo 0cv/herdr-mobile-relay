@@ -192,7 +192,6 @@ console.log(output);
         await assert.rejects(() => (platform as any).readChromeProcess(), error => error === first);
         await assert.rejects(() => platform.launchInstalledApp(), error => error === first);
         assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), state);
-        console.log(`PASS retained kernel acquisition ${scenario}`);
         continue;
       }
       await (platform as any).createChromeSession(false);
@@ -276,7 +275,6 @@ console.log(output);
       assert.equal(calls.some(call => call.path === '/url' && call.method === 'POST'), false);
       assert.equal(calls.some(call => call.body.name === 'WEBVIEW_other'), false);
       assert.equal(maxActive, 1);
-      console.log(`PASS retained signed launch ${scenario}`);
     } finally {
       await Promise.all(pending);
       assert.equal(active, 0);
@@ -701,7 +699,6 @@ async function runAndroidCertificateTeardownControls(fixture: LifecycleFixtureIn
       await assert.rejects(() => platform.startFreshDevice(), error => error === first);
       assert.equal(calls.filter(call => call.method === 'DELETE').length, 1);
     });
-    console.log(`PASS SM56 certificate admission ${variant}`);
   }
 }
 
@@ -830,7 +827,6 @@ async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promi
     if (variant.startsWith('setup-') || variant === 'cold-replacement-post') {
       await runAndroidCreationTeardownControl(isolated, variant);
       if (variant === 'setup-settings-post') await runAndroidCertificateTeardownControls(isolated);
-      console.log(`PASS SM56 lifecycle concurrent-cold-consumers/${variant}`);
       continue;
     }
     await withAndroidRetainedLifecycleFixture(isolated, async ({ platform, client, calls, state, change, hold, assertTerminal, operations }) => {
@@ -914,7 +910,6 @@ async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promi
       assert.throws(owner);
       assert.equal((await operations()).length, variant === 'warm-inspection' ? 0 : 1);
     });
-    console.log(`PASS SM56 lifecycle concurrent-cold-consumers/${variant}`);
   }
 }
 
@@ -1174,5 +1169,3 @@ export async function runAndroidLifecycleCase(fixture: LifecycleFixtureInput, gr
     }
   });
 }
-
-if (import.meta.main) await runAndroidRetainedLaunchRegressions(process.argv.includes('--recorded-two-page') ? ['recorded-two-page'] : undefined);

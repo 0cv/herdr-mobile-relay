@@ -654,8 +654,7 @@ interface Harness {
   snapshot(fixture: Fixture, state: string, output: string, diagnostics: string, timeoutMs?: number): Promise<{ passed: boolean; stderr: string }>;
   check(fixture: Fixture, before: string, after: string, log?: string): Promise<{ passed: boolean; issues: string[] }>;
 }
-type TestOutcome = void | string;
-type Test = [string, () => Promise<TestOutcome>];
+type Test = [string, () => Promise<void>];
 const chromeDeath = '09-10 08:45:09.613 546 1761 I ActivityManager: Process com.android.chrome (pid 6538) has died: fg TOP\n';
 const benign = '09-10 08:45:09.000 1208 7311 W PlatformConfigurator: \tat com.google.android.gms.platformconfigurator.PhenotypeConfigurationUpdateListener.onHandleIntent(:com.google.android.gms@242335041@24.23.35:207)\n';
 const marker = (time: string, message: string) => `09-10 08:45:${time} 2000 2000 I HerdrMeasure: android-test ${message}\n`;
@@ -1635,8 +1634,8 @@ function observeRuntimeControl(child: ChildProcess): RuntimeControlObserver {
 
 export function androidEnvironmentTests(harness: Harness): Test[] {
   const tests: Test[] = [];
-  const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([`Android production CLI ${name}`, body]);
-  const darwinProcessExitTest = (name: string, body: () => Promise<TestOutcome>) => {
+  const test = (name: string, body: () => Promise<void>) => tests.push([`Android production CLI ${name}`, body]);
+  const darwinProcessExitTest = (name: string, body: () => Promise<void>) => {
     if (process.platform === 'darwin') test(name, body);
   };
   test('registers independent supervisor exit-status witness cases only where Darwin EVFILT_PROC NOTE_EXITSTATUS exists', async () => {
@@ -3577,7 +3576,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           assert.equal(existsSync(join(fixture.root, 'android-environment-bootstrap-close.json')), false);
           assert.doesNotMatch(await readFile(fixture.log, 'utf8'), /CLOSE_(?:BEGIN|END)/u);
           completed++;
-          console.log(`PASS SM56 lifecycle ${group}/${name}`);
         } catch (error) {
           try {
             process.stderr.write(`SM56_LIFECYCLE_FAILURE ${redactText(JSON.stringify({
@@ -3694,7 +3692,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         assert.equal(existsSync(join(fixture.root, 'android-environment-bootstrap-close.json')), false);
         assert.doesNotMatch(await readFile(fixture.log, 'utf8'), /force-stop|disable-user|CLOSE_(?:BEGIN|END)/u);
       });
-      console.log(`PASS SM56 environment ${name}`);
     }
   });
   const prepare = (fixture: Fixture, timeoutMs = 5_000) => cli(fixture, ['prepare', '--serial', 'emulator-5554', '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'), '--output', join(fixture.root, 'preparation.json'), '--adb-timeout-ms', String(timeoutMs)]);

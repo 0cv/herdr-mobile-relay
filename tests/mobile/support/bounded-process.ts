@@ -40,7 +40,7 @@ export interface BoundedCommandResult {
   stderrSha256: string;
 }
 
-export interface BoundedCommandOptions {
+interface BoundedCommandOptions {
   budget?: PhaseBudget;
   label?: string;
   maxBytes: number;
