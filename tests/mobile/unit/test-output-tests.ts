@@ -47,7 +47,7 @@ async function authoritativeInventory(): Promise<UnitTestInventory> {
   delete process.env.MOBILE_UNIT_FILTER;
   delete process.env.IOS_TEST_FILTER;
   try {
-    const result = await boundedCommand(process.execPath, ['--no-env-file', join(repositoryRoot, 'tests/mobile/unit/run.ts'), '--list-tests'], 20_000, {
+    const result = await boundedCommand(process.execPath, ['--no-env-file', join(repositoryRoot, 'tests/mobile/unit/suite.test.ts'), '--list-tests'], 20_000, {
       maxBytes: 4 * 1024 * 1024,
       cleanupReservationMs: 1_000,
       label: 'unit output contract source listing',

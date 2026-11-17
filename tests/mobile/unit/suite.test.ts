@@ -2647,7 +2647,7 @@ test('unit runner registry ids distinguish repeated display titles', async () =>
 test('unit runner listing and selection interface is deterministic and registration-only', async () => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-unit-registry-'));
   const marker = join(root, 'body-ran');
-  const runner = repositoryPath('tests/mobile/unit/run.ts');
+  const runner = repositoryPath('tests/mobile/unit/suite.test.ts');
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
     BUN_OPTIONS: '--no-env-file',
@@ -2695,7 +2695,7 @@ test('unit runner explicit selection matches default filtered execution', async 
   const name = 'Android launch failures are classified without hiding command diagnostics';
   const selected = unitTestInventory.filter((entry) => entry.scope === 'outer' && entry.name === name);
   assert.equal(selected.length, 1);
-  const runner = repositoryPath('tests/mobile/unit/run.ts');
+  const runner = repositoryPath('tests/mobile/unit/suite.test.ts');
   const environment: NodeJS.ProcessEnv = { ...process.env, BUN_OPTIONS: '--no-env-file' };
   delete environment.MOBILE_UNIT_FILTER;
   delete environment.IOS_TEST_FILTER;
@@ -2770,7 +2770,7 @@ function parseUnitRunnerOptions(args: string[]): UnitRunnerOptions {
   let selection: string;
   if (args[0] === '--select-tests' && args.length === 2) selection = args[1]!;
   else if (args.length === 1 && args[0]!.startsWith('--select-tests=')) selection = args[0]!.slice('--select-tests='.length);
-  else throw new Error('usage: unit/run.ts [--list-tests | --select-tests <comma-separated-ids>]');
+  else throw new Error('usage: unit/suite.test.ts [--list-tests | --select-tests <comma-separated-ids>]');
   const selectedIds = selection.split(',');
   if (!selection || selection.trim() !== selection || selectedIds.some((id) => !id || id.trim() !== id)
     || new Set(selectedIds).size !== selectedIds.length) {

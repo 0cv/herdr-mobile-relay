@@ -11,7 +11,7 @@
   "scripts": {
     "lint": "eslint .",
     "check": "tsc --noEmit",
-    "test:unit": "bun unit/run.ts",
+    "test:unit": "bun unit/suite.test.ts",
     "test:android-inspection": "bash unit/android-inspection-check.sh",
     "test:android-attachment": "bun unit/android-retained-launch.ts --recorded-two-page",
     "prepare:bundle": "bun prepare.ts",

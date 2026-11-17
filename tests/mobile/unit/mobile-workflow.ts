@@ -374,7 +374,7 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
     assert.ok(script.indexOf('"$root/test.ts" original') < script.indexOf('gate.ts" patch'));
     assert.ok(script.indexOf('gate.ts" patch') < script.indexOf('"$root/test.ts" patched'));
     assert.doesNotMatch(script, /MOBILE_UNIT_FILTER|test:unit/u);
-    const ordinary = await readFile(repositoryPath('tests/mobile/unit/run.ts'), 'utf8');
+    const ordinary = await readFile(repositoryPath('tests/mobile/unit/suite.test.ts'), 'utf8');
     assert.doesNotMatch(ordinary, /iosProducerTests|iosProducerGateTests|IOS_PRODUCER_HOME/u);
     const entry = await readFile(repositoryPath('tests/mobile/ios-appium/test.ts'), 'utf8');
     assert.match(entry, /Unexpected fixture regression inventory/u);

@@ -95,7 +95,7 @@ function makeGroupArtifacts(current: Fixture): UnitCiArtifactGroup[] {
         current.plan,
         group.id,
         shard,
-        { binary: process.execPath, args: ['--no-env-file', 'tests/mobile/unit/run.ts', '--select-tests', shard.selection.join(',')], result: resultFor(output) },
+        { binary: process.execPath, args: ['--no-env-file', 'tests/mobile/unit/suite.test.ts', '--select-tests', shard.selection.join(',')], result: resultFor(output) },
         '2026-01-01T00:00:00.000Z',
         5,
       );
@@ -330,7 +330,7 @@ export const testShardCiTests: Array<[string, () => Promise<void>]> = [
     }
   }],
   ['unit CI adapter sends real outer and nested ids through the P01 explicit-selection interface', async () => {
-    const listing = await fromRepositoryRoot(() => boundedCommand(process.execPath, ['--no-env-file', 'tests/mobile/unit/run.ts', '--list-tests'], 15_000, {
+    const listing = await fromRepositoryRoot(() => boundedCommand(process.execPath, ['--no-env-file', 'tests/mobile/unit/suite.test.ts', '--list-tests'], 15_000, {
       maxBytes: 4 * 1024 * 1024,
       cleanupReservationMs: 1_000,
     }));
@@ -357,7 +357,7 @@ export const testShardCiTests: Array<[string, () => Promise<void>]> = [
     }
   }],
   ['unit CI receipts preserve a bounded redaction-sensitive authoritative success title', async () => {
-    const listing = await fromRepositoryRoot(() => boundedCommand(process.execPath, ['--no-env-file', 'tests/mobile/unit/run.ts', '--list-tests'], 15_000, {
+    const listing = await fromRepositoryRoot(() => boundedCommand(process.execPath, ['--no-env-file', 'tests/mobile/unit/suite.test.ts', '--list-tests'], 15_000, {
       maxBytes: 4 * 1024 * 1024,
       cleanupReservationMs: 1_000,
     }));
@@ -672,7 +672,7 @@ export const testShardCiTests: Array<[string, () => Promise<void>]> = [
       '  detail https://relay.example/?token=PRIVATE_SENTINEL',
       '    at assert (node:internal/assert:1:1)',
       '    at fixture (/home/runner/work/herdr/herdr/tests/mobile/unit/android-environment.ts:8159:16)',
-      '    at /home/runner/work/herdr/herdr/tests/mobile/unit/run.ts:2594:7',
+      '    at /home/runner/work/herdr/herdr/tests/mobile/unit/suite.test.ts:2594:7',
       'not ok - Android fixture unknown: PRIVATE_UNKNOWN',
       '    at /home/runner/work/herdr/herdr/tests/mobile/unit/unknown.ts:1:1',
       'not ok - Android fixture alpha: Error: no stack',
