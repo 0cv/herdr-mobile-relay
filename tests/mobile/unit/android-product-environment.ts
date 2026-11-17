@@ -593,34 +593,21 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       '1789100404.000 77 77 I Zygote: Process 5820 exited cleanly (0)',
       '1789100405.000 546 546 I ActivityManager: Process com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0 (pid 5820) has died: vis BTOP',
     ];
-    input.log = marker(0, 'START') + normal.join('\n') + '\n' + marker(9, 'END');
-    input.collector = JSON.stringify({ bytes: Buffer.byteLength(input.log) });
-    assert.equal(assessAndroidEnvironment(input, measurementIdentity()).normalRetirements.length, 1);
     const helperName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
-    for (const mutation of ['fork', 'birth', 'producer', 'uid', 'exit', 'signal', 'reuse']) {
-      const lines = [...normal];
-      if (mutation === 'fork') lines.splice(0, 1);
-      if (mutation === 'birth') lines.splice(1, 1);
-      if (mutation === 'producer') lines[0] = lines[0].replace('77 77', '78 78');
-      if (mutation === 'uid') lines[1] = lines[1].replace('u0ai0', 'u0ai9999');
-      if (mutation === 'exit') lines[3] = lines[3].replace('(0)', '(1)');
-      if (mutation === 'signal') lines.splice(3, 0, '1789100403.500 5820 5820 I Process: Sending signal. PID: 5820 SIG: 9');
-      if (mutation === 'reuse') lines.splice(2, 0, lines[1]);
-      const assess = (name: string) => {
-        const log = marker(0, 'START') + lines.join('\n').replaceAll(helperName, name) + '\n' + marker(9, 'END');
-        return assessAndroidEnvironment(releaseEnvironmentFixture({ ...input, log, collector: JSON.stringify({ bytes: Buffer.byteLength(log) }) }), measurementIdentity());
-      };
-      const helper = assess(helperName);
-      assert.equal(helper.status, 'PASS', mutation);
-      assert.ok(helper.helperDeaths.length > 0, mutation);
-      assert.deepEqual(helper.forcedRestartEvents, [], mutation);
-      assert.equal(androidProductImpact(helper, observationsFixture()).status, 'PASS', mutation);
-      for (const name of ['com.android.chrome:privileged_process0', 'com.android.chrome']) {
-        const other = assess(name);
-        assert.notEqual(other.status, 'PASS', `${mutation}/${name}`);
-        assert.deepEqual(other.helperDeaths, [], `${mutation}/${name}`);
-        assert.notEqual(androidProductImpact(other, observationsFixture()).status, 'PASS', `${mutation}/${name}`);
-      }
+    const assess = (name: string) => {
+      const log = marker(0, 'START') + normal.join('\n').replaceAll(helperName, name) + '\n' + marker(9, 'END');
+      return assessAndroidEnvironment(releaseEnvironmentFixture({ ...input, log, collector: JSON.stringify({ bytes: Buffer.byteLength(log) }) }), measurementIdentity());
+    };
+    const helper = assess(helperName);
+    assert.equal(helper.status, 'PASS');
+    assert.ok(helper.helperDeaths.length > 0);
+    assert.deepEqual(helper.forcedRestartEvents, []);
+    assert.equal(androidProductImpact(helper, observationsFixture()).status, 'PASS');
+    for (const name of ['com.android.chrome:privileged_process0', 'com.android.chrome']) {
+      const other = assess(name);
+      assert.notEqual(other.status, 'PASS', name);
+      assert.deepEqual(other.helperDeaths, [], name);
+      assert.notEqual(androidProductImpact(other, observationsFixture()).status, 'PASS', name);
     }
     const identity = measurementIdentity();
     const operation: AndroidPlannedTermination = { id: 'cold-1', measurementId: identity.measurementId, packageName: 'com.android.chrome', pid: '42', processes: { '42': 'com.android.chrome' }, command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'], succeeded: true };

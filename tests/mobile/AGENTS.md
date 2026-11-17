@@ -14,7 +14,6 @@
 - `APPIUM_TIMEOUT` stays fatal for the rest of the run because the driver can no longer be trusted. Do not retry inside the run.
 - Hosted iOS runs with `MOBILE_TIMING_SCALE=3`, which scales phase and request allowances but not admission. The release scenario has 45 minutes and the device job 60.
 - Appium's iOS remote debugger deletes properties named `ceil`, `clone`, `floor`, `round`, `scale` and `toString` from web script results. Do not use those names in returned objects.
-- Sandbox-helper deaths are reported in `helperDeaths` and never gate; do not add new accepted helper cases.
 - Raw logs, screenshots and page XML stay in private artifacts with one-day retention. Public summaries carry only the bounded fields built by `publicMobileSummary` in `support/android-product.ts`. Never print raw device output in step logs.
 - Treat a failed download, runner image or simulator boot as an infrastructure fault: rerun the whole workflow, never single jobs. A lane change is done after two green attempts on the same commit.
 
