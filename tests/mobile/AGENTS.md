@@ -20,10 +20,11 @@
 
 ## Tests
 
-- Run tests with `MOBILE_UNIT_FILTER='<regex>' make mobile-unit-check`. The slow groups are:
-  - `^iOS `: about 18 minutes. Narrow it with a longer regex.
-  - `^Android product/environment `: about 11 minutes.
-  - `^Android production CLI `: about 11 minutes.
+- Run tests with `MOBILE_UNIT_FILTER='<regex>' make mobile-unit-check`. CI runs the suite as four legs split by these names. On hosted runners:
+  - `^iOS `: about 1 minute.
+  - `^Android product/environment `: about 1 minute.
+  - `^Android production CLI `: about 18 minutes.
+  - everything else: about 19 minutes, most of it `^Native startup actual XCTest supervisor `.
 
   Run the group you changed first, then all groups before pushing.
 - To show that a new test catches the bug, run it against the previous version of the source file and confirm that it fails.
