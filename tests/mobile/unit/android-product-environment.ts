@@ -658,6 +658,28 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       assert.throws(() => validateProductObservations(altered, identity, [operation]), /coverage/u, field);
     }
   }],
+  ['Android product/environment helper kills inside a planned Chrome force-stop are helper deaths', async () => {
+    const helper = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
+    const input = releaseEnvironmentFixture(environmentFixture());
+    const before = JSON.parse(input.before) as AndroidEnvironmentSnapshot;
+    before.measurement!.processes['301'] = helper;
+    input.before = JSON.stringify(before);
+    const operation: AndroidPlannedTermination = { ...coldOperation(), processes: { '42': 'com.android.chrome', '301': helper } };
+    input.operations = JSON.stringify([operation]);
+    const reap = `1789100403.000 546 546 I ActivityManager: Killing 301:${helper}/u0a146i-9000 (adj 0): isolated not needed`;
+    const helperExit = '1789100403.500 77 77 I Zygote: Process 301 exited due to signal 9 (Killed)';
+    input.log = input.log.replace(marker(6, 'OP_BEGIN cold-1 com.android.chrome 42'), marker(1, 'OP_BEGIN cold-1 com.android.chrome 42')
+      + '1789100402.000 546 546 I ActivityManager: Force stopping com.android.chrome appid=10146 user=0: from pid 50\n'
+      + '1789100402.000 546 546 I ActivityManager: Killing 42:com.android.chrome/u0a146 (adj 0): stop com.android.chrome due to from pid 50\n'
+      + `${reap}\n${helperExit}\n`
+      + '1789100404.000 77 77 I Zygote: Process 42 exited due to signal 9 (Killed)\n').replace(marker(7, 'OP_END cold-1 com.android.chrome 42'), marker(5, 'OP_END cold-1 com.android.chrome 42'));
+    input.collector = JSON.stringify({ bytes: Buffer.byteLength(input.log) });
+    const check = assessAndroidEnvironment(input, measurementIdentity());
+    assert.deepEqual(check.helperDeaths, [reap, helperExit]);
+    assert.deepEqual(check.forcedRestartEvents, []);
+    assert.equal(check.eventCounts.fatalEvents, 0);
+    assert.equal(check.status, 'PASS');
+  }],
   ['Android product/environment SM59 05 observation and producer binding', async () => {
     validateProductObservations(observationsFixture(), measurementIdentity(), [coldOperation()]);
     const recorded = await platformObservationControl();
