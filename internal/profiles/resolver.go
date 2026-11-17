@@ -300,9 +300,9 @@ func (r *Resolver) Forget(paneID string) {
 	}
 }
 
-// ResolvePane picks the profile for a pane: slash-command discovery
-// and the agent that Clear and Restart start. A verified launch record
-// wins; otherwise the profile matching the agent name Herdr reports is used.
+// ResolvePane picks the profile of the agent running in a pane. A verified
+// launch record wins; otherwise the profile matching the agent name Herdr
+// reports is used.
 func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 	if profileID := r.verifiedProfile(paneID); profileID != "" {
 		return profileID
