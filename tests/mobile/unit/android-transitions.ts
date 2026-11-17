@@ -434,19 +434,3 @@ test('Android native invalid-command lookup does not scroll or try another selec
     assert.equal(requests.some((item: any) => item.path === '/execute/sync'), false);
   });
 });
-
-if (import.meta.main) {
-  let failures = 0;
-  const selected = androidTransitionTests.filter(([name]) => !process.env.ANDROID_TEST_FILTER || name.includes(process.env.ANDROID_TEST_FILTER));
-  for (const [name, body] of selected) {
-    try {
-      await body();
-      console.log(`PASS ${name}`);
-    } catch (error) {
-      failures++;
-      console.error(`FAIL ${name}`, error);
-    }
-  }
-  console.log(`${selected.length - failures} passed; ${failures} failed. Host protocol replays are not native qualification. Picker-ready UI is synthetic, not recorded.`);
-  process.exitCode = failures ? 1 : 0;
-}

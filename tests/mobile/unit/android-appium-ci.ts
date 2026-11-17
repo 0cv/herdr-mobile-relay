@@ -145,7 +145,6 @@ if [[ "$*" == *"main.js --address"* ]]; then exit 42; fi
     await rm(integrity);
     assertExit(runBash(['-c', capture], { ...env, MOBILE_OUTPUT: output }), 0, `${filename}: missing Android integrity export`);
     await assert.rejects(() => readFile(artifact), /ENOENT/u);
-    console.log(`PASS ${filename}: scoped installation, startup refusal and bounded Android integrity artifact routing`);
   }
   await writeFile(trace, '');
   assertFailure(runBash(['tests/mobile/android-appium/ci.sh', 'start', '--address', '127.0.0.1'],
@@ -158,7 +157,6 @@ if [[ "$*" == *"main.js --address"* ]]; then exit 42; fi
   assert.equal(startCalls.length, 2);
   assert.match(startCalls[0], /gate.ts verify/u);
   assert.match(startCalls[1], /\/home\/node_modules\/appium\/build\/lib\/main.js --address/u);
-  console.log('PASS launch wrapper verifies immediately before exec of the same local Appium');
 } finally {
   await rm(scratch, { recursive: true, force: true });
 }

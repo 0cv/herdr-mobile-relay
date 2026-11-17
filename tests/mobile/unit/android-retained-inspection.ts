@@ -171,7 +171,6 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
       const count = calls;
       await assert.rejects(() => platform.attachToInstalledView(), error => error === first);
       assert.equal(calls, count);
-      console.log(`PASS retained inspection ${scenario}`);
       continue;
     }
     await platform.attachToInstalledView();
@@ -183,7 +182,6 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
       assert.ok((platform as any).inspectedNavigationId);
       assert.equal(readCalls, 0);
       assert.equal(productCalls, 0);
-      console.log(`PASS retained inspection ${scenario}`);
       continue;
     }
     armed = true;
@@ -278,8 +276,5 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     assert.equal(diagnostic.includes('/devtools/browser/'), false);
     assert.equal(diagnostic.includes('backend-original'), false);
     assert.equal(diagnostic.includes('secret endpoint must not be projected'), false);
-    console.log(`PASS retained inspection ${scenario}`);
   }
 }
-
-if (import.meta.main) await runAndroidRetainedInspectionRegressions();

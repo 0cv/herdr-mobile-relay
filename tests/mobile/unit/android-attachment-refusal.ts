@@ -84,8 +84,3 @@ export async function runAndroidAttachmentRefusalRegressions(): Promise<void> {
     await rm(root, { recursive: true, force: true });
   }
 }
-
-if (import.meta.main) {
-  await runAndroidAttachmentRefusalRegressions();
-  console.log('Android attachment refusal regressions passed (35 cases)');
-}

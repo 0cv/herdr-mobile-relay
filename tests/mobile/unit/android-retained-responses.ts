@@ -86,7 +86,6 @@ export async function runAndroidRetainedResponseRegressions(): Promise<void> {
       await assert.rejects(() => platform.relaunchInstalledApp(), error => error === first);
       await assert.rejects(() => client.currentUrl(), error => error === first);
       assert.equal(calls, count, 'healthy follow-up responses must never be requested');
-      console.log(`PASS retained response ${operation}/${fault}`);
     }
   } finally {
     if (saved === undefined) delete process.env.ADB; else process.env.ADB = saved;
@@ -94,5 +93,3 @@ export async function runAndroidRetainedResponseRegressions(): Promise<void> {
     await rm(root, { recursive: true, force: true });
   }
 }
-
-if (import.meta.main) await runAndroidRetainedResponseRegressions();

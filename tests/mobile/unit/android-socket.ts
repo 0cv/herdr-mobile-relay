@@ -64,6 +64,5 @@ export async function runAndroidSocketRegressions(): Promise<void> {
     }
     assert.deepEqual(metadataArgs, []);
     assert.deepEqual(windows.slice(windowCount), []);
-    console.log(`PASS retained socket ownership ${fault}`);
   }
 }

@@ -234,7 +234,7 @@ mobile-ci-common-check: mobile-frontend-dependencies mobile-test-dependencies mo
 	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml .github/workflows/mobile-ci.yml .github/workflows/release.yml
 
 mobile-unit-check: mobile-frontend-dependencies mobile-test-dependencies
-	MOBILE_UNIT_FILTER="$(value MOBILE_UNIT_FILTER)" bun run --cwd tests/mobile test:unit
+	filter="$(value MOBILE_UNIT_FILTER)"; bun run --cwd tests/mobile test:unit $${filter:+-t "$$filter"}
 
 mobile-frontend-dependencies:
 	bun install --frozen-lockfile --cwd frontend
