@@ -54,11 +54,9 @@ if (cmd === 'dumpsys activity activities') {
 await Bun.write(file, JSON.stringify(state));\n`);
   await chmod(adb, 0o700);
   const savedAdb = process.env.ADB;
-  const realNow = Date.now;
   let offset = 0;
-  Date.now = () => realNow() + offset;
   process.env.ADB = adb;
-  const budget = new PhaseBudget('android-recorded-replay', { timeoutMs: options.budgetMs || 60_000, recoveryLimit: 0 });
+  const budget = new PhaseBudget('android-recorded-replay', { timeoutMs: options.budgetMs || 60_000, recoveryLimit: 0, now: () => Date.now() + offset });
   const requests: Array<{ path: string; body: any; at: number }> = [];
   const elements = new Map<string, any>();
   const chromeControl = (text: string) => text === 'Add' ? options.chromeXML ?? hypotheticalChromeXML : `<hierarchy><android.widget.Button class="android.widget.Button" package="com.android.chrome" text="${text}" content-desc="${text}" clickable="true" enabled="true" displayed="true" bounds="[0,136][400,276]"/></hierarchy>`;
@@ -72,7 +70,7 @@ await Bun.write(file, JSON.stringify(state));\n`);
   const client = new AppiumClient('http://android-replay.invalid', 30_000, async (input, init) => {
     const path = new URL(String(input)).pathname.replace('/session/android-replay', '');
     const payload = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ path, body: payload, at: realNow() });
+    requests.push({ path, body: payload, at: Date.now() });
     active++;
     maxActive = Math.max(maxActive, active);
     try {
@@ -177,7 +175,6 @@ await Bun.write(file, JSON.stringify(state));\n`);
     await writeFile(join(root, 'protocol-result.json'), JSON.stringify({ requests, driver: client.snapshot(), active, maxActive, clicks, sourceCount }, null, 2));
     assert.equal(active, 0);
     assert.equal(maxActive, 1);
-    Date.now = realNow;
     if (savedAdb === undefined) delete process.env.ADB;
     else process.env.ADB = savedAdb;
   }

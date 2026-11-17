@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient, WebDriverError } from '../support/webdriver';
+import { FakeClock } from './fake-clock';
 import initialAppiumSettings from './fixtures/ios-appium-settings.json';
 import { CONFIRMATION_RESTORE_MS, CONFIRMATION_SETTINGS_COMMAND_MS, initializeIOSConfirmationSettings, IOS_SESSION_SETTINGS, IOS_CONFIRMATION_SETTINGS, withIOSConfirmationSettings } from '../support/confirmation-settings';
 
@@ -396,6 +397,7 @@ for (const operationMs of [49_000, 57_000]) confirmationSettingsTests.push([`iOS
 }]);
 
 confirmationSettingsTests.push(['iOS recorded 3312ms settings update remains outside the original command allowance', async () => {
+  const clock = new FakeClock(true);
   let updates = 0;
   let settings: Record<string, unknown> = { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 };
   const driver = new AppiumClient('http://settings.invalid', 30_000, async (input, init) => {
@@ -405,15 +407,15 @@ confirmationSettingsTests.push(['iOS recorded 3312ms settings update remains out
       if (init?.method === 'POST') {
         updates++;
         settings = { ...settings, ...JSON.parse(String(init.body)).settings };
-        if (updates === 1) await new Promise<void>(resolve => setTimeout(resolve, 3_312));
+        if (updates === 1) await clock.sleep(3_312);
         return Response.json({ value: null });
       }
       return Response.json({ value: settings });
     }
     return Response.json({ value: null });
-  });
+  }, clock.now, clock);
   await driver.create({ capabilities: {} });
-  const budget = new PhaseBudget('recorded-settings-delay', { timeoutMs: 30_000 });
+  const budget = new PhaseBudget('recorded-settings-delay', { timeoutMs: 30_000, now: clock.now, sleep: clock.sleep });
   driver.setBudget(budget);
   await assert.rejects(() => withIOSConfirmationSettings(driver, budget, 1_000, async () => {
     assert.fail('the delayed settings response must not authorize the operation');

@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IOSPlatform } from '../platforms/ios';
 import { PhaseBudget, timingScale } from '../support/budget';
-import { AppiumClient, type RequestEnforcementClock } from '../support/webdriver';
+import { AppiumClient } from '../support/webdriver';
+import { FakeClock } from './fake-clock';
 import recorded from './fixtures/ios/publication.json';
 
 const origin = 'https://localhost:52101';
@@ -17,21 +18,10 @@ type Mode = 'boundary' | 'early' | 'headers' | 'body' | 'parse' | 'invalid' | 'p
   | 'launch-gap' | 'scenario-gap' | 'launch-proof' | 'scenario-proof';
 
 async function fixture(mode: Mode) {
-  let now = 0;
+  const clock = new FakeClock();
   const phases = new Map<string, PhaseBudget>();
   const requests: Array<{ path: string; method: string; body: any }> = [];
-  const timers = new Map<ReturnType<typeof setTimeout>, number>();
-  let timerId = 0;
-  const clock: RequestEnforcementClock = {
-    now: () => now,
-    timer: (_callback, ms) => {
-      const id = ++timerId as unknown as ReturnType<typeof setTimeout>;
-      timers.set(id, ms);
-      return id;
-    },
-    clear: id => { timers.delete(id); },
-  };
-  const budget = new PhaseBudget('handoff-scenario', { timeoutMs: 45 * 60_000, now: clock.now, recoveryLimit: 0 });
+  const budget = new PhaseBudget('handoff-scenario', { timeoutMs: 45 * 60_000, now: clock.now, sleep: clock.sleep, recoveryLimit: 0 });
   const phaseView = budget.phaseView.bind(budget);
   budget.phaseView = (name, timeout, reserve) => {
     const phase = phaseView(name, timeout, reserve);
@@ -67,8 +57,8 @@ async function fixture(mode: Mode) {
     if (path.endsWith('/context')) {
       if (clicked && !ready) {
         const provider = phases.get('ios-provider')!;
-        providerDeadline = now + provider.remainingMs;
-        now = mode === 'early' ? now : providerDeadline - (mode === 'too-short' ? 999 : remaining);
+        providerDeadline = clock.elapsed + provider.remainingMs;
+        clock.elapsed = mode === 'early' ? clock.elapsed : providerDeadline - (mode === 'too-short' ? 999 : remaining);
       }
       return value(null);
     }
@@ -78,13 +68,13 @@ async function fixture(mode: Mode) {
       if (!ready) {
         readinessQueries++;
         abortSignal = init?.signal;
-        if (mode === 'headers') now = providerDeadline + 1;
+        if (mode === 'headers') clock.elapsed = providerDeadline + 1;
         const state = mode === 'invalid' ? null : mode === 'pending' || mode === 'pending-home' ? 2 : 4;
         const response = value(state);
         response.text = async () => {
-          queryTimerMs = [...timers.values()].at(-1)!;
-          if (mode === 'body') now = providerDeadline + 1;
-          else if (mode !== 'headers') now += mode === 'pending-home' ? 760 : mode === 'early' ? 10 : remaining - 35;
+          queryTimerMs = [...clock.timers.values()].at(-1)!.ms;
+          if (mode === 'body') clock.elapsed = providerDeadline + 1;
+          else if (mode !== 'headers') clock.elapsed += mode === 'pending-home' ? 760 : mode === 'early' ? 10 : remaining - 35;
           parsePending = mode === 'parse';
           return JSON.stringify({ value: state });
         };
@@ -99,8 +89,8 @@ async function fixture(mode: Mode) {
     if (path.endsWith('/alert/text')) return mode === 'alert' ? value('dialog')
       : Response.json({ value: { error: 'no such alert' } }, { status: 404 });
     if (body.script === 'mobile: activeAppInfo') {
-      if (mode === 'launch-proof') now += phases.get('ios-launch')!.remainingMs + 1;
-      if (mode === 'scenario-proof') now += budget.remainingMs + 1;
+      if (mode === 'launch-proof') clock.elapsed += phases.get('ios-launch')!.remainingMs + 1;
+      if (mode === 'scenario-proof') clock.elapsed += budget.remainingMs + 1;
       return value({ bundleId: mode === 'wrong-bundle' ? 'com.apple.mobilesafari' : 'com.apple.webapp', ...(mode === 'missing-pid' ? {} : { pid: recorded.foreground.pid }) });
     }
     if (body.script === 'mobile: installedContextContract') return value({ contract: 'herdr-installed-contexts-v1', selector: 'herdr-installed-contexts-v1' });
@@ -135,7 +125,7 @@ async function fixture(mode: Mode) {
   driver.mobile = async (command, args, timeout, policy) => {
     const result = await mobile(command, args, timeout, policy);
     if (command === 'queryAppState' && !ready) {
-      validatedAt = now;
+      validatedAt = clock.elapsed;
       assert.equal(driver.snapshot().lastCommand!.timing!.outcome, 'success');
       if (mode === 'owner' || mode === 'reuse') native.driver['sessionOwner'] = {};
       if (mode === 'reuse') native.driver['sessionGeneration']++;
@@ -143,9 +133,9 @@ async function fixture(mode: Mode) {
       if (mode === 'generation') native.driver['sessionGeneration']++;
       if (mode === 'context') native.driver['selectedContext'] = 'WEBVIEW_other';
       ready = true;
-      if (mode === 'launch-gap') now += phases.get('ios-launch')!.remainingMs + 1;
-      else if (mode === 'scenario-gap') now += budget.remainingMs + 1;
-      else if (mode !== 'early' && mode !== 'pending-home') now += 82.67;
+      if (mode === 'launch-gap') clock.elapsed += phases.get('ios-launch')!.remainingMs + 1;
+      else if (mode === 'scenario-gap') clock.elapsed += budget.remainingMs + 1;
+      else if (mode !== 'early' && mode !== 'pending-home') clock.elapsed += 82.67;
     }
     return result;
   };
@@ -165,7 +155,7 @@ async function fixture(mode: Mode) {
     const previous = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
     process.env.MOBILE_DEVICE_OWNERSHIP_FILE = marker;
     JSON.parse = (text, reviver) => {
-      if (parsePending) { parsePending = false; now = providerDeadline + 1; }
+      if (parsePending) { parsePending = false; clock.elapsed = providerDeadline + 1; }
       return parse(text, reviver);
     };
     try { await platform.launchInstalledApp(); } finally {
@@ -174,8 +164,8 @@ async function fixture(mode: Mode) {
       else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previous;
     }
   };
-  return { platform, driver, requests, budget, phases, timers, run, providerPolicy: () => providerPolicy,
-    observations: () => ({ readinessQueries, foregroundProofs, attachmentEntries, providerDeadline, validatedAt, queryTimerMs, now, abortSignal }) };
+  return { platform, driver, requests, budget, phases, timers: clock.timers, run, providerPolicy: () => providerPolicy,
+    observations: () => ({ readinessQueries, foregroundProofs, attachmentEntries, providerDeadline, validatedAt, queryTimerMs, now: clock.elapsed, abortSignal }) };
 }
 
 export const iosProviderHandoffCases: Test[] = [];
@@ -189,14 +179,14 @@ for (const mode of ['boundary', 'early'] as const) {
     assert.ok(observed.validatedAt < observed.providerDeadline);
     if (mode === 'boundary') {
       assert.equal(observed.providerDeadline - observed.validatedAt, 35);
-      assert.ok(Math.abs(observed.now - observed.providerDeadline - 47.67) < 0.001);
+      assert.ok(Math.abs(observed.now - observed.providerDeadline - 797.67) < 0.001);
       assert.equal(observed.queryTimerMs, Math.floor((timingScale === 1 ? 1_000 : 1_261) / timingScale) * timingScale);
     }
     assert.equal(observed.attachmentEntries, 1);
     assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
     assert.equal(a.driver.snapshot().unusable, false);
     assert.equal(a.driver.snapshot().firstFatal, undefined);
-    assert.equal(a.phases.get('ios-provider')!.snapshot().deadline, new Date(30_000 * timingScale).toISOString());
+    assert.equal(a.phases.get('ios-provider')!.snapshot().deadline, new Date(30_000 * timingScale + 750).toISOString());
     assert.equal(a.phases.get('ios-launch')!.snapshot().deadline, new Date(180_000 * timingScale).toISOString());
     assert.equal(a.budget.recoveryCount, 0);
     assert.equal(a.timers.size, 0);

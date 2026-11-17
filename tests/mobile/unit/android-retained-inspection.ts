@@ -76,12 +76,10 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     const clicked: string[] = [];
     const workspaceLookups: string[] = [];
     let elapsed = 0;
-    const clock = Date.now;
-    Date.now = () => clock() + elapsed;
-    try {
-    let timeOrigin = Date.now() - 10;
+    const now = () => Date.now() + elapsed;
+    let timeOrigin = now() - 10;
     const switches: string[] = [];
-    const startedAt = Date.now();
+    const startedAt = now();
     let pending: Promise<Response> | undefined;
     const client = new AppiumClient('http://inspection.invalid', 30_000, async (input, init) => {
       calls++;
@@ -131,7 +129,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
         }
         if (armed && ['completion-parent-expiry', 'failure-parent-expiry'].includes(scenario)) elapsed += 9_000;
         assert.deepEqual(Object.keys(body.args[0]), ['deadline']);
-        const result = retainedFixture([bootstrap, installed], selected, installed, startedAt);
+        const result = retainedFixture([bootstrap, installed], selected, installed, startedAt, now());
         for (const d of [result.observations[1].document, ...(selected === installed ? [result.before.document, result.after.document] : [])]) {
           d.href = href; d.timeOrigin = timeOrigin; d.backendNodeId += mutations;
         }
@@ -151,7 +149,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
       return response(null);
     });
     await client.create({ capabilities: {} });
-    const budget = new PhaseBudget('inspection-regression', { timeoutMs: 90_000, recoveryLimit: 0 });
+    const budget = new PhaseBudget('inspection-regression', { timeoutMs: 90_000, recoveryLimit: 0, now });
     client.setBudget(budget);
     const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://inspection.invalid', outputDir: '/tmp', certificate: '', deviceId: 'emulator-5554', budget });
     Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
@@ -239,12 +237,12 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
                   {identity: {version: '0.21.0'}} as BundleSet['baselines'][number],
                   {app_url: '', relay_urls: [], setup_urls: [], control_url: 'http://fixture.invalid', control_secret: '', ca_certificate: '', old_release: '', candidate_release: ''},
                   '/app.js', 'fail', 'owned', '1', new QualificationFailureLatch(),
-                  new PhaseBudget('failure-parent', {timeoutMs: scenario.endsWith('admission') ? 47_000 : 60_000}));
+                  new PhaseBudget('failure-parent', {timeoutMs: scenario.endsWith('admission') ? 47_000 : 60_000, now}));
               } finally { globalThis.fetch = fetch; }
             }
             if (scenario.startsWith('completion-parent-')) return waitForPhoneCompletion(platform,
               {identity: {version: '0.21.0'}} as BundleSet['baselines'][number], new QualificationFailureLatch(),
-              new PhaseBudget('completion-parent', {timeoutMs: scenario.endsWith('admission') ? 23_000 : 30_000}));
+              new PhaseBudget('completion-parent', {timeoutMs: scenario.endsWith('admission') ? 23_000 : 30_000, now}));
             return scenario === 'mutation-postcheck' ? platform.openSetupURLInInstalledApp('https://fixture.test/pair')
               : platform.attachToInstalledView(scenario === 'parent-admission' ? 10_000 : 30_000);
           }, error => { first = error; return true; });
@@ -281,7 +279,6 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     assert.equal(diagnostic.includes('backend-original'), false);
     assert.equal(diagnostic.includes('secret endpoint must not be projected'), false);
     console.log(`PASS retained inspection ${scenario}`);
-    } finally { Date.now = clock; }
   }
 }
 

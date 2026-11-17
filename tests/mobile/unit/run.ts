@@ -55,6 +55,7 @@ import { androidEventTests } from './android-events';
 import { androidGmsSettleTests } from './android-gms-settle';
 import { androidEnvironmentTests, validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnosticEvent, type FakeAdbDiagnosticStage, type FakeAdbExitCategory, type FakeAdbFixturePathCategory } from './android-environment';
 import { androidTransportTests } from './android-transport';
+import { FakeClock } from './fake-clock';
 import { androidEmulatorLifetimeTests } from './android-emulator-lifetime';
 import { nativeStartupTests } from './native-startup';
 import { xctestOwnerTests } from './xctest-owner';
@@ -1275,18 +1276,18 @@ test('Android fixture verification rejects unsafe HTTP response identities witho
     },
   ];
   for (const [index, scenario] of cases.entries()) {
-    const clock = { value: 0 };
+    const clock = new FakeClock();
     const platform = new AndroidPlatform({
       origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
       certificate: '', deviceId: 'emulator-5554',
-      budget: new PhaseBudget(`android-fixture-rejection-${index}`, { timeoutMs: 350, recoveryLimit: 1, now: () => clock.value }),
+      budget: new PhaseBudget(`android-fixture-rejection-${index}`, { timeoutMs: 350, recoveryLimit: 1, now: clock.now, sleep: clock.sleep }),
     });
     const driver = platform.driver as any;
     driver.contexts = async () => ['NATIVE_APP', 'CHROMIUM'];
     driver.switchContext = async () => undefined;
     driver.navigate = async () => undefined;
     driver.execute = async () => {
-      clock.value += scenario.advanceMs;
+      clock.elapsed += scenario.advanceMs;
       return scenario.observed;
     };
     await assert.rejects(() => (platform as any).verifyFixtureEndpoint(), scenario.error);
@@ -2317,6 +2318,153 @@ test('mobile timing scale stretches phase views and request caps only when confi
     env: { ...process.env, MOBILE_TIMING_SCALE: '2' }, encoding: 'utf8', timeout: 30_000,
   });
   assert.deepEqual(JSON.parse(output.trim().split('\n').at(-1)!), { root: 100_000, child: 20_000, reserved: 98_000, source: 2_000, native: 8_000, admitted: true });
+});
+
+function clockedBudget(timeoutMs: number) {
+  let now = 1_000;
+  const sleeps: number[] = [];
+  const budget = new PhaseBudget('clocked', {
+    timeoutMs,
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      now += ms;
+    },
+  });
+  return { budget, sleeps, time: () => now };
+}
+
+test('PhaseBudget wait uses the injected clock and takes no real time', async () => {
+  const { budget, sleeps, time } = clockedBudget(60_000);
+  const started = performance.now();
+  await budget.wait(30_000);
+  assert.ok(performance.now() - started < 1_000);
+  assert.deepEqual(sleeps, [30_000]);
+  assert.equal(time(), 31_000);
+  assert.equal(budget.remainingMs, 30_000);
+});
+
+test('PhaseBudget wait stops at the remaining time and throws once the budget is exhausted', async () => {
+  const { budget, sleeps, time } = clockedBudget(5_000);
+  await assert.rejects(() => budget.wait(60_000), /PHASE_BUDGET_EXHAUSTED/);
+  assert.deepEqual(sleeps, [5_000]);
+  assert.equal(time(), 6_000);
+  await assert.rejects(() => budget.wait(1), /PHASE_BUDGET_EXHAUSTED/);
+  assert.deepEqual(sleeps, [5_000]);
+});
+
+test('PhaseBudget sleep waits the full time without throwing when the budget is exhausted', async () => {
+  const { budget, sleeps, time } = clockedBudget(5_000);
+  await budget.sleep(20_000);
+  assert.deepEqual(sleeps, [20_000]);
+  assert.equal(time(), 21_000);
+  assert.equal(budget.exhausted, true);
+  await budget.sleep(250);
+  assert.deepEqual(sleeps, [20_000, 250]);
+  assert.equal(budget.now(), 21_250);
+});
+
+test('PhaseBudget phase views use the parent clock and sleep', async () => {
+  const { budget, sleeps, time } = clockedBudget(60_000);
+  const child = budget.phaseView('child', 10_000);
+  assert.equal(child.now(), budget.now());
+  await child.sleep(2_000);
+  assert.deepEqual(sleeps, [2_000]);
+  assert.equal(time(), 3_000);
+  assert.equal(child.now(), 3_000);
+  await child.wait(1_000);
+  assert.deepEqual(sleeps, [2_000, 1_000]);
+  assert.equal(budget.now(), 4_000);
+});
+
+test('Fake clock advance fires due timers in due-time order and equal times in creation order', async () => {
+  const clock = new FakeClock();
+  const fired: string[] = [];
+  clock.timer(() => fired.push('late'), 300);
+  clock.timer(() => fired.push('first-equal'), 100);
+  clock.timer(() => fired.push('early'), 50);
+  clock.timer(() => fired.push('second-equal'), 100);
+  clock.advance(1_000);
+  assert.deepEqual(fired, ['early', 'first-equal', 'second-equal', 'late']);
+  assert.equal(clock.now(), 1_000);
+  assert.equal(clock.timers.size, 0);
+});
+
+test('Fake clock timers run at their due time and may arm timers inside the advanced span', async () => {
+  const clock = new FakeClock();
+  const seen: number[] = [];
+  clock.timer(() => {
+    seen.push(clock.now());
+    clock.timer(() => seen.push(clock.now()), 100);
+  }, 200);
+  clock.advance(500);
+  assert.deepEqual(seen, [200, 300]);
+  assert.equal(clock.now(), 500);
+  assert.equal(clock.wall(), clock.epoch + 500);
+  assert.equal(clock.mono(), 500);
+});
+
+test('Fake clock advance fires only the timers that are due', async () => {
+  const clock = new FakeClock();
+  const fired: string[] = [];
+  clock.timer(() => fired.push('due'), 100);
+  clock.timer(() => fired.push('later'), 101);
+  clock.advance(100);
+  assert.deepEqual(fired, ['due']);
+  assert.equal(clock.timers.size, 1);
+  clock.advance(1);
+  assert.deepEqual(fired, ['due', 'later']);
+});
+
+test('Fake clock clear removes a pending timer', async () => {
+  const clock = new FakeClock();
+  const fired: string[] = [];
+  const cleared = clock.timer(() => fired.push('cleared'), 100);
+  clock.timer(() => fired.push('kept'), 100);
+  clock.clear(cleared);
+  assert.equal(clock.timers.size, 1);
+  clock.advance(100);
+  assert.deepEqual(fired, ['kept']);
+});
+
+test('Fake clock sleep moves the clock and fires the timers it passes', async () => {
+  const clock = new FakeClock();
+  let fired = false;
+  clock.timer(() => { fired = true; }, 250);
+  await clock.sleep(249);
+  assert.equal(fired, false);
+  await clock.sleep(1);
+  assert.equal(fired, true);
+  assert.equal(clock.now(), 250);
+});
+
+test('Fake clock automatic mode fires pending timers in due-time order while the test awaits', async () => {
+  const clock = new FakeClock(true);
+  const fired: string[] = [];
+  const started = performance.now();
+  clock.timer(() => fired.push('late'), 60_000);
+  clock.timer(() => fired.push('first-equal'), 1_000);
+  clock.timer(() => fired.push('second-equal'), 1_000);
+  clock.timer(() => fired.push('early'), 10);
+  assert.deepEqual(fired, []);
+  await clock.sleep(120_000);
+  assert.deepEqual(fired, ['early', 'first-equal', 'second-equal', 'late']);
+  assert.equal(clock.now(), 120_000);
+  assert.ok(performance.now() - started < 1_000);
+});
+
+test('Fake clock automatic mode orders concurrent sleeps and skips cleared timers', async () => {
+  const clock = new FakeClock(true);
+  const order: string[] = [];
+  const cleared = clock.timer(() => order.push('cleared'), 500);
+  clock.clear(cleared);
+  await Promise.all([
+    clock.sleep(300).then(() => order.push('slow')),
+    clock.sleep(100).then(() => order.push('fast')),
+  ]);
+  assert.deepEqual(order, ['fast', 'slow']);
+  assert.equal(clock.now(), 300);
+  assert.equal(clock.timers.size, 0);
 });
 
 test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {
