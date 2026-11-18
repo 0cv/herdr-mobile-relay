@@ -415,9 +415,9 @@ describe('daily activity summary', () => {
 });
 
 describe('attachment batches', () => {
-  it('uses one monotonically increasing sequence across every file', async () => {
+  it('uses one increasing sequence and returns files in selection order', async () => {
     const sequences: number[] = [];
-    const names = ['first.txt', 'second.txt'];
+    const names = ['zebra.txt', 'apple.txt'];
     const controller = new AttachmentBatchController({
       server_session_id: 'server-session',
       pane_id: 'pane',
@@ -461,7 +461,8 @@ describe('attachment batches', () => {
       new File(['cd'], names[1], { type: 'text/plain' }),
     ]);
 
-    await expect(controller.upload()).resolves.toHaveLength(2);
+    const attachments = await controller.upload();
+    expect(attachments.map((attachment) => attachment.name)).toEqual(names);
     expect(sequences).toEqual([0, 1]);
   });
 

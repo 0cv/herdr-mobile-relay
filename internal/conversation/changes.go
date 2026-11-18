@@ -14,41 +14,15 @@ func (r *Reader) ChangeToken(ctx context.Context, scope BrowseScope) (string, er
 		return "", err
 	}
 	kind := agentkind.Of(scope.Provider)
-	if kind == agentkind.OpenCode || kind == agentkind.Hermes {
-		var databases []string
-		if kind == agentkind.Hermes {
-			databases, _ = r.hermes.databases()
-		} else {
-			databases, _ = r.openCode.databases()
-		}
-		digest := sha256.New()
-		for _, database := range databases {
-			for _, path := range []string{database, database + "-wal"} {
-				info, err := os.Stat(path)
-				if err != nil {
-					fmt.Fprintln(digest, path, "unavailable")
-					continue
-				}
-				fmt.Fprintln(digest, path, fileIdentity(info), info.Size(), info.ModTime().UnixNano(), fileChangeToken(info))
-			}
-			fmt.Fprintln(digest, walIndexHeader(database))
-		}
-		return fmt.Sprintf("%x", digest.Sum(nil)), nil
-	}
-	if kind == agentkind.Agy {
-		digest := sha256.New()
-		for _, database := range r.agy.databasePaths(scope.SessionID) {
-			for _, path := range []string{database, database + "-wal"} {
-				info, err := os.Stat(path)
-				if err != nil {
-					fmt.Fprintln(digest, path, "unavailable")
-					continue
-				}
-				fmt.Fprintln(digest, path, fileIdentity(info), info.Size(), info.ModTime().UnixNano(), fileChangeToken(info))
-			}
-			fmt.Fprintln(digest, walIndexHeader(database))
-		}
-		return fmt.Sprintf("%x", digest.Sum(nil)), nil
+	switch kind {
+	case agentkind.OpenCode:
+		databases, _ := r.openCode.databases()
+		return sqliteChangeToken(databases), nil
+	case agentkind.Hermes:
+		databases, _ := r.hermes.databases()
+		return sqliteChangeToken(databases), nil
+	case agentkind.Agy:
+		return sqliteChangeToken(r.agy.databasePaths(scope.SessionID)), nil
 	}
 	if IsKimi(scope.Provider) {
 		return r.kimiChangeToken(ctx, scope)
@@ -79,4 +53,20 @@ func (r *Reader) ChangeToken(ctx context.Context, scope BrowseScope) (string, er
 	defer source.close()
 	fmt.Fprintln(digest, location.Path, source.revision, source.end, source.info.ModTime().UnixNano(), fileChangeToken(source.info))
 	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+func sqliteChangeToken(databases []string) string {
+	digest := sha256.New()
+	for _, database := range databases {
+		for _, path := range []string{database, database + "-wal"} {
+			info, err := os.Stat(path)
+			if err != nil {
+				fmt.Fprintln(digest, path, "unavailable")
+				continue
+			}
+			fmt.Fprintln(digest, path, fileIdentity(info), info.Size(), info.ModTime().UnixNano(), fileChangeToken(info))
+		}
+		fmt.Fprintln(digest, walIndexHeader(database))
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil))
 }

@@ -106,7 +106,6 @@ export interface AttachmentItem {
   name: string;
   mediaType: string;
   bytes: number;
-  order: number;
   state: AttachmentItemState;
   uploadedBytes: number;
   progress: number;
@@ -118,7 +117,6 @@ export interface AttachmentBatchSnapshot {
   items: AttachmentItem[];
   issue?: AttachmentIssue;
   uploading: boolean;
-  canUpload: boolean;
   canRestart: boolean;
 }
 
@@ -186,12 +184,10 @@ export class AttachmentBatchController {
   }
 
   snapshot(): AttachmentBatchSnapshot {
-    const selected = this.items.filter((item) => item.state === 'selected');
     return {
       items: this.items.map(publicItem),
       issue: this.batchIssue ? { ...this.batchIssue, args: this.batchIssue.args ? { ...this.batchIssue.args } : undefined } : undefined,
       uploading: this.uploading,
-      canUpload: !this.uploading && !this.active && selected.length > 0,
       canRestart: !this.uploading && this.items.some((item) => item.state === 'interrupted' && item.file),
     };
   }
@@ -205,11 +201,10 @@ export class AttachmentBatchController {
       this.batchIssue = { code: 'attachment_batch_limit', args: { selected: selected.length, max: this.limits.maxFiles } };
     }
     let batchBytes = 0;
-    for (let order = 0; order < selected.length; order += 1) {
-      const file = selected[order];
+    for (const [index, file] of selected.entries()) {
       const mediaType = normalizedMime(file.type);
       let issue: AttachmentIssue | undefined;
-      if (order >= this.limits.maxFiles) issue = { code: 'attachment_batch_limit', args: { max: this.limits.maxFiles } };
+      if (index >= this.limits.maxFiles) issue = { code: 'attachment_batch_limit', args: { max: this.limits.maxFiles } };
       else if (!validFilename(file.name)) issue = { code: 'attachment_invalid_name' };
       else if (!mediaType || !this.allowedMimes.has(mediaType)) issue = { code: 'attachment_unknown_mime', args: { mime: mediaType || 'unknown' } };
       else if (file.size === 0) issue = { code: 'attachment_file_empty' };
@@ -217,11 +212,10 @@ export class AttachmentBatchController {
       else if (batchBytes + file.size > this.limits.maxBatchBytes) issue = { code: 'attachment_batch_too_large', args: { max: this.limits.maxBatchBytes } };
       if (!issue) batchBytes += file.size;
       this.items.push({
-        clientId: `${this.epoch}-${order}-${crypto.randomUUID()}`,
+        clientId: `${this.epoch}-${index}-${crypto.randomUUID()}`,
         name: file.name,
         mediaType,
         bytes: file.size,
-        order,
         state: issue ? 'rejected' : 'selected',
         uploadedBytes: 0,
         progress: 0,
@@ -234,17 +228,9 @@ export class AttachmentBatchController {
     return this.snapshot();
   }
 
-  remove(clientId: string): void {
-    if (this.uploading || this.active) throw new Error('attachment_batch_locked');
-    this.items = this.items.filter((item) => item.clientId !== clientId);
-    this.items.forEach((item, index) => { item.order = index; });
-    this.notify();
-  }
-
   orderedAttachments(): AttachmentRef[] {
     return this.items
       .filter((item): item is InternalItem & { attachment: AttachmentRef } => item.state === 'ready' && Boolean(item.attachment))
-      .sort((left, right) => left.order - right.order)
       .map((item) => ({ ...item.attachment }));
   }
 
@@ -307,13 +293,6 @@ export class AttachmentBatchController {
     } catch {
       throw { code: 'attachment_cancel_failed' } satisfies AttachmentIssue;
     }
-  }
-
-  clear(): void {
-    if (this.uploading || this.active) throw new Error('attachment_batch_locked');
-    this.items = [];
-    this.batchIssue = undefined;
-    this.notify();
   }
 
   private async startUpload(uploadItems: InternalItem[]): Promise<AttachmentRef[]> {

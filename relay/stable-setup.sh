@@ -11,7 +11,8 @@ ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
 refuse_if_tailscale_selected "$ENV_FILE" || exit 1
 STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}"
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-stable-setup.XXXXXX")"
+STABLE_SETUP_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-stable-setup.XXXXXX")"
+readonly STABLE_SETUP_WORK_DIR
 ENV_WAS_PRESENT=false
 ENV_CONFIG_WAS_PRESENT=false
 STATE_WAS_PRESENT=false
@@ -27,7 +28,7 @@ if [ -f "$ENV_FILE" ] && grep -q '^CLOUDFLARED_CONFIG=' "$ENV_FILE"; then
 fi
 
 cleanup() {
-    rm -rf "$WORK_DIR"
+    rm -rf "$STABLE_SETUP_WORK_DIR"
 }
 trap cleanup EXIT
 
@@ -296,8 +297,8 @@ print_login_guidance() {
 }
 
 list_tunnels() {
-    local output="$WORK_DIR/tunnels.json"
-    local error="$WORK_DIR/tunnels.err"
+    local output="$STABLE_SETUP_WORK_DIR/tunnels.json"
+    local error="$STABLE_SETUP_WORK_DIR/tunnels.err"
 
     if ! cloudflared tunnel list --output json > "$output" 2> "$error"; then
         cat "$error" >&2
@@ -330,8 +331,8 @@ validate_tunnel_config() {
     local config="$1"
     local expected_port="$2"
     local certificate_path
-    local list_output="$WORK_DIR/config-tunnel-list.json"
-    local list_error="$WORK_DIR/config-tunnel-list.err"
+    local list_output="$STABLE_SETUP_WORK_DIR/config-tunnel-list.json"
+    local list_error="$STABLE_SETUP_WORK_DIR/config-tunnel-list.err"
 
     if ! read_cloudflared_relay_config "$config" "$expected_port"; then
         return 1
@@ -399,7 +400,7 @@ wait_for_agent_readiness() {
     local timeout="${HERDR_STABLE_READY_TIMEOUT:-30}"
     local delay="${HERDR_STABLE_POLL_DELAY:-2}"
     local deadline=$((SECONDS + timeout))
-    local ready_file="$WORK_DIR/local-ready.json"
+    local ready_file="$STABLE_SETUP_WORK_DIR/local-ready.json"
 
     printf '▸ Waiting up to %s seconds for Herdr agent inventory' "$timeout"
     while true; do
@@ -434,8 +435,8 @@ wait_for_public_health() {
     local timeout="${HERDR_STABLE_HTTP_TIMEOUT:-60}"
     local delay="${HERDR_STABLE_POLL_DELAY:-2}"
     local deadline=$((SECONDS + timeout))
-    local public_file="$WORK_DIR/public-health.json"
-    local mismatch_file="$WORK_DIR/public-health.err"
+    local public_file="$STABLE_SETUP_WORK_DIR/public-health.json"
+    local mismatch_file="$STABLE_SETUP_WORK_DIR/public-health.err"
     local received=false
 
     printf '▸ Waiting up to %s seconds for HTTPS relay health' "$timeout"
@@ -638,7 +639,7 @@ else
             mkdir -p "$(dirname "$CREDENTIALS_PATH")"
             chmod 700 "$(dirname "$CREDENTIALS_PATH")"
             state_update "stage=creating_tunnel"
-            CREATE_OUTPUT="$WORK_DIR/tunnel-create.json"
+            CREATE_OUTPUT="$STABLE_SETUP_WORK_DIR/tunnel-create.json"
             echo "▸ Creating dedicated Cloudflare tunnel $TUNNEL_NAME..."
             if ! cloudflared tunnel create --output json --credentials-file "$CREDENTIALS_PATH" "$TUNNEL_NAME" > "$CREATE_OUTPUT"; then
                 echo "✗ Cloudflare tunnel creation failed." >&2
@@ -747,7 +748,7 @@ fi
 
 install_service || fail_resumable
 
-LOCAL_HEALTH_FILE="$WORK_DIR/local-health.json"
+LOCAL_HEALTH_FILE="$STABLE_SETUP_WORK_DIR/local-health.json"
 if ! wait_for_relay_health "$PORT" 1 0 "$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)" > "$LOCAL_HEALTH_FILE"; then
     echo "✗ The installed service is not reachable on 127.0.0.1:$PORT." >&2
     fail_resumable
@@ -768,4 +769,5 @@ echo ""
 echo "✓ Stable relay verified: https://$RELAY_HOSTNAME"
 echo "  Public status, instance, version, and protocol match the local relay."
 echo ""
+cleanup
 exec "$SCRIPT_DIR/setup-link.sh" "$RELAY_HOSTNAME"

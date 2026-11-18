@@ -112,7 +112,6 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
   let statusDirty = false;
   let closed = false;
   let observedLeaf = manager.getLeafId();
-  let capturedPrompt;
   let pendingCommits = [];
   let incompleteTurn = false;
   let lateJoin = incomplete;
@@ -133,8 +132,8 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
     liveToolBytes = 0;
     toolsDirty = false;
   }
-  function reconcile(captureNewPrompt = false) {
-    if (!pendingCommits.length && !captureNewPrompt && manager.getLeafId() === observedLeaf) return;
+  function reconcile() {
+    if (!pendingCommits.length && manager.getLeafId() === observedLeaf) return;
     let recoveredBoundary = pendingCommits.length > 0;
     const results = new Map();
     const finalized = new Map();
@@ -171,18 +170,9 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
     if (recoveredBoundary) lateJoin = false;
     if (lateJoin || incompleteTurn) state = 'incomplete';
   }
-  function capturePrompt() {
-    const leaf = manager.getLeafId();
-    if (!leaf || leaf === observedLeaf || leaf === capturedPrompt) return;
-    const entry = manager.getEntry(leaf);
-    if (entry?.type !== 'message' || entry.message?.role !== 'user') return;
-    capturedPrompt = leaf;
-    queue(activityEntry(entry, manager));
-  }
   function emit() {
     if (closed) return;
     reconcile();
-    capturePrompt();
     if (toolsDirty && toolEntryId) { toolsDirty = false; queue(toolEntry()); }
     if ( (!dirty.size && !removed.size && !reset && !statusDirty)) return;
     const frame = { kind: reset ? 'reset' : 'batch', incarnation, epoch, sequence: ++sequence, source_revision: revision(), entries: [...dirty.values()], remove: [...removed], state, capabilities };
@@ -299,10 +289,10 @@ export function createActivitySource(manager, { incomplete = false } = {}) {
       if (ctx && ctx.sessionManager.getSessionId() !== manager.getSessionId()) { markIncomplete(); emit(); return; }
       if (type === 'session_tree') {
         epoch++; sequence = 0; cursors.clear(); dirty.clear(); removed.clear(); activeId = undefined; activeEntry = undefined; resetLive();
-        observedLeaf = manager.getLeafId(); capturedPrompt = undefined; pendingCommits = []; incompleteTurn = false; lateJoin = false; state = 'ready'; reset = true; emit(); return;
+        observedLeaf = manager.getLeafId(); pendingCommits = []; incompleteTurn = false; lateJoin = false; state = 'ready'; reset = true; emit(); return;
       }
       if (type === 'message_start' && event.message?.role === 'assistant') {
-        reconcile(true);
+        reconcile();
         clearLive(); activeId = `live:${incarnation}:${++provisional}`; incompleteTurn = false; lateJoin = false; state = 'generating'; statusDirty = true;
       }
       if (type === 'message_update' && activeId && event.message?.role === 'assistant') {

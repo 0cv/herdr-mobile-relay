@@ -2,16 +2,33 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-change-hostname-test.XXXXXX")"
-trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
+TMP_ROOT="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+WORK_DIR="$(mktemp -d "$TMP_ROOT/herdr-change-hostname-test.XXXXXX")"
+cleanup() {
+    if [ -d "$WORK_DIR/go-mod" ]; then
+        find "$WORK_DIR/go-mod" -type d -exec chmod u+w {} +
+    fi
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
+
+export HERDR_RELAY_BACKEND=herdr
+mkdir "$WORK_DIR/tmp" "$WORK_DIR/go-tmp"
+export TMPDIR="$WORK_DIR/tmp"
+unset HERDR_RELAY_ENV HERDR_GATEWAY_URL
+unset GH_TOKEN GITHUB_TOKEN
+unset CLOUDFLARED_CONFIG HERDR_STABLE_HOSTNAME TUNNEL_ORIGIN_CERT
 
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 # shellcheck source=lib.sh
 . "$REPO_DIR/tests/lib.sh"
 
-unset GH_TOKEN GITHUB_TOKEN
-ensure_relay_test_binary "$WORK_DIR"
+HOME="$WORK_DIR" XDG_CONFIG_HOME="$WORK_DIR/.config" \
+    TMPDIR="$WORK_DIR/go-tmp" GOTMPDIR="$WORK_DIR/go-tmp" GOPATH="$WORK_DIR/go" \
+    GOCACHE="$WORK_DIR/go-build" GOMODCACHE="$WORK_DIR/go-mod" \
+    GOFLAGS=-mod=readonly GOWORK=off \
+    ensure_relay_test_binary "$WORK_DIR"
 
 # Moving a relay to a new domain must not mean tearing down the tunnel and
 # re-pairing every phone: the route is added to the existing tunnel, the ingress
@@ -68,16 +85,14 @@ case "$1 $2" in
     *) exit 0 ;;
 esac
 EOF
-printf '#!/bin/sh\nexit 0\n' > "$MOVE_BIN/service.sh"
-# change-hostname.sh reinstalls the service with the repository's service.sh,
-# so report it as not loaded instead of letting that reach this machine's relay.
-write_stub "$MOVE_BIN/launchctl" <<'EOF'
+export MOVE_HANDOFF_LOG="$WORK_DIR/handoffs"
+cp "$REPO_DIR/relay/change-hostname.sh" "$REPO_DIR/relay/common.sh" "$WORK_DIR/"
+for helper in service.sh setup-link.sh; do
+    write_stub "$WORK_DIR/$helper" <<'EOF'
 #!/bin/sh
-case "$1 $2" in
-    "print gui/"*/*) exit 1 ;;
-esac
+printf '%s %s\n' "${0##*/}" "$*" >> "$MOVE_HANDOFF_LOG"
 EOF
-chmod 700 "$MOVE_BIN/service.sh"
+done
 MOVE_STATE_RECORD="$WORK_DIR/state-hostname"
 export MOVE_STATE_RECORD
 reset_move_config() {
@@ -91,9 +106,6 @@ ingress:
 YAML
     printf "HERDR_RELAY_TOKEN='move-token'\nCLOUDFLARED_CONFIG='%s'\n" "$MOVE_CONFIG" > "$MOVE_ENV"
 }
-# setup-link and service.sh are the two things this action hands off to; both
-# are stubbed so the test observes the move itself.
-cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
 
 LINK_OUTPUT="$(
     HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
@@ -111,12 +123,13 @@ grep -Fq 'relay=wss%3A%2F%2Frelay-fedora.old.test&' <<< "$LINK_OUTPUT"
 
 if HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
     HERDR_RELAY_ENV="$MOVE_ENV" HERDR_STABLE_HOSTNAME=relay.-bad.test \
-    bash "$REPO_DIR/relay/change-hostname.sh" > "$WORK_DIR/invalid-hostname" 2>&1; then
+    bash "$WORK_DIR/change-hostname.sh" > "$WORK_DIR/invalid-hostname" 2>&1; then
     echo "an invalid unattended hostname was accepted" >&2
     exit 1
 fi
 grep -Fq 'Enter a valid hostname' "$WORK_DIR/invalid-hostname"
 test ! -s "$MOVE_ROUTE_LOG"
+test ! -s "$MOVE_HANDOFF_LOG"
 
 MOVE_OUTPUT="$(
     printf 'relay.-bad.test\nHTTPS://RELAY-FEDORA.NEW.TEST./setup\n' |
@@ -125,8 +138,14 @@ MOVE_OUTPUT="$(
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
         HERDR_RELAY_ENV="$MOVE_ENV" \
         HERDR_STABLE_STATE_FILE="$MOVE_STATE" \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$WORK_DIR/change-hostname.sh" 2>&1
 )"
+printf '%s\n' 'service.sh install' 'setup-link.sh relay-fedora.new.test' > "$WORK_DIR/expected-handoffs"
+diff -u "$WORK_DIR/expected-handoffs" "$MOVE_HANDOFF_LOG"
+TEMP_ENTRY="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -print -quit)" ||
+    fail "could not inspect the hostname move temp directory"
+[ -z "$TEMP_ENTRY" ] || fail "hostname move left temporary files behind"
+: > "$MOVE_HANDOFF_LOG"
 grep -Fq 'tunnel route dns herdr-mobile-relay-fedora relay-fedora.new.test' "$MOVE_ROUTE_LOG" ||
     { echo "the new hostname was never routed to the existing tunnel" >&2
       printf '%s\n' "$MOVE_OUTPUT" >&2; exit 1; }
@@ -144,11 +163,16 @@ test "$(cat "$MOVE_STATE_RECORD" 2>/dev/null)" = "relay-fedora.new.test" ||
 # A gateway relay has no hostname to move, and saying so beats editing a config
 # that is not in use.
 printf "HERDR_RELAY_TOKEN='move-token'\n" > "$MOVE_ENV"
-MOVE_OUTPUT="$(
+: > "$MOVE_ROUTE_LOG"
+if MOVE_OUTPUT="$(
     HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
-        HERDR_RELAY_ENV="$MOVE_ENV" bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
-)"
+        HERDR_RELAY_ENV="$MOVE_ENV" bash "$WORK_DIR/change-hostname.sh" </dev/null 2>&1
+)"; then
+    fail "a gateway relay accepted a hostname move"
+fi
 expect "$MOVE_OUTPUT" "does not run a Cloudflare tunnel"
+test ! -s "$MOVE_ROUTE_LOG"
+test ! -s "$MOVE_HANDOFF_LOG"
 
 # cloudflared exits 0 while creating a different name when its certificate does
 # not cover the zone. Believing it once left a live relay serving a hostname
@@ -163,7 +187,7 @@ MOVE_OUTPUT="$(
     printf 'relay-fedora.new.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$WORK_DIR/change-hostname.sh" 2>&1 || true
 )"
 expect "$MOVE_OUTPUT" "created relay-fedora.new.test.old.test, not relay-fedora.new.test"
 grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" &&
@@ -185,7 +209,7 @@ MOVE_OUTPUT="$(
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
         HERDR_STABLE_DNS_TIMEOUT=0 \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$WORK_DIR/change-hostname.sh" 2>&1 || true
 )"
 expect "$MOVE_OUTPUT" "does not resolve to Cloudflare yet"
 grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
@@ -220,7 +244,7 @@ MOVE_OUTPUT="$(
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
         TUNNEL_ORIGIN_CERT="$MOVE_CERT" HERDR_STABLE_RELOGIN=false \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$WORK_DIR/change-hostname.sh" 2>&1 || true
 )"
 case "$MOVE_OUTPUT" in
     *"authorizes old.test"*"cloudflared tunnel login"*) ;;
@@ -235,4 +259,5 @@ esac
 grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
     { echo "the refused move still touched the ingress" >&2; exit 1; }
 
+test ! -s "$MOVE_HANDOFF_LOG"
 echo "change-hostname shell tests passed"

@@ -22,7 +22,7 @@ function fixture(authenticated = vi.fn(), kind: TransportKind = 'websocket') {
     handlers: { onMessage: vi.fn(), onStatus: (status, detail) => { statuses.push(status); details.push(detail); } },
     createChannel: (handlers) => {
       channelHandlers = handlers;
-      return { kind, codec: 'json', open: () => handlers.onOpen(), sendFrame: (frame) => frames.push(frame), close: vi.fn() };
+      return { open: () => handlers.onOpen(), sendFrame: (frame) => frames.push(frame), close: vi.fn() };
     },
   });
   transport.connect();

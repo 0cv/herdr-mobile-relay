@@ -501,6 +501,22 @@ func resolvePathOrSession(roots []string, sessionID, separator string) Location 
 	return Location{}
 }
 
+func containedDatabases(roots, candidates []string) ([]string, string) {
+	databases := make([]string, 0, len(roots))
+	for index, candidate := range candidates {
+		if index >= len(roots) {
+			break
+		}
+		if path := containedRegularFile(candidate, roots[index]); path != "" {
+			databases = append(databases, path)
+		}
+	}
+	if len(databases) == 0 {
+		return nil, "source_unavailable"
+	}
+	return databases, ""
+}
+
 func containedRegularFile(path, root string) string {
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {

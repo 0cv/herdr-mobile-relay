@@ -5,6 +5,11 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-configure-app-deploy-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
+export HERDR_RELAY_BACKEND=herdr
+unset HERDR_RELAY_ENV HERDR_GATEWAY_URL
+unset GH_TOKEN GITHUB_TOKEN
+unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID HERDR_APP_DEPLOY_ATTACH_DOMAIN HERDR_APP_DEPLOY_ORIGIN
+
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 # shellcheck source=lib.sh
@@ -20,6 +25,7 @@ printf "HERDR_RELAY_TOKEN='deploy-token'\n" > "$DEPLOY_ENV"
 write_stub "$DEPLOY_BIN/relay-stub" <<'EOF'
 #!/bin/sh
 case "$1 $2" in
+    "version --json") printf '{"version":"1.2.3"}\n' ;;
     "normalize-origin --allow-loopback-http")
         host="${3#https://}"
         printf 'https://%s\n' "${host#http://}"
@@ -67,17 +73,29 @@ chmod 700 "$DEPLOY_BIN/npx"
 DEPLOY_ATTACHED="$WORK_DIR/attached-domain"
 DEPLOY_ATTACH_LOG="$WORK_DIR/attach-url"
 export DEPLOY_ATTACHED DEPLOY_ATTACH_LOG
+export SERVICE_LOG="$WORK_DIR/service-log"
+cp "$REPO_DIR/relay/configure-app-deploy.sh" "$REPO_DIR/relay/common.sh" "$WORK_DIR/"
+write_stub "$WORK_DIR/service.sh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SERVICE_LOG"
+EOF
 
 run_configure_app_deploy() {
+    : > "$SERVICE_LOG"
     printf '%b' "$1" | HOME="$DEPLOY_HOME" \
         PATH="$DEPLOY_BIN:$PATH" \
         HERDR_RELAY_BIN="$DEPLOY_BIN/relay-stub" \
         HERDR_APP_DEPLOY_NODE_DIR="$DEPLOY_BIN" \
         HERDR_RELAY_ENV="$DEPLOY_ENV" \
-        bash "$REPO_DIR/relay/configure-app-deploy.sh" 2>&1
+        bash "$WORK_DIR/configure-app-deploy.sh" 2>&1
+}
+
+expect_service_install() {
+    printf 'install\n' | diff -u - "$SERVICE_LOG"
 }
 
 DEPLOY_OUTPUT="$(run_configure_app_deploy 'unserved.example.test\nq\n' || true)"
+test ! -s "$SERVICE_LOG"
 case "$DEPLOY_OUTPUT" in
     *"No Pages project above serves https://unserved.example.test"*"Configuration cancelled."*) ;;
     *)
@@ -97,6 +115,7 @@ fi
 # what the run did: it stopped at the project step without complaining about the
 # origin again, and wrote nothing.
 DEPLOY_OUTPUT="$(run_configure_app_deploy 'unserved.example.test\napp.example.test\nq\n' || true)"
+test ! -s "$SERVICE_LOG"
 reject "$DEPLOY_OUTPUT" "No Pages project serves https://app.example.test either"
 expect "$DEPLOY_OUTPUT" "Configuration cancelled."
 if grep -q 'HERDR_CLOUDFLARE_PAGES_PROJECT' "$DEPLOY_ENV"; then
@@ -105,16 +124,14 @@ if grep -q 'HERDR_CLOUDFLARE_PAGES_PROJECT' "$DEPLOY_ENV"; then
 fi
 
 # The whole point of the flow: a matching origin and project are recorded.
-printf '#!/bin/sh\nexit 0\n' > "$DEPLOY_BIN/systemctl"
-chmod 700 "$DEPLOY_BIN/systemctl"
-run_configure_app_deploy 'app.example.test\nherdr-0cv\n' >/dev/null 2>&1 || true
+run_configure_app_deploy 'app.example.test\nherdr-0cv\nn\n' >/dev/null
+expect_service_install
 test "$(env_file_value "$DEPLOY_ENV" HERDR_APP_DEPLOY_ORIGIN)" = "https://app.example.test"
 test "$(env_file_value "$DEPLOY_ENV" HERDR_CLOUDFLARE_PAGES_PROJECT)" = "herdr-0cv"
 test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin-configured")" = "https://app.example.test"
 printf 'https://relay.example.test\n' > "$(dirname "$DEPLOY_ENV")/phone-app-origin"
-DEPLOY_REOPEN_OUTPUT="$(
-    run_configure_app_deploy '\nherdr-0cv\nn\n' 2>&1 || true
-)"
+run_configure_app_deploy '\nherdr-0cv\nn\n' >/dev/null
+expect_service_install
 test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin-configured")" = "https://app.example.test"
 test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin")" = "https://relay.example.test"
 
@@ -126,7 +143,8 @@ rm -f "$DEPLOY_ATTACHED" "$DEPLOY_ATTACH_LOG"
 CLOUDFLARE_API_TOKEN=test-token \
     CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef \
     HERDR_APP_DEPLOY_ATTACH_DOMAIN=true \
-    run_configure_app_deploy 'new.example.test\nherdr-0cv\n' >/dev/null 2>&1 || true
+    run_configure_app_deploy 'new.example.test\nherdr-0cv\nn\n' >/dev/null
+expect_service_install
 test "$(cat "$DEPLOY_ATTACHED" 2>/dev/null)" = "new.example.test" ||
     { echo "the domain was never sent to Cloudflare" >&2; exit 1; }
 case "$(cat "$DEPLOY_ATTACH_LOG" 2>/dev/null)" in
@@ -146,6 +164,7 @@ DEPLOY_OUTPUT="$(
     HERDR_APP_DEPLOY_ATTACH_DOMAIN=true \
         run_configure_app_deploy 'other.example.test\nq\n' || true
 )"
+test ! -s "$SERVICE_LOG"
 expect "$DEPLOY_OUTPUT" "set CLOUDFLARE_API_TOKEN in"
 [ ! -e "$DEPLOY_ATTACHED" ] ||
     { echo "a domain was attached without a token" >&2; exit 1; }
