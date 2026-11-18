@@ -1,13 +1,11 @@
-import { renameSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { validateMeasurementIdentity, type MeasurementIdentity } from './support/mobile-result';
 import { basename, dirname, join, resolve } from 'node:path';
 import { constants as osConstants } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Writable } from 'node:stream';
-import { ANDROID_GMS_OBSERVATION_FILE, checkedTemporaryFile } from './android-measurement-cleanup';
-import { ANDROID_LOG_LIMIT, androidMeasurementMarker, parseAndroidProcesses, assessAndroidEnvironment, readEnvironmentInputs, type AndroidEnvironmentCheck, type AndroidPlannedTermination, type AndroidGmsComponentState } from './android-environment';
+import { ANDROID_GMS_OBSERVATION_FILE, ANDROID_LOG_LIMIT, androidMeasurementMarker, parseAndroidProcesses, assessAndroidEnvironment, readEnvironmentInputs, type AndroidEnvironmentCheck, type AndroidPlannedTermination, type AndroidGmsComponentState } from './android-environment';
 import { CommandError, command, type CommandResult } from './support/process';
 import { sampleHostEmulator } from './support/android-emulator-lifetime';
 import { BoundedCommandError, boundedCommand, type BoundedCommandResult } from './support/bounded-process';
@@ -56,16 +54,13 @@ const ANDROID_GMS_PARSE_RESERVE_MS = 1_000;
 const ANDROID_GMS_PARSE_CLEANUP_RESERVATION_MS = 40;
 const ANDROID_GMS_PERSISTENCE_TIMEOUT_MS = 5_000;
 const ANDROID_MEASUREMENT_JSON_WRITE_TIMEOUT_MS = 1_000;
-const ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS = 1_000;
 const ANDROID_GMS_STAGE_TIMEOUT_MS = ANDROID_GMS_OWNERSHIP_TIMEOUT_MS + ANDROID_GMS_COMMAND_TIMEOUT_MS + ANDROID_GMS_PARSE_RESERVE_MS;
 const ANDROID_GMS_TOTAL_BYTES_LIMIT = ANDROID_GMS_DUMP_LIMIT * ANDROID_GMS_OBSERVATION_STAGES.length;
 const ANDROID_GMS_TOTAL_TIME_LIMIT_MS = ANDROID_GMS_STAGE_TIMEOUT_MS * ANDROID_GMS_OBSERVATION_STAGES.length;
-// A slower owned worker may use spare time, but cannot expand the measurement's shared persistence pool.
+// A slow write may use spare time, but cannot expand the measurement's shared persistence pool.
 const ANDROID_GMS_TOTAL_PERSISTENCE_LIMIT_MS = 6_000;
 const ANDROID_GMS_HASH_ENCODING = 'sha256-hex-dot-separated-v1' as const;
 const ANDROID_GMS_OBSERVATION_FILE_LIMIT = 8_000_000;
-const ANDROID_MEASUREMENT_JSON_FILES = new Set(['android-environment-collector.json', 'android-environment-completion.json',
-  'android-environment-identity.json', 'android-environment-check.json']);
 const ANDROID_MEASUREMENT_LOG_FILE = 'android-qualification-logcat.log';
 const ANDROID_MEASUREMENT_FILE_WRITE_TIMEOUT_MS = 5_000;
 const ANDROID_BEGIN_OPERATION_TIMEOUT_MS = 1_000;
@@ -101,21 +96,18 @@ function collectorRetired(evidence: RetirementEvidence): boolean {
     && evidence.supervisorExitCode === 0 && evidence.supervisorSignal === null;
 }
 
-function gmsWriterBoundary(result: BoundedCommandResult, writerTimeoutMs: number | undefined, dispatchedAfterMs: number | undefined): string {
-  return `GMS writer boundary writerTimeoutMs=${writerTimeoutMs ?? 'none'} dispatchedAfterMs=${dispatchedAfterMs ?? 'none'}`
-    + ` durationMs=${result.durationMs} targetStarted=${result.targetPID !== undefined} timedOut=${result.timedOut}`
-    + ` aborted=${result.aborted} childExited=${result.childExited} targetClosed=${result.targetCloseObserved}`
-    + ` ownedProcessesExited=${result.ownedProcessesExited} stdioClosed=${result.stdioClosed}`
-    + ` exitCode=${result.code} signal=${result.signal ?? 'none'} progress=${gmsWriterProgress(result.stderr)}`;
-}
-
-export function gmsWriterProgress(stderr: string): string {
-  const steps: string[] = [];
-  for (const line of stderr.split('\n')) {
-    const step = /^GMS_WRITER_PROGRESS (ready|input|directory|staged) (\d{1,7})(?: (\d{1,9}))?$/u.exec(line);
-    if (step && steps.length < 4) steps.push(`${step[1]}@${step[2]}${step[3] ? `:${step[3]}` : ''}`);
+async function writeEvidenceFile(directory: string, name: string, contents: string): Promise<string> {
+  const bytes = Buffer.from(contents);
+  const temporary = join(directory, `.${name}.${randomUUID()}.pending`);
+  await mkdir(directory, { recursive: true });
+  try {
+    await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
+    await rename(temporary, join(directory, name));
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
   }
-  return steps.length ? steps.join(',') : 'none';
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 function retainedSha256(value: string): string {
@@ -405,35 +397,15 @@ export class AndroidEnvironmentMeasurement {
       const ownerTimeout = Math.floor(Math.min(ANDROID_GMS_OWNERSHIP_TIMEOUT_MS,
         collectionAllowance - ANDROID_GMS_PARSE_RESERVE_MS - 1));
       const ownershipStarted = this.io.monotonicNow();
-      let ownershipResult: BoundedCommandResult | undefined;
       try {
-        ownershipResult = await this.io.boundedCommand(process.execPath,
-          [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), '--gms-diagnostic-ownership', this.serial], ownerTimeout, {
-            budget,
-            label: 'verify GMS diagnostic device ownership',
-            maxBytes: 512,
-            maxBytesPerStream: 256,
-            cleanupReservationMs: Math.min(100, Math.floor(ownerTimeout / 3)),
-            signal,
-          });
-      } catch (error) {
-        if (error instanceof BoundedCommandError) {
-          ownershipResult = error.result;
-          entry.ownershipChildExited = error.result.childExited;
-          entry.ownershipProcessesExited = error.result.ownedProcessesExited;
-          entry.ownershipStdioClosed = error.result.stdioClosed;
-        }
-        throw error;
+        await requireOwnedDevice('android', this.serial, signal);
       } finally {
         entry.ownershipDurationMs = Math.ceil(Math.max(0, this.io.monotonicNow() - ownershipStarted));
-        if (ownershipResult) {
-          entry.ownershipChildExited = ownershipResult.childExited;
-          entry.ownershipProcessesExited = ownershipResult.ownedProcessesExited;
-          entry.ownershipStdioClosed = ownershipResult.stdioClosed;
-        }
+        entry.ownershipChildExited = true;
+        entry.ownershipProcessesExited = true;
+        entry.ownershipStdioClosed = true;
       }
       if (entry.ownershipDurationMs > ownerTimeout) throw new Error('GMS owned-device verification exceeded its monotonic time bound');
-      if (ownershipResult.stdout !== 'OWNED\n') throw new Error('GMS owned-device verification returned unexpected output');
       if (signal.aborted || this.gmsFinalizationStarted) throw new Error('GMS stage was interrupted by finalization');
 
       const remainingCollection = Math.min(collectionDeadline - this.io.monotonicNow(), budget.remainingMs - ANDROID_GMS_PERSISTENCE_TIMEOUT_MS);
@@ -665,11 +637,6 @@ export class AndroidEnvironmentMeasurement {
     const started = this.io.monotonicNow();
     const remainingPersistence = ANDROID_GMS_TOTAL_PERSISTENCE_LIMIT_MS - this.gmsObservations.priorPersistenceAttemptMs;
     const timeoutMs = Math.floor(Math.min(ANDROID_GMS_PERSISTENCE_TIMEOUT_MS, remainingPersistence, budget?.remainingMs ?? remainingPersistence));
-    const operationDeadline = started + Math.max(0, timeoutMs);
-    let temporary = '';
-    let commandResult: BoundedCommandResult | undefined;
-    let writerAllocationMs: number | undefined;
-    let writerDispatchedAfterMs: number | undefined;
     let succeeded = false;
     try {
       if (timeoutMs < 1 || this.gmsObservations.stages.length > ANDROID_GMS_OBSERVATION_STAGES.length) {
@@ -678,89 +645,25 @@ export class AndroidEnvironmentMeasurement {
       this.gmsObservations.temporaryEvidenceCleanup = 'not-needed';
       if (this.gmsObservations.finalized) this.gmsPublicationConfirmedSha256 = undefined;
       const snapshot = structuredClone(this.gmsObservations);
-      const expected = `${JSON.stringify(sanitizeValue(snapshot), null, 2)}\n`;
-      const expectedBytes = Buffer.byteLength(expected);
-      if (expectedBytes > ANDROID_GMS_OBSERVATION_FILE_LIMIT) throw new Error('GMS observation evidence exceeds its file bound');
-      const expectedSha256 = createHash('sha256').update(expected).digest('hex');
-      const target = resolve(join(this.outputDir, ANDROID_GMS_OBSERVATION_FILE));
-      const candidateTemporary = join(this.outputDir, `.${basename(target)}.${randomUUID()}.pending`);
-      const request = JSON.stringify({ directory: this.outputDir, snapshot, expectedBytes, expectedSha256, temporary: candidateTemporary, target });
-      if (Buffer.byteLength(request) > ANDROID_GMS_OBSERVATION_FILE_LIMIT * 2) {
-        throw new Error('GMS observation persistence request exceeds its input bound');
-      }
-      const commandRemaining = Math.floor(Math.min(operationDeadline - this.io.monotonicNow(), budget?.remainingMs ?? timeoutMs));
-      const cleanupReserve = Math.min(ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS, Math.floor(commandRemaining / 4));
-      const writerTimeoutMs = Math.floor(commandRemaining - cleanupReserve - 25);
-      if (writerTimeoutMs < 1) throw new Error('GMS observation evidence has no persistence time remaining');
-      temporary = candidateTemporary;
-      writerAllocationMs = writerTimeoutMs;
-      writerDispatchedAfterMs = Math.ceil(Math.max(0, this.io.monotonicNow() - started));
-      const persisted = await this.io.boundedCommand(process.execPath,
-        [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), '--gms-diagnostic-persist'], writerTimeoutMs, {
-          budget,
-          label: 'persist GMS diagnostic observations',
-          maxBytes: 4_096,
-          maxBytesPerStream: 2_048,
-          cleanupReservationMs: Math.min(150, Math.floor(writerTimeoutMs / 3)),
-          input: request,
-          signal: stageSignal,
-        });
-      commandResult = persisted;
-      const receipt = JSON.parse(persisted.stdout) as { byteLength?: number; sha256?: string };
-      if (receipt.byteLength !== expectedBytes || receipt.sha256 !== expectedSha256
-        || Buffer.byteLength(expected) > ANDROID_GMS_OBSERVATION_FILE_LIMIT
-        || stageSignal?.aborted || budget?.exhausted || this.io.monotonicNow() - started > timeoutMs) {
-        throw new Error('GMS observation evidence failed bounded sanitized write/read-back verification');
+      const contents = `${JSON.stringify(sanitizeValue(snapshot), null, 2)}\n`;
+      if (Buffer.byteLength(contents) > ANDROID_GMS_OBSERVATION_FILE_LIMIT) throw new Error('GMS observation evidence exceeds its file bound');
+      if (stageSignal?.aborted) throw stageSignal.reason;
+      const sha256 = await writeEvidenceFile(this.outputDir, ANDROID_GMS_OBSERVATION_FILE, contents).catch((error: unknown) => {
+        this.gmsObservations.temporaryEvidenceCleanup = 'removed-after-failure';
+        throw error;
+      });
+      if (stageSignal?.aborted || budget?.exhausted || this.io.monotonicNow() - started > timeoutMs) {
+        throw new Error('GMS observation evidence failed its bounded write');
       }
       succeeded = true;
       this.gmsObservations.persistenceRetirement = 'retired';
       this.gmsObservations.temporaryEvidenceCleanup = 'not-needed';
-      if (snapshot.finalized) this.gmsPublicationConfirmedSha256 = expectedSha256;
-      temporary = '';
+      if (snapshot.finalized) this.gmsPublicationConfirmedSha256 = sha256;
     } catch (error) {
-      if (error instanceof BoundedCommandError) commandResult = error.result;
-      const retired = !commandResult || (commandResult.childExited && commandResult.ownedProcessesExited && commandResult.stdioClosed);
-      this.gmsObservations.persistenceRetirement = retired ? 'retired' : 'pending-temporary-write';
-      if (!retired) this.gmsObservations.temporaryEvidenceCleanup = 'pending';
-      if (temporary && retired) {
-        const cleanupTimeout = Math.floor(Math.min(ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS,
-          operationDeadline - this.io.monotonicNow(), budget?.remainingMs ?? timeoutMs));
-        if (cleanupTimeout < 1) {
-          this.gmsObservations.persistenceRetirement = 'pending-temporary-write';
-          this.gmsObservations.temporaryEvidenceCleanup = 'pending';
-        }
-        else {
-          try {
-            const cleanup = await this.io.boundedCommand(process.execPath,
-              [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--gms-diagnostic-cleanup'], cleanupTimeout, {
-                label: 'remove GMS diagnostic temporary evidence',
-                maxBytes: 512,
-                maxBytesPerStream: 256,
-                cleanupReservationMs: Math.min(50, Math.floor(cleanupTimeout / 3)),
-                input: JSON.stringify({ directory: this.outputDir, temporary, target: resolve(join(this.outputDir, ANDROID_GMS_OBSERVATION_FILE)) }),
-              });
-            const receipt = JSON.parse(cleanup.stdout) as { removed?: boolean };
-            if (receipt.removed) this.gmsObservations.temporaryEvidenceCleanup = 'removed-after-failure';
-            else {
-              this.gmsObservations.temporaryEvidenceCleanup = 'pending';
-              this.failGmsPersistence(entry, 'GMS temporary observation cleanup was not confirmed');
-            }
-          } catch (cleanupError) {
-            const cleanupResult = cleanupError instanceof BoundedCommandError ? cleanupError.result : undefined;
-            this.gmsObservations.temporaryEvidenceCleanup = 'pending';
-            if (!cleanupResult?.childExited || !cleanupResult.ownedProcessesExited || !cleanupResult.stdioClosed) {
-              this.gmsObservations.persistenceRetirement = 'pending-temporary-write';
-            }
-            this.failGmsPersistence(entry, 'GMS temporary observation evidence could not be removed');
-          }
-        }
-      }
-      if (stageSignal?.aborted && retired) {
+      if (stageSignal?.aborted) {
         this.recordGmsError('GMS persistence was interrupted by finalization');
       } else {
-        const message = error instanceof BoundedCommandError
-          ? `${gmsWriterBoundary(error.result, writerAllocationMs, writerDispatchedAfterMs)}: ${error.message}`
-          : error instanceof Error ? error.message : 'GMS observation evidence could not be persisted';
+        const message = error instanceof Error ? error.message : 'GMS observation evidence could not be persisted';
         this.failGmsPersistence(entry, redactText(message).slice(0, 500));
       }
     } finally {
@@ -792,65 +695,25 @@ export class AndroidEnvironmentMeasurement {
     return join(this.outputDir, `android-environment-${name}.json`);
   }
 
-  private async persistOwnedContents(target: string, contents: string, mode: 'json' | 'text', signal?: AbortSignal): Promise<string> {
-    const bytes = Buffer.from(contents);
-    const expectedSha256 = createHash('sha256').update(bytes).digest('hex');
-    const temporary = join(this.outputDir, `.${basename(target)}.${randomUUID()}.pending`);
-    const request = JSON.stringify({ directory: this.outputDir, target, temporary, contents, expectedBytes: bytes.length, expectedSha256 });
-    try {
-      const result = await this.io.boundedCommand(process.execPath,
-        [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), `--android-measurement-persist-${mode}`],
-        mode === 'text' ? ANDROID_MEASUREMENT_FILE_WRITE_TIMEOUT_MS : ANDROID_MEASUREMENT_JSON_WRITE_TIMEOUT_MS, {
-          label: `persist Android measurement ${basename(target)}`,
-          maxBytes: 1_024,
-          maxBytesPerStream: 512,
-          cleanupReservationMs: 150,
-          input: request,
-          signal,
-        });
-      const receipt = JSON.parse(result.stdout) as { byteLength?: number; sha256?: string };
-      if (receipt.byteLength !== bytes.length || receipt.sha256 !== expectedSha256) {
-        throw new Error('ANDROID_ENVIRONMENT: owned measurement file write did not confirm its bytes');
-      }
-      return expectedSha256;
-    } catch (error) {
-      const retired = !(error instanceof BoundedCommandError)
-        || (error.result.childExited && error.result.ownedProcessesExited && error.result.stdioClosed);
-      if (retired) {
-        await this.cleanupOwnedTemporary(temporary, target).catch(() => undefined);
-      }
-      throw error;
+  private async persistOwnedContents(target: string, contents: string, signal?: AbortSignal): Promise<string> {
+    const isLog = basename(target) === ANDROID_MEASUREMENT_LOG_FILE;
+    if (Buffer.byteLength(contents) > (isLog ? ANDROID_LOG_LIMIT : ANDROID_GMS_OBSERVATION_FILE_LIMIT)) {
+      throw new Error(`ANDROID_ENVIRONMENT: ${basename(target)} exceeds its byte bound`);
     }
-  }
-
-  private async cleanupOwnedTemporary(temporary: string, target: string): Promise<void> {
-    const result = await this.io.boundedCommand(process.execPath,
-      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-cleanup-file'], ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS, {
-        label: 'remove retired Android measurement temporary file',
-        maxBytes: 256,
-        maxBytesPerStream: 128,
-        cleanupReservationMs: 50,
-        input: JSON.stringify({ directory: this.outputDir, temporary, target }),
-      });
-    if (result.stdout !== '{"removed":true}\n') throw new Error('ANDROID_ENVIRONMENT: temporary file cleanup was not confirmed');
-  }
-
-  private async invalidateCollectorSummary(): Promise<void> {
-    const result = await this.io.boundedCommand(process.execPath,
-      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-invalidate-collector'], ANDROID_MEASUREMENT_CLEANUP_TIMEOUT_MS, {
-        label: 'invalidate unconfirmed Android collector summary',
-        maxBytes: 256,
-        maxBytesPerStream: 128,
-        cleanupReservationMs: 50,
-        input: JSON.stringify({ directory: this.outputDir, target: this.path('collector') }),
-      });
-    if (JSON.parse(result.stdout).removed !== true) throw new Error('ANDROID_ENVIRONMENT: unconfirmed collector summary invalidation was not confirmed');
+    if (signal?.aborted) throw signal.reason || new Error('ANDROID_ENVIRONMENT: measurement file write was aborted');
+    const timeoutMs = isLog ? ANDROID_MEASUREMENT_FILE_WRITE_TIMEOUT_MS : ANDROID_MEASUREMENT_JSON_WRITE_TIMEOUT_MS;
+    const started = this.io.monotonicNow();
+    const sha256 = await writeEvidenceFile(dirname(target), basename(target), contents);
+    if (this.io.monotonicNow() - started > timeoutMs) {
+      throw new Error(`ANDROID_ENVIRONMENT: writing ${basename(target)} exceeded its time bound`);
+    }
+    return sha256;
   }
 
   private async persistOwnedJson(name: 'collector' | 'completion' | 'identity' | 'check', value: unknown, signal?: AbortSignal): Promise<string> {
     const target = this.path(name);
     const content = `${JSON.stringify(sanitizeValue(value), null, 2)}\n`;
-    return this.persistOwnedContents(target, content, 'json', signal);
+    return this.persistOwnedContents(target, content, signal);
   }
 
   private async snapshot(boundary: 'start' | 'end', signal?: AbortSignal): Promise<void> {
@@ -887,20 +750,13 @@ export class AndroidEnvironmentMeasurement {
     }
   }
 
-  private async runBeginWorker(mode: string, args: string[], input: unknown, signal: AbortSignal, deadline: number): Promise<void> {
+  private async beginStep(deadline: number, operation: () => Promise<unknown>): Promise<void> {
     const timeoutMs = Math.floor(Math.min(ANDROID_BEGIN_OPERATION_TIMEOUT_MS, deadline - this.io.monotonicNow()));
     if (timeoutMs < 1) throw new Error('ANDROID_ENVIRONMENT: begin exhausted its bounded setup allowance');
-    const result = await this.io.boundedCommand(process.execPath,
-      [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), mode, ...args], timeoutMs, {
-        label: `prepare Android measurement ${mode}`,
-        maxBytes: 1_024,
-        maxBytesPerStream: 512,
-        cleanupReservationMs: 150,
-        input: input === undefined ? undefined : JSON.stringify(input),
-        signal,
-      });
-    if (result.stdout !== 'BEGIN_OK\n' || result.stderrBytes > 0 || this.io.monotonicNow() > deadline) {
-      throw new Error('ANDROID_ENVIRONMENT: bounded measurement setup did not confirm completion');
+    const started = this.io.monotonicNow();
+    await operation();
+    if (this.io.monotonicNow() - started > timeoutMs) {
+      throw new Error('ANDROID_ENVIRONMENT: begin setup exceeded its time bound');
     }
   }
 
@@ -912,15 +768,13 @@ export class AndroidEnvironmentMeasurement {
         this.recordGmsError(error.message);
         throw error;
       }
-      await this.runBeginWorker('--android-measurement-owner', [this.serial], undefined, signal, deadline);
+      await this.beginStep(deadline, () => requireOwnedDevice('android', this.serial, signal));
       this.ensureBeginning(signal);
-      await this.runBeginWorker('--android-measurement-mkdir', [], { path: this.outputDir }, signal, deadline);
+      await this.beginStep(deadline, () => mkdir(this.outputDir, { recursive: true }));
       this.ensureBeginning(signal);
-      await this.runBeginWorker('--android-measurement-session', [], {
-        path: this.path('session'), contents: `${JSON.stringify({ id: this.id })}\n`,
-      }, signal, deadline);
+      await this.beginStep(deadline, () => writeFile(this.path('session'), `${JSON.stringify({ id: this.id })}\n`, { flag: 'wx', mode: 0o600 }));
       this.ensureBeginning(signal);
-      await this.runBeginWorker('--android-measurement-operations', [], { path: this.path('operations'), operations: this.operations }, signal, deadline);
+      await this.beginStep(deadline, () => this.io.writeJson(this.path('operations'), this.operations));
       this.ensureBeginning(signal);
       this.collector = this.io.spawnCollector();
       this.collector.failure.then(error => { if (!this.collectorDataFrozen) this.collectorFailure ||= error; });
@@ -1128,7 +982,7 @@ export class AndroidEnvironmentMeasurement {
       const text = raw.toString('utf8');
       if (!Buffer.from(text, 'utf8').equals(raw)) throw new Error('ANDROID_ENVIRONMENT: invalid collector UTF-8');
       const persisted = redactText(text);
-      await this.persistOwnedContents(join(this.outputDir, ANDROID_MEASUREMENT_LOG_FILE), persisted, 'text', signal);
+      await this.persistOwnedContents(join(this.outputDir, ANDROID_MEASUREMENT_LOG_FILE), persisted, signal);
       this.collectorPersistedBytes = Buffer.byteLength(persisted);
     });
     if (signal?.aborted) this.transportObservationAbort?.abort(signal.reason);
@@ -1256,12 +1110,8 @@ export class AndroidEnvironmentMeasurement {
     } catch (error) {
       this.collectorSummaryFailed = true;
       this.errors.push(error);
-      const retired = !(error instanceof BoundedCommandError)
-        || (error.result.childExited && error.result.ownedProcessesExited && error.result.stdioClosed);
-      if (retired) {
-        try { await this.invalidateCollectorSummary(); }
-        catch (cleanupError) { this.errors.push(cleanupError); }
-      }
+      try { await rm(this.path('collector'), { force: true }); }
+      catch (cleanupError) { this.errors.push(cleanupError); }
     }
   }
 
@@ -1386,111 +1236,6 @@ function parseGmsParserOutput(output: string, inputBytes: number, inputSha256: s
   };
 }
 
-async function runGmsDiagnosticOwnership(serial: string): Promise<void> {
-  await requireOwnedDevice('android', serial);
-  process.stdout.write('OWNED\n');
-}
-
-async function runAndroidMeasurementOwnership(serial: string): Promise<void> {
-  await requireOwnedDevice('android', serial);
-  process.stdout.write('BEGIN_OK\n');
-}
-
-async function runBeginInput(): Promise<Record<string, unknown>> {
-  return JSON.parse((await readBoundedStdin(ANDROID_GMS_OBSERVATION_FILE_LIMIT)).toString('utf8')) as Record<string, unknown>;
-}
-
-async function runAndroidMeasurementMkdir(): Promise<void> {
-  const request = await runBeginInput();
-  if (typeof request.path !== 'string') throw new Error('Android measurement directory request is malformed');
-  await mkdir(request.path, { recursive: true });
-  process.stdout.write('BEGIN_OK\n');
-}
-
-async function runAndroidMeasurementSession(): Promise<void> {
-  const request = await runBeginInput();
-  if (typeof request.path !== 'string' || typeof request.contents !== 'string'
-    || basename(request.path) !== 'android-environment-session.json') throw new Error('Android measurement session request is malformed');
-  await writeFile(request.path, request.contents, { flag: 'wx', mode: 0o600 });
-  process.stdout.write('BEGIN_OK\n');
-}
-
-async function runAndroidMeasurementOperations(): Promise<void> {
-  const request = await runBeginInput();
-  if (typeof request.path !== 'string' || basename(request.path) !== 'android-environment-operations.json'
-    || !Array.isArray(request.operations)) throw new Error('Android measurement operations request is malformed');
-  await writeSanitizedJson(request.path, request.operations);
-  process.stdout.write('BEGIN_OK\n');
-}
-
-async function runAndroidMeasurementPersistence(mode: 'json' | 'text'): Promise<void> {
-  const request = JSON.parse((await readBoundedStdin(ANDROID_LOG_LIMIT * 2 + 16_384)).toString('utf8')) as {
-    directory?: string; target?: string; temporary?: string; contents?: string; expectedBytes?: number; expectedSha256?: string;
-  };
-  if (!request.directory || !request.target || !request.temporary || typeof request.contents !== 'string'
-    || !Number.isSafeInteger(request.expectedBytes) || !/^[a-f0-9]{64}$/u.test(request.expectedSha256 || '')) {
-    throw new Error('Android measurement persistence request is malformed');
-  }
-  const target = resolve(request.target);
-  const allowed = new Set([...ANDROID_MEASUREMENT_JSON_FILES, ANDROID_MEASUREMENT_LOG_FILE]);
-  if (dirname(target) !== resolve(request.directory) || !allowed.has(basename(target))) {
-    throw new Error('Android measurement persistence target is invalid');
-  }
-  const temporary = checkedTemporaryFile(request.directory, target, request.temporary);
-  const expected = Buffer.from(request.contents);
-  const expectedSha256 = createHash('sha256').update(expected).digest('hex');
-  const maximum = basename(target) === ANDROID_MEASUREMENT_LOG_FILE ? ANDROID_LOG_LIMIT : ANDROID_GMS_OBSERVATION_FILE_LIMIT;
-  if (expected.byteLength !== request.expectedBytes || expectedSha256 !== request.expectedSha256 || expected.byteLength > maximum) {
-    throw new Error('Android measurement persistence digest is inconsistent');
-  }
-  if (mode === 'json' && `${JSON.stringify(sanitizeValue(JSON.parse(request.contents)), null, 2)}\n` !== request.contents) {
-    throw new Error('Android measurement JSON is not canonical sanitized evidence');
-  }
-  if (mode === 'text' && redactText(request.contents) !== request.contents) {
-    throw new Error('Android measurement log is not sanitized');
-  }
-  await mkdir(resolve(request.directory), { recursive: true });
-  await writeFile(temporary, expected, { flag: 'wx', mode: 0o600 });
-  const staged = await readFile(temporary);
-  if (!staged.equals(expected)) throw new Error('Android measurement staged read-back is inconsistent');
-  renameSync(temporary, target);
-  process.stdout.write(`${JSON.stringify({ byteLength: staged.byteLength, sha256: expectedSha256 })}\n`);
-}
-
-async function runGmsDiagnosticPersistence(): Promise<void> {
-  const progress = (step: string, detail = '') => {
-    process.stderr.write(`GMS_WRITER_PROGRESS ${step} ${Math.round(process.uptime() * 1_000)}${detail}\n`);
-  };
-  progress('ready');
-  const input = await readBoundedStdin(ANDROID_GMS_OBSERVATION_FILE_LIMIT * 2);
-  progress('input', ` ${input.byteLength}`);
-  const request = JSON.parse(input.toString('utf8')) as {
-    directory?: string; temporary?: string; target?: string; snapshot?: AndroidGmsObservations; expectedBytes?: number; expectedSha256?: string;
-  };
-  if (!request.directory || !request.snapshot || !request.temporary || !request.target || !Number.isSafeInteger(request.expectedBytes)
-    || !/^[a-f0-9]{64}$/u.test(request.expectedSha256 || '') || basename(resolve(request.target)) !== ANDROID_GMS_OBSERVATION_FILE
-    || dirname(resolve(request.target)) !== resolve(request.directory)) {
-    throw new Error('GMS persistence request is malformed');
-  }
-  const target = resolve(request.target);
-  const temporary = checkedTemporaryFile(request.directory, target, request.temporary);
-  const expected = `${JSON.stringify(sanitizeValue(request.snapshot), null, 2)}\n`;
-  const expectedBytes = Buffer.byteLength(expected);
-  const expectedSha256 = createHash('sha256').update(expected).digest('hex');
-  if (expectedBytes !== request.expectedBytes || expectedSha256 !== request.expectedSha256
-    || expectedBytes > ANDROID_GMS_OBSERVATION_FILE_LIMIT) throw new Error('GMS persistence request digest is inconsistent');
-  await mkdir(dirname(target), { recursive: true });
-  progress('directory');
-  await writeFile(temporary, expected, { flag: 'wx', mode: 0o600 });
-  progress('staged');
-  const staged = await readFile(temporary);
-  if (staged.byteLength !== expectedBytes || staged.toString('utf8') !== expected) {
-    throw new Error('GMS persistence read-back does not match sanitized bytes');
-  }
-  renameSync(temporary, target);
-  process.stdout.write(`${JSON.stringify({ byteLength: staged.byteLength, sha256: expectedSha256 })}\n`);
-}
-
 async function runAndroidTransportObservationTrigger(): Promise<void> {
   const request = JSON.parse((await readBoundedStdin(4_096)).toString('utf8')) as {
     serial?: string; outputDir?: string; guestEpochSeconds?: string; triggeredAt?: string; anchorGuestEpochSeconds?: string;
@@ -1530,15 +1275,7 @@ async function runAndroidTransportObservationTrigger(): Promise<void> {
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const modes: Record<string, () => Promise<void>> = {
-    '--android-measurement-owner': () => runAndroidMeasurementOwnership(process.argv[3] || ''),
-    '--android-measurement-mkdir': runAndroidMeasurementMkdir,
-    '--android-measurement-session': runAndroidMeasurementSession,
-    '--android-measurement-operations': runAndroidMeasurementOperations,
-    '--android-measurement-persist-json': () => runAndroidMeasurementPersistence('json'),
-    '--android-measurement-persist-text': () => runAndroidMeasurementPersistence('text'),
     '--android-transport-observation-trigger': runAndroidTransportObservationTrigger,
-    '--gms-diagnostic-ownership': () => runGmsDiagnosticOwnership(process.argv[3] || ''),
-    '--gms-diagnostic-persist': runGmsDiagnosticPersistence,
   };
   const operation = modes[process.argv[2]];
   if (operation) {
