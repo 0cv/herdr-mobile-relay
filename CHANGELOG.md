@@ -41,6 +41,8 @@ project follows [Semantic Versioning](https://semver.org/).
   operators can change the gateway-wide connection limits.
 - Clearing activity history no longer leaves the relay stuck when the clear
   fails; the phone now gets the failure result.
+- Stable setup and hostname changes no longer leave a temporary folder behind
+  each time they finish.
 
 ### Removed
 
