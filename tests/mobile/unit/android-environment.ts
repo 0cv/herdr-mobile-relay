@@ -224,7 +224,8 @@ function gmsAttackTimingRule(limits: unknown, stage: unknown, elapsedMs: unknown
   const elapsed = Number(elapsedMs);
   if (parseDurationMs > parseReserveMs) violations.push(`normalization took ${parseDurationMs} ms, beyond its ${parseReserveMs} ms parse reserve`);
   if (durationMs > stageAllowanceMs) violations.push(`collection took ${durationMs} ms, beyond its ${stageAllowanceMs} ms stage allowance`);
-  if (elapsed < durationMs) violations.push(`elapsed ${elapsed} ms is shorter than the ${durationMs} ms collection it contains`);
+  // durationMs is rounded up to whole milliseconds, so compare it with the rounded-up elapsed time.
+  if (Math.ceil(elapsed) < durationMs) violations.push(`elapsed ${elapsed} ms is shorter than the ${durationMs} ms collection it contains`);
   if (elapsed > compositeCeilingMs) violations.push(`collection and both persistence operations took ${elapsed} ms, beyond ${compositeCeilingMs} ms`);
   return { violations, stageAllowanceMs, compositeCeilingMs };
 }
@@ -6957,6 +6958,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       ['collection and both persistence operations took 7750.5 ms, beyond 7750 ms']);
     assert.deepEqual(gmsAttackTimingRule(limits, quietWindowStage, 680).violations,
       ['elapsed 680 ms is shorter than the 681 ms collection it contains']);
+    assert.deepEqual(gmsAttackTimingRule(limits, quietWindowStage, 680.5).violations, []);
     const invalidMeasurements: Array<[unknown, unknown]> = [
       [{ durationMs: 681 }, 1_000], [{ durationMs: 681, parseDurationMs: 0 }, 1_000],
       [{ durationMs: 681, parseDurationMs: Number.NaN }, 1_000], [{ parseDurationMs: 106 }, 1_000],
