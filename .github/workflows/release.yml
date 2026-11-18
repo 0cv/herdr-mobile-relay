@@ -90,7 +90,7 @@ jobs:
             target: linux_arm64
           - runner: macos-15-intel
             target: darwin_amd64
-          - runner: macos-15
+          - runner: macos-26
             target: darwin_arm64
     runs-on: ${{ matrix.runner }}
     steps:
