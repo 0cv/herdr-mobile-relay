@@ -2232,17 +2232,14 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       .map(match => match[1]!)
       .filter(name => /(?:^|\.)(?:kill|killpg|pkill|syscall)$/u.test(name))
       .sort();
-    assert.deepEqual(killApis, ['anchor.kill', 'anchor.kill', 'process.kill', 'process.kill']);
+    assert.deepEqual(killApis, ['process.kill', 'process.kill', 'state.anchor.kill', 'state.anchor.kill']);
     assert.doesNotMatch(source, /\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:kill|killpg|pkill)['"]\s*\]\s*\(/u);
     assert.doesNotMatch(source, /\b(?:exec|execFile|spawn|spawnSync)\s*\(\s*['"`](?:kill|pkill)['"`]/u);
     assert.match(source, /function signalOwnedProcessGroup[\s\S]*?getpgid\(0\) !== groupID[\s\S]*?getsid\(0\) !== sessionID[\s\S]*?process\.kill\(-groupID, signal\)/u);
-    assert.match(source, /guardianParentPID !== expectedAnchorPID[\s\S]*?groupID !== expectedAnchorPID[\s\S]*?sessionID !== expectedSession/u);
-    assert.match(source, /guardianGroupID: groupID/u);
-    assert.match(source, /Number\(message\.groupID\) !== anchorPID \|\| Number\(message\.sessionID\) !== process\.pid/u);
-    assert.match(source, /if \(stopping \|\| startupExpired\) \{\s*sendControl\(\{ type: 'guardian-configuration-refused'/u);
-    assert.match(source, /if \(stopping \|\| startupExpired\) \{\s*sendControl\(\{ type: 'anchor-configuration-refused'/u);
-    assert.match(source, /guardianConfigured \|\| stopping \|\| startupExpired \|\| !pendingAnchorReady/u);
-    assert.match(source, /if \(message\.type === 'anchor-stopping'\) \{\s*stopping = true/u);
+    assert.match(source, /Number\(message\.groupID\) !== state\.anchorPID \|\| Number\(message\.sessionID\) !== process\.pid/u);
+    assert.match(source, /if \(state\.stopping \|\| state\.startupExpired\) \{\s*guardianSendControl\(state, \{ type: 'guardian-configuration-refused'/u);
+    assert.match(source, /state\.guardianConfigured \|\| state\.stopping \|\| state\.startupExpired \|\| !state\.pendingAnchorReady/u);
+    assert.match(source, /if \(message\.type === 'anchor-stopping'\) \{\s*state\.stopping = true/u);
   });
   test('owned group guardian retires TERM-resistant descendants after its anchor is killed', async () => {
     assert.notEqual(process.platform, 'win32');
@@ -2390,6 +2387,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await control.waitFor('anchor-stopping', 1_000);
       control.send({ type: 'configure-anchor', executionDeadlineNs: executionDeadlineNs.toString(),
         hardDeadlineNs: hardDeadlineNs.toString(), killDelayMs: 100 });
+      await control.waitFor('anchor-configuration-refused', 1_000);
       assert.equal(control.records().some(record => record.type === 'anchor-ready'), false);
       const anchorClose = await waitForValue(() => anchor?.signalCode ? { signal: anchor.signalCode } : undefined, 1_000,
         `anchor did not retire its group after guardian readiness refusal: ${anchorStderr}`);
