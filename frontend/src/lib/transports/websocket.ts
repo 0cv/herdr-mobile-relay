@@ -62,8 +62,6 @@ function createWebSocketChannel(
   }
 
   return {
-    kind: 'websocket',
-    codec: 'json',
     open(): void {
       if (closed || socket) return;
       try {

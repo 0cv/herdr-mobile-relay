@@ -5,18 +5,12 @@ import type { RelayTransport, TransportHandlers } from './types';
 import { createWebSocketTransport } from './websocket';
 
 export type {
-  FrameChannel,
-  FrameChannelFactory,
-  FrameChannelHandlers,
   RelayTransport,
   TransportHandlers,
-  TransportKind,
   TransportStatus,
   TransportStatusDetail,
 } from './types';
-export { createEncryptedTransport, type TransportAuthentication } from './encrypted';
-export { createWebSocketTransport } from './websocket';
-export { createHybridTransport } from './path-manager';
+export type { TransportAuthentication } from './encrypted';
 
 /**
  * Builds the transport a relay entry asks for. Legacy entries carry no

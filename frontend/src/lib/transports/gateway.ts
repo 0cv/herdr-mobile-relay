@@ -142,8 +142,6 @@ export function createGatewayChannel(
   }
 
   return {
-    kind: 'gateway',
-    codec: 'binary',
     open(): void {
       if (phase !== 'idle') return;
       if (!base) {
